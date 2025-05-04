@@ -43,8 +43,9 @@ const CRC32_POLY: u32 = 0x04c11db7;
 fn init_crc32_table() -> [u32; 256] {
     let mut crc32_table = [0u32; 256]; // Create a vector with 256 elements initialized to 0
 
-    (0..256).for_each(|i| {
-        let mut c = (i << 24) as u32; // Shift the byte value to the left by 24 bits
+    (0..256usize).for_each(|i| {
+        // FIXME: don't unwrap
+        let mut c: u32 = (i << 24).try_into().unwrap(); // Shift the byte value to the left by 24 bits
         for _ in 0..8 {
             c = if c & 0x80000000 != 0 {
                 (c << 1) ^ CRC32_POLY // If the MSB is set, shift left and XOR with the polynomial
@@ -59,6 +60,7 @@ fn init_crc32_table() -> [u32; 256] {
 }
 
 // NOTE: i'm not 100% sure that it's correct. But most likely, it is
+// TODO: Revisit it because of "as" casts
 pub fn crc32(buf: &[u8]) -> u32 {
     let crc32_table = crc32_table();
     let mut crc: u32 = 0xffffffff; // preload shift register, per CRC-32 spec

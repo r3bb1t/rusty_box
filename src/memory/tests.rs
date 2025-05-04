@@ -42,7 +42,12 @@ fn init_memory_with_address_assertions() {
     let host = THIRTYTWO_MEGABYTES_IN_BITS;
     let block_size = 128 * 1024;
 
-    let mem_stub = BxMemoryStubC::create_and_init(guest, host, block_size).unwrap();
+    let mem_stub = BxMemoryStubC::create_and_init(
+        guest.try_into().unwrap(),
+        host.try_into().unwrap(),
+        block_size,
+    )
+    .unwrap();
 
     let actual_vector = mem_stub.actual_vector();
     let vector = mem_stub.vector();
@@ -59,6 +64,6 @@ fn init_memory_with_address_assertions() {
         vector_ptr,
         rom_ptr
     );
-
-    assert_eq!(vector_ptr as u64 - actual_vector_ptr as u64, 0xff0);
+    // assert_eq!(vector_ptr - actual_vector_ptr, 0xff0);
+    assert_eq!(unsafe { vector_ptr.offset_from(actual_vector_ptr) }, 0xff0);
 }

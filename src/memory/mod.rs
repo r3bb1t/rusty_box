@@ -4,28 +4,27 @@ pub mod memory_stub;
 mod tests;
 
 use std::{
-    cell::{Cell, RefCell, UnsafeCell},
+    cell::{Cell, UnsafeCell},
     fs::File,
-    sync::{Arc, Mutex},
 };
 
 use crate::config::BxPhyAddress;
 
 /// 4M BIOS ROM @0xffc00000, must be a power of 2
-pub(super) static BIOSROMSZ: u64 = 1 << 22;
+pub(super) static BIOSROMSZ: usize = 1 << 22;
 /// ROMs 0xc0000-0xdffff (area 0xe0000-0xfffff=bios mapped)
-pub(super) static EXROMSIZE: u64 = 0x20000;
+pub(super) static EXROMSIZE: usize = 0x20000;
 
-pub(super) static BIOS_MASK: u64 = BIOSROMSZ - 1;
-pub(super) static EXROM_MASK: u64 = EXROMSIZE - 1;
+pub(super) static BIOS_MASK: usize = BIOSROMSZ - 1;
+pub(super) static EXROM_MASK: usize = EXROMSIZE - 1;
 
 pub struct BxMemoryStubC {
     /// could be > 4G
-    len: Cell<u64>,
+    len: Cell<usize>,
     /// could be > 4G
-    allocated: Cell<u64>,
+    allocated: Cell<usize>,
     /// individual block size, must be power of 2
-    block_size: Cell<u32>,
+    block_size: Cell<usize>,
     actual_vector: UnsafeCell<Vec<u8>>,
     /// aligned correctly
     vector_offset: Cell<usize>,
@@ -36,13 +35,13 @@ pub struct BxMemoryStubC {
     /// 4k for unexisting memory
     bogus_offset: usize,
 
-    used_blocks: Cell<u32>,
+    used_blocks: Cell<usize>,
 
     #[cfg(feature = "bx_large_ram_file")]
-    next_swapout_idx: Cell<u32>,
+    next_swapout_idx: Cell<usize>,
     #[cfg(feature = "bx_large_ram_file")]
     //overflow_file: Option<Arc<Mutex<std::fs::File>>>,
-    overflow_file: UnsafeCell<Option<File>>,
+    overflow_file: UnsafeCell<File>,
     //#[cfg(feature = "bx_large_ram_file")]
     //swapped_out: *const u8,
 }
@@ -101,4 +100,66 @@ pub struct BxMemC {
     flash_status: u8,
     flash_wsm_state: u8,
     flash_modified: bool,
+}
+
+// implement getters and setters for memory stub
+impl BxMemoryStubC {
+    #[allow(clippy::mut_from_ref)]
+    pub fn actual_vector(&self) -> &mut Vec<u8> {
+        unsafe { &mut (*self.actual_vector.get()) }
+    }
+    //
+    //fn set_vector(&self, vector: Vec<u8>) {
+    //    unsafe { *self.vector_offset.get() = vector }
+    //}
+    //
+    //fn get_blocks(&self) -> &'a mut Vec<Option<UnsafeCell<&'a mut [u8]>>> {
+    //    unsafe { &mut *self.blocks.get() }
+    //}
+
+    #[allow(clippy::mut_from_ref)]
+    fn blocks_offsets(&self) -> &mut Vec<Option<usize>> {
+        unsafe { &mut (*self.blocks_offsets.get()) }
+    }
+
+    //fn blocks(&self) -> &mut Vec<Option<&mut u8>> {
+    //    let offsets =
+    //    todo!()
+    //}
+
+    pub fn vector(&self) -> &mut [u8] {
+        &mut (self.actual_vector()[self.vector_offset.get()..])
+    }
+
+    pub fn rom(&self) -> &mut [u8] {
+        &mut (self.actual_vector()[self.rom_offset..])
+    }
+
+    pub fn bogus(&self) -> &mut [u8] {
+        &mut (self.actual_vector()[self.bogus_offset..])
+    }
+
+    //fn blocks_by_index(&self, index: usize) -> Option<&'a mut [u8]> {
+    //    if let Some(ref mut val) = &mut self.get_blocks().get_mut(index)? {
+    //        let a: &mut [u8] = unsafe { *val.get() };
+    //        let b = &mut *a;
+    //        Some(b)
+    //    } else {
+    //        None
+    //    }
+    //    //todo!()
+    //}
+    pub fn blocks_by_index(&self, index: usize) -> Option<&mut [u8]> {
+        if let Some(offset) = self.blocks_offsets().get_mut(index)? {
+            let block_ptr = &mut self.vector()[*offset..];
+            Some(block_ptr)
+        } else {
+            None
+        }
+    }
+
+    #[allow(clippy::mut_from_ref)]
+    fn overflow_file_mut(&self) -> &mut File {
+        unsafe { &mut *self.overflow_file.get() }
+    }
 }
