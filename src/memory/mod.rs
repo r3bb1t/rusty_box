@@ -1,3 +1,5 @@
+mod error;
+
 pub mod memory_stub;
 
 #[cfg(test)]
@@ -8,7 +10,9 @@ use std::{
     fs::File,
 };
 
+pub use super::error::*;
 use crate::config::BxPhyAddress;
+pub use error::*;
 
 /// 4M BIOS ROM @0xffc00000, must be a power of 2
 pub(super) static BIOSROMSZ: usize = 1 << 22;
@@ -17,6 +21,12 @@ pub(super) static EXROMSIZE: usize = 0x20000;
 
 pub(super) static BIOS_MASK: usize = BIOSROMSZ - 1;
 pub(super) static EXROM_MASK: usize = EXROMSIZE - 1;
+
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Block {
+    Block(usize),
+    SwappedOut,
+}
 
 pub struct BxMemoryStubC {
     /// could be > 4G
@@ -29,7 +39,7 @@ pub struct BxMemoryStubC {
     /// aligned correctly
     vector_offset: Cell<usize>,
     /// None if swapped out
-    blocks_offsets: UnsafeCell<Vec<Option<usize>>>,
+    blocks_offsets: UnsafeCell<Vec<Block>>,
     /// 512k BIOS rom space + 128k expansion rom space
     rom_offset: usize,
     /// 4k for unexisting memory
@@ -118,11 +128,11 @@ impl BxMemoryStubC {
     //}
 
     #[allow(clippy::mut_from_ref)]
-    fn blocks_offsets(&self) -> &mut Vec<Option<usize>> {
+    fn blocks_offsets(&self) -> &mut Vec<Block> {
         unsafe { &mut (*self.blocks_offsets.get()) }
     }
 
-    //fn blocks(&self) -> &mut Vec<Option<&mut u8>> {
+    //fn blocks(&self) -> &mut Vbuffer_endec<Option<&mut u8>> {
     //    let offsets =
     //    todo!()
     //}
@@ -149,9 +159,9 @@ impl BxMemoryStubC {
     //    }
     //    //todo!()
     //}
-    pub fn blocks_by_index(&self, index: usize) -> Option<&mut [u8]> {
-        if let Some(offset) = self.blocks_offsets().get_mut(index)? {
-            let block_ptr = &mut self.vector()[*offset..];
+    pub fn block_by_index(&self, index: usize) -> Option<&mut [u8]> {
+        if let Block::Block(offset) = self.blocks_offsets().get(index)? {
+            let block_ptr = &mut self.vector()[*offset..self.block_size.get()];
             Some(block_ptr)
         } else {
             None

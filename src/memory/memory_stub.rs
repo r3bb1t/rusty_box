@@ -1,16 +1,14 @@
 use tempfile::tempfile;
 
-use crate::{Error, Result};
-
-use super::BxMemoryStubC;
-use super::{BIOSROMSZ, EXROMSIZE};
+use super::{Block, BxMemoryStubC, MemoryError, Result, BIOSROMSZ, EXROMSIZE};
 
 use crate::config::BxPhyAddress;
 use crate::cpu::BxCpuC;
 use crate::pc_system::a20_addr;
 
 use std::cell::{Cell, UnsafeCell};
-use std::io::{Seek, SeekFrom, Write};
+use std::io::{Read, Seek};
+use std::io::{SeekFrom, Write};
 
 #[inline]
 fn is_power_of_2(x: usize) -> bool {
@@ -18,12 +16,6 @@ fn is_power_of_2(x: usize) -> bool {
 }
 
 const BX_MEM_VECTOR_ALIGN: usize = 4096;
-
-#[derive(Debug, PartialEq, Eq)]
-pub(crate) enum Block<'a> {
-    Block(Option<&'a mut [u8]>),
-    SwappedOut,
-}
 
 impl BxMemoryStubC {
     //fn get_actual_vector_and_offset_to_vector(bytes: u64, alignment: u64) -> (Vec<u8>, usize) {
@@ -57,11 +49,11 @@ impl BxMemoryStubC {
         const ONE_MEGABYTE: usize = 1 << 20; // 1 MB in bytes
 
         if (host % ONE_MEGABYTE) != 0 || (guest % ONE_MEGABYTE) != 0 {
-            return Err(Error::MemorySizeIsNotAMultiplyOf1Megabyte);
+            return Err(MemoryError::MemorySizeIsNotAMultiplyOf1Megabyte.into());
         }
 
         if !is_power_of_2(block_size) {
-            return Err(Error::BlockSizeIsNotAPowerOfTwo(block_size));
+            return Err(MemoryError::BlockSizeIsNotAPowerOfTwo(block_size).into());
         }
 
         let (actual_vector, vector_offset) = Self::get_actual_vector_and_offset_to_vector(
@@ -92,12 +84,12 @@ impl BxMemoryStubC {
         let used_blocks = if false {
             // Map each block to the corresponding location in actual_vector
             for idx in 0..num_blocks {
-                blocks.push(Some(idx * block_size));
+                blocks.push(Block::Block(idx * block_size));
             }
             num_blocks
         } else {
             for _ in 0..num_blocks {
-                blocks.push(None);
+                blocks.push(Block::SwappedOut);
             }
             0
         };
@@ -106,7 +98,8 @@ impl BxMemoryStubC {
         //let swapped_out =
         //    (std::ptr::null::<u8>() as isize - std::mem::size_of::<u8>() as isize) as *const u8;
         //
-        let overflow_file = tempfile().map_err(Error::UnableToCreateTempFile)?;
+        #[cfg(feature = "bx_large_ram_file")]
+        let overflow_file = tempfile().map_err(MemoryError::UnableToCreateTempFile)?;
         Ok(Self {
             actual_vector: UnsafeCell::new(actual_vector),
             len: Cell::new(len),
@@ -148,47 +141,18 @@ impl BxMemoryStubC {
     //    &mut blocks[offset as usize]
     //}
 
-    //#[cfg(feature = "bx_large_ram_file")]
-    //fn read_block(&mut self, block: u32) {
-    //    use std::io::{Read, Seek};
-    //    let binding = self.overflow_file.clone();
-    //    let mut overflow_file = binding.lock().unwrap();
-    //
-    //    let block_address: u64 = (block * self.block_size.get() as u32).into();
-    //
-    //    if overflow_file
-    //        .seek(std::io::SeekFrom::Start(block_address))
-    //        .is_err()
-    //    {
-    //        panic!(
-    //            "FATAL ERROR: Could not seek to {:x} in memory overflow file!",
-    //            block_address
-    //        )
-    //    }
-    //
-    //    let blocks_reference = self.blocks_by_index(block as usize).unwrap();
-    //    let read_result = overflow_file.read_exact(blocks_reference);
-    //
-    //    // Check for EOF
-    //    let mut single_byte_buf = [0u8];
-    //    let read_single_byte_result = overflow_file.read(&mut single_byte_buf);
-    //
-    //    let is_eof = if let Ok(bytes_read) = read_single_byte_result {
-    //        bytes_read == 0
-    //    } else {
-    //        // Seek back one byte
-    //        overflow_file.seek_relative(-1).unwrap();
-    //        false
-    //    };
-    //
-    //    if read_result.is_err() || is_eof {
-    //        panic!(
-    //            "FATAL ERROR: Could not read from {:X} in memory overflow file!",
-    //            block_address
-    //        );
-    //    }
-    //}
-    //
+    #[cfg(feature = "bx_large_ram_file")]
+    fn read_block(&self, block: usize) -> Result<()> {
+        let block_address = block * self.block_size.get();
+        let chosen_block = self.block_by_index(block).unwrap();
+        let overflow_file = self.overflow_file_mut();
+
+        overflow_file.seek(SeekFrom::Start(block_address.try_into()?))?;
+
+        overflow_file.read_exact(chosen_block)?;
+
+        Ok(())
+    }
 
     pub fn allocate_block(&self, block: usize, cpus: &[BxCpuC]) -> Result<()> {
         let max_blocks = self.allocated.get() / self.block_size.get();
@@ -212,28 +176,32 @@ impl BxMemoryStubC {
                         }
 
                         if self.next_swapout_idx.get() == original_replacement_block {
-                            return Err(Error::InsufficientRam);
+                            return Err(MemoryError::InsufficientRam.into());
                         }
-                        let current_block = self.blocks_by_index(self.next_swapout_idx.get());
-                        buffer = Block::Block(current_block);
+                        //let current_block = self.block_by_index(self.next_swapout_idx.get());
+                        buffer = Block::Block(self.next_swapout_idx.get());
                         if buffer == Block::SwappedOut {
                             break;
                         }
                     }
 
                     used_for_tlb = false;
-                    let Block::Block(buffer_as_ref) = &buffer else {
-                        unreachable!("tried to tread buffer as ref")
-                    };
 
-                    let buffer_end = buffer_as_ref
-                        .as_ref()
-                        .unwrap()
-                        .as_ptr()
-                        .wrapping_add(self.block_size.get());
+                    let buffer_end;
+                    {
+                        let Block::Block(buffer) = buffer else {
+                            unreachable!()
+                        };
+                        buffer_end = buffer + self.block_size.get()
+                    }
+                    //let buffer_end = buffer_as_ref
+                    //    .as_ref()
+                    //    .unwrap()
+                    //    .as_ptr()
+                    //    .wrapping_add(self.block_size.get());
 
                     for cpu in cpus {
-                        used_for_tlb = cpu.check_addr_in_tlb_buffers(&buffer, &buffer_end.clone());
+                        used_for_tlb = cpu.check_addr_in_tlb_buffers(&buffer, buffer_end);
                     }
 
                     if !used_for_tlb {
@@ -252,22 +220,29 @@ impl BxMemoryStubC {
                             .try_into()
                             .expect("An error occured while seeking in overflow file"),
                     ))
-                    .map_err(|e| Error::CantSeekToAddressOverflowFile(address, e))?;
+                    .map_err(|e| MemoryError::CantSeekToAddressOverflowFile(address, e))?;
 
                 // TODO: Don't unwrap
                 overflow_file
-                    .write_all(self.blocks_by_index(self.next_swapout_idx.get()).unwrap())
-                    .map_err(|e| Error::FailedToWriteToOverflowFIle(address, e))?;
+                    .write_all(self.block_by_index(self.next_swapout_idx.get()).unwrap())
+                    .map_err(|e| MemoryError::FailedToWriteToOverflowFIle(address, e))?;
 
                 // Mark swapped out block
-                self.blocks_offsets()[self.next_swapout_idx.get()] = None;
+                self.blocks_offsets()[self.next_swapout_idx.get()] = Block::SwappedOut;
                 // TODO: Continue here
-                self.blocks_offsets()[block] = Some(buffer);
+                self.blocks_offsets()[block] = buffer;
+
+                self.read_block(block)?;
+                tracing::debug!(
+                    "allocate_block: block={:#x}, replaced {:#x}",
+                    block,
+                    self.next_swapout_idx.get()
+                )
             }
         } else {
             // Legacy default allocator
             if self.used_blocks.get() >= max_blocks {
-                return Err(Error::AllAvailibleMemoryAllocated);
+                return Err(MemoryError::AllAvailibleMemoryAllocated.into());
             } else {
                 //BX_MEM_THIS blocks[block] = BX_MEM_THIS vector + (BX_MEM_THIS used_blocks * BX_MEM_THIS block_size);
                 let old_used_blocks = self.used_blocks.get();
@@ -284,19 +259,21 @@ impl BxMemoryStubC {
     }
 
     pub fn get_vector(&self, addr: &BxPhyAddress, cpus: &[BxCpuC]) -> Result<&mut [u8]> {
-        let block: usize = addr / self.block_size.get() as BxPhyAddress;
+        let block: usize = addr / self.block_size.get();
         let blocks = self.blocks_offsets();
 
         if cfg!(feature = "bx_large_ram_file") {
             // TODO: Continue here and check if swapped out if always null
-            if blocks[block].is_none() {
+            if let Block::SwappedOut = blocks[block] {
                 self.allocate_block(block, cpus)?;
             }
+        } else {
+            self.allocate_block(block, cpus)?;
         }
 
-        let a = blocks[block];
-        let a = blocks[block].unwrap() + (*addr as usize & (self.block_size.get() as usize - 1));
-        todo!()
+        let offset = (self.block_by_index(block).unwrap().as_ptr() as usize + addr)
+            & (self.block_size.get() - 1);
+        Ok(&mut self.vector()[offset..self.block_size.get()])
     }
 
     pub fn dbg_fetch_mem(
