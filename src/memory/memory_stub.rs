@@ -84,7 +84,9 @@ impl BxMemoryStubC {
         let used_blocks = if false {
             // Map each block to the corresponding location in actual_vector
             for idx in 0..num_blocks {
-                blocks.push(Block::Block(idx * block_size));
+                blocks.push(Block::Block {
+                    offset: idx * block_size,
+                });
             }
             num_blocks
         } else {
@@ -104,7 +106,7 @@ impl BxMemoryStubC {
             actual_vector: UnsafeCell::new(actual_vector),
             len: Cell::new(len),
             allocated: Cell::new(allocated),
-            block_size: Cell::new(block_size),
+            block_size,
             blocks_offsets: UnsafeCell::new(blocks),
             vector_offset: Cell::new(vector_offset),
             rom_offset,
@@ -143,7 +145,7 @@ impl BxMemoryStubC {
 
     #[cfg(feature = "bx_large_ram_file")]
     fn read_block(&self, block: usize) -> Result<()> {
-        let block_address = block * self.block_size.get();
+        let block_address = block * self.block_size;
         let chosen_block = self.block_by_index(block).unwrap();
         let overflow_file = self.overflow_file_mut();
 
@@ -155,7 +157,7 @@ impl BxMemoryStubC {
     }
 
     pub fn allocate_block(&self, block: usize, cpus: &[BxCpuC]) -> Result<()> {
-        let max_blocks = self.allocated.get() / self.block_size.get();
+        let max_blocks = self.allocated.get() / self.block_size;
 
         if cfg!(feature = "bx_large_ram_file") {
             let used_blocks = self.used_blocks.get();
@@ -171,7 +173,7 @@ impl BxMemoryStubC {
                             let current_next_swapout_idx = self.next_swapout_idx.get();
                             self.next_swapout_idx.set(current_next_swapout_idx + 1);
                         }
-                        if self.next_swapout_idx.get() == self.len.get() / self.block_size.get() {
+                        if self.next_swapout_idx.get() == self.len.get() / self.block_size {
                             self.next_swapout_idx.set(0);
                         }
 
@@ -179,7 +181,9 @@ impl BxMemoryStubC {
                             return Err(MemoryError::InsufficientRam.into());
                         }
                         //let current_block = self.block_by_index(self.next_swapout_idx.get());
-                        buffer = Block::Block(self.next_swapout_idx.get());
+                        buffer = Block::Block {
+                            offset: self.next_swapout_idx.get(),
+                        };
                         if buffer == Block::SwappedOut {
                             break;
                         }
@@ -189,10 +193,10 @@ impl BxMemoryStubC {
 
                     let buffer_end;
                     {
-                        let Block::Block(buffer) = buffer else {
+                        let Block::Block { offset: buffer } = buffer else {
                             unreachable!()
                         };
-                        buffer_end = buffer + self.block_size.get()
+                        buffer_end = buffer + self.block_size
                     }
                     //let buffer_end = buffer_as_ref
                     //    .as_ref()
@@ -209,7 +213,7 @@ impl BxMemoryStubC {
                     }
                 }
 
-                let address: BxPhyAddress = self.next_swapout_idx.get() + self.block_size.get();
+                let address: BxPhyAddress = self.next_swapout_idx.get() + self.block_size;
 
                 // Write swapped out block
                 let overflow_file = &mut self.overflow_file_mut();
@@ -259,7 +263,7 @@ impl BxMemoryStubC {
     }
 
     pub fn get_vector(&self, addr: &BxPhyAddress, cpus: &[BxCpuC]) -> Result<&mut [u8]> {
-        let block: usize = addr / self.block_size.get();
+        let block: usize = addr / self.block_size;
         let blocks = self.blocks_offsets();
 
         if cfg!(feature = "bx_large_ram_file") {
@@ -271,9 +275,9 @@ impl BxMemoryStubC {
             self.allocate_block(block, cpus)?;
         }
 
-        let offset = (self.block_by_index(block).unwrap().as_ptr() as usize + addr)
-            & (self.block_size.get() - 1);
-        Ok(&mut self.vector()[offset..self.block_size.get()])
+        let offset =
+            (self.block_by_index(block).unwrap().as_ptr() as usize + addr) & (self.block_size - 1);
+        Ok(&mut self.vector()[offset..self.block_size])
     }
 
     pub fn dbg_fetch_mem(

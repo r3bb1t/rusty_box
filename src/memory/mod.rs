@@ -24,7 +24,7 @@ pub(super) static EXROM_MASK: usize = EXROMSIZE - 1;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Block {
-    Block(usize),
+    Block { offset: usize },
     SwappedOut,
 }
 
@@ -34,7 +34,7 @@ pub struct BxMemoryStubC {
     /// could be > 4G
     allocated: Cell<usize>,
     /// individual block size, must be power of 2
-    block_size: Cell<usize>,
+    block_size: usize,
     actual_vector: UnsafeCell<Vec<u8>>,
     /// aligned correctly
     vector_offset: Cell<usize>,
@@ -160,8 +160,8 @@ impl BxMemoryStubC {
     //    //todo!()
     //}
     pub fn block_by_index(&self, index: usize) -> Option<&mut [u8]> {
-        if let Block::Block(offset) = self.blocks_offsets().get(index)? {
-            let block_ptr = &mut self.vector()[*offset..self.block_size.get()];
+        if let Block::Block { offset } = self.blocks_offsets().get(index)? {
+            let block_ptr = &mut self.vector()[*offset..self.block_size];
             Some(block_ptr)
         } else {
             None
