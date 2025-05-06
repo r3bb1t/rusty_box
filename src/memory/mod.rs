@@ -30,14 +30,14 @@ pub(crate) enum Block {
 
 pub struct BxMemoryStubC {
     /// could be > 4G
-    len: Cell<usize>,
+    len: usize,
     /// could be > 4G
-    allocated: Cell<usize>,
+    allocated: usize,
     /// individual block size, must be power of 2
     block_size: usize,
     actual_vector: UnsafeCell<Vec<u8>>,
     /// aligned correctly
-    vector_offset: Cell<usize>,
+    vector_offset: usize,
     /// None if swapped out
     blocks_offsets: UnsafeCell<Vec<Block>>,
     /// 512k BIOS rom space + 128k expansion rom space
@@ -138,7 +138,7 @@ impl BxMemoryStubC {
     //}
 
     pub fn vector(&self) -> &mut [u8] {
-        &mut (self.actual_vector()[self.vector_offset.get()..])
+        &mut (self.actual_vector()[self.vector_offset..])
     }
 
     pub fn rom(&self) -> &mut [u8] {

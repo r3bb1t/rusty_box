@@ -104,11 +104,11 @@ impl BxMemoryStubC {
         let overflow_file = tempfile().map_err(MemoryError::UnableToCreateTempFile)?;
         Ok(Self {
             actual_vector: UnsafeCell::new(actual_vector),
-            len: Cell::new(len),
-            allocated: Cell::new(allocated),
+            len,
+            allocated,
             block_size,
             blocks_offsets: UnsafeCell::new(blocks),
-            vector_offset: Cell::new(vector_offset),
+            vector_offset,
             rom_offset,
             bogus_offset,
 
@@ -157,7 +157,7 @@ impl BxMemoryStubC {
     }
 
     pub fn allocate_block(&self, block: usize, cpus: &[BxCpuC]) -> Result<()> {
-        let max_blocks = self.allocated.get() / self.block_size;
+        let max_blocks = self.allocated / self.block_size;
 
         if cfg!(feature = "bx_large_ram_file") {
             let used_blocks = self.used_blocks.get();
@@ -173,7 +173,7 @@ impl BxMemoryStubC {
                             let current_next_swapout_idx = self.next_swapout_idx.get();
                             self.next_swapout_idx.set(current_next_swapout_idx + 1);
                         }
-                        if self.next_swapout_idx.get() == self.len.get() / self.block_size {
+                        if self.next_swapout_idx.get() == self.len / self.block_size {
                             self.next_swapout_idx.set(0);
                         }
 
@@ -293,7 +293,7 @@ impl BxMemoryStubC {
         let mut buf_offset = 0;
 
         while len > 0 {
-            if a20_addr_ < self.len.get() {
+            if a20_addr_ < self.len {
                 // TODO: Check if its really index 0
                 buf[buf_offset] = *self.get_vector(&a20_addr_, cpus)?.first().unwrap();
             } else if cfg!(feature = "bx_phy_address_long") && a20_addr_ > 0xffffffff {
