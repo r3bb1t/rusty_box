@@ -118,24 +118,11 @@ impl BxMemoryStubC {
     pub fn actual_vector(&self) -> &mut Vec<u8> {
         unsafe { &mut (*self.actual_vector.get()) }
     }
-    //
-    //fn set_vector(&self, vector: Vec<u8>) {
-    //    unsafe { *self.vector_offset.get() = vector }
-    //}
-    //
-    //fn get_blocks(&self) -> &'a mut Vec<Option<UnsafeCell<&'a mut [u8]>>> {
-    //    unsafe { &mut *self.blocks.get() }
-    //}
 
     #[allow(clippy::mut_from_ref)]
     fn blocks_offsets(&self) -> &mut Vec<Block> {
         unsafe { &mut (*self.blocks_offsets.get()) }
     }
-
-    //fn blocks(&self) -> &mut Vbuffer_endec<Option<&mut u8>> {
-    //    let offsets =
-    //    todo!()
-    //}
 
     pub fn vector(&self) -> &mut [u8] {
         &mut (self.actual_vector()[self.vector_offset..])
@@ -149,16 +136,6 @@ impl BxMemoryStubC {
         &mut (self.actual_vector()[self.bogus_offset..])
     }
 
-    //fn blocks_by_index(&self, index: usize) -> Option<&'a mut [u8]> {
-    //    if let Some(ref mut val) = &mut self.get_blocks().get_mut(index)? {
-    //        let a: &mut [u8] = unsafe { *val.get() };
-    //        let b = &mut *a;
-    //        Some(b)
-    //    } else {
-    //        None
-    //    }
-    //    //todo!()
-    //}
     pub fn block_by_index(&self, index: usize) -> Option<&mut [u8]> {
         if let Block::Block { offset } = self.blocks_offsets().get(index)? {
             let block_ptr = &mut self.vector()[*offset..self.block_size];

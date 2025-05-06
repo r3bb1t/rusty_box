@@ -18,15 +18,6 @@ fn is_power_of_2(x: usize) -> bool {
 const BX_MEM_VECTOR_ALIGN: usize = 4096;
 
 impl BxMemoryStubC {
-    //fn get_actual_vector_and_offset_to_vector(bytes: u64, alignment: u64) -> (Vec<u8>, usize) {
-    //    let test_mask: u64 = alignment - 1;
-    //    let actual_vector_size = bytes + test_mask;
-    //    let actual_vector = vec![0u8; actual_vector_size as usize];
-    //    let actual_vector_ptr = actual_vector.as_ptr() as u64;
-    //    let masked = ((actual_vector_ptr + test_mask) & !test_mask) - actual_vector_ptr;
-    //    (actual_vector, masked as usize)
-    //}
-
     fn get_actual_vector_and_offset_to_vector(bytes: usize, alignment: usize) -> (Vec<u8>, usize) {
         // Validate alignment
 
@@ -120,28 +111,6 @@ impl BxMemoryStubC {
             //swapped_out,
         })
     }
-
-    //// NOTE: Returns offset to blocks (blocks[block]) instead of reference
-    //fn get_vector(&self, addr: BxPhyAddress) -> &mut Option<UnsafeCell<&'a mut [u8]>> {
-    //    let blocks = self.get_blocks();
-    //    let block: u32 = addr as u32 / self.block_size.get() as u32;
-    //
-    //    if cfg!(feature = "bx_large_ram_file") {
-    //        if blocks[block as usize].is_none() {
-    //            // allocate block
-    //        } else if let Some(block) = &blocks[block as usize] {
-    //            // allocate block
-    //        }
-    //    } else {
-    //        if blocks[block as usize].is_some() {
-    //            // allocate block
-    //        }
-    //    }
-    //
-    //    // TODO: check if "+block" is correct
-    //    let offset: u32 = addr as u32 & (self.block_size.get() as u32 - 1 + block);
-    //    &mut blocks[offset as usize]
-    //}
 
     #[cfg(feature = "bx_large_ram_file")]
     fn read_block(&self, block: usize) -> Result<()> {
