@@ -4,16 +4,20 @@ version = "0.1.0"
 edition = "2021"
 
 [features]
-default = ["bx_large_ram_file", "bx_phy_address_long"]
+default = ["bx_large_ram_file", "bx_phy_address_long", "bx_support_monitor_mwait", "bx_little_endian", "bx_debugger"]
 bx_large_ram_file = []
 bx_phy_address_long = []
+bx_support_monitor_mwait = []
+bx_little_endian = []
+bx_debugger = []
+bx_gdb_stub = []
 
 [dependencies]
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-appender = "0.2.3"
 
-static_assertions = "1.1.0"
 lazy_static = "1.5.0"
 thiserror = "2.0.11"
 tempfile = "3.17.1"
+byteorder = "1.5.0"

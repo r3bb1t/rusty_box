@@ -30,7 +30,7 @@ pub(crate) enum Block {
 
 pub struct BxMemoryStubC {
     /// could be > 4G
-    len: usize,
+    pub(super) len: usize,
     /// could be > 4G
     allocated: usize,
     /// individual block size, must be power of 2

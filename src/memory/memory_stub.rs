@@ -1,12 +1,19 @@
+use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
 use tempfile::tempfile;
 
 use super::{Block, BxMemoryStubC, MemoryError, Result, BIOSROMSZ, EXROMSIZE};
 
 use crate::config::BxPhyAddress;
+use crate::cpu::icache::BxPageWriteStampTable;
 use crate::cpu::BxCpuC;
-use crate::pc_system::a20_addr;
+use crate::misc::bswap::{
+    write_host_dword_to_little_endian, write_host_qword_to_little_endian,
+    write_host_word_to_little_endian,
+};
+use crate::pc_system::{self, a20_addr};
 
 use std::cell::{Cell, UnsafeCell};
+use std::ffi::c_uint;
 use std::io::{Read, Seek};
 use std::io::{SeekFrom, Write};
 
@@ -18,7 +25,7 @@ fn is_power_of_2(x: usize) -> bool {
 const BX_MEM_VECTOR_ALIGN: usize = 4096;
 
 impl BxMemoryStubC {
-    fn get_actual_vector_and_offset_to_vector(bytes: usize, alignment: usize) -> (Vec<u8>, usize) {
+    pub fn alloc_vector_aligned(bytes: usize, alignment: usize) -> (Vec<u8>, usize) {
         // Validate alignment
 
         // Calculate the mask and actual vector size
@@ -35,6 +42,10 @@ impl BxMemoryStubC {
         (actual_vector, masked)
     }
 
+    pub fn get_memory_len(&self) -> usize {
+        self.len
+    }
+
     pub fn create_and_init(guest: usize, host: usize, block_size: usize) -> Result<Self> {
         // accept only memory size which is multiply of 1M
         const ONE_MEGABYTE: usize = 1 << 20; // 1 MB in bytes
@@ -47,10 +58,8 @@ impl BxMemoryStubC {
             return Err(MemoryError::BlockSizeIsNotAPowerOfTwo(block_size).into());
         }
 
-        let (actual_vector, vector_offset) = Self::get_actual_vector_and_offset_to_vector(
-            host + BIOSROMSZ + EXROMSIZE + 4096,
-            BX_MEM_VECTOR_ALIGN,
-        );
+        let (actual_vector, vector_offset) =
+            Self::alloc_vector_aligned(host + BIOSROMSZ + EXROMSIZE + 4096, BX_MEM_VECTOR_ALIGN);
         tracing::info!(
             "allocated memory at {:p}. after alignment, vector={:p}, block_size = {}k",
             actual_vector.as_ptr(),
@@ -110,6 +119,24 @@ impl BxMemoryStubC {
             overflow_file: UnsafeCell::new(overflow_file),
             //swapped_out,
         })
+    }
+
+    pub fn get_vector(&self, addr: &BxPhyAddress, cpus: &[BxCpuC]) -> Result<&mut [u8]> {
+        let block: usize = addr / self.block_size;
+        let blocks = self.blocks_offsets();
+
+        if cfg!(feature = "bx_large_ram_file") {
+            // TODO: Continue here and check if swapped out if always null
+            if let Block::SwappedOut = blocks[block] {
+                self.allocate_block(block, cpus)?;
+            }
+        } else {
+            self.allocate_block(block, cpus)?;
+        }
+
+        let offset =
+            (self.block_by_index(block).unwrap().as_ptr() as usize + addr) & (self.block_size - 1);
+        Ok(&mut self.vector()[offset..self.block_size])
     }
 
     #[cfg(feature = "bx_large_ram_file")]
@@ -231,24 +258,6 @@ impl BxMemoryStubC {
         todo!()
     }
 
-    pub fn get_vector(&self, addr: &BxPhyAddress, cpus: &[BxCpuC]) -> Result<&mut [u8]> {
-        let block: usize = addr / self.block_size;
-        let blocks = self.blocks_offsets();
-
-        if cfg!(feature = "bx_large_ram_file") {
-            // TODO: Continue here and check if swapped out if always null
-            if let Block::SwappedOut = blocks[block] {
-                self.allocate_block(block, cpus)?;
-            }
-        } else {
-            self.allocate_block(block, cpus)?;
-        }
-
-        let offset =
-            (self.block_by_index(block).unwrap().as_ptr() as usize + addr) & (self.block_size - 1);
-        Ok(&mut self.vector()[offset..self.block_size])
-    }
-
     pub fn dbg_fetch_mem(
         &self,
         _cpu: BxCpuC,
@@ -257,15 +266,15 @@ impl BxMemoryStubC {
         buf: &mut [u8],
         cpus: &[BxCpuC],
     ) -> Result<bool> {
-        let mut a20_addr_: BxPhyAddress = a20_addr(addr);
+        let mut a20_addr: BxPhyAddress = pc_system::a20_addr(addr);
         let mut ret = true;
         let mut buf_offset = 0;
 
         while len > 0 {
-            if a20_addr_ < self.len {
+            if a20_addr < self.len {
                 // TODO: Check if its really index 0
-                buf[buf_offset] = *self.get_vector(&a20_addr_, cpus)?.first().unwrap();
-            } else if cfg!(feature = "bx_phy_address_long") && a20_addr_ > 0xffffffff {
+                buf[buf_offset] = *self.get_vector(&a20_addr, cpus)?.first().unwrap();
+            } else if cfg!(feature = "bx_phy_address_long") && a20_addr > 0xffffffff {
                 buf[buf_offset] = 0xff;
                 ret = false;
             } else {
@@ -275,14 +284,183 @@ impl BxMemoryStubC {
             len -= 1;
 
             buf_offset += 1;
-            // TODO: I'm not sure about 8
-            a20_addr_ += 8;
+            // TODO: I'm not sure about 1
+            a20_addr += 1;
         }
 
         Ok(ret)
     }
 
-    //fn allocate_block(&self, block: usize) {
-    //    todo!()
-    //}
+    #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
+    pub fn dbg_set_mem(cpus: &[BxCpuC], addr: BxPhyAddress, len: c_uint, buf: &mut [u8]) -> bool {
+        unimplemented!()
+    }
+
+    #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
+    pub fn dbg_crc32(addr1: BxPhyAddress, addr2: BxPhyAddress, crc: &[u32]) -> bool {
+        unimplemented!()
+    }
+
+    ///
+    /// Return a host address corresponding to the guest physical memory
+    /// address (with A20 already applied), given that the calling
+    /// code will perform an 'op' operation.  This address will be
+    /// used for direct access to guest memory.
+    /// Values of 'op' are { BX_READ, BX_WRITE, BX_EXECUTE, BX_RW }.
+    ///
+    ///
+    /// The other assumption is that the calling code _only_ accesses memory
+    /// directly within the page that encompasses the address requested.
+    ///
+    fn get_host_mem_addr(
+        &self,
+        cpus: &[BxCpuC],
+        addr: BxPhyAddress,
+        rw: c_uint,
+    ) -> Result<Option<&mut [u8]>> {
+        let a20_addr = pc_system::a20_addr(addr);
+
+        let write = rw & 1 != 0;
+
+        #[cfg(feature = "bx_support_monitor_mwait")]
+        if write && Self::is_monitor(cpus, a20_addr & !0xfff, 0xfff) {
+            // TODO: Consider actually returning error
+
+            // Vetoed! Write monitored page!
+            return Ok(None);
+        }
+
+        if !write {
+            if addr < self.len {
+                Ok(Some(self.get_vector(&addr, cpus)?))
+            } else {
+                Ok(Some(&mut self.bogus()[a20_addr & 0xfff..]))
+            }
+        } else if a20_addr >= self.len {
+            Ok(None)
+        } else {
+            Ok(Some(self.get_vector(&addr, cpus)?))
+        }
+    }
+
+    fn write_physical_page(
+        &self,
+        cpus: &[BxCpuC],
+        page_write_stamp_table: &mut BxPageWriteStampTable,
+        addr: BxPhyAddress,
+        mut len: usize,
+        data: &mut [u8],
+    ) -> Result<()> {
+        let mut a20_addr = pc_system::a20_addr(addr);
+
+        // Note: accesses should always be contained within a single page
+        if (addr >> 12) != ((addr + len - 1) >> 12) {
+            return Err(MemoryError::WritePhysicalPage { addr, len }.into());
+        }
+
+        #[cfg(feature = "bx_support_monitor_mwait")]
+        Self::is_monitor(cpus, a20_addr, len.try_into()?);
+
+        // TODO: When everything will work, add rust enums for that
+        if a20_addr < self.len {
+            // all of data is within limits of physical memory
+            if len == 8 {
+                page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
+                write_host_qword_to_little_endian(
+                    self.get_vector(&a20_addr, cpus)?,
+                    LittleEndian::read_u64(data),
+                );
+                return Ok(());
+            } else if len == 4 {
+                page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
+                write_host_dword_to_little_endian(
+                    self.get_vector(&a20_addr, cpus)?,
+                    LittleEndian::read_u32(data),
+                );
+                return Ok(());
+            } else if len == 2 {
+                page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
+                write_host_word_to_little_endian(
+                    self.get_vector(&a20_addr, cpus)?,
+                    LittleEndian::read_u16(data),
+                );
+                return Ok(());
+            } else if len == 1 {
+                page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
+                self.get_vector(&a20_addr, cpus)?[0] = data[0];
+                return Ok(());
+            }
+            // len == other, just fall thru to special cases handling
+
+            let mut data_ptr_offset = if cfg!(feature = "bx_little_endian") {
+                0
+            } else {
+                len - 1
+            };
+
+            loop {
+                if (len & 7) == 0 {
+                    page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
+                    write_host_qword_to_little_endian(
+                        self.get_vector(&a20_addr, cpus)?,
+                        LittleEndian::read_u64(&data[data_ptr_offset..]),
+                    );
+                    len -= 8;
+                    a20_addr += 8;
+
+                    if cfg!(feature = "bx_little_endian") {
+                        data_ptr_offset += 8;
+                    } else {
+                        data_ptr_offset -= 8
+                    }
+
+                    if len == 0 {
+                        return Ok(());
+                    }
+                } else {
+                    page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
+                    self.get_vector(&a20_addr, cpus)?[0] = data[0];
+
+                    if len == 1 {
+                        return Ok(());
+                    }
+
+                    len -= 1;
+                    if cfg!(feature = "bx_little_endian") {
+                        data_ptr_offset += 8;
+                    } else {
+                        data_ptr_offset -= 8
+                    }
+                }
+
+                page_write_stamp_table.dec_write_stamp(a20_addr);
+            }
+        } else {
+            tracing::debug!("Write outside the limits of physical memory ({a20_addr:#x}) (ignore)");
+        }
+        Ok(())
+    }
+
+    fn read_physical_page(
+        &self,
+        cpus: &[BxCpuC],
+        addr: BxPhyAddress,
+        len: c_uint,
+        data: &mut [u8],
+    ) -> Result<()> {
+        todo!()
+    }
+
+    #[cfg(feature = "bx_support_monitor_mwait")]
+    fn is_monitor(cpus: &[BxCpuC], begin_addr: BxPhyAddress, len: c_uint) -> bool {
+        cpus.iter().any(|cpu| cpu.is_monitor(begin_addr, len))
+    }
+
+    #[cfg(feature = "bx_support_monitor_mwait")]
+    fn check_monitor(cpus: &mut [BxCpuC], begin_addr: BxPhyAddress, len: c_uint) -> Result<()> {
+        for cpu in cpus {
+            cpu.check_monitor(begin_addr, len)?
+        }
+        Ok(())
+    }
 }

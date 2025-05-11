@@ -1,4 +1,8 @@
+use std::os::raw::c_uint;
+
 use thiserror::Error;
+
+use crate::config::BxPhyAddress;
 
 #[derive(Error, Debug)]
 pub enum MemoryError {
@@ -19,4 +23,10 @@ pub enum MemoryError {
     CantSeekToAddressOverflowFile(usize, std::io::Error),
     #[error("FATAL ERROR: Could not write at {0:x} in overflow file! {1}")]
     FailedToWriteToOverflowFIle(usize, std::io::Error),
+
+    #[error("Tried to write monitored page at addr: {0:x}")]
+    WriteMonitoredPage(usize),
+
+    #[error("writePhysicalPage: cross page access at address {addr:#X}, len={len}")]
+    WritePhysicalPage { addr: BxPhyAddress, len: usize },
 }
