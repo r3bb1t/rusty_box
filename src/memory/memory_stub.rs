@@ -1,4 +1,4 @@
-use byteorder::{ByteOrder, LittleEndian, ReadBytesExt};
+use byteorder::{ByteOrder, LittleEndian};
 use tempfile::tempfile;
 
 use super::{Block, BxMemoryStubC, MemoryError, Result, BIOSROMSZ, EXROMSIZE};
@@ -10,7 +10,7 @@ use crate::misc::bswap::{
     write_host_dword_to_little_endian, write_host_qword_to_little_endian,
     write_host_word_to_little_endian,
 };
-use crate::pc_system::{self, a20_addr};
+use crate::pc_system::{self};
 
 use std::cell::{Cell, UnsafeCell};
 use std::ffi::c_uint;
@@ -95,11 +95,7 @@ impl BxMemoryStubC {
             }
             0
         };
-        //todo!()
 
-        //let swapped_out =
-        //    (std::ptr::null::<u8>() as isize - std::mem::size_of::<u8>() as isize) as *const u8;
-        //
         #[cfg(feature = "bx_large_ram_file")]
         let overflow_file = tempfile().map_err(MemoryError::UnableToCreateTempFile)?;
         Ok(Self {
@@ -194,11 +190,6 @@ impl BxMemoryStubC {
                         };
                         buffer_end = buffer + self.block_size
                     }
-                    //let buffer_end = buffer_as_ref
-                    //    .as_ref()
-                    //    .unwrap()
-                    //    .as_ptr()
-                    //    .wrapping_add(self.block_size.get());
 
                     for cpu in cpus {
                         used_for_tlb = cpu.check_addr_in_tlb_buffers(&buffer, buffer_end);
