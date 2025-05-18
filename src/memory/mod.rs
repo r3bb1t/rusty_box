@@ -1,18 +1,18 @@
 mod error;
-
 pub mod memory_stub;
 
 #[cfg(test)]
 mod tests;
 
-use std::{
-    cell::{Cell, UnsafeCell},
-    fs::File,
-};
-
-pub use super::error::*;
+pub use super::error::Result;
 use crate::config::BxPhyAddress;
+use alloc::{boxed::Box, vec::Vec};
 pub use error::*;
+
+use core::cell::{Cell, UnsafeCell};
+
+#[cfg(all(feature = "bx_large_ram_file", feature = "std"))]
+use std::fs::File;
 
 /// 4M BIOS ROM @0xffc00000, must be a power of 2
 pub(super) static BIOSROMSZ: usize = 1 << 22;
@@ -28,6 +28,7 @@ pub(crate) enum Block {
     SwappedOut,
 }
 
+#[derive(Debug)]
 pub struct BxMemoryStubC {
     /// could be > 4G
     pub(super) len: usize,
@@ -49,7 +50,7 @@ pub struct BxMemoryStubC {
 
     #[cfg(feature = "bx_large_ram_file")]
     next_swapout_idx: Cell<usize>,
-    #[cfg(feature = "bx_large_ram_file")]
+    #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
     //overflow_file: Option<Arc<Mutex<std::fs::File>>>,
     overflow_file: UnsafeCell<File>,
     //#[cfg(feature = "bx_large_ram_file")]
@@ -57,12 +58,13 @@ pub struct BxMemoryStubC {
 }
 
 type Unsigned = u32;
-type MemoryHandlerT = fn(BxPhyAddress, u32, dyn std::any::Any, dyn std::any::Any) -> bool;
-type MemoryDirectAccessHandlerT = fn(BxPhyAddress, Unsigned, dyn std::any::Any) -> Vec<u8>;
+type MemoryHandlerT = fn(BxPhyAddress, u32, dyn core::any::Any, dyn core::any::Any) -> bool;
+type MemoryDirectAccessHandlerT = fn(BxPhyAddress, Unsigned, dyn core::any::Any) -> Vec<u8>;
 
+#[derive(Debug)]
 pub(super) struct MemoryHandlerStruct {
     memory_handler_struct: Box<Self>,
-    param: Box<dyn std::any::Any>,
+    param: Box<dyn core::any::Any>,
     begin: BxPhyAddress,
     end: BxPhyAddress,
     bitmap: u16,
@@ -77,6 +79,7 @@ static BIOS_ROM_LOWER: u8 = 0x01;
 static BIOS_ROM_EXTENDED: u8 = 0x02;
 static BIOS_ROM_1MEG: u8 = 0x04;
 
+#[derive(Debug)]
 enum MemoryAreaT {
     BxMemAreaC0000 = 0,
     BxMemAreaC4000,
@@ -93,6 +96,7 @@ enum MemoryAreaT {
     BxMemAreaF0000,
 }
 
+#[derive(Debug)]
 pub struct BxMemC {
     memory_handlers: Vec<MemoryHandlerStruct>,
     pci_enabled: bool,
@@ -145,6 +149,7 @@ impl BxMemoryStubC {
         }
     }
 
+    #[cfg(all(feature = "bx_large_ram_file", feature = "std"))]
     #[allow(clippy::mut_from_ref)]
     fn overflow_file_mut(&self) -> &mut File {
         unsafe { &mut *self.overflow_file.get() }

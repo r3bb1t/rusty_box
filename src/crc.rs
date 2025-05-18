@@ -26,14 +26,24 @@
 //  of several of the popular FDDI "MAC" chips.
 //  **************************************************************************
 
+#[cfg(feature = "std")]
 use std::sync::OnceLock;
+
+#[cfg(not(feature = "std"))]
+use spin::Once;
 
 /// Initialized first time "crc32()" is called. If you prefer, you can
 /// statically initialize it at compile time. [Another exercise.]
+#[cfg(feature = "std")]
 static CRC32_TABLE: OnceLock<[u32; 256]> = OnceLock::new();
+#[cfg(not(feature = "std"))]
+static CRC32_TABLE: Once<[u32; 256]> = Once::new();
 
 pub fn crc32_table() -> &'static [u32; 256] {
-    CRC32_TABLE.get_or_init(init_crc32_table)
+    #[cfg(feature = "std")]
+    return CRC32_TABLE.get_or_init(init_crc32_table);
+    #[cfg(not(feature = "std"))]
+    return CRC32_TABLE.call_once(init_crc32_table);
 }
 
 // Build auxiliary table for parallel byte-at-a-time CRC-32.

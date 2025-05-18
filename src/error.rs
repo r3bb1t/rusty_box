@@ -8,11 +8,12 @@ pub enum Error {
     Memory(#[from] crate::memory::MemoryError),
 
     #[error(transparent)]
-    Infallible(#[from] std::convert::Infallible),
+    Infallible(#[from] core::convert::Infallible),
 
     #[error(transparent)]
-    TryFromInt(#[from] std::num::TryFromIntError),
+    TryFromInt(#[from] core::num::TryFromIntError),
 
+    #[cfg(feature = "std")]
     #[error(transparent)]
     Io(#[from] std::io::Error),
 }

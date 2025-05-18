@@ -1,21 +1,27 @@
+use alloc::vec::Vec;
 use byteorder::{ByteOrder, LittleEndian};
+#[cfg(feature = "std")]
 use tempfile::tempfile;
 
 use super::{Block, BxMemoryStubC, MemoryError, Result, BIOSROMSZ, EXROMSIZE};
 
 use crate::config::BxPhyAddress;
+use crate::cpu::cpu::BxCpuC;
 use crate::cpu::icache::BxPageWriteStampTable;
-use crate::cpu::BxCpuC;
 use crate::misc::bswap::{
-    write_host_dword_to_little_endian, write_host_qword_to_little_endian,
-    write_host_word_to_little_endian,
+    read_host_dword_to_little_endian, read_host_qword_to_little_endian,
+    read_host_word_to_little_endian, write_host_dword_to_little_endian,
+    write_host_qword_to_little_endian, write_host_word_to_little_endian,
 };
 use crate::pc_system::{self};
 
-use std::cell::{Cell, UnsafeCell};
-use std::ffi::c_uint;
-use std::io::{Read, Seek};
-use std::io::{SeekFrom, Write};
+use core::{
+    cell::{Cell, UnsafeCell},
+    ffi::c_uint,
+};
+
+#[cfg(feature = "std")]
+use std::io::{Read, Seek, SeekFrom, Write};
 
 #[inline]
 fn is_power_of_2(x: usize) -> bool {
@@ -33,7 +39,9 @@ impl BxMemoryStubC {
         let actual_vector_size = bytes + test_mask;
 
         // Create the vector
-        let actual_vector = vec![0u8; actual_vector_size];
+        let mut actual_vector = Vec::new();
+        // And initialize it
+        (0..actual_vector_size).for_each(|_| actual_vector.push(0));
 
         // Calculate the pointer and offset using unsafe block
         let actual_vector_ptr = actual_vector.as_ptr() as usize;
@@ -96,7 +104,7 @@ impl BxMemoryStubC {
             0
         };
 
-        #[cfg(feature = "bx_large_ram_file")]
+        #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
         let overflow_file = tempfile().map_err(MemoryError::UnableToCreateTempFile)?;
         Ok(Self {
             actual_vector: UnsafeCell::new(actual_vector),
@@ -111,7 +119,7 @@ impl BxMemoryStubC {
             used_blocks: Cell::new(used_blocks),
             #[cfg(feature = "bx_large_ram_file")]
             next_swapout_idx: Cell::new(0),
-            #[cfg(feature = "bx_large_ram_file")]
+            #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
             overflow_file: UnsafeCell::new(overflow_file),
             //swapped_out,
         })
@@ -135,14 +143,13 @@ impl BxMemoryStubC {
         Ok(&mut self.vector()[offset..self.block_size])
     }
 
-    #[cfg(feature = "bx_large_ram_file")]
+    #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
     fn read_block(&self, block: usize) -> Result<()> {
         let block_address = block * self.block_size;
         let chosen_block = self.block_by_index(block).unwrap();
         let overflow_file = self.overflow_file_mut();
 
         overflow_file.seek(SeekFrom::Start(block_address.try_into()?))?;
-
         overflow_file.read_exact(chosen_block)?;
 
         Ok(())
@@ -151,7 +158,8 @@ impl BxMemoryStubC {
     pub fn allocate_block(&self, block: usize, cpus: &[BxCpuC]) -> Result<()> {
         let max_blocks = self.allocated / self.block_size;
 
-        if cfg!(feature = "bx_large_ram_file") {
+        #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
+        {
             let used_blocks = self.used_blocks.get();
             if used_blocks >= max_blocks {
                 let original_replacement_block = self.next_swapout_idx.get();
@@ -230,7 +238,10 @@ impl BxMemoryStubC {
                     self.next_swapout_idx.get()
                 )
             }
-        } else {
+        }
+
+        #[cfg(not(feature = "bx_large_ram_file"))]
+        {
             // Legacy default allocator
             if self.used_blocks.get() >= max_blocks {
                 return Err(MemoryError::AllAvailibleMemoryAllocated.into());
@@ -436,9 +447,49 @@ impl BxMemoryStubC {
         &self,
         cpus: &[BxCpuC],
         addr: BxPhyAddress,
-        len: c_uint,
+        len: usize,
         data: &mut [u8],
     ) -> Result<()> {
+        let mut a20_addr = pc_system::a20_addr(addr);
+
+        // Note: accesses should always be contained within a single page
+        if (addr >> 12) != ((addr + len - 1) >> 12) {
+            return Err(MemoryError::ReadPhysicalPage { addr, len }.into());
+        }
+
+        if a20_addr < self.len {
+            // all of data is within limits of physical memory
+            if len == 8 {
+                let val = read_host_qword_to_little_endian(self.get_vector(&a20_addr, cpus)?);
+                LittleEndian::write_u64(data, val);
+                return Ok(());
+            } else if len == 4 {
+                let val = read_host_dword_to_little_endian(self.get_vector(&a20_addr, cpus)?);
+                LittleEndian::write_u32(data, val);
+                return Ok(());
+            } else if len == 2 {
+                let val = read_host_word_to_little_endian(self.get_vector(&a20_addr, cpus)?);
+                LittleEndian::write_u16(data, val);
+                return Ok(());
+            } else if len == 1 {
+                let val = self.get_vector(&a20_addr, cpus)?[0];
+                data[0] = val;
+                return Ok(());
+            }
+            // len == other, just fall thru to special cases handling
+
+            let data_ptr_offset = if cfg!(feature = "bx_little_endian") {
+                0
+            } else {
+                len - 1
+            };
+
+            todo!()
+        } else {
+            // access outside limits of physical memory
+            let bogus = self.bogus();
+            bogus.fill(0xff);
+        }
         todo!()
     }
 

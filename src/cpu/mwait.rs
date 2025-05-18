@@ -1,9 +1,9 @@
-use super::{BxCpuC, Result};
+use super::{cpu::BxCpuC, Result};
 use crate::config::BxPhyAddress;
 
-use std::os::raw::c_uint;
+use core::ffi::c_uint;
 
-impl BxCpuC {
+impl<'c> BxCpuC<'_> {
     pub fn is_monitor(&self, begin_addr: BxPhyAddress, len: c_uint) -> bool {
         unimplemented!()
     }

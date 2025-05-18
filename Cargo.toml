@@ -1,23 +1,66 @@
 [package]
 name = "rusty_box"
-version = "0.1.0"
+version = "0.0.1"
 edition = "2021"
 
+license = "Apache-2.0"
+
+# keep it library only for early stages of development
+[lib]
+name = "rusty_box"
+path = "src/lib.rs"
+
+
 [features]
-default = ["bx_large_ram_file", "bx_phy_address_long", "bx_support_monitor_mwait", "bx_little_endian", "bx_debugger"]
-bx_large_ram_file = []
-bx_phy_address_long = []
-bx_support_monitor_mwait = []
-bx_little_endian = []
+default = ["bx_full"]
+
+std = ["tracing/std", "tempfile"]
+
+bx_full = ["bx_little_endian", "bx_large_ram_file", "bx_phy_address_long", "bx_support_monitor_mwait", "bx_debugger", "bx_cpu_level_6", "bx_support_vmx_1", "bx_support_vmx_2", 
+           "bx_support_svm", "bx_support_x86_64", "bx_support_cet", "bx_support_pkeys", "bx_support_fpu", "bx_support_evex", "bx_support_apic", "bx_configure_msrs", 
+           "bx_support_handlers_chaining_speedups", "bx_support_alignment_check" ]
+
 bx_debugger = []
 bx_gdb_stub = []
+bx_large_ram_file = []
+bx_instrumentation = []
+
+bx_support_alignment_check = []
+bx_support_amx = []
+bx_support_apic = []
+bx_support_avx = []
+bx_support_cet = []
+bx_support_evex = []
+bx_support_fpu = []
+bx_support_handlers_chaining_speedups = []
+bx_support_memtype = []
+bx_support_smp = []
+bx_support_uintr = []
+bx_support_x86_64 = []
+
+bx_big_endian = []
+bx_little_endian = []
+
+bx_phy_address_long = []
+bx_support_monitor_mwait = []
+bx_support_pkeys = []
+bx_configure_msrs = []
+
+bx_support_svm = []
+bx_support_vmx_1 = []
+bx_support_vmx_2 = []
+
+# cpu levels
+bx_cpu_level_4 = []
+bx_cpu_level_5 = []
+bx_cpu_level_6 = []
+
 
 [dependencies]
-tracing = "0.1.41"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-tracing-appender = "0.2.3"
+tracing = { version = "0.1", default-features = false }
 
-thiserror = "2.0.11"
+thiserror = "2.0"
 
-byteorder = "1.5.0"
-tempfile = "3.17.1"
+byteorder = "1.5"
+tempfile = { version =  "3.17", optional = true }
+spin = { version = "0.10.0", default-features = false, features = ["once"] }

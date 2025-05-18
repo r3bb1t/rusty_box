@@ -1,7 +1,7 @@
-use super::BxCpuC;
+use super::cpu::BxCpuC;
 use crate::memory::Block;
 
-impl BxCpuC {
+impl<'c> BxCpuC<'_> {
     #[cfg(feature = "bx_large_ram_file")]
     pub fn check_addr_in_tlb_buffers(&self, addr: &Block, end: usize) -> bool {
         unimplemented!()

@@ -1,9 +1,12 @@
-use std::os::raw::c_uint;
+use core::ffi::c_uint;
 
 use crate::config::BxPhyAddress;
 
+use super::decoder::instr::BxInstruction;
+
+#[derive(Debug)]
 pub struct BxPageWriteStampTable<'a> {
-    fine_granularity_mapping: &'a [u32],
+    pub fine_granularity_mapping: &'a [u32],
 }
 
 impl BxPageWriteStampTable<'_> {
@@ -19,4 +22,25 @@ impl BxPageWriteStampTable<'_> {
     pub fn dec_write_stamp_with_len(&mut self, p_addr: BxPhyAddress, len: c_uint) {
         unimplemented!()
     }
+}
+
+const BX_ICACHE_ENTRIES: usize = 64 * 1024; // Must be a power of 2.
+const BX_ICACHE_MEM_POOL: usize = 576 * 1024;
+
+#[derive(Debug)]
+pub struct BxIcacheEntry {
+    p_addr: BxPhyAddress, // Physical address of the instruction
+    trace_mask: u32,
+
+    tlen: u32, // Trace length in instructions
+    i: BxInstruction,
+}
+
+#[derive(Debug)]
+pub struct BxIcache {
+    pub entry: [BxIcacheEntry; BX_ICACHE_ENTRIES],
+    pub mpool: [BxInstruction; BX_ICACHE_MEM_POOL],
+    pub mpindex: c_uint,
+
+    pub trace_link_time_stamp: u32,
 }
