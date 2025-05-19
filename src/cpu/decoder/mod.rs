@@ -273,7 +273,7 @@ pub(super) enum X86FeatureName {
 
 /// segment register encoding
 #[derive(Debug)]
-enum BxSegregs {
+pub(crate) enum BxSegregs {
     Es = 0,
     Cs = 1,
     Ss = 2,

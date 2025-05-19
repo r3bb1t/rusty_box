@@ -1,5 +1,3 @@
-use core::ffi::c_uint;
-
 #[derive(Debug)]
 pub struct BxCr0 {
     pub val32: u32, // 32bit value of register
@@ -61,9 +59,9 @@ enum Xcr0Enum {
 #[derive(Debug)]
 pub struct MSR {
     /// MSR index
-    index: c_uint,
+    index: u32,
     /// MSR type: 1 - lin address, 2 - phy address
-    r#type: c_uint,
+    r#type: u32,
     /// current MSR value
     val64: u64,
     /// reset value
@@ -75,6 +73,6 @@ pub struct MSR {
 }
 
 impl MSR {
-    const BX_LIN_ADDRESS_MSR: c_uint = 1;
-    const BX_PHY_ADDRESS_MSR: c_uint = 2;
+    const BX_LIN_ADDRESS_MSR: u32 = 1;
+    const BX_PHY_ADDRESS_MSR: u32 = 2;
 }

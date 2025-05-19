@@ -1,8 +1,6 @@
-use core::ffi::{c_int, c_uint};
-
 use crate::config::BxPhyAddress;
 
-use super::cpu::BxCpuC;
+use super::{cpu::BxCpuC, cpuid::BxCpuTrait};
 
 pub const APIC_EDGE_TRIGGERED: u8 = 0;
 pub const APIC_LEVEL_TRIGGERED: u8 = 1;
@@ -117,9 +115,9 @@ pub enum LocalVectorTableRegister {
 }
 
 #[derive(Debug)]
-pub struct BxLocalApic<'c> {
+pub struct BxLocalApic<'c, I: BxCpuTrait> {
     base_addr: BxPhyAddress,
-    mode: c_uint,
+    mode: u32,
     xapic: bool,
 
     #[cfg(feature = "bx_cpu_level_6")]
@@ -178,10 +176,10 @@ pub struct BxLocalApic<'c> {
 
     /// Internal timer state, not accessible from bus
     timer_active: bool,
-    timer_handle: c_int,
+    timer_handle: i32,
 
     #[cfg(feature = "bx_support_vmx_2")]
-    vmx_timer_handle: c_int,
+    vmx_timer_handle: i32,
     #[cfg(feature = "bx_support_vmx_2")]
     vmx_preemption_timer_value: u32,
     #[cfg(feature = "bx_support_vmx_2")]
@@ -196,11 +194,11 @@ pub struct BxLocalApic<'c> {
     #[cfg(feature = "bx_support_vmx_2")]
     vmx_timer_active: bool,
 
-    mwaitx_timer_handle: c_int,
+    mwaitx_timer_handle: i32,
     mwaitx_timer_active: bool,
 
     // ???
-    cpu: &'c BxCpuC<'c>,
+    cpu: &'c BxCpuC<'c, I>,
 }
 
 #[derive(Debug)]

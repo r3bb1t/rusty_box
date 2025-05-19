@@ -1,5 +1,3 @@
-use core::ffi::c_uint;
-
 use crate::config::BxPhyAddress;
 
 use super::decoder::instr::BxInstruction;
@@ -19,7 +17,7 @@ impl BxPageWriteStampTable<'_> {
         unimplemented!()
     }
 
-    pub fn dec_write_stamp_with_len(&mut self, p_addr: BxPhyAddress, len: c_uint) {
+    pub fn dec_write_stamp_with_len(&mut self, p_addr: BxPhyAddress, len: u32) {
         unimplemented!()
     }
 }
@@ -40,7 +38,7 @@ pub struct BxIcacheEntry {
 pub struct BxIcache {
     pub entry: [BxIcacheEntry; BX_ICACHE_ENTRIES],
     pub mpool: [BxInstruction; BX_ICACHE_MEM_POOL],
-    pub mpindex: c_uint,
+    pub mpindex: u32,
 
     pub trace_link_time_stamp: u32,
 }

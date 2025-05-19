@@ -1,7 +1,5 @@
-use core::ffi::c_uint;
-
 use crate::config::BxPtrEquiv;
 
-pub type BxMemType = c_uint;
+pub type BxMemType = u32;
 
 pub type BxHostpageaddr = BxPtrEquiv;

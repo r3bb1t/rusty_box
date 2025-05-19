@@ -1,13 +1,14 @@
-use core::ffi::c_uint;
-
 use crate::config::{BxAddress, BxPhyAddress, BxPtrEquiv};
 
 use super::{
     apic::BxLocalApic,
-    cpuid::BxCpuId,
+    cpuid::BxCpuTrait,
     cpustats::BxCpuStatistics,
     crregs::{BxCr0, BxCr4, BxDr6, BxDr7, Xcr0, MSR},
-    decoder::{BX_GENERAL_REGISTERS, BX_ISA_EXTENSIONS_ARRAY_SIZE, BX_XMM_REGISTERS},
+    decoder::{
+        BxSegregs, BX_16BIT_REG_IP, BX_32BIT_REG_EIP, BX_64BIT_REG_RIP, BX_64BIT_REG_SSP,
+        BX_GENERAL_REGISTERS, BX_ISA_EXTENSIONS_ARRAY_SIZE, BX_TMP_REGISTER, BX_XMM_REGISTERS,
+    },
     descriptor::{BxGlobalSegmentReg, BxSegmentReg},
     i387::{BxPackedRegister, I387},
     icache::BxIcache,
@@ -33,7 +34,7 @@ use super::tlb::BxMemType;
 pub union BxGenRegWord {
     pub dword_filler: u16,
     pub word_filler: u16,
-    pub rx: u32,
+    pub rx: u16,
     pub byte: BxWordByte,
 }
 
@@ -51,7 +52,7 @@ pub struct BxGenRegDword {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union BxGenRegWordInner {
-    pub rx: u32,
+    pub rx: y16,
     pub byte: BxWordByte,
 }
 
@@ -82,7 +83,7 @@ pub union BxGenReg {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union BxGenRegWord {
-    pub rx: u32,
+    pub rx: u16,
     pub byte: BxWordByte,
     pub word_filler: u16,
     pub dword_filler: u16,
@@ -95,15 +96,6 @@ pub union BxGenRegWord {
 pub struct BxGenRegDword {
     pub erx: u32,
     pub hrx: u32,
-}
-
-#[cfg(feature = "bx_support_x86_64")]
-#[cfg(not(feature = "bx_big_endian"))]
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub union BxGenRegWordInner {
-    pub rx: u32,
-    pub byte: BxWordByte,
 }
 
 #[cfg(feature = "bx_support_x86_64")]
@@ -132,7 +124,7 @@ pub union BxGenReg {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union BxGenRegWord {
-    pub rx: u32,
+    pub rx: u16,
     pub byte: BxWordByte,
     pub word_filler: u16,
 }
@@ -142,15 +134,6 @@ pub union BxGenRegWord {
 #[derive(Debug, Copy, Clone)]
 pub struct BxGenRegDword {
     pub erx: u32,
-}
-
-#[cfg(not(feature = "bx_support_x86_64"))]
-#[cfg(not(feature = "bx_big_endian"))]
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub union BxGenRegWordInner {
-    pub rx: u32,
-    pub byte: BxWordByte,
 }
 
 #[cfg(not(feature = "bx_support_x86_64"))]
@@ -172,7 +155,7 @@ pub struct BxWordByte {
 #[derive(Copy, Clone)]
 pub union BxGenRegWord {
     pub word_filler: u16,
-    pub rx: u32,
+    pub rx: u16,
     pub byte: BxWordByte,
 }
 
@@ -200,15 +183,15 @@ impl core::fmt::Debug for BxGenReg {
 const BX_MSR_MAX_INDEX: usize = 0x1000;
 
 #[derive(Debug)]
-pub struct BxCpuC<'c> {
-    bx_cpuid: c_uint,
+pub struct BxCpuC<'c, I: BxCpuTrait> {
+    bx_cpuid: u32,
 
     #[cfg(any(
         feature = "bx_cpu_level_4",
         feature = "bx_cpu_level_5",
         feature = "bx_cpu_level_6"
     ))]
-    cpuid: BxCpuId,
+    cpuid: I,
 
     ia_extensions_bitmask: [u32; BX_ISA_EXTENSIONS_ARRAY_SIZE],
 
@@ -263,7 +246,7 @@ pub struct BxCpuC<'c> {
 
     /// What events to inhibit at any given time.  Certain instructions
     /// inhibit interrupts, some debug exceptions and single-step traps.
-    inhibit_mask: c_uint,
+    inhibit_mask: u32,
     inhibit_icount: u64,
 
     /// user segment register set
@@ -300,7 +283,7 @@ pub struct BxCpuC<'c> {
 
     #[cfg(any(feature = "bx_cpu_level_5", feature = "bx_cpu_level_6"))]
     #[cfg(feature = "bx_support_x86_64")]
-    linaddr_width: c_uint,
+    linaddr_width: u32,
     #[cfg(any(feature = "bx_cpu_level_5", feature = "bx_cpu_level_6"))]
     #[cfg(feature = "bx_support_x86_64")]
     efer_suppmask: u32,
@@ -374,7 +357,7 @@ pub struct BxCpuC<'c> {
     monitor: MonitorAddr,
 
     #[cfg(feature = "bx_support_apic")]
-    lapic: BxLocalApic<'c>,
+    lapic: BxLocalApic<'c, I>,
 
     /// SMM base register
     smbase: u32,
@@ -446,7 +429,7 @@ pub struct BxCpuC<'c> {
     ext: bool,
 
     // Todo: Maybe enum?
-    activity_state: c_uint,
+    activity_state: u32,
 
     pending_event: u32,
     event_mask: u32,
@@ -454,7 +437,7 @@ pub struct BxCpuC<'c> {
     async_event: u32,
 
     in_smm: bool,
-    cpu_mode: c_uint,
+    cpu_mode: u32,
     user_pl: bool,
 
     #[cfg(any(feature = "bx_cpu_level_5", feature = "bx_cpu_level_6"))]
@@ -463,7 +446,7 @@ pub struct BxCpuC<'c> {
     cpu_state_use_ok: u32, // format of BX_FETCH_MODE_*
 
     // FIXME: skipped   static jmp_buf jmp_buf_env;
-    last_exception_type: c_uint,
+    last_exception_type: u32,
 
     #[cfg(feature = "bx_support_handlers_chaining_speedups")]
     cpuloop_stack_anchor: Option<&'c [u8]>,
@@ -494,7 +477,7 @@ pub struct BxCpuC<'c> {
         feature = "bx_cpu_level_6"
     ))]
     #[cfg(feature = "bx_support_alignment_check")]
-    alignment_check_mask: c_uint,
+    alignment_check_mask: u32,
 
     stats: BxCpuStatistics,
 
@@ -524,7 +507,7 @@ pub struct BxCpuC<'c> {
     vmexit_break: bool,
 
     #[cfg(feature = "bx_debugger")]
-    show_flag: c_uint,
+    show_flag: u32,
     #[cfg(feature = "bx_debugger")]
     guard_found: BxGuardFound,
 
@@ -541,6 +524,522 @@ pub struct BxCpuC<'c> {
     fetch_mode_mask: u32,
 
     address_xlation: AddressXlation,
+}
+
+// Implement getters and setters
+// according to RFC #344, we use "set_<name>" for setters
+impl<'c, I: BxCpuTrait> BxCpuC<'c, I> {
+    // getters for 8 bit general registers
+    #[inline]
+    fn al(&self) -> &u8 {
+        unsafe { &self.gen_reg[0].word.byte.rl }
+    }
+    #[inline]
+    fn cl(&self) -> &u8 {
+        unsafe { &self.gen_reg[1].word.byte.rl }
+    }
+    #[inline]
+    fn dl(&self) -> &u8 {
+        unsafe { &self.gen_reg[2].word.byte.rl }
+    }
+    #[inline]
+    fn bl(&self) -> &u8 {
+        unsafe { &self.gen_reg[3].word.byte.rl }
+    }
+    #[inline]
+    fn ah(&self) -> &u8 {
+        unsafe { &self.gen_reg[0].word.byte.rh }
+    }
+    #[inline]
+    fn ch(&self) -> &u8 {
+        unsafe { &self.gen_reg[1].word.byte.rh }
+    }
+    #[inline]
+    fn dh(&self) -> &u8 {
+        unsafe { &self.gen_reg[2].word.byte.rh }
+    }
+    #[inline]
+    fn bh(&self) -> &u8 {
+        unsafe { &self.gen_reg[3].word.byte.rh }
+    }
+    #[inline]
+    fn tmp_8_l(&self) -> &u8 {
+        unsafe { &self.gen_reg[BX_TMP_REGISTER].word.byte.rl }
+    }
+
+    // setters for 8 bit general registers
+    #[inline]
+    fn set_al(&mut self, val: u8) {
+        self.gen_reg[0].word.byte.rl = val
+    }
+    #[inline]
+    fn set_cl(&mut self, val: u8) {
+        self.gen_reg[1].word.byte.rl = val
+    }
+    #[inline]
+    fn set_dl(&mut self, val: u8) {
+        self.gen_reg[2].word.byte.rl = val
+    }
+    #[inline]
+    fn set_bl(&mut self, val: u8) {
+        self.gen_reg[3].word.byte.rl = val
+    }
+    #[inline]
+    fn set_ah(&mut self, val: u8) {
+        self.gen_reg[0].word.byte.rh = val
+    }
+    #[inline]
+    fn set_ch(&mut self, val: u8) {
+        self.gen_reg[1].word.byte.rh = val
+    }
+    #[inline]
+    fn set_dh(&mut self, val: u8) {
+        self.gen_reg[2].word.byte.rh = val
+    }
+    #[inline]
+    fn set_bh(&mut self, val: u8) {
+        self.gen_reg[3].word.byte.rh = val
+    }
+    #[inline]
+    fn set_tmpl_8_l(&mut self, val: u8) {
+        self.gen_reg[BX_TMP_REGISTER].word.byte.rl = val
+    }
+
+    // getters for 16 bit general registers
+    #[inline]
+    fn ax(&self) -> &u16 {
+        unsafe { &self.gen_reg[0].word.rx }
+    }
+    #[inline]
+    fn cx(&self) -> &u16 {
+        unsafe { &self.gen_reg[1].word.rx }
+    }
+    #[inline]
+    fn dx(&self) -> &u16 {
+        unsafe { &self.gen_reg[2].word.rx }
+    }
+    #[inline]
+    fn bx(&self) -> &u16 {
+        unsafe { &self.gen_reg[3].word.rx }
+    }
+    #[inline]
+    fn sp(&self) -> &u16 {
+        unsafe { &self.gen_reg[4].word.rx }
+    }
+    #[inline]
+    fn bp(&self) -> &u16 {
+        unsafe { &self.gen_reg[5].word.rx }
+    }
+    #[inline]
+    fn si(&self) -> &u16 {
+        unsafe { &self.gen_reg[6].word.rx }
+    }
+    #[inline]
+    fn di(&self) -> &u16 {
+        unsafe { &self.gen_reg[7].word.rx }
+    }
+
+    // setters for 16 bit general registers
+    #[inline]
+    fn set_ax(&mut self, val: u16) {
+        self.gen_reg[0].word.rx = val
+    }
+    #[inline]
+    fn set_cx(&mut self, val: u16) {
+        self.gen_reg[1].word.rx = val
+    }
+    #[inline]
+    fn set_dx(&mut self, val: u16) {
+        self.gen_reg[2].word.rx = val
+    }
+    #[inline]
+    fn set_bx(&mut self, val: u16) {
+        self.gen_reg[3].word.rx = val
+    }
+    #[inline]
+    fn set_sp(&mut self, val: u16) {
+        self.gen_reg[4].word.rx = val
+    }
+    #[inline]
+    fn set_bp(&mut self, val: u16) {
+        self.gen_reg[5].word.rx = val
+    }
+    #[inline]
+    fn set_si(&mut self, val: u16) {
+        self.gen_reg[6].word.rx = val
+    }
+    #[inline]
+    fn set_di(&mut self, val: u16) {
+        self.gen_reg[7].word.rx = val
+    }
+
+    // access to 16 bit instruction pointer
+    #[inline]
+    fn ip(&self) -> &u16 {
+        unsafe { &self.gen_reg[BX_16BIT_REG_IP].word.rx }
+    }
+    #[inline]
+    fn set_ip(&mut self, val: u16) {
+        self.gen_reg[BX_16BIT_REG_IP].word.rx = val
+    }
+
+    #[inline]
+    fn tmpl_16(&self) -> &u16 {
+        unsafe { &self.gen_reg[BX_TMP_REGISTER].word.rx }
+    }
+    #[inline]
+    fn set_tmpl_16(&mut self, val: u16) {
+        self.gen_reg[BX_TMP_REGISTER].word.rx = val
+    }
+
+    // getters for 32 bit general registers
+    #[inline]
+    fn eax(&self) -> &u32 {
+        unsafe { &self.gen_reg[0].dword.erx }
+    }
+    #[inline]
+    fn ecx(&self) -> &u32 {
+        unsafe { &self.gen_reg[1].dword.erx }
+    }
+    #[inline]
+    fn edx(&self) -> &u32 {
+        unsafe { &self.gen_reg[2].dword.erx }
+    }
+    #[inline]
+    fn ebx(&self) -> &u32 {
+        unsafe { &self.gen_reg[3].dword.erx }
+    }
+    #[inline]
+    fn esp(&self) -> &u32 {
+        unsafe { &self.gen_reg[4].dword.erx }
+    }
+    #[inline]
+    fn ebp(&self) -> &u32 {
+        unsafe { &self.gen_reg[5].dword.erx }
+    }
+    #[inline]
+    fn esi(&self) -> &u32 {
+        unsafe { &self.gen_reg[6].dword.erx }
+    }
+    #[inline]
+    fn edi(&self) -> &u32 {
+        unsafe { &self.gen_reg[7].dword.erx }
+    }
+
+    // setters for 32 bit general registers
+    #[inline]
+    fn set_eax(&mut self, val: u32) {
+        self.gen_reg[0].dword.erx = val
+    }
+    #[inline]
+    fn set_ecx(&mut self, val: u32) {
+        self.gen_reg[1].dword.erx = val
+    }
+    #[inline]
+    fn set_edx(&mut self, val: u32) {
+        self.gen_reg[2].dword.erx = val
+    }
+    #[inline]
+    fn set_ebx(&mut self, val: u32) {
+        self.gen_reg[3].dword.erx = val
+    }
+    #[inline]
+    fn set_esp(&mut self, val: u32) {
+        self.gen_reg[4].dword.erx = val
+    }
+    #[inline]
+    fn set_ebp(&mut self, val: u32) {
+        self.gen_reg[5].dword.erx = val
+    }
+    #[inline]
+    fn set_esi(&mut self, val: u32) {
+        self.gen_reg[6].dword.erx = val
+    }
+    #[inline]
+    fn set_edi(&mut self, val: u32) {
+        self.gen_reg[7].dword.erx = val
+    }
+
+    // access to 32 bit instruction pointer
+    #[inline]
+    fn eip(&self) -> &u32 {
+        unsafe { &self.gen_reg[BX_32BIT_REG_EIP].dword.erx }
+    }
+    #[inline]
+    fn set_eip(&mut self, val: u32) {
+        self.gen_reg[BX_32BIT_REG_EIP].dword.erx = val
+    }
+
+    #[inline]
+    fn tmp_32(&self) -> &u32 {
+        unsafe { &self.gen_reg[BX_TMP_REGISTER].dword.erx }
+    }
+    #[inline]
+    fn set_tmp_32(&mut self, val: u32) {
+        self.gen_reg[BX_TMP_REGISTER].dword.erx = val
+    }
+
+    // getters for 64 bit general registers
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn rax(&self) -> &u64 {
+        unsafe { &self.gen_reg[0].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn rcx(&self) -> &u64 {
+        unsafe { &self.gen_reg[1].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn rdx(&self) -> &u64 {
+        unsafe { &self.gen_reg[2].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn rbx(&self) -> &u64 {
+        unsafe { &self.gen_reg[3].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn rsp(&self) -> &u64 {
+        unsafe { &self.gen_reg[4].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn rbp(&self) -> &u64 {
+        unsafe { &self.gen_reg[5].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn rsi(&self) -> &u64 {
+        unsafe { &self.gen_reg[6].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn rdi(&self) -> &u64 {
+        unsafe { &self.gen_reg[7].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn r8(&self) -> &u64 {
+        unsafe { &self.gen_reg[8].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn r9(&self) -> &u64 {
+        unsafe { &self.gen_reg[9].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn r10(&self) -> &u64 {
+        unsafe { &self.gen_reg[10].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn r11(&self) -> &u64 {
+        unsafe { &self.gen_reg[11].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn r12(&self) -> &u64 {
+        unsafe { &self.gen_reg[12].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn r13(&self) -> &u64 {
+        unsafe { &self.gen_reg[13].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn r14(&self) -> &u64 {
+        unsafe { &self.gen_reg[14].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn r15(&self) -> &u64 {
+        unsafe { &self.gen_reg[15].rrx }
+    }
+
+    // setters for 32 bit general registers
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_rax(&mut self, val: u64) {
+        self.gen_reg[0].rrx = val
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_rcx(&mut self, val: u64) {
+        self.gen_reg[1].rrx = val
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_rdx(&mut self, val: u64) {
+        self.gen_reg[2].rrx = val
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_rbx(&mut self, val: u64) {
+        self.gen_reg[3].rrx = val
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_rsp(&mut self, val: u64) {
+        self.gen_reg[4].rrx = val
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_rbp(&mut self, val: u64) {
+        self.gen_reg[5].rrx = val
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_rsi(&mut self, val: u64) {
+        self.gen_reg[6].rrx = val
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_rdi(&mut self, val: u64) {
+        self.gen_reg[7].rrx = val
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_r8(&mut self, val: u64) {
+        self.gen_reg[8].rrx = val
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_r9(&mut self, val: u64) {
+        self.gen_reg[9].rrx = val
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_r10(&mut self, val: u64) {
+        self.gen_reg[10].rrx = val
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_r11(&mut self, val: u64) {
+        self.gen_reg[11].rrx = val
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_r12(&mut self, val: u64) {
+        self.gen_reg[12].rrx = val
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_r13(&mut self, val: u64) {
+        self.gen_reg[13].rrx = val
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_r14(&mut self, val: u64) {
+        self.gen_reg[14].rrx = val
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_r15(&mut self, val: u64) {
+        self.gen_reg[15].rrx = val
+    }
+
+    // access to 32 bit instruction pointer
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn rip(&self) -> &u64 {
+        unsafe { &self.gen_reg[BX_64BIT_REG_RIP].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_rip(&mut self, val: u64) {
+        self.gen_reg[BX_64BIT_REG_RIP].rrx = val
+    }
+
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn ssp(&self) -> &u64 {
+        unsafe { &self.gen_reg[BX_64BIT_REG_SSP].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_ssp(&mut self, val: u64) {
+        self.gen_reg[BX_64BIT_REG_SSP].rrx = val
+    }
+
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn tmp_64(&self) -> &u64 {
+        unsafe { &self.gen_reg[BX_TMP_REGISTER].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_tmp_u64(&mut self, val: u64) {
+        self.gen_reg[BX_TMP_REGISTER].rrx = val
+    }
+
+    // access to 64 bit MSR registers
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn msr_fsbase(&self) -> &u64 {
+        unsafe { &self.gen_reg[BxSegregs::Fs as usize].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_msr_fsbase(&mut self, val: u64) {
+        self.gen_reg[BxSegregs::Fs as usize].rrx = val
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn msr_gsbase(&self) -> &u64 {
+        unsafe { &self.gen_reg[BxSegregs::Gs as usize].rrx }
+    }
+    #[cfg(feature = "bx_support_x86_64")]
+    #[inline]
+    fn set_msr_gsbase(&mut self, val: u64) {
+        self.gen_reg[BxSegregs::Gs as usize].rrx = val
+    }
+
+    // simplify merge between 32-bit and 64-bit mode
+    #[cfg(not(feature = "bx_support_x86_64"))]
+    #[inline]
+    fn rax(&self) -> &u32 {
+        self.eax()
+    }
+    #[cfg(not(feature = "bx_support_x86_64"))]
+    #[inline]
+    fn rcx(&self) -> &u32 {
+        self.ecx()
+    }
+    #[cfg(not(feature = "bx_support_x86_64"))]
+    #[inline]
+    fn rdx(&self) -> &u32 {
+        self.edx()
+    }
+    #[cfg(not(feature = "bx_support_x86_64"))]
+    #[inline]
+    fn rbx(&self) -> &u32 {
+        self.ebx()
+    }
+    #[cfg(not(feature = "bx_support_x86_64"))]
+    #[inline]
+    fn rsp(&self) -> &u32 {
+        self.esp()
+    }
+    #[cfg(not(feature = "bx_support_x86_64"))]
+    #[inline]
+    fn rbp(&self) -> &u32 {
+        self.ebp()
+    }
+    #[cfg(not(feature = "bx_support_x86_64"))]
+    #[inline]
+    fn rsi(&self) -> &u32 {
+        self.esi()
+    }
+    #[cfg(not(feature = "bx_support_x86_64"))]
+    #[inline]
+    fn rdi(&self) -> &u32 {
+        self.edi()
+    }
 }
 
 #[derive(Debug)]
@@ -683,7 +1182,7 @@ pub struct BxRegsMsr {
 #[derive(Debug)]
 pub struct MonitorAddr {
     monitor_addr: BxPhyAddress,
-    armed_by: c_uint,
+    armed_by: u32,
 }
 
 #[cfg(feature = "bx_support_uintr")]
@@ -720,14 +1219,14 @@ struct BxDbgGuardState {
     eip: BxAddress,
     laddr: BxAddress,
     // 00 - 16 bit, 01 - 32 bit, 10 - 64-bit, 11 - illegal
-    code_32_64: c_uint, // CS seg size at guard point
+    code_32_64: u32, // CS seg size at guard point
 }
 
 #[cfg(feature = "bx_debugger")]
 #[derive(Debug)]
 struct BxGuardFound {
-    guard_found: c_uint,
+    guard_found: u32,
     icount_max: u64, // stop after completing this many instructions
-    iaddr_index: c_uint,
+    iaddr_index: u32,
     guard_state: BxDbgGuardState,
 }

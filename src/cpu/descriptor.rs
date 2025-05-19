@@ -13,8 +13,6 @@
 // |------------------------|--------------------|
 //
 
-use core::ffi::c_uint;
-
 use crate::config::BxAddress;
 
 #[derive(Debug)]
@@ -71,7 +69,7 @@ pub enum Descriptor {
 
 #[derive(Debug)]
 pub(crate) struct BxDescriptor {
-    pub valid: c_uint, // Holds above values, Or'd together. Used to
+    pub valid: u32, // Holds above values, Or'd together. Used to
     // hold only 0 or 1 once.
     pub p: bool,       /* present */
     pub dpl: u8,       /* descriptor privilege level 0..3 */

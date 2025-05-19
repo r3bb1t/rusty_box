@@ -4,6 +4,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use tempfile::tempfile;
 
 use super::{Block, BxMemoryStubC, MemoryError, Result, BIOSROMSZ, EXROMSIZE};
+use crate::cpu::cpuid::BxCpuTrait;
 
 use crate::config::BxPhyAddress;
 use crate::cpu::cpu::BxCpuC;
@@ -15,10 +16,7 @@ use crate::misc::bswap::{
 };
 use crate::pc_system::{self};
 
-use core::{
-    cell::{Cell, UnsafeCell},
-    ffi::c_uint,
-};
+use core::cell::{Cell, UnsafeCell};
 
 #[cfg(feature = "std")]
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -125,7 +123,11 @@ impl BxMemoryStubC {
         })
     }
 
-    pub fn get_vector(&self, addr: &BxPhyAddress, cpus: &[BxCpuC]) -> Result<&mut [u8]> {
+    pub fn get_vector<I: BxCpuTrait>(
+        &self,
+        addr: &BxPhyAddress,
+        cpus: &[BxCpuC<I>],
+    ) -> Result<&mut [u8]> {
         let block: usize = addr / self.block_size;
         let blocks = self.blocks_offsets();
 
@@ -155,7 +157,7 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    pub fn allocate_block(&self, block: usize, cpus: &[BxCpuC]) -> Result<()> {
+    pub fn allocate_block<I: BxCpuTrait>(&self, block: usize, cpus: &[BxCpuC<I>]) -> Result<()> {
         let max_blocks = self.allocated / self.block_size;
 
         #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
@@ -260,13 +262,13 @@ impl BxMemoryStubC {
         todo!()
     }
 
-    pub fn dbg_fetch_mem(
+    pub fn dbg_fetch_mem<I: BxCpuTrait>(
         &self,
-        _cpu: BxCpuC,
+        _cpu: BxCpuC<I>,
         addr: BxPhyAddress,
         mut len: u32,
         buf: &mut [u8],
-        cpus: &[BxCpuC],
+        cpus: &[BxCpuC<I>],
     ) -> Result<bool> {
         let mut a20_addr: BxPhyAddress = pc_system::a20_addr(addr);
         let mut ret = true;
@@ -294,7 +296,12 @@ impl BxMemoryStubC {
     }
 
     #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
-    pub fn dbg_set_mem(cpus: &[BxCpuC], addr: BxPhyAddress, len: c_uint, buf: &mut [u8]) -> bool {
+    pub fn dbg_set_mem<I: BxCpuTrait>(
+        cpus: &[BxCpuC<I>],
+        addr: BxPhyAddress,
+        len: u32,
+        buf: &mut [u8],
+    ) -> bool {
         unimplemented!()
     }
 
@@ -314,11 +321,11 @@ impl BxMemoryStubC {
     /// The other assumption is that the calling code _only_ accesses memory
     /// directly within the page that encompasses the address requested.
     ///
-    fn get_host_mem_addr(
+    fn get_host_mem_addr<I: BxCpuTrait>(
         &self,
-        cpus: &[BxCpuC],
+        cpus: &[BxCpuC<I>],
         addr: BxPhyAddress,
-        rw: c_uint,
+        rw: u32,
     ) -> Result<Option<&mut [u8]>> {
         let a20_addr = pc_system::a20_addr(addr);
 
@@ -345,9 +352,9 @@ impl BxMemoryStubC {
         }
     }
 
-    fn write_physical_page(
+    fn write_physical_page<I: BxCpuTrait>(
         &self,
-        cpus: &[BxCpuC],
+        cpus: &[BxCpuC<I>],
         page_write_stamp_table: &mut BxPageWriteStampTable,
         addr: BxPhyAddress,
         mut len: usize,
@@ -443,9 +450,9 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    fn read_physical_page(
+    fn read_physical_page<I: BxCpuTrait>(
         &self,
-        cpus: &[BxCpuC],
+        cpus: &[BxCpuC<I>],
         addr: BxPhyAddress,
         len: usize,
         data: &mut [u8],
@@ -494,12 +501,16 @@ impl BxMemoryStubC {
     }
 
     #[cfg(feature = "bx_support_monitor_mwait")]
-    fn is_monitor(cpus: &[BxCpuC], begin_addr: BxPhyAddress, len: c_uint) -> bool {
+    fn is_monitor<I: BxCpuTrait>(cpus: &[BxCpuC<I>], begin_addr: BxPhyAddress, len: u32) -> bool {
         cpus.iter().any(|cpu| cpu.is_monitor(begin_addr, len))
     }
 
     #[cfg(feature = "bx_support_monitor_mwait")]
-    fn check_monitor(cpus: &mut [BxCpuC], begin_addr: BxPhyAddress, len: c_uint) -> Result<()> {
+    fn check_monitor<I: BxCpuTrait>(
+        cpus: &mut [BxCpuC<I>],
+        begin_addr: BxPhyAddress,
+        len: u32,
+    ) -> Result<()> {
         for cpu in cpus {
             cpu.check_monitor(begin_addr, len)?
         }

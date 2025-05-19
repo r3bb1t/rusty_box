@@ -1,19 +1,17 @@
-use core::ffi::c_uint;
-
 const BX_TILE_REGISTERS: usize = 8;
 
 #[derive(Debug, Default)]
 pub struct TILECFG {
-    rows: c_uint,
-    bytes_per_row: c_uint,
+    rows: u32,
+    bytes_per_row: u32,
 }
 
 #[derive(Debug)]
 pub struct AMX {
     /// 0 if tiles are not configured
-    palette_id: c_uint,
+    palette_id: u32,
     /// used to restart tile operations
-    start_row: c_uint,
+    start_row: u32,
 
     tilecfg: [TILECFG; 8],
 }

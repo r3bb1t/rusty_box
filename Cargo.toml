@@ -51,9 +51,12 @@ bx_support_vmx_1 = []
 bx_support_vmx_2 = []
 
 # cpu levels
-bx_cpu_level_4 = []
-bx_cpu_level_5 = []
-bx_cpu_level_6 = []
+bx_cpu_level_1 = []
+bx_cpu_level_2 = ["bx_cpu_level_1"]
+bx_cpu_level_3 = ["bx_cpu_level_2"]
+bx_cpu_level_4 = ["bx_cpu_level_3"]
+bx_cpu_level_5 = ["bx_cpu_level_4"]
+bx_cpu_level_6 = ["bx_cpu_level_5"]
 
 
 [dependencies]

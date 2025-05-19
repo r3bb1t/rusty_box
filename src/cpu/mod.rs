@@ -4,6 +4,7 @@ pub(super) mod apic;
 pub(super) mod avx;
 #[allow(clippy::module_inception)]
 pub mod cpu;
+pub(super) mod cpudb;
 pub(super) mod cpuid;
 pub(super) mod cpustats;
 pub(super) mod crregs;
@@ -11,6 +12,7 @@ pub mod decoder;
 pub(super) mod descriptor;
 pub(super) mod i387;
 pub(super) mod icache;
+pub(super) mod init;
 pub(super) mod lazy_flags;
 pub(super) mod mwait;
 pub(super) mod paging;
