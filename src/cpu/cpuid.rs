@@ -1,4 +1,4 @@
-pub(crate) trait BxCpuTrait {
+pub(crate) trait BxCpuIdTrait {
     const NAME: &'static str;
 
     fn init(&mut self) {}

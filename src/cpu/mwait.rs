@@ -1,7 +1,7 @@
-use super::{cpu::BxCpuC, cpuid::BxCpuTrait, Result};
+use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, Result};
 use crate::config::BxPhyAddress;
 
-impl<'c, I: BxCpuTrait> BxCpuC<'_, I> {
+impl<'c, I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn is_monitor(&self, begin_addr: BxPhyAddress, len: u32) -> bool {
         unimplemented!()
     }

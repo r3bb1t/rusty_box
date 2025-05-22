@@ -299,21 +299,13 @@ enum BxRegs8L {
     Bx8bitRegSil,
     Bx8bitRegDil,
 
-    #[cfg(feature = "bx_support_x86_64")]
     Bx32bitRegR8,
-    #[cfg(feature = "bx_support_x86_64")]
     Bx32bitRegR9,
-    #[cfg(feature = "bx_support_x86_64")]
     Bx32bitRegR10,
-    #[cfg(feature = "bx_support_x86_64")]
     Bx32bitRegR11,
-    #[cfg(feature = "bx_support_x86_64")]
     Bx32bitRegR12,
-    #[cfg(feature = "bx_support_x86_64")]
     Bx32bitRegR13,
-    #[cfg(feature = "bx_support_x86_64")]
     Bx32bitRegR14,
-    #[cfg(feature = "bx_support_x86_64")]
     Bx32bitRegR15,
 }
 
@@ -336,21 +328,13 @@ enum BxRegs16 {
     Si,
     Di,
 
-    #[cfg(feature = "bx_support_x86_64")]
     R8,
-    #[cfg(feature = "bx_support_x86_64")]
     R9,
-    #[cfg(feature = "bx_support_x86_64")]
     R10,
-    #[cfg(feature = "bx_support_x86_64")]
     R11,
-    #[cfg(feature = "bx_support_x86_64")]
     R12,
-    #[cfg(feature = "bx_support_x86_64")]
     R13,
-    #[cfg(feature = "bx_support_x86_64")]
     R14,
-    #[cfg(feature = "bx_support_x86_64")]
     R15,
 }
 
@@ -365,25 +349,16 @@ enum BxRegs32 {
     Esi,
     Edi,
 
-    #[cfg(feature = "bx_support_x86_64")]
     R8,
-    #[cfg(feature = "bx_support_x86_64")]
     R9,
-    #[cfg(feature = "bx_support_x86_64")]
     R10,
-    #[cfg(feature = "bx_support_x86_64")]
     R11,
-    #[cfg(feature = "bx_support_x86_64")]
     R12,
-    #[cfg(feature = "bx_support_x86_64")]
     R13,
-    #[cfg(feature = "bx_support_x86_64")]
     R14,
-    #[cfg(feature = "bx_support_x86_64")]
     R15,
 }
 
-#[cfg(feature = "bx_support_x86_64")]
 #[derive(Debug)]
 enum BxRegs64 {
     Rax,
@@ -404,10 +379,7 @@ enum BxRegs64 {
     R15,
 }
 
-#[cfg(feature = "bx_support_x86_64")]
 pub const BX_GENERAL_REGISTERS: usize = 16;
-#[cfg(not(feature = "bx_support_x86_64"))]
-pub const BX_GENERAL_REGISTERS: usize = 8;
 
 pub(super) const BX_16BIT_REG_IP: usize = BX_GENERAL_REGISTERS;
 pub(super) const BX_32BIT_REG_EIP: usize = BX_GENERAL_REGISTERS;
@@ -440,26 +412,8 @@ pub(super) enum BxAvxVectorLength {
     Vl512 = 4,
 }
 
-#[cfg(feature = "bx_support_evex")]
 pub const BX_SUPPORT_EVEX: u8 = BxAvxVectorLength::Vl512 as _;
 
-#[cfg(not(feature = "bx_support_evex"))]
-#[cfg(feature = "bx_support_avx")]
-pub const BX_SUPPORT_EVEX: u8 = BxAvxVectorLength::Vl256 as _;
-
-#[cfg(not(feature = "bx_support_evex"))]
-#[cfg(not(feature = "bx_support_avx"))]
-pub const BX_SUPPORT_EVEX: u8 = BxAvxVectorLength::Vl128 as _;
-
-#[cfg(feature = "bx_support_evex")]
 pub(crate) const BX_XMM_REGISTERS: usize = 32;
-
-#[cfg(not(feature = "bx_support_evex"))]
-#[cfg(feature = "bx_support_x86_64")]
-pub(crate) const BX_XMM_REGISTERS: usize = 16;
-
-#[cfg(not(feature = "bx_support_evex"))]
-#[cfg(not(feature = "bx_support_x86_64"))]
-pub(crate) const BX_XMM_REGISTERS: usize = 8;
 
 const BX_VECTOR_TMP_REGISTER: usize = BX_XMM_REGISTERS;

@@ -51,7 +51,6 @@ pub enum Descriptor {
         g: bool,
         /// default size: 0=16bit, 1=32bit
         d_b: bool,
-        #[cfg(feature = "bx_support_x86_64")]
         /// long mode: 0=compat, 1=64 bit
         l: bool,
         ///  available for use by system
@@ -100,16 +99,10 @@ impl BxDescriptor {
         self.p
     }
 
-    #[cfg(feature = "bx_support_x86_64")]
     pub fn is_long64_segment(&self, descriptor: Descriptor) -> bool {
         if let Descriptor::Segment { l, .. } = descriptor {
             return l;
         }
-        false
-    }
-
-    #[cfg(not(feature = "bx_support_x86_64"))]
-    pub fn is_long64_segment(&self, _descriptor: Descriptor) -> bool {
         false
     }
 }

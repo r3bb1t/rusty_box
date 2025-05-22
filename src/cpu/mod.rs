@@ -4,6 +4,7 @@ pub(super) mod apic;
 pub(super) mod avx;
 #[allow(clippy::module_inception)]
 pub mod cpu;
+mod cpu_getters_and_setters;
 pub(super) mod cpudb;
 pub(super) mod cpuid;
 pub(super) mod cpustats;
@@ -22,3 +23,6 @@ pub(super) mod svm;
 pub(super) mod tlb;
 pub(super) mod vmx;
 pub(super) mod xmm;
+
+pub use cpu::BxCpuC;
+pub use cpu_getters_and_setters::*;

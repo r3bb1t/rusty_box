@@ -18,19 +18,16 @@ pub struct BxDr7 {
     pub val32: u32, // 32bit value of register
 }
 
-#[cfg(any(feature = "bx_cpu_level_5", feature = "bx_cpu_level_6"))]
 #[derive(Debug)]
 pub struct BxEfer {
     pub value: u32,
 }
 
-#[cfg(feature = "bx_cpu_level_6")]
 #[derive(Debug)]
 pub struct Xcr0 {
     pub value: u32,
 }
 
-#[cfg(feature = "bx_cpu_level_6")]
 #[derive(Debug)]
 enum Xcr0Enum {
     BxXcr0FpuBit = 0,

@@ -1,6 +1,6 @@
 use crate::config::BxPhyAddress;
 
-use super::{cpu::BxCpuC, cpuid::BxCpuTrait};
+use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait};
 
 pub const APIC_EDGE_TRIGGERED: u8 = 0;
 pub const APIC_LEVEL_TRIGGERED: u8 = 1;
@@ -115,12 +115,11 @@ pub enum LocalVectorTableRegister {
 }
 
 #[derive(Debug)]
-pub struct BxLocalApic<'c, I: BxCpuTrait> {
+pub struct BxLocalApic<'c, I: BxCpuIdTrait> {
     base_addr: BxPhyAddress,
     mode: u32,
     xapic: bool,
 
-    #[cfg(feature = "bx_cpu_level_6")]
     xapic_ext: u32, // enabled extended XAPIC features
     ///  4 bit in legacy mode, 8 bit in XAPIC mode
     /// 32 bit in X2APIC mode
@@ -149,7 +148,6 @@ pub struct BxLocalApic<'c, I: BxCpuTrait> {
     /// cleared when the interrupt is acknowledged by the processor.
     irr: [u32; 8],
 
-    #[cfg(feature = "bx_cpu_level_6")]
     /// IER=interrupt enable register. Only vectors that are enabled in IER
     /// participare in APIC's computation of highest priority pending interrupt.
     ier: [u32; 8],
@@ -178,20 +176,14 @@ pub struct BxLocalApic<'c, I: BxCpuTrait> {
     timer_active: bool,
     timer_handle: i32,
 
-    #[cfg(feature = "bx_support_vmx_2")]
     vmx_timer_handle: i32,
-    #[cfg(feature = "bx_support_vmx_2")]
     vmx_preemption_timer_value: u32,
-    #[cfg(feature = "bx_support_vmx_2")]
     /// The value of system tick when set the timer (absolute value)
     vmx_preemption_timer_initial: u64,
-    #[cfg(feature = "bx_support_vmx_2")]
     /// The value of system tick when fire the exception (absolute value)
     vmx_preemption_timer_fire: u64,
-    #[cfg(feature = "bx_support_vmx_2")]
     /// rate stated in MSR_VMX_MISC
     vmx_preemption_timer_rate: u32,
-    #[cfg(feature = "bx_support_vmx_2")]
     vmx_timer_active: bool,
 
     mwaitx_timer_handle: i32,

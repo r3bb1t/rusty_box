@@ -4,7 +4,7 @@ use byteorder::{ByteOrder, LittleEndian};
 use tempfile::tempfile;
 
 use super::{Block, BxMemoryStubC, MemoryError, Result, BIOSROMSZ, EXROMSIZE};
-use crate::cpu::cpuid::BxCpuTrait;
+use crate::cpu::cpuid::BxCpuIdTrait;
 
 use crate::config::BxPhyAddress;
 use crate::cpu::cpu::BxCpuC;
@@ -123,7 +123,7 @@ impl BxMemoryStubC {
         })
     }
 
-    pub fn get_vector<I: BxCpuTrait>(
+    pub fn get_vector<I: BxCpuIdTrait>(
         &self,
         addr: &BxPhyAddress,
         cpus: &[BxCpuC<I>],
@@ -157,7 +157,7 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    pub fn allocate_block<I: BxCpuTrait>(&self, block: usize, cpus: &[BxCpuC<I>]) -> Result<()> {
+    pub fn allocate_block<I: BxCpuIdTrait>(&self, block: usize, cpus: &[BxCpuC<I>]) -> Result<()> {
         let max_blocks = self.allocated / self.block_size;
 
         #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
@@ -262,7 +262,7 @@ impl BxMemoryStubC {
         todo!()
     }
 
-    pub fn dbg_fetch_mem<I: BxCpuTrait>(
+    pub fn dbg_fetch_mem<I: BxCpuIdTrait>(
         &self,
         _cpu: BxCpuC<I>,
         addr: BxPhyAddress,
@@ -296,7 +296,7 @@ impl BxMemoryStubC {
     }
 
     #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
-    pub fn dbg_set_mem<I: BxCpuTrait>(
+    pub fn dbg_set_mem<I: BxCpuIdTrait>(
         cpus: &[BxCpuC<I>],
         addr: BxPhyAddress,
         len: u32,
@@ -321,7 +321,7 @@ impl BxMemoryStubC {
     /// The other assumption is that the calling code _only_ accesses memory
     /// directly within the page that encompasses the address requested.
     ///
-    fn get_host_mem_addr<I: BxCpuTrait>(
+    fn get_host_mem_addr<I: BxCpuIdTrait>(
         &self,
         cpus: &[BxCpuC<I>],
         addr: BxPhyAddress,
@@ -352,7 +352,7 @@ impl BxMemoryStubC {
         }
     }
 
-    fn write_physical_page<I: BxCpuTrait>(
+    fn write_physical_page<I: BxCpuIdTrait>(
         &self,
         cpus: &[BxCpuC<I>],
         page_write_stamp_table: &mut BxPageWriteStampTable,
@@ -450,7 +450,7 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    fn read_physical_page<I: BxCpuTrait>(
+    fn read_physical_page<I: BxCpuIdTrait>(
         &self,
         cpus: &[BxCpuC<I>],
         addr: BxPhyAddress,
@@ -501,12 +501,12 @@ impl BxMemoryStubC {
     }
 
     #[cfg(feature = "bx_support_monitor_mwait")]
-    fn is_monitor<I: BxCpuTrait>(cpus: &[BxCpuC<I>], begin_addr: BxPhyAddress, len: u32) -> bool {
+    fn is_monitor<I: BxCpuIdTrait>(cpus: &[BxCpuC<I>], begin_addr: BxPhyAddress, len: u32) -> bool {
         cpus.iter().any(|cpu| cpu.is_monitor(begin_addr, len))
     }
 
     #[cfg(feature = "bx_support_monitor_mwait")]
-    fn check_monitor<I: BxCpuTrait>(
+    fn check_monitor<I: BxCpuIdTrait>(
         cpus: &mut [BxCpuC<I>],
         begin_addr: BxPhyAddress,
         len: u32,
