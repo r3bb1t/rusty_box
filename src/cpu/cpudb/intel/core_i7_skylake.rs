@@ -6,5 +6,20 @@ use crate::cpu::cpuid::BxCpuIdTrait;
 pub(crate) struct Corei7SkylakeX {}
 
 impl BxCpuIdTrait for Corei7SkylakeX {
-    const NAME: &'static str = "corei7_skylake_x";
+    //const NAME: &'static str = "corei7_skylake_x";
+    fn get_name(&self) -> &'static str {
+        "corei7_skylake_x"
+    }
+
+    fn get_vmx_extensions_bitmask(&self) -> Option<crate::cpu::cpuid::VMXExtensions> {
+        todo!()
+    }
+
+    fn get_svm_extensions_bitmask(&self) -> Option<crate::cpu::cpuid::SVMExtensions> {
+        todo!()
+    }
+
+    fn sanity_checks(&self) -> crate::cpu::error::Result<()> {
+        todo!()
+    }
 }

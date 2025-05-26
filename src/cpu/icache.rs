@@ -13,11 +13,11 @@ impl BxPageWriteStampTable<'_> {
     const BX_ICACHE_ENTRIES: usize = (64 * 1024); // Must be a power of 2.
     const BX_ICACHE_MEM_POOL: usize = (576 * 1024);
 
-    pub fn dec_write_stamp(&mut self, p_addr: BxPhyAddress) {
+    pub fn dec_write_stamp(&mut self, _p_addr: BxPhyAddress) {
         unimplemented!()
     }
 
-    pub fn dec_write_stamp_with_len(&mut self, p_addr: BxPhyAddress, len: u32) {
+    pub fn dec_write_stamp_with_len(&mut self, _p_addr: BxPhyAddress, _len: u32) {
         unimplemented!()
     }
 }

@@ -157,8 +157,8 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    pub fn allocate_block<I: BxCpuIdTrait>(&self, block: usize, cpus: &[BxCpuC<I>]) -> Result<()> {
-        let max_blocks = self.allocated / self.block_size;
+    pub fn allocate_block<I: BxCpuIdTrait>(&self, _block: usize, _cpus: &[BxCpuC<I>]) -> Result<()> {
+        let _max_blocks = self.allocated / self.block_size;
 
         #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
         {
@@ -297,16 +297,16 @@ impl BxMemoryStubC {
 
     #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
     pub fn dbg_set_mem<I: BxCpuIdTrait>(
-        cpus: &[BxCpuC<I>],
-        addr: BxPhyAddress,
-        len: u32,
-        buf: &mut [u8],
+        _cpus: &[BxCpuC<I>],
+        _addr: BxPhyAddress,
+        _len: u32,
+        _buf: &mut [u8],
     ) -> bool {
         unimplemented!()
     }
 
     #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
-    pub fn dbg_crc32(addr1: BxPhyAddress, addr2: BxPhyAddress, crc: &[u32]) -> bool {
+    pub fn dbg_crc32(_addr1: BxPhyAddress, _addr2: BxPhyAddress, _crc: &[u32]) -> bool {
         unimplemented!()
     }
 
@@ -457,7 +457,7 @@ impl BxMemoryStubC {
         len: usize,
         data: &mut [u8],
     ) -> Result<()> {
-        let mut a20_addr = pc_system::a20_addr(addr);
+        let a20_addr = pc_system::a20_addr(addr);
 
         // Note: accesses should always be contained within a single page
         if (addr >> 12) != ((addr + len - 1) >> 12) {
@@ -485,7 +485,7 @@ impl BxMemoryStubC {
             }
             // len == other, just fall thru to special cases handling
 
-            let data_ptr_offset = if cfg!(feature = "bx_little_endian") {
+            let _data_ptr_offset = if cfg!(feature = "bx_little_endian") {
                 0
             } else {
                 len - 1

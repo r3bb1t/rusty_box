@@ -1,4 +1,5 @@
-use super::Result;
+pub mod error;
+pub use error::{CpuError, Result};
 
 pub(super) mod apic;
 pub(super) mod avx;
@@ -25,4 +26,3 @@ pub(super) mod vmx;
 pub(super) mod xmm;
 
 pub use cpu::BxCpuC;
-pub use cpu_getters_and_setters::*;

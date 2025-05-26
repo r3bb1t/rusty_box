@@ -14,5 +14,5 @@ pub mod cpu;
 mod crc;
 mod memory;
 mod misc;
-
+mod params;
 mod pc_system;

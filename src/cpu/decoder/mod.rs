@@ -1,8 +1,29 @@
+pub mod error;
+pub use error::DecodeError;
+
+pub mod disasm;
+pub mod features;
+pub mod fetchdecode;
+pub mod fetchdecode32;
+pub mod fetchdecode_generated;
+pub mod fetchdecode_opmap;
+//pub mod fetchdecode_opmap_after_sed;
 pub mod instr;
+
+pub mod ia_opcodes;
+
 pub const BX_ISA_EXTENSIONS_ARRAY_SIZE: usize = 5;
 
-#[derive(Debug)]
-pub(super) enum X86FeatureName {
+#[derive(Debug, Default)]
+pub struct BxModrm {
+    pub modrm: u32,
+    pub r#mod: u32,
+    pub nnn: u32,
+    pub rm: u32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum X86FeatureName {
     /// 386 or earlier instruction
     Isa386,
     /// FPU (x87) instruction

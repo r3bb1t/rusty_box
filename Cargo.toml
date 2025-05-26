@@ -50,3 +50,4 @@ thiserror = "2.0"
 byteorder = "1.5"
 tempfile = { version =  "3.17", optional = true }
 spin = { version = "0.10.0", default-features = false, features = ["once"] }
+bitflags = "2.9.1"

@@ -6,8 +6,7 @@ use super::{
     cpustats::BxCpuStatistics,
     crregs::{BxCr0, BxCr4, BxDr6, BxDr7, Xcr0, MSR},
     decoder::{
-        BxSegregs, BX_16BIT_REG_IP, BX_32BIT_REG_EIP, BX_64BIT_REG_RIP, BX_64BIT_REG_SSP,
-        BX_GENERAL_REGISTERS, BX_ISA_EXTENSIONS_ARRAY_SIZE, BX_TMP_REGISTER, BX_XMM_REGISTERS,
+        BX_GENERAL_REGISTERS, BX_ISA_EXTENSIONS_ARRAY_SIZE, BX_XMM_REGISTERS,
     },
     descriptor::{BxGlobalSegmentReg, BxSegmentReg},
     i387::{BxPackedRegister, I387},
@@ -118,9 +117,9 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
 
     ia_extensions_bitmask: [u32; BX_ISA_EXTENSIONS_ARRAY_SIZE],
 
-    vmx_extensions_bitmask: u32,
+    vmx_extensions_bitmask: Option<u32>,
 
-    svm_extensions_bitmask: u32,
+    svm_extensions_bitmask: Option<u32>,
 
     /// General register set
     /// rax: accumulator

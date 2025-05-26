@@ -5,6 +5,9 @@ pub type Result<T> = core::result::Result<T, Error>;
 #[derive(Error, Debug)]
 pub enum Error {
     #[error(transparent)]
+    Cpu(#[from] crate::cpu::CpuError),
+
+    #[error(transparent)]
     Memory(#[from] crate::memory::MemoryError),
 
     #[error(transparent)]
