@@ -45,9 +45,14 @@ bx_configure_msrs = []
 [dependencies]
 tracing = { version = "0.1", default-features = false }
 
-thiserror = "2.0"
+thiserror = "2"
 
 byteorder = "1.5"
-tempfile = { version =  "3.17", optional = true }
-spin = { version = "0.10.0", default-features = false, features = ["once"] }
-bitflags = "2.9.1"
+tempfile = { version =  "3.20", optional = true }
+spin = { version = "0.10", default-features = false, features = ["once"] }
+bitflags = "2.9"
+
+
+[dev-dependencies]
+tracing-subscriber = { version = "0.3" }
+

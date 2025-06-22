@@ -1,28 +1,30 @@
-use alloc::borrow::ToOwned;
-
-use crate::cpu::{
-    decoder::{fetchdecode_generated::BxDecodeError, DecodeError},
-    descriptor::{BxSegmentReg, SegmentType},
-    CpuError,
+use crate::cpu::decoder::{
+    fetchdecode::{fetch_dword, fetch_word},
+    fetchdecode_generated::{
+        BxDecodeError, BxModrm, AS32_OFFSET, MODC0_OFFSET, NNN_OFFSET, OS32_OFFSET, RRR_OFFSET,
+        SRC_EQ_DST_OFFSET, SSE_PREFIX_OFFSET,
+    },
+    fetchdecode_opmap_0f38::BxOpcodeTable0F38,
+    fetchdecode_x87::Bx3DNowOpcode,
+    DecodeError, BX_NIL_REGISTER,
 };
 
 use super::{
-    fetchdecode::SsePrefix,
-    fetchdecode_opmap::*,
-    ia_opcodes::Opcode,
-    instr::{BxInstruction, MetaInfoFlags},
-    BxSegregs,
+    fetchdecode::SsePrefix, fetchdecode_opmap::*, fetchdecode_opmap_0f3a::BxOpcodeTable0F3A,
+    ia_opcodes::Opcode, instr::MetaInfoFlags, instr_generated::BxInstructionGenerated, BxRegs16,
+    BxSegregs, DecodeResult,
 };
 
 // Define the function pointer type
-type BxFetchDecode32Ptr = fn(
-    iptr: &[u8],                                  // Slice of Bit8u
-    remain: &mut u32,      // Mutable reference to unsigned (using u32 for unsigned)
-    i: &mut BxInstruction, // Mutable reference to bxInstruction_c
-    b1: u32,               // Unsigned integer (using u32)
-    sse_prefix: u32,       // Unsigned integer (using u32)
-    opcode_table: &'static Option<&'static [u8]>, // Slice of u8 instead of a pointer to void
-) -> i32; // Return type is int (using i32 in Rust)
+type BxFetchDecode32Ptr = for<'a> fn(
+    iptr: &'a [u8], // Slice of Bit8u
+    //remain: &mut usize,                   // Mutable reference to unsigned (using u32 for unsigned)
+    //i: &mut BxInstruction,         // Mutable reference to bxInstruction_c
+    i: &mut BxInstructionGenerated,
+    b1: u32,                              // Unsigned integer (using u32)
+    sse_prefix: Option<SsePrefix>,        // Unsigned integer (using u32)
+    opcode_table: Option<&'static [u64]>, // Slice of u8 instead of a pointer to void
+) -> DecodeResult<(Opcode, &'a [u8])>;
 
 // Some info on the opcodes at {0F A6} and {0F A7}
 //
@@ -2607,346 +2609,769 @@ struct BxOpcodeDecodeDescriptor32 {
     opcode_table: &'static Option<&'static [u64]>, // Use Vec<u8> for dynamic array
 }
 
-fn decoder32_modrm(
-    iptr: &[u8],
-    remain: &mut u32,
-    i: &mut BxInstruction,
-    b1: u32,
-    sse_prefix: u32,
-    opcode_table: &'static Option<&'static [u8]>,
-) -> i32 {
-    unimplemented!()
-}
+const RESOLVE16_BASE_REG: [BxRegs16; 8] = [
+    BxRegs16::Bx,
+    BxRegs16::Bx,
+    BxRegs16::Bp,
+    BxRegs16::Bp,
+    BxRegs16::Si,
+    BxRegs16::Di,
+    BxRegs16::Bp,
+    BxRegs16::Bx,
+];
 
-fn decoder32(
-    iptr: &[u8],
-    remain: &mut u32,
-    i: &mut BxInstruction,
-    b1: u32,
-    sse_prefix: u32,
-    opcode_table: &'static Option<&'static [u8]>,
-) -> i32 {
-    unimplemented!()
-}
+const RESOLVE16_INDEX_REG: [u32; 8] = [
+    BxRegs16::Si as _,
+    BxRegs16::Di as _,
+    BxRegs16::Si as _,
+    BxRegs16::Di as _,
+    BX_NIL_REGISTER as _,
+    BX_NIL_REGISTER as _,
+    BX_NIL_REGISTER as _,
+    BX_NIL_REGISTER as _,
+];
 
-fn decoder_ud32(
-    iptr: &[u8],
-    remain: &mut u32,
-    i: &mut BxInstruction,
-    b1: u32,
-    sse_prefix: u32,
-    opcode_table: &'static Option<&'static [u8]>,
-) -> i32 {
-    unimplemented!()
-}
+// decoding instructions; accessing seg reg's by index
+const SREG_MOD00_RM16: [BxSegregs; 8] = [
+    BxSegregs::Ds,
+    BxSegregs::Ds,
+    BxSegregs::Ss,
+    BxSegregs::Ss,
+    BxSegregs::Ds,
+    BxSegregs::Ds,
+    BxSegregs::Ds,
+    BxSegregs::Ds,
+];
 
-fn decoder_simple32(
-    iptr: &[u8],
-    remain: &mut u32,
-    i: &mut BxInstruction,
-    b1: u32,
-    sse_prefix: u32,
-    opcode_table: &'static Option<&'static [u8]>,
-) -> i32 {
-    unimplemented!()
-}
+const SREG_MOD01OR10_RM16: [BxSegregs; 8] = [
+    BxSegregs::Ds,
+    BxSegregs::Ds,
+    BxSegregs::Ss,
+    BxSegregs::Ss,
+    BxSegregs::Ds,
+    BxSegregs::Ds,
+    BxSegregs::Ss,
+    BxSegregs::Ds,
+];
 
-fn decoder32_fp_escape(
-    iptr: &[u8],
-    remain: &mut u32,
-    i: &mut BxInstruction,
-    b1: u32,
-    sse_prefix: u32,
-    opcode_table: &'static Option<&'static [u8]>,
-) -> i32 {
-    unimplemented!()
-}
+// decoding instructions; accessing seg reg's by index
+const SREG_MOD0_BASE32: [BxSegregs; 8] = [
+    BxSegregs::Ds,
+    BxSegregs::Ds,
+    BxSegregs::Ds,
+    BxSegregs::Ds,
+    BxSegregs::Ss,
+    BxSegregs::Ds,
+    BxSegregs::Ds,
+    BxSegregs::Ds,
+];
 
-fn decoder_evex32(
-    iptr: &[u8],
-    remain: &mut u32,
-    i: &mut BxInstruction,
-    b1: u32,
-    sse_prefix: u32,
-    opcode_table: &'static Option<&'static [u8]>,
-) -> i32 {
-    unimplemented!()
-}
+const SREG_MOD1OR2_BASE32: [BxSegregs; 8] = [
+    BxSegregs::Ds,
+    BxSegregs::Ds,
+    BxSegregs::Ds,
+    BxSegregs::Ds,
+    BxSegregs::Ss,
+    BxSegregs::Ss,
+    BxSegregs::Ds,
+    BxSegregs::Ds,
+];
 
-fn decoder32_3dnow(
-    iptr: &[u8],
-    remain: &mut u32,
-    i: &mut BxInstruction,
-    b1: u32,
-    sse_prefix: u32,
-    opcode_table: &'static Option<&'static [u8]>,
-) -> i32 {
-    unimplemented!()
-}
+//fn decoder32_modrm(
+//    iptr: &[u8],
+//    remain: &mut usize,
+//    i: &mut BxInstruction,
+//    b1: u32,
+//    sse_prefix: Option<SsePrefix>,
+//    opcode_table: Option<&'static [u64]>,
+//) -> DecodeResult<Opcode> {
+//    tracing::info!("in decoder32_modrm");
+//
+//    let modrm = BxModrm::default();
+//
+//    unimplemented!()
+//}
 
-fn decoder_creg32(
-    iptr: &[u8],
-    remain: &mut u32,
-    i: &mut BxInstruction,
-    b1: u32,
-    sse_prefix: u32,
-    opcode_table: &'static Option<&'static [u8]>,
-) -> i32 {
-    unimplemented!()
-}
+fn decodeModrm32<'a>(
+    mut iptr: &'a [u8],
+    // remain: &mut usize,
+    i: &mut BxInstructionGenerated,
+    r#mod: u32,
+    nnn: u32, // Why is it unused in bochs???
+    rm: u32,
+) -> DecodeResult<&'a [u8]> {
+    let mut seg = BxSegregs::Ds;
 
-fn decoder_xop32(
-    iptr: &[u8],
-    remain: &mut u32,
-    i: &mut BxInstruction,
-    b1: u32,
-    sse_prefix: u32,
-    opcode_table: &'static Option<&'static [u8]>,
-) -> i32 {
-    unimplemented!()
-}
+    // initialize displ32 with zero to include cases with no diplacement
+    i.modrm_form.displ32u = 0;
 
-fn decoder32_nop(
-    iptr: &[u8],
-    remain: &mut u32,
-    i: &mut BxInstruction,
-    b1: u32,
-    sse_prefix: u32,
-    opcode_table: &'static Option<&'static [u8]>,
-) -> i32 {
-    unimplemented!()
-}
+    // note that mod==11b handled outside
 
-fn decoder_vex32(
-    iptr: &[u8],
-    remain: &mut u32,
-    i: &mut BxInstruction,
-    b1: u32,
-    sse_prefix: u32,
-    opcode_table: &'static Option<&'static [u8]>,
-) -> i32 {
-    unimplemented!()
-}
+    if i.as_32_l() != 0 {
+        i.set_sib_base(rm);
+        i.set_sib_index(4); // no Index encoding by default
 
-type Result<T> = core::result::Result<T, DecodeError>;
+        // no s-i-b byte
+        if rm != 4 {
+            if r#mod == 0x00 {
+                if rm == 5 {
+                    i.set_sib_base(BX_NIL_REGISTER);
+                    if iptr.len() > 3 {
+                        i.modrm_form.displ32u = fetch_dword(iptr);
+                        iptr = &iptr[4..];
+                    } else {
+                        return Err(BxDecodeError::ModRmParseFail);
+                    }
+                }
+                // mod==00b, rm!=4, rm!=5
+                // Goto modrm_done
+                i.set_seg(seg);
+                return Ok(iptr);
+            }
+            seg = SREG_MOD1OR2_BASE32[usize::try_from(rm).unwrap()];
+        }
+        // mod!=11b, rm==4, s-i-b byte follows
+        else {
+            let mut sib = if !iptr.is_empty() {
+                let value = iptr[0];
+                iptr = &iptr[1..];
+                value
+            } else {
+                return Err(BxDecodeError::ModRmParseFail);
+            };
 
-pub fn fetch_decode32(mut iptr: &[u8], is_32: bool, mut remaining_in_page: u32) -> Result<()> {
-    if remaining_in_page > 15 {
-        remaining_in_page = 15;
+            //let base = sib & 0x7;
+            //let index = (sib >> 3) & 0x7;
+            //let scale = sib >> 6;
+
+            let base = sib & 0x7;
+            sib >>= 3;
+
+            let index = sib & 0x7;
+            sib >>= 3;
+
+            let scale = sib;
+
+            i.set_sib_scale(scale.into());
+            i.set_sib_base(base.into());
+
+            // this part is a little tricky - assign index value always,
+            // it will be really used if the instruction is Gather. Others
+            // assume that resolve function will do the right thing.
+            i.set_sib_index(index.into());
+
+            if r#mod == 0x00 {
+                // mod==00b, rm==4
+                seg = SREG_MOD1OR2_BASE32[usize::from(base)];
+                if base == 5 {
+                    i.set_sib_base(BX_NIL_REGISTER);
+
+                    if iptr.len() > 3 {
+                        i.modrm_form.displ32u = fetch_dword(iptr);
+                        iptr = &iptr[4..];
+                        //*remain -= 4;
+                    } else {
+                        return Err(BxDecodeError::ModRmParseFail);
+                    }
+                }
+                // mod==00b, rm==4, base!=5
+                // Goto modrm_done
+                i.set_seg(seg);
+                return Ok(iptr);
+            } else {
+                seg = SREG_MOD1OR2_BASE32[usize::try_from(rm).unwrap()];
+            }
+        }
+
+        if r#mod == 0x40 {
+            if !iptr.is_empty() {
+                // 8 sign extended to 32
+                i.modrm_form.displ32u = iptr[0] as _;
+                iptr = &iptr[1..];
+                //*remain -= 1;
+            } else {
+                return Err(BxDecodeError::ModRmParseFail);
+            }
+        } else {
+            // (mod == 0x80), mod==10b
+            if iptr.len() > 3 {
+                i.modrm_form.displ32u = fetch_dword(iptr);
+                iptr = &iptr[4..];
+                //remain -= 4;
+            } else {
+                return Err(BxDecodeError::ModRmParseFail);
+            }
+        }
+    } else {
+        // 16-bit addressing modes, mod==11b handled above
+        i.set_sib_base(RESOLVE16_BASE_REG[usize::try_from(rm).unwrap()] as _);
+        i.set_sib_index(RESOLVE16_INDEX_REG[usize::try_from(rm).unwrap()]);
+        i.set_sib_scale(0);
+
+        if r#mod == 0x00 {
+            // mod == 00b
+            seg = SREG_MOD00_RM16[usize::try_from(rm).unwrap()];
+            if rm == 6 {
+                i.set_sib_base(BX_NIL_REGISTER);
+                if !iptr.is_empty() {
+                    i.modrm_form.displ32u = u32::from(fetch_word(iptr));
+                    iptr = &iptr[2..];
+                    //*remain -= 2;
+                } else {
+                    return Err(BxDecodeError::ModRmParseFail);
+                }
+            }
+            // modrm_done
+            i.set_seg(seg);
+            return Ok(iptr);
+        } else {
+            seg = SREG_MOD00_RM16[usize::try_from(rm).unwrap()];
+        }
+
+        if r#mod == 0x40 {
+            // mod == 01b
+
+            if !iptr.is_empty() {
+                // 8 sign extended to 16
+                i.modrm_form.displ32u = i32::from(iptr[0] as i8) as _; // BOCHS, what??
+                                                                       //*remain -= 1;
+            } else {
+                return Err(BxDecodeError::ModRmParseFail);
+            }
+        } else {
+            // (mod == 0x80)      mod == 10b
+
+            if iptr.len() > 1 {
+                i.modrm_form.displ32u = u32::from(fetch_word(iptr));
+                iptr = &iptr[2..];
+                //*remain -= 2;
+            } else {
+                return Err(BxDecodeError::ModRmParseFail);
+            }
+        }
     }
 
-    if iptr.len() > 15 {
-        iptr = &iptr[..15];
+    i.set_seg(seg);
+    Ok(iptr)
+}
+
+fn parse_modrm32<'a>(
+    mut iptr: &'a [u8],
+    i: &mut BxInstructionGenerated,
+) -> DecodeResult<(BxModrm, &'a [u8])> {
+    tracing::info!("in parse_modrm32");
+    let mut modrm = BxModrm::default();
+
+    if iptr.is_empty() {
+        return Err(BxDecodeError::ParseModrm32);
     }
 
-    let mut iptr_offset = 0;
-    let ilen = remaining_in_page;
+    let b2 = u32::from(iptr[0]);
+    iptr = &iptr[1..];
 
-    let mut remain = remaining_in_page; // remain must be at least 1
-    let mut b1 = iptr[0];
+    // Keep original modrm byte
+    modrm.modrm = b2;
 
-    let mut ia_opcode = Opcode::Error;
-    let mut seg_override = BxSegregs::Null;
-    let mut seg_override_cet = BxSegregs::Null;
+    // Parse mod-nnn-rm and related bytes
+    modrm.mod_ = b2 & 0xc0; // leave unshifted
+    modrm.nnn = (b2 >> 3) & 0x7;
+    modrm.rm = b2 & 0x7;
 
+    if modrm.mod_ == 0xc0 { // mod == 11b
+    } else {
+        iptr = decodeModrm32(iptr, i, modrm.mod_, modrm.nnn, modrm.rm)?;
+    }
+
+    tracing::info!("exting parse_modrm32");
+    Ok((modrm, iptr))
+}
+
+fn fetch_immediate() {
+    todo!()
+}
+
+fn evex_displ8_compression() {
+    unimplemented!()
+}
+
+fn assign_srcs() {
+    todo!()
+}
+
+fn assign_srcs_avx() {
+    todo!()
+}
+
+fn decoder_evex32<'a>(
+    iptr: &'a [u8],
+    //remain: &mut usize,
+    //i: &mut BxInstruction,
+    i: &mut BxInstructionGenerated,
+    b1: u32,
+    sse_prefix: Option<SsePrefix>,
+    opcode_table: Option<&'static [u64]>,
+) -> DecodeResult<(Opcode, &'a [u8])> {
+    tracing::info!("in decoder_evex32");
+    unimplemented!()
+}
+
+fn decoder_vex32<'a>(
+    iptr: &'a [u8],
+    //remain: &mut usize,
+    //i: &mut BxInstruction,
+    i: &mut BxInstructionGenerated,
+    b1: u32,
+    sse_prefix: Option<SsePrefix>,
+    opcode_table: Option<&'static [u64]>,
+) -> DecodeResult<(Opcode, &'a [u8])> {
+    tracing::info!("in decoder_vex32");
+    unimplemented!()
+}
+
+fn decoder_xop32<'a>(
+    iptr: &'a [u8],
+    //remain: &mut usize,
+    //i: &mut BxInstruction,
+    i: &mut BxInstructionGenerated,
+    b1: u32,
+    sse_prefix: Option<SsePrefix>,
+    opcode_table: Option<&'static [u64]>,
+) -> DecodeResult<(Opcode, &'a [u8])> {
+    tracing::info!("in decoder_xop32");
+    unimplemented!()
+}
+
+fn decoder32_fp_escape<'a>(
+    iptr: &'a [u8],
+    //remain: &mut usize,
+    //i: &mut BxInstruction,
+    i: &mut BxInstructionGenerated,
+    b1: u32,
+    sse_prefix: Option<SsePrefix>,
+    opcode_table: Option<&'static [u64]>,
+) -> DecodeResult<(Opcode, &'a [u8])> {
+    tracing::info!("in decoder32_fp_escape");
+    unimplemented!()
+}
+
+pub fn decoder32_modrm<'a>(
+    mut iptr: &'a [u8],
+    //remain: &mut usize,
+    //i: &mut BxInstruction,
+    i: &mut BxInstructionGenerated,
+    _b1: u32,
+    sse_prefix: Option<SsePrefix>,
+    opcode_table: Option<&'static [u64]>,
+) -> DecodeResult<(Opcode, &'a [u8])> {
+    tracing::info!("in decoder32_modrm");
+    // opcode requires modrm byte
+
+    let Some(opcode_table) = opcode_table else {
+        unreachable!()
+    };
+
+    //let mut generated_i = BxInstructionGenerated::try_from(i.clone())?;
+    let (modrm, updated_iptr) = parse_modrm32(iptr, i)?; // Handle error if parsing fails
+                                                         //
+    iptr = updated_iptr;
+
+    // Construct the decmask
+    let mut decmask = (i.osize() << OS32_OFFSET)
+        | (i.asize() << AS32_OFFSET)
+        | (sse_prefix.map_or(0, |sp| sp as u32) << SSE_PREFIX_OFFSET)
+        | if i.mod_c0() != 0 {
+            1 << MODC0_OFFSET
+        } else {
+            0
+        }
+        | (modrm.nnn << NNN_OFFSET)
+        | (modrm.rm << RRR_OFFSET);
+
+    if i.mod_c0() > 0 && modrm.nnn == modrm.rm {
+        decmask |= 1 << SRC_EQ_DST_OFFSET;
+    }
+
+    // Find the opcode
+    let ia_opcode = find_opcode(opcode_table, decmask)?;
+
+    // Fetch immediate value
+    //if fetch_immediate(updated_iptr, remain, i, ia_opcode, false)? < 0 {
+    //    return Err(DecodeError::FetchImmediateError);
+    //}
+
+    // Assign sources
+    //assign_srcs(i, ia_opcode, modrm.nnn, modrm.rm);
+
+    Ok((ia_opcode, iptr))
+}
+
+fn decoder_creg32<'a>(
+    iptr: &'a [u8],
+    //remain: &mut usize,
+    //i: &mut BxInstruction,
+    i: &mut BxInstructionGenerated,
+    b1: u32,
+    sse_prefix: Option<SsePrefix>,
+    opcode_table: Option<&'static [u64]>,
+) -> DecodeResult<(Opcode, &'a [u8])> {
+    tracing::info!("in decoder_creg32");
+    unimplemented!()
+}
+
+fn decoder32_3dnow<'a>(
+    iptr: &'a [u8],
+    //remain: &mut usize,
+    //i: &mut BxInstruction,
+    i: &mut BxInstructionGenerated,
+    _b1: u32,
+    _sse_prefix: Option<SsePrefix>,
+    _opcode_table: Option<&'static [u64]>,
+) -> DecodeResult<(Opcode, &'a [u8])> {
+    tracing::info!("in decoder32_3dnow");
+
+    let opcode = Opcode::IaError;
+
+    let (modrm, mut iptr) = parse_modrm32(iptr, i)?;
+
+    if !iptr.is_empty() {
+        unsafe { i.modrm_form.operand_data.Ib[0] = iptr[0] };
+        iptr = &iptr[1..];
+    } else {
+        return Err(BxDecodeError::ThreeDNow);
+    }
+
+    let opcode = Bx3DNowOpcode[usize::from(unsafe { i.modrm_form.operand_data.Ib[0] })];
+
+    Ok((opcode, iptr))
+}
+
+fn decoder32_nop<'a>(
+    iptr: &'a [u8],
+    //remain: &mut usize,
+    //i: &mut BxInstruction,
+    i: &mut BxInstructionGenerated,
+    b1: u32,
+    sse_prefix: Option<SsePrefix>,
+    opcode_table: Option<&'static [u64]>,
+) -> DecodeResult<(Opcode, &'a [u8])> {
+    tracing::info!("in decoder32_nop");
+
+    assert_eq!(b1, 0x90);
+
+    i.assert_mod_c0();
+
+    if let Some(sse_prefix) = sse_prefix {
+        if sse_prefix == SsePrefix::PrefixF3 {
+            return Ok((Opcode::Pause, iptr));
+        }
+    }
+
+    Ok((Opcode::Nop, iptr))
+}
+
+fn decoder_simple32<'a>(
+    iptr: &'a [u8],
+    //remain: &mut usize,
+    //i: &mut BxInstruction,
+    i: &mut BxInstructionGenerated,
+    _b1: u32,
+    _sse_prefix: Option<SsePrefix>,
+    opcode_table: Option<&'static [u64]>,
+) -> DecodeResult<(Opcode, &'a [u8])> {
+    tracing::info!("in decoder_simple32");
+
+    i.assert_mod_c0();
+
+    let Some(opcode_table) = opcode_table else {
+        unreachable!()
+    };
+
+    let op = opcode_table[0];
+
+    // no immediate expected, no sources expected, take first opcode
+    // check attributes ?
+    // Extract the opcode from the upper bits
+    let ia_opcode: u16 = ((op >> 48) & 0x7FFF) as u16; // Extracting the opcode
+
+    // Create the Opcode from the extracted value
+    let opcode = Opcode::try_from(ia_opcode)?;
+    Ok((opcode, iptr))
+}
+
+const fn decoder_ud32<'a>(
+    _iptr: &'a [u8],
+    //_remain: &mut usize,
+    //_i: &mut BxInstruction,
+    i: &mut BxInstructionGenerated,
+    _b1: u32,
+    _sse_prefix: Option<SsePrefix>,
+    _opcode_table: Option<&'static [u64]>,
+) -> DecodeResult<(Opcode, &'a [u8])> {
+    //tracing::info!("in decoder_ud32");
+
+    Err(BxDecodeError::Ud32)
+}
+
+fn find_opcode(op_map: &'static [u64], decmask: u32) -> DecodeResult<Opcode> {
+    let mut ia_opcode_raw = Opcode::IaError as _;
+
+    for &op in op_map {
+        let ignmsk = (op & 0xFFFFFF) as u32;
+        let opmsk = (op >> 24) as u32;
+
+        if (opmsk & ignmsk) == (decmask & ignmsk) {
+            ia_opcode_raw = (op >> 48) as u16 & 0x7FFF; // Masking to get the opcode
+            break;
+        }
+    }
+
+    tracing::warn!("opcode number: {ia_opcode_raw}");
+    Opcode::try_from(ia_opcode_raw)
+}
+
+fn decoder32<'a>(
+    iptr: &'a [u8],
+    //i: &mut BxInstruction,
+    i: &mut BxInstructionGenerated,
+    b1: u32,
+    sse_prefix: Option<SsePrefix>,
+    opcode_table: Option<&'static [u64]>,
+) -> DecodeResult<(Opcode, &'a [u8])> {
+    tracing::info!("in decoder32");
+
+    let Some(opcode_table) = opcode_table else {
+        unreachable!()
+    };
+    let rm: u32 = b1 & 0x7;
+    let nnn: u32 = (b1 >> 3) & 0x7;
+
+    //i->assertModC0();
+    //
+
+    let sse_prefix_raw = match sse_prefix {
+        Some(prefix) => prefix as u32,
+        None => 0,
+    };
+    let mut decmask = (i.osize() << OS32_OFFSET)
+        | (i.asize() << AS32_OFFSET)
+        | (sse_prefix_raw << SSE_PREFIX_OFFSET)
+        | (1 << MODC0_OFFSET);
+
+    if nnn == rm {
+        decmask |= 1 << SRC_EQ_DST_OFFSET;
+    }
+
+    let ia_opcode = find_opcode(opcode_table, decmask)?;
+
+    tracing::warn!("decoder32(): Opcode: {ia_opcode:?}");
+
+    Ok((ia_opcode, iptr))
+}
+
+pub fn fetch_decode32_chatgpt_generated_instr(
+    mut iptr: &[u8],
+    is_32: bool,
+) -> DecodeResult<BxInstructionGenerated> {
+    let remaining_in_page = iptr.len().min(15);
+    iptr = &iptr[0..remaining_in_page];
+
+    let mut instruction = BxInstructionGenerated::default(); // Initialize the instruction
+                                                             //instruction.set_il_len(remaining_in_page);
+
+    //let mut remain = remaining_in_page;
+    //let mut b1: u32;
+    let mut b1: u32;
+    let mut ia_opcode = Opcode::IaError;
+    let mut seg_override: Option<BxSegregs> = None;
     let mut os_32 = is_32;
     let mut lock = false;
 
     let mut sse_prefix: Option<SsePrefix> = None;
 
-    let mut meta_info_1 = MetaInfoFlags::default();
-
-    let mut meta_info1_raw = ((is_32 as u8) << 2) | ((is_32 as u8) << 3) | (0 << 0) | (0 << 1);
+    let meta_info1_raw = ((is_32 as u8) << 2) | ((is_32 as u8) << 3);
     let mut meta_info_1 = MetaInfoFlags::from_bits_truncate(meta_info1_raw);
 
-    // First, start with fetching prefixes
-    // There are maximum 4 bytes of such prefixes
-    let mut b1 = u32::from(iptr[0]);
-    for _ in 0..4 {
-        remain -= 1;
+    instruction.init(is_32 as _, is_32 as _, 0, 0);
 
-        if b1 == 0x3e {
-            seg_override_cet = BxSegregs::Ds;
-        }
-        match b1 {
-            // Lock
-            0x0f => {
-                if iptr.len() > 1 {
-                    b1 = 0x100 | u32::from(iptr[0]);
+    if iptr.is_empty() {
+        return Err(BxDecodeError::NoMoreLen);
+    }
+
+    //instruction.init(is_32, is_32, 0, 0);
+
+    loop {
+        if !iptr.is_empty() {
+            b1 = iptr[0] as u32;
+            //remain -= 1;
+            iptr = &iptr[1..];
+
+            if b1 == 0x3e {
+                // Handle DS prefix for CET
+                // seg_override_cet = BX_SEG_REG_DS; // Removed as per your request
+            }
+
+            match b1 {
+                0x0f => {
+                    if iptr.is_empty() {
+                        return Err(DecodeError::NoMoreLen);
+                    }
+                    b1 = 0x100 | (iptr[0] as u32);
                     iptr = &iptr[1..];
+                    //remain -= 1;
+                }
+                0x66 => {
+                    os_32 = !is_32;
+                    if sse_prefix.is_none() {
+                        sse_prefix = Some(SsePrefix::Prefix66);
+                    }
+                    meta_info_1.set_os32_b(os_32);
+                    //instruction.set_os32_b(os_32);
+                }
+                0x67 => {
+                    instruction.set_as32_b(!is_32);
+                }
+                // REPNE/REPNZ
+                0xf2 => {
+                    sse_prefix = Some(SsePrefix::PrefixF2);
+                    meta_info_1.set_lock_rep_used(b1 & 3);
+                    //instruction.set_lock_rep_used(b1 & 3);
+                }
+                // REP/REPE/REPZ
+                0xf3 => {
+                    sse_prefix = Some(SsePrefix::PrefixF3);
+                    //instruction.set_lock_rep_used(b1 & 3);
+                }
+                // Segment override
+                0x26 => {
+                    seg_override = Some(BxSegregs::Es);
+                }
+                0x2e => {
+                    seg_override = Some(BxSegregs::Cs);
+                }
+                0x36 => {
+                    seg_override = Some(BxSegregs::Ss);
+                }
+                0x3e => {
+                    seg_override = Some(BxSegregs::Ds);
+                }
+                0x64 => {
+                    seg_override = Some(BxSegregs::Fs);
+                }
+                0x65 => seg_override = Some(BxSegregs::Gs),
+                0xf0 => {
+                    lock = true;
+                }
+                _ => {
                     break;
                 }
             }
-            // OpSize
-            0x66 => {
-                os_32 = !is_32;
-                if sse_prefix.is_none() {
-                    sse_prefix = Some(SsePrefix::Prefix66);
-                }
-            }
-            // Segment override
-            0x26 => {
-                seg_override = BxSegregs::Es;
-            }
-            0x2e => {
-                seg_override = BxSegregs::Cs;
-            }
-            0x36 => {
-                seg_override = BxSegregs::Ss;
-            }
-            0x3e => {
-                seg_override = BxSegregs::Ds;
-            }
-            0x64 => {
-                seg_override = BxSegregs::Fs;
-            }
-            0x65 => seg_override = BxSegregs::Gs,
-            _ => {
-                // Handle default case...
-            }
-        }
 
-        b1 = u32::from(iptr[0]);
-        if iptr.len() < 2 {
-            return Err(BxDecodeError::Other);
+            tracing::warn!("seg_override: {seg_override:?} sse_prefix: {sse_prefix:?}");
+
+            if iptr.is_empty() {
+                return Err(DecodeError::NoMoreLen);
+            }
         }
-        iptr = &iptr[1..];
     }
 
-    todo!()
+    tracing::info!("Passed the loop");
+
+    let decode_descriptor =
+        &DECODE32_DESCRIPTOR[usize::try_from(b1).map_err(|_| DecodeError::U32toUsize)?];
+    let decode_method = decode_descriptor.decode_method;
+    let mut opcode_table = *decode_descriptor.opcode_table;
+
+    if b1 == 0x138 || b1 == 0x13a {
+        if iptr.is_empty() {
+            return Err(DecodeError::NoMoreLen);
+        }
+        let opcode = iptr[0];
+        iptr = &iptr[1..];
+        //remain -= 1;
+
+        if b1 == 0x138 {
+            opcode_table = Some(BxOpcodeTable0F38[opcode as usize]);
+            b1 = 0x200 | opcode as u32;
+        } else if b1 == 0x13a {
+            opcode_table = Some(BxOpcodeTable0F3A[opcode as usize]);
+            b1 = 0x300 | opcode as u32;
+        }
+    }
+
+    instruction.set_seg(BxSegregs::Ds); // default segment is DS:
+    instruction.set_cet_seg_override(BxSegregs::Null);
+    //seg_override_cet handling removed
+
+    instruction.modrm_form.operand_data.Id = 0;
+
+    //instruction.metainfo.meta_info1 = meta_info_1;
+
+    (ia_opcode, iptr) = decode_method(iptr, &mut instruction, b1, sse_prefix, opcode_table)?;
+
+    instruction.meta_info.metainfo1 = meta_info_1.bits();
+    instruction.meta_info.ia_opcode = ia_opcode;
+    instruction.meta_info.ilen = remaining_in_page as u8 - iptr.len() as u8;
+
+    if lock {
+        tracing::info!("We have a lock btw");
+    }
+
+    //if ia_opcode < 0 {
+    //    return Err(DecodeError::NoMoreLen);
+    //}
+
+    //instruction.set_il_len(remaining_in_page - remain);
+    //instruction.set_ia_opcode(ia_opcode);
+    //
+    //if seg_override.is_some() {
+    //    instruction.set_seg(seg_override);
+    //}
+
+    //let op_flags = BxOpcodesTable[ia_opcode].opflags;
+    //
+    //if lock {
+    //    instruction.set_lock();
+    //    if instruction.mod_c0() || !(op_flags & BX_LOCKABLE) != 0 {
+    //        // Handle lock errors
+    //        instruction.set_ia_opcode(BX_IA_ERROR);
+    //    }
+    //}
+
+    Ok(instruction) // Return the initialized instruction
 }
 
-//pub fn fetch_decode32_v2(iptr: &[u8], is_32: bool, mut remaining_in_page: u32) -> Result<()> {
-//    if remaining_in_page > 15 {
-//        remaining_in_page = 15;
-//    }
-//    i.set_il_len(remaining_in_page);
-//
-//    let mut remain = remaining_in_page; // remain must be at least 1
-//    let mut b1: u8;
-//    let mut ia_opcode = Opcode::Error;
-//    let mut seg_override = Some(BxSegregs::Null as u8);
-//    let mut seg_override_cet = Some(BxSegregs::Null as u8);
-//    let mut os_32 = is_32;
-//    let mut lock = false;
-//    let mut sse_prefix: Option<u8> = None;
-//
-//    i.init(is_32, is_32, 0, 0);
-//
-//    while remain > 0 {
-//        b1 = iptr[0]; // Fetch the byte
-//        iptr = &iptr[1..]; // Move the pointer forward
-//        remain -= 1;
-//
-//        if b1 == 0x3e {
-//            seg_override_cet = Some(BxSegregs::Ds as u8);
-//        }
-//
-//        match b1 {
-//            0x0f => {
-//                // 2-byte escape
-//                if remain == 0 {
-//                    return Err(CpuError::Decoder(Error));
-//                }
-//                remain -= 1;
-//                b1 = 0x100 | iptr[0]; // Fetch the next byte
-//                iptr = &iptr[1..]; // Move the pointer forward
-//                break;
-//            }
-//            0x66 => {
-//                // OpSize
-//                os_32 = !is_32;
-//                if sse_prefix.is_none() {
-//                    sse_prefix = Some(SsePrefix::Prefix66 as u8);
-//                }
-//                i.set_os32_b(os_32);
-//            }
-//            0x67 => {
-//                // AddrSize
-//                i.set_as32_b(!is_32);
-//            }
-//            0xf2 | 0xf3 => {
-//                // REPNE/REPNZ or REP/REPE/REPZ
-//                sse_prefix = Some((b1 & 3) ^ 1);
-//                i.set_lock_rep_used(b1 & 3);
-//            }
-//            0x26 | 0x2e | 0x36 | 0x3e => {
-//                // Segment overrides
-//                seg_override = Some((b1 >> 3) & 3);
-//            }
-//            0x64 | 0x65 => {
-//                // FS: or GS:
-//                seg_override = Some(b1 & 0xf);
-//            }
-//            0xf0 => {
-//                // LOCK:
-//                lock = true;
-//            }
-//            _ => break,
-//        }
-//
-//        if remain == 0 {
-//            return Err(CpuError::Decode);
-//        }
-//    }
-//
-//    let decode_descriptor = DECODE32_DESCRIPTOR[usize::from(b1)];
-//
-//    //let decode_descriptor = &decode32_descriptor[b1 as usize];
-//    //let decode_method = decode_descriptor.decode_method;
-//    //let mut opcode_table = decode_descriptor.opcode_table;
-//    //
-//    //if b1 == 0x138 || b1 == 0x13a {
-//    //    if remain == 0 {
-//    //        return Err(CpuError::Decoder);
-//    //    }
-//    //    let opcode = iptr[0]; // Fetch the next byte
-//    //    iptr = &iptr[1..]; // Move the pointer forward
-//    //    remain -= 1;
-//    //
-//    //    if b1 == 0x138 {
-//    //        opcode_table = BxOpcodeTable0F38[opcode as usize];
-//    //        b1 = 0x200 | opcode;
-//    //    } else if b1 == 0x13a {
-//    //        opcode_table = BxOpcodeTable0F3A[opcode as usize];
-//    //        b1 = 0x300 | opcode;
-//    //    }
-//    //}
-//    //
-//    //i.set_seg(BX_SEG_REG_DS); // Default segment is DS
-//    //i.set_cet_seg_override(seg_override_cet);
-//    //i.mod_rm_form.id = 0;
-//    //
-//    //ia_opcode = decode_method(iptr, remain, i, b1, sse_prefix, opcode_table)?;
-//    //if ia_opcode < 0 {
-//    //    return Err(CpuError::Decoder);
-//    //}
-//    //
-//    //i.set_il_len(remaining_in_page - remain);
-//    //i.set_ia_opcode(ia_opcode);
-//    //
-//    //if !BX_NULL_SEG_REG(seg_override) {
-//    //    i.set_seg(seg_override);
-//    //}
-//    //
-//    //let op_flags = BxOpcodesTable[ia_opcode].opflags;
-//    //if lock {
-//    //    i.set_lock();
-//    //    if i.mod_c0() || !(op_flags & BX_LOCKABLE) != 0 {
-//    //        #[cfg(BX_CPU_LEVEL >= 6)]
-//    //        if (op_flags & BX_LOCKABLE) != 0 {
-//    //            if ia_opcode == BX_IA_MOV_CR0Rd {
-//    //                i.set_src_reg(0, 8); // extend CR0 -> CR8
-//    //            } else if ia_opcode == BX_IA_MOV_RdCR0 {
-//    //                i.set_src_reg(1, 8); // extend CR0 -> CR8
-//    //            } else {
-//    //                i.set_ia_opcode(BX_IA_ERROR); // replace execution function with undefined-opcode
-//    //            }
-//    //        } else {
-//    //            i.set_ia_opcode(BX_IA_ERROR); // replace execution function with undefined-opcode
-//    //        }
-//    //    }
-//    //}
-//    //
-//    //Ok(())
-//}
+#[cfg(test)]
+mod tests {
+    use crate::cpu::decoder::fetchdecode32::fetch_decode32_chatgpt_generated_instr;
+
+    #[test]
+    fn example_decode() {
+        tracing_subscriber::fmt()
+            .without_time()
+            .with_target(false)
+            .init();
+
+        //let buf = [0x90];
+        let buf = [
+            0x31, 0xff, 0x48, 0x31, 0xf6, 0x48, 0x31, 0xd2, 0x48, 0x31, 0xc0, 0x50, 0x48, 0xbb,
+            0x2f, 0x62, 0x69, 0x6e, 0x2f, 0x2f, 0x73, 0x68, 0x53, 0x48, 0x89, 0xe7, 0xb0, 0x3b,
+            0x0f, 0x05,
+        ];
+        let buf = [0x8B, 0x03]; //  mov    eax,DWORD PTR [ebx]
+        let buf = [0x8b, 0x40, 0x10]; // mov eax, [eax+0x10]
+        let buf = [0x8B, 0x80, 0x45, 0x23, 0x01, 0x00]; // mov eax, [eax+0x12345]
+        let buf = [0x0f, 0x93, 0xc0]; //  setnb al
+        let buf = [0xc3]; // ret
+        let buf = [0xe9, 0xfc, 0xff, 0xff, 0xff]; // jmp rcx
+        let buf = [0x98]; // cwde
+        let buf = [0x91]; // xchg eax, ecx
+                          //let buf = [0x0f, 0xcb]; // bswap ebx (not working)
+
+        //let buf = [0x48]; // dec eax
+
+        match fetch_decode32_chatgpt_generated_instr(&buf, true) {
+            Ok(instr) => tracing::info!("{:#?}", instr),
+            Err(e) => tracing::error!("Error when decoding: {e:?}"),
+        }
+    }
+}

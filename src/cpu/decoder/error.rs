@@ -1,5 +1,7 @@
 use super::fetchdecode_generated::{self, BxDecodeError};
 
+pub type DecodeResult<T> = core::result::Result<T, DecodeError>;
+
 pub type DecodeError = fetchdecode_generated::BxDecodeError;
 
 impl core::fmt::Display for BxDecodeError {

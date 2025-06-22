@@ -1544,9 +1544,9 @@ pub(super) const BxOpcodeTable0F23_32: [u64; 1] = [last_opcode(0, Opcode::MovDdR
 pub(super) const BxOpcodeTable0F23_64: [u64; 1] = [last_opcode(0, Opcode::MovDqRq)];
 
 // opcode 0F 24
-pub(super) const BxOpcodeTable0F24: [u64; 1] = [last_opcode(0, Opcode::Error)]; // BX_IA_MOV_RdTd not implemented
-                                                                                // opcode 0F 26
-pub(super) const BxOpcodeTable0F26: [u64; 1] = [last_opcode(0, Opcode::Error)]; // BX_IA_MOV_TdRd not implemented
+pub(super) const BxOpcodeTable0F24: [u64; 1] = [last_opcode(0, Opcode::IaError)]; // BX_IA_MOV_RdTd not implemented
+                                                                                  // opcode 0F 26
+pub(super) const BxOpcodeTable0F26: [u64; 1] = [last_opcode(0, Opcode::IaError)]; // BX_IA_MOV_TdRd not implemented
 
 // opcode 0F 28
 pub(super) const BxOpcodeTable0F28: [u64; 2] = [

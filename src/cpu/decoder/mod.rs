@@ -1,5 +1,5 @@
 pub mod error;
-pub use error::DecodeError;
+pub use error::{DecodeError, DecodeResult};
 
 pub mod disasm;
 pub mod features;
@@ -7,20 +7,18 @@ pub mod fetchdecode;
 pub mod fetchdecode32;
 pub mod fetchdecode_generated;
 pub mod fetchdecode_opmap;
+pub mod fetchdecode_opmap_0f38;
+pub mod fetchdecode_opmap_0f3a;
 //pub mod fetchdecode_opmap_after_sed;
 pub mod instr;
+
+pub(super) mod fetchdecode_x87;
+
+mod instr_generated;
 
 pub mod ia_opcodes;
 
 pub const BX_ISA_EXTENSIONS_ARRAY_SIZE: usize = 5;
-
-#[derive(Debug, Default)]
-pub struct BxModrm {
-    pub modrm: u32,
-    pub r#mod: u32,
-    pub nnn: u32,
-    pub rm: u32,
-}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum X86FeatureName {
@@ -293,7 +291,7 @@ pub(crate) enum X86FeatureName {
 }
 
 /// segment register encoding
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 pub(crate) enum BxSegregs {
     Es = 0,
     Cs = 1,
@@ -338,7 +336,7 @@ enum BxRegs8H {
     Bh,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, Copy)]
 enum BxRegs16 {
     Ax,
     Cx,
@@ -410,7 +408,7 @@ pub(super) const BX_32BIT_REG_SSP: usize = BX_GENERAL_REGISTERS + 1;
 pub(super) const BX_64BIT_REG_SSP: usize = BX_GENERAL_REGISTERS + 1;
 
 pub(super) const BX_TMP_REGISTER: usize = BX_GENERAL_REGISTERS + 2;
-pub(super) const BX_NIL_REGISTER: usize = BX_GENERAL_REGISTERS + 3;
+pub(super) const BX_NIL_REGISTER: u32 = (BX_GENERAL_REGISTERS + 3) as _;
 
 #[derive(Debug)]
 pub(super) enum OpmaskRegs {
