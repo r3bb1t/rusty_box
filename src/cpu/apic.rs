@@ -1,6 +1,5 @@
 use crate::config::BxPhyAddress;
 
-use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait};
 
 pub const APIC_EDGE_TRIGGERED: u8 = 0;
 pub const APIC_LEVEL_TRIGGERED: u8 = 1;

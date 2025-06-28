@@ -1,6 +1,5 @@
 use core::marker::PhantomData;
 
-use alloc::boxed::Box;
 
 use crate::{
     config::{BxAddress, BxPhyAddress, BxPtrEquiv},

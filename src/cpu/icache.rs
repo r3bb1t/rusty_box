@@ -1,12 +1,11 @@
 use crate::{
     config::BxPhyAddress,
     cpu::decoder::{
-        fetchdecode32::{self, fetch_decode32_chatgpt_generated_instr},
+        fetchdecode32::fetch_decode32_chatgpt_generated_instr,
         instr_generated::BxInstructionGenerated,
     },
 };
 
-use super::decoder::instr::BxInstruction;
 
 const BX_ICACHE_INVALID_PHY_ADDRESS: BxPhyAddress = -1 as _;
 

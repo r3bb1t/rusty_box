@@ -1,9 +1,10 @@
 use crate::cpu::{
-    cpu::BX_MSR_MAX_INDEX, cpuid::BxCpuIdTrait, init::cpuid_factory, smm::SMMRAM_Fields, BxCpuC,
+    cpu::BX_MSR_MAX_INDEX, cpuid::BxCpuIdTrait, smm::SMMRAM_Fields, BxCpuC,
 };
 
 use super::Result;
 
+#[derive(Debug)]
 pub struct BxCpuBuilder<I: BxCpuIdTrait> {
     cpuid: I,
 }

@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, vec::Vec};
+use alloc::vec::Vec;
 
 use super::Result;
 use crate::{
@@ -65,7 +65,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.init_statistics();
 
-        todo!()
+        Ok(())
     }
 
     fn init_statistics(&mut self) {

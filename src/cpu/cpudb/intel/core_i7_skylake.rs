@@ -12,15 +12,15 @@ impl BxCpuIdTrait for Corei7SkylakeX {
     }
 
     fn get_vmx_extensions_bitmask(&self) -> Option<crate::cpu::cpuid::VMXExtensions> {
-        todo!()
+        None
     }
 
     fn get_svm_extensions_bitmask(&self) -> Option<crate::cpu::cpuid::SVMExtensions> {
-        todo!()
+        None
     }
 
     fn sanity_checks(&self) -> crate::cpu::error::Result<()> {
-        todo!()
+        Ok(())
     }
 
     fn new() -> Self {
