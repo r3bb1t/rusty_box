@@ -14,12 +14,13 @@ pub mod instr;
 
 pub(super) mod fetchdecode_x87;
 
-mod instr_generated;
+pub mod instr_generated;
 
 pub mod ia_opcodes;
 
 pub const BX_ISA_EXTENSIONS_ARRAY_SIZE: usize = 5;
 
+#[allow(unused)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum X86FeatureName {
     /// 386 or earlier instruction

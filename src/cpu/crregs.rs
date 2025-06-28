@@ -1,19 +1,21 @@
-#[derive(Debug)]
+use super::{cpuid::BxCpuIdTrait, decoder::instr_generated::BxInstructionGenerated, BxCpuC};
+
+#[derive(Debug, Default)]
 pub struct BxCr0 {
     pub val32: u32, // 32bit value of register
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct BxCr4 {
     pub val32: u32, // 32bit value of register
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct BxDr6 {
     pub val32: u32, // 32bit value of register
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct BxDr7 {
     pub val32: u32, // 32bit value of register
 }
@@ -23,7 +25,7 @@ pub struct BxEfer {
     pub value: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct Xcr0 {
     pub value: u32,
 }
@@ -53,23 +55,42 @@ enum Xcr0Enum {
     BxXcr0Last, // make sure it is < 32
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct MSR {
     /// MSR index
-    index: u32,
+    pub(crate) index: u32,
     /// MSR type: 1 - lin address, 2 - phy address
-    r#type: u32,
+    pub(crate) r#type: u32,
     /// current MSR value
-    val64: u64,
+    pub(crate) val64: u64,
     /// reset value
-    reset_value: u64,
+    pub(crate) reset_value: u64,
     /// r/o bits - fault on write
-    reserved: u64,
+    pub(crate) reserved: u64,
     /// hardwired bits - ignored on write
-    ignored: u64,
+    pub(crate) ignored: u64,
 }
 
 impl MSR {
     const BX_LIN_ADDRESS_MSR: u32 = 1;
     const BX_PHY_ADDRESS_MSR: u32 = 2;
+}
+
+//struct XSaveRestoreStateHelper {
+//  len: usize,
+//  offset: usize,
+//  XSaveStateInUsePtr_tR xstate_in_use_method;
+//  XSavePtr_tR xsave_method;
+//  XRestorPtr_tR xrstor_method;
+//  XRestorInitPtr_tR xrstor_init_method;
+//}
+
+type XSaveStateInUsePtr_tR = fn() -> bool;
+type XSavePtr_tR = fn(&BxInstructionGenerated, usize);
+type XRestorPtr_tR = fn(&BxInstructionGenerated, usize);
+
+impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    pub(super) fn xsave_xrestor_init(&mut self) {
+        //self
+    }
 }

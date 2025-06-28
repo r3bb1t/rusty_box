@@ -16,9 +16,9 @@ default = ["bx_full"]
 
 std = ["tracing/std", "tempfile"]
 
-bx_full = ["bx_little_endian", "bx_large_ram_file", "bx_phy_address_long", "bx_support_monitor_mwait", "bx_debugger", 
+bx_full = ["bx_little_endian", "bx_large_ram_file", "bx_phy_address_long", "bx_support_monitor_mwait",  
            "bx_support_pkeys", "bx_support_apic", "bx_configure_msrs", 
-           "bx_support_handlers_chaining_speedups", "bx_support_alignment_check" ]
+           "bx_support_handlers_chaining_speedups", "bx_support_alignment_check"  ]
 
 bx_debugger = []
 bx_gdb_stub = []

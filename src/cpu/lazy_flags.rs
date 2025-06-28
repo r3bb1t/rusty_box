@@ -1,6 +1,6 @@
 use crate::config::BxAddress;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct BxLazyflagsEntry {
     result: BxAddress,
     auxbits: BxAddress,

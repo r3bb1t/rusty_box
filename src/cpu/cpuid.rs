@@ -5,7 +5,7 @@ use super::{decoder::BX_ISA_EXTENSIONS_ARRAY_SIZE, BxCpuC, Result};
 #[derive(Debug, thiserror::Error)]
 pub enum CpuIdError {}
 
-pub(crate) trait BxCpuIdTrait {
+pub trait BxCpuIdTrait: core::fmt::Debug {
     fn get_name(&self) -> &'static str;
 
     fn init(&mut self) {}
@@ -16,9 +16,12 @@ pub(crate) trait BxCpuIdTrait {
     fn get_svm_extensions_bitmask(&self) -> Option<SVMExtensions>;
 
     fn sanity_checks(&self) -> Result<()>;
+
+    fn new() -> Self;
 }
 
 bitflags! {
+    #[derive(Debug)]
     pub struct VMXExtensions: u32 {
         /// TPR shadow
         const TprShadow = 1 << 0;
@@ -125,6 +128,7 @@ bitflags! {
     /// [15:15] Nested Virtualization (virtualized VMLOAD and VMSAVE) Support
     /// [16:16] Virtual GIF
     /// [17:17] Guest Mode Execute Trap (CMET)
+    #[derive(Debug)]
     pub struct SVMExtensions: u32 {
         const NestedPaging = 1 << 0;
         const LbrVirtualization = 1 << 1;
@@ -146,3 +150,10 @@ bitflags! {
         const Cmet = 1 << 17;
     }
 }
+//
+//impl<I: BxCpuIdTrait> BxCpuIdTrait<'_, I> {
+//    pub(super) fn sanity_checks(&mut self) -> Result<()> {
+//        // TODO: Implement this in future
+//        Ok(())
+//    }
+//}

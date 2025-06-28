@@ -1,12 +1,16 @@
-use crate::cpu::decoder::{
-    fetchdecode::{fetch_dword, fetch_word},
-    fetchdecode_generated::{
-        BxDecodeError, BxModrm, AS32_OFFSET, MODC0_OFFSET, NNN_OFFSET, OS32_OFFSET, RRR_OFFSET,
-        SRC_EQ_DST_OFFSET, SSE_PREFIX_OFFSET,
+use crate::cpu::{
+    cpuid::BxCpuIdTrait,
+    decoder::{
+        fetchdecode::{fetch_dword, fetch_word},
+        fetchdecode_generated::{
+            BxDecodeError, BxModrm, AS32_OFFSET, MODC0_OFFSET, NNN_OFFSET, OS32_OFFSET, RRR_OFFSET,
+            SRC_EQ_DST_OFFSET, SSE_PREFIX_OFFSET,
+        },
+        fetchdecode_opmap_0f38::BxOpcodeTable0F38,
+        fetchdecode_x87::Bx3DNowOpcode,
+        DecodeError, BX_NIL_REGISTER,
     },
-    fetchdecode_opmap_0f38::BxOpcodeTable0F38,
-    fetchdecode_x87::Bx3DNowOpcode,
-    DecodeError, BX_NIL_REGISTER,
+    BxCpuC,
 };
 
 use super::{
@@ -3338,6 +3342,13 @@ pub fn fetch_decode32_chatgpt_generated_instr(
     //}
 
     Ok(instruction) // Return the initialized instruction
+}
+
+impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    pub(in crate::cpu) fn init_fetch_decode_tables(&mut self) -> crate::cpu::Result<()> {
+        // TODO: implement this in future
+        Ok(())
+    }
 }
 
 #[cfg(test)]

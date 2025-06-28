@@ -3,7 +3,7 @@
 use crate::cpu::cpuid::BxCpuIdTrait;
 
 #[derive(Debug)]
-pub(crate) struct Corei7SkylakeX {}
+pub struct Corei7SkylakeX {}
 
 impl BxCpuIdTrait for Corei7SkylakeX {
     //const NAME: &'static str = "corei7_skylake_x";
@@ -21,5 +21,9 @@ impl BxCpuIdTrait for Corei7SkylakeX {
 
     fn sanity_checks(&self) -> crate::cpu::error::Result<()> {
         todo!()
+    }
+
+    fn new() -> Self {
+        Self {}
     }
 }

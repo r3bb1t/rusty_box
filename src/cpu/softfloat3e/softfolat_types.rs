@@ -15,21 +15,21 @@ pub type float32 = u32;
 pub type float64 = u64;
 
 #[cfg(feature = "bx_little_endian")]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub struct uint128 {
     pub v0: u64,
     pub v64: u64,
 }
 
 #[cfg(feature = "bx_little_endian")]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub struct uint64_extra {
     pub extra: u64,
     pub v: u64,
 }
 
 #[cfg(feature = "bx_little_endian")]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub struct uint128_extra {
     pub extra: u64,
     pub v: uint128,
@@ -63,12 +63,12 @@ pub struct uint128_extra {
 | arguments and results to/from functions.  These types must be exactly
 | 16 bits, 32 bits, 64 bits, and 128 bits in size, respectively.
 *----------------------------------------------------------------------------*/
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub struct f16_t {
     pub v: u16,
 }
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub struct f32_t {
     pub v: u32,
 }
@@ -82,7 +82,7 @@ pub type float128_t = u128;
 *----------------------------------------------------------------------------*/
 
 #[cfg(feature = "bx_little_endian")]
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Default)]
 pub struct extFloat80M {
     pub signif: u64,
     pub sign_exp: u16,

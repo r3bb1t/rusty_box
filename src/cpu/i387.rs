@@ -2,7 +2,7 @@ use crate::config::BxAddress;
 
 use super::softfloat3e::softfolat_types::floatx80;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct I387 {
     /// Control word
     pub cwd: u64,
@@ -37,4 +37,10 @@ pub enum BxPackedRegister {
     U16([u16; 4]),
     U32([u32; 2]),
     U64(u64),
+}
+
+impl Default for BxPackedRegister {
+    fn default() -> Self {
+        Self::U64(0)
+    }
 }

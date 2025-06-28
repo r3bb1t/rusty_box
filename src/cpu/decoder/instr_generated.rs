@@ -154,6 +154,10 @@ impl BxInstructionGenerated {
     pub(super) fn set_cet_seg_override(&mut self, val: BxSegregs) {
         self.meta_data[BX_INSTR_METADATA_CET_SEGOVERRIDE] = val as _;
     }
+
+    pub(crate) fn ilen(&self) -> u8 {
+        self.meta_info.ilen
+    }
     //BX_CPP_INLINE void setSeg(unsigned val) {
     //  metaData[BX_INSTR_METADATA_SEG] = val;
     //}

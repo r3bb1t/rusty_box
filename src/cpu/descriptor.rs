@@ -15,7 +15,7 @@
 
 use crate::config::BxAddress;
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub(crate) struct BxSelector {
     /* bx_selector_t */
     pub(super) value: u16, /* the 16bit value of the selector */
@@ -247,13 +247,13 @@ enum BxDataAndCodeDescriptorEnum {
     CodeExecReadConformingAccessed = 0xf,
 }
 
-#[derive(Debug)]
-pub struct BxSegmentReg {
+#[derive(Debug, Default)]
+pub(super) struct BxSegmentReg {
     pub(super) selector: BxSelector,
-    pub(super) cache: BxDescriptor,
+    pub(super) cache: Option<BxDescriptor>, // Idk if really option
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct BxGlobalSegmentReg {
     /// base address: 24bits=286,32bits=386,64bits=x86-64
     pub(super) base: BxAddress,

@@ -15,6 +15,13 @@ pub enum BxPackedZmmRegister {
     ZmmV256([BxPackedYmmRegister; 2]),
 }
 
+// FIXME: erase that
+impl Default for BxPackedZmmRegister {
+    fn default() -> Self {
+        Self::ZmmU64([0, 0, 0, 0, 0, 0, 0, 0]) // Just randomly
+    }
+}
+
 pub type BxXmmReg = BxPackedXmmRegister;
 #[derive(Debug)]
 pub enum BxPackedXmmRegister {
@@ -42,7 +49,7 @@ pub enum BxPackedYmmRegister {
     YmmV128([BxPackedXmmRegister; 2]),
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct BxMxcsr {
     mxcsr: u32,
 }

@@ -68,6 +68,10 @@ impl BxInstruction {
     pub(super) fn asize(&self) -> u32 {
         u32::from(self.metainfo.meta_info1.bits() & 0x3)
     }
+
+    pub(crate) fn ilen(&self) -> u8 {
+        self.metainfo.ilen
+    }
 }
 
 #[derive(Debug)]

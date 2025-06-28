@@ -6,7 +6,7 @@ pub struct TILECFG {
     bytes_per_row: u32,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct AMX {
     /// 0 if tiles are not configured
     palette_id: u32,

@@ -157,11 +157,10 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    pub fn allocate_block<I: BxCpuIdTrait>(&self, _block: usize, _cpus: &[BxCpuC<I>]) -> Result<()> {
-        let _max_blocks = self.allocated / self.block_size;
-
+    pub fn allocate_block<I: BxCpuIdTrait>(&self, block: usize, cpus: &[BxCpuC<I>]) -> Result<()> {
         #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
         {
+            let max_blocks = self.allocated / self.block_size;
             let used_blocks = self.used_blocks.get();
             if used_blocks >= max_blocks {
                 let original_replacement_block = self.next_swapout_idx.get();

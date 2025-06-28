@@ -1,22 +1,33 @@
-use crate::config::{BxAddress, BxPhyAddress, BxPtrEquiv};
+use core::marker::PhantomData;
+
+use alloc::boxed::Box;
+
+use crate::{
+    config::{BxAddress, BxPhyAddress, BxPtrEquiv},
+    cpu::{
+        cpuid::{SVMExtensions, VMXExtensions},
+        smm::SMMRAM_Fields,
+        CpuError,
+    },
+};
 
 use super::{
     apic::BxLocalApic,
     cpuid::BxCpuIdTrait,
     cpustats::BxCpuStatistics,
     crregs::{BxCr0, BxCr4, BxDr6, BxDr7, Xcr0, MSR},
-    decoder::{
-        BX_GENERAL_REGISTERS, BX_ISA_EXTENSIONS_ARRAY_SIZE, BX_XMM_REGISTERS,
-    },
+    decoder::{BX_GENERAL_REGISTERS, BX_ISA_EXTENSIONS_ARRAY_SIZE, BX_XMM_REGISTERS},
     descriptor::{BxGlobalSegmentReg, BxSegmentReg},
     i387::{BxPackedRegister, I387},
-    icache::BxIcache,
+    icache::{BxIcache, BxIcacheEntry},
     lazy_flags::BxLazyflagsEntry,
     svm::VmcbCache,
     tlb::BxHostpageaddr,
     vmx::{VmcsCache, VmcsMapping, VmxCap},
     xmm::{BxMxcsr, BxZmmReg},
 };
+
+const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
 
 #[cfg(feature = "bx_support_amx")]
 use super::avx::amx::AMX;
@@ -72,6 +83,12 @@ pub union BxGenReg {
     pub dword: BxGenRegDword,
 }
 
+impl Default for BxGenReg {
+    fn default() -> Self {
+        Self { rrx: 0 }
+    }
+}
+
 #[cfg(not(feature = "bx_big_endian"))]
 #[repr(C)]
 #[derive(Copy, Clone)]
@@ -107,19 +124,20 @@ impl core::fmt::Debug for BxGenReg {
     }
 }
 
-const BX_MSR_MAX_INDEX: usize = 0x1000;
+pub(super) const BX_MSR_MAX_INDEX: usize = 0x1000;
 
+#[allow(unused)]
 #[derive(Debug)]
 pub struct BxCpuC<'c, I: BxCpuIdTrait> {
-    bx_cpuid: u32,
+    pub(super) bx_cpuid: u32,
 
-    cpuid: I,
+    pub(super) cpuid: I,
 
-    ia_extensions_bitmask: [u32; BX_ISA_EXTENSIONS_ARRAY_SIZE],
+    pub(super) ia_extensions_bitmask: [u32; BX_ISA_EXTENSIONS_ARRAY_SIZE],
 
-    vmx_extensions_bitmask: Option<u32>,
+    pub(super) vmx_extensions_bitmask: Option<VMXExtensions>,
 
-    svm_extensions_bitmask: Option<u32>,
+    pub(super) svm_extensions_bitmask: Option<SVMExtensions>,
 
     /// General register set
     /// rax: accumulator
@@ -146,80 +164,80 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     // ==|==|=====| ==|==|==|==| ==|==|==|==| ==|==|==|==
     //  0|NT| IOPL| OF|DF|IF|TF| SF|ZF| 0|AF|  0|PF| 1|CF
     //
-    eflags: u32, // Raw 32-bit value in x86 bit position.
+    pub(super) eflags: u32, // Raw 32-bit value in x86 bit position.
 
     /// lazy arithmetic flags state
-    oszapc: BxLazyflagsEntry,
+    pub(super) oszapc: BxLazyflagsEntry,
 
     /// so that we can back up when handling faults, exceptions, etc.
     /// we need to store the value of the instruction pointer, before
     /// each fetch/execute cycle.
-    prev_rip: BxAddress,
-    prev_rsp: BxAddress,
+    pub(super) prev_rip: BxAddress,
+    pub(super) prev_rsp: BxAddress,
 
-    prev_ssp: BxAddress,
-    speculative_rsp: bool,
+    pub(super) prev_ssp: BxAddress,
+    pub(super) speculative_rsp: bool,
 
-    icount: u64,
-    icount_last_sync: u64,
+    pub(super) icount: u64,
+    pub(super) icount_last_sync: u64,
 
     /// What events to inhibit at any given time.  Certain instructions
     /// inhibit interrupts, some debug exceptions and single-step traps.
-    inhibit_mask: u32,
-    inhibit_icount: u64,
+    pub(super) inhibit_mask: u32,
+    pub(super) inhibit_icount: u64,
 
     /// user segment register set
-    sregs: [BxSegmentReg; 6],
+    pub(super) sregs: [BxSegmentReg; 6],
 
     // system segment registers
     /// global descriptor table register
-    gdtr: BxGlobalSegmentReg,
+    pub(super) gdtr: BxGlobalSegmentReg,
     /// interrupt descriptor table register
-    idtr: BxGlobalSegmentReg,
+    pub(super) idtr: BxGlobalSegmentReg,
     /// local descriptor table register
-    ldtr: BxSegmentReg,
+    pub(super) ldtr: BxSegmentReg,
     /// task register
-    tr: BxSegmentReg,
+    pub(super) tr: BxSegmentReg,
 
     // debug registers DR0-DR7
     /// Dr0-DR3
-    dr: [BxAddress; 5],
-    dr6: BxDr6,
-    dr7: BxDr7,
+    pub(super) dr: [BxAddress; 5],
+    pub(super) dr6: BxDr6,
+    pub(super) dr7: BxDr7,
 
     /// holds DR6 value (16bit) to be set
-    debug_trap: u32,
+    pub(super) debug_trap: u32,
 
     // Control registers
-    bx_cr0_t: BxCr0,
-    cr2: BxAddress,
-    cr3: BxAddress,
+    pub(super) bx_cr0_t: BxCr0,
+    pub(super) r2: BxAddress,
+    pub(super) r3: BxAddress,
 
-    cr4: BxCr4,
-    cr4_suppmask: u32,
+    pub(super) r4: BxCr4,
+    pub(super) r4_suppmask: u32,
 
-    linaddr_width: u32,
-    efer_suppmask: u32,
+    pub(super) inaddr_width: u32,
+    pub(super) fer_suppmask: u32,
 
     /// TSC: Time Stamp Counter
     /// Instead of storing a counter and incrementing it every instruction, we
     /// remember the time in ticks that it was reset to zero.  With a little
     /// algebra, we can also support setting it to something other than zero.
     /// Don't read this directly; use get_TSC and set_TSC to access the TSC.
-    tsc_adjust: i64,
+    pub(super) sc_adjust: i64,
 
-    tsc_offset: i64,
+    pub(super) sc_offset: i64,
 
-    xcr0: Xcr0,
+    pub(super) cr0: Xcr0,
 
-    xcr0_suppmask: u32,
-    ia32_xss_suppmask: u32,
+    pub(super) cr0_suppmask: u32,
+    pub(super) a32_xss_suppmask: u32,
 
     // protection keys
     #[cfg(feature = "bx_support_pkeys")]
-    pkru: u32,
+    pub(super) pkru: u32,
     #[cfg(feature = "bx_support_pkeys")]
-    pkrs: u32,
+    pub(super) pkrs: u32,
 
     // unpacked protection keys to be tested together with accessBits from TLB
     // the unpacked key is stored in the accessBits format:
@@ -234,166 +252,171 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     // When protection key prevents writes to the page bit 1 will be set and 3 cleared
     // When no protection keys are enabled all bits should be set for all keys
     #[cfg(feature = "bx_support_pkeys")]
-    rd_pkey: [u32; 16],
+    pub(super) rd_pkey: [u32; 16],
     #[cfg(feature = "bx_support_pkeys")]
-    wr_pkey: [u32; 16],
+    pub(super) wr_pkey: [u32; 16],
 
-    uintr: Uintr,
+    pub(super) uintr: Uintr,
 
-    the_i387: I387,
+    pub(super) the_i387: I387,
 
     // Vector register set
     // vmm0-vmmN: up to 32 vector registers
     // vtmp: temp register
-    vmm: [BxZmmReg; BX_XMM_REGISTERS],
+    pub(super) vmm: [BxZmmReg; BX_XMM_REGISTERS],
     // Note, didnt check for other features. Basically only aligment changes
-    mxcsr: BxMxcsr,
-    mxcsr_mask: u32,
+    pub(super) mxcsr: BxMxcsr,
+    pub(super) mxcsr_mask: u32,
 
-    opmask: [BxGenReg; 8],
+    pub(super) opmask: [BxGenReg; 8],
 
     #[cfg(feature = "bx_support_monitor_mwait")]
-    monitor: MonitorAddr,
+    pub(super) monitor: MonitorAddr,
 
     #[cfg(feature = "bx_support_apic")]
-    lapic: BxLocalApic<'c, I>,
+    pub(super) lapic: BxLocalApic,
 
     /// SMM base register
-    smbase: u32,
+    pub(super) smbase: u32,
 
-    msr: BxRegsMsr,
+    pub(super) msr: BxRegsMsr,
 
     #[cfg(feature = "bx_configure_msrs")]
-    msrs: [MSR; BX_MSR_MAX_INDEX],
+    pub(super) msrs: [MSR; BX_MSR_MAX_INDEX],
 
     #[cfg(feature = "bx_support_amx")]
-    amx: AMX,
+    pub(super) amx: Option<AMX>,
 
-    in_vmx: bool,
-    in_vmx_guest: bool,
+    pub(super) in_vmx: bool,
+    pub(super) in_vmx_guest: bool,
     /// save in_vmx and in_vmx_guest flags when in SMM mode
-    in_smm_vmx: bool,
-    in_smm_vmx_guest: bool,
-    vmcsptr: u64,
+    pub(super) in_smm_vmx: bool,
+    pub(super) in_smm_vmx_guest: bool,
+    pub(super) vmcsptr: u64,
 
     #[cfg(feature = "bx_support_memtype")]
     vmcs_memtype: BxMemType,
 
-    vmxonptr: u64,
+    pub(super) vmxonptr: u64,
 
-    vmcs: VmcsCache,
-    vmx_cap: VmxCap,
-    vmcs_map: VmcsMapping,
+    pub(super) vmcs: VmcsCache,
+    pub(super) vmx_cap: VmxCap,
+    pub(super) vmcs_map: VmcsMapping,
 
-    in_svm_guest: bool,
+    pub(super) in_svm_guest: bool,
     /// global interrupt enable flag, when zero all external interrupt disabled
-    svm_gif: bool,
-    vmcbptr: BxPhyAddress,
-    vmcbhostptr: BxHostpageaddr,
+    pub(super) svm_gif: bool,
+    pub(super) vmcbptr: BxPhyAddress,
+    pub(super) vmcbhostptr: BxHostpageaddr,
     #[cfg(feature = "bx_support_memtype")]
     vmcb_memtype: BxMemType,
 
-    vmcb: VmcbCache,
+    pub(super) vmcb: Option<VmcbCache>,
 
-    in_event: bool,
+    pub(super) in_event: bool,
 
-    nmi_unblocking_iret: bool,
+    pub(super) nmi_unblocking_iret: bool,
 
     /// 1 if processing external interrupt or exception
     /// or if not related to current instruction,
     /// 0 if current CS:EIP caused exception */
-    ext: bool,
+    pub(super) ext: bool,
 
     // Todo: Maybe enum?
-    activity_state: u32,
+    pub(super) activity_state: u32,
 
-    pending_event: u32,
-    event_mask: u32,
+    pub(super) pending_event: u32,
+    pub(super) event_mask: u32,
     // keep 32-bit because of BX_ASYNC_EVENT_STOP_TRACE
-    async_event: u32,
+    pub(super) async_event: u32,
 
-    in_smm: bool,
-    cpu_mode: u32,
-    user_pl: bool,
+    pub(super) in_smm: bool,
+    pub(super) cpu_mode: u32,
+    pub(super) user_pl: bool,
 
-    ignore_bad_msrs: bool,
+    pub(super) ignore_bad_msrs: bool,
 
-    cpu_state_use_ok: u32, // format of BX_FETCH_MODE_*
+    pub(super) cpu_state_use_ok: u32, // format of BX_FETCH_MODE_*
 
     // FIXME: skipped   static jmp_buf jmp_buf_env;
-    last_exception_type: u32,
+    pub(super) last_exception_type: u32,
 
     #[cfg(feature = "bx_support_handlers_chaining_speedups")]
-    cpuloop_stack_anchor: Option<&'c [u8]>,
+    pub(super) cpuloop_stack_anchor: Option<&'c [u8]>,
 
     // Boundaries of current code page, based on EIP
-    eip_page_bias: BxAddress,
-    eip_page_window_size: u32,
-    eip_fetch_ptr: &'c [u8],
-    p_addr_fetch_page: BxPhyAddress, // Guest physical address of current instruction page
+    pub(super) eip_page_bias: BxAddress,
+    pub(super) eip_page_window_size: u32,
+    pub(super) eip_fetch_ptr: &'c [u8],
+    pub(super) p_addr_fetch_page: BxPhyAddress, // Guest physical address of current instruction page
 
     // Boundaries of current stack page, based on ESP
     // Linear address of current stack page
-    esp_page_bias: BxAddress,
-    esp_page_window_size: u32,
-    esp_host_ptr: &'c [u8],
+    pub(super) esp_page_bias: BxAddress,
+    pub(super) esp_page_window_size: u32,
+    pub(super) esp_host_ptr: &'c [u8],
     /// Guest physical address of current stack page
-    p_addr_stack_page: BxPhyAddress,
+    pub(super) p_addr_stack_page: BxPhyAddress,
 
     #[cfg(feature = "bx_support_memtype")]
     espPageMemtype: BxMemType,
 
     #[cfg(not(feature = "bx_support_smp"))]
-    esp_page_fine_granularity_mapping: u32,
+    pub(super) esp_page_fine_granularity_mapping: u32,
 
     #[cfg(feature = "bx_support_alignment_check")]
-    alignment_check_mask: u32,
+    pub(super) alignment_check_mask: u32,
 
-    stats: BxCpuStatistics,
-
-    #[cfg(feature = "bx_debugger")]
-    watchpoint: BxPhyAddress,
-    #[cfg(feature = "bx_debugger")]
-    break_point: u8,
-    #[cfg(feature = "bx_debugger")]
-    magic_break: u8,
-    #[cfg(feature = "bx_debugger")]
-    stop_reason: u8,
-    #[cfg(feature = "bx_debugger")]
-    trace: bool,
-    #[cfg(feature = "bx_debugger")]
-    trace_reg: bool,
-    #[cfg(feature = "bx_debugger")]
-    trace_mem: bool,
-    #[cfg(feature = "bx_debugger")]
-    mode_break: bool,
+    pub(super) stats: BxCpuStatistics,
 
     #[cfg(feature = "bx_debugger")]
-    vmexit_break: bool,
+    pub(super) watchpoint: BxPhyAddress,
+    #[cfg(feature = "bx_debugger")]
+    pub(super) break_point: u8,
+    #[cfg(feature = "bx_debugger")]
+    pub(super) magic_break: u8,
+    #[cfg(feature = "bx_debugger")]
+    pub(super) stop_reason: u8,
+    #[cfg(feature = "bx_debugger")]
+    pub(super) trace: bool,
+    #[cfg(feature = "bx_debugger")]
+    pub(super) trace_reg: bool,
+    #[cfg(feature = "bx_debugger")]
+    pub(super) trace_mem: bool,
+    #[cfg(feature = "bx_debugger")]
+    pub(super) mode_break: bool,
 
     #[cfg(feature = "bx_debugger")]
-    show_flag: u32,
+    pub(super) vmexit_break: bool,
+
     #[cfg(feature = "bx_debugger")]
-    guard_found: BxGuardFound,
+    pub(super) show_flag: u32,
+    #[cfg(feature = "bx_debugger")]
+    pub(super) guard_found: BxGuardFound,
 
     #[cfg(feature = "bx_instrumentation")]
     far_branch: FarBranch,
 
-    pdptrcache: PdptrCache,
+    pub(super) pdptrcache: PdptrCache,
 
     /// An instruction cache.  Each entry should be exactly 32 bytes, and
     /// this structure should be aligned on a 32-byte boundary to be friendly
     /// with the host cache lines.
-    i_cache: BxIcache,
-    fetch_mode_mask: u32,
+    pub(super) i_cache: BxIcache,
+    pub(super) fetch_mode_mask: u32,
 
-    address_xlation: AddressXlation,
+    pub(super) address_xlation: AddressXlation,
+
+    /* Now other not so obvious fields */
+    pub(super) smram_map: [u32; SMMRAM_Fields::SMRAM_FIELD_LAST as _],
+
+    pub(super) phantom: PhantomData<I>,
 }
 
 // Implement getters and setters
 
-#[derive(Debug)]
-struct AddressXlation {
+#[derive(Debug, Default)]
+pub(super) struct AddressXlation {
     /// The address offset after resolution
     rm_addr: BxPhyAddress,
     /// physical address after translation of 1st len1 bytes of data
@@ -421,8 +444,8 @@ struct AddressXlation {
     memtype2: BxMemType,
 }
 
-#[derive(Debug)]
-struct PdptrCache {
+#[derive(Debug, Default)]
+pub(super) struct PdptrCache {
     pub entry: [u64; 4],
 }
 
@@ -464,7 +487,7 @@ impl Default for BxCpuActivityState {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct BxRegsMsr {
     #[cfg(feature = "bx_support_apic")]
     apicbase: BxPhyAddress,
@@ -505,17 +528,18 @@ pub struct BxRegsMsr {
 
                            // note from bochs source code:
                            /* TODO finish of the others */
+                           //
 }
 
 #[cfg(feature = "bx_support_monitor_mwait")]
-#[derive(Debug)]
+#[derive(Debug, Default)]
 pub struct MonitorAddr {
     monitor_addr: BxPhyAddress,
     armed_by: u32,
 }
 
-#[derive(Debug)]
-struct Uintr {
+#[derive(Debug, Default)]
+pub(super) struct Uintr {
     ui_handler: BxAddress,
     stack_adjust: u64,
     /// user interrupt notification vector, actually 8 bit
@@ -556,4 +580,72 @@ struct BxGuardFound {
     icount_max: u64, // stop after completing this many instructions
     iaddr_index: u32,
     guard_state: BxDbgGuardState,
+}
+
+impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
+    pub fn cpu_loop(&'c mut self) -> super::Result<()> {
+        let stack_anchor = 0;
+
+        self.cpuloop_stack_anchor = None;
+
+        // FIXME: setjmp
+
+        // We get here either by a normal function call, or by a longjmp
+        // back from an exception() call.  In either case, commit the
+        // new EIP/ESP, and set up other environmental fields.  This code
+        // mirrors similar code below, after the interrupt() call.
+
+        self.prev_rip = *self.rip();
+        self.speculative_rsp = false;
+
+        if self.in_vmx_guest {
+            let vm = &mut self.vmcs;
+
+            if vm.shadow_stack_prematurely_busy {
+                return Err(CpuError::ShadowStackPrematurelyBusy);
+            }
+            vm.shadow_stack_prematurely_busy = false; // for safety
+        }
+
+        loop {
+            // check on events which occurred for previous instructions (traps)
+            // and ones which are asynchronous to the CPU (hardware interrupts)
+            if self.async_event != 0 {
+                self.handle_async_event();
+                // If request to return to caller ASAP.
+                return Ok(());
+            }
+
+            let entry = self.get_icache_entry();
+            let mut i = entry.i;
+
+            loop {
+                self.before_execution(self.bx_cpuid);
+                let old_rip = *self.rip();
+                self.set_rip(old_rip + u64::from(i.ilen()));
+
+                // TODO: Add actual instruction execution
+                // TODO: And syncing of time
+
+                if self.async_event > 0 {
+                    break;
+                }
+
+                // clear stop trace magic indication that probably was set by repeat or branch32/64
+                i = self.get_icache_entry().i;
+            }
+
+            self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+        }
+
+        todo!()
+    }
+
+    fn get_icache_entry(&mut self) -> BxIcacheEntry {
+        unimplemented!()
+    }
+
+    fn before_execution(&mut self, cpu_id: u32) {
+        todo!()
+    }
 }

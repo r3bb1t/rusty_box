@@ -114,8 +114,8 @@ pub enum LocalVectorTableRegister {
     ApicLvtEntries,
 }
 
-#[derive(Debug)]
-pub struct BxLocalApic<'c, I: BxCpuIdTrait> {
+#[derive(Debug, Default)]
+pub struct BxLocalApic {
     base_addr: BxPhyAddress,
     mode: u32,
     xapic: bool,
@@ -188,9 +188,8 @@ pub struct BxLocalApic<'c, I: BxCpuIdTrait> {
 
     mwaitx_timer_handle: i32,
     mwaitx_timer_active: bool,
-
     // ???
-    cpu: &'c BxCpuC<'c, I>,
+    //cpu: &'c BxCpuC<'c, I>,
 }
 
 #[derive(Debug)]
