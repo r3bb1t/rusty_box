@@ -6,7 +6,6 @@ use crate::{
     },
 };
 
-
 const BX_ICACHE_INVALID_PHY_ADDRESS: BxPhyAddress = -1 as _;
 
 const BX_ICACHE_PAGE_SPLIT_ENTRIES: usize = 8;
@@ -82,6 +81,15 @@ impl BxIcache {
         // Reset memory‐pool index and trace‐link timestamp
         self.mpindex = 0;
         self.trace_link_time_stamp = 0;
+    }
+
+    #[inline]
+    pub(super) fn find_entry(
+        &self,
+        p_addr: BxPhyAddress,
+        fethc_mode_mask: u32,
+    ) -> Option<BxIcacheEntry> {
+        unimplemented!()
     }
 }
 

@@ -1,3 +1,5 @@
+use crate::cpu::vmx_ctrls::{VmxPinBasedVmexecControls, VmxVmexec1Controls, VmxVmexec2Controls};
+
 pub type VmcsCache = BxVmcs;
 
 #[derive(Debug, Default)]
@@ -6,6 +8,11 @@ pub struct VmcsMapping {}
 // TODO: Implement this
 #[derive(Debug, Default)] // Fixme: derive default by hand maybe
 pub struct BxVmcs {
+    pin_vmexec_ctrls: VmxPinBasedVmexecControls,
+
+    vmexec_ctrls1: VmxVmexec1Controls,
+
+    vmexec_ctrls2: VmxVmexec2Controls,
     // todo
     pub(crate) shadow_stack_prematurely_busy: bool,
 }

@@ -1,3 +1,5 @@
+use alloc::borrow::ToOwned;
+
 use super::{
     cpuid::BxCpuIdTrait,
     decoder::{
@@ -11,36 +13,36 @@ use super::{
 impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     // getters for 8 bit general registers
     #[inline]
-    pub fn al(&self) -> &u8 {
-        unsafe { &self.gen_reg[0].word.byte.rl }
+    pub fn al(&self) -> u8 {
+        unsafe { &self.gen_reg[0].word.byte.rl }.to_owned()
     }
     #[inline]
-    pub fn cl(&self) -> &u8 {
-        unsafe { &self.gen_reg[1].word.byte.rl }
+    pub fn cl(&self) -> u8 {
+        unsafe { &self.gen_reg[1].word.byte.rl }.to_owned()
     }
     #[inline]
-    pub fn dl(&self) -> &u8 {
-        unsafe { &self.gen_reg[2].word.byte.rl }
+    pub fn dl(&self) -> u8 {
+        unsafe { &self.gen_reg[2].word.byte.rl }.to_owned()
     }
     #[inline]
-    pub fn bl(&self) -> &u8 {
-        unsafe { &self.gen_reg[3].word.byte.rl }
+    pub fn bl(&self) -> u8 {
+        unsafe { &self.gen_reg[3].word.byte.rl }.to_owned()
     }
     #[inline]
-    pub fn ah(&self) -> &u8 {
-        unsafe { &self.gen_reg[0].word.byte.rh }
+    pub fn ah(&self) -> u8 {
+        unsafe { &self.gen_reg[0].word.byte.rh }.to_owned()
     }
     #[inline]
-    pub fn ch(&self) -> &u8 {
-        unsafe { &self.gen_reg[1].word.byte.rh }
+    pub fn ch(&self) -> u8 {
+        unsafe { &self.gen_reg[1].word.byte.rh }.to_owned()
     }
     #[inline]
-    pub fn dh(&self) -> &u8 {
-        unsafe { &self.gen_reg[2].word.byte.rh }
+    pub fn dh(&self) -> u8 {
+        unsafe { &self.gen_reg[2].word.byte.rh }.to_owned()
     }
     #[inline]
-    pub fn bh(&self) -> &u8 {
-        unsafe { &self.gen_reg[3].word.byte.rh }
+    pub fn bh(&self) -> u8 {
+        unsafe { &self.gen_reg[3].word.byte.rh }.to_owned()
     }
     #[inline]
     pub fn tmp_8_l(&self) -> &u8 {
@@ -87,36 +89,36 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
     // getters for 16 bit general registers
     #[inline]
-    pub fn ax(&self) -> &u16 {
-        unsafe { &self.gen_reg[0].word.rx }
+    pub fn ax(&self) -> u16 {
+        unsafe { &self.gen_reg[0].word.rx }.to_owned()
     }
     #[inline]
-    pub fn cx(&self) -> &u16 {
-        unsafe { &self.gen_reg[1].word.rx }
+    pub fn cx(&self) -> u16 {
+        unsafe { &self.gen_reg[1].word.rx }.to_owned()
     }
     #[inline]
-    pub fn dx(&self) -> &u16 {
-        unsafe { &self.gen_reg[2].word.rx }
+    pub fn dx(&self) -> u16 {
+        unsafe { &self.gen_reg[2].word.rx }.to_owned()
     }
     #[inline]
-    pub fn bx(&self) -> &u16 {
-        unsafe { &self.gen_reg[3].word.rx }
+    pub fn bx(&self) -> u16 {
+        unsafe { &self.gen_reg[3].word.rx }.to_owned()
     }
     #[inline]
-    pub fn sp(&self) -> &u16 {
-        unsafe { &self.gen_reg[4].word.rx }
+    pub fn sp(&self) -> u16 {
+        unsafe { &self.gen_reg[4].word.rx }.to_owned()
     }
     #[inline]
-    pub fn bp(&self) -> &u16 {
-        unsafe { &self.gen_reg[5].word.rx }
+    pub fn bp(&self) -> u16 {
+        unsafe { &self.gen_reg[5].word.rx }.to_owned()
     }
     #[inline]
-    pub fn si(&self) -> &u16 {
-        unsafe { &self.gen_reg[6].word.rx }
+    pub fn si(&self) -> u16 {
+        unsafe { &self.gen_reg[6].word.rx }.to_owned()
     }
     #[inline]
-    pub fn di(&self) -> &u16 {
-        unsafe { &self.gen_reg[7].word.rx }
+    pub fn di(&self) -> u16 {
+        unsafe { &self.gen_reg[7].word.rx }.to_owned()
     }
 
     // setters for 16 bit general registers
@@ -174,36 +176,36 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
     // getters for 32 bit general registers
     #[inline]
-    pub fn eax(&self) -> &u32 {
-        unsafe { &self.gen_reg[0].dword.erx }
+    pub fn eax(&self) -> u32 {
+        unsafe { &self.gen_reg[0].dword.erx }.to_owned()
     }
     #[inline]
-    pub fn ecx(&self) -> &u32 {
-        unsafe { &self.gen_reg[1].dword.erx }
+    pub fn ecx(&self) -> u32 {
+        unsafe { &self.gen_reg[1].dword.erx }.to_owned()
     }
     #[inline]
-    pub fn edx(&self) -> &u32 {
-        unsafe { &self.gen_reg[2].dword.erx }
+    pub fn edx(&self) -> u32 {
+        unsafe { &self.gen_reg[2].dword.erx }.to_owned()
     }
     #[inline]
-    pub fn ebx(&self) -> &u32 {
-        unsafe { &self.gen_reg[3].dword.erx }
+    pub fn ebx(&self) -> u32 {
+        unsafe { &self.gen_reg[3].dword.erx }.to_owned()
     }
     #[inline]
-    pub fn esp(&self) -> &u32 {
-        unsafe { &self.gen_reg[4].dword.erx }
+    pub fn esp(&self) -> u32 {
+        unsafe { &self.gen_reg[4].dword.erx }.to_owned()
     }
     #[inline]
-    pub fn ebp(&self) -> &u32 {
-        unsafe { &self.gen_reg[5].dword.erx }
+    pub fn ebp(&self) -> u32 {
+        unsafe { &self.gen_reg[5].dword.erx }.to_owned()
     }
     #[inline]
-    pub fn esi(&self) -> &u32 {
-        unsafe { &self.gen_reg[6].dword.erx }
+    pub fn esi(&self) -> u32 {
+        unsafe { &self.gen_reg[6].dword.erx }.to_owned()
     }
     #[inline]
-    pub fn edi(&self) -> &u32 {
-        unsafe { &self.gen_reg[7].dword.erx }
+    pub fn edi(&self) -> u32 {
+        unsafe { &self.gen_reg[7].dword.erx }.to_owned()
     }
 
     // setters for 32 bit general registers
@@ -242,8 +244,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
     // access to 32 bit instruction pointer
     #[inline]
-    pub fn eip(&self) -> &u32 {
-        unsafe { &self.gen_reg[BX_32BIT_REG_EIP].dword.erx }
+    pub fn eip(&self) -> u32 {
+        unsafe { &self.gen_reg[BX_32BIT_REG_EIP].dword.erx }.to_owned()
     }
     #[inline]
     pub fn set_eip(&mut self, val: u32) {
@@ -251,8 +253,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     #[inline]
-    pub fn tmp_32(&self) -> &u32 {
-        unsafe { &self.gen_reg[BX_TMP_REGISTER].dword.erx }
+    pub fn tmp_32(&self) -> u32 {
+        unsafe { &self.gen_reg[BX_TMP_REGISTER].dword.erx }.to_owned()
     }
     #[inline]
     pub fn set_tmp_32(&mut self, val: u32) {
@@ -261,68 +263,68 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
     // getters for 64 bit general registers
     #[inline]
-    pub fn rax(&self) -> &u64 {
-        unsafe { &self.gen_reg[0].rrx }
+    pub fn rax(&self) -> u64 {
+        unsafe { &self.gen_reg[0].rrx }.to_owned()
     }
     #[inline]
-    pub fn rcx(&self) -> &u64 {
-        unsafe { &self.gen_reg[1].rrx }
+    pub fn rcx(&self) -> u64 {
+        unsafe { &self.gen_reg[1].rrx }.to_owned()
     }
     #[inline]
-    pub fn rdx(&self) -> &u64 {
-        unsafe { &self.gen_reg[2].rrx }
+    pub fn rdx(&self) -> u64 {
+        unsafe { &self.gen_reg[2].rrx }.to_owned()
     }
     #[inline]
-    pub fn rbx(&self) -> &u64 {
-        unsafe { &self.gen_reg[3].rrx }
+    pub fn rbx(&self) -> u64 {
+        unsafe { &self.gen_reg[3].rrx }.to_owned()
     }
     #[inline]
-    pub fn rsp(&self) -> &u64 {
-        unsafe { &self.gen_reg[4].rrx }
+    pub fn rsp(&self) -> u64 {
+        unsafe { &self.gen_reg[4].rrx }.to_owned()
     }
     #[inline]
-    pub fn rbp(&self) -> &u64 {
-        unsafe { &self.gen_reg[5].rrx }
+    pub fn rbp(&self) -> u64 {
+        unsafe { &self.gen_reg[5].rrx }.to_owned()
     }
     #[inline]
-    pub fn rsi(&self) -> &u64 {
-        unsafe { &self.gen_reg[6].rrx }
+    pub fn rsi(&self) -> u64 {
+        unsafe { &self.gen_reg[6].rrx }.to_owned()
     }
     #[inline]
-    pub fn rdi(&self) -> &u64 {
-        unsafe { &self.gen_reg[7].rrx }
+    pub fn rdi(&self) -> u64 {
+        unsafe { &self.gen_reg[7].rrx }.to_owned()
     }
     #[inline]
-    pub fn r8(&self) -> &u64 {
-        unsafe { &self.gen_reg[8].rrx }
+    pub fn r8(&self) -> u64 {
+        unsafe { &self.gen_reg[8].rrx }.to_owned()
     }
     #[inline]
-    pub fn r9(&self) -> &u64 {
-        unsafe { &self.gen_reg[9].rrx }
+    pub fn r9(&self) -> u64 {
+        unsafe { &self.gen_reg[9].rrx }.to_owned()
     }
     #[inline]
-    pub fn r10(&self) -> &u64 {
-        unsafe { &self.gen_reg[10].rrx }
+    pub fn r10(&self) -> u64 {
+        unsafe { &self.gen_reg[10].rrx }.to_owned()
     }
     #[inline]
-    pub fn r11(&self) -> &u64 {
-        unsafe { &self.gen_reg[11].rrx }
+    pub fn r11(&self) -> u64 {
+        unsafe { &self.gen_reg[11].rrx }.to_owned()
     }
     #[inline]
-    pub fn r12(&self) -> &u64 {
-        unsafe { &self.gen_reg[12].rrx }
+    pub fn r12(&self) -> u64 {
+        unsafe { &self.gen_reg[12].rrx }.to_owned()
     }
     #[inline]
-    pub fn r13(&self) -> &u64 {
-        unsafe { &self.gen_reg[13].rrx }
+    pub fn r13(&self) -> u64 {
+        unsafe { &self.gen_reg[13].rrx }.to_owned()
     }
     #[inline]
-    pub fn r14(&self) -> &u64 {
-        unsafe { &self.gen_reg[14].rrx }
+    pub fn r14(&self) -> u64 {
+        unsafe { &self.gen_reg[14].rrx }.to_owned()
     }
     #[inline]
-    pub fn r15(&self) -> &u64 {
-        unsafe { &self.gen_reg[15].rrx }
+    pub fn r15(&self) -> u64 {
+        unsafe { &self.gen_reg[15].rrx }.to_owned()
     }
 
     // setters for 32 bit general registers
@@ -393,8 +395,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
     // access to 32 bit instruction pointer
     #[inline]
-    pub fn rip(&self) -> &u64 {
-        unsafe { &self.gen_reg[BX_64BIT_REG_RIP].rrx }
+    pub fn rip(&self) -> u64 {
+        unsafe { &self.gen_reg[BX_64BIT_REG_RIP].rrx }.to_owned()
     }
     #[inline]
     pub fn set_rip(&mut self, val: u64) {
@@ -402,8 +404,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     #[inline]
-    pub fn ssp(&self) -> &u64 {
-        unsafe { &self.gen_reg[BX_64BIT_REG_SSP].rrx }
+    pub fn ssp(&self) -> u64 {
+        unsafe { &self.gen_reg[BX_64BIT_REG_SSP].rrx }.to_owned()
     }
     #[inline]
     pub fn set_ssp(&mut self, val: u64) {
@@ -411,8 +413,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     #[inline]
-    pub fn tmp_64(&self) -> &u64 {
-        unsafe { &self.gen_reg[BX_TMP_REGISTER].rrx }
+    pub fn tmp_64(&self) -> u64 {
+        unsafe { &self.gen_reg[BX_TMP_REGISTER].rrx }.to_owned()
     }
     #[inline]
     pub fn set_tmp_u64(&mut self, val: u64) {
@@ -421,16 +423,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
     // access to 64 bit MSR registers
     #[inline]
-    pub fn msr_fsbase(&self) -> &u64 {
-        unsafe { &self.gen_reg[BxSegregs::Fs as usize].rrx }
+    pub fn msr_fsbase(&self) -> u64 {
+        unsafe { &self.gen_reg[BxSegregs::Fs as usize].rrx }.to_owned()
     }
     #[inline]
     pub fn set_msr_fsbase(&mut self, val: u64) {
         self.gen_reg[BxSegregs::Fs as usize].rrx = val
     }
     #[inline]
-    pub fn msr_gsbase(&self) -> &u64 {
-        unsafe { &self.gen_reg[BxSegregs::Gs as usize].rrx }
+    pub fn msr_gsbase(&self) -> u64 {
+        unsafe { &self.gen_reg[BxSegregs::Gs as usize].rrx }.to_owned()
     }
     #[inline]
     pub fn set_msr_gsbase(&mut self, val: u64) {

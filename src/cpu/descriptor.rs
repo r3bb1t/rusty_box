@@ -38,35 +38,80 @@ struct Taskgate {
     tss_selector: u16, /* TSS segment selector */
 }
 
-#[derive(Debug)]
-pub enum Descriptor {
-    Segment {
-        /// base address: 286=24bits, 386=32bits, long=64
-        base: BxAddress,
-        /// for efficiency, this contrived field is set to
-        ///  limit for byte granular, and
-        ///  `(limit << 12) | 0xfff` for page granular seg's
-        limit_scaled: u32,
-        /// granularity: 0=byte, 1=4K (page)
-        g: bool,
-        /// default size: 0=16bit, 1=32bit
-        d_b: bool,
-        /// long mode: 0=compat, 1=64 bit
-        l: bool,
-        ///  available for use by system
-        avl: bool, // available for use by system
-    },
-    Gate {
-        param_count: u8, // 5 bits (0..31) #words/dword to copy
-        dest_selector: u16,
-        dest_offset: u32,
-    },
-    TaskGate {
-        tss_selector: u16, // TSS segment selector
-    },
+//#[derive(Debug)]
+//pub enum Descriptor {
+//    Segment {
+//        /// base address: 286=24bits, 386=32bits, long=64
+//        base: BxAddress,
+//        /// for efficiency, this contrived field is set to
+//        ///  limit for byte granular, and
+//        ///  `(limit << 12) | 0xfff` for page granular seg's
+//        limit_scaled: u32,
+//        /// granularity: 0=byte, 1=4K (page)
+//        g: bool,
+//        /// default size: 0=16bit, 1=32bit
+//        d_b: bool,
+//        /// long mode: 0=compat, 1=64 bit
+//        l: bool,
+//        ///  available for use by system
+//        avl: bool, // available for use by system
+//    },
+//    Gate {
+//        param_count: u8, // 5 bits (0..31) #words/dword to copy
+//        dest_selector: u16,
+//        dest_offset: u32,
+//    },
+//    TaskGate {
+//        tss_selector: u16, // TSS segment selector
+//    },
+//}
+
+#[derive(Clone, Copy)]
+pub(super) union Descriptor {
+    pub segment: DescriptorSegment,
+    pub gate: DescriptorGate,
+    pub task_gate: DescriptorTaskGate,
 }
 
-#[derive(Debug)]
+#[derive(Clone, Copy)]
+pub(super) struct DescriptorSegment {
+    /// base address: 286=24bits, 386=32bits, long=64
+    pub base: BxAddress,
+    /// for efficiency, this contrived field is set to
+    ///  limit for byte granular, and
+    ///  `(limit << 12) | 0xfff` for page granular seg's
+    pub limit_scaled: u32,
+    /// granularity: 0=byte, 1=4K (page)
+    pub g: bool,
+    /// default size: 0=16bit, 1=32bit
+    pub d_b: bool,
+    /// long mode: 0=compat, 1=64 bit
+    pub l: bool,
+    ///  available for use by system
+    pub avl: bool, // available for use by system
+}
+
+#[derive(Clone, Copy)]
+struct DescriptorGate {
+    pub param_count: u8, // 5 bits (0..31) #words/dword to copy
+    pub dest_selector: u16,
+    pub dest_offset: u32,
+}
+
+#[derive(Clone, Copy, Default)]
+struct DescriptorTaskGate {
+    tss_selector: u16, // TSS segment selector
+}
+
+impl Default for Descriptor {
+    fn default() -> Self {
+        Self {
+            task_gate: DescriptorTaskGate { tss_selector: 0 },
+        }
+    }
+}
+
+#[derive(Default)]
 pub(crate) struct BxDescriptor {
     pub valid: u32, // Holds above values, Or'd together. Used to
     // hold only 0 or 1 once.
@@ -96,14 +141,11 @@ pub(crate) struct BxDescriptor {
 impl BxDescriptor {
     #[inline]
     pub fn is_present(&self) -> bool {
-        self.p
+        self.segment
     }
 
-    pub fn is_long64_segment(&self, descriptor: Descriptor) -> bool {
-        if let Descriptor::Segment { l, .. } = descriptor {
-            return l;
-        }
-        false
+    pub fn is_long64_segment(&self) -> bool {
+        unsafe { self.u.segment.l }
     }
 }
 
@@ -247,10 +289,10 @@ enum BxDataAndCodeDescriptorEnum {
     CodeExecReadConformingAccessed = 0xf,
 }
 
-#[derive(Debug, Default)]
+#[derive(Default)]
 pub(super) struct BxSegmentReg {
     pub(super) selector: BxSelector,
-    pub(super) cache: Option<BxDescriptor>, // Idk if really option
+    pub(super) cache: BxDescriptor, // Idk if really option
 }
 
 #[derive(Debug, Default)]

@@ -125,10 +125,10 @@ impl BxMemoryStubC {
 
     pub fn get_vector<I: BxCpuIdTrait>(
         &self,
-        addr: &BxPhyAddress,
+        addr: BxPhyAddress,
         cpus: &[BxCpuC<I>],
     ) -> Result<&mut [u8]> {
-        let block: usize = addr / self.block_size;
+        let block: usize = (addr / u64::from(self.block_size)) as _;
         let blocks = self.blocks_offsets();
 
         if cfg!(feature = "bx_large_ram_file") {
@@ -140,9 +140,13 @@ impl BxMemoryStubC {
             self.allocate_block(block, cpus)?;
         }
 
-        let offset =
-            (self.block_by_index(block).unwrap().as_ptr() as usize + addr) & (self.block_size - 1);
-        Ok(&mut self.vector()[offset..self.block_size])
+        let offset = (addr & u64::from(self.block_size - 1)) as u32;
+        //Ok(self.block_by_index(block).unwrap().as_ptr() as )
+        Ok(&mut self.vector()[offset..(self.block_size as usize)])
+
+        //let offset = (self.block_by_index(block).unwrap().as_ptr() as usize + *addr as usize)
+        //    & (self.block_size - 1);
+        //Ok(&mut self.vector()[offset..(self.block_size as usize)])
     }
 
     #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]

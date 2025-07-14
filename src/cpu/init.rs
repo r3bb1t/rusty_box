@@ -37,20 +37,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         #[cfg(feature = "bx_support_amx")]
         {
-            self.amx = if self
-                .ia_extensions_bitmask
-                .contains(&(X86Feature::IsaAMX as _))
-            {
-                Some(AMX::default())
+            self.amx = if self.bx_cpuid_support_isa_extension(X86Feature::IsaAMX) {
+                Some(Amx::default())
             } else {
                 None
             };
         }
 
-        self.vmcb = if self
-            .ia_extensions_bitmask
-            .contains(&(X86Feature::IsaSVM as _))
-        {
+        self.vmcb = if self.bx_cpuid_support_isa_extension(X86Feature::IsaSVM) {
             Some(VmcbCache::default())
         } else {
             None

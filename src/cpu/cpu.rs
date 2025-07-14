@@ -1,13 +1,19 @@
 use core::marker::PhantomData;
 
-
 use crate::{
     config::{BxAddress, BxPhyAddress, BxPtrEquiv},
     cpu::{
         cpuid::{SVMExtensions, VMXExtensions},
+        crregs::BxEfer,
+        decoder::{features::X86Feature, BxSegregs, BX_64BIT_REG_RIP},
+        paging::translate_linear,
+        rusty_box::MemoryAccessType,
         smm::SMMRAM_Fields,
+        tlb::{lpf_of, page_offset, ppf_of, Tlb},
         CpuError,
     },
+    impl_eflag,
+    memory::BxMemoryStubC,
 };
 
 use super::{
@@ -24,9 +30,13 @@ use super::{
     tlb::BxHostpageaddr,
     vmx::{VmcsCache, VmcsMapping, VmxCap},
     xmm::{BxMxcsr, BxZmmReg},
+    Result,
 };
 
 const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
+
+const BX_DTLB_SIZE: usize = 2048;
+const BX_ITLB_SIZE: usize = 1024;
 
 #[cfg(feature = "bx_support_amx")]
 use super::avx::amx::AMX;
@@ -123,10 +133,170 @@ impl core::fmt::Debug for BxGenReg {
     }
 }
 
+// <TAG-INSTRUMENTATION_COMMON-BEGIN>
+
+// possible types passed to BX_INSTR_TLB_CNTRL()
+pub(super) enum InstrTLBControl {
+    MovCr0 = 10,
+    MovCr3 = 11,
+    MovCr4 = 12,
+    TaskSwitch = 13,
+    ContextSwitch = 14,
+    INVLPG = 15,
+    INVEPT = 16,
+    INVVPID = 17,
+    INVPCID = 18,
+}
+
+// possible types passed to BX_INSTR_CACHE_CNTRL()
+pub(super) enum InstrCacheControl {
+    INVD = 10,
+    WBINVD = 11,
+}
+
+// possible types passed to BX_INSTR_FAR_BRANCH() and BX_INSTR_UCNEAR_BRANCH()
+pub(super) enum InstrBranch {
+    Isjmp = 10,
+    IsJmpIndirect = 11,
+    IsCall = 12,
+    IsCallIndirect = 13,
+    IsRet = 14,
+    IsIret = 15,
+    IsInt = 16,
+    IsSyscall = 17,
+    IsSysret = 18,
+    IsSysenter = 19,
+    IsSysexit = 20,
+    IsUIRET = 21,
+}
+
+// possible types passed to BX_INSTR_PREFETCH_HINT()
+pub(super) enum InstrPrefetchHint {
+    Nta = 0,
+    T0 = 1,
+    T1 = 2,
+    T2 = 3,
+    Hint4 = 4,
+    Hint5 = 5,
+    Hint6 = 6,
+    Hint7 = 7,
+}
+
+// <TAG-INSTRUMENTATION_COMMON-END>
+
+// passed to internal debugger together with BX_READ/BX_WRITE/BX_EXECUTE/BX_RW
+pub(super) enum AccessReason {
+    AccessReasonNotSpecified = 0,
+    Pdptr0Access = 1,
+    Pdptr1Access,
+    Pdptr2Access,
+    Pdptr3Access,
+    NestedPDPTR0Access,
+    NestedPDPTR1Access,
+    NestedPDPTR2Access,
+    NestedPDPTR3Access,
+    PTeAccess,
+    PdeAccess,
+    PdteAccess,
+    Pml4eAccess,
+    PML5EAccess,
+    NestedPteAccess,
+    NestedPdeAccess,
+    NestedPdteAccess,
+    NestedPML4EAccess,
+    NestedPML5EAccess,
+    EptPteAccess,
+    EptPdeAccess,
+    EptPdteAccess,
+    EptPml4eAccess,
+    EptPml5eAccess, // place holder
+    EptSppPteAccess,
+    EptSppPdeAccess,
+    EptSppPdteaccess,
+    EptSppPml4eaccess,
+    VmcsAccess,
+    ShadowVMCSAccess,
+    MSRBitmapAccess,
+    IoBitmapAccess,
+    VmreadBitmapAccess,
+    VmwriteBitmapAccess,
+    VMXLoadMsrAccess,
+    VMXStoreMsrAccess,
+    VMXVAPICAccess,
+    VMXPMLWrite,
+    VMXPid,
+    SMRAMAccess,
+}
+
+#[derive(PartialEq, Clone)]
+pub(super) enum Exception {
+    /// Divide error (fault)
+    De = 0,
+    /// Debug (fault/trap)
+    Db = 1,
+    /// Breakpoint (trap)
+    Bp = 3,
+    /// Overflow (trap)
+    Of = 4,
+    /// BOUND (fault)
+    Br = 5,
+    Ud = 6,
+    Nm = 7,
+    Df = 8,
+    Ts = 10,
+    Np = 11,
+    Ss = 12,
+    Gp = 13,
+    Pf = 14,
+    Mf = 16,
+    Ac = 17,
+    Mc = 18,
+    Xm = 19,
+    Ve = 20,
+    /// Control Protection (fault)
+    Cp = 21,
+    /// SVM Security Exception (fault)
+    Sx = 30,
+}
+
+pub(super) enum CpExceptionErrorCode {
+    NearRet = 1,
+    FarRetIret = 2,
+    Endbranch = 3,
+    Rstorssp = 4,
+    SETSSBSY = 5,
+}
+
+pub(super) const BX_CPU_HANDLED_EXCEPTIONS: usize = 32;
+
+pub(super) enum ExceptionClass {
+    Trap = 0,
+    Fault = 1,
+    Abort = 2,
+}
+
+#[derive(Debug, Default, PartialEq)]
+pub(super) enum CpuMode {
+    #[default]
+    Ia32Real = 0, // CR0.PE=0                |
+    Ia32V8086 = 1,     // CR0.PE=1, EFLAGS.VM=1   | EFER.LMA=0
+    Ia32Protected = 2, // CR0.PE=1, EFLAGS.VM=0   |
+    LongCompat = 3,    // EFER.LMA = 1, CR0.PE=1, CS.L=0
+    Long64 = 4,        // EFER.LMA = 1, CR0.PE=1, CS.L=1
+}
+
 pub(super) const BX_MSR_MAX_INDEX: usize = 0x1000;
 
+impl_eflag!(id, 21);
+impl_eflag!(vip, 20);
+impl_eflag!(vif, 19);
+impl_eflag!(ac, 18);
+impl_eflag!(vm, 17);
+impl_eflag!(rf, 16);
+impl_eflag!(nt, 14);
+
 #[allow(unused)]
-#[derive(Debug)]
+//#[derive(Debug)]
 pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) bx_cpuid: u32,
 
@@ -208,29 +378,31 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) debug_trap: u32,
 
     // Control registers
-    pub(super) bx_cr0_t: BxCr0,
-    pub(super) r2: BxAddress,
-    pub(super) r3: BxAddress,
+    pub(super) cr0: BxCr0,
+    pub(super) cr2: BxAddress,
+    pub(super) cr3: BxAddress,
 
-    pub(super) r4: BxCr4,
-    pub(super) r4_suppmask: u32,
+    pub(super) cr4: BxCr4,
+    pub(super) cr4_suppmask: u32,
 
-    pub(super) inaddr_width: u32,
-    pub(super) fer_suppmask: u32,
+    pub(super) linaddr_width: u8,
+
+    pub(super) efer: BxEfer,
+    pub(super) efer_suppmask: u32,
 
     /// TSC: Time Stamp Counter
     /// Instead of storing a counter and incrementing it every instruction, we
     /// remember the time in ticks that it was reset to zero.  With a little
     /// algebra, we can also support setting it to something other than zero.
     /// Don't read this directly; use get_TSC and set_TSC to access the TSC.
-    pub(super) sc_adjust: i64,
+    pub(super) tsc_adjust: i64,
 
-    pub(super) sc_offset: i64,
+    pub(super) tsc_offset: i64,
 
-    pub(super) cr0: Xcr0,
+    pub(super) xcr0: Xcr0,
 
-    pub(super) cr0_suppmask: u32,
-    pub(super) a32_xss_suppmask: u32,
+    pub(super) xcr0_suppmask: u32,
+    pub(super) ia32_xss_suppmask: u32,
 
     // protection keys
     #[cfg(feature = "bx_support_pkeys")]
@@ -330,7 +502,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) async_event: u32,
 
     pub(super) in_smm: bool,
-    pub(super) cpu_mode: u32,
+    pub(super) cpu_mode: CpuMode,
     pub(super) user_pl: bool,
 
     pub(super) ignore_bad_msrs: bool,
@@ -346,7 +518,8 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     // Boundaries of current code page, based on EIP
     pub(super) eip_page_bias: BxAddress,
     pub(super) eip_page_window_size: u32,
-    pub(super) eip_fetch_ptr: &'c [u8],
+    //pub(super) eip_fetch_ptr: &'c [u8],
+    pub(super) eip_fetch_ptr: u64,
     pub(super) p_addr_fetch_page: BxPhyAddress, // Guest physical address of current instruction page
 
     // Boundaries of current stack page, based on ESP
@@ -396,6 +569,9 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     #[cfg(feature = "bx_instrumentation")]
     far_branch: FarBranch,
 
+    pub(super) dtlb: Tlb<BX_DTLB_SIZE>,
+    pub(super) itlb: Tlb<BX_ITLB_SIZE>,
+
     pub(super) pdptrcache: PdptrCache,
 
     /// An instruction cache.  Each entry should be exactly 32 bytes, and
@@ -412,7 +588,25 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) phantom: PhantomData<I>,
 }
 
-// Implement getters and setters
+impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    pub fn is_canonical(&self, addr: BxAddress) -> bool {
+        Self::is_canonical_to_width(addr, self.linaddr_width.into())
+    }
+
+    #[inline]
+    pub fn is_canonical_to_width(addr: u64, width: u32) -> bool {
+        // Reinterpret addr as signed, shift right (arithmetic shift),
+        // add 1, cast back to unsigned and compare with 2.
+        let signed = (addr as i64) >> (width - 1);
+        let jumped = signed.wrapping_add(1);
+        (jumped as u64) < 2
+    }
+
+    pub(super) fn bx_cpuid_support_isa_extension(&self, feature: X86Feature) -> bool {
+        let feature_as_usize = feature as usize;
+        (self.ia_extensions_bitmask[feature_as_usize / 32] & (1 << (feature_as_usize % 32))) != 0
+    }
+}
 
 #[derive(Debug, Default)]
 pub(super) struct AddressXlation {
@@ -530,6 +724,40 @@ pub struct BxRegsMsr {
                            //
 }
 
+impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    /* CPL == 3 */
+    #[inline]
+    pub(super) fn user_pl(&self) -> bool {
+        self.user_pl
+    }
+
+    pub(super) fn v8086_mode(&self) -> bool {
+        self.cpu_mode == CpuMode::Ia32V8086
+    }
+
+    //    fn BX_WRITE_8BIT_REGx(index, extended, val) {\
+    //  if (((index) & 4) == 0 || (extended)) \
+    //    BX_CPU_THIS_PTR gen_reg[index].word.byte.rl = val; \
+    //  else \
+    //    BX_CPU_THIS_PTR gen_reg[(index)-4].word.byte.rh = val; \
+    //}
+
+    fn bx_write_32bit_regz(&mut self, index: usize, val: u32) {
+        self.gen_reg[index].rrx = val as _;
+    }
+
+    fn bx_write_64bit_reg(&mut self, index: usize, val: u64) {
+        self.gen_reg[index].rrx = val;
+    }
+    fn bx_clear_64bit_high(&mut self, index: usize) {
+        self.gen_reg[index].dword.hrx = 0;
+    }
+
+    fn get_laddr32(&self, seg: usize, offset: u32) -> u32 {
+        (unsafe { self.sregs[seg].cache.u.segment.base } + u64::from(offset)) as u32
+    }
+}
+
 #[cfg(feature = "bx_support_monitor_mwait")]
 #[derive(Debug, Default)]
 pub struct MonitorAddr {
@@ -582,7 +810,7 @@ struct BxGuardFound {
 }
 
 impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
-    pub fn cpu_loop(&'c mut self) -> super::Result<()> {
+    pub fn cpu_loop(&'c mut self, mem: &mut BxMemoryStubC) -> super::Result<()> {
         let stack_anchor = 0;
 
         self.cpuloop_stack_anchor = None;
@@ -594,7 +822,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // new EIP/ESP, and set up other environmental fields.  This code
         // mirrors similar code below, after the interrupt() call.
 
-        self.prev_rip = *self.rip();
+        self.prev_rip = self.rip();
         self.speculative_rsp = false;
 
         if self.in_vmx_guest {
@@ -615,12 +843,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 return Ok(());
             }
 
-            let entry = self.get_icache_entry();
+            let entry = self.get_icache_entry(mem)?;
             let mut i = entry.i;
 
             loop {
                 self.before_execution(self.bx_cpuid);
-                let old_rip = *self.rip();
+                let old_rip = self.rip();
                 self.set_rip(old_rip + u64::from(i.ilen()));
 
                 // TODO: Add actual instruction execution
@@ -631,7 +859,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 }
 
                 // clear stop trace magic indication that probably was set by repeat or branch32/64
-                i = self.get_icache_entry().i;
+                i = self.get_icache_entry(mem)?.i;
             }
 
             self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
@@ -640,11 +868,120 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         todo!()
     }
 
-    fn get_icache_entry(&mut self) -> BxIcacheEntry {
+    fn get_icache_entry(&mut self, mem: &BxMemoryStubC) -> Result<BxIcacheEntry> {
+        let mut eip_biased: BxAddress = self.rip() + self.eip_page_bias;
+
+        if eip_biased >= self.eip_page_bias {
+            self.prefetch(mem)?;
+            eip_biased = self.rip() + self.eip_page_bias;
+        }
+
+        //   INC_ICACHE_STAT(iCacheLookups);
+        let p_addr: BxPhyAddress = self.p_addr_fetch_page + eip_biased;
+        let mut entry_option = self.i_cache.find_entry(p_addr, self.fetch_mode_mask);
+
+        if entry_option.is_none() {
+            // iCache miss. No validated instruction with matching fetch parameters
+            // is in the iCache.
+        }
+
         unimplemented!()
     }
 
     fn before_execution(&mut self, cpu_id: u32) {
         todo!()
+    }
+
+    fn prefetch(&mut self, mem: &BxMemoryStubC) -> Result<()> {
+        let mut laddr: BxAddress;
+        let mut page_offset;
+
+        if self.long64_mode() {
+            if self.is_canonical_access(self.rip(), MemoryAccessType::Execute, self.user_pl()) {
+                tracing::error!("prefetch: #GP(0): RIP crossed canonical boundary");
+                self.exception(Exception::Gp, 0)?;
+            }
+
+            // linear address is equal to RIP in 64-bit long mode
+            page_offset = super::tlb::page_offset(self.eip().into());
+            laddr = self.rip();
+
+            // Calculate RIP at the beginning of the page.
+            self.eip_page_bias = u64::from(page_offset) - self.rip();
+            self.eip_page_window_size = 4096;
+        } else {
+            if self.user_pl()
+                && self.get_vip() != 0
+                && self.get_vif() != 0
+                && self.cr4.pvi() | (self.v8086_mode() && self.cr4.vme())
+            {
+                tracing::error!("prefetch: inconsistent VME state");
+                self.exception(Exception::Gp, 0)?;
+            }
+
+            self.bx_clear_64bit_high(BX_64BIT_REG_RIP); /* avoid 32-bit EIP wrap */
+
+            laddr = BxAddress::from(self.get_laddr32(BxSegregs::Cs as _, self.eip()));
+            page_offset = super::tlb::page_offset(laddr);
+
+            // Calculate RIP at the beginning of the page.
+            self.eip_page_bias = BxAddress::from(page_offset - self.eip());
+
+            let limit: u32 = unsafe {
+                self.sregs[BxSegregs::Cs as usize]
+                    .cache
+                    .u
+                    .segment
+                    .limit_scaled
+            };
+
+            let eip = self.eip();
+            if eip > limit {
+                tracing::error!("prefetch: EIP [{eip:#x}] > CS.limit [{limit:#x}]",);
+                self.exception(Exception::Gp, 0)?;
+            }
+
+            self.eip_page_window_size = 4096;
+
+            if limit + self.eip_page_window_size < 4096 {
+                self.eip_page_window_size = (u64::from(limit) + self.eip_page_bias + 1) as u32;
+            }
+        }
+        // skip the
+        // '''cpp
+        // '#if BX_X86_DEBUGGER
+        // '''
+        self.clear_rf();
+        let lpf = lpf_of(laddr);
+        let tlb_entry = self.itlb.get_entry_of(laddr, 0);
+
+        let fetch_ptr_option = if (tlb_entry.lpf == lpf)
+            && (tlb_entry.access_bits & (1 << u32::from(self.user_pl))) != 0
+        {
+            self.p_addr_fetch_page = tlb_entry.ppf;
+            Some(tlb_entry.host_page_addr)
+        } else {
+            let p_addr =
+                translate_linear(tlb_entry, laddr, self.user_pl, MemoryAccessType::Execute);
+            self.p_addr_fetch_page = ppf_of(p_addr);
+            None
+        };
+
+        if let Some(fetch_ptr) = fetch_ptr_option {
+            self.eip_fetch_ptr = fetch_ptr;
+        } else {
+            let p_addr: BxPhyAddress = self.p_addr_fetch_page + u64::from(page_offset);
+            if p_addr >= mem.len {
+                return Err(CpuError::PrefetchBogusMemory { p_addr });
+            } else {
+                return Err(CpuError::VetoedDirectRead { p_addr });
+            }
+        }
+
+        Ok(())
+    }
+
+    pub(super) fn long64_mode(&self) -> bool {
+        self.cpu_mode == CpuMode::Long64
     }
 }

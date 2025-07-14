@@ -2,6 +2,7 @@
 use std::sync::OnceLock;
 
 use crate::config::BxPhyAddress;
+#[cfg(not(feature = "std"))]
 use spin::once::Once;
 
 #[cfg(feature = "std")]

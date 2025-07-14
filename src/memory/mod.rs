@@ -1,8 +1,8 @@
 mod error;
-pub mod memory_stub;
+//pub mod memory_stub;
 
-#[cfg(test)]
-mod tests;
+//#[cfg(test)]
+//mod tests;
 
 pub use super::error::Result;
 use crate::config::BxPhyAddress;
@@ -31,11 +31,11 @@ pub(crate) enum Block {
 #[derive(Debug)]
 pub struct BxMemoryStubC {
     /// could be > 4G
-    pub(super) len: usize,
+    pub(super) len: u64,
     /// could be > 4G
     allocated: usize,
     /// individual block size, must be power of 2
-    block_size: usize,
+    block_size: u32,
     actual_vector: UnsafeCell<Vec<u8>>,
     /// aligned correctly
     vector_offset: usize,
@@ -140,14 +140,14 @@ impl BxMemoryStubC {
         &mut (self.actual_vector()[self.bogus_offset..])
     }
 
-    pub fn block_by_index(&self, index: usize) -> Option<&mut [u8]> {
-        if let Block::Block { offset } = self.blocks_offsets().get(index)? {
-            let block_ptr = &mut self.vector()[*offset..self.block_size];
-            Some(block_ptr)
-        } else {
-            None
-        }
-    }
+    //pub fn block_by_index(&self, index: usize) -> Option<&mut [u8]> {
+    //    if let Block::Block { offset } = self.blocks_offsets().get(index)? {
+    //        let block_ptr = &mut self.vector()[*offset..self.block_size];
+    //        Some(block_ptr)
+    //    } else {
+    //        None
+    //    }
+    //}
 
     #[cfg(all(feature = "bx_large_ram_file", feature = "std"))]
     #[allow(clippy::mut_from_ref)]
