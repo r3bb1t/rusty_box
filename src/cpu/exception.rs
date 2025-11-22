@@ -220,16 +220,51 @@ const EXCEPTIONS_INFO: [BxExceptionInfo; BX_CPU_HANDLED_EXCEPTIONS as _] = [
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // vector:     0..255: vector in IDT
     // error_code: if exception generates and error, push this error code
-    pub(super) fn exception(&mut self, vector: Exception, error_code: u16) -> Result<()> {
+    pub(super) fn exception(&mut self, vector: Exception, mut error_code: u16) -> Result<()> {
         let mut exception_type = ExceptionType::Benign;
         let mut exception_class = ExceptionClass::Fault;
         let mut push_error = false;
 
         if (vector.clone() as usize) < BX_CPU_HANDLED_EXCEPTIONS {
-            push_error = self.exception_push_error(vector as usize);
+            push_error = self.exception_push_error(vector.clone() as usize);
+        } else {
+            return Err(super::error::CpuError::BadVector { vector });
+        }
+        /* Excluding page faults and double faults, error_code may not have the
+        * least significant bit set correctly. This correction is applied first
+             todo!()   * to make the change transparent to any instrumentation.
+         }   */
+        if push_error {
+            if vector != Exception::Pf
+                && vector != Exception::Df
+                && vector != Exception::Cp
+                && vector != Exception::Sx
+            {
+                error_code = (error_code & 0xfffe) | (self.ext as u16);
+            }
         }
 
-        todo!()
+        tracing::debug!("exception({:?}): error_code={:#x}", vector, error_code);
+
+        if self.real_mode() {
+            push_error = false; // not INT, no error code pushed
+            error_code = 0;
+        }
+
+        // #if BX_DEBUGGER
+        // if (bx_dbg.debugger_active)
+        // bx_dbg_exception(BX_CPU_ID, vector, error_code);
+        // #endif
+
+        // #if BX_SUPPORT_VMX
+        // VMexit_Event(BX_HARDWARE_EXCEPTION, vector, error_code, push_error);
+        // #endif
+
+        // #if BX_SUPPORT_SVM
+        // SvmInterceptException(BX_HARDWARE_EXCEPTION, vector, error_code, push_error);
+        // #endif
+
+        Ok(())
     }
 
     fn exception_push_error(&mut self, vector: usize) -> bool {

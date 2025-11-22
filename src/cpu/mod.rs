@@ -18,6 +18,7 @@ pub(super) mod descriptor;
 pub(super) mod event;
 pub(super) mod exception;
 pub(super) mod i387;
+pub(super) mod i_cache_v2;
 pub(super) mod icache;
 pub(super) mod init;
 pub(super) mod lazy_flags;

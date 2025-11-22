@@ -1,6 +1,6 @@
 /// memory access type (read/write/execute/rw)
-#[derive(Debug, PartialEq)]
-pub(super) enum MemoryAccessType {
+#[derive(Debug, PartialEq, Clone, Copy)]
+pub(crate) enum MemoryAccessType {
     Read = 0,
     Write = 1,
     Execute = 2,

@@ -53,6 +53,7 @@ pub enum BxDecodeError {
 
     DecodeModrm32,
     ParseModrm32,
+    Execute1NotImplemented,
 }
 
 impl Default for BxDecodeError {

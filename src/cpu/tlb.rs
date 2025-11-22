@@ -13,6 +13,8 @@ const PPF_MASK: BxPhyAddress = 0xfffffffffffff000u64;
 #[cfg(not(feature = "bx_phy_address_long"))]
 const PPF_MASK: BxPhyAddress = 0xfffff000;
 
+const TLB_GLOBAL_PAGE: u32 = 0x80000000;
+
 const BX_INVALID_TLB_ENTRY: u64 = 0xffffffffffffffffu64;
 
 pub(super) struct TLBEntry {
@@ -99,8 +101,6 @@ impl TLBEntry {
 pub struct Tlb<const SIZE: usize> {
     entries: [TLBEntry; SIZE],
 
-    // only present if CPU level >= 5
-    #[cfg(feature = "bx_cpu_level_ge5")]
     split_large: bool,
 }
 
@@ -108,7 +108,7 @@ impl<const SIZE: usize> Tlb<SIZE> {
     /// Create a new, flushed TLB
     pub fn new() -> Self {
         // Initialize each entry via its `Default` or `new()` constructor:
-        let mut entries: [TLBEntry; SIZE] = {
+        let entries: [TLBEntry; SIZE] = {
             // Trick: build from an array of `TLBEntry::new()`
             let mut tmp: Vec<TLBEntry> = Vec::with_capacity(SIZE);
             for _ in 0..SIZE {
@@ -118,12 +118,10 @@ impl<const SIZE: usize> Tlb<SIZE> {
         };
 
         // If we had a split_large field, initialize it here:
-        #[cfg(feature = "bx_cpu_level_ge5")]
         let split_large = false;
 
         Self {
             entries,
-            #[cfg(feature = "bx_cpu_level_ge5")]
             split_large,
         }
     }
@@ -150,14 +148,10 @@ impl<const SIZE: usize> Tlb<SIZE> {
         for entry in &mut self.entries {
             entry.invalidate();
         }
-        #[cfg(feature = "bx_cpu_level_ge5")]
-        {
-            self.split_large = false;
-        }
+        self.split_large = false;
     }
 
     /// Invalidate all non‐global entries (only if CPU ≥ 6)
-    #[cfg(feature = "bx_cpu_level_ge6")]
     pub fn flush_non_global(&mut self) {
         let mut lpf_mask_accum: u32 = 0;
 
@@ -170,16 +164,12 @@ impl<const SIZE: usize> Tlb<SIZE> {
                 }
             }
         }
-        #[cfg(feature = "bx_cpu_level_ge5")]
-        {
-            // If any large‐page mask bit remains, we keep split_large = true
-            self.split_large = (lpf_mask_accum > 0xFFF);
-        }
+        // If any large‐page mask bit remains, we keep split_large = true
+        self.split_large = (lpf_mask_accum > 0xFFF);
     }
 
     /// Invalidate a single page (INVLPG)
     pub fn invlpg(&mut self, laddr: u64) {
-        #[cfg(feature = "bx_cpu_level_ge5")]
         if self.split_large {
             // We have to scan all entries to handle large pages specially
             let mut lpf_mask_accum: u32 = 0;
@@ -196,10 +186,7 @@ impl<const SIZE: usize> Tlb<SIZE> {
                 }
             }
 
-            #[cfg(feature = "bx_cpu_level_ge5")]
-            {
-                self.split_large = (lpf_mask_accum > 0xFFF);
-            }
+            self.split_large = lpf_mask_accum > 0xFFF;
             return;
         }
 
@@ -213,8 +200,11 @@ impl<const SIZE: usize> Tlb<SIZE> {
 }
 
 #[inline]
-pub(super) fn page_offset(laddr: BxAddress) -> u32 {
-    (laddr as u32) & 0xfff
+pub(super) fn page_offset<I>(laddr: I) -> u32
+where
+    I: Into<BxAddress>,
+{
+    (laddr.into() as u32) & 0xfff
 }
 
 #[inline]

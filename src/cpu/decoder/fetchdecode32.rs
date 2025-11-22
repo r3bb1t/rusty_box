@@ -3368,15 +3368,15 @@ mod tests {
             0x2f, 0x62, 0x69, 0x6e, 0x2f, 0x2f, 0x73, 0x68, 0x53, 0x48, 0x89, 0xe7, 0xb0, 0x3b,
             0x0f, 0x05,
         ];
-        let buf = [0x8B, 0x03]; //  mov    eax,DWORD PTR [ebx]
-        let buf = [0x8b, 0x40, 0x10]; // mov eax, [eax+0x10]
+        //let buf = [0x8B, 0x03]; //  mov    eax,DWORD PTR [ebx]
+        //let buf = [0x8b, 0x40, 0x10]; // mov eax, [eax+0x10]
         let buf = [0x8B, 0x80, 0x45, 0x23, 0x01, 0x00]; // mov eax, [eax+0x12345]
-        let buf = [0x0f, 0x93, 0xc0]; //  setnb al
-        let buf = [0xc3]; // ret
-        let buf = [0xe9, 0xfc, 0xff, 0xff, 0xff]; // jmp rcx
-        let buf = [0x98]; // cwde
-        let buf = [0x91]; // xchg eax, ecx
-                          //let buf = [0x0f, 0xcb]; // bswap ebx (not working)
+                                                        //let buf = [0x0f, 0x93, 0xc0]; //  setnb al
+                                                        //let buf = [0xc3]; // ret
+                                                        //let buf = [0xe9, 0xfc, 0xff, 0xff, 0xff]; // jmp rcx
+                                                        //let buf = [0x98]; // cwde
+                                                        // let buf = [0x91]; // xchg eax, ecx
+                                                        //let buf = [0x0f, 0xcb]; // bswap ebx (not working)
 
         //let buf = [0x48]; // dec eax
 

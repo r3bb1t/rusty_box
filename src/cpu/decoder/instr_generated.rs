@@ -44,7 +44,22 @@
 
 use core::fmt::Debug;
 
+use crate::cpu::{BxCpuC, BxCpuIdTrait};
+
 use super::{ia_opcodes::Opcode, BxSegregs};
+
+pub type BxExecutePtrTR<I: BxCpuIdTrait> = fn(&mut BxCpuC<I>, &mut BxInstructionGenerated);
+
+// This will be replaced with From trait
+impl<I: BxCpuIdTrait> TryFrom<Opcode> for BxExecutePtrTR<I> {
+    type Error = super::error::DecodeError;
+
+    fn try_from(value: Opcode) -> Result<Self, Self::Error> {
+        match value {
+            _ => Err(super::DecodeError::Execute1NotImplemented),
+        }
+    }
+}
 
 const BX_INSTR_METADATA_DST: usize = 0;
 const BX_INSTR_METADATA_SRC1: usize = 1;
@@ -157,6 +172,18 @@ impl BxInstructionGenerated {
 
     pub(crate) fn ilen(&self) -> u8 {
         self.meta_info.ilen
+    }
+
+    pub(crate) fn set_ilen(&mut self, ilen: u8) {
+        self.meta_info.ilen = ilen
+    }
+
+    pub(crate) fn get_ia_opcode(&self) -> Opcode {
+        self.meta_info.ia_opcode
+    }
+
+    pub(crate) fn set_ia_opcode(&mut self, op: Opcode) {
+        self.meta_info.ia_opcode = op
     }
     //BX_CPP_INLINE void setSeg(unsigned val) {
     //  metaData[BX_INSTR_METADATA_SEG] = val;

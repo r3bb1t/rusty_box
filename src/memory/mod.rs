@@ -1,26 +1,27 @@
 mod error;
-//pub mod memory_stub;
+pub(crate) mod memory_rusty_box;
+pub mod memory_stub;
+pub mod misc_mem;
 
 //#[cfg(test)]
 //mod tests;
 
 pub use super::error::Result;
-use crate::config::BxPhyAddress;
-use alloc::{boxed::Box, vec::Vec};
+use crate::{
+    config::BxPhyAddress,
+    cpu::{rusty_box::MemoryAccessType, BxCpuC, BxCpuIdTrait},
+    memory::misc_mem::FLASH_READ_ARRAY,
+};
+use alloc::{
+    boxed::Box,
+    vec::{self, Vec},
+};
 pub use error::*;
 
 use core::cell::{Cell, UnsafeCell};
 
 #[cfg(all(feature = "bx_large_ram_file", feature = "std"))]
 use std::fs::File;
-
-/// 4M BIOS ROM @0xffc00000, must be a power of 2
-pub(super) static BIOSROMSZ: usize = 1 << 22;
-/// ROMs 0xc0000-0xdffff (area 0xe0000-0xfffff=bios mapped)
-pub(super) static EXROMSIZE: usize = 0x20000;
-
-pub(super) static BIOS_MASK: usize = BIOSROMSZ - 1;
-pub(super) static EXROM_MASK: usize = EXROMSIZE - 1;
 
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Block {
@@ -31,12 +32,12 @@ pub(crate) enum Block {
 #[derive(Debug)]
 pub struct BxMemoryStubC {
     /// could be > 4G
-    pub(super) len: u64,
+    pub(super) len: usize,
     /// could be > 4G
     allocated: usize,
     /// individual block size, must be power of 2
-    block_size: u32,
-    actual_vector: UnsafeCell<Vec<u8>>,
+    block_size: usize,
+    actual_vector: Vec<u8>,
     /// aligned correctly
     vector_offset: usize,
     /// None if swapped out
@@ -58,19 +59,21 @@ pub struct BxMemoryStubC {
 }
 
 type Unsigned = u32;
-type MemoryHandlerT = fn(BxPhyAddress, u32, dyn core::any::Any, dyn core::any::Any) -> bool;
-type MemoryDirectAccessHandlerT = fn(BxPhyAddress, Unsigned, dyn core::any::Any) -> Vec<u8>;
+
+type MemoryHandlerT = fn(BxPhyAddress, u32, &dyn core::any::Any, &dyn core::any::Any) -> bool;
+type MemoryDirectAccessHandlerT<'a> =
+    fn(&dyn core::any::Any, BxPhyAddress, MemoryAccessType, &dyn core::any::Any) -> &'a mut [u8];
 
 #[derive(Debug)]
-pub(super) struct MemoryHandlerStruct {
-    memory_handler_struct: Box<Self>,
+pub(super) struct MemoryHandlerStruct<'a> {
+    next: Option<Box<MemoryHandlerStruct<'a>>>, // Correctly represent the linked list
     param: Box<dyn core::any::Any>,
     begin: BxPhyAddress,
     end: BxPhyAddress,
     bitmap: u16,
     read_handler: MemoryHandlerT,
     write_handler: MemoryHandlerT,
-    da_handler: MemoryHandlerT,
+    da_handler: Option<MemoryDirectAccessHandlerT<'a>>,
 }
 
 //#define BIOS_MAP_LAST128K(addr) (((addr) | 0xfff00000) & BIOS_MASK)
@@ -80,25 +83,8 @@ static BIOS_ROM_EXTENDED: u8 = 0x02;
 static BIOS_ROM_1MEG: u8 = 0x04;
 
 #[derive(Debug)]
-enum MemoryAreaT {
-    BxMemAreaC0000 = 0,
-    BxMemAreaC4000,
-    BxMemAreaC8000,
-    BxMemAreaCc000,
-    BxMemAreaD0000,
-    BxMemAreaD4000,
-    BxMemAreaD8000,
-    BxMemAreaDc000,
-    BxMemAreaE0000,
-    BxMemAreaE4000,
-    BxMemAreaE8000,
-    BxMemAreaEc000,
-    BxMemAreaF0000,
-}
-
-#[derive(Debug)]
-pub struct BxMemC {
-    memory_handlers: Vec<MemoryHandlerStruct>,
+pub struct BxMemC<'a> {
+    memory_handlers: Vec<Option<MemoryHandlerStruct<'a>>>,
     pci_enabled: bool,
     bios_write_enabled: bool,
 
@@ -114,13 +100,17 @@ pub struct BxMemC {
     flash_status: u8,
     flash_wsm_state: u8,
     flash_modified: bool,
+
+    inherited_memory_stub: BxMemoryStubC,
 }
 
 // implement getters and setters for memory stub
 impl BxMemoryStubC {
     #[allow(clippy::mut_from_ref)]
-    pub fn actual_vector(&self) -> &mut Vec<u8> {
-        unsafe { &mut (*self.actual_vector.get()) }
+    pub fn actual_vector<'a>(&'a mut self) -> &'a mut [u8] {
+        //unsafe { &mut (*self.actual_vector.get()) }
+        //unsafe { &mut (*self.actual_vector.get()) }
+        &mut self.actual_vector
     }
 
     #[allow(clippy::mut_from_ref)]
@@ -128,16 +118,19 @@ impl BxMemoryStubC {
         unsafe { &mut (*self.blocks_offsets.get()) }
     }
 
-    pub fn vector(&self) -> &mut [u8] {
-        &mut (self.actual_vector()[self.vector_offset..])
+    pub fn vector<'a>(&'a mut self) -> &'a mut [u8] {
+        //&mut self.actual_vector()[self.vector_offset..]
+        &mut self.actual_vector[self.vector_offset..]
     }
 
-    pub fn rom(&self) -> &mut [u8] {
-        &mut (self.actual_vector()[self.rom_offset..])
+    pub fn rom(&mut self) -> &mut [u8] {
+        //&mut (self.actual_vector()[self.rom_offset..])
+        &mut self.actual_vector[self.rom_offset..]
     }
 
-    pub fn bogus(&self) -> &mut [u8] {
-        &mut (self.actual_vector()[self.bogus_offset..])
+    pub fn bogus(&mut self) -> &mut [u8] {
+        //&mut (self.actual_vector()[self.bogus_offset..])
+        &mut self.actual_vector[self.bogus_offset..]
     }
 
     //pub fn block_by_index(&self, index: usize) -> Option<&mut [u8]> {
@@ -153,5 +146,28 @@ impl BxMemoryStubC {
     #[allow(clippy::mut_from_ref)]
     fn overflow_file_mut(&self) -> &mut File {
         unsafe { &mut *self.overflow_file.get() }
+    }
+}
+
+impl<'m> BxMemC<'m> {
+    pub(crate) fn get_vector<I: BxCpuIdTrait>(
+        &mut self,
+        cpus: &[&BxCpuC<I>],
+        addr: BxPhyAddress,
+    ) -> Result<&mut [u8]> {
+        self.inherited_memory_stub.get_vector(addr, cpus)
+    }
+
+    #[cfg(feature = "bx_support_monitor_mwait")]
+    pub(super) fn is_monitor<I: BxCpuIdTrait>(
+        cpus: &[&BxCpuC<I>],
+        begin_addr: BxPhyAddress,
+        len: u32,
+    ) -> bool {
+        BxMemoryStubC::is_monitor(cpus, begin_addr, len)
+    }
+
+    pub(crate) fn get_memory_len(&self) -> usize {
+        self.inherited_memory_stub.len
     }
 }

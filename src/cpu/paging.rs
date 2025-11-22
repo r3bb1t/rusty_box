@@ -7,6 +7,7 @@ use crate::{
         rusty_box::MemoryAccessType,
         tlb::{BxHostpageaddr, TLBEntry},
     },
+    memory::BxMemC,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -22,21 +23,35 @@ pub(super) fn translate_linear(
     user: bool,
     rw: MemoryAccessType,
 ) -> BxPhyAddress {
-    todo!()
+    0 // FIXME: remove that
+    // todo!()
 }
 
-impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     fn is_virtual_apic_page(&self, p_addr: &BxPhyAddress) -> bool {
         if self.in_vmx_guest {
             let vm = &self.vmcs;
+            // FIXME: add more here
         }
 
         false
     }
-    fn getHostMemAddr(p_addr: BxPhyAddress, rw: MemoryAccessType) -> Option<BxHostpageaddr> {
+    pub(crate) fn get_host_mem_addr(
+        &self,
+        p_addr: BxPhyAddress,
+        rw: MemoryAccessType,
+        mem: &'c mut BxMemC<'c>,
+        // cpus: &[&Self],
+    ) -> crate::Result<Option<&'c mut [u8]>> {
         //#[cfg(feature = "bx_support_vmx")]
         //if self.i
-        //
-        todo!()
+        if self.is_virtual_apic_page(&p_addr) {
+            return Ok(None); // Do not allow direct access to virtual apic page
+        }
+
+        // let addr_option = mem.get_host_mem_addr(Some(self), p_addr, rw, cpus)?;
+        let addr_option = mem.get_host_mem_addr(p_addr, rw, &[&self])?;
+        // let addr_option = mem.get_host_mem_addr(Some(self), p_addr, rw, &[&self])?;
+        Ok(addr_option)
     }
 }

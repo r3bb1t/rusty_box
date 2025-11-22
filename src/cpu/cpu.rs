@@ -1,4 +1,4 @@
-use core::marker::PhantomData;
+use core::{cell::UnsafeCell, marker::PhantomData};
 
 use crate::{
     config::{BxAddress, BxPhyAddress, BxPtrEquiv},
@@ -13,7 +13,7 @@ use crate::{
         CpuError,
     },
     impl_eflag,
-    memory::BxMemoryStubC,
+    memory::{BxMemC, BxMemoryStubC},
 };
 
 use super::{
@@ -33,7 +33,7 @@ use super::{
     Result,
 };
 
-const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
+pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
 
 const BX_DTLB_SIZE: usize = 2048;
 const BX_ITLB_SIZE: usize = 1024;
@@ -228,8 +228,8 @@ pub(super) enum AccessReason {
     SMRAMAccess,
 }
 
-#[derive(PartialEq, Clone)]
-pub(super) enum Exception {
+#[derive(PartialEq, Clone, Debug)]
+pub enum Exception {
     /// Divide error (fault)
     De = 0,
     /// Debug (fault/trap)
@@ -518,8 +518,8 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     // Boundaries of current code page, based on EIP
     pub(super) eip_page_bias: BxAddress,
     pub(super) eip_page_window_size: u32,
-    //pub(super) eip_fetch_ptr: &'c [u8],
-    pub(super) eip_fetch_ptr: u64,
+    // pub(super) eip_fetch_ptr: &'c [u8],
+    pub(super) eip_fetch_ptr: Option<&'c [u8]>,
     pub(super) p_addr_fetch_page: BxPhyAddress, // Guest physical address of current instruction page
 
     // Boundaries of current stack page, based on ESP
@@ -577,7 +577,8 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     /// An instruction cache.  Each entry should be exactly 32 bytes, and
     /// this structure should be aligned on a 32-byte boundary to be friendly
     /// with the host cache lines.
-    pub(super) i_cache: BxIcache,
+    //pub(super) i_cache: BxIcache,
+    pub(super) i_cache: super::i_cache_v2::BxICache,
     pub(super) fetch_mode_mask: u32,
 
     pub(super) address_xlation: AddressXlation,
@@ -586,6 +587,10 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) smram_map: [u32; SMMRAM_Fields::SMRAM_FIELD_LAST as _],
 
     pub(super) phantom: PhantomData<I>,
+}
+
+impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
 }
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -605,6 +610,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn bx_cpuid_support_isa_extension(&self, feature: X86Feature) -> bool {
         let feature_as_usize = feature as usize;
         (self.ia_extensions_bitmask[feature_as_usize / 32] & (1 << (feature_as_usize % 32))) != 0
+    }
+
+    pub(super) fn real_mode(&self) -> bool {
+        self.cpu_mode == CpuMode::Ia32Real
     }
 }
 
@@ -750,7 +759,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.gen_reg[index].rrx = val;
     }
     fn bx_clear_64bit_high(&mut self, index: usize) {
-        self.gen_reg[index].dword.hrx = 0;
+        unsafe {
+            self.gen_reg[index].dword.hrx = 0;
+        }
     }
 
     fn get_laddr32(&self, seg: usize, offset: u32) -> u32 {
@@ -810,7 +821,7 @@ struct BxGuardFound {
 }
 
 impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
-    pub fn cpu_loop(&'c mut self, mem: &mut BxMemoryStubC) -> super::Result<()> {
+    pub fn cpu_loop(&mut self, mem: &'c mut BxMemC<'c>, cpus: &[&Self]) -> super::Result<()> {
         let stack_anchor = 0;
 
         self.cpuloop_stack_anchor = None;
@@ -834,7 +845,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             vm.shadow_stack_prematurely_busy = false; // for safety
         }
 
+        let mem_unsafe_cell = UnsafeCell::new(mem);
+
+        let mut iteration = 0u32;
         loop {
+            iteration += 1;
+            tracing::info!("iteration: {iteration:?}");
             // check on events which occurred for previous instructions (traps)
             // and ones which are asynchronous to the CPU (hardware interrupts)
             if self.async_event != 0 {
@@ -843,7 +859,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 return Ok(());
             }
 
-            let entry = self.get_icache_entry(mem)?;
+            let entry = self.get_icache_entry(unsafe { *mem_unsafe_cell.get() }, cpus)?;
             let mut i = entry.i;
 
             loop {
@@ -859,7 +875,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 }
 
                 // clear stop trace magic indication that probably was set by repeat or branch32/64
-                i = self.get_icache_entry(mem)?.i;
+                i = self
+                    .get_icache_entry(unsafe { *mem_unsafe_cell.get() }, cpus)?
+                    .i;
             }
 
             self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
@@ -868,17 +886,21 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         todo!()
     }
 
-    fn get_icache_entry(&mut self, mem: &BxMemoryStubC) -> Result<BxIcacheEntry> {
+    fn get_icache_entry(
+        &mut self,
+        mem: &'c mut BxMemC<'c>,
+        cpus: &[&Self],
+    ) -> Result<BxIcacheEntry> {
         let mut eip_biased: BxAddress = self.rip() + self.eip_page_bias;
 
         if eip_biased >= self.eip_page_bias {
-            self.prefetch(mem)?;
+            self.prefetch(mem, cpus)?;
             eip_biased = self.rip() + self.eip_page_bias;
         }
 
         //   INC_ICACHE_STAT(iCacheLookups);
         let p_addr: BxPhyAddress = self.p_addr_fetch_page + eip_biased;
-        let mut entry_option = self.i_cache.find_entry(p_addr, self.fetch_mode_mask);
+        let mut entry_option = self.i_cache.find_entry(p_addr, self.fetch_mode_mask.into());
 
         if entry_option.is_none() {
             // iCache miss. No validated instruction with matching fetch parameters
@@ -892,7 +914,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         todo!()
     }
 
-    fn prefetch(&mut self, mem: &BxMemoryStubC) -> Result<()> {
+    // boundaries of consideration:
+    //
+    //  * physical memory boundary: 1024k (1Megabyte) (increments of...)
+    //  * A20 boundary:             1024k (1Megabyte)
+    //  * page boundary:            4k
+    //  * ROM boundary:             2k (dont care since we are only reading)
+    //  * segment boundary:         any
+    fn prefetch(&mut self, mem: &'c mut BxMemC<'c>, cpus: &[&Self]) -> Result<()> {
+        // let cpus = [&self];
         let mut laddr: BxAddress;
         let mut page_offset;
 
@@ -903,7 +933,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
 
             // linear address is equal to RIP in 64-bit long mode
-            page_offset = super::tlb::page_offset(self.eip().into());
+            page_offset = super::tlb::page_offset(self.eip());
             laddr = self.rip();
 
             // Calculate RIP at the beginning of the page.
@@ -968,10 +998,27 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         };
 
         if let Some(fetch_ptr) = fetch_ptr_option {
-            self.eip_fetch_ptr = fetch_ptr;
+            // let fetch_ptr_as_ptr = fetch_ptr as *mut u8;
+            let fetch_ptr_as_ptr =
+                unsafe { core::slice::from_raw_parts(fetch_ptr as *mut u8, 4096) };
+            self.eip_fetch_ptr = Some(fetch_ptr_as_ptr);
         } else {
+            // FIXME: Add here
+            let mem_len = mem.get_memory_len();
+
+            let p_addr_fetch_page = self.p_addr_fetch_page.clone();
+
+            let eip_fetch_ptr = self
+                .get_host_mem_addr(p_addr_fetch_page, MemoryAccessType::Execute, mem)
+                .unwrap(); // FIXME: Don't unwrap
+            if let Some(fetch_ptr) = eip_fetch_ptr {
+                self.eip_fetch_ptr = Some(fetch_ptr)
+            } else {
+                self.eip_fetch_ptr = None;
+            }
+            // self.eip_fetch_ptr = eip_fetch_ptr.as_deref();
             let p_addr: BxPhyAddress = self.p_addr_fetch_page + u64::from(page_offset);
-            if p_addr >= mem.len {
+            if p_addr >= mem_len.try_into()? {
                 return Err(CpuError::PrefetchBogusMemory { p_addr });
             } else {
                 return Err(CpuError::VetoedDirectRead { p_addr });
@@ -983,5 +1030,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
     pub(super) fn long64_mode(&self) -> bool {
         self.cpu_mode == CpuMode::Long64
+    }
+
+    pub(crate) fn smm_mode(&self) -> bool {
+        self.in_smm
     }
 }

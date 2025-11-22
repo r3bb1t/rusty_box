@@ -1,11 +1,14 @@
 use thiserror::Error;
 
-use crate::config::BxPhyAddress;
+use crate::{config::BxPhyAddress, cpu::cpu::Exception};
 
 pub type Result<T> = core::result::Result<T, CpuError>;
 
 #[derive(Error, Debug)]
 pub enum CpuError {
+    #[error("exception({vector:?}): bad vector")]
+    BadVector { vector: Exception },
+
     #[error("Shadow stack prematurely busy is left set !")]
     ShadowStackPrematurelyBusy,
 
@@ -24,4 +27,10 @@ pub enum CpuError {
 
     #[error("Decoder error")]
     Decoder(#[from] super::decoder::DecodeError),
+
+    #[error(transparent)]
+    TryFromIntError(#[from] core::num::TryFromIntError),
+
+    #[error(transparent)]
+    Memory(#[from] crate::memory::MemoryError),
 }

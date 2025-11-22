@@ -3,12 +3,13 @@ use byteorder::{ByteOrder, LittleEndian};
 #[cfg(feature = "std")]
 use tempfile::tempfile;
 
-use super::{Block, BxMemoryStubC, MemoryError, Result, BIOSROMSZ, EXROMSIZE};
+use super::{Block, BxMemoryStubC, MemoryError, Result};
 use crate::cpu::cpuid::BxCpuIdTrait;
 
 use crate::config::BxPhyAddress;
 use crate::cpu::cpu::BxCpuC;
 use crate::cpu::icache::BxPageWriteStampTable;
+use crate::memory::memory_rusty_box::{BIOSROMSZ, EXROMSIZE};
 use crate::misc::bswap::{
     read_host_dword_to_little_endian, read_host_qword_to_little_endian,
     read_host_word_to_little_endian, write_host_dword_to_little_endian,
@@ -105,7 +106,7 @@ impl BxMemoryStubC {
         #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
         let overflow_file = tempfile().map_err(MemoryError::UnableToCreateTempFile)?;
         Ok(Self {
-            actual_vector: UnsafeCell::new(actual_vector),
+            actual_vector,
             len,
             allocated,
             block_size,
@@ -123,12 +124,12 @@ impl BxMemoryStubC {
         })
     }
 
-    pub fn get_vector<I: BxCpuIdTrait>(
-        &self,
+    pub(super) fn get_vector<'a, I: BxCpuIdTrait>(
+        &'a mut self,
         addr: BxPhyAddress,
-        cpus: &[BxCpuC<I>],
-    ) -> Result<&mut [u8]> {
-        let block: usize = (addr / u64::from(self.block_size)) as _;
+        cpus: &[&BxCpuC<I>],
+    ) -> Result<&'a mut [u8]> {
+        let block: usize = (addr / self.block_size as u64) as _;
         let blocks = self.blocks_offsets();
 
         if cfg!(feature = "bx_large_ram_file") {
@@ -140,9 +141,11 @@ impl BxMemoryStubC {
             self.allocate_block(block, cpus)?;
         }
 
-        let offset = (addr & u64::from(self.block_size - 1)) as u32;
+        let offset = (addr & (self.block_size - 1) as u64) as u32;
         //Ok(self.block_by_index(block).unwrap().as_ptr() as )
-        Ok(&mut self.vector()[offset..(self.block_size as usize)])
+        //Ok(&mut self.vector()[offset as usize..(self.block_size as usize)])
+        let block_size = self.block_size as usize;
+        Ok(&mut self.vector()[offset as usize..block_size])
 
         //let offset = (self.block_by_index(block).unwrap().as_ptr() as usize + *addr as usize)
         //    & (self.block_size - 1);
@@ -161,7 +164,7 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    pub fn allocate_block<I: BxCpuIdTrait>(&self, block: usize, cpus: &[BxCpuC<I>]) -> Result<()> {
+    pub fn allocate_block<I: BxCpuIdTrait>(&self, block: usize, cpus: &[&BxCpuC<I>]) -> Result<()> {
         #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
         {
             let max_blocks = self.allocated / self.block_size;
@@ -265,22 +268,22 @@ impl BxMemoryStubC {
         todo!()
     }
 
-    pub fn dbg_fetch_mem<I: BxCpuIdTrait>(
-        &self,
+    pub fn dbg_fetch_mem<'a, I: BxCpuIdTrait>(
+        &'a mut self,
         _cpu: BxCpuC<I>,
         addr: BxPhyAddress,
         mut len: u32,
         buf: &mut [u8],
-        cpus: &[BxCpuC<I>],
+        cpus: &[&BxCpuC<I>],
     ) -> Result<bool> {
         let mut a20_addr: BxPhyAddress = pc_system::a20_addr(addr);
         let mut ret = true;
         let mut buf_offset = 0;
 
         while len > 0 {
-            if a20_addr < self.len {
+            if a20_addr < self.len.try_into()? {
                 // TODO: Check if its really index 0
-                buf[buf_offset] = *self.get_vector(&a20_addr, cpus)?.first().unwrap();
+                buf[buf_offset] = *self.get_vector(a20_addr, cpus)?.first().unwrap();
             } else if cfg!(feature = "bx_phy_address_long") && a20_addr > 0xffffffff {
                 buf[buf_offset] = 0xff;
                 ret = false;
@@ -324,12 +327,12 @@ impl BxMemoryStubC {
     /// The other assumption is that the calling code _only_ accesses memory
     /// directly within the page that encompasses the address requested.
     ///
-    fn get_host_mem_addr<I: BxCpuIdTrait>(
-        &self,
-        cpus: &[BxCpuC<I>],
+    fn get_host_mem_addr<'a, I: BxCpuIdTrait>(
+        &'a mut self,
+        cpus: &[&BxCpuC<I>],
         addr: BxPhyAddress,
         rw: u32,
-    ) -> Result<Option<&mut [u8]>> {
+    ) -> Result<Option<&'a mut [u8]>> {
         let a20_addr = pc_system::a20_addr(addr);
 
         let write = rw & 1 != 0;
@@ -343,21 +346,21 @@ impl BxMemoryStubC {
         }
 
         if !write {
-            if addr < self.len {
-                Ok(Some(self.get_vector(&addr, cpus)?))
+            if addr < self.len.try_into()? {
+                Ok(Some(self.get_vector(addr, cpus)?))
             } else {
-                Ok(Some(&mut self.bogus()[a20_addr & 0xfff..]))
+                Ok(Some(&mut self.bogus()[a20_addr as usize & 0xfff..]))
             }
-        } else if a20_addr >= self.len {
+        } else if a20_addr >= self.len.try_into()? {
             Ok(None)
         } else {
-            Ok(Some(self.get_vector(&addr, cpus)?))
+            Ok(Some(self.get_vector(addr, cpus)?))
         }
     }
 
-    fn write_physical_page<I: BxCpuIdTrait>(
-        &self,
-        cpus: &[BxCpuC<I>],
+    fn write_physical_page<'a, I: BxCpuIdTrait>(
+        &'a mut self,
+        cpus: &[&BxCpuC<I>],
         page_write_stamp_table: &mut BxPageWriteStampTable,
         addr: BxPhyAddress,
         mut len: usize,
@@ -366,7 +369,7 @@ impl BxMemoryStubC {
         let mut a20_addr = pc_system::a20_addr(addr);
 
         // Note: accesses should always be contained within a single page
-        if (addr >> 12) != ((addr + len - 1) >> 12) {
+        if (addr >> 12) != ((addr + len as u64 - 1) >> 12) {
             return Err(MemoryError::WritePhysicalPage { addr, len }.into());
         }
 
@@ -374,32 +377,32 @@ impl BxMemoryStubC {
         Self::is_monitor(cpus, a20_addr, len.try_into()?);
 
         // TODO: When everything will work, add rust enums for that
-        if a20_addr < self.len {
+        if a20_addr < self.len.try_into()? {
             // all of data is within limits of physical memory
             if len == 8 {
                 page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
                 write_host_qword_to_little_endian(
-                    self.get_vector(&a20_addr, cpus)?,
+                    self.get_vector(a20_addr, cpus)?,
                     LittleEndian::read_u64(data),
                 );
                 return Ok(());
             } else if len == 4 {
                 page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
                 write_host_dword_to_little_endian(
-                    self.get_vector(&a20_addr, cpus)?,
+                    self.get_vector(a20_addr, cpus)?,
                     LittleEndian::read_u32(data),
                 );
                 return Ok(());
             } else if len == 2 {
                 page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
                 write_host_word_to_little_endian(
-                    self.get_vector(&a20_addr, cpus)?,
+                    self.get_vector(a20_addr, cpus)?,
                     LittleEndian::read_u16(data),
                 );
                 return Ok(());
             } else if len == 1 {
                 page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
-                self.get_vector(&a20_addr, cpus)?[0] = data[0];
+                self.get_vector(a20_addr, cpus)?[0] = data[0];
                 return Ok(());
             }
             // len == other, just fall thru to special cases handling
@@ -414,7 +417,7 @@ impl BxMemoryStubC {
                 if (len & 7) == 0 {
                     page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
                     write_host_qword_to_little_endian(
-                        self.get_vector(&a20_addr, cpus)?,
+                        self.get_vector(a20_addr, cpus)?,
                         LittleEndian::read_u64(&data[data_ptr_offset..]),
                     );
                     len -= 8;
@@ -431,7 +434,7 @@ impl BxMemoryStubC {
                     }
                 } else {
                     page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
-                    self.get_vector(&a20_addr, cpus)?[0] = data[0];
+                    self.get_vector(a20_addr, cpus)?[0] = data[0];
 
                     if len == 1 {
                         return Ok(());
@@ -453,9 +456,9 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    fn read_physical_page<I: BxCpuIdTrait>(
-        &self,
-        cpus: &[BxCpuC<I>],
+    fn read_physical_page<'a, I: BxCpuIdTrait>(
+        &'a mut self,
+        cpus: &[&BxCpuC<I>],
         addr: BxPhyAddress,
         len: usize,
         data: &mut [u8],
@@ -463,26 +466,26 @@ impl BxMemoryStubC {
         let a20_addr = pc_system::a20_addr(addr);
 
         // Note: accesses should always be contained within a single page
-        if (addr >> 12) != ((addr + len - 1) >> 12) {
+        if (addr >> 12) != ((addr + len as u64 - 1) >> 12) {
             return Err(MemoryError::ReadPhysicalPage { addr, len }.into());
         }
 
-        if a20_addr < self.len {
+        if a20_addr < self.len.try_into()? {
             // all of data is within limits of physical memory
             if len == 8 {
-                let val = read_host_qword_to_little_endian(self.get_vector(&a20_addr, cpus)?);
+                let val = read_host_qword_to_little_endian(self.get_vector(a20_addr, cpus)?);
                 LittleEndian::write_u64(data, val);
                 return Ok(());
             } else if len == 4 {
-                let val = read_host_dword_to_little_endian(self.get_vector(&a20_addr, cpus)?);
+                let val = read_host_dword_to_little_endian(self.get_vector(a20_addr, cpus)?);
                 LittleEndian::write_u32(data, val);
                 return Ok(());
             } else if len == 2 {
-                let val = read_host_word_to_little_endian(self.get_vector(&a20_addr, cpus)?);
+                let val = read_host_word_to_little_endian(self.get_vector(a20_addr, cpus)?);
                 LittleEndian::write_u16(data, val);
                 return Ok(());
             } else if len == 1 {
-                let val = self.get_vector(&a20_addr, cpus)?[0];
+                let val = self.get_vector(a20_addr, cpus)?[0];
                 data[0] = val;
                 return Ok(());
             }
@@ -504,7 +507,11 @@ impl BxMemoryStubC {
     }
 
     #[cfg(feature = "bx_support_monitor_mwait")]
-    fn is_monitor<I: BxCpuIdTrait>(cpus: &[BxCpuC<I>], begin_addr: BxPhyAddress, len: u32) -> bool {
+    pub(super) fn is_monitor<I: BxCpuIdTrait>(
+        cpus: &[&BxCpuC<I>],
+        begin_addr: BxPhyAddress,
+        len: u32,
+    ) -> bool {
         cpus.iter().any(|cpu| cpu.is_monitor(begin_addr, len))
     }
 
