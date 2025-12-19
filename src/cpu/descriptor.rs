@@ -13,9 +13,11 @@
 // |------------------------|--------------------|
 //
 
+use core::{default, ffi::c_uint};
+
 use crate::config::BxAddress;
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone)]
 pub(crate) struct BxSelector {
     /* bx_selector_t */
     pub(super) value: u16, /* the 16bit value of the selector */
@@ -111,7 +113,13 @@ impl Default for Descriptor {
     }
 }
 
-#[derive(Default)]
+pub(super) const SEG_VALID_CACHE: u32 = 0x01;
+pub(super) const SEG_ACCESS_ROK: u32 = 0x02;
+pub(super) const SEG_ACCESS_WOK: u32 = 0x04;
+pub(super) const SEG_ACCESS_ROK4_G: u32 = 0x08;
+pub(super) const SEG_ACCESS_WOK4_G: u32 = 0x10;
+
+#[derive(Default, Clone)]
 pub(crate) struct BxDescriptor {
     pub valid: u32, // Holds above values, Or'd together. Used to
     // hold only 0 or 1 once.
@@ -249,8 +257,9 @@ pub fn is_code_segment_non_conforming(type_: u8) -> bool {
     !is_code_segment_conforming(type_)
 }
 
-#[derive(Debug)]
-enum SystemAndGateDescriptorEnum {
+#[derive(Debug, Clone, Default)]
+pub(super) enum SystemAndGateDescriptorEnum {
+    #[default] // FIXME: delete this
     BxGateTypeNone = 0x0,
     BxSysSegmentAvail286Tss = 0x1,
     BxSysSegmentLdt = 0x2,
@@ -269,11 +278,12 @@ enum SystemAndGateDescriptorEnum {
     Bx386TrapGate = 0xf,
 }
 
-#[derive(Debug)]
-enum BxDataAndCodeDescriptorEnum {
+#[derive(Debug, Default, Clone)]
+pub(super) enum BxDataAndCodeDescriptorEnum {
     DataReadOnly = 0x0,
     DataReadOnlyAccessed = 0x1,
     DataReadWrite = 0x2,
+    #[default]
     DataReadWriteAccessed = 0x3,
     DataReadOnlyExpandDown = 0x4,
     DataReadOnlyExpandDownAccessed = 0x5,
@@ -289,7 +299,7 @@ enum BxDataAndCodeDescriptorEnum {
     CodeExecReadConformingAccessed = 0xf,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(super) struct BxSegmentReg {
     pub(super) selector: BxSelector,
     pub(super) cache: BxDescriptor, // Idk if really option

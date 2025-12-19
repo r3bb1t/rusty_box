@@ -40,3 +40,4 @@ pub use cpu::BxCpuC;
 pub use cpuid::BxCpuIdTrait;
 
 pub use cpudb::intel::*;
+pub use init::ResetReason;

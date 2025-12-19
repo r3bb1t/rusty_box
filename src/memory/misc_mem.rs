@@ -62,6 +62,7 @@ impl<'c> BxMemC<'c> {
         rw: MemoryAccessType,
         cpus: &[&BxCpuC<I>],
     ) -> Result<Option<&mut [u8]>> {
+        tracing::debug!("get_host_mem_addr addr: {addr:?} rw: {rw:?}");
         let a20_addr: BxPhyAddress = crate::pc_system::a20_addr(addr);
 
         let mut is_bios = a20_addr > self.bios_rom_addr.into();

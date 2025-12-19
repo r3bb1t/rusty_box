@@ -2719,7 +2719,7 @@ fn decodeModrm32<'a>(
         if rm != 4 {
             if r#mod == 0x00 {
                 if rm == 5 {
-                    i.set_sib_base(BX_NIL_REGISTER);
+                    i.set_sib_base(BX_NIL_REGISTER as _);
                     if iptr.len() > 3 {
                         i.modrm_form.displ32u = fetch_dword(iptr);
                         iptr = &iptr[4..];
@@ -2768,7 +2768,7 @@ fn decodeModrm32<'a>(
                 // mod==00b, rm==4
                 seg = SREG_MOD1OR2_BASE32[usize::from(base)];
                 if base == 5 {
-                    i.set_sib_base(BX_NIL_REGISTER);
+                    i.set_sib_base(BX_NIL_REGISTER as _);
 
                     if iptr.len() > 3 {
                         i.modrm_form.displ32u = fetch_dword(iptr);
@@ -2816,7 +2816,7 @@ fn decodeModrm32<'a>(
             // mod == 00b
             seg = SREG_MOD00_RM16[usize::try_from(rm).unwrap()];
             if rm == 6 {
-                i.set_sib_base(BX_NIL_REGISTER);
+                i.set_sib_base(BX_NIL_REGISTER as _);
                 if !iptr.is_empty() {
                     i.modrm_form.displ32u = u32::from(fetch_word(iptr));
                     iptr = &iptr[2..];

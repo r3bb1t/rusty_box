@@ -63,10 +63,12 @@ impl_crreg_accessors!(BxCr0, cd, 30);
 impl_crreg_accessors!(BxCr0, pg, 31);
 
 impl BxCr0 {
-    fn get32(&self) -> u32 {
+    #[inline]
+    pub(super) fn get32(&self) -> u32 {
         self.val32
     }
-    fn set32(&mut self, val: u32) {
+    #[inline]
+    pub(super) fn set32(&mut self, val: u32) {
         self.val32 = val | 0x10
     }
 }
@@ -109,10 +111,12 @@ impl_crreg_accessors!(BxCr4, lass, 27);
 impl_crreg_accessors!(BxCr4, lam_supervisor, 28);
 
 impl BxCr4 {
-    fn get32(&self) -> u32 {
+    #[inline]
+    pub(super) fn get32(&self) -> u32 {
         self.val32
     }
-    fn set32(&mut self, val: u32) {
+    #[inline]
+    pub(super) fn set32(&mut self, val: u32) {
         self.val32 = val
     }
 }
@@ -132,10 +136,12 @@ impl_crreg_accessors!(BxDr6, bs, 14);
 impl_crreg_accessors!(BxDr6, bt, 15);
 
 impl BxDr6 {
-    fn get32(&self) -> u32 {
+    #[inline]
+    pub(super) fn get32(&self) -> u32 {
         self.val32
     }
-    fn set32(&mut self, val: u32) {
+    #[inline]
+    pub(super) fn set32(&mut self, val: u32) {
         self.val32 = val
     }
 }
@@ -182,10 +188,10 @@ impl_drreg_accessors!(BxDr7, len3, 0xC0000000, 30);
 impl_drreg_accessors!(BxDr7, bp_enabled, 0xFF, 0);
 
 impl BxDr7 {
-    fn get32(&self) -> u32 {
+    pub(super) fn get32(&self) -> u32 {
         self.val32
     }
-    fn set32(&mut self, val: u32) {
+    pub(super) fn set32(&mut self, val: u32) {
         self.val32 = val
     }
 }
@@ -208,10 +214,12 @@ impl_crreg_accessors!(BxEfer, ffxsr, 14);
 impl_crreg_accessors!(BxEfer, tce, 15); /* AMD Translation Cache Extensions */
 
 impl BxEfer {
-    fn get32(&self) -> u32 {
+    #[inline]
+    pub(super) fn get32(&self) -> u32 {
         self.val32
     }
-    fn set32(&mut self, val: u32) {
+    #[inline]
+    pub(super) fn set32(&mut self, val: u32) {
         self.val32 = val
     }
 }
@@ -250,6 +258,13 @@ const XSAVE_APX_STATE_OFFSET: u32 = 960; // repurpose deprecated BND (MPX) state
 #[derive(Debug, Default)]
 pub struct Xcr0 {
     pub value: u32,
+}
+
+impl Xcr0 {
+    #[inline]
+    pub(super) fn set32(&mut self, val: u32) {
+        self.value = val
+    }
 }
 
 #[derive(Debug)]

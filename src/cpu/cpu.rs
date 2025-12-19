@@ -295,6 +295,31 @@ impl_eflag!(vm, 17);
 impl_eflag!(rf, 16);
 impl_eflag!(nt, 14);
 
+#[derive(Debug, Default)]
+pub(super) enum CpuActivityState {
+    #[default]
+    Active,
+    Hlt,
+    Shutdown,
+    WaitForSipi,
+    VmxLastActivityState,
+    Mwait,
+    MwaitIf,
+}
+
+impl From<CpuActivityState> for u8 {
+    fn from(value: CpuActivityState) -> Self {
+        match value {
+            CpuActivityState::Active => 0,
+            CpuActivityState::Hlt => 1,
+            CpuActivityState::Shutdown => 2,
+            CpuActivityState::WaitForSipi | CpuActivityState::VmxLastActivityState => 3,
+            CpuActivityState::Mwait => 4,
+            CpuActivityState::MwaitIf => 5,
+        }
+    }
+}
+
 #[allow(unused)]
 //#[derive(Debug)]
 pub struct BxCpuC<'c, I: BxCpuIdTrait> {
@@ -494,7 +519,8 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) ext: bool,
 
     // Todo: Maybe enum?
-    pub(super) activity_state: u32,
+    // pub(super) activity_state: u32,
+    pub(super) activity_state: CpuActivityState,
 
     pub(super) pending_event: u32,
     pub(super) event_mask: u32,
@@ -526,7 +552,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     // Linear address of current stack page
     pub(super) esp_page_bias: BxAddress,
     pub(super) esp_page_window_size: u32,
-    pub(super) esp_host_ptr: &'c [u8],
+    pub(super) esp_host_ptr: Option<&'c [u8]>,
     /// Guest physical address of current stack page
     pub(super) p_addr_stack_page: BxPhyAddress,
 
@@ -615,6 +641,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn real_mode(&self) -> bool {
         self.cpu_mode == CpuMode::Ia32Real
     }
+
+    pub(super) fn bx_write_opmask(&mut self, index: usize, val_64: u64) {
+        self.opmask[index].rrx = val_64;
+    }
 }
 
 #[derive(Debug, Default)]
@@ -692,45 +722,46 @@ impl Default for BxCpuActivityState {
 #[derive(Debug, Default)]
 pub struct BxRegsMsr {
     #[cfg(feature = "bx_support_apic")]
-    apicbase: BxPhyAddress,
+    pub apicbase: BxPhyAddress,
 
     // SYSCALL/SYSRET instruction msr's
-    star: u64,
+    pub star: u64,
 
-    lstar: u64,
-    cstar: u64,
-    fmask: u32,
-    kernelgsbase: u64,
-    tsc_aux: u32,
+    pub lstar: u64,
+    pub cstar: u64,
+    pub fmask: u32,
+    pub kernelgsbase: u64,
+    pub tsc_aux: u32,
 
     // SYSENTER/SYSEXIT instruction msr's
-    sysenter_cs_msr: u32,
-    sysenter_esp_msr: BxAddress,
-    sysenter_eip_msr: BxAddress,
+    pub sysenter_cs_msr: u32,
+    pub sysenter_esp_msr: BxAddress,
+    pub sysenter_eip_msr: BxAddress,
 
-    pat: BxPackedRegister,
-    mtrrphys: [u64; 16],
-    mtrrfix64k: BxPackedRegister,
-    mtrrfix16k: [BxPackedRegister; 2],
-    mtrrfix4k: [BxPackedRegister; 8],
-    mtrr_deftype: u32,
+    pub pat: BxPackedRegister,
+    pub mtrrphys: [u64; 16],
+    pub mtrrfix64k: BxPackedRegister,
+    pub mtrrfix16k: [BxPackedRegister; 2],
+    pub mtrrfix4k: [BxPackedRegister; 8],
+    pub mtrr_deftype: u32,
 
-    ia32_feature_ctrl: u32,
+    pub ia32_feature_ctrl: u32,
 
-    svm_vm_cr: u32,
-    svm_hsave_pa: u64,
+    pub svm_vm_cr: u32,
+    pub svm_hsave_pa: u64,
 
-    ia32_xss: u64,
+    pub ia32_xss: u64,
 
-    ia32_cet_control: [u64; 2], // indexed by CPL==3
-    ia32_pl_ssp: [u64; 4],
-    ia32_interrupt_ssp_table: u64,
+    pub ia32_cet_control: [u64; 2], // indexed by CPL==3
+    pub ia32_pl_ssp: [u64; 4],
+    pub ia32_interrupt_ssp_table: u64,
 
-    ia32_umwait_ctrl: u32, // SCA
+    pub ia32_umwait_ctrl: u32,
+    pub ia32_spec_ctrl: u32, // SCA
 
-                           // note from bochs source code:
-                           /* TODO finish of the others */
-                           //
+                             // note from bochs source code:
+                             /* TODO finish of the others */
+                             //
 }
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -850,7 +881,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let mut iteration = 0u32;
         loop {
             iteration += 1;
-            tracing::info!("iteration: {iteration:?}");
+            tracing::debug!("iteration: {iteration:?}");
             // check on events which occurred for previous instructions (traps)
             // and ones which are asynchronous to the CPU (hardware interrupts)
             if self.async_event != 0 {

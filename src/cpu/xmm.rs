@@ -1,3 +1,7 @@
+use crate::cpu::{BxCpuC, BxCpuIdTrait};
+
+pub(super) const MXCSR_RESET: u32 = 0x00001F80; /* reset value of the MXCSR register */
+
 pub type BxPackedAvxRegister = BxPackedZmmRegister;
 
 pub type BxZmmReg = BxPackedZmmRegister;
@@ -51,5 +55,11 @@ pub enum BxPackedYmmRegister {
 
 #[derive(Debug, Default)]
 pub struct BxMxcsr {
-    mxcsr: u32,
+    pub mxcsr: u32,
+}
+
+impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    fn BX_CLEAR_AVX_REG(&self, index: usize) {
+        self.vmm[index].clear()
+    }
 }

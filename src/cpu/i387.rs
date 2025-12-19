@@ -1,3 +1,5 @@
+use core::fmt::Debug;
+
 use crate::config::BxAddress;
 
 use super::softfloat3e::softfolat_types::floatx80;
@@ -27,20 +29,38 @@ pub struct I387 {
 }
 
 pub type BxPackedRegT = BxPackedRegister;
-#[derive(Debug)]
-pub enum BxPackedRegister {
-    Sbyte([i8; 8]),
-    S16([i16; 4]),
-    S32([i32; 2]),
-    S64(i64),
-    Ubyte([u8; 8]),
-    U16([u16; 4]),
-    U32([u32; 2]),
-    U64(u64),
+// #[derive(Debug)]
+#[derive(Clone, Copy)]
+pub union BxPackedRegister {
+    pub Sbyte: [i8; 8],
+    pub S16: [i16; 4],
+    pub S32: [i32; 2],
+    pub S64: i64,
+    pub Ubyte: [u8; 8],
+    pub U16: [u16; 4],
+    pub U32: [u32; 2],
+    pub U64: u64,
+}
+
+impl Debug for BxPackedRegister {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("BxPackedRegister")
+            .field("Sbyte", unsafe { &self.Sbyte })
+            .field("S16", unsafe { &self.S16 })
+            .field("S32", unsafe { &self.S32 })
+            .field("S64", unsafe { &self.S64 })
+            .field("Ubyte", unsafe { &self.Ubyte })
+            .field("U16", unsafe { &self.U16 })
+            .field("U32", unsafe { &self.U32 })
+            .field("U64", unsafe { &self.U64 })
+            .finish()
+    }
 }
 
 impl Default for BxPackedRegister {
     fn default() -> Self {
-        Self::U64(0)
+        BxPackedRegister {
+            U64: 0x0007040600070406,
+        }
     }
 }

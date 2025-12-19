@@ -1,10 +1,9 @@
 use crate::config::BxPhyAddress;
 
-
 pub const APIC_EDGE_TRIGGERED: u8 = 0;
 pub const APIC_LEVEL_TRIGGERED: u8 = 1;
 
-pub const BX_LAPIC_BASE_ADDR: BxPhyAddress = 0xfee00000;
+pub const BX_LAPIC_BASE_ADDR: BxPhyAddress = 0xfee00000; // default Local APIC address
 
 // TODO: add BX_NUM_LOCAL_APICS
 

@@ -409,7 +409,7 @@ pub(super) const BX_32BIT_REG_SSP: usize = BX_GENERAL_REGISTERS + 1;
 pub(super) const BX_64BIT_REG_SSP: usize = BX_GENERAL_REGISTERS + 1;
 
 pub(super) const BX_TMP_REGISTER: usize = BX_GENERAL_REGISTERS + 2;
-pub(super) const BX_NIL_REGISTER: u32 = (BX_GENERAL_REGISTERS + 3) as _;
+pub(super) const BX_NIL_REGISTER: usize = (BX_GENERAL_REGISTERS + 3) as _;
 
 #[derive(Debug)]
 pub(super) enum OpmaskRegs {

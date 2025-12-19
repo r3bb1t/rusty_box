@@ -17,6 +17,8 @@ use crate::{
 mod config;
 pub mod cpu;
 mod crc;
+mod gui;
+mod iodev;
 pub mod memory;
 mod misc;
 mod params;

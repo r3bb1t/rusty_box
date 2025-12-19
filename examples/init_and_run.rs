@@ -1,7 +1,8 @@
 use rusty_box::{
-    cpu::{builder::BxCpuBuilder, core_i7_skylake::Corei7SkylakeX},
+    cpu::{builder::BxCpuBuilder, core_i7_skylake::Corei7SkylakeX, ResetReason},
     memory::{BxMemC, BxMemoryStubC},
 };
+use tracing::Level;
 
 fn main() {
     const THREAD_STACK_SIZE: usize = if cfg!(debug_assertions) {
@@ -22,6 +23,7 @@ fn inner_main() {
     tracing_subscriber::fmt()
         .without_time()
         .with_target(false)
+        .with_max_level(Level::DEBUG)
         .init();
     let builder: BxCpuBuilder<Corei7SkylakeX> = BxCpuBuilder::new();
 
@@ -43,12 +45,13 @@ fn inner_main() {
 
     tracing::info!("After: Rax: {} , Rip: {}", cpu.rax(), cpu.rip());
 
-
     let guest_mb = 32;
     let host_mb = 32;
     let mem_stub =
         BxMemoryStubC::create_and_init(guest_mb * 1024 * 1024, host_mb * 1024 * 1024, 128 * 1024)
             .unwrap();
     let mut mem = BxMemC::new(mem_stub, false);
+    cpu.reset(ResetReason::Hardware);
+    tracing::info!("Initial rip after reset: {:x}", cpu.rip());
     cpu.cpu_loop(&mut mem, &[]).unwrap()
 }
