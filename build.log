@@ -1,0 +1,4935 @@
+warning: unused imports: `BxMemoryStubC` and `page_offset`
+  --> src\cpu\cpu.rs:12:23
+   |
+12 |         tlb::{lpf_of, page_offset, ppf_of, Tlb},
+   |                       ^^^^^^^^^^^
+...
+16 |     memory::{BxMemC, BxMemoryStubC},
+   |                      ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `BxIcache`
+  --> src\cpu\cpu.rs:27:14
+   |
+27 |     icache::{BxIcache, BxIcacheEntry},
+   |              ^^^^^^^^
+
+warning: type `XSaveStateInUsePtr_tR` should have an upper camel case name
+   --> src\cpu\crregs.rs:325:6
+    |
+325 | type XSaveStateInUsePtr_tR = fn() -> bool;
+    |      ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `XsaveStateInUsePtrTR`
+    |
+    = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: type `XSavePtr_tR` should have an upper camel case name
+   --> src\cpu\crregs.rs:326:6
+    |
+326 | type XSavePtr_tR = fn(&BxInstructionGenerated, usize);
+    |      ^^^^^^^^^^^ help: convert the identifier to upper camel case: `XsavePtrTR`
+
+warning: type `XRestorPtr_tR` should have an upper camel case name
+   --> src\cpu\crregs.rs:327:6
+    |
+327 | type XRestorPtr_tR = fn(&BxInstructionGenerated, usize);
+    |      ^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `XrestorPtrTR`
+
+warning: type `_bindgen_ty_4` should have an upper camel case name
+   --> src\cpu\decoder\fetchdecode_generated.rs:153:10
+    |
+153 | pub enum _bindgen_ty_4 {
+    |          ^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `BindgenTy4`
+
+warning: unused imports: `default` and `ffi::c_uint`
+  --> src\cpu\descriptor.rs:16:12
+   |
+16 | use core::{default, ffi::c_uint};
+   |            ^^^^^^^  ^^^^^^^^^^^
+
+warning: unused import: `core::ops::Deref`
+ --> src\cpu\i_cache_v2.rs:1:5
+  |
+1 | use core::ops::Deref;
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Result`
+ --> src\cpu\paging.rs:1:47
+  |
+1 | use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, Result};
+  |                                               ^^^^^^
+
+warning: unused import: `BxHostpageaddr`
+ --> src\cpu\paging.rs:8:15
+  |
+8 |         tlb::{BxHostpageaddr, TLBEntry},
+  |               ^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around assigned value
+   --> src\cpu\tlb.rs:168:28
+    |
+168 |         self.split_large = (lpf_mask_accum > 0xFFF);
+    |                            ^                      ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+168 -         self.split_large = (lpf_mask_accum > 0xFFF);
+168 +         self.split_large = lpf_mask_accum > 0xFFF ;
+    |
+
+warning: unused import: `memory::misc_mem::FLASH_READ_ARRAY`
+  --> src\memory\mod.rs:13:5
+   |
+13 |     memory::misc_mem::FLASH_READ_ARRAY,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `self`
+  --> src\memory\mod.rs:17:11
+   |
+17 |     vec::{self, Vec},
+   |           ^^^^
+
+warning: unreachable expression
+   --> src\cpu\cpu.rs:917:9
+    |
+882 | /         loop {
+883 | |             iteration += 1;
+884 | |             tracing::debug!("iteration: {iteration:?}");
+...   |
+914 | |             self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+915 | |         }
+    | |_________- any code following this expression is unreachable
+916 |
+917 |           todo!()
+    |           ^^^^^^^ unreachable expression
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+    = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unnecessary `unsafe` block
+   --> src\cpu\cpu.rs:793:9
+    |
+793 |         unsafe {
+    |         ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `stack_anchor`
+   --> src\cpu\cpu.rs:856:13
+    |
+856 |         let stack_anchor = 0;
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_stack_anchor`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src\cpu\cpu.rs:934:13
+    |
+934 |         let mut entry_option = self.i_cache.find_entry(p_addr, self.fetch_mode_mask.into());
+    |             ----^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `cpu_id`
+   --> src\cpu\cpu.rs:944:36
+    |
+944 |     fn before_execution(&mut self, cpu_id: u32) {
+    |                                    ^^^^^^ help: if this is intentional, prefix it with an underscore: `_cpu_id`
+
+warning: variable does not need to be mutable
+   --> src\cpu\cpu.rs:957:13
+    |
+957 |         let mut laddr: BxAddress;
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src\cpu\cpu.rs:958:13
+    |
+958 |         let mut page_offset;
+    |             ----^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `cpus`
+   --> src\cpu\cpu.rs:955:53
+    |
+955 |     fn prefetch(&mut self, mem: &'c mut BxMemC<'c>, cpus: &[&Self]) -> Result<()> {
+    |                                                     ^^^^ help: if this is intentional, prefix it with an underscore: `_cpus`
+
+warning: unused variable: `opcode`
+ --> src\cpu\decoder\disasm.rs:6:5
+  |
+6 |     opcode: &[u8; 16],
+  |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_opcode`
+
+warning: unused variable: `is_32`
+ --> src\cpu\decoder\disasm.rs:7:5
+  |
+7 |     is_32: bool,
+  |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_is_32`
+
+warning: unused variable: `is_64`
+ --> src\cpu\decoder\disasm.rs:8:5
+  |
+8 |     is_64: bool,
+  |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_is_64`
+
+warning: unused variable: `disbuf`
+ --> src\cpu\decoder\disasm.rs:9:5
+  |
+9 |     disbuf: &mut [u8],
+  |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_disbuf`
+
+warning: unused variable: `cs_base`
+  --> src\cpu\decoder\disasm.rs:10:5
+   |
+10 |     cs_base: u64,
+   |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cs_base`
+
+warning: unused variable: `rip`
+  --> src\cpu\decoder\disasm.rs:11:5
+   |
+11 |     rip: BxAddress,
+   |     ^^^ help: if this is intentional, prefix it with an underscore: `_rip`
+
+warning: unused variable: `style`
+  --> src\cpu\decoder\disasm.rs:12:5
+   |
+12 |     style: BxDisasmStyle,
+   |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_style`
+
+warning: unused variable: `is_32`
+  --> src\cpu\decoder\disasm.rs:18:5
+   |
+18 |     is_32: bool,
+   |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_is_32`
+
+warning: unused variable: `is_64`
+  --> src\cpu\decoder\disasm.rs:19:5
+   |
+19 |     is_64: bool,
+   |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_is_64`
+
+warning: unused variable: `cs_base`
+  --> src\cpu\decoder\disasm.rs:20:5
+   |
+20 |     cs_base: BxAddress,
+   |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cs_base`
+
+warning: unused variable: `ip`
+  --> src\cpu\decoder\disasm.rs:21:5
+   |
+21 |     ip: BxAddress,
+   |     ^^ help: if this is intentional, prefix it with an underscore: `_ip`
+
+warning: unused variable: `instr`
+  --> src\cpu\decoder\disasm.rs:22:5
+   |
+22 |     instr: &[u8; 16],
+   |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_instr`
+
+warning: unused variable: `disbuf`
+  --> src\cpu\decoder\disasm.rs:23:5
+   |
+23 |     disbuf: &mut [u8],
+   |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_disbuf`
+
+warning: unused variable: `nnn`
+    --> src\cpu\decoder\fetchdecode32.rs:2704:5
+     |
+2704 |     nnn: u32, // Why is it unused in bochs???
+     |     ^^^ help: if this is intentional, prefix it with an underscore: `_nnn`
+
+warning: unused variable: `iptr`
+    --> src\cpu\decoder\fetchdecode32.rs:2910:5
+     |
+2910 |     iptr: &'a [u8],
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_iptr`
+
+warning: unused variable: `i`
+    --> src\cpu\decoder\fetchdecode32.rs:2913:5
+     |
+2913 |     i: &mut BxInstructionGenerated,
+     |     ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `b1`
+    --> src\cpu\decoder\fetchdecode32.rs:2914:5
+     |
+2914 |     b1: u32,
+     |     ^^ help: if this is intentional, prefix it with an underscore: `_b1`
+
+warning: unused variable: `sse_prefix`
+    --> src\cpu\decoder\fetchdecode32.rs:2915:5
+     |
+2915 |     sse_prefix: Option<SsePrefix>,
+     |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sse_prefix`
+
+warning: unused variable: `opcode_table`
+    --> src\cpu\decoder\fetchdecode32.rs:2916:5
+     |
+2916 |     opcode_table: Option<&'static [u64]>,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_opcode_table`
+
+warning: unused variable: `iptr`
+    --> src\cpu\decoder\fetchdecode32.rs:2923:5
+     |
+2923 |     iptr: &'a [u8],
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_iptr`
+
+warning: unused variable: `i`
+    --> src\cpu\decoder\fetchdecode32.rs:2926:5
+     |
+2926 |     i: &mut BxInstructionGenerated,
+     |     ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `b1`
+    --> src\cpu\decoder\fetchdecode32.rs:2927:5
+     |
+2927 |     b1: u32,
+     |     ^^ help: if this is intentional, prefix it with an underscore: `_b1`
+
+warning: unused variable: `sse_prefix`
+    --> src\cpu\decoder\fetchdecode32.rs:2928:5
+     |
+2928 |     sse_prefix: Option<SsePrefix>,
+     |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sse_prefix`
+
+warning: unused variable: `opcode_table`
+    --> src\cpu\decoder\fetchdecode32.rs:2929:5
+     |
+2929 |     opcode_table: Option<&'static [u64]>,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_opcode_table`
+
+warning: unused variable: `iptr`
+    --> src\cpu\decoder\fetchdecode32.rs:2936:5
+     |
+2936 |     iptr: &'a [u8],
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_iptr`
+
+warning: unused variable: `i`
+    --> src\cpu\decoder\fetchdecode32.rs:2939:5
+     |
+2939 |     i: &mut BxInstructionGenerated,
+     |     ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `b1`
+    --> src\cpu\decoder\fetchdecode32.rs:2940:5
+     |
+2940 |     b1: u32,
+     |     ^^ help: if this is intentional, prefix it with an underscore: `_b1`
+
+warning: unused variable: `sse_prefix`
+    --> src\cpu\decoder\fetchdecode32.rs:2941:5
+     |
+2941 |     sse_prefix: Option<SsePrefix>,
+     |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sse_prefix`
+
+warning: unused variable: `opcode_table`
+    --> src\cpu\decoder\fetchdecode32.rs:2942:5
+     |
+2942 |     opcode_table: Option<&'static [u64]>,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_opcode_table`
+
+warning: unused variable: `iptr`
+    --> src\cpu\decoder\fetchdecode32.rs:2949:5
+     |
+2949 |     iptr: &'a [u8],
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_iptr`
+
+warning: unused variable: `i`
+    --> src\cpu\decoder\fetchdecode32.rs:2952:5
+     |
+2952 |     i: &mut BxInstructionGenerated,
+     |     ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `b1`
+    --> src\cpu\decoder\fetchdecode32.rs:2953:5
+     |
+2953 |     b1: u32,
+     |     ^^ help: if this is intentional, prefix it with an underscore: `_b1`
+
+warning: unused variable: `sse_prefix`
+    --> src\cpu\decoder\fetchdecode32.rs:2954:5
+     |
+2954 |     sse_prefix: Option<SsePrefix>,
+     |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sse_prefix`
+
+warning: unused variable: `opcode_table`
+    --> src\cpu\decoder\fetchdecode32.rs:2955:5
+     |
+2955 |     opcode_table: Option<&'static [u64]>,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_opcode_table`
+
+warning: unused variable: `iptr`
+    --> src\cpu\decoder\fetchdecode32.rs:3013:5
+     |
+3013 |     iptr: &'a [u8],
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_iptr`
+
+warning: unused variable: `i`
+    --> src\cpu\decoder\fetchdecode32.rs:3016:5
+     |
+3016 |     i: &mut BxInstructionGenerated,
+     |     ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `b1`
+    --> src\cpu\decoder\fetchdecode32.rs:3017:5
+     |
+3017 |     b1: u32,
+     |     ^^ help: if this is intentional, prefix it with an underscore: `_b1`
+
+warning: unused variable: `sse_prefix`
+    --> src\cpu\decoder\fetchdecode32.rs:3018:5
+     |
+3018 |     sse_prefix: Option<SsePrefix>,
+     |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sse_prefix`
+
+warning: unused variable: `opcode_table`
+    --> src\cpu\decoder\fetchdecode32.rs:3019:5
+     |
+3019 |     opcode_table: Option<&'static [u64]>,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_opcode_table`
+
+warning: unused variable: `opcode`
+    --> src\cpu\decoder\fetchdecode32.rs:3036:9
+     |
+3036 |     let opcode = Opcode::IaError;
+     |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_opcode`
+
+warning: unused variable: `modrm`
+    --> src\cpu\decoder\fetchdecode32.rs:3038:10
+     |
+3038 |     let (modrm, mut iptr) = parse_modrm32(iptr, i)?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_modrm`
+
+warning: unused variable: `opcode_table`
+    --> src\cpu\decoder\fetchdecode32.rs:3059:5
+     |
+3059 |     opcode_table: Option<&'static [u64]>,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_opcode_table`
+
+warning: unused variable: `i`
+    --> src\cpu\decoder\fetchdecode32.rs:3109:5
+     |
+3109 |     i: &mut BxInstructionGenerated,
+     |     ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: value assigned to `b1` is never read
+    --> src\cpu\decoder\fetchdecode32.rs:3222:21
+     |
+3222 |                     b1 = 0x100 | (iptr[0] as u32);
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `ia_opcode` is never read
+    --> src\cpu\decoder\fetchdecode32.rs:3188:25
+     |
+3188 |     let mut ia_opcode = Opcode::IaError;
+     |                         ^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `os_32` is never read
+    --> src\cpu\decoder\fetchdecode32.rs:3190:21
+     |
+3190 |     let mut os_32 = is_32;
+     |                     ^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unused variable: `value`
+    --> src\cpu\decoder\ia_opcodes.rs:4374:13
+     |
+4374 |     fn from(value: Opcode) -> Self {
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_value`
+
+warning: variable does not need to be mutable
+   --> src\cpu\exception.rs:224:13
+    |
+224 |         let mut exception_type = ExceptionType::Benign;
+    |             ----^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src\cpu\exception.rs:225:13
+    |
+225 |         let mut exception_class = ExceptionClass::Fault;
+    |             ----^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `exception_type`
+   --> src\cpu\exception.rs:224:13
+    |
+224 |         let mut exception_type = ExceptionType::Benign;
+    |             ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_exception_type`
+
+warning: unused variable: `exception_class`
+   --> src\cpu\exception.rs:225:13
+    |
+225 |         let mut exception_class = ExceptionClass::Fault;
+    |             ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_exception_class`
+
+warning: value assigned to `error_code` is never read
+   --> src\cpu\exception.rs:251:13
+    |
+251 |             error_code = 0;
+    |             ^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `push_error` is never read
+   --> src\cpu\exception.rs:226:30
+    |
+226 |         let mut push_error = false;
+    |                              ^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `push_error` is never read
+   --> src\cpu\exception.rs:250:13
+    |
+250 |             push_error = false; // not INT, no error code pushed
+    |             ^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `remaining_in_page`
+   --> src\cpu\i_cache_v2.rs:376:13
+    |
+376 |         let remaining_in_page = self.eip_page_window_size - eip_biased;
+    |             ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_remaining_in_page`
+
+warning: variable `ret` is assigned to, but never used
+   --> src\cpu\i_cache_v2.rs:379:13
+    |
+379 |         let mut ret;
+    |             ^^^^^^^
+    |
+    = note: consider using `_ret` instead
+
+warning: unused variable: `i`
+   --> src\cpu\i_cache_v2.rs:381:13
+    |
+381 |         let i = entry.i;
+    |             ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `page_offset`
+   --> src\cpu\i_cache_v2.rs:383:13
+    |
+383 |         let page_offset = page_offset(p_addr as u32);
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_page_offset`
+
+warning: unused variable: `trace_mask`
+   --> src\cpu\i_cache_v2.rs:384:13
+    |
+384 |         let trace_mask = 0;
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_trace_mask`
+
+warning: unused variable: `n`
+   --> src\cpu\i_cache_v2.rs:389:13
+    |
+389 |         for n in 0..quantum {
+    |             ^ help: if this is intentional, prefix it with an underscore: `_n`
+
+warning: value assigned to `ret` is never read
+   --> src\cpu\i_cache_v2.rs:390:13
+    |
+390 |             ret = fetch_decode32_chatgpt_generated_instr(&fetch_ptr, true)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `p_addr`
+  --> src\cpu\icache.rs:89:9
+   |
+89 |         p_addr: BxPhyAddress,
+   |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_p_addr`
+
+warning: unused variable: `fethc_mode_mask`
+  --> src\cpu\icache.rs:90:9
+   |
+90 |         fethc_mode_mask: u32,
+   |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_fethc_mode_mask`
+
+warning: unreachable pattern
+  --> src\cpu\init.rs:95:13
+   |
+95 |             _ => info!("cpu reset"),
+   |             ^ no value can reach this
+   |
+note: multiple earlier patterns match some of the same values
+  --> src\cpu\init.rs:95:13
+   |
+93 |             ResetReason::Software => info!("cpu hardware reset"),
+   |             --------------------- matches some of the same values
+94 |             ResetReason::Hardware => info!("cpu software reset"),
+   |             --------------------- matches some of the same values
+95 |             _ => info!("cpu reset"),
+   |             ^ collectively making this unreachable
+   = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `tlb_entry`
+  --> src\cpu\paging.rs:21:5
+   |
+21 |     tlb_entry: &TLBEntry,
+   |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tlb_entry`
+
+warning: unused variable: `laddr`
+  --> src\cpu\paging.rs:22:5
+   |
+22 |     laddr: BxAddress,
+   |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_laddr`
+
+warning: unused variable: `user`
+  --> src\cpu\paging.rs:23:5
+   |
+23 |     user: bool,
+   |     ^^^^ help: if this is intentional, prefix it with an underscore: `_user`
+
+warning: unused variable: `rw`
+  --> src\cpu\paging.rs:24:5
+   |
+24 |     rw: MemoryAccessType,
+   |     ^^ help: if this is intentional, prefix it with an underscore: `_rw`
+
+warning: unused variable: `p_addr`
+  --> src\cpu\paging.rs:31:36
+   |
+31 |     fn is_virtual_apic_page(&self, p_addr: &BxPhyAddress) -> bool {
+   |                                    ^^^^^^ help: if this is intentional, prefix it with an underscore: `_p_addr`
+
+warning: unused variable: `vm`
+  --> src\cpu\paging.rs:33:17
+   |
+33 |             let vm = &self.vmcs;
+   |                 ^^ help: if this is intentional, prefix it with an underscore: `_vm`
+
+warning: unused variable: `mem`
+ --> src\iodev\devices.rs:5:22
+  |
+5 | fn init_devices_stub(mem: &mut BxMemC) {}
+  |                      ^^^ help: if this is intentional, prefix it with an underscore: `_mem`
+
+warning: unused variable: `block`
+   --> src\memory\memory_stub.rs:167:51
+    |
+167 |     pub fn allocate_block<I: BxCpuIdTrait>(&self, block: usize, cpus: &[&BxCpuC<I>]) -> Result<()> {
+    |                                                   ^^^^^ help: if this is intentional, prefix it with an underscore: `_block`
+
+warning: unused variable: `cpus`
+   --> src\memory\memory_stub.rs:167:65
+    |
+167 |     pub fn allocate_block<I: BxCpuIdTrait>(&self, block: usize, cpus: &[&BxCpuC<I>]) -> Result<()> {
+    |                                                                 ^^^^ help: if this is intentional, prefix it with an underscore: `_cpus`
+
+warning: type `DescriptorGate` is more private than the item `Descriptor::gate`
+  --> src\cpu\descriptor.rs:74:5
+   |
+74 |     pub gate: DescriptorGate,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^ field `Descriptor::gate` is reachable at visibility `pub(in crate::cpu)`
+   |
+note: but type `DescriptorGate` is only usable at visibility `pub(self)`
+  --> src\cpu\descriptor.rs:97:1
+   |
+97 | struct DescriptorGate {
+   | ^^^^^^^^^^^^^^^^^^^^^
+   = note: `#[warn(private_interfaces)]` on by default
+
+warning: type `DescriptorTaskGate` is more private than the item `Descriptor::task_gate`
+   --> src\cpu\descriptor.rs:75:5
+    |
+ 75 |     pub task_gate: DescriptorTaskGate,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `Descriptor::task_gate` is reachable at visibility `pub(in crate::cpu)`
+    |
+note: but type `DescriptorTaskGate` is only usable at visibility `pub(self)`
+   --> src\cpu\descriptor.rs:104:1
+    |
+104 | struct DescriptorTaskGate {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `Descriptor` is more private than the item `BxDescriptor::u`
+   --> src\cpu\descriptor.rs:146:5
+    |
+146 |     pub u: Descriptor,
+    |     ^^^^^^^^^^^^^^^^^ field `BxDescriptor::u` is reachable at visibility `pub(crate)`
+    |
+note: but type `Descriptor` is only usable at visibility `pub(in crate::cpu)`
+   --> src\cpu\descriptor.rs:72:1
+    |
+ 72 | pub(super) union Descriptor {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `BxICacheEntry` is more private than the item `BxICache::entry`
+   --> src\cpu\i_cache_v2.rs:138:5
+    |
+138 |     pub(crate) entry: [BxICacheEntry; BX_ICACHE_ENTRIES],
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `BxICache::entry` is reachable at visibility `pub(crate)`
+    |
+note: but type `BxICacheEntry` is only usable at visibility `pub(in crate::cpu)`
+   --> src\cpu\i_cache_v2.rs:117:1
+    |
+117 | pub(super) struct BxICacheEntry {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `PageSplitEntryIndex` is more private than the item `BxICache::page_split_index`
+   --> src\cpu\i_cache_v2.rs:142:5
+    |
+142 |     pub(crate) page_split_index: [PageSplitEntryIndex; BX_ICACHE_PAGE_SPLIT_ENTRIES],
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `BxICache::page_split_index` is reachable at visibility `pub(crate)`
+    |
+note: but type `PageSplitEntryIndex` is only usable at visibility `pub(self)`
+   --> src\cpu\i_cache_v2.rs:130:1
+    |
+130 | struct PageSplitEntryIndex {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `BxICacheEntry` is more private than the item `BxICache::commit_page_split_trace`
+   --> src\cpu\i_cache_v2.rs:197:5
+    |
+197 |     pub fn commit_page_split_trace(&mut self, p_addr: BxPhyAddress, e: BxICacheEntry) {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `BxICache::commit_page_split_trace` is reachable at visibility `pub(crate)`
+    |
+note: but type `BxICacheEntry` is only usable at visibility `pub(in crate::cpu)`
+   --> src\cpu\i_cache_v2.rs:117:1
+    |
+117 | pub(super) struct BxICacheEntry {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `BxICacheEntry` is more private than the item `BxICache::get_entry`
+   --> src\cpu\i_cache_v2.rs:213:5
+    |
+213 |     pub fn get_entry(&self, p_addr: BxPhyAddress, fetch_mode_mask: u64) -> BxICacheEntry {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `BxICache::get_entry` is reachable at visibility `pub(crate)`
+    |
+note: but type `BxICacheEntry` is only usable at visibility `pub(in crate::cpu)`
+   --> src\cpu\i_cache_v2.rs:117:1
+    |
+117 | pub(super) struct BxICacheEntry {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `PageSplitEntry` is more private than the item `BxIcache::page_split_index`
+  --> src\cpu\icache.rs:56:5
+   |
+56 |     pub page_split_index: [PageSplitEntry; BX_ICACHE_PAGE_SPLIT_ENTRIES],
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `BxIcache::page_split_index` is reachable at visibility `pub(crate)`
+   |
+note: but type `PageSplitEntry` is only usable at visibility `pub(self)`
+  --> src\cpu\icache.rs:46:1
+   |
+46 | struct PageSplitEntry {
+   | ^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `TLBEntry` is more private than the item `Tlb::<SIZE>::get_entry_of`
+   --> src\cpu\tlb.rs:141:5
+    |
+141 |     pub fn get_entry_of(&mut self, lpf: u64, len: u32) -> &mut TLBEntry {
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ method `Tlb::<SIZE>::get_entry_of` is reachable at visibility `pub(crate)`
+    |
+note: but type `TLBEntry` is only usable at visibility `pub(in crate::cpu)`
+   --> src\cpu\tlb.rs:20:1
+    |
+ 20 | pub(super) struct TLBEntry {
+    | ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `X86FeatureName` is more private than the item `BxParams::cpu_include_features`
+  --> src\params.rs:11:5
+   |
+11 |     pub cpu_include_features: Vec<X86FeatureName>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `BxParams::cpu_include_features` is reachable at visibility `pub`
+   |
+note: but type `X86FeatureName` is only usable at visibility `pub(crate)`
+  --> src\cpu\decoder\mod.rs:25:1
+   |
+25 | pub(crate) enum X86FeatureName {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: type `X86FeatureName` is more private than the item `BxParams::cpu_exclude_features`
+  --> src\params.rs:12:5
+   |
+12 |     pub cpu_exclude_features: Vec<X86FeatureName>,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ field `BxParams::cpu_exclude_features` is reachable at visibility `pub`
+   |
+note: but type `X86FeatureName` is only usable at visibility `pub(crate)`
+  --> src\cpu\decoder\mod.rs:25:1
+   |
+25 | pub(crate) enum X86FeatureName {
+   | ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `memory` and `cpu` are never read
+  --> src\lib.rs:28:5
+   |
+27 | pub struct EmulatorContext<'c, I: BxCpuIdTrait> {
+   |            --------------- fields in this struct
+28 |     memory: BxMemoryStubC,
+   |     ^^^^^^
+29 |     cpu: BxCpuC<'c, I>,
+   |     ^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: constant `APIC_EDGE_TRIGGERED` is never used
+  --> src\cpu\apic.rs:11:11
+   |
+11 | pub const APIC_EDGE_TRIGGERED: u8 = 0;
+   |           ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `APIC_LEVEL_TRIGGERED` is never used
+  --> src\cpu\apic.rs:14:11
+   |
+14 | pub const APIC_LEVEL_TRIGGERED: u8 = 1;
+   |           ^^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `ApicDest` is never used
+  --> src\cpu\apic.rs:26:10
+   |
+26 | pub type ApicDest = u32;
+   |          ^^^^^^^^
+
+warning: method `as_raw` is never used
+  --> src\cpu\apic.rs:55:12
+   |
+42 | impl ApicMode {
+   | ------------- method in this implementation
+...
+55 |     pub fn as_raw(self) -> u64 {
+   |            ^^^^^^
+
+warning: enum `LapicRegister` is never used
+  --> src\cpu\apic.rs:63:10
+   |
+63 | pub enum LapicRegister {
+   |          ^^^^^^^^^^^^^
+
+warning: enum `ApicDeliveryMode` is never used
+   --> src\cpu\apic.rs:161:10
+    |
+161 | pub enum ApicDeliveryMode {
+    |          ^^^^^^^^^^^^^^^^
+
+warning: enum `LocalVectorTableEntry` is never used
+   --> src\cpu\apic.rs:183:10
+    |
+183 | pub enum LocalVectorTableEntry {
+    |          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+   --> src\cpu\apic.rs:277:5
+    |
+208 | pub struct BxLocalApic {
+    |            ----------- fields in this struct
+...
+277 |     timer_handle: i32,
+    |     ^^^^^^^^^^^^
+...
+280 |     vmx_timer_handle: i32,
+    |     ^^^^^^^^^^^^^^^^
+281 |     /// VMX preemption timer value
+282 |     vmx_preemption_timer_value: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^
+283 |     /// System tick value when timer was set (absolute value)
+284 |     vmx_preemption_timer_initial: u64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+285 |     /// System tick value when timer fires (absolute value)
+286 |     vmx_preemption_timer_fire: u64,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+287 |     /// VMX preemption timer rate (from MSR_VMX_MISC)
+288 |     vmx_preemption_timer_rate: u32,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+293 |     mwaitx_timer_handle: i32,
+    |     ^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `BxLocalApic` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `deactivate_mwaitx_timer` is never used
+   --> src\cpu\apic.rs:300:19
+    |
+298 | impl BxLocalApic {
+    | ---------------- method in this implementation
+299 |     /// Deactivates the MWAITX timer if the main timer is not active
+300 |     pub(super) fn deactivate_mwaitx_timer(&mut self) {
+    |                   ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_TILE_REGISTERS` is never used
+ --> src\cpu\avx\amx.rs:1:7
+  |
+1 | const BX_TILE_REGISTERS: usize = 8;
+  |       ^^^^^^^^^^^^^^^^^
+
+warning: struct `TILECFG` is never constructed
+ --> src\cpu\avx\amx.rs:4:12
+  |
+4 | pub struct TILECFG {
+  |            ^^^^^^^
+
+warning: struct `AMX` is never constructed
+  --> src\cpu\avx\amx.rs:10:12
+   |
+10 | pub struct AMX {
+   |            ^^^
+
+warning: method `clear` is never used
+  --> src\cpu\avx\amx.rs:20:8
+   |
+19 | impl TILECFG {
+   | ------------ method in this implementation
+20 |     fn clear(&mut self) {
+   |        ^^^^^
+
+warning: field `cpuid` is never read
+ --> src\cpu\builder.rs:9:5
+  |
+8 | pub struct BxCpuBuilder<I: BxCpuIdTrait> {
+  |            ------------ field in this struct
+9 |     cpuid: I,
+  |     ^^^^^
+  |
+  = note: `BxCpuBuilder` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: enum `InstrTLBControl` is never used
+   --> src\cpu\cpu.rs:139:17
+    |
+139 | pub(super) enum InstrTLBControl {
+    |                 ^^^^^^^^^^^^^^^
+
+warning: enum `InstrCacheControl` is never used
+   --> src\cpu\cpu.rs:152:17
+    |
+152 | pub(super) enum InstrCacheControl {
+    |                 ^^^^^^^^^^^^^^^^^
+
+warning: enum `InstrBranch` is never used
+   --> src\cpu\cpu.rs:158:17
+    |
+158 | pub(super) enum InstrBranch {
+    |                 ^^^^^^^^^^^
+
+warning: enum `InstrPrefetchHint` is never used
+   --> src\cpu\cpu.rs:174:17
+    |
+174 | pub(super) enum InstrPrefetchHint {
+    |                 ^^^^^^^^^^^^^^^^^
+
+warning: enum `AccessReason` is never used
+   --> src\cpu\cpu.rs:188:17
+    |
+188 | pub(super) enum AccessReason {
+    |                 ^^^^^^^^^^^^
+
+warning: enum `CpExceptionErrorCode` is never used
+   --> src\cpu\cpu.rs:262:17
+    |
+262 | pub(super) enum CpExceptionErrorCode {
+    |                 ^^^^^^^^^^^^^^^^^^^^
+
+warning: variants `Ia32Protected` and `LongCompat` are never constructed
+   --> src\cpu\cpu.rs:283:5
+    |
+279 | pub(super) enum CpuMode {
+    |                 ------- variants in this enum
+...
+283 |     Ia32Protected = 2, // CR0.PE=1, EFLAGS.VM=0   |
+    |     ^^^^^^^^^^^^^
+284 |     LongCompat = 3,    // EFER.LMA = 1, CR0.PE=1, CS.L=0
+    |     ^^^^^^^^^^
+    |
+    = note: `CpuMode` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: methods `get_id`, `get_b_id`, `assert_id`, `clear_id`, and `set_id` are never used
+   --> src\cpu\cpu_macros.rs:7:31
+    |
+  5 |             impl<'c, I: $crate::cpu::cpuid::BxCpuIdTrait> $crate::cpu::BxCpuC<'c, I> {
+    |             ------------------------------------------------------------------------ methods in this implementation
+  6 |                 #[inline]
+  7 |                 pub(crate) fn [<get_ $name>](&self) -> u32 {
+    |                               ^^^^^^^^^^^^^^
+...
+ 12 |                 pub(crate) fn [<get_b_ $name>](&self) -> u32 {
+    |                               ^^^^^^^^^^^^^^^^
+...
+ 17 |                 pub(crate) fn [<assert_ $name>](&mut self) {
+    |                               ^^^^^^^^^^^^^^^^^
+...
+ 22 |                 pub(crate) fn [<clear_ $name>](&mut self) {
+    |                               ^^^^^^^^^^^^^^^^
+...
+ 27 |                 pub(crate) fn [<set_ $name>](&mut self, val: bool) {
+    |                               ^^^^^^^^^^^^^^
+    |
+   ::: src\cpu\cpu.rs:290:1
+    |
+290 | impl_eflag!(id, 21);
+    | ------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_eflag` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `get_b_vip`, `assert_vip`, `clear_vip`, and `set_vip` are never used
+   --> src\cpu\cpu_macros.rs:12:31
+    |
+  5 |             impl<'c, I: $crate::cpu::cpuid::BxCpuIdTrait> $crate::cpu::BxCpuC<'c, I> {
+    |             ------------------------------------------------------------------------ methods in this implementation
+...
+ 12 |                 pub(crate) fn [<get_b_ $name>](&self) -> u32 {
+    |                               ^^^^^^^^^^^^^^^^
+...
+ 17 |                 pub(crate) fn [<assert_ $name>](&mut self) {
+    |                               ^^^^^^^^^^^^^^^^^
+...
+ 22 |                 pub(crate) fn [<clear_ $name>](&mut self) {
+    |                               ^^^^^^^^^^^^^^^^
+...
+ 27 |                 pub(crate) fn [<set_ $name>](&mut self, val: bool) {
+    |                               ^^^^^^^^^^^^^^
+    |
+   ::: src\cpu\cpu.rs:291:1
+    |
+291 | impl_eflag!(vip, 20);
+    | -------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_eflag` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `get_b_vif`, `assert_vif`, `clear_vif`, and `set_vif` are never used
+   --> src\cpu\cpu_macros.rs:12:31
+    |
+  5 |             impl<'c, I: $crate::cpu::cpuid::BxCpuIdTrait> $crate::cpu::BxCpuC<'c, I> {
+    |             ------------------------------------------------------------------------ methods in this implementation
+...
+ 12 |                 pub(crate) fn [<get_b_ $name>](&self) -> u32 {
+    |                               ^^^^^^^^^^^^^^^^
+...
+ 17 |                 pub(crate) fn [<assert_ $name>](&mut self) {
+    |                               ^^^^^^^^^^^^^^^^^
+...
+ 22 |                 pub(crate) fn [<clear_ $name>](&mut self) {
+    |                               ^^^^^^^^^^^^^^^^
+...
+ 27 |                 pub(crate) fn [<set_ $name>](&mut self, val: bool) {
+    |                               ^^^^^^^^^^^^^^
+    |
+   ::: src\cpu\cpu.rs:292:1
+    |
+292 | impl_eflag!(vif, 19);
+    | -------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_eflag` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `get_b_ac`, `assert_ac`, `clear_ac`, and `set_ac` are never used
+   --> src\cpu\cpu_macros.rs:12:31
+    |
+  5 |             impl<'c, I: $crate::cpu::cpuid::BxCpuIdTrait> $crate::cpu::BxCpuC<'c, I> {
+    |             ------------------------------------------------------------------------ methods in this implementation
+...
+ 12 |                 pub(crate) fn [<get_b_ $name>](&self) -> u32 {
+    |                               ^^^^^^^^^^^^^^^^
+...
+ 17 |                 pub(crate) fn [<assert_ $name>](&mut self) {
+    |                               ^^^^^^^^^^^^^^^^^
+...
+ 22 |                 pub(crate) fn [<clear_ $name>](&mut self) {
+    |                               ^^^^^^^^^^^^^^^^
+...
+ 27 |                 pub(crate) fn [<set_ $name>](&mut self, val: bool) {
+    |                               ^^^^^^^^^^^^^^
+    |
+   ::: src\cpu\cpu.rs:293:1
+    |
+293 | impl_eflag!(ac, 18);
+    | ------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_eflag` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `get_vm`, `get_b_vm`, `assert_vm`, `clear_vm`, and `set_vm` are never used
+   --> src\cpu\cpu_macros.rs:7:31
+    |
+  5 |             impl<'c, I: $crate::cpu::cpuid::BxCpuIdTrait> $crate::cpu::BxCpuC<'c, I> {
+    |             ------------------------------------------------------------------------ methods in this implementation
+  6 |                 #[inline]
+  7 |                 pub(crate) fn [<get_ $name>](&self) -> u32 {
+    |                               ^^^^^^^^^^^^^^
+...
+ 12 |                 pub(crate) fn [<get_b_ $name>](&self) -> u32 {
+    |                               ^^^^^^^^^^^^^^^^
+...
+ 17 |                 pub(crate) fn [<assert_ $name>](&mut self) {
+    |                               ^^^^^^^^^^^^^^^^^
+...
+ 22 |                 pub(crate) fn [<clear_ $name>](&mut self) {
+    |                               ^^^^^^^^^^^^^^^^
+...
+ 27 |                 pub(crate) fn [<set_ $name>](&mut self, val: bool) {
+    |                               ^^^^^^^^^^^^^^
+    |
+   ::: src\cpu\cpu.rs:294:1
+    |
+294 | impl_eflag!(vm, 17);
+    | ------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_eflag` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `get_rf`, `get_b_rf`, `assert_rf`, and `set_rf` are never used
+   --> src\cpu\cpu_macros.rs:7:31
+    |
+  5 |             impl<'c, I: $crate::cpu::cpuid::BxCpuIdTrait> $crate::cpu::BxCpuC<'c, I> {
+    |             ------------------------------------------------------------------------ methods in this implementation
+  6 |                 #[inline]
+  7 |                 pub(crate) fn [<get_ $name>](&self) -> u32 {
+    |                               ^^^^^^^^^^^^^^
+...
+ 12 |                 pub(crate) fn [<get_b_ $name>](&self) -> u32 {
+    |                               ^^^^^^^^^^^^^^^^
+...
+ 17 |                 pub(crate) fn [<assert_ $name>](&mut self) {
+    |                               ^^^^^^^^^^^^^^^^^
+...
+ 27 |                 pub(crate) fn [<set_ $name>](&mut self, val: bool) {
+    |                               ^^^^^^^^^^^^^^
+    |
+   ::: src\cpu\cpu.rs:295:1
+    |
+295 | impl_eflag!(rf, 16);
+    | ------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_eflag` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `get_nt`, `get_b_nt`, `assert_nt`, `clear_nt`, and `set_nt` are never used
+   --> src\cpu\cpu_macros.rs:7:31
+    |
+  5 |             impl<'c, I: $crate::cpu::cpuid::BxCpuIdTrait> $crate::cpu::BxCpuC<'c, I> {
+    |             ------------------------------------------------------------------------ methods in this implementation
+  6 |                 #[inline]
+  7 |                 pub(crate) fn [<get_ $name>](&self) -> u32 {
+    |                               ^^^^^^^^^^^^^^
+...
+ 12 |                 pub(crate) fn [<get_b_ $name>](&self) -> u32 {
+    |                               ^^^^^^^^^^^^^^^^
+...
+ 17 |                 pub(crate) fn [<assert_ $name>](&mut self) {
+    |                               ^^^^^^^^^^^^^^^^^
+...
+ 22 |                 pub(crate) fn [<clear_ $name>](&mut self) {
+    |                               ^^^^^^^^^^^^^^^^
+...
+ 27 |                 pub(crate) fn [<set_ $name>](&mut self, val: bool) {
+    |                               ^^^^^^^^^^^^^^
+    |
+   ::: src\cpu\cpu.rs:296:1
+    |
+296 | impl_eflag!(nt, 14);
+    | ------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_eflag` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: variants `Hlt`, `Shutdown`, `WaitForSipi`, `VmxLastActivityState`, `Mwait`, and `MwaitIf` are never constructed
+   --> src\cpu\cpu.rs:302:5
+    |
+299 | pub(super) enum CpuActivityState {
+    |                 ---------------- variants in this enum
+...
+302 |     Hlt,
+    |     ^^^
+303 |     Shutdown,
+    |     ^^^^^^^^
+304 |     WaitForSipi,
+    |     ^^^^^^^^^^^
+305 |     VmxLastActivityState,
+    |     ^^^^^^^^^^^^^^^^^^^^
+306 |     Mwait,
+    |     ^^^^^
+307 |     MwaitIf,
+    |     ^^^^^^^
+    |
+    = note: `CpuActivityState` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: associated constant `BX_ASYNC_EVENT_STOP_TRACE` is never used
+   --> src\cpu\cpu.rs:619:22
+    |
+618 | impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    | ----------------------------------- associated constant in this implementation
+619 |     pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
+    |                      ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: fields `rm_addr`, `paddress1`, `paddress2`, `len1`, `len2`, and `pages` are never read
+   --> src\cpu\cpu.rs:653:5
+    |
+651 | pub(super) struct AddressXlation {
+    |                   -------------- fields in this struct
+652 |     /// The address offset after resolution
+653 |     rm_addr: BxPhyAddress,
+    |     ^^^^^^^
+654 |     /// physical address after translation of 1st len1 bytes of data
+655 |     paddress1: BxPhyAddress,
+    |     ^^^^^^^^^
+656 |     /// physical address after translation of 2nd len2 bytes of data
+657 |     paddress2: BxPhyAddress,
+    |     ^^^^^^^^^
+658 |     /// Number of bytes in page 1
+659 |     len1: u32,
+    |     ^^^^
+660 |     // Number of bytes in page 2
+661 |     len2: u32,
+    |     ^^^^
+...
+670 |     pages: BxPtrEquiv,
+    |     ^^^^^
+    |
+    = note: `AddressXlation` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `entry` is never read
+   --> src\cpu\cpu.rs:681:9
+    |
+680 | pub(super) struct PdptrCache {
+    |                   ---------- field in this struct
+681 |     pub entry: [u64; 4],
+    |         ^^^^^
+    |
+    = note: `PdptrCache` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: struct `FarBranch` is never constructed
+   --> src\cpu\cpu.rs:685:8
+    |
+685 | struct FarBranch {
+    |        ^^^^^^^^^
+
+warning: variants `ActivityStateActive`, `ActivityStateHlt`, `ActivityStateShutdown`, `ActivityStateWaitForSipi`, `ActivityStateMwait`, and `ActivityStateMwaitIf` are never constructed
+   --> src\cpu\cpu.rs:692:5
+    |
+691 | enum BxCpuActivityState {
+    |      ------------------ variants in this enum
+692 |     ActivityStateActive = 0,
+    |     ^^^^^^^^^^^^^^^^^^^
+693 |     ActivityStateHlt,
+    |     ^^^^^^^^^^^^^^^^
+694 |     ActivityStateShutdown,
+    |     ^^^^^^^^^^^^^^^^^^^^^
+695 |     ActivityStateWaitForSipi,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+696 |     VmxLastActivityState,
+697 |     ActivityStateMwait,
+    |     ^^^^^^^^^^^^^^^^^^
+698 |     ActivityStateMwaitIf,
+    |     ^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `BxCpuActivityState` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: methods `bx_write_32bit_regz` and `bx_write_64bit_reg` are never used
+   --> src\cpu\cpu.rs:785:8
+    |
+767 | impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    | ----------------------------------- methods in this implementation
+...
+785 |     fn bx_write_32bit_regz(&mut self, index: usize, val: u32) {
+    |        ^^^^^^^^^^^^^^^^^^^
+...
+789 |     fn bx_write_64bit_reg(&mut self, index: usize, val: u64) {
+    |        ^^^^^^^^^^^^^^^^^^
+
+warning: fields `monitor_addr` and `armed_by` are never read
+   --> src\cpu\cpu.rs:806:5
+    |
+805 | pub struct MonitorAddr {
+    |            ----------- fields in this struct
+806 |     monitor_addr: BxPhyAddress,
+    |     ^^^^^^^^^^^^
+807 |     armed_by: u32,
+    |     ^^^^^^^^
+    |
+    = note: `MonitorAddr` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: multiple fields are never read
+   --> src\cpu\cpu.rs:812:5
+    |
+811 | pub(super) struct Uintr {
+    |                   ----- fields in this struct
+812 |     ui_handler: BxAddress,
+    |     ^^^^^^^^^^
+813 |     stack_adjust: u64,
+    |     ^^^^^^^^^^^^
+814 |     /// user interrupt notification vector, actually 8 bit
+815 |     uinv: u32,
+    |     ^^^^
+816 |     /// user interrupt target table size
+817 |     uitt_size: u32,
+    |     ^^^^^^^^^
+818 |     /// user interrupt target table address
+819 |     uitt_addr: BxAddress,
+    |     ^^^^^^^^^
+820 |     /// user posted-interrupt descriptor address
+821 |     upid_addr: BxAddress,
+    |     ^^^^^^^^^
+822 |     /// user-interrupt request register
+823 |     uirr: u64,
+    |     ^^^^
+824 |     /// if UIF=0 user interrupt cannot be delivered
+825 |     uif: bool,
+    |     ^^^
+    |
+    = note: `Uintr` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `senduipi_enabled` is never used
+   --> src\cpu\cpu.rs:829:8
+    |
+828 | impl Uintr {
+    | ---------- method in this implementation
+829 |     fn senduipi_enabled(&self) -> bool {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: struct `BxCpuId` is never constructed
+  --> src\cpu\cpuid.rs:87:19
+   |
+87 | pub(crate) struct BxCpuId<'c, I: BxCpuIdTrait> {
+   |                   ^^^^^^^
+
+warning: associated function `new` is never used
+  --> src\cpu\cpuid.rs:97:12
+   |
+96 | impl<'c, I: BxCpuIdTrait> BxCpuId<'c, I> {
+   | ---------------------------------------- associated function in this implementation
+97 |     pub fn new(cpu: &'c BxCpuC<I>, nprocessors: u32, ncores: u32, nthreads: u32) -> Self {
+   |            ^^^
+
+warning: multiple fields are never read
+  --> src\cpu\cpustats.rs:4:9
+   |
+ 2 | pub struct BxCpuStatistics {
+   |            --------------- fields in this struct
+ 3 |     // icache statistics
+ 4 |     pub i_cache_lookups: u64,
+   |         ^^^^^^^^^^^^^^^
+ 5 |     pub i_cache_prefetch: u64,
+   |         ^^^^^^^^^^^^^^^^
+ 6 |     pub i_cache_misses: u64,
+   |         ^^^^^^^^^^^^^^
+...
+ 9 |     pub tlb_lookups: u64,
+   |         ^^^^^^^^^^^
+10 |     pub tlb_execute_lookups: u64,
+   |         ^^^^^^^^^^^^^^^^^^^
+11 |     pub tlb_write_lookups: u64,
+   |         ^^^^^^^^^^^^^^^^^
+12 |     pub tlb_misses: u64,
+   |         ^^^^^^^^^^
+13 |     pub tlb_execute_misses: u64,
+   |         ^^^^^^^^^^^^^^^^^^
+14 |     pub tlb_write_misses: u64,
+   |         ^^^^^^^^^^^^^^^^
+...
+17 |     pub tlb_global_flushes: u64,
+   |         ^^^^^^^^^^^^^^^^^^
+18 |     pub tlb_non_global_flushes: u64,
+   |         ^^^^^^^^^^^^^^^^^^^^^^
+...
+21 |     pub stack_prefetch: u64,
+   |         ^^^^^^^^^^^^^^
+...
+24 |     pub smc: u64,
+   |         ^^^
+   |
+   = note: `BxCpuStatistics` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: methods `pe` and `set_pe` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+51 |   impl_crreg_accessors!(BxCr0, pe, 0);
+   |   -----------------------------^^---- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `mp` and `set_mp` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+52 |   impl_crreg_accessors!(BxCr0, mp, 1);
+   |   -----------------------------^^---- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `em` and `set_em` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+53 |   impl_crreg_accessors!(BxCr0, em, 2);
+   |   -----------------------------^^---- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `ts` and `set_ts` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+54 |   impl_crreg_accessors!(BxCr0, ts, 3);
+   |   -----------------------------^^---- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `et` and `set_et` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+56 |   impl_crreg_accessors!(BxCr0, et, 4);
+   |   -----------------------------^^---- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `ne` and `set_ne` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+57 |   impl_crreg_accessors!(BxCr0, ne, 5);
+   |   -----------------------------^^---- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `wp` and `set_wp` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+58 |   impl_crreg_accessors!(BxCr0, wp, 16);
+   |   -----------------------------^^----- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `set_am` is never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- method in this implementation
+...
+59 |   impl_crreg_accessors!(BxCr0, am, 18);
+   |   ------------------------------------ in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `nw` and `set_nw` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+60 |   impl_crreg_accessors!(BxCr0, nw, 29);
+   |   -----------------------------^^----- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `cd` and `set_cd` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+61 |   impl_crreg_accessors!(BxCr0, cd, 30);
+   |   -----------------------------^^----- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `pg` and `set_pg` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+63 |   impl_crreg_accessors!(BxCr0, pg, 31);
+   |   -----------------------------^^----- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `get32` is never used
+  --> src\cpu\crregs.rs:67:19
+   |
+65 | impl BxCr0 {
+   | ---------- method in this implementation
+66 |     #[inline]
+67 |     pub(super) fn get32(&self) -> u32 {
+   |                   ^^^^^
+
+warning: method `set_vme` is never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- method in this implementation
+...
+81 |   impl_crreg_accessors!(BxCr4, vme, 0);
+   |   ------------------------------------ in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `set_pvi` is never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- method in this implementation
+...
+82 |   impl_crreg_accessors!(BxCr4, pvi, 1);
+   |   ------------------------------------ in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `tsd` and `set_tsd` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+83 |   impl_crreg_accessors!(BxCr4, tsd, 2);
+   |   -----------------------------^^^---- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `de` and `set_de` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+84 |   impl_crreg_accessors!(BxCr4, de, 3);
+   |   -----------------------------^^---- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `pse` and `set_pse` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+85 |   impl_crreg_accessors!(BxCr4, pse, 4);
+   |   -----------------------------^^^---- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `pae` and `set_pae` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+86 |   impl_crreg_accessors!(BxCr4, pae, 5);
+   |   -----------------------------^^^---- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `mce` and `set_mce` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+87 |   impl_crreg_accessors!(BxCr4, mce, 6);
+   |   -----------------------------^^^---- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `pge` and `set_pge` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+88 |   impl_crreg_accessors!(BxCr4, pge, 7);
+   |   -----------------------------^^^---- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `pce` and `set_pce` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+89 |   impl_crreg_accessors!(BxCr4, pce, 8);
+   |   -----------------------------^^^---- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `osfxsr` and `set_osfxsr` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+90 |   impl_crreg_accessors!(BxCr4, osfxsr, 9);
+   |   -----------------------------^^^^^^---- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `osxmmexcpt` and `set_osxmmexcpt` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+91 |   impl_crreg_accessors!(BxCr4, osxmmexcpt, 10);
+   |   -----------------------------^^^^^^^^^^----- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `umip` and `set_umip` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+92 |   impl_crreg_accessors!(BxCr4, umip, 11);
+   |   -----------------------------^^^^----- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `la57` and `set_la57` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+93 |   impl_crreg_accessors!(BxCr4, la57, 12);
+   |   -----------------------------^^^^----- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `vmxe` and `set_vmxe` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+95 |   impl_crreg_accessors!(BxCr4, vmxe, 13);
+   |   -----------------------------^^^^----- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `smxe` and `set_smxe` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+97 |   impl_crreg_accessors!(BxCr4, smxe, 14);
+   |   -----------------------------^^^^----- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `fsgsbase` and `set_fsgsbase` are never used
+  --> src\cpu\crregs.rs:22:24
+   |
+15 | /             impl $struct_name {
+16 | |                 /// Returns the bit at position $bitnum as a bool.
+17 | |                 pub fn $name(&self) -> bool {
+18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...  |
+22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+   | |                        ^^^^^^^^^^^^^^
+...  |
+28 | |             }
+   | |_____________- methods in this implementation
+...
+99 |   impl_crreg_accessors!(BxCr4, fsgsbase, 16);
+   |   -----------------------------^^^^^^^^----- in this macro invocation
+   |
+   = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `pcide` and `set_pcide` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+101 |   impl_crreg_accessors!(BxCr4, pcide, 17);
+    |   -----------------------------^^^^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `osxsave` and `set_osxsave` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+102 |   impl_crreg_accessors!(BxCr4, osxsave, 18);
+    |   -----------------------------^^^^^^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `keylocker` and `set_keylocker` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+103 |   impl_crreg_accessors!(BxCr4, keylocker, 19);
+    |   -----------------------------^^^^^^^^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `smep` and `set_smep` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+104 |   impl_crreg_accessors!(BxCr4, smep, 20);
+    |   -----------------------------^^^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `set_smap` is never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- method in this implementation
+...
+105 |   impl_crreg_accessors!(BxCr4, smap, 21);
+    |   -------------------------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `pke` and `set_pke` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+106 |   impl_crreg_accessors!(BxCr4, pke, 22);
+    |   -----------------------------^^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `cet` and `set_cet` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+107 |   impl_crreg_accessors!(BxCr4, cet, 23);
+    |   -----------------------------^^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `pks` and `set_pks` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+108 |   impl_crreg_accessors!(BxCr4, pks, 24);
+    |   -----------------------------^^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `uintr` and `set_uintr` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+109 |   impl_crreg_accessors!(BxCr4, uintr, 25);
+    |   -----------------------------^^^^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `set_lass` is never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- method in this implementation
+...
+110 |   impl_crreg_accessors!(BxCr4, lass, 27);
+    |   -------------------------------------- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `lam_supervisor` and `set_lam_supervisor` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+111 |   impl_crreg_accessors!(BxCr4, lam_supervisor, 28);
+    |   -----------------------------^^^^^^^^^^^^^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `get32` is never used
+   --> src\cpu\crregs.rs:115:19
+    |
+113 | impl BxCr4 {
+    | ---------- method in this implementation
+114 |     #[inline]
+115 |     pub(super) fn get32(&self) -> u32 {
+    |                   ^^^^^
+
+warning: methods `b0` and `set_b0` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+129 |   impl_crreg_accessors!(BxDr6, b0, 0);
+    |   -----------------------------^^---- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `b1` and `set_b1` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+130 |   impl_crreg_accessors!(BxDr6, b1, 1);
+    |   -----------------------------^^---- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `b2` and `set_b2` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+131 |   impl_crreg_accessors!(BxDr6, b2, 2);
+    |   -----------------------------^^---- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `b3` and `set_b3` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+132 |   impl_crreg_accessors!(BxDr6, b3, 3);
+    |   -----------------------------^^---- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `bd` and `set_bd` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+134 |   impl_crreg_accessors!(BxDr6, bd, 13);
+    |   -----------------------------^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `bs` and `set_bs` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+135 |   impl_crreg_accessors!(BxDr6, bs, 14);
+    |   -----------------------------^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `bt` and `set_bt` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+136 |   impl_crreg_accessors!(BxDr6, bt, 15);
+    |   -----------------------------^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `get32` is never used
+   --> src\cpu\crregs.rs:140:19
+    |
+138 | impl BxDr6 {
+    | ---------- method in this implementation
+139 |     #[inline]
+140 |     pub(super) fn get32(&self) -> u32 {
+    |                   ^^^^^
+
+warning: methods `l0` and `set_l0` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+167 |   impl_crreg_accessors!(BxDr7, l0, 0);
+    |   -----------------------------^^---- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `g0` and `set_g0` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+168 |   impl_crreg_accessors!(BxDr7, g0, 1);
+    |   -----------------------------^^---- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `l1` and `set_l1` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+169 |   impl_crreg_accessors!(BxDr7, l1, 2);
+    |   -----------------------------^^---- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `g1` and `set_g1` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+170 |   impl_crreg_accessors!(BxDr7, g1, 3);
+    |   -----------------------------^^---- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `l2` and `set_l2` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+171 |   impl_crreg_accessors!(BxDr7, l2, 4);
+    |   -----------------------------^^---- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `g2` and `set_g2` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+172 |   impl_crreg_accessors!(BxDr7, g2, 5);
+    |   -----------------------------^^---- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `l3` and `set_l3` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+173 |   impl_crreg_accessors!(BxDr7, l3, 6);
+    |   -----------------------------^^---- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `g3` and `set_g3` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+174 |   impl_crreg_accessors!(BxDr7, g3, 7);
+    |   -----------------------------^^---- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `le` and `set_le` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+175 |   impl_crreg_accessors!(BxDr7, le, 8);
+    |   -----------------------------^^---- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `ge` and `set_ge` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+176 |   impl_crreg_accessors!(BxDr7, ge, 9);
+    |   -----------------------------^^---- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `gd` and `set_gd` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+177 |   impl_crreg_accessors!(BxDr7, gd, 13);
+    |   -----------------------------^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `r_w0` is never used
+   --> src\cpu\crregs.rs:179:30
+    |
+157 | /             impl $ty {
+158 | |                 #[inline]
+159 | |                 pub fn $name(&self) -> u32 {
+160 | |                     (self.val32 & $mask) >> $shift
+161 | |                 }
+162 | |             }
+    | |_____________- method in this implementation
+...
+179 |   impl_drreg_accessors!(BxDr7, r_w0, 0x00030000, 16);
+    |                                ^^^^
+    |
+    = note: this warning originates in the macro `impl_drreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `len0` is never used
+   --> src\cpu\crregs.rs:180:30
+    |
+157 | /             impl $ty {
+158 | |                 #[inline]
+159 | |                 pub fn $name(&self) -> u32 {
+160 | |                     (self.val32 & $mask) >> $shift
+161 | |                 }
+162 | |             }
+    | |_____________- method in this implementation
+...
+180 |   impl_drreg_accessors!(BxDr7, len0, 0x000C0000, 18);
+    |                                ^^^^
+    |
+    = note: this warning originates in the macro `impl_drreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `r_w1` is never used
+   --> src\cpu\crregs.rs:181:30
+    |
+157 | /             impl $ty {
+158 | |                 #[inline]
+159 | |                 pub fn $name(&self) -> u32 {
+160 | |                     (self.val32 & $mask) >> $shift
+161 | |                 }
+162 | |             }
+    | |_____________- method in this implementation
+...
+181 |   impl_drreg_accessors!(BxDr7, r_w1, 0x00300000, 20);
+    |                                ^^^^
+    |
+    = note: this warning originates in the macro `impl_drreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `len1` is never used
+   --> src\cpu\crregs.rs:182:30
+    |
+157 | /             impl $ty {
+158 | |                 #[inline]
+159 | |                 pub fn $name(&self) -> u32 {
+160 | |                     (self.val32 & $mask) >> $shift
+161 | |                 }
+162 | |             }
+    | |_____________- method in this implementation
+...
+182 |   impl_drreg_accessors!(BxDr7, len1, 0x00C00000, 22);
+    |                                ^^^^
+    |
+    = note: this warning originates in the macro `impl_drreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `r_w2` is never used
+   --> src\cpu\crregs.rs:183:30
+    |
+157 | /             impl $ty {
+158 | |                 #[inline]
+159 | |                 pub fn $name(&self) -> u32 {
+160 | |                     (self.val32 & $mask) >> $shift
+161 | |                 }
+162 | |             }
+    | |_____________- method in this implementation
+...
+183 |   impl_drreg_accessors!(BxDr7, r_w2, 0x03000000, 24);
+    |                                ^^^^
+    |
+    = note: this warning originates in the macro `impl_drreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `len2` is never used
+   --> src\cpu\crregs.rs:184:30
+    |
+157 | /             impl $ty {
+158 | |                 #[inline]
+159 | |                 pub fn $name(&self) -> u32 {
+160 | |                     (self.val32 & $mask) >> $shift
+161 | |                 }
+162 | |             }
+    | |_____________- method in this implementation
+...
+184 |   impl_drreg_accessors!(BxDr7, len2, 0x0C000000, 26);
+    |                                ^^^^
+    |
+    = note: this warning originates in the macro `impl_drreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `r_w3` is never used
+   --> src\cpu\crregs.rs:185:30
+    |
+157 | /             impl $ty {
+158 | |                 #[inline]
+159 | |                 pub fn $name(&self) -> u32 {
+160 | |                     (self.val32 & $mask) >> $shift
+161 | |                 }
+162 | |             }
+    | |_____________- method in this implementation
+...
+185 |   impl_drreg_accessors!(BxDr7, r_w3, 0x30000000, 28);
+    |                                ^^^^
+    |
+    = note: this warning originates in the macro `impl_drreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `len3` is never used
+   --> src\cpu\crregs.rs:186:30
+    |
+157 | /             impl $ty {
+158 | |                 #[inline]
+159 | |                 pub fn $name(&self) -> u32 {
+160 | |                     (self.val32 & $mask) >> $shift
+161 | |                 }
+162 | |             }
+    | |_____________- method in this implementation
+...
+186 |   impl_drreg_accessors!(BxDr7, len3, 0xC0000000, 30);
+    |                                ^^^^
+    |
+    = note: this warning originates in the macro `impl_drreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `bp_enabled` is never used
+   --> src\cpu\crregs.rs:188:30
+    |
+157 | /             impl $ty {
+158 | |                 #[inline]
+159 | |                 pub fn $name(&self) -> u32 {
+160 | |                     (self.val32 & $mask) >> $shift
+161 | |                 }
+162 | |             }
+    | |_____________- method in this implementation
+...
+188 |   impl_drreg_accessors!(BxDr7, bp_enabled, 0xFF, 0);
+    |                                ^^^^^^^^^^
+    |
+    = note: this warning originates in the macro `impl_drreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `get32` is never used
+   --> src\cpu\crregs.rs:191:19
+    |
+190 | impl BxDr7 {
+    | ---------- method in this implementation
+191 |     pub(super) fn get32(&self) -> u32 {
+    |                   ^^^^^
+
+warning: methods `sce` and `set_sce` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+204 |   impl_crreg_accessors!(BxEfer, sce, 0);
+    |   ------------------------------^^^---- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `lme` and `set_lme` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+206 |   impl_crreg_accessors!(BxEfer, lme, 8);
+    |   ------------------------------^^^---- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `lma` and `set_lma` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+207 |   impl_crreg_accessors!(BxEfer, lma, 10);
+    |   ------------------------------^^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `nxe` and `set_nxe` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+209 |   impl_crreg_accessors!(BxEfer, nxe, 11);
+    |   ------------------------------^^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `svme` and `set_svme` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+211 |   impl_crreg_accessors!(BxEfer, svme, 12); /* AMD Secure Virtual Machine */
+    |   ------------------------------^^^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `lmsle` and `set_lmsle` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+212 |   impl_crreg_accessors!(BxEfer, lmsle, 13); /* AMD Long Mode Segment Limit */
+    |   ------------------------------^^^^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `ffxsr` and `set_ffxsr` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+213 |   impl_crreg_accessors!(BxEfer, ffxsr, 14);
+    |   ------------------------------^^^^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: methods `tce` and `set_tce` are never used
+   --> src\cpu\crregs.rs:22:24
+    |
+ 15 | /             impl $struct_name {
+ 16 | |                 /// Returns the bit at position $bitnum as a bool.
+ 17 | |                 pub fn $name(&self) -> bool {
+ 18 | |                     ((self.val32 >> $bitnum) & 1) != 0
+...   |
+ 22 | |                 pub fn [<set_ $name>](&mut self, val: u8) {
+    | |                        ^^^^^^^^^^^^^^
+...   |
+ 28 | |             }
+    | |_____________- methods in this implementation
+...
+214 |   impl_crreg_accessors!(BxEfer, tce, 15); /* AMD Translation Cache Extensions */
+    |   ------------------------------^^^----- in this macro invocation
+    |
+    = note: this warning originates in the macro `impl_crreg_accessors` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: method `get32` is never used
+   --> src\cpu\crregs.rs:218:19
+    |
+216 | impl BxEfer {
+    | ----------- method in this implementation
+217 |     #[inline]
+218 |     pub(super) fn get32(&self) -> u32 {
+    |                   ^^^^^
+
+warning: constant `XSAVE_HEADER_LEN` is never used
+   --> src\cpu\crregs.rs:227:7
+    |
+227 | const XSAVE_HEADER_LEN: u32 = 64;
+    |       ^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_FPU_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:228:7
+    |
+228 | const XSAVE_FPU_STATE_LEN: u32 = 160;
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_SSE_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:229:7
+    |
+229 | const XSAVE_SSE_STATE_LEN: u32 = 256;
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_YMM_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:230:7
+    |
+230 | const XSAVE_YMM_STATE_LEN: u32 = 256;
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_OPMASK_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:231:7
+    |
+231 | const XSAVE_OPMASK_STATE_LEN: u32 = 64;
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_ZMM_HI256_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:232:7
+    |
+232 | const XSAVE_ZMM_HI256_STATE_LEN: u32 = 512;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_HI_ZMM_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:233:7
+    |
+233 | const XSAVE_HI_ZMM_STATE_LEN: u32 = 1024;
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_PT_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:234:7
+    |
+234 | const XSAVE_PT_STATE_LEN: u32 = 128;
+    |       ^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_PKRU_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:235:7
+    |
+235 | const XSAVE_PKRU_STATE_LEN: u32 = 8;
+    |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_PASID_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:236:7
+    |
+236 | const XSAVE_PASID_STATE_LEN: u32 = 8;
+    |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_CET_U_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:237:7
+    |
+237 | const XSAVE_CET_U_STATE_LEN: u32 = 16;
+    |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_CET_S_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:238:7
+    |
+238 | const XSAVE_CET_S_STATE_LEN: u32 = 24;
+    |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_HDC_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:239:7
+    |
+239 | const XSAVE_HDC_STATE_LEN: u32 = 8;
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_UINTR_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:240:7
+    |
+240 | const XSAVE_UINTR_STATE_LEN: u32 = 48;
+    |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_LBR_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:241:7
+    |
+241 | const XSAVE_LBR_STATE_LEN: u32 = 808;
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_HWP_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:242:7
+    |
+242 | const XSAVE_HWP_STATE_LEN: u32 = 8;
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_XTILECFG_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:243:7
+    |
+243 | const XSAVE_XTILECFG_STATE_LEN: u32 = 64;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_XTILEDATA_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:244:7
+    |
+244 | const XSAVE_XTILEDATA_STATE_LEN: u32 = 8192;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_APX_STATE_LEN` is never used
+   --> src\cpu\crregs.rs:245:7
+    |
+245 | const XSAVE_APX_STATE_LEN: u32 = 128;
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_FPU_STATE_OFFSET` is never used
+   --> src\cpu\crregs.rs:247:7
+    |
+247 | const XSAVE_FPU_STATE_OFFSET: u32 = 0;
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_SSE_STATE_OFFSET` is never used
+   --> src\cpu\crregs.rs:248:7
+    |
+248 | const XSAVE_SSE_STATE_OFFSET: u32 = 160;
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_YMM_STATE_OFFSET` is never used
+   --> src\cpu\crregs.rs:249:7
+    |
+249 | const XSAVE_YMM_STATE_OFFSET: u32 = 576;
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_OPMASK_STATE_OFFSET` is never used
+   --> src\cpu\crregs.rs:250:7
+    |
+250 | const XSAVE_OPMASK_STATE_OFFSET: u32 = 1088;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_ZMM_HI256_STATE_OFFSET` is never used
+   --> src\cpu\crregs.rs:251:7
+    |
+251 | const XSAVE_ZMM_HI256_STATE_OFFSET: u32 = 1152;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_HI_ZMM_STATE_OFFSET` is never used
+   --> src\cpu\crregs.rs:252:7
+    |
+252 | const XSAVE_HI_ZMM_STATE_OFFSET: u32 = 1664;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_PKRU_STATE_OFFSET` is never used
+   --> src\cpu\crregs.rs:253:7
+    |
+253 | const XSAVE_PKRU_STATE_OFFSET: u32 = 2688;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_XTILECFG_STATE_OFFSET` is never used
+   --> src\cpu\crregs.rs:254:7
+    |
+254 | const XSAVE_XTILECFG_STATE_OFFSET: u32 = 2752;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_XTILEDATA_STATE_OFFSET` is never used
+   --> src\cpu\crregs.rs:255:7
+    |
+255 | const XSAVE_XTILEDATA_STATE_OFFSET: u32 = 2816;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `XSAVE_APX_STATE_OFFSET` is never used
+   --> src\cpu\crregs.rs:256:7
+    |
+256 | const XSAVE_APX_STATE_OFFSET: u32 = 960; // repurpose deprecated BND (MPX) state
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: enum `Xcr0Enum` is never used
+   --> src\cpu\crregs.rs:271:6
+    |
+271 | enum Xcr0Enum {
+    |      ^^^^^^^^
+
+warning: fields `index`, `type`, `val64`, `reset_value`, `reserved`, and `ignored` are never read
+   --> src\cpu\crregs.rs:298:16
+    |
+296 | pub struct MSR {
+    |            --- fields in this struct
+297 |     /// MSR index
+298 |     pub(crate) index: u32,
+    |                ^^^^^
+299 |     /// MSR type: 1 - lin address, 2 - phy address
+300 |     pub(crate) r#type: u32,
+    |                ^^^^^^
+301 |     /// current MSR value
+302 |     pub(crate) val64: u64,
+    |                ^^^^^
+303 |     /// reset value
+304 |     pub(crate) reset_value: u64,
+    |                ^^^^^^^^^^^
+305 |     /// r/o bits - fault on write
+306 |     pub(crate) reserved: u64,
+    |                ^^^^^^^^
+307 |     /// hardwired bits - ignored on write
+308 |     pub(crate) ignored: u64,
+    |                ^^^^^^^
+    |
+    = note: `MSR` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: associated constants `BX_LIN_ADDRESS_MSR` and `BX_PHY_ADDRESS_MSR` are never used
+   --> src\cpu\crregs.rs:312:11
+    |
+311 | impl MSR {
+    | -------- associated constants in this implementation
+312 |     const BX_LIN_ADDRESS_MSR: u32 = 1;
+    |           ^^^^^^^^^^^^^^^^^^
+313 |     const BX_PHY_ADDRESS_MSR: u32 = 2;
+    |           ^^^^^^^^^^^^^^^^^^
+
+warning: type alias `XSaveStateInUsePtr_tR` is never used
+   --> src\cpu\crregs.rs:325:6
+    |
+325 | type XSaveStateInUsePtr_tR = fn() -> bool;
+    |      ^^^^^^^^^^^^^^^^^^^^^
+
+warning: type alias `XSavePtr_tR` is never used
+   --> src\cpu\crregs.rs:326:6
+    |
+326 | type XSavePtr_tR = fn(&BxInstructionGenerated, usize);
+    |      ^^^^^^^^^^^
+
+warning: type alias `XRestorPtr_tR` is never used
+   --> src\cpu\crregs.rs:327:6
+    |
+327 | type XRestorPtr_tR = fn(&BxInstructionGenerated, usize);
+    |      ^^^^^^^^^^^^^
+
+warning: enum `BxRegs8L` is never used
+   --> src\cpu\decoder\mod.rs:312:6
+    |
+312 | enum BxRegs8L {
+    |      ^^^^^^^^
+
+warning: enum `BxRegs8H` is never used
+   --> src\cpu\decoder\mod.rs:333:6
+    |
+333 | enum BxRegs8H {
+    |      ^^^^^^^^
+
+warning: multiple variants are never constructed
+   --> src\cpu\decoder\mod.rs:342:5
+    |
+341 | enum BxRegs16 {
+    |      -------- variants in this enum
+342 |     Ax,
+    |     ^^
+343 |     Cx,
+    |     ^^
+344 |     Dx,
+    |     ^^
+345 |     Bx,
+346 |     Sp,
+    |     ^^
+...
+351 |     R8,
+    |     ^^
+352 |     R9,
+    |     ^^
+353 |     R10,
+    |     ^^^
+354 |     R11,
+    |     ^^^
+355 |     R12,
+    |     ^^^
+356 |     R13,
+    |     ^^^
+357 |     R14,
+    |     ^^^
+358 |     R15,
+    |     ^^^
+    |
+    = note: `BxRegs16` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: enum `BxRegs32` is never used
+   --> src\cpu\decoder\mod.rs:362:6
+    |
+362 | enum BxRegs32 {
+    |      ^^^^^^^^
+
+warning: enum `BxRegs64` is never used
+   --> src\cpu\decoder\mod.rs:383:6
+    |
+383 | enum BxRegs64 {
+    |      ^^^^^^^^
+
+warning: constant `BX_32BIT_REG_SSP` is never used
+   --> src\cpu\decoder\mod.rs:408:18
+    |
+408 | pub(super) const BX_32BIT_REG_SSP: usize = BX_GENERAL_REGISTERS + 1;
+    |                  ^^^^^^^^^^^^^^^^
+
+warning: enum `OpmaskRegs` is never used
+   --> src\cpu\decoder\mod.rs:415:17
+    |
+415 | pub(super) enum OpmaskRegs {
+    |                 ^^^^^^^^^^
+
+warning: variants `NoVl`, `Vl128`, and `Vl256` are never constructed
+   --> src\cpu\decoder\mod.rs:429:5
+    |
+428 | pub(super) enum BxAvxVectorLength {
+    |                 ----------------- variants in this enum
+429 |     NoVl,
+    |     ^^^^
+430 |     Vl128 = 1,
+    |     ^^^^^
+431 |     Vl256 = 2,
+    |     ^^^^^
+    |
+    = note: `BxAvxVectorLength` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: constant `BX_VECTOR_TMP_REGISTER` is never used
+   --> src\cpu\decoder\mod.rs:439:7
+    |
+439 | const BX_VECTOR_TMP_REGISTER: usize = BX_XMM_REGISTERS;
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `disasm` is never used
+ --> src\cpu\decoder\disasm.rs:5:4
+  |
+5 | fn disasm(
+  |    ^^^^^^
+
+warning: multiple variants are never constructed
+   --> src\cpu\decoder\features.rs:4:5
+    |
+  3 | pub(crate) enum X86Feature {
+    |                 ---------- variants in this enum
+  4 |     Isa386,                   /* 386 or earlier instruction */
+    |     ^^^^^^
+  5 |     IsaX87,                   /* FPU (x87) instruction */
+  6 |     Isa486,                   /* 486 new instruction */
+    |     ^^^^^^
+  7 |     IsaPENTIUM,               /* Pentium new instruction */
+    |     ^^^^^^^^^^
+  8 |     IsaP6,                    /* P6 new instruction */
+    |     ^^^^^
+  9 |     IsaMMX,                   /* MMX instruction */
+    |     ^^^^^^
+ 10 |     Isa3DNOW,                 /* 3DNow! Instructions (AMD) */
+    |     ^^^^^^^^
+ 11 |     Isa3DNOW_EXT,             /* 3DNow! Extensions (AMD) */
+    |     ^^^^^^^^^^^^
+ 12 |     IsaDEBUG_EXTENSIONS,      /* Debug Extensions support */
+    |     ^^^^^^^^^^^^^^^^^^^
+ 13 |     IsaVME,                   /* VME support */
+    |     ^^^^^^
+ 14 |     IsaPSE,                   /* PSE support */
+    |     ^^^^^^
+ 15 |     IsaPAE,                   /* PAE support */
+    |     ^^^^^^
+ 16 |     IsaPGE,                   /* Global Pages support */
+    |     ^^^^^^
+ 17 |     IsaMTRR,                  /* MTRR support */
+    |     ^^^^^^^
+ 18 |     IsaPAT,                   /* PAT support */
+    |     ^^^^^^
+ 19 |     IsaSYSCALL_SYSRET_LEGACY, /* SYSCALL/SYSRET in legacy mode (AMD) */
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^
+ 20 |     IsaSYSENTER_SYSEXIT,      /* SYSENTER/SYSEXIT instruction */
+    |     ^^^^^^^^^^^^^^^^^^^
+ 21 |     IsaCLFLUSH,               /* CLFLUSH instruction */
+    |     ^^^^^^^^^^
+ 22 |     IsaCLFLUSHOPT,            /* CLFLUSHOPT instruction */
+    |     ^^^^^^^^^^^^^
+ 23 |     IsaCLWB,                  /* CLWB instruction */
+    |     ^^^^^^^
+ 24 |     IsaSSE,                   /* SSE  instruction */
+    |     ^^^^^^
+ 25 |     IsaSSE2,                  /* SSE2 instruction */
+ 26 |     IsaSSE3,                  /* SSE3 instruction */
+    |     ^^^^^^^
+ 27 |     IsaSSSE3,                 /* SSSE3 instruction */
+    |     ^^^^^^^^
+ 28 |     IsaSSE4_1,                /* SSE4_1 instruction */
+    |     ^^^^^^^^^
+ 29 |     IsaSSE4_2,                /* SSE4_2 instruction */
+    |     ^^^^^^^^^
+ 30 |     IsaPOPCNT,                /* POPCNT instruction */
+    |     ^^^^^^^^^
+ 31 |     IsaMONITOR_MWAIT,         /* MONITOR/MWAIT instruction */
+    |     ^^^^^^^^^^^^^^^^
+ 32 |     IsaWAITPKG,               /* TPAUSE/UMONITOR/UMWAIT instructions */
+    |     ^^^^^^^^^^
+ 33 |     IsaMONITORLESS_MWAIT,     /* MONITOR-less MWAIT extension */
+    |     ^^^^^^^^^^^^^^^^^^^^
+ 34 |     IsaMONITORX_MWAITX,       /* MONITORX/MWAITX instruction (AMD) */
+    |     ^^^^^^^^^^^^^^^^^^
+ 35 |     IsaLONG_MODE,             /* Long Mode (x86-64) support */
+ 36 |     IsaLM_LAHF_SAHF,          /* Long Mode LAHF/SAHF instruction */
+    |     ^^^^^^^^^^^^^^^
+ 37 |     IsaNX,                    /* No-Execute Pages support */
+    |     ^^^^^
+ 38 |     Isa1G_PAGES,              /* 1Gb pages support */
+    |     ^^^^^^^^^^^
+ 39 |     IsaCMPXCHG16B,            /* CMPXCHG16B instruction */
+    |     ^^^^^^^^^^^^^
+ 40 |     IsaRDTSCP,                /* RDTSCP instruction */
+    |     ^^^^^^^^^
+ 41 |     IsaFFXSR,                 /* EFER.FFXSR support (AMD) */
+    |     ^^^^^^^^
+ 42 |     IsaXSAVE,                 /* XSAVE/XRSTOR extensions instruction */
+    |     ^^^^^^^^
+ 43 |     IsaXSAVEOPT,              /* XSAVEOPT instruction */
+    |     ^^^^^^^^^^^
+ 44 |     IsaXSAVEC,                /* XSAVEC instruction */
+    |     ^^^^^^^^^
+ 45 |     IsaXSAVES,                /* XSAVES instruction */
+    |     ^^^^^^^^^
+ 46 |     IsaAES_PCLMULQDQ,         /* AES+PCLMULQDQ instructions */
+    |     ^^^^^^^^^^^^^^^^
+ 47 |     IsaVAES_VPCLMULQDQ,       /* Wide vector versions of AES+PCLMULQDQ instructions */
+    |     ^^^^^^^^^^^^^^^^^^
+ 48 |     IsaMOVBE,                 /* MOVBE instruction */
+    |     ^^^^^^^^
+ 49 |     IsaFSGSBASE,              /* FS/GS BASE access instruction */
+    |     ^^^^^^^^^^^
+ 50 |     IsaAVX,                   /* AVX instruction */
+    |     ^^^^^^
+ 51 |     IsaAVX2,                  /* AVX2 instruction */
+    |     ^^^^^^^
+ 52 |     IsaAVX_F16C,              /* AVX F16 convert instruction */
+    |     ^^^^^^^^^^^
+ 53 |     IsaAVX_FMA,               /* AVX FMA instruction */
+    |     ^^^^^^^^^^
+ 54 |     IsaSSE4A,                 /* SSE4A instruction (AMD) */
+    |     ^^^^^^^^
+ 55 |     IsaMISALIGNED_SSE,        /* Misaligned SSE (AMD) */
+ 56 |     IsaALT_MOV_CR8,           /* LOCK CR0 access CR8 (AMD) */
+    |     ^^^^^^^^^^^^^^
+ 57 |     IsaLZCNT,                 /* LZCNT instruction */
+    |     ^^^^^^^^
+ 58 |     IsaBMI1,                  /* BMI1 instruction */
+    |     ^^^^^^^
+ 59 |     IsaBMI2,                  /* BMI2 instruction */
+    |     ^^^^^^^
+ 60 |     IsaFMA4,                  /* FMA4 instruction (AMD) */
+    |     ^^^^^^^
+ 61 |     IsaXOP,                   /* XOP instruction (AMD) */
+    |     ^^^^^^
+ 62 |     IsaTBM,                   /* TBM instruction (AMD) */
+    |     ^^^^^^
+ 63 |     IsaSVM,                   /* SVM instruction (AMD) */
+ 64 |     IsaVMX,                   /* VMX instruction */
+    |     ^^^^^^
+ 65 |     IsaSMX,                   /* SMX instruction */
+    |     ^^^^^^
+ 66 |     IsaRDRAND,                /* RDRAND instruction */
+    |     ^^^^^^^^^
+ 67 |     IsaRDSEED,                /* RDSEED instruction */
+    |     ^^^^^^^^^
+ 68 |     IsaADX,                   /* ADCX/ADOX instruction */
+    |     ^^^^^^
+ 69 |     IsaSMAP,                  /* SMAP support */
+    |     ^^^^^^^
+ 70 |     IsaSMEP,                  /* SMEP support */
+    |     ^^^^^^^
+ 71 |     IsaSHA,                   /* SHA instruction */
+    |     ^^^^^^
+ 72 |     IsaSHA512,                /* SHA-512 instruction */
+    |     ^^^^^^^^^
+ 73 |     IsaGFNI,                  /* GFNI instruction */
+    |     ^^^^^^^
+ 74 |     IsaSM3,                   /* SM3 instruction */
+    |     ^^^^^^
+ 75 |     IsaSM4,                   /* SM4 instruction */
+    |     ^^^^^^
+ 76 |     IsaAVX_IFMA,              /* AVX encoded IFMA Instructions */
+    |     ^^^^^^^^^^^
+ 77 |     IsaAVX_VNNI,              /* AVX encoded VNNI Instructions */
+    |     ^^^^^^^^^^^
+ 78 |     IsaAVX_VNNI_INT8,         /* AVX encoded VNNI-INT8 Instructions */
+    |     ^^^^^^^^^^^^^^^^
+ 79 |     IsaAVX_VNNI_INT16,        /* AVX encoded VNNI-INT16 Instructions */
+    |     ^^^^^^^^^^^^^^^^^
+ 80 |     IsaAVX_NE_CONVERT,        /* AVX-NE-CONVERT Instructions */
+    |     ^^^^^^^^^^^^^^^^^
+ 81 |     IsaAVX512,                /* AVX-512 instruction */
+    |     ^^^^^^^^^
+ 82 |     IsaAVX512_DQ,             /* AVX-512DQ instruction */
+    |     ^^^^^^^^^^^^
+ 83 |     IsaAVX512_BW,             /* AVX-512 Byte/Word instruction */
+    |     ^^^^^^^^^^^^
+ 84 |     IsaAVX512_CD,             /* AVX-512 Conflict Detection instruction */
+    |     ^^^^^^^^^^^^
+...
+ 87 |     IsaAVX512_VBMI,         /* AVX-512 VBMI : Vector Bit Manipulation Instructions */
+    |     ^^^^^^^^^^^^^^
+ 88 |     IsaAVX512_VBMI2,        /* AVX-512 VBMI2 : Vector Bit Manipulation Instructions */
+    |     ^^^^^^^^^^^^^^^
+ 89 |     IsaAVX512_IFMA52,       /* AVX-512 IFMA52 Instructions */
+    |     ^^^^^^^^^^^^^^^^
+ 90 |     IsaAVX512_VPOPCNTDQ,    /* AVX-512 VPOPCNTD/VPOPCNTQ Instructions */
+    |     ^^^^^^^^^^^^^^^^^^^
+ 91 |     IsaAVX512_VNNI,         /* AVX-512 VNNI Instructions */
+    |     ^^^^^^^^^^^^^^
+ 92 |     IsaAVX512_BITALG,       /* AVX-512 BITALG Instructions */
+    |     ^^^^^^^^^^^^^^^^
+ 93 |     IsaAVX512_VP2INTERSECT, /* AVX-512 VP2INTERSECT Instructions */
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+ 94 |     IsaAVX512_BF16,         /* AVX-512 BF16 Instructions */
+    |     ^^^^^^^^^^^^^^
+ 95 |     IsaAVX512_FP16,         /* AVX-512 FP16 Instructions */
+    |     ^^^^^^^^^^^^^^
+ 96 |     IsaAMX,                 /* AMX Instructions */
+    |     ^^^^^^
+ 97 |     IsaAMX_INT8,            /* AMX-INT8 Instructions */
+    |     ^^^^^^^^^^^
+ 98 |     IsaAMX_BF16,            /* AMX-BF16 Instructions */
+    |     ^^^^^^^^^^^
+ 99 |     IsaAMX_FP16,            /* AMX-FP16 Instructions */
+    |     ^^^^^^^^^^^
+100 |     IsaAMX_TF32,            /* AMX-TF32 Instructions */
+    |     ^^^^^^^^^^^
+101 |     IsaAMX_COMPLEX,         /* AMX-COMPLEX Instructions */
+    |     ^^^^^^^^^^^^^^
+102 |     IsaAMX_MOVRS,           /* AMX-MOVRS Instructions */
+    |     ^^^^^^^^^^^^
+103 |     IsaAMX_AVX512,          /* AMX-AVX512 Instructions */
+    |     ^^^^^^^^^^^^^
+104 |     IsaAVX10_1,             /* AVX10.1 Instructions */
+    |     ^^^^^^^^^^
+105 |     IsaAVX10_2,             /* AVX10.2 Instructions */
+    |     ^^^^^^^^^^
+106 |     IsaAVX10_2_MOVRS,       /* AVX10.2 MOVRS Instructions */
+    |     ^^^^^^^^^^^^^^^^
+107 |     IsaXAPIC,               /* XAPIC support */
+    |     ^^^^^^^^
+108 |     IsaX2APIC,              /* X2APIC support */
+    |     ^^^^^^^^^
+109 |     IsaXAPIC_EXT,           /* XAPIC Extensions support (AMD) */
+    |     ^^^^^^^^^^^^
+110 |     IsaPCID,                /* PCID support */
+    |     ^^^^^^^
+111 |     IsaINVPCID,             /* INVPCID instruction */
+    |     ^^^^^^^^^^
+112 |     IsaTSC_ADJUST,          /* TSC-Adjust MSR */
+    |     ^^^^^^^^^^^^^
+113 |     IsaTSC_DEADLINE,        /* TSC-Deadline */
+    |     ^^^^^^^^^^^^^^^
+114 |     IsaFOPCODE_DEPRECATION, /* FOPCODE Deprecation - FOPCODE update on unmasked x87 exception only */
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+115 |     IsaFCS_FDS_DEPRECATION, /* FCS/FDS Deprecation */
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+116 |     IsaFDP_DEPRECATION,     /* FDP Deprecation - FDP update on unmasked x87 exception only */
+    |     ^^^^^^^^^^^^^^^^^^
+117 |     IsaPKU,                 /* User-Mode Protection Keys */
+    |     ^^^^^^
+118 |     IsaPKS,                 /* Supervisor-Mode Protection Keys */
+    |     ^^^^^^
+119 |     IsaUMIP,                /* User-Mode Instructions Prevention */
+    |     ^^^^^^^
+120 |     IsaRDPID,               /* RDPID Support */
+    |     ^^^^^^^^
+121 |     IsaTCE,                 /* Translation Cache Extensions (TCE) support (AMD) */
+    |     ^^^^^^
+122 |     IsaCLZERO,              /* CLZERO instruction support (AMD) */
+    |     ^^^^^^^^^
+123 |     IsaSCA_MITIGATIONS,     /* Report SCA Mitigations in CPUID */
+    |     ^^^^^^^^^^^^^^^^^^
+124 |     IsaCET,                 /* Control Flow Enforcement */
+125 |     IsaWRMSRNS,             /* Non-Serializing version of WRMSR */
+    |     ^^^^^^^^^^
+126 |     IsaMSR_IMM,             /* Immediate forms of RDMSR and WRMSRNS */
+    |     ^^^^^^^^^^
+127 |     IsaCMPCCXADD,           /* CMPccXADD instructions */
+    |     ^^^^^^^^^^^^
+128 |     IsaSERIALIZE,           /* SERIALIZE instruction */
+    |     ^^^^^^^^^^^^
+129 |     IsaLASS,                /* Linear Address Space Separation support */
+    |     ^^^^^^^
+130 |     IsaLA57,                /* 57-bit Virtual Address and 5-level paging support */
+    |     ^^^^^^^
+131 |     IsaUINTR,               /* User Level Interrupts support */
+    |     ^^^^^^^^
+132 |     IsaFLEXIBLE_UIRET,      /* Flexible UIRET support */
+    |     ^^^^^^^^^^^^^^^^^
+133 |     IsaMOVDIRI,             /* MOVDIRI instruction support */
+    |     ^^^^^^^^^^
+134 |     IsaMOVDIR64B,           /* MOVDIR64B instruction support */
+    |     ^^^^^^^^^^^^
+135 |     IsaMSRLIST,             /* RDMSRLIST/WRMSRLIST instructions support */
+    |     ^^^^^^^^^^
+136 |     IsaRAO_INT,             /* RAO-INT instructions support */
+    |     ^^^^^^^^^^
+137 |     IsaMOVRS,               /* MOVRS instructions support */
+    |     ^^^^^^^^
+    |
+    = note: `X86Feature` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: function `fetch_qword` is never used
+  --> src\cpu\decoder\fetchdecode.rs:47:15
+   |
+47 | pub(super) fn fetch_qword(iptr: &[u8]) -> u64 {
+   |               ^^^^^^^^^^^
+
+warning: constant `SREG_MOD01OR10_RM16` is never used
+    --> src\cpu\decoder\fetchdecode32.rs:2650:7
+     |
+2650 | const SREG_MOD01OR10_RM16: [BxSegregs; 8] = [
+     |       ^^^^^^^^^^^^^^^^^^^
+
+warning: constant `SREG_MOD0_BASE32` is never used
+    --> src\cpu\decoder\fetchdecode32.rs:2662:7
+     |
+2662 | const SREG_MOD0_BASE32: [BxSegregs; 8] = [
+     |       ^^^^^^^^^^^^^^^^
+
+warning: function `fetch_immediate` is never used
+    --> src\cpu\decoder\fetchdecode32.rs:2893:4
+     |
+2893 | fn fetch_immediate() {
+     |    ^^^^^^^^^^^^^^^
+
+warning: function `evex_displ8_compression` is never used
+    --> src\cpu\decoder\fetchdecode32.rs:2897:4
+     |
+2897 | fn evex_displ8_compression() {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `assign_srcs` is never used
+    --> src\cpu\decoder\fetchdecode32.rs:2901:4
+     |
+2901 | fn assign_srcs() {
+     |    ^^^^^^^^^^^
+
+warning: function `assign_srcs_avx` is never used
+    --> src\cpu\decoder\fetchdecode32.rs:2905:4
+     |
+2905 | fn assign_srcs_avx() {
+     |    ^^^^^^^^^^^^^^^
+
+warning: methods `osize`, `asize`, and `ilen` are never used
+  --> src\cpu\decoder\instr.rs:63:19
+   |
+61 | impl BxInstruction {
+   | ------------------ methods in this implementation
+62 |     #[inline]
+63 |     pub(super) fn osize(&self) -> u32 {
+   |                   ^^^^^
+...
+68 |     pub(super) fn asize(&self) -> u32 {
+   |                   ^^^^^
+...
+72 |     pub(crate) fn ilen(&self) -> u8 {
+   |                   ^^^^
+
+warning: fields `Id`, `Iw`, and `Ib` are never read
+  --> src\cpu\decoder\instr.rs:84:5
+   |
+83 | pub union ModRmFirstForm {
+   |           -------------- fields in this union
+84 |     Id: u32,
+   |     ^^
+85 |     Iw: [u16; 2],
+   |     ^^
+...
+94 |     Ib: [u8; 4],
+   |     ^^
+
+warning: fields `displ16u`, `displ32u`, `Id2`, `Iw2`, and `Ib2` are never read
+   --> src\cpu\decoder\instr.rs:98:5
+    |
+ 97 | pub union ModRmSecondForm {
+    |           --------------- fields in this union
+ 98 |     displ16u: u16, // for 16-bit modrm forms
+    |     ^^^^^^^^
+ 99 |     displ32u: u32, // for 32-bit modrm forms
+    |     ^^^^^^^^
+100 |
+101 |     Id2: u32,
+    |     ^^^
+102 |     Iw2: [u16; 2],
+    |     ^^^
+103 |     Ib2: [u8; 4],
+    |     ^^^
+
+warning: fields `a` and `b` are never read
+   --> src\cpu\decoder\instr.rs:106:5
+    |
+105 | pub struct ModRmform {
+    |            --------- fields in this struct
+106 |     a: ModRmFirstForm,
+    |     ^
+107 |     b: ModRmSecondForm,
+    |     ^
+
+warning: constant `BX_LOCK_PREFIX_USED` is never used
+   --> src\cpu\decoder\instr.rs:110:18
+    |
+110 | pub(crate) const BX_LOCK_PREFIX_USED: bool = true;
+    |                  ^^^^^^^^^^^^^^^^^^^
+
+warning: method `mod_c0` is never used
+   --> src\cpu\decoder\instr.rs:166:19
+    |
+155 | impl MetaInfoFlags {
+    | ------------------ method in this implementation
+...
+166 |     pub(super) fn mod_c0(&self) -> u32 {
+    |                   ^^^^^^
+
+warning: constant `BX_INSTR_METADATA_DST` is never used
+  --> src\cpu\decoder\instr_generated.rs:64:7
+   |
+64 | const BX_INSTR_METADATA_DST: usize = 0;
+   |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_INSTR_METADATA_SRC1` is never used
+  --> src\cpu\decoder\instr_generated.rs:65:7
+   |
+65 | const BX_INSTR_METADATA_SRC1: usize = 1;
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_INSTR_METADATA_SRC2` is never used
+  --> src\cpu\decoder\instr_generated.rs:66:7
+   |
+66 | const BX_INSTR_METADATA_SRC2: usize = 2;
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_INSTR_METADATA_SRC3` is never used
+  --> src\cpu\decoder\instr_generated.rs:67:7
+   |
+67 | const BX_INSTR_METADATA_SRC3: usize = 3;
+   |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `seg`, `set_ilen`, `get_ia_opcode`, and `set_ia_opcode` are never used
+   --> src\cpu\decoder\instr_generated.rs:160:19
+    |
+138 | impl BxInstructionGenerated {
+    | --------------------------- methods in this implementation
+...
+160 |     pub(super) fn seg(&self) -> u8 {
+    |                   ^^^
+...
+177 |     pub(crate) fn set_ilen(&mut self, ilen: u8) {
+    |                   ^^^^^^^^
+...
+181 |     pub(crate) fn get_ia_opcode(&self) -> Opcode {
+    |                   ^^^^^^^^^^^^^
+...
+185 |     pub(crate) fn set_ia_opcode(&mut self, op: Opcode) {
+    |                   ^^^^^^^^^^^^^
+
+warning: struct `Gate` is never constructed
+  --> src\cpu\descriptor.rs:31:19
+   |
+31 | pub(crate) struct Gate {
+   |                   ^^^^
+
+warning: struct `Taskgate` is never constructed
+  --> src\cpu\descriptor.rs:38:8
+   |
+38 | struct Taskgate {
+   |        ^^^^^^^^
+
+warning: field `gate` is never read
+  --> src\cpu\descriptor.rs:74:9
+   |
+72 | pub(super) union Descriptor {
+   |                  ---------- field in this union
+73 |     pub segment: DescriptorSegment,
+74 |     pub gate: DescriptorGate,
+   |         ^^^^
+   |
+   = note: `Descriptor` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: fields `param_count`, `dest_selector`, and `dest_offset` are never read
+   --> src\cpu\descriptor.rs:98:9
+    |
+ 97 | struct DescriptorGate {
+    |        -------------- fields in this struct
+ 98 |     pub param_count: u8, // 5 bits (0..31) #words/dword to copy
+    |         ^^^^^^^^^^^
+ 99 |     pub dest_selector: u16,
+    |         ^^^^^^^^^^^^^
+100 |     pub dest_offset: u32,
+    |         ^^^^^^^^^^^
+    |
+    = note: `DescriptorGate` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: field `tss_selector` is never read
+   --> src\cpu\descriptor.rs:105:5
+    |
+104 | struct DescriptorTaskGate {
+    |        ------------------ field in this struct
+105 |     tss_selector: u16, // TSS segment selector
+    |     ^^^^^^^^^^^^
+    |
+    = note: `DescriptorTaskGate` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: constant `SEG_ACCESS_ROK4_G` is never used
+   --> src\cpu\descriptor.rs:119:18
+    |
+119 | pub(super) const SEG_ACCESS_ROK4_G: u32 = 0x08;
+    |                  ^^^^^^^^^^^^^^^^^
+
+warning: constant `SEG_ACCESS_WOK4_G` is never used
+   --> src\cpu\descriptor.rs:120:18
+    |
+120 | pub(super) const SEG_ACCESS_WOK4_G: u32 = 0x10;
+    |                  ^^^^^^^^^^^^^^^^^
+
+warning: methods `is_present` and `is_long64_segment` are never used
+   --> src\cpu\descriptor.rs:151:12
+    |
+149 | impl BxDescriptor {
+    | ----------------- methods in this implementation
+150 |     #[inline]
+151 |     pub fn is_present(&self) -> bool {
+    |            ^^^^^^^^^^
+...
+155 |     pub fn is_long64_segment(&self) -> bool {
+    |            ^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_SEGMENT_CODE` is never used
+   --> src\cpu\descriptor.rs:161:7
+    |
+161 | const BX_SEGMENT_CODE: u8 = 0x8;
+    |       ^^^^^^^^^^^^^^^
+
+warning: constant `BX_SEGMENT_DATA_EXPAND_DOWN` is never used
+   --> src\cpu\descriptor.rs:162:7
+    |
+162 | const BX_SEGMENT_DATA_EXPAND_DOWN: u8 = 0x4;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_SEGMENT_CODE_CONFORMING` is never used
+   --> src\cpu\descriptor.rs:163:7
+    |
+163 | const BX_SEGMENT_CODE_CONFORMING: u8 = 0x4;
+    |       ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_SEGMENT_DATA_WRITE` is never used
+   --> src\cpu\descriptor.rs:164:7
+    |
+164 | const BX_SEGMENT_DATA_WRITE: u8 = 0x2;
+    |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_SEGMENT_CODE_READ` is never used
+   --> src\cpu\descriptor.rs:165:7
+    |
+165 | const BX_SEGMENT_CODE_READ: u8 = 0x2;
+    |       ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_SEGMENT_ACCESSED` is never used
+   --> src\cpu\descriptor.rs:166:7
+    |
+166 | const BX_SEGMENT_ACCESSED: u8 = 0x1;
+    |       ^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_code_segment` is never used
+   --> src\cpu\descriptor.rs:227:8
+    |
+227 | pub fn is_code_segment(type_: u8) -> bool {
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `is_code_segment_conforming` is never used
+   --> src\cpu\descriptor.rs:231:8
+    |
+231 | pub fn is_code_segment_conforming(type_: u8) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_data_segment_expand_down` is never used
+   --> src\cpu\descriptor.rs:235:8
+    |
+235 | pub fn is_data_segment_expand_down(type_: u8) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_code_segment_readable` is never used
+   --> src\cpu\descriptor.rs:239:8
+    |
+239 | pub fn is_code_segment_readable(type_: u8) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_data_segment_writable` is never used
+   --> src\cpu\descriptor.rs:243:8
+    |
+243 | pub fn is_data_segment_writable(type_: u8) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_segment_accessed` is never used
+   --> src\cpu\descriptor.rs:247:8
+    |
+247 | pub fn is_segment_accessed(type_: u8) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_data_segment` is never used
+   --> src\cpu\descriptor.rs:252:8
+    |
+252 | pub fn is_data_segment(type_: u8) -> bool {
+    |        ^^^^^^^^^^^^^^^
+
+warning: function `is_code_segment_non_conforming` is never used
+   --> src\cpu\descriptor.rs:256:8
+    |
+256 | pub fn is_code_segment_non_conforming(type_: u8) -> bool {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple variants are never constructed
+   --> src\cpu\descriptor.rs:264:5
+    |
+261 | pub(super) enum SystemAndGateDescriptorEnum {
+    |                 --------------------------- variants in this enum
+...
+264 |     BxSysSegmentAvail286Tss = 0x1,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+265 |     BxSysSegmentLdt = 0x2,
+266 |     BxSysSegmentBusy286Tss = 0x3,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+267 |     Bx286CallGate = 0x4,
+    |     ^^^^^^^^^^^^^
+268 |     BxTaskGate = 0x5,
+    |     ^^^^^^^^^^
+269 |     Bx286InterruptGate = 0x6,
+    |     ^^^^^^^^^^^^^^^^^^
+270 |     Bx286TrapGate = 0x7,
+    |     ^^^^^^^^^^^^^
+271 |     /* 0x8 reserved */
+272 |     BxSysSegmentAvail386Tss = 0x9,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+...
+275 |     Bx386CallGate = 0xc,
+    |     ^^^^^^^^^^^^^
+276 |     /* 0xd reserved */
+277 |     Bx386InterruptGate = 0xe,
+    |     ^^^^^^^^^^^^^^^^^^
+278 |     Bx386TrapGate = 0xf,
+    |     ^^^^^^^^^^^^^
+    |
+    = note: `SystemAndGateDescriptorEnum` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: multiple variants are never constructed
+   --> src\cpu\descriptor.rs:283:5
+    |
+282 | pub(super) enum BxDataAndCodeDescriptorEnum {
+    |                 --------------------------- variants in this enum
+283 |     DataReadOnly = 0x0,
+    |     ^^^^^^^^^^^^
+284 |     DataReadOnlyAccessed = 0x1,
+    |     ^^^^^^^^^^^^^^^^^^^^
+285 |     DataReadWrite = 0x2,
+    |     ^^^^^^^^^^^^^
+...
+288 |     DataReadOnlyExpandDown = 0x4,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+289 |     DataReadOnlyExpandDownAccessed = 0x5,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+290 |     DataReadWriteExpandDown = 0x6,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^
+291 |     DataReadWriteExpandDownAccessed = 0x7,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+292 |     CodeExecOnly = 0x8,
+    |     ^^^^^^^^^^^^
+293 |     CodeExecOnlyAccessed = 0x9,
+    |     ^^^^^^^^^^^^^^^^^^^^
+294 |     CodeExecRead = 0xa,
+    |     ^^^^^^^^^^^^
+295 |     CodeExecReadAccessed = 0xb,
+    |     ^^^^^^^^^^^^^^^^^^^^
+296 |     CodeExecOnlyConforming = 0xc,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+297 |     CodeExecOnlyConformingAccessed = 0xd,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+298 |     CodeExecReadConforming = 0xe,
+    |     ^^^^^^^^^^^^^^^^^^^^^^
+299 |     CodeExecReadConformingAccessed = 0xf,
+    |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `BxDataAndCodeDescriptorEnum` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `exception_type` and `exception_class` are never read
+  --> src\cpu\exception.rs:19:5
+   |
+18 | struct BxExceptionInfo {
+   |        --------------- fields in this struct
+19 |     exception_type: ExceptionType,
+   |     ^^^^^^^^^^^^^^
+20 |     exception_class: ExceptionClass,
+   |     ^^^^^^^^^^^^^^^
+
+warning: fields `align1`, `align2`, and `align3` are never read
+  --> src\cpu\i387.rs:26:9
+   |
+ 8 | pub struct I387 {
+   |            ---- fields in this struct
+...
+26 |     pub align1: u8,
+   |         ^^^^^^
+27 |     pub align2: u8,
+   |         ^^^^^^
+28 |     pub align3: u8,
+   |         ^^^^^^
+   |
+   = note: `I387` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: type alias `BxPackedRegT` is never used
+  --> src\cpu\i387.rs:31:10
+   |
+31 | pub type BxPackedRegT = BxPackedRegister;
+   |          ^^^^^^^^^^^^
+
+warning: struct `BxPageWriteStampTable` is never constructed
+  --> src\cpu\i_cache_v2.rs:16:8
+   |
+16 | struct BxPageWriteStampTable {
+   |        ^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple associated items are never used
+  --> src\cpu\i_cache_v2.rs:21:11
+   |
+20 | impl BxPageWriteStampTable {
+   | -------------------------- associated items in this implementation
+21 |     const PHY_MEM_PAGES_IN_4G_SPACE: usize = 1024 * 1024;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+24 |     fn hash(p_addr: BxPhyAddress) -> u32 {
+   |        ^^^^
+...
+30 |     fn get_fine_granularity_mapping(&self, p_addr: BxPhyAddress) -> u32 {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+35 |     fn mark_icache(&mut self, p_addr: BxPhyAddress, len: u32) {
+   |        ^^^^^^^^^^^
+...
+43 |     fn mark_icache_mask(&mut self, p_addr: BxPhyAddress, mask: u32) {
+   |        ^^^^^^^^^^^^^^^^
+...
+48 |     fn dec_write_stamp<I: BxCpuIdTrait>(&mut self, cpus: &mut [BxCpuC<I>], p_addr: BxPhyAddress) {
+   |        ^^^^^^^^^^^^^^^
+...
+59 |     pub fn dec_write_stamp_with_len<I: BxCpuIdTrait>(
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^
+...
+79 |     fn reset_write_stamps(&mut self) {
+   |        ^^^^^^^^^^^^^^^^^^
+
+warning: function `handle_smc` is never used
+  --> src\cpu\i_cache_v2.rs:86:4
+   |
+86 | fn handle_smc<I: BxCpuIdTrait>(cpus: &mut [BxCpuC<I>], p_addr: BxPhyAddress, mask: u32) {
+   |    ^^^^^^^^^^
+
+warning: constant `BX_MAX_TRACE_LENGTH` is never used
+  --> src\cpu\i_cache_v2.rs:97:7
+   |
+97 | const BX_MAX_TRACE_LENGTH: usize = 32;
+   |       ^^^^^^^^^^^^^^^^^^^
+
+warning: variant `Address` is never constructed
+   --> src\cpu\i_cache_v2.rs:104:5
+    |
+101 | enum IcacheAddress {
+    |      ------------- variant in this enum
+...
+104 |     Address(BxPhyAddress),
+    |     ^^^^^^^
+    |
+    = note: `IcacheAddress` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: fields `trace_mask`, `tlen`, and `i` are never read
+   --> src\cpu\i_cache_v2.rs:120:5
+    |
+117 | pub(super) struct BxICacheEntry {
+    |                   ------------- fields in this struct
+...
+120 |     trace_mask: u32,
+    |     ^^^^^^^^^^
+...
+123 |     tlen: usize, // Trace length in instructions
+    |     ^^^^
+124 |     i: BxInstructionGenerated,
+    |     ^
+    |
+    = note: `BxICacheEntry` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: fields `ppf` and `e` are never read
+   --> src\cpu\i_cache_v2.rs:132:5
+    |
+130 | struct PageSplitEntryIndex {
+    |        ------------------- fields in this struct
+131 |     // Physical address of 2nd page of the trace
+132 |     ppf: BxPhyAddress,
+    |     ^^^
+133 |     e: BxICacheEntry,
+    |     ^
+    |
+    = note: `PageSplitEntryIndex` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: fields `mpool`, `mpindex`, `trace_link_time_stamp`, `page_split_index`, and `next_page_split_index` are never read
+   --> src\cpu\i_cache_v2.rs:139:16
+    |
+137 | pub(crate) struct BxICache {
+    |                   -------- fields in this struct
+138 |     pub(crate) entry: [BxICacheEntry; BX_ICACHE_ENTRIES],
+139 |     pub(crate) mpool: [BxInstructionGenerated; BX_ICACHE_MEM_POOL],
+    |                ^^^^^
+140 |     pub(crate) mpindex: usize,
+    |                ^^^^^^^
+141 |     pub(crate) trace_link_time_stamp: u32,
+    |                ^^^^^^^^^^^^^^^^^^^^^
+142 |     pub(crate) page_split_index: [PageSplitEntryIndex; BX_ICACHE_PAGE_SPLIT_ENTRIES],
+    |                ^^^^^^^^^^^^^^^^
+143 |     pub(crate) next_page_split_index: usize,
+    |                ^^^^^^^^^^^^^^^^^^^^^
+    |
+    = note: `BxICache` has a derived impl for the trait `Clone`, but this is intentionally ignored during dead code analysis
+
+warning: multiple methods are never used
+   --> src\cpu\i_cache_v2.rs:182:8
+    |
+159 | impl BxICache {
+    | ------------- methods in this implementation
+...
+182 |     fn alloc_trace(&mut self, e: &mut BxICacheEntry) {
+    |        ^^^^^^^^^^^
+...
+192 |     fn commit_trace(&mut self, len: usize) {
+    |        ^^^^^^^^^^^^
+...
+197 |     pub fn commit_page_split_trace(&mut self, p_addr: BxPhyAddress, e: BxICacheEntry) {
+    |            ^^^^^^^^^^^^^^^^^^^^^^^
+...
+232 |     fn flush_icache_entries(&mut self) {
+    |        ^^^^^^^^^^^^^^^^^^^^
+...
+248 |     fn invalidate_page_split_icache_entries(&mut self) {
+    |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+...
+266 |     fn handle_smc(&mut self, p_addr: BxPhyAddress, mask: u32) {
+    |        ^^^^^^^^^^
+...
+319 |     fn break_links(&mut self) -> bool {
+    |        ^^^^^^^^^^^
+
+warning: function `flush_icaches` is never used
+   --> src\cpu\i_cache_v2.rs:332:4
+    |
+332 | fn flush_icaches<I: BxCpuIdTrait>(
+    |    ^^^^^^^^^^^^^
+
+warning: function `flush_smc` is never used
+   --> src\cpu\i_cache_v2.rs:344:4
+    |
+344 | fn flush_smc(e: &mut BxICacheEntry) {
+    |    ^^^^^^^^^
+
+warning: function `gen_dummy_icache_entry` is never used
+   --> src\cpu\i_cache_v2.rs:356:4
+    |
+356 | fn gen_dummy_icache_entry(i: &mut BxInstructionGenerated) {
+    |    ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: methods `bx_end_trace` and `serve_icache_miss` are never used
+   --> src\cpu\i_cache_v2.rs:363:8
+    |
+362 | impl<'c, I: BxCpuIdTrait> BxCpuC<'_, I> {
+    | --------------------------------------- methods in this implementation
+363 |     fn bx_end_trace(&mut self) {
+    |        ^^^^^^^^^^^^
+...
+367 |     fn serve_icache_miss(&mut self, eip_biased: u32, p_addr: BxPhyAddress) {
+    |        ^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_ICACHE_INVALID_PHY_ADDRESS` is never used
+ --> src\cpu\icache.rs:9:7
+  |
+9 | const BX_ICACHE_INVALID_PHY_ADDRESS: BxPhyAddress = -1 as _;
+  |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_ICACHE_PAGE_SPLIT_ENTRIES` is never used
+  --> src\cpu\icache.rs:11:7
+   |
+11 | const BX_ICACHE_PAGE_SPLIT_ENTRIES: usize = 8;
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `BxPageWriteStampTable` is never constructed
+  --> src\cpu\icache.rs:14:12
+   |
+14 | pub struct BxPageWriteStampTable<'a> {
+   |            ^^^^^^^^^^^^^^^^^^^^^
+
+warning: associated items `PHY_MEM_PAGES_IN_4G_SPACE`, `BX_ICACHE_ENTRIES`, `BX_ICACHE_MEM_POOL`, `dec_write_stamp`, and `dec_write_stamp_with_len` are never used
+  --> src\cpu\icache.rs:19:11
+   |
+18 | impl BxPageWriteStampTable<'_> {
+   | ------------------------------ associated items in this implementation
+19 |     const PHY_MEM_PAGES_IN_4G_SPACE: u32 = 1024 * 1024;
+   |           ^^^^^^^^^^^^^^^^^^^^^^^^^
+20 |
+21 |     const BX_ICACHE_ENTRIES: usize = (64 * 1024); // Must be a power of 2.
+   |           ^^^^^^^^^^^^^^^^^
+22 |     const BX_ICACHE_MEM_POOL: usize = (576 * 1024);
+   |           ^^^^^^^^^^^^^^^^^^
+23 |
+24 |     pub fn dec_write_stamp(&mut self, _p_addr: BxPhyAddress) {
+   |            ^^^^^^^^^^^^^^^
+...
+28 |     pub fn dec_write_stamp_with_len(&mut self, _p_addr: BxPhyAddress, _len: u32) {
+   |            ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_ICACHE_ENTRIES` is never used
+  --> src\cpu\icache.rs:33:7
+   |
+33 | const BX_ICACHE_ENTRIES: usize = 64 * 1024; // Must be a power of 2.
+   |       ^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_ICACHE_MEM_POOL` is never used
+  --> src\cpu\icache.rs:34:7
+   |
+34 | const BX_ICACHE_MEM_POOL: usize = 576 * 1024;
+   |       ^^^^^^^^^^^^^^^^^^
+
+warning: fields `p_addr`, `trace_mask`, and `tlen` are never read
+  --> src\cpu\icache.rs:38:16
+   |
+37 | pub struct BxIcacheEntry {
+   |            ------------- fields in this struct
+38 |     pub(super) p_addr: BxPhyAddress, // Physical address of the instruction
+   |                ^^^^^^
+39 |     pub(super) trace_mask: u32,
+   |                ^^^^^^^^^^
+40 |
+41 |     pub(super) tlen: u32, // Trace length in instructions
+   |                ^^^^
+   |
+   = note: `BxIcacheEntry` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: struct `PageSplitEntry` is never constructed
+  --> src\cpu\icache.rs:46:8
+   |
+46 | struct PageSplitEntry {
+   |        ^^^^^^^^^^^^^^
+
+warning: struct `BxIcache` is never constructed
+  --> src\cpu\icache.rs:52:12
+   |
+52 | pub struct BxIcache {
+   |            ^^^^^^^^
+
+warning: methods `flush_icache_entries` and `find_entry` are never used
+  --> src\cpu\icache.rs:66:12
+   |
+64 | impl BxIcache {
+   | ------------- methods in this implementation
+65 |     #[inline]
+66 |     pub fn flush_icache_entries(&mut self) {
+   |            ^^^^^^^^^^^^^^^^^^^^
+...
+87 |     pub(super) fn find_entry(
+   |                   ^^^^^^^^^^
+
+warning: function `cpuid_factory` is never used
+  --> src\cpu\init.rs:32:15
+   |
+32 | pub(super) fn cpuid_factory() -> impl BxCpuIdTrait {
+   |               ^^^^^^^^^^^^^
+
+warning: method `write_32bit_regz` is never used
+   --> src\cpu\init.rs:425:8
+    |
+ 44 | impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    | ----------------------------------- method in this implementation
+...
+425 |     fn write_32bit_regz(&mut self, index: usize, val: u64) {
+    |        ^^^^^^^^^^^^^^^^
+
+warning: fields `result` and `auxbits` are never read
+ --> src\cpu\lazy_flags.rs:5:5
+  |
+4 | pub(crate) struct BxLazyflagsEntry {
+  |                   ---------------- fields in this struct
+5 |     result: BxAddress,
+  |     ^^^^^^
+6 |     auxbits: BxAddress,
+  |     ^^^^^^^
+  |
+  = note: `BxLazyflagsEntry` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `check_addr_in_tlb_buffers` is never used
+  --> src\cpu\paging.rs:15:19
+   |
+13 | impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+   | ----------------------------------- method in this implementation
+14 |     #[cfg(feature = "bx_large_ram_file")]
+15 |     pub(crate) fn check_addr_in_tlb_buffers(&self, _addr: &Block, _end: usize) -> bool {
+   |                   ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: method `get_tsc` is never used
+  --> src\cpu\proc_ctrl.rs:33:8
+   |
+ 6 | impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+   | ----------------------------------- method in this implementation
+...
+33 |     fn get_tsc(&self) -> u64 {
+   |        ^^^^^^^
+
+warning: multiple variants are never constructed
+  --> src\cpu\rusty_box.rs:4:5
+   |
+ 3 | pub(crate) enum MemoryAccessType {
+   |                 ---------------- variants in this enum
+ 4 |     Read = 0,
+   |     ^^^^
+ 5 |     Write = 1,
+   |     ^^^^^
+ 6 |     Execute = 2,
+ 7 |     RW = 3,
+   |     ^^
+ 8 |     ShadowStackRead = 4,
+   |     ^^^^^^^^^^^^^^^
+ 9 |     ShadowStackWrite = 5,
+   |     ^^^^^^^^^^^^^^^^
+10 |     ShadowStackInvalid = 6, // can't execute shadow stack
+   |     ^^^^^^^^^^^^^^^^^^
+11 |     ShadowStackRw = 7,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `MemoryAccessType` has derived impls for the traits `Clone` and `Debug`, but these are intentionally ignored during dead code analysis
+
+warning: type alias `float16` is never used
+ --> src\cpu\softfloat3e\softfolat_types.rs:9:10
+  |
+9 | pub type float16 = u16;
+  |          ^^^^^^^
+
+warning: type alias `bfloat16` is never used
+  --> src\cpu\softfloat3e\softfolat_types.rs:11:10
+   |
+11 | pub type bfloat16 = u16;
+   |          ^^^^^^^^
+
+warning: type alias `float32` is never used
+  --> src\cpu\softfloat3e\softfolat_types.rs:13:10
+   |
+13 | pub type float32 = u32;
+   |          ^^^^^^^
+
+warning: type alias `float64` is never used
+  --> src\cpu\softfloat3e\softfolat_types.rs:15:10
+   |
+15 | pub type float64 = u64;
+   |          ^^^^^^^
+
+warning: struct `uint128` is never constructed
+  --> src\cpu\softfloat3e\softfolat_types.rs:19:12
+   |
+19 | pub struct uint128 {
+   |            ^^^^^^^
+
+warning: struct `uint64_extra` is never constructed
+  --> src\cpu\softfloat3e\softfolat_types.rs:26:12
+   |
+26 | pub struct uint64_extra {
+   |            ^^^^^^^^^^^^
+
+warning: struct `uint128_extra` is never constructed
+  --> src\cpu\softfloat3e\softfolat_types.rs:33:12
+   |
+33 | pub struct uint128_extra {
+   |            ^^^^^^^^^^^^^
+
+warning: struct `f16_t` is never constructed
+  --> src\cpu\softfloat3e\softfolat_types.rs:67:12
+   |
+67 | pub struct f16_t {
+   |            ^^^^^
+
+warning: struct `f32_t` is never constructed
+  --> src\cpu\softfloat3e\softfolat_types.rs:72:12
+   |
+72 | pub struct f32_t {
+   |            ^^^^^
+
+warning: type alias `float128_t` is never used
+  --> src\cpu\softfloat3e\softfolat_types.rs:76:10
+   |
+76 | pub type float128_t = u128;
+   |          ^^^^^^^^^^
+
+warning: type alias `extFloat80_t` is never used
+   --> src\cpu\softfloat3e\softfolat_types.rs:110:10
+    |
+110 | pub type extFloat80_t = extFloat80M;
+    |          ^^^^^^^^^^^^
+
+warning: type alias `BxMemType` is never used
+ --> src\cpu\tlb.rs:5:10
+  |
+5 | pub type BxMemType = u32;
+  |          ^^^^^^^^^
+
+warning: constant `TLB_GLOBAL_PAGE` is never used
+  --> src\cpu\tlb.rs:16:7
+   |
+16 | const TLB_GLOBAL_PAGE: u32 = 0x80000000;
+   |       ^^^^^^^^^^^^^^^
+
+warning: fields `pkey` and `lpf_mask` are never read
+  --> src\cpu\tlb.rs:28:16
+   |
+20 | pub(super) struct TLBEntry {
+   |                   -------- fields in this struct
+...
+28 |     pub(super) pkey: u32,
+   |                ^^^^
+29 |     // linear address mask of the page size
+30 |     pub(super) lpf_mask: u32,
+   |                ^^^^^^^^
+
+warning: enum `MemType` is never used
+  --> src\cpu\tlb.rs:36:6
+   |
+36 | enum MemType {
+   |      ^^^^^^^
+
+warning: methods `valid`, `invalidate`, and `get_memtype` are never used
+  --> src\cpu\tlb.rs:78:8
+   |
+49 | impl TLBEntry {
+   | ------------- methods in this implementation
+...
+78 |     fn valid(&self) -> bool {
+   |        ^^^^^
+...
+82 |     fn invalidate(&mut self) {
+   |        ^^^^^^^^^^
+...
+87 |     fn get_memtype(&self) -> MemType {
+   |        ^^^^^^^^^^^
+
+warning: field `split_large` is never read
+   --> src\cpu\tlb.rs:104:5
+    |
+101 | pub struct Tlb<const SIZE: usize> {
+    |            --- field in this struct
+...
+104 |     split_large: bool,
+    |     ^^^^^^^^^^^
+
+warning: methods `flush`, `flush_non_global`, and `invlpg` are never used
+   --> src\cpu\tlb.rs:147:12
+    |
+107 | impl<const SIZE: usize> Tlb<SIZE> {
+    | --------------------------------- methods in this implementation
+...
+147 |     pub fn flush(&mut self) {
+    |            ^^^^^
+...
+155 |     pub fn flush_non_global(&mut self) {
+    |            ^^^^^^^^^^^^^^^^
+...
+172 |     pub fn invlpg(&mut self, laddr: u64) {
+    |            ^^^^^^
+
+warning: fields `pin_vmexec_ctrls`, `vmexec_ctrls1`, and `vmexec_ctrls2` are never read
+  --> src\cpu\vmx.rs:11:5
+   |
+10 | pub struct BxVmcs {
+   |            ------ fields in this struct
+11 |     pin_vmexec_ctrls: VmxPinBasedVmexecControls,
+   |     ^^^^^^^^^^^^^^^^
+12 |
+13 |     vmexec_ctrls1: VmxVmexec1Controls,
+   |     ^^^^^^^^^^^^^
+14 |
+15 |     vmexec_ctrls2: VmxVmexec2Controls,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `BxVmcs` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: type alias `BxVmxCap` is never used
+  --> src\cpu\vmx.rs:20:10
+   |
+20 | pub type BxVmxCap = VmxCap;
+   |          ^^^^^^^^
+
+warning: field `vmexec_ctrls` is never read
+ --> src\cpu\vmx_ctrls.rs:3:16
+  |
+2 | pub(super) struct VmxVmexec1Controls {
+  |                   ------------------ field in this struct
+3 |     pub(super) vmexec_ctrls: u32,
+  |                ^^^^^^^^^^^^
+  |
+  = note: `VmxVmexec1Controls` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `pin_vmexec_ctrls` is never read
+ --> src\cpu\vmx_ctrls.rs:8:16
+  |
+7 | pub(super) struct VmxPinBasedVmexecControls {
+  |                   ------------------------- field in this struct
+8 |     pub(super) pin_vmexec_ctrls: u32,
+  |                ^^^^^^^^^^^^^^^^
+  |
+  = note: `VmxPinBasedVmexecControls` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: field `vmexec_ctrls` is never read
+  --> src\cpu\vmx_ctrls.rs:13:5
+   |
+12 | pub(super) struct VmxVmexec2Controls {
+   |                   ------------------ field in this struct
+13 |     vmexec_ctrls: u32,
+   |     ^^^^^^^^^^^^
+   |
+   = note: `VmxVmexec2Controls` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: type alias `BxPackedAvxRegister` is never used
+ --> src\cpu\xmm.rs:5:10
+  |
+5 | pub type BxPackedAvxRegister = BxPackedZmmRegister;
+  |          ^^^^^^^^^^^^^^^^^^^
+
+warning: field `0` is never read
+  --> src\cpu\xmm.rs:17:12
+   |
+17 |     ZmmU64([u64; 8]),
+   |     ------ ^^^^^^^^
+   |     |
+   |     field in this variant
+   |
+   = note: `BxPackedZmmRegister` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+help: consider changing the field to be of unit type to suppress this warning while preserving the field numbering, or remove the field
+   |
+17 -     ZmmU64([u64; 8]),
+17 +     ZmmU64(()),
+   |
+
+warning: multiple variants are never constructed
+  --> src\cpu\xmm.rs:10:5
+   |
+ 9 | pub enum BxPackedZmmRegister {
+   |          ------------------- variants in this enum
+10 |     ZmmSbyte([i8; 64]),
+   |     ^^^^^^^^
+11 |     ZmmS16([i16; 32]),
+   |     ^^^^^^
+12 |     ZmmS32([i32; 16]),
+   |     ^^^^^^
+13 |     ZmmS64([i64; 8]),
+   |     ^^^^^^
+14 |     ZmmUbyte([u8; 64]),
+   |     ^^^^^^^^
+15 |     ZmmU16([u16; 32]),
+   |     ^^^^^^
+16 |     ZmmU32([u32; 16]),
+   |     ^^^^^^
+17 |     ZmmU64([u64; 8]),
+18 |     ZmmV128([BxPackedXmmRegister; 4]),
+   |     ^^^^^^^
+19 |     ZmmV256([BxPackedYmmRegister; 2]),
+   |     ^^^^^^^
+   |
+   = note: `BxPackedZmmRegister` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `clear` is never used
+  --> src\cpu\xmm.rs:23:19
+   |
+22 | impl BxPackedZmmRegister {
+   | ------------------------ method in this implementation
+23 |     pub(super) fn clear(&mut self) {
+   |                   ^^^^^
+
+warning: type alias `BxXmmReg` is never used
+  --> src\cpu\xmm.rs:35:10
+   |
+35 | pub type BxXmmReg = BxPackedXmmRegister;
+   |          ^^^^^^^^
+
+warning: multiple variants are never constructed
+  --> src\cpu\xmm.rs:38:5
+   |
+37 | pub enum BxPackedXmmRegister {
+   |          ------------------- variants in this enum
+38 |     XmmSbyte([i8; 16]),
+   |     ^^^^^^^^
+39 |     XmmS16([i16; 8]),
+   |     ^^^^^^
+40 |     XmmS32([i32; 4]),
+   |     ^^^^^^
+41 |     XmmS64([i64; 2]),
+   |     ^^^^^^
+42 |     XmmUbyte([u8; 16]),
+   |     ^^^^^^^^
+43 |     XmmU16([i16; 8]),
+   |     ^^^^^^
+44 |     XmmU32([i32; 4]),
+   |     ^^^^^^
+45 |     XmmU64([u64; 2]),
+   |     ^^^^^^
+   |
+   = note: `BxPackedXmmRegister` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: type alias `BxYmmReg` is never used
+  --> src\cpu\xmm.rs:48:10
+   |
+48 | pub type BxYmmReg = BxPackedYmmRegister;
+   |          ^^^^^^^^
+
+warning: multiple variants are never constructed
+  --> src\cpu\xmm.rs:51:5
+   |
+50 | pub enum BxPackedYmmRegister {
+   |          ------------------- variants in this enum
+51 |     YmmSbyte([i8; 32]),
+   |     ^^^^^^^^
+52 |     YmmS16([i16; 16]),
+   |     ^^^^^^
+53 |     YmmS32([i32; 8]),
+   |     ^^^^^^
+54 |     YmmS64([i64; 4]),
+   |     ^^^^^^
+55 |     YmmUbyte([u8; 32]),
+   |     ^^^^^^^^
+56 |     YmmU16([u16; 16]),
+   |     ^^^^^^
+57 |     YmmU32([u32; 8]),
+   |     ^^^^^^
+58 |     YmmU64([u64; 4]),
+   |     ^^^^^^
+59 |     YmmV128([BxPackedXmmRegister; 2]),
+   |     ^^^^^^^
+   |
+   = note: `BxPackedYmmRegister` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: method `BX_CLEAR_AVX_REG` is never used
+  --> src\cpu\xmm.rs:68:8
+   |
+67 | impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+   | ----------------------------------- method in this implementation
+68 |     fn BX_CLEAR_AVX_REG(&mut self, index: usize) {
+   |        ^^^^^^^^^^^^^^^^
+
+warning: static `CRC32_TABLE` is never used
+  --> src\crc.rs:40:8
+   |
+40 | static CRC32_TABLE: Once<[u32; 256]> = Once::new();
+   |        ^^^^^^^^^^^
+
+warning: function `crc32_table` is never used
+  --> src\crc.rs:42:8
+   |
+42 | pub fn crc32_table() -> &'static [u32; 256] {
+   |        ^^^^^^^^^^^
+
+warning: constant `CRC32_POLY` is never used
+  --> src\crc.rs:51:7
+   |
+51 | const CRC32_POLY: u32 = 0x04c11db7;
+   |       ^^^^^^^^^^
+
+warning: function `init_crc32_table` is never used
+  --> src\crc.rs:53:4
+   |
+53 | fn init_crc32_table() -> [u32; 256] {
+   |    ^^^^^^^^^^^^^^^^
+
+warning: function `crc32` is never used
+  --> src\crc.rs:74:8
+   |
+74 | pub fn crc32(buf: &[u8]) -> u32 {
+   |        ^^^^^
+
+warning: trait `BxSimulatorInterfaceC` is never used
+ --> src\gui\siminterface.rs:1:7
+  |
+1 | trait BxSimulatorInterfaceC {}тРН
+  |       ^^^^^^^^^^^^^^^^^^^^^
+
+warning: struct `IoHandlerStruct` is never constructed
+ --> src\iodev\mod.rs:5:8
+  |
+5 | struct IoHandlerStruct {
+  |        ^^^^^^^^^^^^^^^
+
+warning: struct `BxDevicesC` is never constructed
+  --> src\iodev\mod.rs:15:8
+   |
+15 | struct BxDevicesC {}
+   |        ^^^^^^^^^^
+
+warning: methods `default_read_handler` and `default_write_handler` are never used
+  --> src\iodev\mod.rs:18:19
+   |
+17 | impl BxDevicesC {
+   | --------------- methods in this implementation
+18 |     pub(crate) fn default_read_handler(&self, _address: u32, _io_len: u8) -> u32 {
+   |                   ^^^^^^^^^^^^^^^^^^^^
+...
+22 |     pub(crate) fn default_write_handler(&self, _address: u32, _value: u32, _io_len: u8) {}
+   |                   ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `init_devices_stub` is never used
+ --> src\iodev\devices.rs:5:4
+  |
+5 | fn init_devices_stub(mem: &mut BxMemC) {}
+  |    ^^^^^^^^^^^^^^^^^
+
+warning: fields `allocated`, `used_blocks`, and `next_swapout_idx` are never read
+  --> src\memory\mod.rs:37:5
+   |
+33 | pub struct BxMemoryStubC {
+   |            ------------- fields in this struct
+...
+37 |     allocated: usize,
+   |     ^^^^^^^^^
+...
+50 |     used_blocks: Cell<usize>,
+   |     ^^^^^^^^^^^
+...
+53 |     next_swapout_idx: Cell<usize>,
+   |     ^^^^^^^^^^^^^^^^
+   |
+   = note: `BxMemoryStubC` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: type alias `Unsigned` is never used
+  --> src\memory\mod.rs:61:6
+   |
+61 | type Unsigned = u32;
+   |      ^^^^^^^^
+
+warning: fields `bitmap`, `read_handler`, and `write_handler` are never read
+  --> src\memory\mod.rs:73:5
+   |
+68 | pub(super) struct MemoryHandlerStruct<'a> {
+   |                   ------------------- fields in this struct
+...
+73 |     bitmap: u16,
+   |     ^^^^^^
+74 |     read_handler: MemoryHandlerT,
+   |     ^^^^^^^^^^^^
+75 |     write_handler: MemoryHandlerT,
+   |     ^^^^^^^^^^^^^
+   |
+   = note: `MemoryHandlerStruct` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: static `BIOS_ROM_LOWER` is never used
+  --> src\memory\mod.rs:81:8
+   |
+81 | static BIOS_ROM_LOWER: u8 = 0x01;
+   |        ^^^^^^^^^^^^^^
+
+warning: static `BIOS_ROM_EXTENDED` is never used
+  --> src\memory\mod.rs:82:8
+   |
+82 | static BIOS_ROM_EXTENDED: u8 = 0x02;
+   |        ^^^^^^^^^^^^^^^^^
+
+warning: static `BIOS_ROM_1MEG` is never used
+  --> src\memory\mod.rs:83:8
+   |
+83 | static BIOS_ROM_1MEG: u8 = 0x04;
+   |        ^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+   --> src\memory\mod.rs:89:5
+    |
+ 86 | pub struct BxMemC<'a> {
+    |            ------ fields in this struct
+...
+ 89 |     bios_write_enabled: bool,
+    |     ^^^^^^^^^^^^^^^^^^
+...
+ 93 |     smram_restricted: bool,
+    |     ^^^^^^^^^^^^^^^^
+ 94 |
+ 95 |     rom_present: [bool; 65],
+    |     ^^^^^^^^^^^
+...
+ 98 |     bios_rom_access: u8,
+    |     ^^^^^^^^^^^^^^^
+ 99 |     flash_type: u8,
+    |     ^^^^^^^^^^
+100 |     flash_status: u8,
+    |     ^^^^^^^^^^^^
+101 |     flash_wsm_state: u8,
+    |     ^^^^^^^^^^^^^^^
+102 |     flash_modified: bool,
+    |     ^^^^^^^^^^^^^^
+    |
+    = note: `BxMemC` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: multiple variants are never constructed
+  --> src\memory\memory_rusty_box.rs:14:5
+   |
+13 | pub(super) enum MemoryAreaT {
+   |                 ----------- variants in this enum
+14 |     C0000 = 0,
+   |     ^^^^^
+15 |     C4000,
+   |     ^^^^^
+16 |     C8000,
+   |     ^^^^^
+17 |     CC000,
+   |     ^^^^^
+18 |     D0000,
+   |     ^^^^^
+19 |     D4000,
+   |     ^^^^^
+20 |     D8000,
+   |     ^^^^^
+21 |     DC000,
+   |     ^^^^^
+22 |     E0000,
+   |     ^^^^^
+23 |     E4000,
+   |     ^^^^^
+24 |     E8000,
+   |     ^^^^^
+25 |     EC000,
+   |     ^^^^^
+
+warning: associated items `get_host_mem_addr`, `write_physical_page`, `read_physical_page`, and `check_monitor` are never used
+   --> src\memory\memory_stub.rs:330:8
+    |
+ 32 | impl BxMemoryStubC {
+    | ------------------ associated items in this implementation
+...
+330 |     fn get_host_mem_addr<'a, I: BxCpuIdTrait>(
+    |        ^^^^^^^^^^^^^^^^^
+...
+361 |     fn write_physical_page<'a, I: BxCpuIdTrait>(
+    |        ^^^^^^^^^^^^^^^^^^^
+...
+459 |     fn read_physical_page<'a, I: BxCpuIdTrait>(
+    |        ^^^^^^^^^^^^^^^^^^
+...
+519 |     fn check_monitor<I: BxCpuIdTrait>(
+    |        ^^^^^^^^^^^^^
+
+warning: constant `FLASH_INT_ID` is never used
+  --> src\memory\misc_mem.rs:13:18
+   |
+13 | pub(super) const FLASH_INT_ID: u8 = 0x90;
+   |                  ^^^^^^^^^^^^
+
+warning: constant `FLASH_READ_STATUS` is never used
+  --> src\memory\misc_mem.rs:14:18
+   |
+14 | pub(super) const FLASH_READ_STATUS: u8 = 0x70;
+   |                  ^^^^^^^^^^^^^^^^^
+
+warning: constant `FLASH_CLR_STATUS` is never used
+  --> src\memory\misc_mem.rs:15:18
+   |
+15 | pub(super) const FLASH_CLR_STATUS: u8 = 0x50;
+   |                  ^^^^^^^^^^^^^^^^
+
+warning: constant `FLASH_ERASE_SETUP` is never used
+  --> src\memory\misc_mem.rs:16:18
+   |
+16 | pub(super) const FLASH_ERASE_SETUP: u8 = 0x20;
+   |                  ^^^^^^^^^^^^^^^^^
+
+warning: constant `FLASH_ERASE_SUSP` is never used
+  --> src\memory\misc_mem.rs:17:18
+   |
+17 | pub(super) const FLASH_ERASE_SUSP: u8 = 0xb0;
+   |                  ^^^^^^^^^^^^^^^^
+
+warning: constant `FLASH_PROG_SETUP` is never used
+  --> src\memory\misc_mem.rs:18:18
+   |
+18 | pub(super) const FLASH_PROG_SETUP: u8 = 0x40;
+   |                  ^^^^^^^^^^^^^^^^
+
+warning: constant `FLASH_ERASE` is never used
+  --> src\memory\misc_mem.rs:19:18
+   |
+19 | pub(super) const FLASH_ERASE: u8 = 0xd0;
+   |                  ^^^^^^^^^^^
+
+warning: function `write_host_word_to_little_endian` is never used
+ --> src\misc\bswap.rs:7:8
+  |
+7 | pub fn write_host_word_to_little_endian(host_ptr: &mut [u8], native_var16: u16) {
+  |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `write_host_dword_to_little_endian` is never used
+  --> src\misc\bswap.rs:12:8
+   |
+12 | pub fn write_host_dword_to_little_endian(host_ptr: &mut [u8], native_var32: u32) {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `write_host_qword_to_little_endian` is never used
+  --> src\misc\bswap.rs:17:8
+   |
+17 | pub fn write_host_qword_to_little_endian(host_ptr: &mut [u8], native_var64: u64) {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_host_qword_to_little_endian` is never used
+  --> src\misc\bswap.rs:32:8
+   |
+32 | pub fn read_host_qword_to_little_endian(host_ptr: &[u8]) -> u64 {
+   |        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: multiple fields are never read
+  --> src\pc_system.rs:27:5
+   |
+26 | struct Timer {
+   |        ----- fields in this struct
+27 |     in_use: bool,                   // Timer slot is in-use (currently registered).
+   |     ^^^^^^
+28 |     period: u64,                    // Timer periodocity in cpu ticks.
+   |     ^^^^^^
+29 |     time_to_fire: u64,              // Time to fire next (in absolute ticks).
+   |     ^^^^^^^^^^^^
+30 |     active: bool,                   // 0=inactive, 1=active.
+   |     ^^^^^^
+31 |     continuous: bool,               // 0=one-shot timer, 1=continuous periodicity.
+   |     ^^^^^^^^^^
+32 |     funct: Option<BxTimerHandlerT>, // A callback function for when the
+   |     ^^^^^
+33 |     // this_ptr: *mut c_void,            // The this-> pointer for C++ callbacks
+34 |     id: [u8; BxMaxTimerIDLen], // String ID of timer.
+   |     ^^
+35 |     param: u32,                // Device-specific value assigned to timer (optional)
+   |     ^^^^^
+   |
+   = note: `Timer` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: multiple fields are never read
+  --> src\pc_system.rs:40:5
+   |
+39 | pub struct BxPcSystemC {
+   |            ----------- fields in this struct
+40 |     timer: Timer,
+   |     ^^^^^
+41 |     num_timers: u32,
+   |     ^^^^^^^^^^
+42 |     triggered_timer: u32,
+   |     ^^^^^^^^^^^^^^^
+43 |     curr_countdown: u32, // Current countdown ticks value (decrements to 0).
+   |     ^^^^^^^^^^^^^^
+44 |     curr_countdown_period: u32, // Length of current countdown period.
+   |     ^^^^^^^^^^^^^^^^^^^^^
+45 |     ticks_total: u64,    // Num ticks total since start of emulator execution.
+46 |     last_time_usec: u64, // Last sequentially read time in usec.
+   |     ^^^^^^^^^^^^^^
+47 |     usec_since_last: u32, // Number of useconds claimed since then.
+   |     ^^^^^^^^^^^^^^^
+...
+54 |     NullTimerInterval: u64,
+   |     ^^^^^^^^^^^^^^^^^
+   |
+   = note: `BxPcSystemC` has a derived impl for the trait `Debug`, but this is intentionally ignored during dead code analysis
+
+warning: function `decodeModrm32` should have a snake case name
+    --> src\cpu\decoder\fetchdecode32.rs:2699:4
+     |
+2699 | fn decodeModrm32<'a>(
+     |    ^^^^^^^^^^^^^ help: convert the identifier to snake case: `decode_modrm32`
+     |
+     = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: constant `BxOpcodeGroup_ERR` should have an upper case name
+   --> src\cpu\decoder\fetchdecode_generated.rs:454:11
+    |
+454 | pub const BxOpcodeGroup_ERR: [u64; 1] = [last_opcode(0, super::ia_opcodes::Opcode::IaError)];
+    |           ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `BX_OPCODE_GROUP_ERR`
+    |
+    = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: structure field `Id` should have a snake case name
+  --> src\cpu\decoder\instr.rs:84:5
+   |
+84 |     Id: u32,
+   |     ^^ help: convert the identifier to snake case (notice the capitalization): `id`
+
+warning: structure field `Iw` should have a snake case name
+  --> src\cpu\decoder\instr.rs:85:5
+   |
+85 |     Iw: [u16; 2],
+   |     ^^ help: convert the identifier to snake case (notice the capitalization): `iw`
+
+warning: structure field `Ib` should have a snake case name
+  --> src\cpu\decoder\instr.rs:94:5
+   |
+94 |     Ib: [u8; 4],
+   |     ^^ help: convert the identifier to snake case (notice the capitalization): `ib`
+
+warning: structure field `Id2` should have a snake case name
+   --> src\cpu\decoder\instr.rs:101:5
+    |
+101 |     Id2: u32,
+    |     ^^^ help: convert the identifier to snake case (notice the capitalization): `id2`
+
+warning: structure field `Iw2` should have a snake case name
+   --> src\cpu\decoder\instr.rs:102:5
+    |
+102 |     Iw2: [u16; 2],
+    |     ^^^ help: convert the identifier to snake case (notice the capitalization): `iw2`
+
+warning: structure field `Ib2` should have a snake case name
+   --> src\cpu\decoder\instr.rs:103:5
+    |
+103 |     Ib2: [u8; 4],
+    |     ^^^ help: convert the identifier to snake case (notice the capitalization): `ib2`
+
+warning: constant `Bx3DNowOpcode` should have an upper case name
+ --> src\cpu\decoder\fetchdecode_x87.rs:3:18
+  |
+3 | pub(super) const Bx3DNowOpcode: [Opcode; 256] = [
+  |                  ^^^^^^^^^^^^^
+  |
+help: convert the identifier to upper case
+  |
+3 - pub(super) const Bx3DNowOpcode: [Opcode; 256] = [
+3 + pub(super) const BX3_DNOW_OPCODE: [Opcode; 256] = [
+  |
+
+warning: bounds on generic parameters in type aliases are not enforced
+  --> src\cpu\decoder\instr_generated.rs:51:28
+   |
+51 | pub type BxExecutePtrTR<I: BxCpuIdTrait> = fn(&mut BxCpuC<I>, &mut BxInstructionGenerated);
+   |                          --^^^^^^^^^^^^
+   |                          | |
+   |                          | will not be checked at usage sites of the type alias
+   |                          help: remove this bound
+   |
+   = note: this is a known limitation of the type checker that may be lifted in a future edition.
+           see issue #112792 <https://github.com/rust-lang/rust/issues/112792> for more information
+   = note: `#[warn(type_alias_bounds)]` on by default
+
+warning: structure field `Id2` should have a snake case name
+  --> src\cpu\decoder\instr_generated.rs:98:9
+   |
+98 |     pub Id2: u32,
+   |         ^^^ help: convert the identifier to snake case (notice the capitalization): `id2`
+
+warning: structure field `Iw2` should have a snake case name
+  --> src\cpu\decoder\instr_generated.rs:99:9
+   |
+99 |     pub Iw2: [u16; 2usize],
+   |         ^^^ help: convert the identifier to snake case (notice the capitalization): `iw2`
+
+warning: structure field `Ib2` should have a snake case name
+   --> src\cpu\decoder\instr_generated.rs:100:9
+    |
+100 |     pub Ib2: [u8; 4usize],
+    |         ^^^ help: convert the identifier to snake case (notice the capitalization): `ib2`
+
+warning: structure field `Id` should have a snake case name
+   --> src\cpu\decoder\instr_generated.rs:105:9
+    |
+105 |     pub Id: u32,
+    |         ^^ help: convert the identifier to snake case (notice the capitalization): `id`
+
+warning: structure field `Iw` should have a snake case name
+   --> src\cpu\decoder\instr_generated.rs:106:9
+    |
+106 |     pub Iw: [u16; 2usize],
+    |         ^^ help: convert the identifier to snake case (notice the capitalization): `iw`
+
+warning: structure field `Ib` should have a snake case name
+   --> src\cpu\decoder\instr_generated.rs:107:9
+    |
+107 |     pub Ib: [u8; 4usize],
+    |         ^^ help: convert the identifier to snake case (notice the capitalization): `ib`
+
+warning: structure field `Id2` should have a snake case name
+   --> src\cpu\decoder\instr_generated.rs:133:9
+    |
+133 |     pub Id2: u32,
+    |         ^^^ help: convert the identifier to snake case (notice the capitalization): `id2`
+
+warning: structure field `Iw2` should have a snake case name
+   --> src\cpu\decoder\instr_generated.rs:134:9
+    |
+134 |     pub Iw2: [u16; 2usize],
+    |         ^^^ help: convert the identifier to snake case (notice the capitalization): `iw2`
+
+warning: structure field `Ib2` should have a snake case name
+   --> src\cpu\decoder\instr_generated.rs:135:9
+    |
+135 |     pub Ib2: [u8; 4usize],
+    |         ^^^ help: convert the identifier to snake case (notice the capitalization): `ib2`
+
+warning: structure field `Sbyte` should have a snake case name
+  --> src\cpu\i387.rs:35:9
+   |
+35 |     pub Sbyte: [i8; 8],
+   |         ^^^^^ help: convert the identifier to snake case (notice the capitalization): `sbyte`
+
+warning: structure field `S16` should have a snake case name
+  --> src\cpu\i387.rs:36:9
+   |
+36 |     pub S16: [i16; 4],
+   |         ^^^ help: convert the identifier to snake case (notice the capitalization): `s16`
+
+warning: structure field `S32` should have a snake case name
+  --> src\cpu\i387.rs:37:9
+   |
+37 |     pub S32: [i32; 2],
+   |         ^^^ help: convert the identifier to snake case (notice the capitalization): `s32`
+
+warning: structure field `S64` should have a snake case name
+  --> src\cpu\i387.rs:38:9
+   |
+38 |     pub S64: i64,
+   |         ^^^ help: convert the identifier to snake case (notice the capitalization): `s64`
+
+warning: structure field `Ubyte` should have a snake case name
+  --> src\cpu\i387.rs:39:9
+   |
+39 |     pub Ubyte: [u8; 8],
+   |         ^^^^^ help: convert the identifier to snake case (notice the capitalization): `ubyte`
+
+warning: structure field `U16` should have a snake case name
+  --> src\cpu\i387.rs:40:9
+   |
+40 |     pub U16: [u16; 4],
+   |         ^^^ help: convert the identifier to snake case (notice the capitalization): `u16`
+
+warning: structure field `U32` should have a snake case name
+  --> src\cpu\i387.rs:41:9
+   |
+41 |     pub U32: [u32; 2],
+   |         ^^^ help: convert the identifier to snake case (notice the capitalization): `u32`
+
+warning: structure field `U64` should have a snake case name
+  --> src\cpu\i387.rs:42:9
+   |
+42 |     pub U64: u64,
+   |         ^^^ help: convert the identifier to snake case (notice the capitalization): `u64`
+
+warning: unused comparison that must be used
+   --> src\cpu\i_cache_v2.rs:338:9
+    |
+338 |         cpu.async_event != BX_ASYNC_EVENT_STOP_TRACE;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the comparison produces a value
+    |
+    = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+    |
+338 |         let _ = cpu.async_event != BX_ASYNC_EVENT_STOP_TRACE;
+    |         +++++++
+
+warning: unused comparison that must be used
+   --> src\cpu\i_cache_v2.rs:351:9
+    |
+351 |         e.p_addr == IcacheAddress::Invalid;
+    |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ the comparison produces a value
+    |
+help: use `let _ = ...` to ignore the resulting value
+    |
+351 |         let _ = e.p_addr == IcacheAddress::Invalid;
+    |         +++++++
+
+warning: method `set_VMCSPTR` should have a snake case name
+   --> src\cpu\init.rs:461:8
+    |
+461 |     fn set_VMCSPTR(&mut self, vmxptr: u64) {
+    |        ^^^^^^^^^^^ help: convert the identifier to snake case: `set_vmcsptr`
+
+warning: method `set_VMCBPTR` should have a snake case name
+   --> src\cpu\init.rs:470:8
+    |
+470 |     fn set_VMCBPTR(&mut self, _vmcb_ptr: u64) {
+    |        ^^^^^^^^^^^ help: convert the identifier to snake case: `set_vmcbptr`
+
+warning: method `BX_CLEAR_AVX_REG` should have a snake case name
+  --> src\cpu\xmm.rs:68:8
+   |
+68 |     fn BX_CLEAR_AVX_REG(&mut self, index: usize) {
+   |        ^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `bx_clear_avx_reg`
+
+warning: constant `BxMaxTimerIDLen` should have an upper case name
+  --> src\pc_system.rs:22:7
+   |
+22 | const BxMaxTimerIDLen: usize = 32;
+   |       ^^^^^^^^^^^^^^^
+   |
+help: convert the identifier to upper case
+   |
+22 - const BxMaxTimerIDLen: usize = 32;
+22 + const BX_MAX_TIMER_IDLEN: usize = 32;
+   |
+
+warning: structure field `NullTimerInterval` should have a snake case name
+  --> src\pc_system.rs:54:5
+   |
+54 |     NullTimerInterval: u64,
+   |     ^^^^^^^^^^^^^^^^^ help: convert the identifier to snake case: `null_timer_interval`
+
+warning: `rusty_box` (lib) generated 443 warnings (run `cargo fix --lib -p rusty_box` to apply 82 suggestions)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 0.20s

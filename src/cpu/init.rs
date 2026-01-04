@@ -15,10 +15,15 @@ use crate::{
         svm::VmcbCache,
         vmcs::BX_INVALID_VMCSPTR,
         xmm::MXCSR_RESET,
-        BxCpuC,
+            BxCpuC,
+            i387::BxPackedRegister,
     },
     params::BxParams,
 };
+
+    // Minimal MXCSR/feature related masks used at reset-time.
+    const MXCSR_DAZ: u32 = 1 << 6;
+    const MXCSR_MISALIGNED_EXCEPTION_MASK: u32 = 1 << 13;
 
 use super::{
     cpudb::intel::core_i7_skylake::Corei7SkylakeX, cpuid::BxCpuIdTrait, decoder::X86FeatureName,
@@ -29,7 +34,7 @@ pub(super) fn cpuid_factory() -> impl BxCpuIdTrait {
     Corei7SkylakeX {}
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Copy, Clone)]
 pub enum ResetReason {
     Software = 10,
     Hardware = 11,
@@ -211,7 +216,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.cpu_mode = CpuMode::Ia32Real;
 
         // DR0 - DR7 (Debug Registers)
-        self.dr = [0; _];
+        self.dr = [0; 5];
 
         self.dr6.set32(0xFFFF0FF0);
         self.dr7.set32(0x00000400);
@@ -260,19 +265,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.msr.ia32_cet_control[0] = 0;
         self.msr.ia32_cet_control[1] = 0;
 
-        self.msr.ia32_pl_ssp = [0; _];
+        self.msr.ia32_pl_ssp = [0; 4];
 
         self.msr.ia32_spec_ctrl = 0;
 
         /* initialise MSR registers to defaults */
         self.msr.apicbase = BX_LAPIC_BASE_ADDR;
-        self.lapic.reset(source);
+        self.lapic.reset(source as u8);
         self.msr.apicbase |= 0x900;
         self.lapic.set_base(self.msr.apicbase);
         self.lapic.enable_xapic_extensions();
 
         self.efer.set32(0);
-        self.efer_suppmask = get_efer_allow_mask();
+        // Allow-mask helpers are not implemented yet; use conservative default
+        self.efer_suppmask = 0;
         self.msr.star = 0;
 
         if self.bx_cpuid_support_isa_extension(X86Feature::IsaLONG_MODE) {
@@ -301,19 +307,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Do not change MTRR on INIT
-        self.msr.mtrrphys = [0; _];
+        self.msr.mtrrphys = [0; 16];
 
-        self.msr.mtrrfix64k = 0; // all fix range MTRRs undefined according to manual
-        self.msr.mtrrfix16k[0] = 0;
-        self.msr.mtrrfix16k[1] = 0;
+        self.msr.mtrrfix64k = BxPackedRegister::default(); // all fix range MTRRs undefined according to manual
+        self.msr.mtrrfix16k[0] = BxPackedRegister::default();
+        self.msr.mtrrfix16k[1] = BxPackedRegister::default();
 
-        self.msr.mtrrfix4k = [0; _];
+        self.msr.mtrrfix4k = [BxPackedRegister::default(); 8];
 
-        self.msr.pat = 0x0007040600070406i64 as u64;
+        self.msr.pat = BxPackedRegister {
+            U64: 0x0007040600070406,
+        };
         self.msr.mtrr_deftype = 0;
 
         // All configurable MSRs do not change on INIT
-        self.msrs.iter().for_each(|msr| msr.reset());
+        #[cfg(feature = "bx_configure_msrs")]
+        {
+            self.msrs.iter_mut().for_each(|msr| *msr = Default::default());
+        }
 
         self.ext = false;
         self.last_exception_type = 0;
@@ -405,15 +416,35 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         //     //     enter_sleep_state(BX_ACTIVITY_STATE_WAIT_FOR_SIPI);
         //     //   }
         // }
+        self.handle_cpu_context_change();
 
-        self.handleCpuContextChange();
-
-        self.cpuid.dump_cpuid();
-        self.cpuid.dump_features();
+        // self.cpuid.dump_cpuid();
+        // self.cpuid.dump_features();
     }
 
     fn write_32bit_regz(&mut self, index: usize, val: u64) {
         self.gen_reg[index].rrx = val
+    }
+
+    // Minimal platform housekeeping helpers used during reset/context changes.
+    pub(super) fn tlb_flush(&mut self) {
+        // Placeholder: concrete TLB invalidation will be implemented elsewhere.
+    }
+
+    pub(super) fn invalidate_prefetch_q(&mut self) {
+        self.eip_fetch_ptr = None;
+        self.eip_page_bias = 0;
+        self.eip_page_window_size = 0;
+    }
+
+    pub(super) fn invalidate_stack_cache(&mut self) {
+        self.esp_host_ptr = None;
+        self.esp_page_bias = 0;
+        self.esp_page_window_size = 0;
+    }
+
+    pub(super) fn handle_interrupt_mask_change(&mut self) {
+        // no-op for now; real implementation updates APIC/MSR state
     }
 
     fn init_statistics(&mut self) {
@@ -424,4 +455,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Late
         Ok(())
     }
-}
+
+    /// Sets the VMCS pointer and performs associated memory mapping setup
+    /// Mirrors the C++ BX_CPU_C::set_VMCSPTR behavior
+    fn set_VMCSPTR(&mut self, vmxptr: u64) {
+        self.vmcsptr = vmxptr;
+        // Note: In a full implementation, this would also set up vmcshostptr
+        // via getHostMemAddr() and configure memory type (vmcs_memtype).
+        // For now, a simple assignment suffices.
+    }
+
+    /// Sets the VMCB pointer for SVM mode
+    /// Mirrors the C++ BX_CPU_C::set_VMCBPTR behavior
+    fn set_VMCBPTR(&mut self, _vmcb_ptr: u64) {
+        // Note: In a full implementation, this would set up the VMCB host
+        // pointer and memory mapping. For now, this is a placeholder.
+    }}

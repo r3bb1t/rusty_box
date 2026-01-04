@@ -346,6 +346,64 @@ impl BxLocalApic {
         self.xapic_ext = BX_XAPIC_EXT_SUPPORT_IER | BX_XAPIC_EXT_SUPPORT_SEOI;
     }
 
+    /// Resets the Local APIC to its initial state (called on CPU reset)
+    pub(super) fn reset(&mut self, _reset_type: u8) {
+        // Initialize APIC registers to their reset values
+        // base_addr remains unchanged (set by set_base)
+        
+        self.error_status = 0;
+        self.shadow_error_status = 0;
+        self.ldr = 0;
+        self.dest_format = 0xf;
+        self.icr_hi = 0;
+        self.icr_lo = 0;
+        self.task_priority = 0;
+
+        // Clear interrupt request, in-service, and trigger mode registers
+        for i in 0..8 {
+            self.irr[i] = 0;
+            self.isr[i] = 0;
+            self.tmr[i] = 0;
+            // All interrupts are enabled by default
+            self.ier[i] = 0xFFFFFFFF;
+        }
+
+        // Reset timer configuration
+        self.timer_divconf = 0;
+        self.timer_divide_factor = 1;
+        self.timer_initial = 0;
+        self.timer_current = 0;
+        self.ticks_initial = 0;
+
+        // Deactivate timers
+        self.timer_active = false;
+        self.vmx_timer_active = false;
+        self.mwaitx_timer_active = false;
+
+        // Mask all LVT entries (0x10000 = masked bit)
+        for i in 0..LVT_ENTRY_COUNT {
+            self.lvt[i] = 0x10000;
+        }
+
+        // Reset spurious vector register fields
+        self.spurious_vector = 0xff;
+        self.software_enabled = false;
+        self.focus_disable = false;
+
+        // Set APIC mode to XAPIC by default
+        self.mode = ApicMode::XapicMode;
+
+        // Set version ID based on xapic flag
+        if self.xapic {
+            self.apic_version_id = 0x00050014; // P4 with 6 LVT entries
+        } else {
+            self.apic_version_id = 0x00030010; // P6 with 4 LVT entries
+        }
+
+        // Clear XAPIC extensions
+        self.xapic_ext = 0;
+    }
+
     /// Writes to the spurious interrupt vector register
     ///
     /// Bits [7:0]: Spurious vector (bits 0-3 hardwired to 1 in legacy mode)

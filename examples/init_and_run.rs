@@ -53,5 +53,20 @@ fn inner_main() {
     let mut mem = BxMemC::new(mem_stub, false);
     cpu.reset(ResetReason::Hardware);
     tracing::info!("Initial rip after reset: {:x}", cpu.rip());
-    cpu.cpu_loop(&mut mem, &[]).unwrap()
+    
+    // Set a max iteration limit for now to prevent infinite loops
+    std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        eprintln!("TIMEOUT: cpu_loop exceeded 2 seconds, likely stuck");
+        std::process::exit(1);
+    });
+    
+    match cpu.cpu_loop(&mut mem, &[]) {
+        Ok(_) => {
+            tracing::info!("CPU loop completed successfully");
+        }
+        Err(e) => {
+            tracing::error!("CPU loop encountered error: {:?}", e);
+        }
+    }
 }

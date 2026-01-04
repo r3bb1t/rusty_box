@@ -10,6 +10,7 @@ use crate::config::BxPhyAddress;
 use crate::cpu::cpu::BxCpuC;
 use crate::cpu::icache::BxPageWriteStampTable;
 use crate::memory::memory_rusty_box::{BIOSROMSZ, EXROMSIZE};
+use crate::memory::MemoryResult;
 use crate::misc::bswap::{
     read_host_dword_to_little_endian, read_host_qword_to_little_endian,
     read_host_word_to_little_endian, write_host_dword_to_little_endian,
@@ -128,7 +129,7 @@ impl BxMemoryStubC {
         &'a mut self,
         addr: BxPhyAddress,
         cpus: &[&BxCpuC<I>],
-    ) -> Result<&'a mut [u8]> {
+    ) -> MemoryResult<&'a mut [u8]> {
         let block: usize = (addr / self.block_size as u64) as _;
         let blocks = self.blocks_offsets();
 
@@ -164,7 +165,11 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    pub fn allocate_block<I: BxCpuIdTrait>(&self, block: usize, cpus: &[&BxCpuC<I>]) -> Result<()> {
+    pub fn allocate_block<I: BxCpuIdTrait>(
+        &self,
+        block: usize,
+        cpus: &[&BxCpuC<I>],
+    ) -> MemoryResult<()> {
         #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
         {
             let max_blocks = self.allocated / self.block_size;

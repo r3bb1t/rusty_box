@@ -1,0 +1,658 @@
+   Compiling rusty_box v0.0.1 (C:\Users\Aslan\rusty_box)
+warning: unused imports: `BxMemoryStubC` and `page_offset`
+  --> src\cpu\cpu.rs:12:23
+   |
+12 |         tlb::{lpf_of, page_offset, ppf_of, Tlb},
+   |                       ^^^^^^^^^^^
+...
+16 |     memory::{BxMemC, BxMemoryStubC},
+   |                      ^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `BxIcache`
+  --> src\cpu\cpu.rs:27:14
+   |
+27 |     icache::{BxIcache, BxIcacheEntry},
+   |              ^^^^^^^^
+
+warning: type `XSaveStateInUsePtr_tR` should have an upper camel case name
+   --> src\cpu\crregs.rs:325:6
+    |
+325 | type XSaveStateInUsePtr_tR = fn() -> bool;
+    |      ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `XsaveStateInUsePtrTR`
+    |
+    = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: type `XSavePtr_tR` should have an upper camel case name
+   --> src\cpu\crregs.rs:326:6
+    |
+326 | type XSavePtr_tR = fn(&BxInstructionGenerated, usize);
+    |      ^^^^^^^^^^^ help: convert the identifier to upper camel case: `XsavePtrTR`
+
+warning: type `XRestorPtr_tR` should have an upper camel case name
+   --> src\cpu\crregs.rs:327:6
+    |
+327 | type XRestorPtr_tR = fn(&BxInstructionGenerated, usize);
+    |      ^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `XrestorPtrTR`
+
+warning: type `_bindgen_ty_4` should have an upper camel case name
+   --> src\cpu\decoder\fetchdecode_generated.rs:153:10
+    |
+153 | pub enum _bindgen_ty_4 {
+    |          ^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `BindgenTy4`
+
+warning: unused imports: `default` and `ffi::c_uint`
+  --> src\cpu\descriptor.rs:16:12
+   |
+16 | use core::{default, ffi::c_uint};
+   |            ^^^^^^^  ^^^^^^^^^^^
+
+warning: unused import: `core::ops::Deref`
+ --> src\cpu\i_cache_v2.rs:1:5
+  |
+1 | use core::ops::Deref;
+  |     ^^^^^^^^^^^^^^^^
+
+warning: unused import: `Result`
+ --> src\cpu\paging.rs:1:47
+  |
+1 | use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, Result};
+  |                                               ^^^^^^
+
+warning: unused import: `BxHostpageaddr`
+ --> src\cpu\paging.rs:8:15
+  |
+8 |         tlb::{BxHostpageaddr, TLBEntry},
+  |               ^^^^^^^^^^^^^^
+
+warning: unnecessary parentheses around assigned value
+   --> src\cpu\tlb.rs:168:28
+    |
+168 |         self.split_large = (lpf_mask_accum > 0xFFF);
+    |                            ^                      ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+168 -         self.split_large = (lpf_mask_accum > 0xFFF);
+168 +         self.split_large = lpf_mask_accum > 0xFFF ;
+    |
+
+warning: unused import: `memory::misc_mem::FLASH_READ_ARRAY`
+  --> src\memory\mod.rs:13:5
+   |
+13 |     memory::misc_mem::FLASH_READ_ARRAY,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `self`
+  --> src\memory\mod.rs:17:11
+   |
+17 |     vec::{self, Vec},
+   |           ^^^^
+
+warning: unreachable expression
+   --> src\cpu\cpu.rs:917:9
+    |
+882 | /         loop {
+883 | |             iteration += 1;
+884 | |             tracing::debug!("iteration: {iteration:?}");
+...   |
+914 | |             self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+915 | |         }
+    | |_________- any code following this expression is unreachable
+916 |
+917 |           todo!()
+    |           ^^^^^^^ unreachable expression
+    |
+    = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+    = note: this warning originates in the macro `todo` (in Nightly builds, run with -Z macro-backtrace for more info)
+
+warning: unnecessary `unsafe` block
+   --> src\cpu\cpu.rs:793:9
+    |
+793 |         unsafe {
+    |         ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `stack_anchor`
+   --> src\cpu\cpu.rs:856:13
+    |
+856 |         let stack_anchor = 0;
+    |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_stack_anchor`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+   --> src\cpu\cpu.rs:934:13
+    |
+934 |         let mut entry_option = self.i_cache.find_entry(p_addr, self.fetch_mode_mask.into());
+    |             ----^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+    |
+    = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `cpu_id`
+   --> src\cpu\cpu.rs:944:36
+    |
+944 |     fn before_execution(&mut self, cpu_id: u32) {
+    |                                    ^^^^^^ help: if this is intentional, prefix it with an underscore: `_cpu_id`
+
+warning: variable does not need to be mutable
+   --> src\cpu\cpu.rs:957:13
+    |
+957 |         let mut laddr: BxAddress;
+    |             ----^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src\cpu\cpu.rs:958:13
+    |
+958 |         let mut page_offset;
+    |             ----^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `cpus`
+   --> src\cpu\cpu.rs:955:53
+    |
+955 |     fn prefetch(&mut self, mem: &'c mut BxMemC<'c>, cpus: &[&Self]) -> Result<()> {
+    |                                                     ^^^^ help: if this is intentional, prefix it with an underscore: `_cpus`
+
+warning: unused variable: `opcode`
+ --> src\cpu\decoder\disasm.rs:6:5
+  |
+6 |     opcode: &[u8; 16],
+  |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_opcode`
+
+warning: unused variable: `is_32`
+ --> src\cpu\decoder\disasm.rs:7:5
+  |
+7 |     is_32: bool,
+  |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_is_32`
+
+warning: unused variable: `is_64`
+ --> src\cpu\decoder\disasm.rs:8:5
+  |
+8 |     is_64: bool,
+  |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_is_64`
+
+warning: unused variable: `disbuf`
+ --> src\cpu\decoder\disasm.rs:9:5
+  |
+9 |     disbuf: &mut [u8],
+  |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_disbuf`
+
+warning: unused variable: `cs_base`
+  --> src\cpu\decoder\disasm.rs:10:5
+   |
+10 |     cs_base: u64,
+   |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cs_base`
+
+warning: unused variable: `rip`
+  --> src\cpu\decoder\disasm.rs:11:5
+   |
+11 |     rip: BxAddress,
+   |     ^^^ help: if this is intentional, prefix it with an underscore: `_rip`
+
+warning: unused variable: `style`
+  --> src\cpu\decoder\disasm.rs:12:5
+   |
+12 |     style: BxDisasmStyle,
+   |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_style`
+
+warning: unused variable: `is_32`
+  --> src\cpu\decoder\disasm.rs:18:5
+   |
+18 |     is_32: bool,
+   |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_is_32`
+
+warning: unused variable: `is_64`
+  --> src\cpu\decoder\disasm.rs:19:5
+   |
+19 |     is_64: bool,
+   |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_is_64`
+
+warning: unused variable: `cs_base`
+  --> src\cpu\decoder\disasm.rs:20:5
+   |
+20 |     cs_base: BxAddress,
+   |     ^^^^^^^ help: if this is intentional, prefix it with an underscore: `_cs_base`
+
+warning: unused variable: `ip`
+  --> src\cpu\decoder\disasm.rs:21:5
+   |
+21 |     ip: BxAddress,
+   |     ^^ help: if this is intentional, prefix it with an underscore: `_ip`
+
+warning: unused variable: `instr`
+  --> src\cpu\decoder\disasm.rs:22:5
+   |
+22 |     instr: &[u8; 16],
+   |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_instr`
+
+warning: unused variable: `disbuf`
+  --> src\cpu\decoder\disasm.rs:23:5
+   |
+23 |     disbuf: &mut [u8],
+   |     ^^^^^^ help: if this is intentional, prefix it with an underscore: `_disbuf`
+
+warning: unused variable: `nnn`
+    --> src\cpu\decoder\fetchdecode32.rs:2704:5
+     |
+2704 |     nnn: u32, // Why is it unused in bochs???
+     |     ^^^ help: if this is intentional, prefix it with an underscore: `_nnn`
+
+warning: unused variable: `iptr`
+    --> src\cpu\decoder\fetchdecode32.rs:2910:5
+     |
+2910 |     iptr: &'a [u8],
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_iptr`
+
+warning: unused variable: `i`
+    --> src\cpu\decoder\fetchdecode32.rs:2913:5
+     |
+2913 |     i: &mut BxInstructionGenerated,
+     |     ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `b1`
+    --> src\cpu\decoder\fetchdecode32.rs:2914:5
+     |
+2914 |     b1: u32,
+     |     ^^ help: if this is intentional, prefix it with an underscore: `_b1`
+
+warning: unused variable: `sse_prefix`
+    --> src\cpu\decoder\fetchdecode32.rs:2915:5
+     |
+2915 |     sse_prefix: Option<SsePrefix>,
+     |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sse_prefix`
+
+warning: unused variable: `opcode_table`
+    --> src\cpu\decoder\fetchdecode32.rs:2916:5
+     |
+2916 |     opcode_table: Option<&'static [u64]>,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_opcode_table`
+
+warning: unused variable: `iptr`
+    --> src\cpu\decoder\fetchdecode32.rs:2923:5
+     |
+2923 |     iptr: &'a [u8],
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_iptr`
+
+warning: unused variable: `i`
+    --> src\cpu\decoder\fetchdecode32.rs:2926:5
+     |
+2926 |     i: &mut BxInstructionGenerated,
+     |     ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `b1`
+    --> src\cpu\decoder\fetchdecode32.rs:2927:5
+     |
+2927 |     b1: u32,
+     |     ^^ help: if this is intentional, prefix it with an underscore: `_b1`
+
+warning: unused variable: `sse_prefix`
+    --> src\cpu\decoder\fetchdecode32.rs:2928:5
+     |
+2928 |     sse_prefix: Option<SsePrefix>,
+     |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sse_prefix`
+
+warning: unused variable: `opcode_table`
+    --> src\cpu\decoder\fetchdecode32.rs:2929:5
+     |
+2929 |     opcode_table: Option<&'static [u64]>,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_opcode_table`
+
+warning: unused variable: `iptr`
+    --> src\cpu\decoder\fetchdecode32.rs:2936:5
+     |
+2936 |     iptr: &'a [u8],
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_iptr`
+
+warning: unused variable: `i`
+    --> src\cpu\decoder\fetchdecode32.rs:2939:5
+     |
+2939 |     i: &mut BxInstructionGenerated,
+     |     ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `b1`
+    --> src\cpu\decoder\fetchdecode32.rs:2940:5
+     |
+2940 |     b1: u32,
+     |     ^^ help: if this is intentional, prefix it with an underscore: `_b1`
+
+warning: unused variable: `sse_prefix`
+    --> src\cpu\decoder\fetchdecode32.rs:2941:5
+     |
+2941 |     sse_prefix: Option<SsePrefix>,
+     |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sse_prefix`
+
+warning: unused variable: `opcode_table`
+    --> src\cpu\decoder\fetchdecode32.rs:2942:5
+     |
+2942 |     opcode_table: Option<&'static [u64]>,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_opcode_table`
+
+warning: unused variable: `iptr`
+    --> src\cpu\decoder\fetchdecode32.rs:2949:5
+     |
+2949 |     iptr: &'a [u8],
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_iptr`
+
+warning: unused variable: `i`
+    --> src\cpu\decoder\fetchdecode32.rs:2952:5
+     |
+2952 |     i: &mut BxInstructionGenerated,
+     |     ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `b1`
+    --> src\cpu\decoder\fetchdecode32.rs:2953:5
+     |
+2953 |     b1: u32,
+     |     ^^ help: if this is intentional, prefix it with an underscore: `_b1`
+
+warning: unused variable: `sse_prefix`
+    --> src\cpu\decoder\fetchdecode32.rs:2954:5
+     |
+2954 |     sse_prefix: Option<SsePrefix>,
+     |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sse_prefix`
+
+warning: unused variable: `opcode_table`
+    --> src\cpu\decoder\fetchdecode32.rs:2955:5
+     |
+2955 |     opcode_table: Option<&'static [u64]>,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_opcode_table`
+
+warning: unused variable: `iptr`
+    --> src\cpu\decoder\fetchdecode32.rs:3013:5
+     |
+3013 |     iptr: &'a [u8],
+     |     ^^^^ help: if this is intentional, prefix it with an underscore: `_iptr`
+
+warning: unused variable: `i`
+    --> src\cpu\decoder\fetchdecode32.rs:3016:5
+     |
+3016 |     i: &mut BxInstructionGenerated,
+     |     ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `b1`
+    --> src\cpu\decoder\fetchdecode32.rs:3017:5
+     |
+3017 |     b1: u32,
+     |     ^^ help: if this is intentional, prefix it with an underscore: `_b1`
+
+warning: unused variable: `sse_prefix`
+    --> src\cpu\decoder\fetchdecode32.rs:3018:5
+     |
+3018 |     sse_prefix: Option<SsePrefix>,
+     |     ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_sse_prefix`
+
+warning: unused variable: `opcode_table`
+    --> src\cpu\decoder\fetchdecode32.rs:3019:5
+     |
+3019 |     opcode_table: Option<&'static [u64]>,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_opcode_table`
+
+warning: unused variable: `opcode`
+    --> src\cpu\decoder\fetchdecode32.rs:3036:9
+     |
+3036 |     let opcode = Opcode::IaError;
+     |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_opcode`
+
+warning: unused variable: `modrm`
+    --> src\cpu\decoder\fetchdecode32.rs:3038:10
+     |
+3038 |     let (modrm, mut iptr) = parse_modrm32(iptr, i)?;
+     |          ^^^^^ help: if this is intentional, prefix it with an underscore: `_modrm`
+
+warning: unused variable: `opcode_table`
+    --> src\cpu\decoder\fetchdecode32.rs:3059:5
+     |
+3059 |     opcode_table: Option<&'static [u64]>,
+     |     ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_opcode_table`
+
+warning: unused variable: `i`
+    --> src\cpu\decoder\fetchdecode32.rs:3109:5
+     |
+3109 |     i: &mut BxInstructionGenerated,
+     |     ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: value assigned to `b1` is never read
+    --> src\cpu\decoder\fetchdecode32.rs:3222:21
+     |
+3222 |                     b1 = 0x100 | (iptr[0] as u32);
+     |                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `ia_opcode` is never read
+    --> src\cpu\decoder\fetchdecode32.rs:3188:25
+     |
+3188 |     let mut ia_opcode = Opcode::IaError;
+     |                         ^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `os_32` is never read
+    --> src\cpu\decoder\fetchdecode32.rs:3190:21
+     |
+3190 |     let mut os_32 = is_32;
+     |                     ^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unused variable: `value`
+    --> src\cpu\decoder\ia_opcodes.rs:4374:13
+     |
+4374 |     fn from(value: Opcode) -> Self {
+     |             ^^^^^ help: if this is intentional, prefix it with an underscore: `_value`
+
+warning: variable does not need to be mutable
+   --> src\cpu\exception.rs:224:13
+    |
+224 |         let mut exception_type = ExceptionType::Benign;
+    |             ----^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+   --> src\cpu\exception.rs:225:13
+    |
+225 |         let mut exception_class = ExceptionClass::Fault;
+    |             ----^^^^^^^^^^^^^^^
+    |             |
+    |             help: remove this `mut`
+
+warning: unused variable: `exception_type`
+   --> src\cpu\exception.rs:224:13
+    |
+224 |         let mut exception_type = ExceptionType::Benign;
+    |             ^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_exception_type`
+
+warning: unused variable: `exception_class`
+   --> src\cpu\exception.rs:225:13
+    |
+225 |         let mut exception_class = ExceptionClass::Fault;
+    |             ^^^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_exception_class`
+
+warning: value assigned to `error_code` is never read
+   --> src\cpu\exception.rs:251:13
+    |
+251 |             error_code = 0;
+    |             ^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `push_error` is never read
+   --> src\cpu\exception.rs:226:30
+    |
+226 |         let mut push_error = false;
+    |                              ^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: value assigned to `push_error` is never read
+   --> src\cpu\exception.rs:250:13
+    |
+250 |             push_error = false; // not INT, no error code pushed
+    |             ^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `remaining_in_page`
+   --> src\cpu\i_cache_v2.rs:376:13
+    |
+376 |         let remaining_in_page = self.eip_page_window_size - eip_biased;
+    |             ^^^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_remaining_in_page`
+
+warning: variable `ret` is assigned to, but never used
+   --> src\cpu\i_cache_v2.rs:379:13
+    |
+379 |         let mut ret;
+    |             ^^^^^^^
+    |
+    = note: consider using `_ret` instead
+
+warning: unused variable: `i`
+   --> src\cpu\i_cache_v2.rs:381:13
+    |
+381 |         let i = entry.i;
+    |             ^ help: if this is intentional, prefix it with an underscore: `_i`
+
+warning: unused variable: `page_offset`
+   --> src\cpu\i_cache_v2.rs:383:13
+    |
+383 |         let page_offset = page_offset(p_addr as u32);
+    |             ^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_page_offset`
+
+warning: unused variable: `trace_mask`
+   --> src\cpu\i_cache_v2.rs:384:13
+    |
+384 |         let trace_mask = 0;
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_trace_mask`
+
+warning: unused variable: `n`
+   --> src\cpu\i_cache_v2.rs:389:13
+    |
+389 |         for n in 0..quantum {
+    |             ^ help: if this is intentional, prefix it with an underscore: `_n`
+
+warning: value assigned to `ret` is never read
+   --> src\cpu\i_cache_v2.rs:390:13
+    |
+390 |             ret = fetch_decode32_chatgpt_generated_instr(&fetch_ptr, true)
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+    |
+    = help: maybe it is overwritten before being read?
+
+warning: unused variable: `p_addr`
+  --> src\cpu\icache.rs:89:9
+   |
+89 |         p_addr: BxPhyAddress,
+   |         ^^^^^^ help: if this is intentional, prefix it with an underscore: `_p_addr`
+
+warning: unused variable: `fethc_mode_mask`
+  --> src\cpu\icache.rs:90:9
+   |
+90 |         fethc_mode_mask: u32,
+   |         ^^^^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_fethc_mode_mask`
+
+warning: unreachable pattern
+  --> src\cpu\init.rs:95:13
+   |
+95 |             _ => info!("cpu reset"),
+   |             ^ no value can reach this
+   |
+note: multiple earlier patterns match some of the same values
+  --> src\cpu\init.rs:95:13
+   |
+93 |             ResetReason::Software => info!("cpu hardware reset"),
+   |             --------------------- matches some of the same values
+94 |             ResetReason::Hardware => info!("cpu software reset"),
+   |             --------------------- matches some of the same values
+95 |             _ => info!("cpu reset"),
+   |             ^ collectively making this unreachable
+   = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+error[E0382]: borrow of moved value: `source`
+   --> src\cpu\init.rs:285:16
+    |
+ 91 |     pub fn reset(&mut self, source: ResetReason) {
+    |                             ------ move occurs because `source` has type `ResetReason`, which does not implement the `Copy` trait
+...
+274 |         self.lapic.reset(source as u8);
+    |                          ------ value moved here
+...
+285 |             if source == ResetReason::Hardware {
+    |                ^^^^^^ value borrowed here after move
+    |
+note: if `ResetReason` implemented `Clone`, you could clone the value
+   --> src\cpu\init.rs:38:1
+    |
+ 38 | pub enum ResetReason {
+    | ^^^^^^^^^^^^^^^^^^^^ consider implementing `Clone` for this type
+...
+274 |         self.lapic.reset(source as u8);
+    |                          ------ you could clone this value
+
+warning: unused variable: `tlb_entry`
+  --> src\cpu\paging.rs:21:5
+   |
+21 |     tlb_entry: &TLBEntry,
+   |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_tlb_entry`
+
+warning: unused variable: `laddr`
+  --> src\cpu\paging.rs:22:5
+   |
+22 |     laddr: BxAddress,
+   |     ^^^^^ help: if this is intentional, prefix it with an underscore: `_laddr`
+
+warning: unused variable: `user`
+  --> src\cpu\paging.rs:23:5
+   |
+23 |     user: bool,
+   |     ^^^^ help: if this is intentional, prefix it with an underscore: `_user`
+
+warning: unused variable: `rw`
+  --> src\cpu\paging.rs:24:5
+   |
+24 |     rw: MemoryAccessType,
+   |     ^^ help: if this is intentional, prefix it with an underscore: `_rw`
+
+warning: unused variable: `p_addr`
+  --> src\cpu\paging.rs:31:36
+   |
+31 |     fn is_virtual_apic_page(&self, p_addr: &BxPhyAddress) -> bool {
+   |                                    ^^^^^^ help: if this is intentional, prefix it with an underscore: `_p_addr`
+
+warning: unused variable: `vm`
+  --> src\cpu\paging.rs:33:17
+   |
+33 |             let vm = &self.vmcs;
+   |                 ^^ help: if this is intentional, prefix it with an underscore: `_vm`
+
+warning: unused variable: `mem`
+ --> src\iodev\devices.rs:5:22
+  |
+5 | fn init_devices_stub(mem: &mut BxMemC) {}
+  |                      ^^^ help: if this is intentional, prefix it with an underscore: `_mem`
+
+warning: unused variable: `block`
+   --> src\memory\memory_stub.rs:167:51
+    |
+167 |     pub fn allocate_block<I: BxCpuIdTrait>(&self, block: usize, cpus: &[&BxCpuC<I>]) -> Result<()> {
+    |                                                   ^^^^^ help: if this is intentional, prefix it with an underscore: `_block`
+
+warning: unused variable: `cpus`
+   --> src\memory\memory_stub.rs:167:65
+    |
+167 |     pub fn allocate_block<I: BxCpuIdTrait>(&self, block: usize, cpus: &[&BxCpuC<I>]) -> Result<()> {
+    |                                                                 ^^^^ help: if this is intentional, prefix it with an underscore: `_cpus`
+
+For more information about this error, try `rustc --explain E0382`.
+warning: `rusty_box` (lib) generated 94 warnings
+error: could not compile `rusty_box` (lib) due to 1 previous error; 94 warnings emitted

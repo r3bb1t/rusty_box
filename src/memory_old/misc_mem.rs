@@ -3,12 +3,12 @@ use alloc::vec::Vec;
 use crate::{
     config::BxPhyAddress,
     cpu::{rusty_box::MemoryAccessType, BxCpuC, BxCpuIdTrait},
-    memory::{
-        memory_rusty_box::{bios_map_last128k, MemoryAreaT, BIOSROMSZ, BIOS_MASK, EXROM_MASK},
-        BxMemC, BxMemoryStubC,
-    },
 };
 
+use super::{
+    memory_rusty_box::{bios_map_last128k, MemoryAreaT, BIOSROMSZ, BIOS_MASK, EXROM_MASK},
+    BxMemC, BxMemoryStubC, MemoryResult,
+};
 pub(super) const FLASH_READ_ARRAY: u8 = 0xff;
 pub(super) const FLASH_INT_ID: u8 = 0x90;
 pub(super) const FLASH_READ_STATUS: u8 = 0x70;
@@ -18,12 +18,24 @@ pub(super) const FLASH_ERASE_SUSP: u8 = 0xb0;
 pub(super) const FLASH_PROG_SETUP: u8 = 0x40;
 pub(super) const FLASH_ERASE: u8 = 0xd0;
 
-use super::Result;
-
 const BX_PHY_ADDRESS_WIDTH: u64 = 40;
 const BX_MEM_HANDLERS: usize = ((1u64 << BX_PHY_ADDRESS_WIDTH) >> 20) as usize;
 
-impl BxMemC<'_> {
+impl Default for BxMemC {
+    fn default() -> Self {
+        const GUEST_MB: usize = 32;
+        const HOST_MB: usize = 32;
+        let mem_stub = BxMemoryStubC::create_and_init(
+            GUEST_MB * 1024 * 1024,
+            HOST_MB * 1024 * 1024,
+            128 * 1024,
+        )
+        .unwrap();
+        Self::new(mem_stub, false)
+    }
+}
+
+impl BxMemC {
     pub fn new(mem_stub: BxMemoryStubC, pci_enabled: bool) -> Self {
         let mut memory_handlers = Vec::with_capacity(BX_MEM_HANDLERS);
         for _ in 0..BX_MEM_HANDLERS {
@@ -54,17 +66,16 @@ impl BxMemC<'_> {
     }
 }
 
-impl<'c> BxMemC<'c> {
-    pub(crate) fn get_host_mem_addr<I: BxCpuIdTrait>(
-        &mut self,
+impl BxMemC {
+    pub(crate) fn get_host_mem_addr<'a, I: BxCpuIdTrait>(
+        &'a mut self,
         // cpu_option: Option<&'c BxCpuC<I>>,
         addr: BxPhyAddress,
         rw: MemoryAccessType,
         cpus: &[&BxCpuC<I>],
-    ) -> Result<Option<&mut [u8]>> {
-        tracing::debug!("get_host_mem_addr addr: {addr:?} ({:#x}) rw: {rw:?}", addr);
+    ) -> MemoryResult<Option<&'a mut [u8]>> {
+        tracing::debug!("get_host_mem_addr addr: {addr:?} rw: {rw:?}");
         let a20_addr: BxPhyAddress = crate::pc_system::a20_addr(addr);
-        tracing::debug!("after A20 masking: {a20_addr:?} ({:#x})", a20_addr);
 
         let mut is_bios = a20_addr > self.bios_rom_addr.into();
 
@@ -90,11 +101,33 @@ impl<'c> BxMemC<'c> {
             return Ok(None);
         }
 
-        // Access the memory handler at the specified index
-        if let Some(handler_struct) = &self.memory_handlers[(a20_addr >> 20) as usize] {
-            let mut memory_handler = handler_struct.next.as_ref();
-
-            while let Some(handler) = memory_handler {
+        // // Access the memory handler at the specified index
+        // let mut memory_handler = self.memory_handlers[(a20_addr >> 20) as usize]
+        //     .as_ref()
+        //     .unwrap() // FIXME: don't unwrap
+        //     .next
+        //     .as_ref();
+        //
+        // while let Some(handler) = memory_handler {
+        //     // Check if the address is within the range
+        //     if handler.begin <= a20_addr && handler.end >= a20_addr {
+        //         // Call the direct access handler if it exists
+        //         if let Some(da_handler) = handler.da_handler {
+        //             return Ok(Some(da_handler(
+        //                 &handler.param,
+        //                 a20_addr,
+        //                 rw,
+        //                 &handler.param,
+        //             )));
+        //         } else {
+        //             return Ok(None); // Vetoed! No handler available
+        //         }
+        //     }
+        //     // Move to the next handler
+        //     memory_handler = handler.next.as_ref();
+        // }
+        if let Some(memory_handler) = &self.memory_handlers[(a20_addr >> 20) as usize] {
+            while let Some(handler) = &memory_handler.next {
                 // Check if the address is within the range
                 if handler.begin <= a20_addr && handler.end >= a20_addr {
                     // Call the direct access handler if it exists
@@ -109,8 +142,6 @@ impl<'c> BxMemC<'c> {
                         return Ok(None); // Vetoed! No handler available
                     }
                 }
-                // Move to the next handler
-                memory_handler = handler.next.as_ref();
             }
         }
         //let mut memory_handler = self.memory_handlers[a20_addr as usize >> 20];
@@ -133,14 +164,7 @@ impl<'c> BxMemC<'c> {
 
         if !write {
             if a20_addr >= 0x000a0000 && a20_addr < 0x000c0000 {
-                // VGA memory area - vetoed
                 Ok(None)
-            } else if (a20_addr & 0xfffe0000) == 0x000e0000 {
-                // last 128K of BIOS ROM mapped to 0xE0000-0xFFFFF - handle first
-                Ok(Some(
-                    &mut self.inherited_memory_stub.rom()
-                        [bios_map_last128k(a20_addr.try_into()?)..],
-                ))
             } else if cfg!(feature = "bx_support_pci")
                 && self.pci_enabled
                 && (a20_addr >= 0x000c0000 && a20_addr < 0x00100000)
@@ -151,11 +175,18 @@ impl<'c> BxMemC<'c> {
                 }
                 if self.memory_type[area][0] == false {
                     // Read from ROM
-                    let to_return = &mut self.inherited_memory_stub.rom()[((a20_addr
-                        & EXROM_MASK as BxPhyAddress)
-                        + BIOSROMSZ as BxPhyAddress)
-                        .try_into()?..];
-                    Ok(Some(to_return))
+                    if (a20_addr & 0xfffe0000) == 0x000e0000 {
+                        // last 128K of BIOS ROM mapped to 0xE0000-0xFFFFF
+                        let to_return = &mut self.inherited_memory_stub.rom()
+                            [bios_map_last128k(a20_addr.try_into()?)..];
+                        Ok(Some(to_return))
+                    } else {
+                        let to_return = &mut self.inherited_memory_stub.rom()[((a20_addr
+                            & EXROM_MASK as BxPhyAddress)
+                            + BIOSROMSZ as BxPhyAddress)
+                            .try_into()?..];
+                        Ok(Some(to_return))
+                    }
                 } else {
                     // Read from ShadowRAM
                     Ok(Some(self.get_vector(cpus, a20_addr)?))
@@ -164,8 +195,14 @@ impl<'c> BxMemC<'c> {
                 if a20_addr < 0x000c0000 || a20_addr >= 0x00100000 {
                     Ok(Some(self.get_vector(cpus, a20_addr)?))
                 }
-                // must be in C0000 - FFFFF range (non-last-128K)
-                else {
+                // must be in C0000 - FFFFF range
+                else if (a20_addr & 0xfffe0000) == 0x000e0000 {
+                    // last 128K of BIOS ROM mapped to 0xE0000-0xFFFFF
+                    Ok(Some(
+                        &mut self.inherited_memory_stub.rom()
+                            [bios_map_last128k(a20_addr.try_into()?)..],
+                    ))
+                } else {
                     Ok(Some(
                         &mut self.inherited_memory_stub.rom()[((a20_addr
                             & EXROM_MASK as BxPhyAddress)

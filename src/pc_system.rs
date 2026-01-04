@@ -56,7 +56,15 @@ pub struct BxPcSystemC {
 
 impl BxPcSystemC {
     fn new() -> Self {
-        Default::default()
+        let mut sys = Self::default();
+        // A20 line enabled: all bits can be used (no masking of bit 20)
+        sys.a20_mask = 0xFFFFFFFFFFFFFFFFu64; // All bits enabled initially
+        sys
+    }
+
+    /// Return current tick count used as a monotonic TSC source.
+    pub fn time_ticks(&self) -> u64 {
+        self.ticks_total
     }
 }
 

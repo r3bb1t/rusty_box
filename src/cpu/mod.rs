@@ -3,6 +3,7 @@ pub use error::{CpuError, Result};
 
 pub(super) mod access;
 pub(super) mod apic;
+pub(super) mod arith;
 pub(super) mod avx;
 pub mod builder;
 #[allow(clippy::module_inception)]
@@ -13,6 +14,7 @@ pub(super) mod cpudb;
 pub(super) mod cpuid;
 pub(super) mod cpustats;
 pub(super) mod crregs;
+pub(super) mod data_xfer;
 pub mod decoder;
 pub(super) mod descriptor;
 pub(super) mod event;
@@ -25,6 +27,7 @@ pub(super) mod lazy_flags;
 pub(super) mod msr;
 pub(super) mod mwait;
 pub(super) mod paging;
+pub(super) mod proc_ctrl;
 pub(super) mod rusty_box;
 pub(super) mod segment_ctrl_pro;
 pub(super) mod smm;

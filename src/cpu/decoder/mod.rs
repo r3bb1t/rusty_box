@@ -16,6 +16,8 @@ pub(super) mod fetchdecode_x87;
 
 pub mod instr_generated;
 
+pub mod simple_decoder;
+
 pub mod ia_opcodes;
 
 pub const BX_ISA_EXTENSIONS_ARRAY_SIZE: usize = 5;

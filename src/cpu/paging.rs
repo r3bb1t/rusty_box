@@ -23,8 +23,13 @@ pub(super) fn translate_linear(
     user: bool,
     rw: MemoryAccessType,
 ) -> BxPhyAddress {
-    0 // FIXME: remove that
-    // todo!()
+    // FIXME: implement full paging support
+    // For now, in real mode (paging disabled), linear address = physical address
+    // Just mask with A20 and return
+    tracing::debug!("translate_linear: laddr={laddr:#x}");
+    let paddr = crate::pc_system::a20_addr(laddr);
+    tracing::debug!("translate_linear: after A20: paddr={paddr:#x}");
+    paddr
 }
 
 impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {

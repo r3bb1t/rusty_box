@@ -64,3 +64,22 @@ impl Default for BxPackedRegister {
         }
     }
 }
+impl I387 {
+    /// Resets the i387 FPU state to initial values (called on CPU reset)
+    pub fn reset(&mut self) {
+        self.cwd = 0x0040;    // Control word reset value
+        self.swd = 0;          // Status word reset
+        self.tos = 0;          // Top of stack
+        self.twd = 0x5555;     // Tag word: all registers tagged as empty
+        self.foo = 0;          // Last instruction opcode
+        self.fip = 0;          // FPU instruction pointer
+        self.fcs = 0;          // FPU code segment
+        self.fds = 0;          // FPU data segment
+        self.fdp = 0;          // FPU data pointer
+        
+        // Clear all ST register space (8 x 10-byte values)
+        for reg in &mut self.st_space {
+            *reg = floatx80::default();
+        }
+    }
+}

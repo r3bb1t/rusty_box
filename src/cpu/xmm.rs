@@ -19,6 +19,12 @@ pub enum BxPackedZmmRegister {
     ZmmV256([BxPackedYmmRegister; 2]),
 }
 
+impl BxPackedZmmRegister {
+    pub(super) fn clear(&mut self) {
+        *self = Default::default();
+    }
+}
+
 // FIXME: erase that
 impl Default for BxPackedZmmRegister {
     fn default() -> Self {
@@ -59,7 +65,7 @@ pub struct BxMxcsr {
 }
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
-    fn BX_CLEAR_AVX_REG(&self, index: usize) {
+    fn BX_CLEAR_AVX_REG(&mut self, index: usize) {
         self.vmm[index].clear()
     }
 }
