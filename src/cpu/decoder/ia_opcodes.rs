@@ -16,7 +16,7 @@ macro_rules! back_to_enum {
             fn try_from(v: u16) -> Result<Self, Self::Error> {
                 match v {
                     $(x if x == $name::$vname as u16 => Ok($name::$vname),)*
-                    _ => Err(super::DecodeError::BxIllegalOpcode),
+                    _ => Err(super::fetchdecode_generated::BxDecodeError::BxIllegalOpcode.into()),
                 }
             }
         }
@@ -25,7 +25,8 @@ macro_rules! back_to_enum {
 
 back_to_enum! {
     #[allow(unused)]
-    #[derive(Debug, Clone, Copy)]
+    #[repr(u16)]
+    #[derive(Debug, Clone, Copy, PartialEq)]
      pub enum Opcode {
 
         IaError,
@@ -4379,5 +4380,23 @@ impl From<Opcode> for OpFlags {
 impl Default for Opcode {
     fn default() -> Self {
         Self::IaError
+    }
+}
+
+impl Opcode {
+    /// Convert from u16 in const context
+    /// 
+    /// This uses transmute which is unsafe but valid because:
+    /// 1. Opcode is repr(u16)
+    /// 2. All u16 values map to valid Opcode variants (IaError for unknown)
+    pub const fn from_u16_const(val: u16) -> Self {
+        // The opcode enum has variants from 0 to ~4300
+        // Values beyond the max variant should return IaError
+        if val > 4300 {
+            return Self::IaError;
+        }
+        // SAFETY: Opcode is #[repr(u16)] and val is within valid range
+        // The enum is densely packed starting from 0
+        unsafe { core::mem::transmute(val) }
     }
 }

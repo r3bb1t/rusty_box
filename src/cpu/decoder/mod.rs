@@ -5,6 +5,7 @@ pub mod disasm;
 pub mod features;
 pub mod fetchdecode;
 pub mod fetchdecode32;
+pub mod fetchdecode64;
 pub mod fetchdecode_generated;
 pub mod fetchdecode_opmap;
 pub mod fetchdecode_opmap_0f38;
@@ -19,6 +20,13 @@ pub mod instr_generated;
 pub mod simple_decoder;
 
 pub mod ia_opcodes;
+
+// Const-compatible decoders for compile-time instruction decoding
+pub mod const_fetchdecode64;
+pub mod const_fetchdecode32;
+
+#[cfg(test)]
+mod tests;
 
 pub const BX_ISA_EXTENSIONS_ARRAY_SIZE: usize = 5;
 

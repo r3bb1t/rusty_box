@@ -22,7 +22,7 @@ impl TryFrom<BxInstructionGenerated> for BxInstruction {
         let metainfo = MetaInfo {
             ia_opcode: meta.ia_opcode,
             ilen: meta.ilen,
-            meta_info1: MetaInfoFlags::from_bits_retain(meta.metainfo1),
+            meta_info1: meta.metainfo1,
         };
 
         let instruction = Self {
@@ -43,11 +43,10 @@ impl TryFrom<BxInstruction> for BxInstructionGenerated {
         let meta_info = BxInstructionMetaInfo {
             ia_opcode: meta.ia_opcode as _,
             ilen: meta.ilen,
-            metainfo1: meta.meta_info1.bits(),
+            metainfo1: meta.meta_info1,
         };
 
         let instruction_generated = Self {
-            opcode: value.metainfo.ia_opcode,
             meta_info,
             meta_data: value.meta_data,
             // NOTE: Losing data here
@@ -111,15 +110,32 @@ pub(crate) const BX_LOCK_PREFIX_USED: bool = true;
 
 bitflags! {
     /// Flags for the metaInfo1 field
-    #[derive(Debug, Default, Clone, Copy)]
+    /// 
+    /// Instruction metadata flags encoding:
+    ///  7..6: lockUsed, repUsed (0=none, 1=0xF0, 2=0xF2, 3=0xF3) - handled manually
+    ///  5:    extend8bit
+    ///  4:    mod==c0 (modrm)
+    ///  3:    os64
+    ///  2:    os32
+    ///  1:    as64
+    ///  0:    as32
+    /// 
+    /// Note: Bits 6-7 encode a 2-bit value for lock/rep prefixes and are handled
+    /// manually via set_lock_rep_used() and lock_rep_used_value() methods.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
     pub struct MetaInfoFlags: u8 {
-        const AS32 = 0b0000_0001; // Bit 0
-        const AS64 = 0b0000_0010; // Bit 1
-        const OS32 = 0b0000_0100; // Bit 2
-        const OS64 = 0b0000_1000; // Bit 3
-        const MOD_C0 = 0b0001_0000; // Bit 4
-        const EXTEND_8BIT = 0b0010_0000; // Bit 5
-        const REP_USED = 0b1100_0000; // Bits 6-7 (0=none, 1=0xF0, 2=0xF2, 3=0xF3)
+        /// Address size 32-bit
+        const As32 = 1 << 0;
+        /// Address size 64-bit
+        const As64 = 1 << 1;
+        /// Operand size 32-bit
+        const Os32 = 1 << 2;
+        /// Operand size 64-bit
+        const Os64 = 1 << 3;
+        /// ModRM mod field == 0xc0 (register form)
+        const ModC0 = 1 << 4;
+        /// Extend 8-bit immediate to 64-bit (for 64-bit mode)
+        const Extend8bit = 1 << 5;
     }
 }
 
@@ -154,48 +170,23 @@ impl Default for MetaInfo {
 
 impl MetaInfoFlags {
     pub(crate) fn set_os32_b(&mut self, bit: bool) {
-        let new_value_raw = self.bits() & !(1 << 2) | ((bit as u8) << 2);
-        *self = Self::from_bits_truncate(new_value_raw)
+        self.set(Self::Os32, bit);
     }
 
     pub(super) fn set_lock_rep_used(&mut self, value: u32) {
-        let new_value_raw = u32::from(self.bits() & 0x3F) | (value << 6);
-        *self = Self::from_bits_truncate(new_value_raw as u8)
+        // Clear bits 6-7, then set them to value
+        let bits = self.bits();
+        let new_bits = (bits & 0x3F) | ((value as u8) << 6);
+        *self = Self::from_bits_truncate(new_bits);
     }
 
     pub(super) fn mod_c0(&self) -> u32 {
         // This is a cheaper way to test for modRM instructions where
         // the mod field is 0xc0.  FetchDecode flags this condition since
         // it is quite common to be tested for.
-        u32::from(self.bits() & (1 << 4))
+        u32::from(self.bits() & Self::ModC0.bits())
     }
 }
 
-impl BxInstructionGenerated {
-    #[inline]
-    pub(super) fn osize(&self) -> u32 {
-        u32::from((self.meta_info.metainfo1 >> 2) & 0x3)
-    }
-
-    #[inline]
-    pub(super) fn asize(&self) -> u32 {
-        u32::from(self.meta_info.metainfo1 & 0x3)
-    }
-
-    #[inline]
-    pub(super) fn mod_c0(&self) -> u8 {
-        self.meta_info.metainfo1 & (1 << 4)
-    }
-
-    pub(super) fn init(&mut self, os32: u32, as32: u32, os64: u32, as64: u32) {
-        self.meta_info.metainfo1 = ((os32 << 2) | (os64 << 3) | (as32 << 0) | (as64 << 1)) as u8;
-    }
-
-    pub(super) fn set_as32_b(&mut self, bit: bool) {
-        self.meta_info.metainfo1 = (self.meta_info.metainfo1 & !0x1) | (bit as u8);
-    }
-
-    pub(super) fn assert_mod_c0(&mut self) {
-        self.meta_info.metainfo1 |= 1 << 4;
-    }
-}
+// NOTE: Methods for BxInstructionGenerated are defined in instr_generated.rs
+// These duplicate methods were removed to avoid conflicts with the public API

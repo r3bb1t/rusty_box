@@ -34,7 +34,7 @@ pub fn MOV_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 /// Immediate value stored in operand_data.Id
 pub fn MOV_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
     let dst_idx = instr.meta_data[0] as usize;
-    let imm: u32 = unsafe { instr.modrm_form.operand_data.Id };
+    let imm: u32 = instr.modrm_form.operand_data.id();
     
     cpu.set_gpr32(dst_idx, imm);
 }
@@ -44,7 +44,7 @@ pub fn MOV_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 /// meta_data[0] = register index
 pub fn MOV_EAX_Id<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
     let dst_idx = instr.meta_data[0] as usize;
-    let imm: u32 = unsafe { instr.modrm_form.operand_data.Id };
+    let imm: u32 = instr.modrm_form.operand_data.id();
     
     cpu.set_gpr32(dst_idx, imm);
 }

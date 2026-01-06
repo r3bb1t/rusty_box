@@ -44,7 +44,7 @@ type BxFetchDecode32Ptr = for<'a> fn(
 //   {OF B0} = CMPXCHG 8
 //   {OF B1} = CMPXCHG 16|32
 
-const DECODE32_DESCRIPTOR: [BxOpcodeDecodeDescriptor32; 512] = [
+pub(super) const DECODE32_DESCRIPTOR: [BxOpcodeDecodeDescriptor32; 512] = [
     /*    00 */
     BxOpcodeDecodeDescriptor32 {
         decode_method: decoder32_modrm,
@@ -2608,9 +2608,9 @@ const DECODE32_DESCRIPTOR: [BxOpcodeDecodeDescriptor32; 512] = [
 ];
 
 // Define the BxOpcodeDecodeDescriptor32 struct
-struct BxOpcodeDecodeDescriptor32 {
-    decode_method: BxFetchDecode32Ptr,             // Function pointer
-    opcode_table: &'static Option<&'static [u64]>, // Use Vec<u8> for dynamic array
+pub(super) struct BxOpcodeDecodeDescriptor32 {
+    pub(super) decode_method: BxFetchDecode32Ptr,             // Function pointer
+    pub(super) opcode_table: &'static Option<&'static [u64]>, // Use Vec<u8> for dynamic array
 }
 
 const RESOLVE16_BASE_REG: [BxRegs16; 8] = [
@@ -2707,24 +2707,28 @@ fn decodeModrm32<'a>(
     let mut seg = BxSegregs::Ds;
 
     // initialize displ32 with zero to include cases with no diplacement
-    i.modrm_form.displ32u = 0;
+    i.modrm_form.displacement.set_displ32u(0);
 
     // note that mod==11b handled outside
 
-    if i.as_32_l() != 0 {
-        i.set_sib_base(rm);
+    if i.as32_l() != 0 {
+        // rm is a 3-bit field (0-7), safe to convert to u8
+        // This conversion should never fail as rm is extracted from ModRM byte with & 0x7
+        i.set_sib_base(rm.try_into()?);
         i.set_sib_index(4); // no Index encoding by default
 
         // no s-i-b byte
         if rm != 4 {
             if r#mod == 0x00 {
                 if rm == 5 {
-                    i.set_sib_base(BX_NIL_REGISTER as _);
+                    // BX_NIL_REGISTER is 19, fits in u8
+                    // This conversion should never fail as BX_NIL_REGISTER = BX_GENERAL_REGISTERS + 3 = 19
+                    i.set_sib_base(BX_NIL_REGISTER.try_into()?);
                     if iptr.len() > 3 {
-                        i.modrm_form.displ32u = fetch_dword(iptr);
+                        i.modrm_form.displacement.set_displ32u(fetch_dword(iptr));
                         iptr = &iptr[4..];
                     } else {
-                        return Err(BxDecodeError::ModRmParseFail);
+                        return Err(BxDecodeError::ModRmParseFail.into());
                     }
                 }
                 // mod==00b, rm!=4, rm!=5
@@ -2741,7 +2745,7 @@ fn decodeModrm32<'a>(
                 iptr = &iptr[1..];
                 value
             } else {
-                return Err(BxDecodeError::ModRmParseFail);
+                return Err(BxDecodeError::ModRmParseFail.into());
             };
 
             //let base = sib & 0x7;
@@ -2768,14 +2772,16 @@ fn decodeModrm32<'a>(
                 // mod==00b, rm==4
                 seg = SREG_MOD1OR2_BASE32[usize::from(base)];
                 if base == 5 {
-                    i.set_sib_base(BX_NIL_REGISTER as _);
+                    // BX_NIL_REGISTER is 19, fits in u8
+                    // This conversion should never fail as BX_NIL_REGISTER = BX_GENERAL_REGISTERS + 3 = 19
+                    i.set_sib_base(BX_NIL_REGISTER.try_into()?);
 
                     if iptr.len() > 3 {
-                        i.modrm_form.displ32u = fetch_dword(iptr);
+                        i.modrm_form.displacement.set_displ32u(fetch_dword(iptr));
                         iptr = &iptr[4..];
                         //*remain -= 4;
                     } else {
-                        return Err(BxDecodeError::ModRmParseFail);
+                        return Err(BxDecodeError::ModRmParseFail.into());
                     }
                 }
                 // mod==00b, rm==4, base!=5
@@ -2790,26 +2796,34 @@ fn decodeModrm32<'a>(
         if r#mod == 0x40 {
             if !iptr.is_empty() {
                 // 8 sign extended to 32
-                i.modrm_form.displ32u = iptr[0] as _;
+                // 8-bit value, zero-extend to 32-bit
+                i.modrm_form.displacement.set_displ32u(u32::from(iptr[0]));
                 iptr = &iptr[1..];
                 //*remain -= 1;
             } else {
-                return Err(BxDecodeError::ModRmParseFail);
+                return Err(BxDecodeError::ModRmParseFail.into());
             }
         } else {
             // (mod == 0x80), mod==10b
             if iptr.len() > 3 {
-                i.modrm_form.displ32u = fetch_dword(iptr);
+                i.modrm_form.displacement.set_displ32u(fetch_dword(iptr));
                 iptr = &iptr[4..];
                 //remain -= 4;
             } else {
-                return Err(BxDecodeError::ModRmParseFail);
+                return Err(BxDecodeError::ModRmParseFail.into());
             }
         }
     } else {
         // 16-bit addressing modes, mod==11b handled above
-        i.set_sib_base(RESOLVE16_BASE_REG[usize::try_from(rm).unwrap()] as _);
-        i.set_sib_index(RESOLVE16_INDEX_REG[usize::try_from(rm).unwrap()]);
+        // rm is 0-7, safe to index array
+        // rm is extracted from ModRM byte with & 0x7, so it's always 0-7
+        let rm_idx = usize::try_from(rm)?;
+        // RESOLVE16_BASE_REG and RESOLVE16_INDEX_REG contain register enum values that should fit in u8
+        let base_reg = RESOLVE16_BASE_REG[rm_idx];
+        let index_reg = RESOLVE16_INDEX_REG[rm_idx];
+        // Register enum values are small, should fit in u8
+        i.set_sib_base((base_reg as u32).try_into()?);
+        i.set_sib_index(index_reg.try_into()?);
         i.set_sib_scale(0);
 
         if r#mod == 0x00 {
@@ -2818,11 +2832,11 @@ fn decodeModrm32<'a>(
             if rm == 6 {
                 i.set_sib_base(BX_NIL_REGISTER as _);
                 if !iptr.is_empty() {
-                    i.modrm_form.displ32u = u32::from(fetch_word(iptr));
+                    i.modrm_form.displacement.set_displ32u(u32::from(fetch_word(iptr)));
                     iptr = &iptr[2..];
                     //*remain -= 2;
                 } else {
-                    return Err(BxDecodeError::ModRmParseFail);
+                    return Err(BxDecodeError::ModRmParseFail.into());
                 }
             }
             // modrm_done
@@ -2837,20 +2851,23 @@ fn decodeModrm32<'a>(
 
             if !iptr.is_empty() {
                 // 8 sign extended to 16
-                i.modrm_form.displ32u = i32::from(iptr[0] as i8) as _; // BOCHS, what??
+                // 8-bit sign-extended to 32-bit: interpret u8 as signed i8, then widen to i32, then to u32
+                // Using 'as i8' is safe here as it performs sign extension (bit 7 becomes sign bit)
+                let signed_val = iptr[0] as i8;
+                i.modrm_form.displacement.set_displ32u(u32::try_from(i32::from(signed_val)).unwrap_or(0)); // BOCHS, what??
                                                                        //*remain -= 1;
             } else {
-                return Err(BxDecodeError::ModRmParseFail);
+                return Err(BxDecodeError::ModRmParseFail.into());
             }
         } else {
             // (mod == 0x80)      mod == 10b
 
             if iptr.len() > 1 {
-                i.modrm_form.displ32u = u32::from(fetch_word(iptr));
+                i.modrm_form.displacement.set_displ32u(u32::from(fetch_word(iptr)));
                 iptr = &iptr[2..];
                 //*remain -= 2;
             } else {
-                return Err(BxDecodeError::ModRmParseFail);
+                return Err(BxDecodeError::ModRmParseFail.into());
             }
         }
     }
@@ -2867,7 +2884,7 @@ fn parse_modrm32<'a>(
     let mut modrm = BxModrm::default();
 
     if iptr.is_empty() {
-        return Err(BxDecodeError::ParseModrm32);
+        return Err(BxDecodeError::ParseModrm32.into());
     }
 
     let b2 = u32::from(iptr[0]);
@@ -2890,72 +2907,999 @@ fn parse_modrm32<'a>(
     Ok((modrm, iptr))
 }
 
-fn fetch_immediate() {
-    todo!()
+/// Get source operand descriptors for an opcode
+/// 
+/// Returns [src0, src1, src2, src3] where each is encoded as BX_FORM_SRC(type, src_origin)
+/// 
+/// TODO: This should be replaced with a generated table from ia_opcodes.def
+/// For now, we use a match statement for common opcodes
+fn get_opcode_srcs(opcode: Opcode) -> [u8; 4] {
+    use super::fetchdecode_generated::*;
+    
+    // Helper to form src descriptor: (type << 4) | src_origin
+    const fn form_src(type_val: u8, src_val: u8) -> u8 {
+        (type_val << 4) | src_val
+    }
+    
+    match opcode {
+        // ADD instructions
+        Opcode::AddGdEd | Opcode::AddGwEw | Opcode::AddGqEq => {
+            [OP_ED, OP_GD, OP_NONE, OP_NONE]
+        }
+        Opcode::AddEdGd | Opcode::AddEwGw | Opcode::AddEqGq => {
+            [OP_ED, OP_GD, OP_NONE, OP_NONE]
+        }
+        Opcode::AddEaxid | Opcode::AddAxiw | Opcode::AddRaxid => {
+            [OP_EAXREG, OP_ID, OP_NONE, OP_NONE]
+        }
+        Opcode::AddAlib | Opcode::AddEbIb => {
+            [OP_ALREG, OP_IB, OP_NONE, OP_NONE]
+        }
+        Opcode::AddEbGb => {
+            [OP_EB, OP_GB, OP_NONE, OP_NONE]
+        }
+        Opcode::AddGbEb => {
+            [OP_GB, OP_EB, OP_NONE, OP_NONE]
+        }
+        
+        // SUB instructions
+        Opcode::SubGdEd | Opcode::SubGwEw | Opcode::SubGqEq => {
+            [OP_ED, OP_GD, OP_NONE, OP_NONE]
+        }
+        Opcode::SubEdGd | Opcode::SubEwGw | Opcode::SubEqGq => {
+            [OP_ED, OP_GD, OP_NONE, OP_NONE]
+        }
+        Opcode::SubEaxid | Opcode::SubAxiw | Opcode::SubRaxid => {
+            [OP_EAXREG, OP_ID, OP_NONE, OP_NONE]
+        }
+        
+        // MOV instructions
+        Opcode::MovOp32GdEd | Opcode::MovOp64GdEd => {
+            [OP_ED, OP_GD, OP_NONE, OP_NONE]
+        }
+        Opcode::MovOp32EdGd | Opcode::MovOp64EdGd => {
+            [OP_ED, OP_GD, OP_NONE, OP_NONE]
+        }
+        Opcode::MovEdId | Opcode::MovEwIw | Opcode::MovEqId => {
+            [OP_ED, OP_ID, OP_NONE, OP_NONE]
+        }
+        Opcode::MovAlod => {
+            [OP_ALREG, OP_OB, OP_NONE, OP_NONE]
+        }
+        Opcode::MovAloq => {
+            [OP_OB, OP_ALREG, OP_NONE, OP_NONE]
+        }
+        
+        // Jump instructions with 8-bit relative offset (Jbw forms)
+        // These use sign-extended 8-bit immediate: BX_IMMBW_SE (3) with BX_SRC_BRANCH_OFFSET (9)
+        Opcode::JnbJbw | Opcode::JbJbw | Opcode::JbeJbw | Opcode::JzJbw
+        | Opcode::JnzJbw | Opcode::JnbeJbw | Opcode::JsJbw
+        | Opcode::JnsJbw | Opcode::JpJbw | Opcode::JnpJbw | Opcode::JlJbw
+        | Opcode::JnlJbw | Opcode::JleJbw | Opcode::JnleJbw
+        | Opcode::JoJbw | Opcode::JnoJbw => {
+            // 8-bit sign-extended branch offset: form_src(BX_IMMBW_SE, BX_SRC_BRANCH_OFFSET)
+            // BX_IMMBW_SE = 3, BX_SRC_BRANCH_OFFSET = 9
+            // form_src(3, 9) = (3 << 4) | 9 = 48 | 9 = 57
+            [form_src(3, 9), OP_NONE, OP_NONE, OP_NONE]
+        }
+        
+        // Jump instructions with 16-bit relative offset (Jw forms)
+        Opcode::JnbJw | Opcode::JbJw | Opcode::JbeJw | Opcode::JzJw
+        | Opcode::JnzJw | Opcode::JnbeJw | Opcode::JsJw
+        | Opcode::JnsJw | Opcode::JpJw | Opcode::JnpJw | Opcode::JlJw
+        | Opcode::JnlJw | Opcode::JleJw | Opcode::JnleJw
+        | Opcode::JoJw | Opcode::JnoJw => {
+            // 16-bit branch offset: form_src(BX_IMMW, BX_SRC_BRANCH_OFFSET)
+            // BX_IMMW = 5, BX_SRC_BRANCH_OFFSET = 9
+            // form_src(5, 9) = (5 << 4) | 9 = 80 | 9 = 89
+            [form_src(5, 9), OP_NONE, OP_NONE, OP_NONE]
+        }
+        
+        // Jump instructions with 32-bit relative offset (Jd forms)
+        Opcode::JnbJd | Opcode::JbJd | Opcode::JbeJd | Opcode::JzJd
+        | Opcode::JnzJd | Opcode::JnbeJd | Opcode::JsJd
+        | Opcode::JnsJd | Opcode::JpJd | Opcode::JnpJd | Opcode::JlJd
+        | Opcode::JnlJd | Opcode::JleJd | Opcode::JnleJd
+        | Opcode::JoJd | Opcode::JnoJd => {
+            // 32-bit branch offset: form_src(BX_IMMD, BX_SRC_BRANCH_OFFSET)
+            // BX_IMMD = 6, BX_SRC_BRANCH_OFFSET = 9
+            // form_src(6, 9) = (6 << 4) | 9 = 96 | 9 = 105
+            [form_src(6, 9), OP_NONE, OP_NONE, OP_NONE]
+        }
+        
+        // Default: no sources
+        _ => [OP_NONE, OP_NONE, OP_NONE, OP_NONE],
+    }
 }
 
-fn evex_displ8_compression() {
-    unimplemented!()
+/// Extract source type from encoded src descriptor
+/// 
+/// BX_DISASM_SRC_TYPE(src) = src >> 4
+#[inline]
+const fn get_src_type(src: u8) -> u8 {
+    src >> 4
 }
 
-fn assign_srcs() {
-    todo!()
+/// Extract source origin from encoded src descriptor
+/// 
+/// BX_DISASM_SRC_ORIGIN(src) = src & 0xf
+#[inline]
+const fn get_src_origin(src: u8) -> u8 {
+    src & 0xf
 }
 
-fn assign_srcs_avx() {
-    todo!()
+/// Fetch immediate values from instruction stream
+/// 
+/// Based on the opcode's source operand definitions, fetches immediate values
+/// of various sizes (Ib, Iw, Id, Iq, etc.) and stores them in the instruction structure.
+/// 
+/// Returns the updated instruction pointer slice after consuming immediate bytes,
+/// or an error if insufficient bytes are available.
+/// 
+/// This function matches the C++ `fetchImmediate` implementation.
+pub(super) fn fetch_immediate<'a>(
+    mut iptr: &'a [u8],
+    i: &mut BxInstructionGenerated,
+    ia_opcode: Opcode,
+    is_64: bool,
+) -> DecodeResult<&'a [u8]> {
+    use super::fetchdecode_generated::*;
+    use super::fetchdecode::*;
+    
+    let srcs = get_opcode_srcs(ia_opcode);
+    
+    for n in 0..=3 {
+        let src_encoded = srcs[n];
+        if src_encoded == OP_NONE {
+            continue;
+        }
+        
+        let src_type = get_src_type(src_encoded);
+        let src_origin = get_src_origin(src_encoded);
+        
+        // Only fetch immediates (not register operands)
+        if src_origin == BX_SRC_IMM as u8 || src_origin == BX_SRC_BRANCH_OFFSET as u8 {
+            // src_type is u8 (from src >> 4), safe to widen to u32
+            let imm_type = u32::from(src_type);
+            
+            match imm_type {
+                x if x == BX_IMM1 as u32 => {
+                    // Constant 1
+                    i.modrm_form.operand_data.set_ib([1, 0, 0, 0]);
+                }
+                x if x == BX_IMMB as u32 => {
+                    // 8-bit immediate
+                    if iptr.is_empty() {
+                        return Err(BxDecodeError::NoMoreLen.into());
+                    }
+                    let val = iptr[0];
+                    iptr = &iptr[1..];
+                    i.modrm_form.operand_data.set_ib([val, 0, 0, 0]);
+                }
+                x if x == BX_IMMBW_SE as u32 => {
+                    // Sign-extended 8-bit to 16-bit
+                    if iptr.is_empty() {
+                        return Err(BxDecodeError::NoMoreLen.into());
+                    }
+                    // Sign-extend 8-bit to 16-bit: interpret u8 as signed i8, then widen to i16, then to u16
+                    // Using 'as i8' is safe here as it performs sign extension (bit 7 becomes sign bit)
+                    let signed_byte = iptr[0] as i8;
+                    let val = u16::try_from(i16::from(signed_byte)).unwrap_or(0);
+                    iptr = &iptr[1..];
+                    i.modrm_form.operand_data.set_iw([val, 0]);
+                }
+                x if x == BX_IMMBD_SE as u32 => {
+                    // Sign-extended 8-bit to 32-bit
+                    if iptr.is_empty() {
+                        return Err(BxDecodeError::NoMoreLen.into());
+                    }
+                    // Sign-extend 8-bit to 32-bit: interpret u8 as signed i8, then widen to i32, then to u32
+                    // Using 'as i8' is safe here as it performs sign extension (bit 7 becomes sign bit)
+                    let signed_byte = iptr[0] as i8;
+                    let val = u32::try_from(i32::from(signed_byte)).unwrap_or(0);
+                    iptr = &iptr[1..];
+                    i.modrm_form.operand_data.set_id(val);
+                }
+                x if x == BX_IMMB2 as u32 => {
+                    // Second 8-bit immediate
+                    if iptr.is_empty() {
+                        return Err(BxDecodeError::NoMoreLen.into());
+                    }
+                    let val = iptr[0];
+                    iptr = &iptr[1..];
+                    let mut ib2 = i.modrm_form.displacement.ib2();
+                    ib2[0] = val;
+                    i.modrm_form.displacement.set_id2(unsafe { core::mem::transmute(ib2) });
+                }
+                x if x == BX_IMMW as u32 => {
+                    // 16-bit immediate
+                    if iptr.len() < 2 {
+                        return Err(BxDecodeError::NoMoreLen.into());
+                    }
+                    let val = fetch_word(iptr);
+                    iptr = &iptr[2..];
+                    i.modrm_form.operand_data.set_iw([val, 0]);
+                }
+                x if x == BX_IMMD as u32 => {
+                    // 32-bit immediate
+                    if iptr.len() < 4 {
+                        return Err(BxDecodeError::NoMoreLen.into());
+                    }
+                    let val = fetch_dword(iptr);
+                    iptr = &iptr[4..];
+                    i.modrm_form.operand_data.set_id(val);
+                }
+                #[cfg(feature = "x86_64")]
+                x if x == BX_IMMQ as u32 => {
+                    // 64-bit immediate (x86-64 only)
+                    if iptr.len() < 8 {
+                        return Err(BxDecodeError::NoMoreLen.into());
+                    }
+                    let val = fetch_qword(iptr);
+                    iptr = &iptr[8..];
+                    i.set_iq(val);
+                }
+                x if x == BX_DIRECT_PTR as u32 => {
+                    // Direct pointer: IdIw2 in 32-bit mode, IwIw2 in 16-bit mode
+                    if i.os32_l() != 0 {
+                        // 32-bit mode: fetch 32-bit offset
+                        if iptr.len() < 4 {
+                            return Err(BxDecodeError::NoMoreLen.into());
+                        }
+                        let val = fetch_dword(iptr);
+                        iptr = &iptr[4..];
+                        i.modrm_form.operand_data.set_id(val);
+                    } else {
+                        // 16-bit mode: fetch 16-bit offset
+                        if iptr.len() < 2 {
+                            return Err(BxDecodeError::NoMoreLen.into());
+                        }
+                        let val = fetch_word(iptr);
+                        iptr = &iptr[2..];
+                        i.modrm_form.operand_data.set_iw([val, 0]);
+                    }
+                    
+                    // Then fetch 16-bit segment selector
+                    if iptr.len() < 2 {
+                        return Err(BxDecodeError::NoMoreLen.into());
+                    }
+                    let val = fetch_word(iptr);
+                    iptr = &iptr[2..];
+                    i.modrm_form.displacement.set_id2(unsafe { core::mem::transmute([val, 0u16]) });
+                }
+                x if x == BX_DIRECT_MEMREF_B as u32
+                    || x == BX_DIRECT_MEMREF_W as u32
+                    || x == BX_DIRECT_MEMREF_D as u32
+                    || x == BX_DIRECT_MEMREF_Q as u32 => {
+                    // Direct memory reference - address embedded in opcode
+                    #[cfg(feature = "x86_64")]
+                    if is_64 {
+                        if i.as64_l() != 0 {
+                            // 64-bit addressing
+                            if iptr.len() < 8 {
+                                return Err(BxDecodeError::NoMoreLen.into());
+                            }
+                            let val = fetch_qword(iptr);
+                            iptr = &iptr[8..];
+                            i.set_iq(val);
+                        } else {
+                            // 32-bit addressing (zero-extended to 64)
+                            if iptr.len() < 4 {
+                                return Err(BxDecodeError::NoMoreLen.into());
+                            }
+                            let val = u64::from(fetch_dword(iptr));
+                            iptr = &iptr[4..];
+                            i.set_iq(val);
+                        }
+                    } else {
+                        // 32-bit mode
+                        if i.as32_l() != 0 {
+                            // 32-bit addressing
+                            if iptr.len() < 4 {
+                                return Err(BxDecodeError::NoMoreLen.into());
+                            }
+                            let val = fetch_dword(iptr);
+                            iptr = &iptr[4..];
+                            i.modrm_form.operand_data.set_id(val);
+                        } else {
+                            // 16-bit addressing (zero-extended to 32)
+                            if iptr.len() < 2 {
+                                return Err(BxDecodeError::NoMoreLen.into());
+                            }
+                            let val = u32::from(fetch_word(iptr));
+                            iptr = &iptr[2..];
+                            i.modrm_form.operand_data.set_id(val);
+                        }
+                    }
+                }
+                _ => {
+                    // Unknown immediate type - skip
+                }
+            }
+        } else if src_origin == BX_SRC_VIB as u8 {
+            // Vector immediate byte
+            if iptr.is_empty() {
+                return Err(BxDecodeError::NoMoreLen.into());
+            }
+            let val = iptr[0];
+            iptr = &iptr[1..];
+            i.modrm_form.operand_data.set_ib([val, 0, 0, 0]);
+        }
+    }
+    
+    Ok(iptr)
 }
 
+/// EVEX displacement 8 compression helper
+/// 
+/// Calculates the memory operand size for EVEX compressed displacement encoding.
+/// This is used when the EVEX.b bit indicates compressed 8-bit displacement.
+fn evex_displ8_compression(
+    _i: &BxInstructionGenerated,
+    _ia_opcode: Opcode,
+    _src: u8,
+    _type: u8,
+    _vex_w: u8,
+) -> u32 {
+    // TODO: Implement full EVEX displacement compression logic
+    // For now, return default size based on type
+    match _type {
+        x if x == super::fetchdecode_generated::BX_GPR64 as u8 => 8,
+        x if x == super::fetchdecode_generated::BX_GPR32 as u8 => 4,
+        x if x == super::fetchdecode_generated::BX_GPR16 as u8 => 2,
+        _ => 1,
+    }
+}
+
+/// Assign source registers based on opcode and ModRM
+/// 
+/// This function assigns the source register indices to the instruction's meta_data
+/// array based on the opcode's source operand definitions and the ModRM byte.
+/// 
+/// This matches the C++ `assign_srcs` implementation (non-AVX version).
+pub(super) fn assign_srcs(
+    i: &mut BxInstructionGenerated,
+    ia_opcode: Opcode,
+    nnn: u32,
+    rm: u32,
+) -> Result<(), BxDecodeError> {
+    use super::fetchdecode_generated::*;
+    use super::BX_TMP_REGISTER;
+    
+    let srcs = get_opcode_srcs(ia_opcode);
+    
+    for n in 0..=3 {
+        let src_encoded = srcs[n];
+        if src_encoded == OP_NONE {
+            continue;
+        }
+        
+        let src_type = get_src_type(src_encoded);
+        let src_origin = get_src_origin(src_encoded);
+        
+        match src_origin {
+            x if x == BX_SRC_NONE as u8
+                || x == BX_SRC_IMM as u8
+                || x == BX_SRC_BRANCH_OFFSET as u8
+                || x == BX_SRC_IMPLICIT as u8 => {
+                // No register assignment needed
+            }
+            x if x == BX_SRC_EAX as u8 => {
+                // Source is AL/AX/EAX/RAX
+                i.set_src_reg(n, 0);
+            }
+            x if x == BX_SRC_NNN as u8 => {
+                // Source is from ModRM reg field (nnn)
+                i.set_src_reg(n, u8::try_from(nnn).unwrap_or(0));
+            }
+            x if x == BX_SRC_RM as u8 => {
+                // Source is from ModRM r/m field
+                if i.mod_c0() {
+                    // Register mode: use rm directly
+                    i.set_src_reg(n, u8::try_from(rm).unwrap_or(0));
+                } else {
+                    // Memory mode: use temporary register
+                    let tmpreg = if src_type == BX_VMM_REG as u8 {
+                        super::BX_XMM_REGISTERS // BX_VECTOR_TMP_REGISTER
+                    } else {
+                        BX_TMP_REGISTER
+                    };
+                    i.set_src_reg(n, u8::try_from(tmpreg).unwrap_or(0));
+                }
+            }
+            x if x == BX_SRC_VECTOR_RM as u8 => {
+                // Source is vector register or memory
+                if i.mod_c0() {
+                    i.set_src_reg(n, u8::try_from(rm).unwrap_or(0));
+                } else {
+                    i.set_src_reg(n, super::BX_XMM_REGISTERS as u8); // BX_VECTOR_TMP_REGISTER
+                }
+            }
+            _ => {
+                // Unknown source origin - this shouldn't happen for basic opcodes
+                // For now, we'll skip it rather than panic
+                tracing::warn!(
+                    "assign_srcs: unknown source origin {} for opcode {:?} src {}",
+                    src_origin,
+                    ia_opcode,
+                    n
+                );
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+/// Assign source registers for AVX/EVEX/XOP instructions
+/// 
+/// This is the AVX version of assign_srcs that handles VEX/EVEX/XOP-specific
+/// source operands like VVV (vector register from VEX.vvvv field).
+/// 
+/// This matches the C++ `assign_srcs` implementation (AVX version).
+#[cfg(feature = "avx")]
+fn assign_srcs_avx(
+    i: &mut BxInstructionGenerated,
+    ia_opcode: Opcode,
+    _is_64: bool,
+    nnn: u32,
+    rm: u32,
+    vvv: u32,
+    _vex_w: u32,
+    _had_evex: bool,
+    _displ8: bool,
+) -> Result<(), BxDecodeError> {
+    use super::fetchdecode_generated::*;
+    use super::BX_TMP_REGISTER;
+    
+    let srcs = get_opcode_srcs(ia_opcode);
+    
+    for n in 0..=3 {
+        let src_encoded = srcs[n];
+        if src_encoded == OP_NONE {
+            continue;
+        }
+        
+        let src_type = get_src_type(src_encoded);
+        let src_origin = get_src_origin(src_encoded);
+        
+        match src_origin {
+            x if x == BX_SRC_NONE as u8
+                || x == BX_SRC_IMM as u8
+                || x == BX_SRC_BRANCH_OFFSET as u8
+                || x == BX_SRC_IMPLICIT as u8 => {
+                // No register assignment needed
+            }
+            x if x == BX_SRC_EAX as u8 => {
+                i.set_src_reg(n, 0);
+            }
+            x if x == BX_SRC_NNN as u8 => {
+                i.set_src_reg(n, u8::try_from(nnn).unwrap_or(0));
+                // TODO: Add EVEX/AMX register validation
+            }
+            x if x == BX_SRC_RM as u8 => {
+                if i.mod_c0() {
+                    i.set_src_reg(n, u8::try_from(rm).unwrap_or(0));
+                    // TODO: Add EVEX/AMX register validation
+                } else {
+                    let tmpreg = if src_type == BX_VMM_REG as u8 {
+                        super::BX_XMM_REGISTERS // BX_VECTOR_TMP_REGISTER
+                    } else {
+                        BX_TMP_REGISTER
+                    };
+                    i.set_src_reg(n, u8::try_from(tmpreg).unwrap_or(0));
+                }
+            }
+            x if x == BX_SRC_VECTOR_RM as u8 => {
+                if i.mod_c0() {
+                    i.set_src_reg(n, u8::try_from(rm).unwrap_or(0));
+                } else {
+                    i.set_src_reg(n, super::BX_XMM_REGISTERS as u8); // BX_VECTOR_TMP_REGISTER
+                }
+            }
+            x if x == BX_SRC_VVV as u8 => {
+                // Source is from VEX/EVEX vvvv field
+                i.set_src_reg(n, u8::try_from(vvv).unwrap_or(0));
+            }
+            _ => {
+                tracing::warn!(
+                    "assign_srcs_avx: unknown source origin {} for opcode {:?} src {}",
+                    src_origin,
+                    ia_opcode,
+                    n
+                );
+            }
+        }
+    }
+    
+    Ok(())
+}
+
+#[cfg(not(feature = "avx"))]
+fn assign_srcs_avx(
+    _i: &mut BxInstructionGenerated,
+    _ia_opcode: Opcode,
+    _is_64: bool,
+    _nnn: u32,
+    _rm: u32,
+    _vvv: u32,
+    _vex_w: u32,
+    _had_evex: bool,
+    _displ8: bool,
+) -> Result<(), BxDecodeError> {
+    // AVX not supported
+    Err(BxDecodeError::BxIllegalOpcode.into())
+}
+
+/// Decode EVEX-prefixed AVX-512 instructions
+/// 
+/// EVEX prefix is 0x62 followed by 3 bytes.
+/// Based on the C++ decoder_evex32 implementation.
+#[cfg(not(feature = "evex"))]
 fn decoder_evex32<'a>(
-    iptr: &'a [u8],
-    //remain: &mut usize,
-    //i: &mut BxInstruction,
+    _iptr: &'a [u8],
+    _i: &mut BxInstructionGenerated,
+    _b1: u32,
+    _sse_prefix: Option<SsePrefix>,
+    _opcode_table: Option<&'static [u64]>,
+) -> DecodeResult<(Opcode, &'a [u8])> {
+    // EVEX not supported
+    Err(BxDecodeError::BxIllegalOpcode.into())
+}
+
+#[cfg(feature = "evex")]
+fn decoder_evex32<'a>(
+    mut iptr: &'a [u8],
     i: &mut BxInstructionGenerated,
     b1: u32,
     sse_prefix: Option<SsePrefix>,
-    opcode_table: Option<&'static [u64]>,
+    _opcode_table: Option<&'static [u64]>,
 ) -> DecodeResult<(Opcode, &'a [u8])> {
-    tracing::info!("in decoder_evex32");
-    unimplemented!()
+    use super::fetchdecode_generated::*;
+    use super::fetchdecode::fetch_dword;
+    
+    // make sure EVEX 0x62 prefix
+    assert_eq!(b1, 0x62, "decoder_evex32: invalid b1 value");
+    
+    if iptr.is_empty() {
+        return Err(BxDecodeError::NoMoreLen.into());
+    }
+    
+    // If mod field is not 11b (register form), fall back to regular modrm decoder
+    if (iptr[0] & 0xc0) != 0xc0 {
+        // TODO: Call decoder32_modrm - for now return error
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
+    
+    if sse_prefix.is_some() {
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
+    
+    if iptr.len() < 4 {
+        return Err(BxDecodeError::NoMoreLen.into());
+    }
+    
+    let evex = fetch_dword(iptr);
+    iptr = &iptr[4..];
+    
+    // EVEX format: 0x62 P0 P1 P2
+    // Check for reserved EVEX bits
+    if (evex & 0x08) != 0 {
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
+    
+    // EVEX.U must be '1
+    if (evex & 0x400) == 0 {
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
+    
+    let evex_opc_map = u32::from(evex & 0x7);
+    if evex_opc_map == 0 || evex_opc_map == 4 || evex_opc_map == 7 {
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
+    let evex_opc_map = if evex_opc_map >= 4 { evex_opc_map - 1 } else { evex_opc_map };
+    
+    let sse_prefix_raw = u32::from((evex >> 8) & 0x3);
+    let vvv = 15u32 - u32::from((evex >> 11) & 0xf);
+    if vvv >= 8 {
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
+    
+    let vex_w = u32::from((evex >> 15) & 0x1);
+    let opmask = u8::try_from((evex >> 16) & 0x7).unwrap_or(0);
+    i.set_opmask(opmask);
+    let evex_v = ((evex >> 19) & 0x1) ^ 0x1;
+    if evex_v != 0 {
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
+    let evex_b = u8::try_from((evex >> 20) & 0x1).unwrap_or(0);
+    i.set_evex_b(evex_b);
+    
+    let evex_vl_rc = u8::try_from((evex >> 21) & 0x3).unwrap_or(0);
+    i.set_rc(evex_vl_rc);
+    // VL: 0 -> 128, 1 -> 256, 2 -> 512, 3 -> reserved
+    let vl_value = match evex_vl_rc {
+        0 => 128u8,
+        1 => 256u8,
+        2 => 512u8,
+        _ => return Err(BxDecodeError::BxIllegalOpcode.into()),
+    };
+    i.set_vl(vl_value);
+    i.set_vex_w(vex_w as u8);
+    
+    let evex_z = u8::try_from((evex >> 23) & 0x1).unwrap_or(0);
+    i.set_zero_masking(evex_z);
+    
+    if evex_z != 0 && opmask == 0 {
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
+    
+    let opcode_byte = u32::from((evex >> 24) & 0xff);
+    let opcode_byte = opcode_byte + 256 * (evex_opc_map - 1);
+    
+    let (modrm, mut updated_iptr) = parse_modrm32(iptr, i)?;
+    iptr = updated_iptr;
+    
+    let displ8 = (modrm.mod_ == 0x40);
+    
+    if modrm.mod_ == 0xc0 {
+        // EVEX.b in reg form implies 512-bit vector length
+        if i.get_evex_b() != 0 {
+            i.set_vl(512u8); // BX_VL512
+        }
+    }
+    
+    let vl = i.get_vl() - 1; // 0: VL128, 1: VL256, 3: VL512
+    let mut decmask = ((i.osize() as u32) << OS32_OFFSET)
+        | ((i.asize() as u32) << AS32_OFFSET)
+        | (sse_prefix_raw << SSE_PREFIX_OFFSET)
+        | (if i.mod_c0() { 1 << MODC0_OFFSET } else { 0 })
+        | (modrm.nnn << NNN_OFFSET)
+        | (modrm.rm << RRR_OFFSET)
+        | (vex_w << VEX_W_OFFSET)
+        | (vl << VEX_VL_128_256_OFFSET);
+    
+    if i.mod_c0() && modrm.nnn == modrm.rm {
+        decmask |= 1 << SRC_EQ_DST_OFFSET;
+    }
+    if opmask == 0 {
+        decmask |= 1 << MASK_K0_OFFSET;
+    }
+    
+    // TODO: Use BxOpcodeTableEVEX[opcode_byte] to find opcode
+    let _ia_opcode = Opcode::IaError;
+    
+    // Check for immediate
+    let has_immediate = (opcode_byte >= 0x70 && opcode_byte <= 0x73) 
+        || (opcode_byte >= 0xC2 && opcode_byte <= 0xC6) 
+        || (opcode_byte >= 0x200 && opcode_byte < 0x300);
+    
+    if has_immediate {
+        if iptr.is_empty() {
+            return Err(BxDecodeError::NoMoreLen.into());
+        }
+        let mut ib = i.modrm_form.operand_data.ib();
+        ib[0] = iptr[0];
+        i.modrm_form.operand_data.set_ib(ib);
+        iptr = &iptr[1..];
+    }
+    
+    // TODO: Call assign_srcs_avx with proper parameters
+    // assign_srcs_avx(i, ia_opcode, false, modrm.nnn, modrm.rm, vvv, vex_w, true, displ8)?;
+    
+    // EVEX specific #UD conditions
+    if i.get_vl() > 512 {
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
+    
+    Err(BxDecodeError::BxIllegalOpcode.into()) // Not fully implemented yet
 }
 
+/// Decode VEX-prefixed AVX instructions
+/// 
+/// VEX prefix can be 2-byte (0xC5) or 3-byte (0xC4).
+/// Based on the C++ decoder_vex32 implementation.
+#[cfg(not(feature = "avx"))]
 fn decoder_vex32<'a>(
-    iptr: &'a [u8],
-    //remain: &mut usize,
-    //i: &mut BxInstruction,
+    _iptr: &'a [u8],
+    _i: &mut BxInstructionGenerated,
+    _b1: u32,
+    _sse_prefix: Option<SsePrefix>,
+    _opcode_table: Option<&'static [u64]>,
+) -> DecodeResult<(Opcode, &'a [u8])> {
+    // AVX not supported
+    Err(BxDecodeError::BxIllegalOpcode.into())
+}
+
+#[cfg(feature = "avx")]
+fn decoder_vex32<'a>(
+    mut iptr: &'a [u8],
     i: &mut BxInstructionGenerated,
     b1: u32,
     sse_prefix: Option<SsePrefix>,
-    opcode_table: Option<&'static [u64]>,
+    _opcode_table: Option<&'static [u64]>,
 ) -> DecodeResult<(Opcode, &'a [u8])> {
-    tracing::info!("in decoder_vex32");
-    unimplemented!()
+    use super::fetchdecode_generated::*;
+    
+    // make sure VEX 0xC4 or VEX 0xC5
+    assert!((b1 & !0x1) == 0xc4, "decoder_vex32: invalid b1 value");
+    
+    if iptr.is_empty() {
+        return Err(BxDecodeError::NoMoreLen.into());
+    }
+    
+    // If mod field is not 11b (register form), fall back to regular modrm decoder
+    if (iptr[0] & 0xc0) != 0xc0 {
+        // TODO: Call decoder32_modrm - for now return error
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
+    
+    if sse_prefix.is_some() {
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
+    
+    let mut rm = 0u32;
+    let mut nnn = 0u32;
+    let mut vex_w = 0u32;
+    let mut vex_opc_map = 1u32;
+    
+    let vex = iptr[0];
+    iptr = &iptr[1..];
+    
+    if b1 == 0xc4 {
+        // decode 3-byte VEX prefix
+        vex_opc_map = u32::from(vex & 0x1f);
+        if iptr.is_empty() {
+            return Err(BxDecodeError::NoMoreLen.into());
+        }
+        let vex3 = iptr[0];
+        iptr = &iptr[1..];
+        vex_w = u32::from((vex3 >> 7) & 0x1);
+        let vvv = 15u32 - u32::from((vex3 >> 3) & 0xf);
+        let vex_l = (vex3 >> 2) & 0x1;
+        i.set_vl(128u8.saturating_add((vex_l * 128).try_into().unwrap_or(0))); // BX_VL128 + vex_l
+        i.set_vex_w(vex_w.try_into().unwrap_or(0));
+        let sse_prefix_raw = u32::from(vex3 & 0x3);
+        
+        if iptr.is_empty() {
+            return Err(BxDecodeError::NoMoreLen.into());
+        }
+        let opcode_byte = u32::from(iptr[0]);
+        iptr = &iptr[1..];
+        
+        // there are instructions only from maps 1,2,3 for now in 32-bit mode
+        if vex_opc_map < 1 || vex_opc_map >= 4 {
+            return Err(BxDecodeError::BxIllegalOpcode.into());
+        }
+        
+        let has_modrm = opcode_byte != 0x177; // if not VZEROUPPER/VZEROALL opcode
+        let opcode_byte = opcode_byte.wrapping_sub(256);
+        
+        if has_modrm {
+            // opcode requires modrm byte
+            let (modrm, updated_iptr) = parse_modrm32(iptr, i)?;
+            iptr = updated_iptr;
+            nnn = modrm.nnn;
+            rm = modrm.rm;
+        } else {
+            // Opcode does not require a MODRM byte
+            rm = u32::from(b1 & 0x7);
+            nnn = u32::from((b1 >> 3) & 0x7);
+            i.assert_mod_c0();
+        }
+        
+        let mut decmask = (u32::from(i.osize()) << OS32_OFFSET)
+            | (u32::from(i.asize()) << AS32_OFFSET)
+            | (sse_prefix_raw << SSE_PREFIX_OFFSET)
+            | (if i.mod_c0() { 1 << MODC0_OFFSET } else { 0 })
+            | (nnn << NNN_OFFSET)
+            | (rm << RRR_OFFSET)
+            | (vex_w << VEX_W_OFFSET)
+            | (vex_l << VEX_VL_128_256_OFFSET);
+        
+        if i.mod_c0() && nnn == rm {
+            decmask |= 1 << SRC_EQ_DST_OFFSET;
+        }
+        
+        // TODO: Use BxOpcodeTableVEX[opcode_byte] to find opcode
+        // For now, return error
+        let _ia_opcode = Opcode::IaError;
+        
+        // Check for immediate
+        let has_immediate = (opcode_byte >= 0x70 && opcode_byte <= 0x73) 
+            || (opcode_byte >= 0xC2 && opcode_byte <= 0xC6) 
+            || (opcode_byte >= 0x200);
+        
+        if has_immediate {
+            if iptr.is_empty() {
+                return Err(BxDecodeError::NoMoreLen.into());
+            }
+            let mut ib = i.modrm_form.operand_data.ib();
+            ib[0] = iptr[0];
+            i.modrm_form.operand_data.set_ib(ib);
+            iptr = &iptr[1..];
+        }
+        
+        // TODO: Call assign_srcs_avx with proper parameters
+        // assign_srcs_avx(i, ia_opcode, false, nnn, rm, vvv, vex_w)?;
+        
+        return Err(BxDecodeError::BxIllegalOpcode.into()); // Not fully implemented yet
+    } else {
+        // 2-byte VEX (0xC5) - not fully implemented
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
 }
 
+/// Decode XOP-prefixed instructions
+/// 
+/// XOP prefix is 0x8F followed by 2 bytes.
+/// Based on the C++ decoder_xop32 implementation.
+#[cfg(not(feature = "avx"))]
 fn decoder_xop32<'a>(
-    iptr: &'a [u8],
-    //remain: &mut usize,
-    //i: &mut BxInstruction,
-    i: &mut BxInstructionGenerated,
-    b1: u32,
-    sse_prefix: Option<SsePrefix>,
-    opcode_table: Option<&'static [u64]>,
+    _iptr: &'a [u8],
+    _i: &mut BxInstructionGenerated,
+    _b1: u32,
+    _sse_prefix: Option<SsePrefix>,
+    _opcode_table: Option<&'static [u64]>,
 ) -> DecodeResult<(Opcode, &'a [u8])> {
-    tracing::info!("in decoder_xop32");
-    unimplemented!()
+    // AVX/XOP not supported
+    Err(BxDecodeError::BxIllegalOpcode.into())
 }
 
-fn decoder32_fp_escape<'a>(
-    iptr: &'a [u8],
-    //remain: &mut usize,
-    //i: &mut BxInstruction,
+#[cfg(feature = "avx")]
+fn decoder_xop32<'a>(
+    mut iptr: &'a [u8],
     i: &mut BxInstructionGenerated,
     b1: u32,
     sse_prefix: Option<SsePrefix>,
-    opcode_table: Option<&'static [u64]>,
+    _opcode_table: Option<&'static [u64]>,
 ) -> DecodeResult<(Opcode, &'a [u8])> {
-    tracing::info!("in decoder32_fp_escape");
-    unimplemented!()
+    use super::fetchdecode_generated::*;
+    
+    // make sure XOP 0x8f prefix
+    assert_eq!(b1, 0x8f, "decoder_xop32: invalid b1 value");
+    
+    if iptr.is_empty() {
+        return Err(BxDecodeError::NoMoreLen.into());
+    }
+    
+    // Check if this is actually an XOP prefix
+    if (iptr[0] & 0xc8) != 0xc8 {
+        // not XOP prefix, decode regular opcode
+        // TODO: Call decoder32_modrm - for now return error
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
+    
+    if sse_prefix.is_some() {
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
+    
+    // 3 byte XOP prefix
+    if iptr.len() < 3 {
+        return Err(BxDecodeError::NoMoreLen.into());
+    }
+    
+    let xop2 = iptr[0];
+    iptr = &iptr[1..];
+    
+    let xop_opcext = i32::from(xop2 & 0x1f) - 8;
+    if xop_opcext < 0 || xop_opcext >= 3 {
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
+    
+    let xop3 = iptr[0];
+    iptr = &iptr[1..];
+    
+    let vex_w = u32::from((xop3 >> 7) & 0x1);
+    let vvv = 15u32 - u32::from((xop3 >> 3) & 0xf);
+    let vex_l = (xop3 >> 2) & 0x1;
+    i.set_vl(128u8.saturating_add((vex_l * 128).try_into().unwrap_or(0))); // BX_VL128 + vex_l
+    i.set_vex_w(vex_w.try_into().unwrap_or(0));
+    let sse_prefix_raw = u32::from(xop3 & 0x3);
+    
+    if sse_prefix_raw != 0 {
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
+    
+    if iptr.is_empty() {
+        return Err(BxDecodeError::NoMoreLen.into());
+    }
+    let opcode_byte = u32::from(iptr[0]);
+    iptr = &iptr[1..];
+    let opcode_byte = opcode_byte + 256 * u32::try_from(xop_opcext).unwrap_or(0);
+    
+    let (modrm, updated_iptr) = parse_modrm32(iptr, i)?;
+    iptr = updated_iptr;
+    
+    let mut decmask = ((i.osize() as u32) << OS32_OFFSET)
+        | ((i.asize() as u32) << AS32_OFFSET)
+        | (if i.mod_c0() { 1 << MODC0_OFFSET } else { 0 })
+        | (modrm.nnn << NNN_OFFSET)
+        | (modrm.rm << RRR_OFFSET)
+        | (vex_w << VEX_W_OFFSET)
+        | (vex_l << VEX_VL_128_256_OFFSET);
+    
+    if i.mod_c0() && modrm.nnn == modrm.rm {
+        decmask |= 1 << SRC_EQ_DST_OFFSET;
+    }
+    
+    // TODO: Use BxOpcodeTableXOP[opcode_byte] to find opcode
+    let _ia_opcode = Opcode::IaError;
+    
+    // Fetch immediate if needed
+    // TODO: Call fetch_immediate(iptr, i, ia_opcode, false)?;
+    
+    // TODO: Call assign_srcs_avx with proper parameters
+    // assign_srcs_avx(i, ia_opcode, false, modrm.nnn, modrm.rm, vvv, vex_w)?;
+    
+    Err(BxDecodeError::BxIllegalOpcode.into()) // Not fully implemented yet
+}
+
+/// Decode x87 FPU escape instructions (D8-DF)
+/// 
+/// Based on the C++ decoder32_fp_escape implementation.
+/// x87 instructions use escape opcodes D8-DF followed by ModRM byte.
+fn decoder32_fp_escape<'a>(
+    mut iptr: &'a [u8],
+    i: &mut BxInstructionGenerated,
+    b1: u32,
+    _sse_prefix: Option<SsePrefix>,
+    _opcode_table: Option<&'static [u64]>,
+) -> DecodeResult<(Opcode, &'a [u8])> {
+    use super::fetchdecode_x87::*;
+    
+    // b1 should be 0xD8-0xDF
+    assert!(b1 >= 0xd8 && b1 <= 0xdf, "decoder32_fp_escape: invalid b1 value");
+    
+    // opcode requires modrm byte
+    if iptr.is_empty() {
+        return Err(BxDecodeError::ModRmParseFail.into());
+    }
+    
+    let modrm_byte = iptr[0];
+    iptr = &iptr[1..];
+    
+    // Parse mod-nnn-rm
+    let mod_field = modrm_byte & 0xc0;
+    let nnn = (modrm_byte >> 3) & 0x7;
+    let rm = modrm_byte & 0x7;
+    
+    // Store foo field for x87: (modrm | (b1 << 8)) & 0x7ff
+    let foo = ((u16::from(modrm_byte)) | (u16::try_from(b1).unwrap_or(0) << 8)) & 0x7ff;
+    i.set_foo(foo);
+    
+    // Select the appropriate x87 opcode table based on b1
+    let x87_table = match b1 {
+        0xd8 => &BxOpcodeInfo_FloatingPointD8[..],
+        0xd9 => &BxOpcodeInfo_FloatingPointD9[..],
+        0xda => &BxOpcodeInfo_FloatingPointDA[..],
+        0xdb => &BxOpcodeInfo_FloatingPointDB[..],
+        0xdc => &BxOpcodeInfo_FloatingPointDC[..],
+        0xdd => &BxOpcodeInfo_FloatingPointDD[..],
+        0xde => &BxOpcodeInfo_FloatingPointDE[..],
+        0xdf => &BxOpcodeInfo_FloatingPointDF[..],
+        _ => return Err(BxDecodeError::BxIllegalOpcode.into()),
+    };
+    
+    // Determine opcode index
+    let opcode_idx = if mod_field != 0xc0 {
+        // /m form: use nnn directly (0-7)
+        usize::try_from(nnn).unwrap_or(0)
+    } else {
+        // /r form: use (modrm & 0x3f) + 8
+        usize::try_from(modrm_byte & 0x3f).unwrap_or(0) + 8
+    };
+    
+    if opcode_idx >= x87_table.len() {
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    }
+    
+    let ia_opcode = x87_table[opcode_idx];
+    
+    // Assign sources
+    assign_srcs(i, ia_opcode, u32::from(nnn), u32::from(rm))?;
+    
+    Ok((ia_opcode, iptr))
 }
 
 pub fn decoder32_modrm<'a>(
@@ -2980,10 +3924,10 @@ pub fn decoder32_modrm<'a>(
     iptr = updated_iptr;
 
     // Construct the decmask
-    let mut decmask = (i.osize() << OS32_OFFSET)
-        | (i.asize() << AS32_OFFSET)
-        | (sse_prefix.map_or(0, |sp| sp as u32) << SSE_PREFIX_OFFSET)
-        | if i.mod_c0() != 0 {
+    let mut decmask = (u32::from(i.osize()) << OS32_OFFSET)
+        | (u32::from(i.asize()) << AS32_OFFSET)
+        | (sse_prefix.map_or(0u32, |sp| sp as u32) << SSE_PREFIX_OFFSET)
+        | if i.mod_c0() {
             1 << MODC0_OFFSET
         } else {
             0
@@ -2991,7 +3935,7 @@ pub fn decoder32_modrm<'a>(
         | (modrm.nnn << NNN_OFFSET)
         | (modrm.rm << RRR_OFFSET);
 
-    if i.mod_c0() > 0 && modrm.nnn == modrm.rm {
+    if i.mod_c0() && modrm.nnn == modrm.rm {
         decmask |= 1 << SRC_EQ_DST_OFFSET;
     }
 
@@ -2999,27 +3943,67 @@ pub fn decoder32_modrm<'a>(
     let ia_opcode = find_opcode(opcode_table, decmask)?;
 
     // Fetch immediate value
-    //if fetch_immediate(updated_iptr, remain, i, ia_opcode, false)? < 0 {
-    //    return Err(DecodeError::FetchImmediateError);
-    //}
+    iptr = fetch_immediate(iptr, i, ia_opcode, false)?;
 
     // Assign sources
-    //assign_srcs(i, ia_opcode, modrm.nnn, modrm.rm);
+    assign_srcs(i, ia_opcode, modrm.nnn, modrm.rm)?;
 
     Ok((ia_opcode, iptr))
 }
 
+/// Decode control register instructions (MOV CRx, DRx)
+/// 
+/// MOVs with CRx and DRx always use register ops and ignore the mod field.
+/// Based on the C++ decoder_creg32 implementation.
 fn decoder_creg32<'a>(
-    iptr: &'a [u8],
-    //remain: &mut usize,
-    //i: &mut BxInstruction,
+    mut iptr: &'a [u8],
     i: &mut BxInstructionGenerated,
     b1: u32,
     sse_prefix: Option<SsePrefix>,
     opcode_table: Option<&'static [u64]>,
 ) -> DecodeResult<(Opcode, &'a [u8])> {
-    tracing::info!("in decoder_creg32");
-    unimplemented!()
+    use super::fetchdecode_generated::*;
+    
+    // MOVs with CRx and DRx always use register ops and ignore the mod field.
+    // b1 should be 0x120-0x127 (0x120 | nnn)
+    assert!((b1 & !7) == 0x120, "decoder_creg32: invalid b1 value");
+    
+    // opcode requires modrm byte
+    if iptr.is_empty() {
+        return Err(BxDecodeError::ModRmParseFail.into());
+    }
+    
+    let b2 = u32::from(iptr[0]);
+    iptr = &iptr[1..];
+    
+    // Parse mod-nnn-rm and related bytes
+    let nnn = (b2 >> 3) & 0x7;
+    let rm = b2 & 0x7;
+    
+    i.assert_mod_c0();
+    
+    let sse_prefix_raw = match sse_prefix {
+        Some(prefix) => prefix as u32,
+        None => 0,
+    };
+    
+    let mut decmask = ((i.osize() as u32) << OS32_OFFSET)
+        | ((i.asize() as u32) << AS32_OFFSET)
+        | (sse_prefix_raw << SSE_PREFIX_OFFSET)
+        | (1 << MODC0_OFFSET)
+        | (nnn << NNN_OFFSET)
+        | (rm << RRR_OFFSET);
+    
+    let Some(opcode_table) = opcode_table else {
+        return Err(BxDecodeError::BxIllegalOpcode.into());
+    };
+    
+    let ia_opcode = find_opcode(opcode_table, decmask)?;
+    
+    // Assign sources
+    assign_srcs(i, ia_opcode, nnn, rm)?;
+    
+    Ok((ia_opcode, iptr))
 }
 
 fn decoder32_3dnow<'a>(
@@ -3038,13 +4022,16 @@ fn decoder32_3dnow<'a>(
     let (modrm, mut iptr) = parse_modrm32(iptr, i)?;
 
     if !iptr.is_empty() {
-        unsafe { i.modrm_form.operand_data.Ib[0] = iptr[0] };
+        let mut ib = i.modrm_form.operand_data.ib();
+        ib[0] = iptr[0];
+        i.modrm_form.operand_data.set_ib(ib);
         iptr = &iptr[1..];
     } else {
-        return Err(BxDecodeError::ThreeDNow);
+        return Err(BxDecodeError::ThreeDNow.into());
     }
 
-    let opcode = Bx3DNowOpcode[usize::from(unsafe { i.modrm_form.operand_data.Ib[0] })];
+    let ib_val = i.modrm_form.operand_data.ib()[0];
+    let opcode = Bx3DNowOpcode[usize::from(ib_val)];
 
     Ok((opcode, iptr))
 }
@@ -3095,14 +4082,14 @@ fn decoder_simple32<'a>(
     // no immediate expected, no sources expected, take first opcode
     // check attributes ?
     // Extract the opcode from the upper bits
-    let ia_opcode: u16 = ((op >> 48) & 0x7FFF) as u16; // Extracting the opcode
+    let ia_opcode: u16 = u16::try_from((op >> 48) & 0x7FFF_u64).unwrap_or(0); // Extracting the opcode
 
     // Create the Opcode from the extracted value
     let opcode = Opcode::try_from(ia_opcode)?;
     Ok((opcode, iptr))
 }
 
-const fn decoder_ud32<'a>(
+fn decoder_ud32<'a>(
     _iptr: &'a [u8],
     //_remain: &mut usize,
     //_i: &mut BxInstruction,
@@ -3113,18 +4100,18 @@ const fn decoder_ud32<'a>(
 ) -> DecodeResult<(Opcode, &'a [u8])> {
     //tracing::info!("in decoder_ud32");
 
-    Err(BxDecodeError::Ud32)
+    Err(BxDecodeError::Ud32.into())
 }
 
-fn find_opcode(op_map: &'static [u64], decmask: u32) -> DecodeResult<Opcode> {
+pub(super) fn find_opcode(op_map: &'static [u64], decmask: u32) -> DecodeResult<Opcode> {
     let mut ia_opcode_raw = Opcode::IaError as _;
 
     for &op in op_map {
-        let ignmsk = (op & 0xFFFFFF) as u32;
-        let opmsk = (op >> 24) as u32;
+        let ignmsk = u32::try_from(op & 0xFFFFFF_u64).unwrap_or(0);
+        let opmsk = u32::try_from((op >> 24) & 0xFFFFFF_u64).unwrap_or(0);
 
         if (opmsk & ignmsk) == (decmask & ignmsk) {
-            ia_opcode_raw = (op >> 48) as u16 & 0x7FFF; // Masking to get the opcode
+            ia_opcode_raw = u16::try_from((op >> 48) & 0x7FFF_u64).unwrap_or(0); // Masking to get the opcode
             break;
         }
     }
@@ -3156,8 +4143,8 @@ fn decoder32<'a>(
         Some(prefix) => prefix as u32,
         None => 0,
     };
-    let mut decmask = (i.osize() << OS32_OFFSET)
-        | (i.asize() << AS32_OFFSET)
+    let mut decmask = (u32::from(i.osize()) << OS32_OFFSET)
+        | (u32::from(i.asize()) << AS32_OFFSET)
         | (sse_prefix_raw << SSE_PREFIX_OFFSET)
         | (1 << MODC0_OFFSET);
 
@@ -3167,9 +4154,16 @@ fn decoder32<'a>(
 
     let ia_opcode = find_opcode(opcode_table, decmask)?;
 
+    // Fetch immediate value if needed
+    let mut updated_iptr = fetch_immediate(iptr, i, ia_opcode, false)?;
+
+    // Assign sources (decoder32 is for register-only instructions, so modC0 is always true)
+    i.assert_mod_c0();
+    assign_srcs(i, ia_opcode, nnn, rm)?;
+
     tracing::warn!("decoder32(): Opcode: {ia_opcode:?}");
 
-    Ok((ia_opcode, iptr))
+    Ok((ia_opcode, updated_iptr))
 }
 
 pub fn fetch_decode32_chatgpt_generated_instr(
@@ -3192,20 +4186,20 @@ pub fn fetch_decode32_chatgpt_generated_instr(
 
     let mut sse_prefix: Option<SsePrefix> = None;
 
-    let meta_info1_raw = ((is_32 as u8) << 2) | ((is_32 as u8) << 3);
+    let meta_info1_raw = (u8::from(is_32) << 2) | (u8::from(is_32) << 3);
     let mut meta_info_1 = MetaInfoFlags::from_bits_truncate(meta_info1_raw);
 
-    instruction.init(is_32 as _, is_32 as _, 0, 0);
+    instruction.init(u8::from(is_32), u8::from(is_32), 0, 0);
 
     if iptr.is_empty() {
-        return Err(BxDecodeError::NoMoreLen);
+        return Err(BxDecodeError::NoMoreLen.into());
     }
 
     //instruction.init(is_32, is_32, 0, 0);
 
     loop {
         if !iptr.is_empty() {
-            b1 = iptr[0] as u32;
+            b1 = u32::from(iptr[0]);
             //remain -= 1;
             iptr = &iptr[1..];
 
@@ -3217,9 +4211,9 @@ pub fn fetch_decode32_chatgpt_generated_instr(
             match b1 {
                 0x0f => {
                     if iptr.is_empty() {
-                        return Err(DecodeError::NoMoreLen);
+                        return Err(BxDecodeError::NoMoreLen.into());
                     }
-                    b1 = 0x100 | (iptr[0] as u32);
+                    b1 = 0x100 | u32::from(iptr[0]);
                     iptr = &iptr[1..];
                     //remain -= 1;
                 }
@@ -3273,7 +4267,7 @@ pub fn fetch_decode32_chatgpt_generated_instr(
             tracing::warn!("seg_override: {seg_override:?} sse_prefix: {sse_prefix:?}");
 
             if iptr.is_empty() {
-                return Err(DecodeError::NoMoreLen);
+                return Err(BxDecodeError::NoMoreLen.into());
             }
         }
     }
@@ -3281,13 +4275,13 @@ pub fn fetch_decode32_chatgpt_generated_instr(
     tracing::info!("Passed the loop");
 
     let decode_descriptor =
-        &DECODE32_DESCRIPTOR[usize::try_from(b1).map_err(|_| DecodeError::U32toUsize)?];
+        &DECODE32_DESCRIPTOR[usize::try_from(b1).map_err(|_| BxDecodeError::U32toUsize)?];
     let decode_method = decode_descriptor.decode_method;
     let mut opcode_table = *decode_descriptor.opcode_table;
 
     if b1 == 0x138 || b1 == 0x13a {
         if iptr.is_empty() {
-            return Err(DecodeError::NoMoreLen);
+            return Err(BxDecodeError::NoMoreLen.into());
         }
         let opcode = iptr[0];
         iptr = &iptr[1..];
@@ -3295,10 +4289,10 @@ pub fn fetch_decode32_chatgpt_generated_instr(
 
         if b1 == 0x138 {
             opcode_table = Some(BxOpcodeTable0F38[opcode as usize]);
-            b1 = 0x200 | opcode as u32;
+            b1 = 0x200 | u32::from(opcode);
         } else if b1 == 0x13a {
             opcode_table = Some(BxOpcodeTable0F3A[opcode as usize]);
-            b1 = 0x300 | opcode as u32;
+            b1 = 0x300 | u32::from(opcode);
         }
     }
 
@@ -3306,15 +4300,15 @@ pub fn fetch_decode32_chatgpt_generated_instr(
     instruction.set_cet_seg_override(BxSegregs::Null);
     //seg_override_cet handling removed
 
-    instruction.modrm_form.operand_data.Id = 0;
+    instruction.modrm_form.operand_data.set_id(0);
 
     //instruction.metainfo.meta_info1 = meta_info_1;
 
     (ia_opcode, iptr) = decode_method(iptr, &mut instruction, b1, sse_prefix, opcode_table)?;
 
-    instruction.meta_info.metainfo1 = meta_info_1.bits();
+    instruction.meta_info.metainfo1 = meta_info_1;
     instruction.meta_info.ia_opcode = ia_opcode;
-    instruction.meta_info.ilen = remaining_in_page as u8 - iptr.len() as u8;
+    instruction.meta_info.ilen = u8::try_from(remaining_in_page).unwrap_or(0).saturating_sub(u8::try_from(iptr.len()).unwrap_or(0));
 
     if lock {
         tracing::info!("We have a lock btw");

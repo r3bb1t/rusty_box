@@ -259,3 +259,52 @@ pub(super) const Bx3DNowOpcode: [Opcode; 256] = [
     /* FE */ Opcode::IaError,
     /* FF */ Opcode::IaError,
 ];
+
+// x87 Floating Point opcode tables
+// Based on cpp_orig/bochs/cpu/decoder/fetchdecode_x87.h
+
+/// D8 opcode table (64+8 entries = 72 total)
+/// /m form: 0-7 (8 entries)
+/// /r form: 8-71 (64 entries, D8 C0-FF)
+pub(super) const BxOpcodeInfo_FloatingPointD8: [Opcode; 72] = [
+    // /m form (0-7)
+    Opcode::FaddSingleReal,    // 0
+    Opcode::FmulSingleReal,    // 1
+    Opcode::FcomSingleReal,    // 2
+    Opcode::FcompSingleReal,   // 3
+    Opcode::FsubSingleReal,    // 4
+    Opcode::FsubrSingleReal,   // 5
+    Opcode::FdivSingleReal,    // 6
+    Opcode::FdivrSingleReal,   // 7
+    // /r form (8-71, D8 C0-FF, 64 entries)
+    Opcode::FaddSt0Stj, Opcode::FaddSt0Stj, Opcode::FaddSt0Stj, Opcode::FaddSt0Stj, Opcode::FaddSt0Stj, Opcode::FaddSt0Stj, Opcode::FaddSt0Stj, Opcode::FaddSt0Stj, // D8 C0-C7
+    Opcode::FmulSt0Stj, Opcode::FmulSt0Stj, Opcode::FmulSt0Stj, Opcode::FmulSt0Stj, Opcode::FmulSt0Stj, Opcode::FmulSt0Stj, Opcode::FmulSt0Stj, Opcode::FmulSt0Stj, // D8 C8-CF
+    Opcode::FcomSti, Opcode::FcomSti, Opcode::FcomSti, Opcode::FcomSti, Opcode::FcomSti, Opcode::FcomSti, Opcode::FcomSti, Opcode::FcomSti, // D8 D0-D7
+    Opcode::FcompSti, Opcode::FcompSti, Opcode::FcompSti, Opcode::FcompSti, Opcode::FcompSti, Opcode::FcompSti, Opcode::FcompSti, Opcode::FcompSti, // D8 D8-DF
+    Opcode::FsubSt0Stj, Opcode::FsubSt0Stj, Opcode::FsubSt0Stj, Opcode::FsubSt0Stj, Opcode::FsubSt0Stj, Opcode::FsubSt0Stj, Opcode::FsubSt0Stj, Opcode::FsubSt0Stj, // D8 E0-E7
+    Opcode::FsubrSt0Stj, Opcode::FsubrSt0Stj, Opcode::FsubrSt0Stj, Opcode::FsubrSt0Stj, Opcode::FsubrSt0Stj, Opcode::FsubrSt0Stj, Opcode::FsubrSt0Stj, Opcode::FsubrSt0Stj, // D8 E8-EF
+    Opcode::FdivSt0Stj, Opcode::FdivSt0Stj, Opcode::FdivSt0Stj, Opcode::FdivSt0Stj, Opcode::FdivSt0Stj, Opcode::FdivSt0Stj, Opcode::FdivSt0Stj, Opcode::FdivSt0Stj, // D8 F0-F7
+    Opcode::FdivrSt0Stj, Opcode::FdivrSt0Stj, Opcode::FdivrSt0Stj, Opcode::FdivrSt0Stj, Opcode::FdivrSt0Stj, Opcode::FdivrSt0Stj, Opcode::FdivrSt0Stj, Opcode::FdivrSt0Stj, // D8 F8-FF
+];
+
+/// D9 opcode table (64+8 entries)
+/// Most entries are IaError for now - can be expanded later
+pub(super) const BxOpcodeInfo_FloatingPointD9: [Opcode; 72] = [Opcode::IaError; 72];
+
+/// DA opcode table (64+8 entries)
+pub(super) const BxOpcodeInfo_FloatingPointDA: [Opcode; 72] = [Opcode::IaError; 72];
+
+/// DB opcode table (64+8 entries)
+pub(super) const BxOpcodeInfo_FloatingPointDB: [Opcode; 72] = [Opcode::IaError; 72];
+
+/// DC opcode table (64+8 entries)
+pub(super) const BxOpcodeInfo_FloatingPointDC: [Opcode; 72] = [Opcode::IaError; 72];
+
+/// DD opcode table (64+8 entries)
+pub(super) const BxOpcodeInfo_FloatingPointDD: [Opcode; 72] = [Opcode::IaError; 72];
+
+/// DE opcode table (64+8 entries)
+pub(super) const BxOpcodeInfo_FloatingPointDE: [Opcode; 72] = [Opcode::IaError; 72];
+
+/// DF opcode table (64+8 entries)
+pub(super) const BxOpcodeInfo_FloatingPointDF: [Opcode; 72] = [Opcode::IaError; 72];

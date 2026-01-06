@@ -41,7 +41,7 @@ pub fn ADD_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 /// Immediate value stored in operand_data.Id
 pub fn ADD_EAX_Id<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
     let eax = cpu.eax();
-    let imm: u32 = unsafe { instr.modrm_form.operand_data.Id };
+    let imm: u32 = instr.modrm_form.operand_data.id();
     let result = eax.wrapping_add(imm);
     
     cpu.set_eax(result);
@@ -80,7 +80,7 @@ pub fn SUB_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 /// Opcode: 0x2D
 pub fn SUB_EAX_Id<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
     let eax = cpu.eax();
-    let imm: u32 = unsafe { instr.modrm_form.operand_data.Id };
+    let imm: u32 = instr.modrm_form.operand_data.id();
     let result = eax.wrapping_sub(imm);
     
     cpu.set_eax(result);
