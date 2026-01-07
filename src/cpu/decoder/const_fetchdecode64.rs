@@ -4,6 +4,8 @@
 //! that returns `BxInstructionGenerated` - the same structure used by
 //! the non-const decoder.
 
+use super::error::{DecodeError, DecodeResult};
+use super::fetchdecode_generated::BxDecodeError;
 use super::ia_opcodes::Opcode;
 use super::instr::MetaInfoFlags;
 use super::instr_generated::{
@@ -60,9 +62,10 @@ const fn find_opcode_in_table(table: &[u64], decmask: u32) -> Opcode {
 
 /// Const-compatible 64-bit instruction decoder
 ///
-/// Decodes an x86-64 instruction and returns a `BxInstructionGenerated` struct.
+/// Decodes an x86-64 instruction and returns a `Result` containing either
+/// a `BxInstructionGenerated` struct on success, or a `DecodeError` on failure.
 /// This is the const fn equivalent of `fetch_decode64`.
-pub const fn const_fetch_decode64(bytes: &[u8]) -> BxInstructionGenerated {
+pub const fn const_fetch_decode64(bytes: &[u8]) -> DecodeResult<BxInstructionGenerated> {
     let mut instr = BxInstructionGenerated {
         meta_info: BxInstructionMetaInfo {
             ia_opcode: Opcode::IaError,
@@ -80,7 +83,7 @@ pub const fn const_fetch_decode64(bytes: &[u8]) -> BxInstructionGenerated {
     };
 
     if bytes.is_empty() {
-        return instr;
+        return Err(DecodeError::BufferUnderflow);
     }
 
     let max_len = if bytes.len() > 15 { 15 } else { bytes.len() };
@@ -168,9 +171,7 @@ pub const fn const_fetch_decode64(bytes: &[u8]) -> BxInstructionGenerated {
     }
 
     if pos >= max_len {
-        instr.meta_info.ilen = pos as u8;
-        instr.meta_info.metainfo1 = MetaInfoFlags::from_bits_retain(metainfo1_bits);
-        return instr;
+        return Err(DecodeError::PrefixBufferUnderflow);
     }
 
     // Set segment override
@@ -189,20 +190,14 @@ pub const fn const_fetch_decode64(bytes: &[u8]) -> BxInstructionGenerated {
         // VEX prefix - simplified handling
         if pos < max_len && (bytes[pos] & 0xC0) == 0xC0 {
             // This is a VEX prefix (mod=11 check)
-            instr.meta_info.ilen = pos as u8;
-            instr.meta_info.ia_opcode = Opcode::IaError;
-            instr.meta_info.metainfo1 = MetaInfoFlags::from_bits_retain(metainfo1_bits);
-            return instr; // VEX not fully supported in const
+            return Err(DecodeError::Decoder(BxDecodeError::BxIllegalVexXopOpcodeMap)); // VEX not fully supported in const
         }
     }
 
     if b1 == 0x62 {
         // EVEX prefix - simplified handling
         if pos + 2 < max_len && (bytes[pos] & 0x0C) == 0 {
-            instr.meta_info.ilen = pos as u8;
-            instr.meta_info.ia_opcode = Opcode::IaError;
-            instr.meta_info.metainfo1 = MetaInfoFlags::from_bits_retain(metainfo1_bits);
-            return instr; // EVEX not fully supported in const
+            return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet)); // EVEX not fully supported in const
         }
     }
 
@@ -210,9 +205,7 @@ pub const fn const_fetch_decode64(bytes: &[u8]) -> BxInstructionGenerated {
     let mut opcode_map: u8 = 0; // 0=1-byte, 1=0F, 2=0F38, 3=0F3A
     if b1 == 0x0F {
         if pos >= max_len {
-            instr.meta_info.ilen = pos as u8;
-            instr.meta_info.metainfo1 = MetaInfoFlags::from_bits_retain(metainfo1_bits);
-            return instr;
+            return Err(DecodeError::OpcodeBufferUnderflow);
         }
 
         let b2 = bytes[pos];
@@ -221,9 +214,7 @@ pub const fn const_fetch_decode64(bytes: &[u8]) -> BxInstructionGenerated {
         if b2 == 0x38 {
             // 0F 38 xx
             if pos >= max_len {
-                instr.meta_info.ilen = pos as u8;
-                instr.meta_info.metainfo1 = MetaInfoFlags::from_bits_retain(metainfo1_bits);
-                return instr;
+                return Err(DecodeError::OpcodeBufferUnderflow);
             }
             b1 = 0x200 | (bytes[pos] as u32);
             opcode_map = 2;
@@ -231,9 +222,7 @@ pub const fn const_fetch_decode64(bytes: &[u8]) -> BxInstructionGenerated {
         } else if b2 == 0x3A {
             // 0F 3A xx
             if pos >= max_len {
-                instr.meta_info.ilen = pos as u8;
-                instr.meta_info.metainfo1 = MetaInfoFlags::from_bits_retain(metainfo1_bits);
-                return instr;
+                return Err(DecodeError::OpcodeBufferUnderflow);
             }
             b1 = 0x300 | (bytes[pos] as u32);
             opcode_map = 3;
@@ -256,9 +245,7 @@ pub const fn const_fetch_decode64(bytes: &[u8]) -> BxInstructionGenerated {
 
     if needs_modrm {
         if pos >= max_len {
-            instr.meta_info.ilen = pos as u8;
-            instr.meta_info.metainfo1 = MetaInfoFlags::from_bits_retain(metainfo1_bits);
-            return instr;
+            return Err(DecodeError::ModRmBufferUnderflow);
         }
 
         let modrm = bytes[pos];
@@ -285,9 +272,7 @@ pub const fn const_fetch_decode64(bytes: &[u8]) -> BxInstructionGenerated {
 
             if use_sib {
                 if pos >= max_len {
-                    instr.meta_info.ilen = pos as u8;
-                    instr.meta_info.metainfo1 = MetaInfoFlags::from_bits_retain(metainfo1_bits);
-                    return instr;
+                    return Err(DecodeError::SibBufferUnderflow);
                 }
 
                 let sib = bytes[pos];
@@ -313,9 +298,7 @@ pub const fn const_fetch_decode64(bytes: &[u8]) -> BxInstructionGenerated {
                 if mod_field == 0 && (base & 0x7) == 5 {
                     // [disp32] or [base+disp32]
                     if pos + 4 > max_len {
-                        instr.meta_info.ilen = pos as u8;
-                        instr.meta_info.metainfo1 = MetaInfoFlags::from_bits_retain(metainfo1_bits);
-                        return instr;
+                        return Err(DecodeError::DisplacementBufferUnderflow);
                     }
                     let disp = read_u32_le(bytes, pos);
                     pos += 4;
@@ -330,9 +313,7 @@ pub const fn const_fetch_decode64(bytes: &[u8]) -> BxInstructionGenerated {
                 if mod_field == 0 && (rm & 0x7) == 5 {
                     // RIP-relative addressing
                     if pos + 4 > max_len {
-                        instr.meta_info.ilen = pos as u8;
-                        instr.meta_info.metainfo1 = MetaInfoFlags::from_bits_retain(metainfo1_bits);
-                        return instr;
+                        return Err(DecodeError::DisplacementBufferUnderflow);
                     }
                     let disp = read_u32_le(bytes, pos);
                     pos += 4;
@@ -345,9 +326,7 @@ pub const fn const_fetch_decode64(bytes: &[u8]) -> BxInstructionGenerated {
             if mod_field == 1 {
                 // disp8
                 if pos >= max_len {
-                    instr.meta_info.ilen = pos as u8;
-                    instr.meta_info.metainfo1 = MetaInfoFlags::from_bits_retain(metainfo1_bits);
-                    return instr;
+                    return Err(DecodeError::DisplacementBufferUnderflow);
                 }
                 let disp = bytes[pos] as i8 as i32 as u32;
                 pos += 1;
@@ -355,9 +334,7 @@ pub const fn const_fetch_decode64(bytes: &[u8]) -> BxInstructionGenerated {
             } else if mod_field == 2 {
                 // disp32
                 if pos + 4 > max_len {
-                    instr.meta_info.ilen = pos as u8;
-                    instr.meta_info.metainfo1 = MetaInfoFlags::from_bits_retain(metainfo1_bits);
-                    return instr;
+                    return Err(DecodeError::DisplacementBufferUnderflow);
                 }
                 let disp = read_u32_le(bytes, pos);
                 pos += 4;
@@ -378,9 +355,7 @@ pub const fn const_fetch_decode64(bytes: &[u8]) -> BxInstructionGenerated {
 
     if imm_size > 0 {
         if pos + (imm_size as usize) > max_len {
-            instr.meta_info.ilen = pos as u8;
-            instr.meta_info.metainfo1 = MetaInfoFlags::from_bits_retain(metainfo1_bits);
-            return instr;
+            return Err(DecodeError::ImmediateBufferUnderflow);
         }
 
         match imm_size {
@@ -433,7 +408,12 @@ pub const fn const_fetch_decode64(bytes: &[u8]) -> BxInstructionGenerated {
     // Look up opcode from tables
     instr.meta_info.ia_opcode = lookup_opcode_64(b1, opcode_map, decmask, nnn);
 
-    instr
+    // Check if opcode lookup failed
+    if matches!(instr.meta_info.ia_opcode, Opcode::IaError) {
+        return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+    }
+
+    Ok(instr)
 }
 
 /// Get opcode table and look up opcode for 64-bit mode
@@ -954,7 +934,7 @@ mod tests {
     fn test_nop() {
         // 0x90 is actually XCHG EAX,EAX which is the NOP encoding
         // In 64-bit mode with no REX.W, operand size is 32-bit
-        let i = const_fetch_decode64(&[0x90]);
+        let i = const_fetch_decode64(&[0x90]).unwrap();
         assert_eq!(i.ilen(), 1);
         // XchgErxEax is the 32-bit XCHG EAX,r32 - NOP is encoded as XCHG EAX,EAX
         assert_eq!(i.get_ia_opcode(), Opcode::XchgErxEax);
@@ -962,63 +942,63 @@ mod tests {
 
     #[test]
     fn test_ret() {
-        let i = const_fetch_decode64(&[0xC3]);
+        let i = const_fetch_decode64(&[0xC3]).unwrap();
         assert_eq!(i.ilen(), 1);
         assert_eq!(i.get_ia_opcode(), Opcode::RetOp64);
     }
 
     #[test]
     fn test_int3() {
-        let i = const_fetch_decode64(&[0xCC]);
+        let i = const_fetch_decode64(&[0xCC]).unwrap();
         assert_eq!(i.ilen(), 1);
         assert_eq!(i.get_ia_opcode(), Opcode::INT3);
     }
 
     #[test]
     fn test_rex_w() {
-        let i = const_fetch_decode64(&[0x48, 0x89, 0xC0]); // MOV RAX, RAX
+        let i = const_fetch_decode64(&[0x48, 0x89, 0xC0]).unwrap(); // MOV RAX, RAX
         assert_eq!(i.ilen(), 3);
         assert!(i.os64_l() != 0);
     }
 
     #[test]
     fn test_modrm_reg() {
-        let i = const_fetch_decode64(&[0x89, 0xD8]); // MOV EAX, EBX
+        let i = const_fetch_decode64(&[0x89, 0xD8]).unwrap(); // MOV EAX, EBX
         assert_eq!(i.ilen(), 2);
         assert!(i.mod_c0());
     }
 
     #[test]
     fn test_modrm_mem() {
-        let i = const_fetch_decode64(&[0x8B, 0x03]); // MOV EAX, [RBX]
+        let i = const_fetch_decode64(&[0x8B, 0x03]).unwrap(); // MOV EAX, [RBX]
         assert_eq!(i.ilen(), 2);
         assert!(!i.mod_c0());
     }
 
     #[test]
     fn test_sib() {
-        let i = const_fetch_decode64(&[0x8B, 0x04, 0x8B]); // MOV EAX, [RBX+RCX*4]
+        let i = const_fetch_decode64(&[0x8B, 0x04, 0x8B]).unwrap(); // MOV EAX, [RBX+RCX*4]
         assert_eq!(i.ilen(), 3);
         assert_eq!(i.sib_scale(), 2); // *4
     }
 
     #[test]
     fn test_disp8() {
-        let i = const_fetch_decode64(&[0x8B, 0x43, 0x10]); // MOV EAX, [RBX+0x10]
+        let i = const_fetch_decode64(&[0x8B, 0x43, 0x10]).unwrap(); // MOV EAX, [RBX+0x10]
         assert_eq!(i.ilen(), 3);
         assert_eq!(i.modrm_form.displacement.displ32u(), 0x10);
     }
 
     #[test]
     fn test_disp32() {
-        let i = const_fetch_decode64(&[0x8B, 0x83, 0x78, 0x56, 0x34, 0x12]);
+        let i = const_fetch_decode64(&[0x8B, 0x83, 0x78, 0x56, 0x34, 0x12]).unwrap();
         assert_eq!(i.ilen(), 6);
         assert_eq!(i.modrm_form.displacement.displ32u(), 0x12345678);
     }
 
     #[test]
     fn test_imm8() {
-        let i = const_fetch_decode64(&[0x6A, 0x42]); // PUSH 0x42
+        let i = const_fetch_decode64(&[0x6A, 0x42]).unwrap(); // PUSH 0x42
         assert_eq!(i.ilen(), 2);
         assert_eq!(i.modrm_form.operand_data.id(), 0x42);
     }
@@ -1026,7 +1006,7 @@ mod tests {
     #[test]
     fn test_imm32() {
         init_tracing();
-        let i = const_fetch_decode64(&[0x68, 0x78, 0x56, 0x34, 0x12]); // PUSH 0x12345678
+        let i = const_fetch_decode64(&[0x68, 0x78, 0x56, 0x34, 0x12]).unwrap(); // PUSH 0x12345678
         tracing::info!("{i:#x?}");
         let i2 = fetch_decode64(&[0x68, 0x78, 0x56, 0x34, 0x12]); // PUSH 0x12345678
         tracing::info!("{i2:#x?}");
@@ -1036,20 +1016,20 @@ mod tests {
 
     #[test]
     fn test_0f_opcode() {
-        let i = const_fetch_decode64(&[0x0F, 0xA2]); // CPUID
+        let i = const_fetch_decode64(&[0x0F, 0xA2]).unwrap(); // CPUID
         assert_eq!(i.ilen(), 2);
     }
 
     #[test]
     fn test_jcc_rel32() {
-        let i = const_fetch_decode64(&[0x0F, 0x84, 0x78, 0x56, 0x34, 0x12]); // JE
+        let i = const_fetch_decode64(&[0x0F, 0x84, 0x78, 0x56, 0x34, 0x12]).unwrap(); // JE
         assert_eq!(i.ilen(), 6);
         assert_eq!(i.modrm_form.operand_data.id(), 0x12345678);
     }
 
     #[test]
     fn test_lock() {
-        let i = const_fetch_decode64(&[0xF0, 0x87, 0x03]); // LOCK XCHG
+        let i = const_fetch_decode64(&[0xF0, 0x87, 0x03]).unwrap(); // LOCK XCHG
         assert_eq!(i.ilen(), 3);
         // Check raw bits - expect bit 6 set for LOCK
         let bits = i.meta_info.metainfo1.bits();
@@ -1064,26 +1044,27 @@ mod tests {
 
     #[test]
     fn test_rep() {
-        let i = const_fetch_decode64(&[0xF3, 0xA4]); // REP MOVSB
+        let i = const_fetch_decode64(&[0xF3, 0xA4]).unwrap(); // REP MOVSB
         assert_eq!(i.ilen(), 2);
         assert_eq!(i.lock_rep_used_value(), 3);
     }
 
     #[test]
     fn test_empty() {
-        let i = const_fetch_decode64(&[]);
-        assert_eq!(i.ilen(), 0);
+        let result = const_fetch_decode64(&[]);
+        assert!(result.is_err());
+        assert!(matches!(result.unwrap_err(), DecodeError::BufferUnderflow));
     }
 
     #[test]
     fn test_0f38() {
-        let i = const_fetch_decode64(&[0x66, 0x0F, 0x38, 0x00, 0xC1]); // PSHUFB
+        let i = const_fetch_decode64(&[0x66, 0x0F, 0x38, 0x00, 0xC1]).unwrap(); // PSHUFB
         assert_eq!(i.ilen(), 5);
     }
 
     #[test]
     fn test_0f3a() {
-        let i = const_fetch_decode64(&[0x66, 0x0F, 0x3A, 0x0F, 0xC1, 0x05]); // PALIGNR
+        let i = const_fetch_decode64(&[0x66, 0x0F, 0x3A, 0x0F, 0xC1, 0x05]).unwrap(); // PALIGNR
         assert_eq!(i.ilen(), 6);
     }
 
@@ -1132,7 +1113,10 @@ mod tests {
         while offset < data.len() {
             let remaining = &data[offset..];
 
-            let decoded = const_fetch_decode64(remaining);
+            let decoded = match const_fetch_decode64(remaining) {
+                Ok(instr) => instr,
+                Err(_) => break,
+            };
 
             let length = decoded.meta_info.ilen as usize;
 

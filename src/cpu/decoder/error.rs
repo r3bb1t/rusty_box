@@ -6,10 +6,20 @@ pub type DecodeResult<T> = core::result::Result<T, DecodeError>;
 /// Decoder error type
 /// 
 /// This enum represents all possible errors that can occur during instruction decoding.
-/// It includes both decoder-specific errors and common conversion errors.
+/// It includes both decoder-specific errors, buffer underflow errors, and common conversion errors.
+/// 
+/// Error mapping from C++ source:
+/// - `return(-1)` in C++ → Buffer underflow errors (PrefixBufferUnderflow, OpcodeBufferUnderflow, etc.)
+/// - `return(BX_IA_ERROR)` or `ia_opcode = BX_IA_ERROR` → Decoder(BxDecodeError::BxIllegalOpcode)
+/// - `assign_srcs()` returning non-OK → Decoder(BxDecodeError::...) (via #[from] conversion)
+/// - `fetchImmediate()` returning -1 → ImmediateBufferUnderflow
+/// - `parseModrm64/32()` returning NULL → ModRmBufferUnderflow or SibBufferUnderflow or DisplacementBufferUnderflow
 #[derive(Error, Debug)]
 pub enum DecodeError {
     /// Bochs decoder-specific errors
+    /// 
+    /// Maps to: `BxDecodeError` enum values from `assign_srcs()` and other validation functions.
+    /// These include illegal opcode, illegal VEX/EVEX/XOP conditions, illegal lock prefix, etc.
     #[error(transparent)]
     Decoder(#[from] BxDecodeError),
     
@@ -20,6 +30,61 @@ pub enum DecodeError {
     /// is too large.
     #[error("integer conversion failed: value out of range for target type")]
     IntegerConversion(#[from] core::num::TryFromIntError),
+    
+    /// Buffer underflow: not enough bytes to complete instruction decoding
+    /// 
+    /// Maps to: `return(-1)` when `bytes.is_empty()` or general buffer exhaustion.
+    /// C++ equivalent: `if (remainingInPage == 0) return(-1)` at function start.
+    #[error("buffer underflow: not enough bytes to complete instruction decoding")]
+    BufferUnderflow,
+    
+    /// Buffer underflow while parsing prefixes
+    /// 
+    /// Maps to: `return(-1)` in prefix parsing switch cases when `remain == 0`.
+    /// C++ locations: fetchdecode64.cc lines 1396, 1403, 1412, 1421, 1429, 1437, 1444, 1451
+    ///                 fetchdecode32.cc lines 1924, 1932, 1938, 1946, 1955, 1962, 1968
+    #[error("buffer underflow while parsing prefixes")]
+    PrefixBufferUnderflow,
+    
+    /// Buffer underflow while parsing opcode
+    /// 
+    /// Maps to: `return(-1)` when parsing 0x0F escape or 0F 38/3A opcodes and `remain == 0`.
+    /// C++ locations: fetchdecode64.cc lines 1403, 1463
+    ///                 fetchdecode32.cc lines 1924, 1980
+    #[error("buffer underflow while parsing opcode")]
+    OpcodeBufferUnderflow,
+    
+    /// Buffer underflow while parsing ModRM byte
+    /// 
+    /// Maps to: `return(-1)` when `parseModrm64/32()` returns NULL (remain == 0 before ModRM).
+    /// C++ locations: fetchdecode64.cc lines 742, 830, 987, 1100, 1150, 1188, 1255, 1295
+    ///                 fetchdecode32.cc lines 866, 1431, 1572, 1670, 1707, 1740, 1791, 1824
+    #[error("buffer underflow while parsing ModRM byte")]
+    ModRmBufferUnderflow,
+    
+    /// Buffer underflow while parsing SIB byte
+    /// 
+    /// Maps to: `return(-1)` when `decodeModrm64/32()` needs SIB but `remain == 0`.
+    /// C++ locations: fetchdecode64.cc line 682 (decodeModrm64)
+    ///                 fetchdecode32.cc line 752 (decodeModrm32)
+    #[error("buffer underflow while parsing SIB byte")]
+    SibBufferUnderflow,
+    
+    /// Buffer underflow while parsing displacement
+    /// 
+    /// Maps to: `return(-1)` when `decodeModrm64/32()` needs displacement but insufficient bytes.
+    /// C++ locations: fetchdecode64.cc lines 714, 728 (decodeModrm64)
+    ///                 fetchdecode32.cc lines 738, 775, 804, 824, 840, 851 (decodeModrm32)
+    #[error("buffer underflow while parsing displacement")]
+    DisplacementBufferUnderflow,
+    
+    /// Buffer underflow while parsing immediate value
+    /// 
+    /// Maps to: `return(-1)` from `fetchImmediate()` when insufficient bytes for immediate.
+    /// C++ locations: fetchdecode64.cc lines 867, 876, 1023 (VEX/EVEX/XOP immediate)
+    ///                 fetchdecode32.cc lines 906, 916, 926, 936, 945, 955, 979, 989, 999, etc. (fetchImmediate)
+    #[error("buffer underflow while parsing immediate value")]
+    ImmediateBufferUnderflow,
 }
 
 // Implement Display for BxDecodeError to support #[error(transparent)]

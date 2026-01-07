@@ -34,7 +34,7 @@ pub enum SsePrefix {
 
 pub(super) const ATTR_LAST_OPCODE: u64 = 0x8000000000000000;
 
-pub(super) const ATTR_LOCK_PREFIX_NOT_ALLOWED: u64 = 0x0000000000000001; // Example value, adjust as needed
+pub(super) const ATTR_LOCK_PREFIX_NOT_ALLOWED: u64 = 131072; // (1 << LOCK_PREFIX_OFFSET) = (1 << 17)
 
 pub(super) fn fetch_dword(iptr: &[u8]) -> u32 {
     read_host_dword_to_little_endian(iptr)

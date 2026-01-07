@@ -27,16 +27,16 @@ use rusty_box::cpu::decoder::const_fetchdecode64::const_fetch_decode64;
 
 // 32-bit/16-bit mode const decoder
 // is_32: true for 32-bit mode, false for 16-bit mode
-const DECODED_32: BxInstructionGenerated = const_fetch_decode32(&[0x90], true);
+const DECODED_32: BxInstructionGenerated = const_fetch_decode32(&[0x90], true).unwrap();
 
 // 64-bit mode const decoder
-const DECODED_64: BxInstructionGenerated = const_fetch_decode64(&[0x90]);
+const DECODED_64: BxInstructionGenerated = const_fetch_decode64(&[0x90]).unwrap();
 ```
 
 **Key differences:**
-- Const decoders return `BxInstructionGenerated` directly (not `Result`)
+- Const decoders return `Result<BxInstructionGenerated, DecodeError>` (compatible with const in current Rust)
 - Const decoders can be used in `const` contexts
-- Invalid instructions return with `Opcode::IaError`
+- Invalid instructions return `Err(DecodeError::...)` with specific error types
 
 ## Register Operands
 
@@ -183,14 +183,17 @@ use rusty_box::cpu::decoder::const_fetchdecode64::const_fetch_decode64;
 use rusty_box::cpu::decoder::ia_opcodes::Opcode;
 
 // Decode at compile time
-const NOP_INSTR: BxInstructionGenerated = const_fetch_decode64(&[0x90]);
-const RET_INSTR: BxInstructionGenerated = const_fetch_decode64(&[0xC3]);
-const INT3_INSTR: BxInstructionGenerated = const_fetch_decode64(&[0xCC]);
+const NOP_INSTR: BxInstructionGenerated = const_fetch_decode64(&[0x90]).unwrap();
+const RET_INSTR: BxInstructionGenerated = const_fetch_decode64(&[0xC3]).unwrap();
+const INT3_INSTR: BxInstructionGenerated = const_fetch_decode64(&[0xCC]).unwrap();
 
 // Use in const context
 const fn is_nop(bytes: &[u8]) -> bool {
-    let instr = const_fetch_decode64(bytes);
-    matches!(instr.meta_info.ia_opcode, Opcode::Nop)
+    if let Ok(instr) = const_fetch_decode64(bytes) {
+        matches!(instr.meta_info.ia_opcode, Opcode::Nop)
+    } else {
+        false
+    }
 }
 
 // Verify at compile time
@@ -204,4 +207,12 @@ const _: () = assert!(is_nop(&[0x90]));
 - For branch instructions, the immediate is a **signed** relative offset from the end of the instruction
 - The instruction length (`ilen`) includes all bytes: opcode, prefixes, ModRM, SIB, displacement, and immediate
 - Const decoders do not support tracing/logging (removed for const compatibility)
-- Invalid/unsupported instructions in const decoders set `ia_opcode` to `Opcode::IaError`
+- Invalid/unsupported instructions in const decoders return `Err(DecodeError::...)` with specific error types:
+  - `BufferUnderflow` - not enough bytes to decode
+  - `PrefixBufferUnderflow` - not enough bytes while parsing prefixes
+  - `OpcodeBufferUnderflow` - not enough bytes while parsing opcode
+  - `ModRmBufferUnderflow` - not enough bytes while parsing ModRM
+  - `SibBufferUnderflow` - not enough bytes while parsing SIB
+  - `DisplacementBufferUnderflow` - not enough bytes while parsing displacement
+  - `ImmediateBufferUnderflow` - not enough bytes while parsing immediate
+  - `Decoder(BxDecodeError::...)` - decoder-specific errors (illegal opcode, illegal prefixes, etc.)
