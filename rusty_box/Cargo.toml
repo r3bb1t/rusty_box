@@ -1,0 +1,62 @@
+[package]
+name = "rusty_box"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "rusty_box"
+path = "src/lib.rs"
+
+[features]
+default = ["bx_full"]
+
+std = ["tracing/std", "tempfile"]
+
+bx_full = [
+    "bx_little_endian",
+    "bx_large_ram_file",
+    "bx_phy_address_long",
+    "bx_support_monitor_mwait",
+    "bx_support_pkeys",
+    "bx_support_apic",
+    "bx_configure_msrs",
+    "bx_support_handlers_chaining_speedups",
+    "bx_support_alignment_check",
+    "bx_support_pci",
+]
+
+bx_debugger = []
+bx_gdb_stub = []
+bx_large_ram_file = []
+bx_instrumentation = []
+
+bx_support_alignment_check = []
+bx_support_amx = []
+bx_support_apic = []
+bx_support_handlers_chaining_speedups = []
+bx_support_memtype = []
+bx_support_smp = []
+
+bx_big_endian = []
+bx_little_endian = []
+
+bx_phy_address_long = []
+bx_support_monitor_mwait = []
+bx_support_pkeys = []
+bx_configure_msrs = []
+bx_support_pci = []
+
+[dependencies]
+tracing.workspace = true
+thiserror.workspace = true
+byteorder.workspace = true
+tempfile = { version = "3.20", optional = true }
+spin.workspace = true
+bitflags.workspace = true
+paste.workspace = true
+rusty_box_decoder = { path = "../rusty_box_decoder" }
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+
