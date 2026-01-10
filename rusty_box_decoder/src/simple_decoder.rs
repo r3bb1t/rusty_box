@@ -171,6 +171,85 @@ pub fn decode_simple_32(bytes: &[u8]) -> Option<InstructionGenerated> {
             instr.modrm_form.operand_data = unsafe { core::mem::transmute(imm) };
             Some(instr)
         }
+        // FAR JMP ptr16:16/ptr16:32 (0xEA) - used by BIOS reset vector
+        0xEA => {
+            // In 16-bit mode: JMP ptr16:16 (5 bytes: opcode + offset16 + segment16)
+            // In 32-bit mode: JMP ptr16:32 (7 bytes: opcode + offset32 + segment16)
+            // For now, handle 16-bit mode (real mode BIOS boot)
+            if bytes.len() < 5 {
+                return None;
+            }
+            let offset = u16::from_le_bytes([bytes[1], bytes[2]]);
+            let segment = u16::from_le_bytes([bytes[3], bytes[4]]);
+            instr.meta_info.ia_opcode = Opcode::JmpfAp;
+            instr.meta_info.ilen = 5;
+            // Store offset in lower 16 bits, segment in upper 16 bits of operand_data
+            let combined = ((segment as u32) << 16) | (offset as u32);
+            instr.modrm_form.operand_data = unsafe { core::mem::transmute(combined) };
+            Some(instr)
+        }
+        // CLI - Clear Interrupt Flag (0xFA)
+        0xFA => {
+            instr.meta_info.ia_opcode = Opcode::Cli;
+            instr.meta_info.ilen = 1;
+            Some(instr)
+        }
+        // STI - Set Interrupt Flag (0xFB)
+        0xFB => {
+            instr.meta_info.ia_opcode = Opcode::Sti;
+            instr.meta_info.ilen = 1;
+            Some(instr)
+        }
+        // CLD - Clear Direction Flag (0xFC)
+        0xFC => {
+            instr.meta_info.ia_opcode = Opcode::Cld;
+            instr.meta_info.ilen = 1;
+            Some(instr)
+        }
+        // STD - Set Direction Flag (0xFD)
+        0xFD => {
+            instr.meta_info.ia_opcode = Opcode::Std;
+            instr.meta_info.ilen = 1;
+            Some(instr)
+        }
+        // XOR r/m32, r32 (0x31) - used in XOR EAX, EAX
+        0x31 => {
+            if bytes.len() < 2 {
+                return None;
+            }
+            let modrm = bytes[1];
+            let mod_bits = (modrm & 0b1100_0000) >> 6;
+            let reg = ((modrm & 0b0011_1000) >> 3) as u8;
+            let rm = (modrm & 0b0000_0111) as u8;
+            if mod_bits == 0b11 {
+                instr.meta_info.ia_opcode = Opcode::XorEdGd;
+                instr.meta_info.ilen = 2;
+                instr.meta_data[0] = rm;
+                instr.meta_data[1] = reg;
+                Some(instr)
+            } else {
+                None
+            }
+        }
+        // XOR r32, r/m32 (0x33)
+        0x33 => {
+            if bytes.len() < 2 {
+                return None;
+            }
+            let modrm = bytes[1];
+            let mod_bits = (modrm & 0b1100_0000) >> 6;
+            let reg = ((modrm & 0b0011_1000) >> 3) as u8;
+            let rm = (modrm & 0b0000_0111) as u8;
+            if mod_bits == 0b11 {
+                instr.meta_info.ia_opcode = Opcode::XorGdEd;
+                instr.meta_info.ilen = 2;
+                instr.meta_data[0] = reg;
+                instr.meta_data[1] = rm;
+                Some(instr)
+            } else {
+                None
+            }
+        }
         _ => None,
     }
 }

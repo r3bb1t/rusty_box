@@ -33,4 +33,18 @@ pub enum MemoryError {
 
     #[error("read_physical_page: cross page access at address {addr:#X}, len={len}")]
     ReadPhysicalPage { addr: BxPhyAddress, len: usize },
+
+    // ROM loading / BIOS
+    #[error("ROM image is too large (max {0} bytes)")]
+    RomTooLarge(usize),
+    #[error("System BIOS must end at 0xfffff, but ends at {0:#x}")]
+    SystemBiosInvalidEnd(u64),
+    #[error("ROM image size must be a multiple of 512 bytes")]
+    RomSizeNotMultipleOf512,
+    #[error("ROM image must start at a 2KB boundary")]
+    RomNot2kAligned,
+    #[error("ROM address space out of range")]
+    RomAddressOutOfRange,
+    #[error("ROM address space {0:#x} already in use")]
+    RomAddressAlreadyInUse(usize),
 }

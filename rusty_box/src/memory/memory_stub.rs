@@ -15,7 +15,7 @@ use crate::misc::bswap::{
     read_host_word_to_little_endian, write_host_dword_to_little_endian,
     write_host_qword_to_little_endian, write_host_word_to_little_endian,
 };
-use crate::pc_system::{self};
+use crate::config::BxPhyAddress as A20Mask;
 
 use core::cell::{Cell, UnsafeCell};
 
@@ -216,16 +216,14 @@ impl BxMemoryStubC {
                     }
                 }
 
-                let address: BxPhyAddress = self.next_swapout_idx.get() + self.block_size;
+                let address: usize = self.next_swapout_idx.get() + self.block_size;
 
                 // Write swapped out block
                 let overflow_file = &mut self.overflow_file_mut();
                 overflow_file
                     // FIXME: don't unwrap
                     .seek(SeekFrom::Start(
-                        address
-                            .try_into()
-                            .expect("An error occured while seeking in overflow file"),
+                        address as u64
                     ))
                     .map_err(|e| MemoryError::CantSeekToAddressOverflowFile(address, e))?;
 
@@ -275,8 +273,9 @@ impl BxMemoryStubC {
         mut len: u32,
         buf: &mut [u8],
         cpus: &[&BxCpuC<I>],
+        a20_mask: A20Mask,
     ) -> Result<bool> {
-        let mut a20_addr: BxPhyAddress = pc_system::a20_addr(addr);
+        let mut a20_addr: BxPhyAddress = addr & a20_mask;
         let mut ret = true;
         let mut buf_offset = 0;
 
@@ -332,8 +331,9 @@ impl BxMemoryStubC {
         cpus: &[&BxCpuC<I>],
         addr: BxPhyAddress,
         rw: u32,
+        a20_mask: A20Mask,
     ) -> Result<Option<&'a mut [u8]>> {
-        let a20_addr = pc_system::a20_addr(addr);
+        let a20_addr = addr & a20_mask;
 
         let write = rw & 1 != 0;
 
@@ -365,8 +365,9 @@ impl BxMemoryStubC {
         addr: BxPhyAddress,
         mut len: usize,
         data: &mut [u8],
+        a20_mask: A20Mask,
     ) -> Result<()> {
-        let mut a20_addr = pc_system::a20_addr(addr);
+        let mut a20_addr = addr & a20_mask;
 
         // Note: accesses should always be contained within a single page
         if (addr >> 12) != ((addr + len as u64 - 1) >> 12) {
@@ -462,8 +463,9 @@ impl BxMemoryStubC {
         addr: BxPhyAddress,
         len: usize,
         data: &mut [u8],
+        a20_mask: A20Mask,
     ) -> Result<()> {
-        let a20_addr = pc_system::a20_addr(addr);
+        let a20_addr = addr & a20_mask;
 
         // Note: accesses should always be contained within a single page
         if (addr >> 12) != ((addr + len as u64 - 1) >> 12) {

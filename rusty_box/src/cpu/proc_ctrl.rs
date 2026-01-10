@@ -1,7 +1,4 @@
-use crate::{
-    cpu::{BxCpuC, BxCpuIdTrait},
-    pc_system::bx_pc_system,
-};
+use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn handle_cpu_context_change(&mut self) {
@@ -30,12 +27,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
-    fn get_tsc(&self) -> u64 {
-        bx_pc_system().time_ticks() + self.tsc_adjust as u64
+    /// Get the Time Stamp Counter value
+    /// 
+    /// # Arguments
+    /// * `system_ticks` - Current system ticks from BxPcSystemC
+    pub fn get_tsc(&self, system_ticks: u64) -> u64 {
+        system_ticks.wrapping_add(self.tsc_adjust as u64)
     }
-    pub(super) fn set_tsc(&mut self, newval: u64) {
-        // compute the correct setting of tsc_adjust so that a get_TSC()
+
+    /// Set the Time Stamp Counter to a specific value
+    /// 
+    /// # Arguments
+    /// * `newval` - The value to set TSC to
+    /// * `system_ticks` - Current system ticks from BxPcSystemC
+    pub fn set_tsc(&mut self, newval: u64, system_ticks: u64) {
+        // compute the correct setting of tsc_adjust so that a get_tsc()
         // will return newval
-        self.tsc_adjust = (newval - bx_pc_system().time_ticks()) as i64
+        self.tsc_adjust = newval.wrapping_sub(system_ticks) as i64
     }
 }

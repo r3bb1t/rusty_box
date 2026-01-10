@@ -102,6 +102,28 @@ pub struct BxMemC<'a> {
     flash_modified: bool,
 
     inherited_memory_stub: BxMemoryStubC,
+
+    /// A20 address mask - controls address line 20 gating
+    /// This is synchronized from BxPcSystemC when A20 state changes
+    a20_mask: BxPhyAddress,
+}
+
+impl BxMemC<'_> {
+    /// Apply A20 masking to an address
+    #[inline]
+    pub fn a20_addr(&self, addr: BxPhyAddress) -> BxPhyAddress {
+        addr & self.a20_mask
+    }
+
+    /// Set the A20 mask (called when A20 line state changes)
+    pub fn set_a20_mask(&mut self, mask: BxPhyAddress) {
+        self.a20_mask = mask;
+    }
+
+    /// Get the current A20 mask
+    pub fn a20_mask(&self) -> BxPhyAddress {
+        self.a20_mask
+    }
 }
 
 // implement getters and setters for memory stub
@@ -133,14 +155,21 @@ impl BxMemoryStubC {
         &mut self.actual_vector[self.bogus_offset..]
     }
 
-    //pub fn block_by_index(&self, index: usize) -> Option<&mut [u8]> {
-    //    if let Block::Block { offset } = self.blocks_offsets().get(index)? {
-    //        let block_ptr = &mut self.vector()[*offset..self.block_size];
-    //        Some(block_ptr)
-    //    } else {
-    //        None
-    //    }
-    //}
+    /// Get a mutable reference to a memory block by index
+    #[cfg(all(feature = "bx_large_ram_file", feature = "std"))]
+    #[allow(clippy::mut_from_ref)]
+    pub fn block_by_index(&self, index: usize) -> Option<&mut [u8]> {
+        if let Some(Block::Block { offset }) = self.blocks_offsets().get(index) {
+            let start = self.vector_offset + *offset;
+            let end = start + self.block_size;
+            // SAFETY: We're accessing within bounds of actual_vector via interior mutability pattern
+            let vec_ptr = self.actual_vector.as_ptr() as *mut u8;
+            let slice = unsafe { core::slice::from_raw_parts_mut(vec_ptr.add(start), self.block_size) };
+            Some(slice)
+        } else {
+            None
+        }
+    }
 
     #[cfg(all(feature = "bx_large_ram_file", feature = "std"))]
     #[allow(clippy::mut_from_ref)]
@@ -169,5 +198,20 @@ impl<'m> BxMemC<'m> {
 
     pub(crate) fn get_memory_len(&self) -> usize {
         self.inherited_memory_stub.len
+    }
+}
+impl<'m> BxMemC<'m> {
+    pub fn init_memory(
+        &mut self,
+        guest_size: usize,
+        host_size: usize,
+        block_size: usize,
+    ) -> Result<()> {
+        let mem_stub = BxMemoryStubC::create_and_init(guest_size, host_size, block_size)?;
+        self.inherited_memory_stub = mem_stub;
+        self.rom_present = [false; 65];
+        self.bios_rom_addr = 0xffff0000;
+        self.memory_type = [[false, false]; 13];
+        Ok(())
     }
 }

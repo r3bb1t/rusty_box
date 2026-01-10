@@ -1,0 +1,72 @@
+   0.182083400s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="rusty_box"}: cargo::core::compiler::fingerprint: stale: changed "C:\\Users\\Aslan\\rusty_box_cursor\\rusty_box\\src\\iodev\\mod.rs"
+   0.182137100s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="rusty_box"}: cargo::core::compiler::fingerprint:           (vs) "C:\\Users\\Aslan\\rusty_box_cursor\\target\\debug\\.fingerprint\\rusty_box-ec67480196748aef\\dep-lib-rusty_box"
+   0.182148500s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="rusty_box"}: cargo::core::compiler::fingerprint:                FileTime { seconds: 13412532202, nanos: 157964100 } < FileTime { seconds: 13412556966, nanos: 521881500 }
+   0.182668200s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="rusty_box"}: cargo::core::compiler::fingerprint: fingerprint dirty for rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box)/Check { test: false }/TargetInner { ..: lib_target("rusty_box", ["lib"], "C:\\Users\\Aslan\\rusty_box_cursor\\rusty_box\\src\\lib.rs", Edition2021) }
+   0.182724700s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="rusty_box"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: "C:\\Users\\Aslan\\rusty_box_cursor\\target\\debug\\.fingerprint\\rusty_box-ec67480196748aef\\dep-lib-rusty_box", reference_mtime: FileTime { seconds: 13412532202, nanos: 157964100 }, stale: "C:\\Users\\Aslan\\rusty_box_cursor\\rusty_box\\src\\iodev\\mod.rs", stale_mtime: FileTime { seconds: 13412556966, nanos: 521881500 } }))
+   0.205981400s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="rusty_box"}: cargo::core::compiler::fingerprint: stale: changed "C:\\Users\\Aslan\\rusty_box_cursor\\rusty_box\\src\\cpu\\paging.rs"
+   0.206011500s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="rusty_box"}: cargo::core::compiler::fingerprint:           (vs) "C:\\Users\\Aslan\\rusty_box_cursor\\target\\debug\\.fingerprint\\rusty_box-d3481c45c7775013\\dep-test-lib-rusty_box"
+   0.206019100s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="rusty_box"}: cargo::core::compiler::fingerprint:                FileTime { seconds: 13412532202, nanos: 157964100 } < FileTime { seconds: 13412556966, nanos: 516879600 }
+   0.206300900s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="rusty_box"}: cargo::core::compiler::fingerprint: fingerprint dirty for rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box)/Check { test: true }/TargetInner { ..: lib_target("rusty_box", ["lib"], "C:\\Users\\Aslan\\rusty_box_cursor\\rusty_box\\src\\lib.rs", Edition2021) }
+   0.206335500s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="rusty_box"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleItem(ChangedFile { reference: "C:\\Users\\Aslan\\rusty_box_cursor\\target\\debug\\.fingerprint\\rusty_box-d3481c45c7775013\\dep-test-lib-rusty_box", reference_mtime: FileTime { seconds: 13412532202, nanos: 157964100 }, stale: "C:\\Users\\Aslan\\rusty_box_cursor\\rusty_box\\src\\cpu\\paging.rs", stale_mtime: FileTime { seconds: 13412556966, nanos: 516879600 } }))
+   0.212813900s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="bios_boot"}: cargo::core::compiler::fingerprint: fingerprint dirty for rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box)/Check { test: false }/TargetInner { kind: "example", name: "bios_boot", tested: false, benched: false, ..: with_path("C:\\Users\\Aslan\\rusty_box_cursor\\rusty_box\\examples\\bios_boot.rs", Edition2021) }
+   0.212864400s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="bios_boot"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { name: "rusty_box" })
+   0.214355700s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="hardware_init"}: cargo::core::compiler::fingerprint: fingerprint error for rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box)/Check { test: false }/TargetInner { kind: "example", name: "hardware_init", tested: false, benched: false, ..: with_path("C:\\Users\\Aslan\\rusty_box_cursor\\rusty_box\\examples\\hardware_init.rs", Edition2021) }
+   0.214394300s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="hardware_init"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Aslan\rusty_box_cursor\target\debug\.fingerprint\rusty_box-0abb71c134af6d36\example-hardware_init`
+
+Caused by:
+    Не удается найти указанный файл. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_libgit2_prerelease
+  12: <unknown>
+  13: <unknown>
+  14: <unknown>
+  15: <unknown>
+  16: git_midx_writer_dump
+  17: git_filter_source_repo
+  18: git_midx_writer_dump
+  19: BaseThreadInitThunk
+  20: RtlUserThreadStart
+   0.232327400s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="init_and_run"}: cargo::core::compiler::fingerprint: fingerprint dirty for rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box)/Check { test: false }/TargetInner { kind: "example", name: "init_and_run", tested: false, benched: false, ..: with_path("C:\\Users\\Aslan\\rusty_box_cursor\\rusty_box\\examples\\init_and_run.rs", Edition2021) }
+   0.232373700s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="init_and_run"}: cargo::core::compiler::fingerprint:     dirty: FsStatusOutdated(StaleDepFingerprint { name: "rusty_box" })
+   0.233696800s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="multi_instance"}: cargo::core::compiler::fingerprint: fingerprint error for rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box)/Check { test: false }/TargetInner { kind: "example", name: "multi_instance", tested: false, benched: false, ..: with_path("C:\\Users\\Aslan\\rusty_box_cursor\\rusty_box\\examples\\multi_instance.rs", Edition2021) }
+   0.233739800s  INFO prepare_target{force=false package_id=rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box) target="multi_instance"}: cargo::core::compiler::fingerprint:     err: failed to read `C:\Users\Aslan\rusty_box_cursor\target\debug\.fingerprint\rusty_box-d3fabd54faef0737\example-multi_instance`
+
+Caused by:
+    Не удается найти указанный файл. (os error 2)
+
+Stack backtrace:
+   0: git_midx_writer_dump
+   1: git_midx_writer_dump
+   2: git_midx_writer_dump
+   3: git_midx_writer_dump
+   4: git_filter_source_repo
+   5: git_filter_source_repo
+   6: git_filter_source_repo
+   7: git_filter_source_repo
+   8: git_filter_source_repo
+   9: git_filter_source_repo
+  10: git_filter_source_repo
+  11: git_libgit2_prerelease
+  12: <unknown>
+  13: <unknown>
+  14: <unknown>
+  15: <unknown>
+  16: git_midx_writer_dump
+  17: git_filter_source_repo
+  18: git_midx_writer_dump
+  19: BaseThreadInitThunk
+  20: RtlUserThreadStart
+    Checking rusty_box v0.0.1 (C:\Users\Aslan\rusty_box_cursor\rusty_box)
+    Finished `dev` profile [unoptimized + debuginfo] target(s) in 3.22s

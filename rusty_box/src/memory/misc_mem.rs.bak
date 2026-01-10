@@ -50,9 +50,6 @@ impl BxMemC<'_> {
             memory_type,
 
             bios_rom_access: 0, // idk tbh
-            
-            // A20 enabled by default (full 64-bit addressing)
-            a20_mask: 0xFFFF_FFFF_FFFF_FFFFu64,
         }
     }
 }
@@ -66,7 +63,7 @@ impl<'c> BxMemC<'c> {
         cpus: &[&BxCpuC<I>],
     ) -> Result<Option<&mut [u8]>> {
         tracing::debug!("get_host_mem_addr addr: {addr:?} ({:#x}) rw: {rw:?}", addr);
-        let a20_addr: BxPhyAddress = self.a20_addr(addr);
+        let a20_addr: BxPhyAddress = crate::pc_system::a20_addr(addr);
         tracing::debug!("after A20 masking: {a20_addr:?} ({:#x})", a20_addr);
 
         let mut is_bios = a20_addr > self.bios_rom_addr.into();
@@ -241,4 +238,5 @@ impl BxMemC<'_> {
         Ok(())
     }
 }
+
 

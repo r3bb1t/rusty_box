@@ -12,6 +12,9 @@ pub enum CpuError {
     #[error("Shadow stack prematurely busy is left set !")]
     ShadowStackPrematurelyBusy,
 
+    #[error("CPU/Emulator not initialized - call initialize() first")]
+    CpuNotInitialized,
+
     #[error("prefetch: running in bogus memory, pAddr={p_addr:#x}")]
     PrefetchBogusMemory { p_addr: BxPhyAddress },
 

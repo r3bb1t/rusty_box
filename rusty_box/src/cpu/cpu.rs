@@ -26,6 +26,7 @@ use super::{
     i387::{BxPackedRegister, I387},
     icache::{BxIcache, BxIcacheEntry},
     lazy_flags::BxLazyflagsEntry,
+    segment_ctrl_pro::parse_selector,
     svm::VmcbCache,
     tlb::BxHostpageaddr,
     vmx::{VmcsCache, VmcsMapping, VmxCap},
@@ -33,7 +34,7 @@ use super::{
     Result,
 };
 
-use crate::cpu::decoder::decode_simple_32;
+use crate::cpu::decoder::{decode_simple_32, fetch_decode32_chatgpt_generated_instr};
 
 pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
 
@@ -885,15 +886,26 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // SAFETY: We cast mem to a shorter-lived reference for each loop iteration.
         // Each call to get_icache_entry is independent and completes before the next iteration.
 
-        let mut iteration = 0u32;
+        self.cpu_loop_n(mem, cpus, 1_000_000)?;
+        Ok(())
+    }
+
+    /// Execute CPU loop with a maximum instruction count
+    /// 
+    /// Returns Ok(instructions_executed) when limit is reached or async event occurs.
+    pub fn cpu_loop_n(
+        &mut self,
+        mem: &'c mut BxMemC<'c>,
+        cpus: &[&Self],
+        max_instructions: u64,
+    ) -> super::Result<u64> {
+        let mut iteration = 0u64;
         loop {
             iteration += 1;
-            tracing::debug!("iteration: {iteration:?}");
             
-            // FIXME: Remove this limit once instruction execution is properly implemented
-            if iteration > 10 {
-                tracing::info!("Stopping after {} iterations to avoid infinite loop", iteration);
-                return Ok(());
+            // Safety limit - pause when instruction limit is reached
+            if iteration > max_instructions {
+                return Ok(iteration - 1);
             }
             
             // check on events which occurred for previous instructions (traps)
@@ -901,7 +913,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             if self.async_event != 0 {
                 self.handle_async_event();
                 // If request to return to caller ASAP.
-                return Ok(());
+                return Ok(iteration);
             }
 
             // SAFETY: We extend the lifetime of mem temporarily for this call only.
@@ -947,43 +959,80 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         mem: &'c mut BxMemC<'c>,
         cpus: &[&Self],
     ) -> Result<BxIcacheEntry> {
-        let mut eip_biased: BxAddress = self.rip() + self.eip_page_bias;
-
-        if eip_biased >= self.eip_page_bias {
+        // Check if we need to prefetch a new page
+        // eip_page_window_size == 0 means we haven't prefetched yet
+        if self.eip_page_window_size == 0 || self.eip_fetch_ptr.is_none() {
             self.prefetch(mem, cpus)?;
-            eip_biased = self.rip() + self.eip_page_bias;
         }
 
-        //   INC_ICACHE_STAT(iCacheLookups);
-        let p_addr: BxPhyAddress = self.p_addr_fetch_page + eip_biased;
-        let mut entry_option = self.i_cache.find_entry(p_addr, self.fetch_mode_mask.into());
+        // Calculate the offset within the current page
+        // In real/protected mode: laddr = CS.base + EIP
+        // page_offset = laddr & 0xFFF
+        let laddr = if self.long64_mode() {
+            self.rip()
+        } else {
+            BxAddress::from(self.get_laddr32(BxSegregs::Cs as _, self.eip()))
+        };
+        let page_offset = (laddr & 0xFFF) as usize;
+        
+        // Physical address for this instruction
+        let p_addr: BxPhyAddress = self.p_addr_fetch_page | (page_offset as u64);
+        
+        tracing::debug!("get_icache_entry: laddr={:#x}, page_offset={:#x}, p_addr={:#x}", 
+            laddr, page_offset, p_addr);
+
+        let entry_option = self.i_cache.find_entry(p_addr, self.fetch_mode_mask.into());
 
         if entry_option.is_none() {
             // iCache miss. Try a tiny inline decoder first (simple cases)
-            tracing::debug!("iCache miss at {p_addr:#x}, attempting simple decode");
+            tracing::trace!("iCache miss at {p_addr:#x}, attempting decode");
             // try to use direct fetch pointer if available
             if let Some(fetch_ptr) = self.eip_fetch_ptr {
-                let start = eip_biased as usize;
-                if start < fetch_ptr.len() {
-                    let slice = &fetch_ptr[start..];
+                if page_offset < fetch_ptr.len() {
+                    let slice = &fetch_ptr[page_offset..];
+                    tracing::trace!("Decoding from fetch_ptr, first bytes: {:02x?}", 
+                        &slice[..core::cmp::min(16, slice.len())]);
+                    
+                    // Try simple decoder first (faster for common instructions)
                     if let Some(decoded) = decode_simple_32(slice) {
                         let tlen = decoded.meta_info.ilen as u32;
+                        tracing::trace!("Simple decoded: opcode={:?}, ilen={}", 
+                            decoded.meta_info.ia_opcode, decoded.meta_info.ilen);
                         return Ok(BxIcacheEntry { p_addr, trace_mask: 0, tlen, i: decoded });
+                    }
+                    
+                    // Fallback to full decoder
+                    // Use 16-bit mode for real mode (no protected mode yet)
+                    let is_32bit = false; // Real mode is 16-bit
+                    match fetch_decode32_chatgpt_generated_instr(slice, is_32bit) {
+                        Ok(decoded) => {
+                            let tlen = decoded.meta_info.ilen as u32;
+                            tracing::trace!("Full decoded: opcode={:?}, ilen={}", 
+                                decoded.meta_info.ia_opcode, decoded.meta_info.ilen);
+                            return Ok(BxIcacheEntry { p_addr, trace_mask: 0, tlen, i: decoded });
+                        }
+                        Err(e) => {
+                            tracing::trace!("Decode failed at {p_addr:#x}: {:?}, bytes: {:02x?}", 
+                                e, &slice[..core::cmp::min(8, slice.len())]);
+                        }
                     }
                 }
             }
 
-            // Fallback: return a NOP instruction as a stub
-            tracing::debug!("simple decode failed; returning stub NOP instruction at {p_addr:#x}");
+            // Fallback: return a NOP instruction as a stub (should not happen normally)
+            tracing::trace!("All decoding failed at {p_addr:#x}, returning NOP stub (advancing by 1 byte)");
         }
 
         // FIXME: Return actual decoded instruction from iCache or decode from memory
-        // For now, return a stub entry with NOP (0x90)
+        // For now, return a stub entry with NOP (0x90), ilen=1 to advance RIP
+        let mut stub = BxInstructionGenerated::default();
+        stub.meta_info.ilen = 1; // Ensure RIP advances by 1 byte
+        stub.meta_info.ia_opcode = crate::cpu::decoder::Opcode::Nop;
         Ok(BxIcacheEntry {
             p_addr,
             trace_mask: 0,
             tlen: 1,
-            i: BxInstructionGenerated::default(),
+            i: stub,
         })
     }
 
@@ -1109,7 +1158,109 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 arith::SUB_EAX_Id(self, instr);
                 Ok(())
             }
-            _ => Ok(()), // unsupported -- treat as NOP for now
+            // XOR instructions
+            Opcode::XorEdGd | Opcode::XorEdGdZeroIdiom => {
+                let dst = instr.meta_data[0] as usize;
+                let src = instr.meta_data[1] as usize;
+                let val1 = self.get_gpr32(dst);
+                let val2 = self.get_gpr32(src);
+                let result = val1 ^ val2;
+                self.set_gpr32(dst, result);
+                // Update flags for XOR
+                self.update_flags_logic32(result);
+                Ok(())
+            }
+            Opcode::XorGdEd | Opcode::XorGdEdZeroIdiom => {
+                let dst = instr.meta_data[0] as usize;
+                let src = instr.meta_data[1] as usize;
+                let val1 = self.get_gpr32(dst);
+                let val2 = self.get_gpr32(src);
+                let result = val1 ^ val2;
+                self.set_gpr32(dst, result);
+                self.update_flags_logic32(result);
+                Ok(())
+            }
+            // FAR JMP - Jump to absolute address with segment change
+            Opcode::JmpfAp => {
+                // Operand contains segment:offset (segment in upper 16 bits)
+                let operand: u32 = unsafe { core::mem::transmute(instr.modrm_form.operand_data) };
+                let offset = (operand & 0xFFFF) as u16;
+                let segment = ((operand >> 16) & 0xFFFF) as u16;
+                tracing::debug!("FAR JMP to {:04x}:{:04x}", segment, offset);
+                
+                // In real mode, just update CS and EIP
+                // CS.base = segment << 4
+                let cs_index = BxSegregs::Cs as usize;
+                parse_selector(segment, &mut self.sregs[cs_index].selector);
+                self.sregs[cs_index].cache.u.segment.base = ((segment as u32) << 4) as u64;
+                self.set_rip(offset as u64);
+                
+                // Invalidate prefetch since we jumped
+                self.eip_fetch_ptr = None;
+                self.eip_page_window_size = 0;
+                Ok(())
+            }
+            // Flag manipulation instructions
+            Opcode::Cli => {
+                // Clear Interrupt Flag
+                self.eflags &= !(1 << 9); // IF is bit 9
+                tracing::debug!("CLI: Interrupts disabled");
+                Ok(())
+            }
+            Opcode::Sti => {
+                // Set Interrupt Flag
+                self.eflags |= 1 << 9;
+                tracing::debug!("STI: Interrupts enabled");
+                Ok(())
+            }
+            Opcode::Cld => {
+                // Clear Direction Flag
+                self.eflags &= !(1 << 10); // DF is bit 10
+                tracing::debug!("CLD: Direction flag cleared");
+                Ok(())
+            }
+            Opcode::Std => {
+                // Set Direction Flag
+                self.eflags |= 1 << 10;
+                tracing::debug!("STD: Direction flag set");
+                Ok(())
+            }
+            Opcode::Nop => {
+                // NOP - do nothing
+                Ok(())
+            }
+            _ => {
+                tracing::trace!("Unimplemented opcode: {:?}", instr.get_ia_opcode());
+                Ok(()) // unsupported -- treat as NOP for now
+            }
+        }
+    }
+
+    fn update_flags_logic32(&mut self, result: u32) {
+        // Clear OF, CF (always 0 for logical operations)
+        self.eflags &= !((1 << 11) | (1 << 0)); // OF=0, CF=0
+        
+        // Set SF (sign flag) - bit 7 of result for 32-bit
+        if (result & 0x80000000) != 0 {
+            self.eflags |= 1 << 7;
+        } else {
+            self.eflags &= !(1 << 7);
+        }
+        
+        // Set ZF (zero flag) - bit 6
+        if result == 0 {
+            self.eflags |= 1 << 6;
+        } else {
+            self.eflags &= !(1 << 6);
+        }
+        
+        // Set PF (parity flag) - bit 2, based on low 8 bits
+        let low_byte = (result & 0xFF) as u8;
+        let ones = low_byte.count_ones();
+        if ones % 2 == 0 {
+            self.eflags |= 1 << 2;
+        } else {
+            self.eflags &= !(1 << 2);
         }
     }
 
@@ -1141,7 +1292,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             laddr = self.rip();
 
             // Calculate RIP at the beginning of the page.
-            self.eip_page_bias = u64::from(page_offset) - self.rip();
+            self.eip_page_bias = u64::from(page_offset).wrapping_sub(self.rip());
             self.eip_page_window_size = 4096;
         } else {
             if self.user_pl()
@@ -1159,7 +1310,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             page_offset = super::tlb::page_offset(laddr);
 
             // Calculate RIP at the beginning of the page.
-            self.eip_page_bias = BxAddress::from(page_offset - self.eip());
+            self.eip_page_bias = BxAddress::from(page_offset.wrapping_sub(self.eip()));
 
             let limit: u32 = unsafe {
                 self.sregs[BxSegregs::Cs as usize]
@@ -1196,7 +1347,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             Some(tlb_entry.host_page_addr)
         } else {
             let p_addr =
-                translate_linear(tlb_entry, laddr, self.user_pl, MemoryAccessType::Execute);
+                translate_linear(tlb_entry, laddr, self.user_pl, MemoryAccessType::Execute, mem.a20_mask());
             self.p_addr_fetch_page = ppf_of(p_addr);
             None
         };
@@ -1227,9 +1378,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             // self.eip_fetch_ptr = eip_fetch_ptr.as_deref();
             let p_addr: BxPhyAddress = self.p_addr_fetch_page + u64::from(page_offset);
-            if p_addr >= mem_len.try_into()? {
+            if self.eip_fetch_ptr.is_none() && p_addr >= mem_len.try_into()? {
                 // Address is beyond available memory - set to no direct access
-                tracing::debug!("prefetch: address {p_addr:#x} beyond memory limit {mem_len:#x}");
+                tracing::debug!("prefetch: address {p_addr:#x} beyond memory limit {mem_len:#x} and no ROM mapping");
                 self.eip_fetch_ptr = None;
             }
         }
@@ -1245,3 +1396,4 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.in_smm
     }
 }
+

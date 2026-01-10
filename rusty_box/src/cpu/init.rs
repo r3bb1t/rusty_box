@@ -297,7 +297,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.tsc_offset = 0;
 
         if source == ResetReason::Hardware {
-            self.set_tsc(0); //  do not change TSC on INIT
+            // Set TSC to 0 on hardware reset
+            // Pass 0 for system_ticks since we're at reset time
+            self.set_tsc(0, 0);
         }
 
         if source == ResetReason::Hardware {

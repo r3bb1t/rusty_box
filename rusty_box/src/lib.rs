@@ -9,22 +9,16 @@ extern crate alloc;
 pub mod error;
 pub use error::{Error, Result};
 
-use crate::{
-    cpu::{BxCpuC, BxCpuIdTrait},
-    memory::BxMemoryStubC,
-};
-
 mod config;
 pub mod cpu;
 mod crc;
+pub mod emulator;
 mod gui;
-mod iodev;
+pub mod iodev;
 pub mod memory;
 mod misc;
-mod params;
-mod pc_system;
+pub mod params;
+pub mod pc_system;
 
-pub struct EmulatorContext<'c, I: BxCpuIdTrait> {
-    memory: BxMemoryStubC,
-    cpu: BxCpuC<'c, I>,
-}
+// Re-export commonly used types
+pub use emulator::{Emulator, EmulatorConfig};
