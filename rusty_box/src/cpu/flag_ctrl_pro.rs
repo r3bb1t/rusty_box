@@ -1,25 +1,21 @@
-use crate::cpu::{cpu::PendingEvent, BxCpuC, BxCpuIdTrait};
+//! Flag Control Instructions (Protected Mode)
+//!
+//! This module contains flag manipulation helpers for protected mode.
+//! 
+//! Note: handle_interrupt_mask_change is defined in init.rs
+
+use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
-    pub(super) fn handle_interrupt_mask_change(&mut self) {
-        if self.get_if() != 0 {
-            // EFLAGS.IF was set, unmask all affected events
-
-            self.unmask_event(
-                PendingEvent::VmxInterruptWindowExiting
-                    | PendingEvent::PendingIntr
-                    | PendingEvent::PendingLapicIntr
-                    | PendingEvent::PendingVmxVirtualIntr,
-            );
-
-            if self.in_svm_guest {
-                if true {
-                    self.unmask_event(PendingEvent::SvmVirqPending);
-                }
-            }
-
-            //  TODO: look into it
-            //  if (!uintr_masked()) unmask_event(BX_EVENT_PENDING_UINTR);
-        }
+    /// Check if interrupts are enabled (EFLAGS.IF = 1)
+    #[inline]
+    pub fn interrupts_enabled(&self) -> bool {
+        (self.eflags & (1 << 9)) != 0
+    }
+    
+    /// Check if direction flag is set (EFLAGS.DF = 1)
+    #[inline]
+    pub fn direction_flag(&self) -> bool {
+        (self.eflags & (1 << 10)) != 0
     }
 }

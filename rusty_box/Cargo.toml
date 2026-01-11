@@ -9,7 +9,7 @@ name = "rusty_box"
 path = "src/lib.rs"
 
 [features]
-default = ["bx_full"]
+default = ["bx_full", "std"]
 
 std = ["tracing/std", "tempfile"]
 

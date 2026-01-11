@@ -438,4 +438,66 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     pub fn set_msr_gsbase(&mut self, val: u64) {
         self.gen_reg[BxSegregs::Gs as usize].rrx = val
     }
+
+    // =========================================================================
+    // Indexed register accessors (by register number)
+    // =========================================================================
+
+    /// Get 8-bit register by index (0=AL, 1=CL, 2=DL, 3=BL, 4=AH, 5=CH, 6=DH, 7=BH)
+    /// For x86-64 with REX prefix, 4-7 map to SPL, BPL, SIL, DIL instead
+    #[inline]
+    pub fn get_gpr8(&self, reg: usize) -> u8 {
+        if reg < 4 {
+            // AL, CL, DL, BL
+            unsafe { self.gen_reg[reg].word.byte.rl }
+        } else if reg < 8 {
+            // AH, CH, DH, BH (legacy mode) or SPL, BPL, SIL, DIL (x86-64 with REX)
+            unsafe { self.gen_reg[reg - 4].word.byte.rh }
+        } else {
+            // R8B-R15B (x86-64)
+            unsafe { self.gen_reg[reg].word.byte.rl }
+        }
+    }
+
+    /// Set 8-bit register by index
+    #[inline]
+    pub fn set_gpr8(&mut self, reg: usize, val: u8) {
+        if reg < 4 {
+            self.gen_reg[reg].word.byte.rl = val;
+        } else if reg < 8 {
+            self.gen_reg[reg - 4].word.byte.rh = val;
+        } else {
+            self.gen_reg[reg].word.byte.rl = val;
+        }
+    }
+
+    /// Get 16-bit register by index (0=AX, 1=CX, 2=DX, 3=BX, 4=SP, 5=BP, 6=SI, 7=DI)
+    #[inline]
+    pub fn get_gpr16(&self, reg: usize) -> u16 {
+        unsafe { self.gen_reg[reg].word.rx }
+    }
+
+    /// Set 16-bit register by index
+    #[inline]
+    pub fn set_gpr16(&mut self, reg: usize, val: u16) {
+        self.gen_reg[reg].word.rx = val;
+    }
+
+    /// Get 64-bit register by index (0=RAX, 1=RCX, ..., 15=R15)
+    #[inline]
+    pub fn get_gpr64(&self, reg: usize) -> u64 {
+        unsafe { self.gen_reg[reg].rrx }
+    }
+
+    /// Set 64-bit register by index
+    #[inline]
+    pub fn set_gpr64(&mut self, reg: usize, val: u64) {
+        self.gen_reg[reg].rrx = val;
+    }
+
+    /// Get IP (instruction pointer) as u16
+    #[inline]
+    pub fn get_ip(&self) -> u16 {
+        unsafe { self.gen_reg[BX_16BIT_REG_IP].word.rx }
+    }
 }

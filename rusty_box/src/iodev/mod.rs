@@ -5,11 +5,35 @@
 //!
 //! Each `BxDevicesC` instance is fully independent, allowing multiple
 //! emulator instances to run concurrently without conflicts.
+//!
+//! ## Device Modules
+//! 
+//! The following hardware devices are emulated:
+//! - **PIC (8259)**: Programmable Interrupt Controller - handles hardware interrupts
+//! - **PIT (8254)**: Programmable Interval Timer - system timer, speaker control
+//! - **CMOS/RTC**: CMOS RAM and Real Time Clock
+//! - **DMA (8237)**: Direct Memory Access controller
+//! - **Keyboard (8042)**: PS/2 keyboard and mouse controller
+//! - **HardDrive (ATA/IDE)**: Hard disk controller
 
 use alloc::{boxed::Box, string::String, vec::Vec};
 use core::ffi::c_void;
 
 pub mod devices;
+pub mod pic;
+pub mod pit;
+pub mod cmos;
+pub mod dma;
+pub mod keyboard;
+pub mod harddrv;
+
+// Re-export device types for convenience
+pub use pic::BxPicC;
+pub use pit::BxPitC;
+pub use cmos::BxCmosC;
+pub use dma::BxDmaC;
+pub use keyboard::BxKeyboardC;
+pub use harddrv::BxHardDriveC;
 
 /// Number of I/O ports (0x0000 - 0xFFFF)
 pub const IO_PORTS: usize = 0x10000;

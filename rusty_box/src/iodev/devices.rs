@@ -2,6 +2,13 @@
 //!
 //! This module implements the device initialization sequence from Bochs,
 //! including the Port 0x92 System Control handler for A20 line control.
+//!
+//! ## Device Architecture
+//!
+//! The device system mirrors Bochs' plugin architecture:
+//! - Core devices (PIC, PIT, DMA, CMOS, Keyboard) are always present
+//! - Standard devices (HardDrive, Floppy, VGA) are configurable
+//! - Each device registers its own I/O port handlers
 
 use core::ffi::c_void;
 
@@ -13,6 +20,12 @@ use crate::{
 };
 
 use super::BxDevicesC;
+use super::pic::{self, BxPicC, PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA, PIC_ELCR1, PIC_ELCR2};
+use super::pit::{self, BxPitC, PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2, PIT_CONTROL};
+use super::cmos::{self, BxCmosC, CMOS_ADDR, CMOS_DATA};
+use super::dma::{self, BxDmaC};
+use super::keyboard::{self, BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT, SYSTEM_CONTROL_B};
+use super::harddrv::{self, BxHardDriveC};
 
 /// Port 0x92 - System Control Port
 /// Bit 0: Fast A20 gate control (1 = A20 enabled)
@@ -24,6 +37,303 @@ const PORT_92H: u16 = 0x0092;
 pub struct Port92State {
     /// Current value of port 92h
     pub value: u8,
+}
+
+/// Unified Device Manager
+/// 
+/// Holds all hardware devices and manages their initialization,
+/// reset, and I/O port registration. This mirrors Bochs' `bx_devices_c`.
+#[derive(Debug)]
+pub struct DeviceManager {
+    /// 8259 PIC (Programmable Interrupt Controller)
+    pub pic: BxPicC,
+    /// 8254 PIT (Programmable Interval Timer)
+    pub pit: BxPitC,
+    /// CMOS/RTC
+    pub cmos: BxCmosC,
+    /// 8237 DMA Controller
+    pub dma: BxDmaC,
+    /// 8042 Keyboard Controller
+    pub keyboard: BxKeyboardC,
+    /// ATA/IDE Hard Drive Controller
+    pub harddrv: BxHardDriveC,
+}
+
+impl Default for DeviceManager {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl DeviceManager {
+    /// Create a new device manager with all devices
+    pub fn new() -> Self {
+        Self {
+            pic: BxPicC::new(),
+            pit: BxPitC::new(),
+            cmos: BxCmosC::new(),
+            dma: BxDmaC::new(),
+            keyboard: BxKeyboardC::new(),
+            harddrv: BxHardDriveC::new(),
+        }
+    }
+
+    /// Initialize all devices and register I/O handlers
+    pub fn init(&mut self, io: &mut BxDevicesC) -> Result<()> {
+        tracing::info!("Initializing device manager");
+
+        // Initialize each device
+        self.pic.init();
+        self.pit.init();
+        self.cmos.init();
+        self.dma.init();
+        self.keyboard.init();
+        self.harddrv.init();
+
+        // Register I/O handlers for each device
+        self.register_pic_handlers(io);
+        self.register_pit_handlers(io);
+        self.register_cmos_handlers(io);
+        self.register_dma_handlers(io);
+        self.register_keyboard_handlers(io);
+        self.register_harddrv_handlers(io);
+
+        tracing::info!("Device manager initialization complete");
+        Ok(())
+    }
+
+    /// Reset all devices
+    pub fn reset(&mut self, reset_type: ResetReason) -> Result<()> {
+        tracing::info!("Device manager reset: {:?}", reset_type);
+        
+        self.pic.reset();
+        self.pit.reset();
+        self.cmos.reset();
+        self.dma.reset();
+        self.keyboard.reset();
+        self.harddrv.reset();
+
+        Ok(())
+    }
+
+    /// Register PIC I/O handlers
+    fn register_pic_handlers(&mut self, io: &mut BxDevicesC) {
+        let pic_ptr = &mut self.pic as *mut BxPicC as *mut c_void;
+        
+        for port in [PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA, PIC_ELCR1, PIC_ELCR2] {
+            io.register_io_handler(
+                pic_ptr,
+                pic::pic_read_handler,
+                pic::pic_write_handler,
+                port,
+                "8259 PIC",
+                0x1,
+            );
+        }
+    }
+
+    /// Register PIT I/O handlers
+    fn register_pit_handlers(&mut self, io: &mut BxDevicesC) {
+        let pit_ptr = &mut self.pit as *mut BxPitC as *mut c_void;
+        
+        for port in [PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2, PIT_CONTROL] {
+            io.register_io_handler(
+                pit_ptr,
+                pit::pit_read_handler,
+                pit::pit_write_handler,
+                port,
+                "8254 PIT",
+                0x1,
+            );
+        }
+    }
+
+    /// Register CMOS I/O handlers
+    fn register_cmos_handlers(&mut self, io: &mut BxDevicesC) {
+        let cmos_ptr = &mut self.cmos as *mut BxCmosC as *mut c_void;
+        
+        io.register_io_handler(
+            cmos_ptr,
+            cmos::cmos_read_handler,
+            cmos::cmos_write_handler,
+            CMOS_ADDR,
+            "CMOS Address",
+            0x1,
+        );
+        io.register_io_handler(
+            cmos_ptr,
+            cmos::cmos_read_handler,
+            cmos::cmos_write_handler,
+            CMOS_DATA,
+            "CMOS Data",
+            0x1,
+        );
+    }
+
+    /// Register DMA I/O handlers
+    fn register_dma_handlers(&mut self, io: &mut BxDevicesC) {
+        let dma_ptr = &mut self.dma as *mut BxDmaC as *mut c_void;
+        
+        // DMA1 ports (0x00-0x0F)
+        for port in 0x00..=0x0F_u16 {
+            io.register_io_handler(
+                dma_ptr,
+                dma::dma_read_handler,
+                dma::dma_write_handler,
+                port,
+                "DMA1",
+                0x1,
+            );
+        }
+        
+        // DMA2 ports (0xC0-0xDF)
+        for port in 0xC0..=0xDF_u16 {
+            io.register_io_handler(
+                dma_ptr,
+                dma::dma_read_handler,
+                dma::dma_write_handler,
+                port,
+                "DMA2",
+                0x1,
+            );
+        }
+        
+        // DMA page registers
+        for port in [0x81_u16, 0x82, 0x83, 0x87, 0x89, 0x8A, 0x8B, 0x8F] {
+            io.register_io_handler(
+                dma_ptr,
+                dma::dma_read_handler,
+                dma::dma_write_handler,
+                port,
+                "DMA Page",
+                0x1,
+            );
+        }
+    }
+
+    /// Register Keyboard I/O handlers
+    fn register_keyboard_handlers(&mut self, io: &mut BxDevicesC) {
+        let kbd_ptr = &mut self.keyboard as *mut BxKeyboardC as *mut c_void;
+        
+        io.register_io_handler(
+            kbd_ptr,
+            keyboard::keyboard_read_handler,
+            keyboard::keyboard_write_handler,
+            KBD_DATA_PORT,
+            "Keyboard Data",
+            0x1,
+        );
+        io.register_io_handler(
+            kbd_ptr,
+            keyboard::keyboard_read_handler,
+            keyboard::keyboard_write_handler,
+            KBD_STATUS_PORT,
+            "Keyboard Status/Command",
+            0x1,
+        );
+        io.register_io_handler(
+            kbd_ptr,
+            keyboard::keyboard_read_handler,
+            keyboard::keyboard_write_handler,
+            SYSTEM_CONTROL_B,
+            "System Control B",
+            0x1,
+        );
+    }
+
+    /// Register Hard Drive I/O handlers
+    fn register_harddrv_handlers(&mut self, io: &mut BxDevicesC) {
+        let hd_ptr = &mut self.harddrv as *mut BxHardDriveC as *mut c_void;
+        
+        // Primary ATA (0x1F0-0x1F7, 0x3F6)
+        for port in 0x1F0..=0x1F7_u16 {
+            io.register_io_handler(
+                hd_ptr,
+                harddrv::harddrv_read_handler,
+                harddrv::harddrv_write_handler,
+                port,
+                "ATA Primary",
+                0x7, // 1, 2, 4 byte access
+            );
+        }
+        io.register_io_handler(
+            hd_ptr,
+            harddrv::harddrv_read_handler,
+            harddrv::harddrv_write_handler,
+            0x3F6,
+            "ATA Primary Control",
+            0x1,
+        );
+        
+        // Secondary ATA (0x170-0x177, 0x376)
+        for port in 0x170..=0x177_u16 {
+            io.register_io_handler(
+                hd_ptr,
+                harddrv::harddrv_read_handler,
+                harddrv::harddrv_write_handler,
+                port,
+                "ATA Secondary",
+                0x7,
+            );
+        }
+        io.register_io_handler(
+            hd_ptr,
+            harddrv::harddrv_read_handler,
+            harddrv::harddrv_write_handler,
+            0x376,
+            "ATA Secondary Control",
+            0x1,
+        );
+    }
+
+    /// Simulate time passing for timer-based devices
+    /// Returns true if any interrupt is pending
+    pub fn tick(&mut self, usec: u64) -> bool {
+        // Tick PIT and check for IRQ0
+        if self.pit.check_irq0() {
+            self.pic.raise_irq(0);
+        }
+        
+        // Tick CMOS/RTC and check for IRQ8
+        if self.cmos.check_irq8() {
+            self.pic.raise_irq(8);
+        }
+        
+        // Check keyboard IRQ1
+        if self.keyboard.check_irq1() {
+            self.pic.raise_irq(1);
+        }
+        
+        // Check mouse IRQ12
+        if self.keyboard.check_irq12() {
+            self.pic.raise_irq(12);
+        }
+        
+        // Check hard drive IRQ14/15
+        if self.harddrv.check_irq14() {
+            self.pic.raise_irq(14);
+        }
+        if self.harddrv.check_irq15() {
+            self.pic.raise_irq(15);
+        }
+        
+        self.pic.has_interrupt()
+    }
+
+    /// Check if an interrupt is pending
+    pub fn has_interrupt(&self) -> bool {
+        self.pic.has_interrupt()
+    }
+
+    /// Acknowledge interrupt and get vector
+    pub fn iac(&mut self) -> u8 {
+        self.pic.iac()
+    }
+
+    /// Get A20 state from keyboard controller
+    pub fn get_a20_from_keyboard(&self) -> bool {
+        self.keyboard.get_a20_enabled()
+    }
 }
 
 impl BxDevicesC {

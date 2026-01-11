@@ -1,0 +1,235 @@
+//! Stack operations for x86 CPU emulation
+//!
+//! Based on Bochs stack16.cc and stack32.cc
+//! Copyright (C) 2001-2018 The Bochs Project
+//!
+//! NOTE: This implementation uses simple register-based stack tracking.
+//! Full memory access would require integration with the memory subsystem.
+
+use super::{
+    cpu::BxCpuC,
+    cpuid::BxCpuIdTrait,
+    decoder::{BxInstructionGenerated, BxSegregs},
+};
+
+impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    // =========================================================================
+    // Helper functions for stack operations
+    // =========================================================================
+    
+    /// Check if using 32-bit stack (SS.D_B flag)
+    #[inline]
+    fn is_stack_32bit(&self) -> bool {
+        unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b }
+    }
+
+    /// Push a 16-bit value onto the stack (register-only version)
+    pub fn push_16(&mut self, _value: u16) {
+        if self.is_stack_32bit() {
+            let esp = self.esp();
+            self.set_esp(esp.wrapping_sub(2));
+        } else {
+            let sp = self.sp();
+            self.set_sp(sp.wrapping_sub(2));
+        }
+        // Note: Memory write would go here with full implementation
+        tracing::trace!("PUSH16: value would be written to stack");
+    }
+
+    /// Pop a 16-bit value from the stack (register-only version)
+    pub fn pop_16(&mut self) -> u16 {
+        // Note: Memory read would go here with full implementation
+        let value: u16 = 0; // Placeholder
+        
+        if self.is_stack_32bit() {
+            let esp = self.esp();
+            self.set_esp(esp.wrapping_add(2));
+        } else {
+            let sp = self.sp();
+            self.set_sp(sp.wrapping_add(2));
+        }
+        tracing::trace!("POP16: value would be read from stack");
+        value
+    }
+
+    /// Push a 32-bit value onto the stack (register-only version)
+    pub fn push_32(&mut self, _value: u32) {
+        if self.is_stack_32bit() {
+            let esp = self.esp();
+            self.set_esp(esp.wrapping_sub(4));
+        } else {
+            let sp = self.sp();
+            self.set_sp(sp.wrapping_sub(4));
+        }
+        tracing::trace!("PUSH32: value would be written to stack");
+    }
+
+    /// Pop a 32-bit value from the stack (register-only version)
+    pub fn pop_32(&mut self) -> u32 {
+        let value: u32 = 0; // Placeholder
+        
+        if self.is_stack_32bit() {
+            let esp = self.esp();
+            self.set_esp(esp.wrapping_add(4));
+        } else {
+            let sp = self.sp();
+            self.set_sp(sp.wrapping_add(4));
+        }
+        tracing::trace!("POP32: value would be read from stack");
+        value
+    }
+
+    // =========================================================================
+    // 16-bit PUSH instructions
+    // =========================================================================
+
+    /// PUSH r16 - Push 16-bit register
+    pub fn push_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        let dst = instr.dst() as usize;
+        let value = self.get_gpr16(dst);
+        self.push_16(value);
+        tracing::trace!("PUSH r16 (reg {}): {:#06x}", dst, value);
+    }
+
+    /// PUSH Sw - Push segment register
+    pub fn push16_sw(&mut self, instr: &BxInstructionGenerated) {
+        let src = instr.src() as usize;
+        let value = self.sregs[src].selector.value;
+        self.push_16(value);
+        tracing::trace!("PUSH Sw (seg {}): {:#06x}", src, value);
+    }
+
+    /// PUSH imm16
+    pub fn push_iw(&mut self, instr: &BxInstructionGenerated) {
+        let value = instr.iw();
+        self.push_16(value);
+        tracing::trace!("PUSH imm16: {:#06x}", value);
+    }
+
+    // =========================================================================
+    // 16-bit POP instructions
+    // =========================================================================
+
+    /// POP r16 - Pop into 16-bit register
+    pub fn pop_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        let dst = instr.dst() as usize;
+        let value = self.pop_16();
+        self.set_gpr16(dst, value);
+        tracing::trace!("POP r16 (reg {}): {:#06x}", dst, value);
+    }
+
+    /// POP Sw - Pop into segment register
+    pub fn pop16_sw(&mut self, instr: &BxInstructionGenerated) {
+        let dst = instr.dst() as usize;
+        let value = self.pop_16();
+        
+        // Load segment register (simplified for real mode)
+        super::segment_ctrl_pro::parse_selector(value, &mut self.sregs[dst].selector);
+        self.sregs[dst].cache.u.segment.base = (value as u64) << 4;
+        
+        tracing::trace!("POP Sw (seg {}): {:#06x}", dst, value);
+    }
+
+    // =========================================================================
+    // 32-bit PUSH instructions
+    // =========================================================================
+
+    /// PUSH r32 - Push 32-bit register
+    pub fn push_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        let dst = instr.dst() as usize;
+        let value = self.get_gpr32(dst);
+        self.push_32(value);
+        tracing::trace!("PUSH r32 (reg {}): {:#010x}", dst, value);
+    }
+
+    /// PUSH imm32
+    pub fn push_id(&mut self, instr: &BxInstructionGenerated) {
+        let value = instr.id();
+        self.push_32(value);
+        tracing::trace!("PUSH imm32: {:#010x}", value);
+    }
+
+    // =========================================================================
+    // 32-bit POP instructions
+    // =========================================================================
+
+    /// POP r32 - Pop into 32-bit register
+    pub fn pop_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        let dst = instr.dst() as usize;
+        let value = self.pop_32();
+        self.set_gpr32(dst, value);
+        tracing::trace!("POP r32 (reg {}): {:#010x}", dst, value);
+    }
+
+    // =========================================================================
+    // PUSHA/POPA instructions (stub implementations)
+    // =========================================================================
+
+    /// PUSHA - Push all 16-bit general registers
+    pub fn pusha16(&mut self, _instr: &BxInstructionGenerated) {
+        // Simplified - just adjust SP/ESP
+        if self.is_stack_32bit() {
+            let esp = self.esp();
+            self.set_esp(esp.wrapping_sub(16));
+        } else {
+            let sp = self.sp();
+            self.set_sp(sp.wrapping_sub(16));
+        }
+        tracing::trace!("PUSHA16 (stub)");
+    }
+
+    /// POPA - Pop all 16-bit general registers
+    pub fn popa16(&mut self, _instr: &BxInstructionGenerated) {
+        if self.is_stack_32bit() {
+            let esp = self.esp();
+            self.set_esp(esp.wrapping_add(16));
+        } else {
+            let sp = self.sp();
+            self.set_sp(sp.wrapping_add(16));
+        }
+        tracing::trace!("POPA16 (stub)");
+    }
+
+    // =========================================================================
+    // PUSHF/POPF instructions
+    // =========================================================================
+
+    /// PUSHF - Push flags (16-bit)
+    pub fn pushf_fw(&mut self, _instr: &BxInstructionGenerated) {
+        let flags = (self.eflags & 0xFFFF) as u16;
+        self.push_16(flags);
+        tracing::trace!("PUSHF: {:#06x}", flags);
+    }
+
+    /// POPF - Pop flags (16-bit)
+    pub fn popf_fw(&mut self, _instr: &BxInstructionGenerated) {
+        let flags = self.pop_16();
+        
+        // Mask to preserve certain bits
+        // Changeable: CF, PF, AF, ZF, SF, TF, DF, OF, NT
+        const CHANGE_MASK: u32 = 0x0FD5; // bits 0,2,4,6,7,8,9,10,14
+        
+        self.eflags = (self.eflags & !CHANGE_MASK) | ((flags as u32) & CHANGE_MASK);
+        tracing::trace!("POPF: {:#06x}", flags);
+    }
+
+    /// PUSHFD - Push flags (32-bit)
+    pub fn pushf_fd(&mut self, _instr: &BxInstructionGenerated) {
+        // VM & RF flags cleared in image stored on the stack
+        let flags = self.eflags & 0x00FCFFFF;
+        self.push_32(flags);
+        tracing::trace!("PUSHFD: {:#010x}", flags);
+    }
+
+    /// POPFD - Pop flags (32-bit)
+    pub fn popf_fd(&mut self, _instr: &BxInstructionGenerated) {
+        let flags = self.pop_32();
+        
+        // RF is always zero after POPF
+        // VM, VIP, VIF are unaffected in protected mode
+        const CHANGE_MASK: u32 = 0x00244FD5;
+        
+        self.eflags = (self.eflags & !CHANGE_MASK) | (flags & CHANGE_MASK);
+        tracing::trace!("POPFD: {:#010x}", flags);
+    }
+}

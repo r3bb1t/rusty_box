@@ -616,11 +616,20 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) smram_map: [u32; SMMRAM_Fields::SMRAM_FIELD_LAST as _],
 
     pub(super) phantom: PhantomData<I>,
+
+    /// Temporary memory pointer for instruction execution (set during cpu_loop)
+    /// This is a raw pointer to avoid lifetime issues - only valid during cpu_loop
+    /// SAFETY: Must only be used during cpu_loop when memory is valid
+    pub(super) mem_ptr: Option<*mut u8>,
+    pub(super) mem_len: usize,
 }
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
 }
+
+// Note: Memory access is done through mem_ptr/mem_len raw pointer 
+// which is set during cpu_loop. See string.rs for mem_read_byte/mem_write_byte helpers.
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn is_canonical(&self, addr: BxAddress) -> bool {
@@ -899,13 +908,19 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         cpus: &[&Self],
         max_instructions: u64,
     ) -> super::Result<u64> {
+        // Set memory pointer for instruction execution
+        // Store raw pointer to the memory vector for direct access
+        let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
+        self.mem_ptr = Some(mem_vector);
+        self.mem_len = mem_len;
+        
         let mut iteration = 0u64;
-        loop {
+        let result = loop {
             iteration += 1;
             
             // Safety limit - pause when instruction limit is reached
             if iteration > max_instructions {
-                return Ok(iteration - 1);
+                break Ok(iteration - 1);
             }
             
             // check on events which occurred for previous instructions (traps)
@@ -913,7 +928,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             if self.async_event != 0 {
                 self.handle_async_event();
                 // If request to return to caller ASAP.
-                return Ok(iteration);
+                break Ok(iteration);
             }
 
             // SAFETY: We extend the lifetime of mem temporarily for this call only.
@@ -939,10 +954,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // clear stop trace magic indication that probably was set by repeat or branch32/64
                 self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
             }
-        }
-
-        #[allow(unreachable_code)]
-        todo!()
+        };
+        
+        // Clear memory pointer when done
+        self.mem_ptr = None;
+        result
     }
 
     fn fetch_next_instruction(
@@ -1119,7 +1135,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         use crate::cpu::data_xfer;
         
         match instr.get_ia_opcode() {
-            // Data transfer (MOV) instructions
+            // =========================================================================
+            // Data transfer (MOV) instructions - 32-bit
+            // =========================================================================
             Opcode::MovOp32GdEd => {
                 data_xfer::MOV_GdEd_R(self, instr);
                 Ok(())
@@ -1130,6 +1148,86 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::MovEdId => {
                 data_xfer::MOV_EdId_R(self, instr);
+                Ok(())
+            }
+            
+            // =========================================================================
+            // Data transfer (MOV) instructions - 8-bit
+            // =========================================================================
+            Opcode::MovGbEb => { self.mov_gb_eb_r(instr); Ok(()) }
+            Opcode::MovEbGb => { self.mov_eb_gb_r(instr); Ok(()) }
+            Opcode::MovEbIb => { self.mov_rb_ib(instr); Ok(()) }
+            
+            // =========================================================================
+            // Data transfer (MOV) instructions - 16-bit
+            // =========================================================================
+            Opcode::MovGwEw => { self.mov_gw_ew_r(instr); Ok(()) }
+            Opcode::MovEwGw => { self.mov_ew_gw_r(instr); Ok(()) }
+            Opcode::MovEwIw => { self.mov_rw_iw(instr); Ok(()) }
+            
+            // =========================================================================
+            // Segment register MOV
+            // =========================================================================
+            Opcode::MovEwSw => { self.mov_ew_sw(instr); Ok(()) }
+            Opcode::MovSwEw => { self.mov_sw_ew(instr); Ok(()) }
+            
+            // =========================================================================
+            // MOV with direct memory offset
+            // =========================================================================
+            Opcode::MovAlod => {
+                // MOV AL, moffs8 - Load AL from memory
+                let offset = instr.id() as u64;
+                let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
+                let addr = ds_base.wrapping_add(offset);
+                let val = self.mem_read_byte(addr);
+                self.set_al(val);
+                Ok(())
+            }
+            Opcode::MovAxod => {
+                // MOV AX, moffs16 - Load AX from memory
+                let offset = instr.id() as u64;
+                let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
+                let addr = ds_base.wrapping_add(offset);
+                let val = self.mem_read_word(addr);
+                self.set_ax(val);
+                Ok(())
+            }
+            Opcode::MovOdAl => {
+                // MOV moffs8, AL - Store AL to memory
+                let offset = instr.id() as u64;
+                let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
+                let addr = ds_base.wrapping_add(offset);
+                self.mem_write_byte(addr, self.al());
+                Ok(())
+            }
+            Opcode::MovOdAx => {
+                // MOV moffs16, AX - Store AX to memory
+                let offset = instr.id() as u64;
+                let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
+                let addr = ds_base.wrapping_add(offset);
+                self.mem_write_word(addr, self.ax());
+                Ok(())
+            }
+            
+            // =========================================================================
+            // PUSH/POP segment registers
+            // =========================================================================
+            Opcode::PushOp16Sw => {
+                let seg = instr.meta_data[0] as usize;
+                let val = self.sregs[seg].selector.value;
+                self.push_16(val);
+                Ok(())
+            }
+            Opcode::PopOp16Sw => {
+                let seg = instr.meta_data[0] as usize;
+                let val = self.pop_16();
+                // Don't allow loading CS
+                if seg != BxSegregs::Cs as usize {
+                    parse_selector(val, &mut self.sregs[seg].selector);
+                    unsafe {
+                        self.sregs[seg].cache.u.segment.base = (val as u64) << 4;
+                    }
+                }
                 Ok(())
             }
             // Arithmetic (ADD) instructions
@@ -1143,6 +1241,25 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::AddEaxid => {
                 arith::ADD_EAX_Id(self, instr);
+                Ok(())
+            }
+            Opcode::AddAlib => {
+                // ADD AL, imm8
+                let al = self.al();
+                let imm = instr.ib();
+                let result = al.wrapping_add(imm);
+                self.set_al(result);
+                self.update_flags_add8(al, imm, result);
+                Ok(())
+            }
+            Opcode::AddEwsIb => {
+                // ADD r/m16, imm8 (sign-extended)
+                let dst = instr.meta_data[0] as usize;
+                let op1 = self.get_gpr16(dst);
+                let op2 = (instr.ib() as i8 as i16 as u16);
+                let result = op1.wrapping_add(op2);
+                self.set_gpr16(dst, result);
+                self.update_flags_add16(op1, op2, result);
                 Ok(())
             }
             // Arithmetic (SUB) instructions
@@ -1178,6 +1295,37 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 let result = val1 ^ val2;
                 self.set_gpr32(dst, result);
                 self.update_flags_logic32(result);
+                Ok(())
+            }
+            Opcode::XorEbGb | Opcode::XorGbEb => {
+                // XOR r8, r/m8
+                let dst = instr.meta_data[0] as usize;
+                let src = instr.meta_data[1] as usize;
+                let val1 = self.get_gpr8(dst);
+                let val2 = self.get_gpr8(src);
+                let result = val1 ^ val2;
+                self.set_gpr8(dst, result);
+                self.update_flags_logic8(result);
+                Ok(())
+            }
+            Opcode::XorEwGw | Opcode::XorGwEw => {
+                // XOR r16, r/m16
+                let dst = instr.meta_data[0] as usize;
+                let src = instr.meta_data[1] as usize;
+                let val1 = self.get_gpr16(dst);
+                let val2 = self.get_gpr16(src);
+                let result = val1 ^ val2;
+                self.set_gpr16(dst, result);
+                self.update_flags_logic16(result);
+                Ok(())
+            }
+            Opcode::XorAlib => {
+                // XOR AL, imm8
+                let al = self.al();
+                let imm = instr.ib();
+                let result = al ^ imm;
+                self.set_al(result);
+                self.update_flags_logic8(result);
                 Ok(())
             }
             // FAR JMP - Jump to absolute address with segment change
@@ -1229,6 +1377,240 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // NOP - do nothing
                 Ok(())
             }
+            // I/O port instructions
+            Opcode::InAlib => {
+                self.in_al_ib(instr);
+                Ok(())
+            }
+            Opcode::InAxib => {
+                self.in_ax_ib(instr);
+                Ok(())
+            }
+            Opcode::InEaxib => {
+                self.in_eax_ib(instr);
+                Ok(())
+            }
+            Opcode::OutIbAl => {
+                self.out_ib_al(instr);
+                Ok(())
+            }
+            Opcode::OutIbAx => {
+                self.out_ib_ax(instr);
+                Ok(())
+            }
+            Opcode::OutIbEax => {
+                self.out_ib_eax(instr);
+                Ok(())
+            }
+            Opcode::InAlDx => {
+                self.in_al_dx(instr);
+                Ok(())
+            }
+            Opcode::InAxDx => {
+                self.in_ax_dx(instr);
+                Ok(())
+            }
+            Opcode::InEaxDx => {
+                self.in_eax_dx(instr);
+                Ok(())
+            }
+            Opcode::OutDxAl => {
+                self.out_dx_al(instr);
+                Ok(())
+            }
+            Opcode::OutDxAx => {
+                self.out_dx_ax(instr);
+                Ok(())
+            }
+            Opcode::OutDxEax => {
+                self.out_dx_eax(instr);
+                Ok(())
+            }
+            
+            // =========================================================================
+            // Conditional jumps (8-bit displacement, 16-bit mode)
+            // =========================================================================
+            Opcode::JoJbw => { self.jo_jb(instr); Ok(()) }
+            Opcode::JnoJbw => { self.jno_jb(instr); Ok(()) }
+            Opcode::JbJbw => { self.jb_jb(instr); Ok(()) }
+            Opcode::JnbJbw => { self.jnb_jb(instr); Ok(()) }
+            Opcode::JzJbw => { self.jz_jb(instr); Ok(()) }
+            Opcode::JnzJbw => { self.jnz_jb(instr); Ok(()) }
+            Opcode::JbeJbw => { self.jbe_jb(instr); Ok(()) }
+            Opcode::JnbeJbw => { self.jnbe_jb(instr); Ok(()) }
+            Opcode::JsJbw => { self.js_jb(instr); Ok(()) }
+            Opcode::JnsJbw => { self.jns_jb(instr); Ok(()) }
+            Opcode::JpJbw => { self.jp_jb(instr); Ok(()) }
+            Opcode::JnpJbw => { self.jnp_jb(instr); Ok(()) }
+            Opcode::JlJbw => { self.jl_jb(instr); Ok(()) }
+            Opcode::JnlJbw => { self.jnl_jb(instr); Ok(()) }
+            Opcode::JleJbw => { self.jle_jb(instr); Ok(()) }
+            Opcode::JnleJbw => { self.jnle_jb(instr); Ok(()) }
+            
+            // Conditional jumps (16-bit displacement)
+            Opcode::JzJw => { self.jz_jw(instr); Ok(()) }
+            Opcode::JnzJw => { self.jnz_jw(instr); Ok(()) }
+            
+            // JMP instructions
+            Opcode::JmpJbw => { self.jmp_jb(instr); Ok(()) }
+            Opcode::JmpJw => { self.jmp_jw(instr); Ok(()) }
+            Opcode::JmpJd => { self.jmp_jd(instr); Ok(()) }
+            Opcode::JmpEw => { self.jmp_ew_r(instr); Ok(()) }
+            Opcode::JmpEd => { self.jmp_ed_r(instr); Ok(()) }
+            
+            // CALL instructions
+            Opcode::CallJw => { self.call_jw(instr); Ok(()) }
+            Opcode::CallJd => { self.call_jd(instr); Ok(()) }
+            Opcode::CallEw => { self.call_ew_r(instr); Ok(()) }
+            Opcode::CallEd => { self.call_ed_r(instr); Ok(()) }
+            
+            // RET instructions
+            Opcode::RetOp16 => { self.ret_near16(instr); Ok(()) }
+            Opcode::RetOp16Iw => { self.ret_near16_iw(instr); Ok(()) }
+            Opcode::RetOp32 => { self.ret_near32(instr); Ok(()) }
+            Opcode::RetOp32Iw => { self.ret_near32_iw(instr); Ok(()) }
+            
+            // LOOP instructions
+            Opcode::LoopJbw => { self.loop16_jb(instr); Ok(()) }
+            Opcode::LoopeJbw => { self.loope16_jb(instr); Ok(()) }
+            Opcode::LoopneJbw => { self.loopne16_jb(instr); Ok(()) }
+            Opcode::JcxzJbw => { self.jcxz_jb(instr); Ok(()) }
+            
+            // =========================================================================
+            // CMP instructions
+            // =========================================================================
+            Opcode::CmpGbEb => { self.cmp_gb_eb_r(instr); Ok(()) }
+            Opcode::CmpGwEw => { self.cmp_gw_ew_r(instr); Ok(()) }
+            Opcode::CmpGdEd => { self.cmp_gd_ed_r(instr); Ok(()) }
+            Opcode::CmpAlib => { self.cmp_al_ib(instr); Ok(()) }
+            Opcode::CmpEbIb => {
+                // CMP r/m8, imm8
+                let dst = instr.meta_data[0] as usize;
+                let op1 = self.get_gpr8(dst);
+                let op2 = instr.ib();
+                let result = op1.wrapping_sub(op2);
+                self.update_flags_sub8(op1, op2, result);
+                Ok(())
+            }
+            Opcode::CmpEbGb => {
+                // CMP r/m8, r8
+                let dst = instr.meta_data[0] as usize;
+                let src = instr.meta_data[1] as usize;
+                let op1 = self.get_gpr8(dst);
+                let op2 = self.get_gpr8(src);
+                let result = op1.wrapping_sub(op2);
+                self.update_flags_sub8(op1, op2, result);
+                Ok(())
+            }
+            Opcode::CmpAxiw => { self.cmp_ax_iw(instr); Ok(()) }
+            Opcode::CmpEaxid => { self.cmp_eax_id(instr); Ok(()) }
+            Opcode::CmpEwIw => { self.cmp_ew_iw_r(instr); Ok(()) }
+            Opcode::CmpEdId => { self.cmp_ed_id_r(instr); Ok(()) }
+            
+            // TEST instructions
+            Opcode::TestEbGb => { self.test_eb_gb_r(instr); Ok(()) }
+            Opcode::TestEwGw => { self.test_ew_gw_r(instr); Ok(()) }
+            Opcode::TestEdGd => { self.test_ed_gd_r(instr); Ok(()) }
+            Opcode::TestAlib => { self.test_al_ib(instr); Ok(()) }
+            Opcode::TestAxiw => { self.test_ax_iw(instr); Ok(()) }
+            Opcode::TestEaxid => { self.test_eax_id(instr); Ok(()) }
+            Opcode::TestEwIw => { self.test_ew_iw_r(instr); Ok(()) }
+            Opcode::TestEdId => { self.test_ed_id_r(instr); Ok(()) }
+            
+            // =========================================================================
+            // AND/OR/NOT instructions
+            // =========================================================================
+            Opcode::AndGbEb => { self.and_gb_eb_r(instr); Ok(()) }
+            Opcode::AndGwEw => { self.and_gw_ew_r(instr); Ok(()) }
+            Opcode::AndGdEd => { self.and_gd_ed_r(instr); Ok(()) }
+            Opcode::AndAlib => { self.and_al_ib(instr); Ok(()) }
+            Opcode::AndAxiw => { self.and_ax_iw(instr); Ok(()) }
+            Opcode::AndEaxid => { self.and_eax_id(instr); Ok(()) }
+            Opcode::AndEwIw => { self.and_ew_iw_r(instr); Ok(()) }
+            Opcode::AndEdId => { self.and_ed_id_r(instr); Ok(()) }
+            
+            Opcode::OrGbEb => { self.or_gb_eb_r(instr); Ok(()) }
+            Opcode::OrGwEw => { self.or_gw_ew_r(instr); Ok(()) }
+            Opcode::OrGdEd => { self.or_gd_ed_r(instr); Ok(()) }
+            Opcode::OrAlib => { self.or_al_ib(instr); Ok(()) }
+            Opcode::OrAxiw => { self.or_ax_iw(instr); Ok(()) }
+            Opcode::OrEaxid => { self.or_eax_id(instr); Ok(()) }
+            
+            // =========================================================================
+            // INC/DEC instructions
+            // =========================================================================
+            Opcode::IncEw => { self.inc_ew_r(instr); Ok(()) }
+            Opcode::IncEd => { self.inc_ed_r(instr); Ok(()) }
+            Opcode::DecEw => { self.dec_ew_r(instr); Ok(()) }
+            Opcode::DecEd => { self.dec_ed_r(instr); Ok(()) }
+            
+            // =========================================================================
+            // PUSH/POP instructions
+            // =========================================================================
+            Opcode::PushEw => { self.push_ew_r(instr); Ok(()) }
+            Opcode::PushEd => { self.push_ed_r(instr); Ok(()) }
+            Opcode::PopEw => { self.pop_ew_r(instr); Ok(()) }
+            Opcode::PopEd => { self.pop_ed_r(instr); Ok(()) }
+            Opcode::PushaOp16 => { self.pusha16(instr); Ok(()) }
+            Opcode::PopaOp16 => { self.popa16(instr); Ok(()) }
+            Opcode::PushfFw => { self.pushf_fw(instr); Ok(()) }
+            Opcode::PopfFw => { self.popf_fw(instr); Ok(()) }
+            Opcode::PushfFd => { self.pushf_fd(instr); Ok(()) }
+            Opcode::PopfFd => { self.popf_fd(instr); Ok(()) }
+            
+            // =========================================================================
+            // String instructions
+            // =========================================================================
+            Opcode::RepMovsbYbXb => { self.rep_movsb16(instr); Ok(()) }
+            Opcode::RepStosbYbAl => { self.rep_stosb16(instr); Ok(()) }
+            Opcode::RepStoswYwAx => { self.rep_stosw16(instr); Ok(()) }
+            Opcode::RepLodsbAlxb => { self.rep_lodsb16(instr); Ok(()) }
+            
+            // =========================================================================
+            // Software interrupts
+            // =========================================================================
+            Opcode::IntIb => { self.int_ib(instr); Ok(()) }
+            Opcode::INT3 => { self.int3(instr); Ok(()) }
+            Opcode::IretOp16 => { self.iret16(instr); Ok(()) }
+            Opcode::IretOp32 => { self.iret32(instr); Ok(()) }
+            Opcode::Hlt => { self.hlt(instr); Ok(()) }
+            
+            // =========================================================================
+            // Shift/Rotate instructions
+            // =========================================================================
+            Opcode::ShlEbI1 => { self.shl_eb_1(instr); Ok(()) }
+            Opcode::ShlEb => { self.shl_eb_cl(instr); Ok(()) }
+            Opcode::ShlEbIb => { self.shl_eb_ib(instr); Ok(()) }
+            Opcode::ShlEwI1 => { self.shl_ew_1(instr); Ok(()) }
+            Opcode::ShlEw => { self.shl_ew_cl(instr); Ok(()) }
+            Opcode::ShlEwIb => { self.shl_ew_ib(instr); Ok(()) }
+            Opcode::ShlEdI1 => { self.shl_ed_1(instr); Ok(()) }
+            Opcode::ShlEd => { self.shl_ed_cl(instr); Ok(()) }
+            Opcode::ShlEdIb => { self.shl_ed_ib(instr); Ok(()) }
+            
+            Opcode::ShrEbI1 => { self.shr_eb_1(instr); Ok(()) }
+            Opcode::ShrEb => { self.shr_eb_cl(instr); Ok(()) }
+            Opcode::ShrEwI1 => { self.shr_ew_1(instr); Ok(()) }
+            Opcode::ShrEw => { self.shr_ew_cl(instr); Ok(()) }
+            Opcode::ShrEwIb => { self.shr_ew_ib(instr); Ok(()) }
+            Opcode::ShrEdI1 => { self.shr_ed_1(instr); Ok(()) }
+            Opcode::ShrEd => { self.shr_ed_cl(instr); Ok(()) }
+            
+            // =========================================================================
+            // Data transfer extensions
+            // =========================================================================
+            Opcode::LeaGwM => { self.lea_gw_m(instr); Ok(()) }
+            Opcode::LeaGdM => { self.lea_gd_m(instr); Ok(()) }
+            Opcode::XchgEwGw => { self.xchg_ew_gw(instr); Ok(()) }
+            Opcode::XchgEdGd => { self.xchg_ed_gd(instr); Ok(()) }
+            Opcode::Cbw => { self.cbw(instr); Ok(()) }
+            Opcode::Cwd => { self.cwd(instr); Ok(()) }
+            Opcode::Cwde => { self.cwde(instr); Ok(()) }
+            Opcode::Cdq => { self.cdq(instr); Ok(()) }
+            Opcode::Xlat => { self.xlat(instr); Ok(()) }
+            Opcode::Lahf => { self.lahf(instr); Ok(()) }
+            Opcode::Sahf => { self.sahf(instr); Ok(()) }
+            
             _ => {
                 tracing::trace!("Unimplemented opcode: {:?}", instr.get_ia_opcode());
                 Ok(()) // unsupported -- treat as NOP for now
@@ -1236,7 +1618,98 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
     }
 
-    fn update_flags_logic32(&mut self, result: u32) {
+    // 8-bit flag updates
+    pub(super) fn update_flags_add8(&mut self, op1: u8, op2: u8, result: u8) {
+        let cf = result < op1; // Carry occurred
+        let zf = result == 0;
+        let sf = (result & 0x80) != 0;
+        let of = ((op1 ^ result) & (op2 ^ result) & 0x80) != 0; // Signed overflow
+        let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
+        let pf = (result.count_ones() % 2) == 0;
+
+        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
+        self.eflags &= !MASK;
+
+        if cf { self.eflags |= 1 << 0; }
+        if pf { self.eflags |= 1 << 2; }
+        if af { self.eflags |= 1 << 4; }
+        if zf { self.eflags |= 1 << 6; }
+        if sf { self.eflags |= 1 << 7; }
+        if of { self.eflags |= 1 << 11; }
+    }
+
+    pub(super) fn update_flags_add16(&mut self, op1: u16, op2: u16, result: u16) {
+        let cf = result < op1;
+        let zf = result == 0;
+        let sf = (result & 0x8000) != 0;
+        let of = ((op1 ^ result) & (op2 ^ result) & 0x8000) != 0;
+        let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
+        let pf = ((result & 0xFF) as u8).count_ones() % 2 == 0;
+
+        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
+        self.eflags &= !MASK;
+
+        if cf { self.eflags |= 1 << 0; }
+        if pf { self.eflags |= 1 << 2; }
+        if af { self.eflags |= 1 << 4; }
+        if zf { self.eflags |= 1 << 6; }
+        if sf { self.eflags |= 1 << 7; }
+        if of { self.eflags |= 1 << 11; }
+    }
+
+    pub(super) fn update_flags_sub8(&mut self, op1: u8, op2: u8, result: u8) {
+        let cf = op1 < op2;
+        let zf = result == 0;
+        let sf = (result & 0x80) != 0;
+        let of = (op1 as i8).checked_sub(op2 as i8).is_none();
+        let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
+        let pf = (result.count_ones() % 2) == 0;
+
+        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
+        self.eflags &= !MASK;
+
+        if cf { self.eflags |= 1 << 0; }
+        if pf { self.eflags |= 1 << 2; }
+        if af { self.eflags |= 1 << 4; }
+        if zf { self.eflags |= 1 << 6; }
+        if sf { self.eflags |= 1 << 7; }
+        if of { self.eflags |= 1 << 11; }
+    }
+
+    pub(super) fn update_flags_sub16(&mut self, op1: u16, op2: u16, result: u16) {
+        let cf = op1 < op2;
+        let zf = result == 0;
+        let sf = (result & 0x8000) != 0;
+        let of = (op1 as i16).checked_sub(op2 as i16).is_none();
+        let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
+        let pf = ((result & 0xFF) as u8).count_ones() % 2 == 0;
+
+        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
+        self.eflags &= !MASK;
+
+        if cf { self.eflags |= 1 << 0; }
+        if pf { self.eflags |= 1 << 2; }
+        if af { self.eflags |= 1 << 4; }
+        if zf { self.eflags |= 1 << 6; }
+        if sf { self.eflags |= 1 << 7; }
+        if of { self.eflags |= 1 << 11; }
+    }
+
+    pub(super) fn update_flags_logic8(&mut self, result: u8) {
+        self.eflags &= !((1 << 11) | (1 << 0)); // OF=0, CF=0
+        if (result & 0x80) != 0 { self.eflags |= 1 << 7; } else { self.eflags &= !(1 << 7); }
+        if result == 0 { self.eflags |= 1 << 6; } else { self.eflags &= !(1 << 6); }
+        if (result.count_ones() % 2) == 0 { self.eflags |= 1 << 2; } else { self.eflags &= !(1 << 2); }
+    }
+
+    pub(super) fn update_flags_logic16(&mut self, result: u16) {
+        self.eflags &= !((1 << 11) | (1 << 0)); // OF=0, CF=0
+        if (result & 0x8000) != 0 { self.eflags |= 1 << 7; } else { self.eflags &= !(1 << 7); }
+        if result == 0 { self.eflags |= 1 << 6; } else { self.eflags &= !(1 << 6); }
+        if (((result & 0xFF) as u8).count_ones() % 2) == 0 { self.eflags |= 1 << 2; } else { self.eflags &= !(1 << 2); }
+    }
+
+    pub(super) fn update_flags_logic32(&mut self, result: u32) {
         // Clear OF, CF (always 0 for logical operations)
         self.eflags &= !((1 << 11) | (1 << 0)); // OF=0, CF=0
         

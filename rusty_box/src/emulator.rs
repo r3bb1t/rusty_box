@@ -8,7 +8,7 @@
 
 use crate::{
     cpu::{builder::BxCpuBuilder, BxCpuC, BxCpuIdTrait, ResetReason},
-    iodev::{devices::SystemControlPort, BxDevicesC},
+    iodev::{devices::{SystemControlPort, DeviceManager}, BxDevicesC},
     memory::{BxMemC, BxMemoryStubC},
     params::BxParams,
     pc_system::BxPcSystemC,
@@ -74,8 +74,10 @@ pub struct Emulator<'a, I: BxCpuIdTrait> {
     pub cpu: BxCpuC<'a, I>,
     /// Memory subsystem
     pub memory: BxMemC<'a>,
-    /// Device controller
+    /// Device controller (I/O port handlers)
     pub devices: BxDevicesC,
+    /// Device manager (actual hardware devices)
+    pub device_manager: DeviceManager,
     /// PC system (timers, A20, etc.)
     pub pc_system: BxPcSystemC,
     /// System Control Port state (Port 0x92)
@@ -113,8 +115,11 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Sync A20 mask from PC system
         memory.set_a20_mask(pc_system.a20_mask());
 
-        // Create devices
+        // Create devices (I/O port handlers)
         let devices = BxDevicesC::new();
+        
+        // Create device manager (actual hardware)
+        let device_manager = DeviceManager::new();
 
         // Create CPU
         let builder: BxCpuBuilder<I> = BxCpuBuilder::new();
@@ -124,6 +129,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             cpu,
             memory,
             devices,
+            device_manager,
             pc_system,
             system_control: SystemControlPort::new(),
             config,
@@ -161,8 +167,11 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.cpu.initialize(self.config.cpu_params.clone())?;
         tracing::debug!("CPU initialized");
 
-        // Step 4: Initialize devices
+        // Step 4: Initialize devices (I/O port handlers)
         self.devices.init(&mut self.memory)?;
+        
+        // Step 4b: Initialize device manager (actual hardware + I/O handler registration)
+        self.device_manager.init(&mut self.devices)?;
         tracing::debug!("Devices initialized");
 
         // Step 5: Register state for save/restore
@@ -219,6 +228,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Reset devices (only on hardware reset)
         if matches!(reset_type, ResetReason::Hardware) {
             self.devices.reset(reset_type)?;
+            self.device_manager.reset(reset_type)?;
         }
 
         // Reset system control port state
@@ -291,6 +301,53 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     /// Read Port 92h value
     pub fn read_port_92h(&self) -> u8 {
         self.system_control.read()
+    }
+
+    /// Attach a hard disk image (requires std feature)
+    ///
+    /// # Arguments
+    /// * `channel` - ATA channel (0=primary, 1=secondary)
+    /// * `drive` - Drive number (0=master, 1=slave)
+    /// * `path` - Path to the disk image file
+    /// * `cylinders` - Number of cylinders
+    /// * `heads` - Number of heads
+    /// * `spt` - Sectors per track
+    #[cfg(feature = "std")]
+    pub fn attach_disk(
+        &mut self,
+        channel: usize,
+        drive: usize,
+        path: &str,
+        cylinders: u16,
+        heads: u8,
+        spt: u8,
+    ) -> std::io::Result<()> {
+        self.device_manager.harddrv.attach_disk(channel, drive, path, cylinders, heads, spt)
+    }
+
+    /// Check if an interrupt is pending
+    pub fn has_interrupt(&self) -> bool {
+        self.device_manager.has_interrupt()
+    }
+
+    /// Acknowledge interrupt and get vector
+    pub fn iac(&mut self) -> u8 {
+        self.device_manager.iac()
+    }
+
+    /// Simulate time passing (for timer-based devices)
+    pub fn tick_devices(&mut self, usec: u64) {
+        self.device_manager.tick(usec);
+    }
+
+    /// Configure CMOS memory size
+    pub fn configure_memory_in_cmos(&mut self, base_kb: u16, extended_kb: u16) {
+        self.device_manager.cmos.set_memory_size(base_kb, extended_kb);
+    }
+
+    /// Configure CMOS hard drive
+    pub fn configure_disk_in_cmos(&mut self, drive_num: u8, drive_type: u8) {
+        self.device_manager.cmos.set_hard_drive(drive_num, drive_type);
     }
 }
 

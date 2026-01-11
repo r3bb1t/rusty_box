@@ -120,6 +120,8 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             address_xlation: Default::default(),
             smram_map: [0; SMMRAM_Fields::SMRAM_FIELD_LAST as _],
             phantom: Default::default(),
+            mem_ptr: None,
+            mem_len: 0,
         };
 
         let config = Default::default();

@@ -199,6 +199,14 @@ impl<'m> BxMemC<'m> {
     pub(crate) fn get_memory_len(&self) -> usize {
         self.inherited_memory_stub.len
     }
+
+    /// Get raw pointer to memory for direct CPU access
+    /// SAFETY: Caller must ensure the pointer is only used while memory is valid
+    pub fn get_raw_memory_ptr(&mut self) -> (*mut u8, usize) {
+        let ptr = self.inherited_memory_stub.actual_vector.as_mut_ptr();
+        let len = self.inherited_memory_stub.actual_vector.len();
+        (ptr, len)
+    }
 }
 impl<'m> BxMemC<'m> {
     pub fn init_memory(
