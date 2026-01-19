@@ -13,7 +13,7 @@ mod config;
 pub mod cpu;
 mod crc;
 pub mod emulator;
-mod gui;
+pub mod gui;
 pub mod iodev;
 pub mod memory;
 mod misc;

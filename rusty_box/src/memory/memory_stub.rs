@@ -65,7 +65,7 @@ impl BxMemoryStubC {
             return Err(MemoryError::BlockSizeIsNotAPowerOfTwo(block_size).into());
         }
 
-        let (actual_vector, vector_offset) =
+        let (mut actual_vector, vector_offset) =
             Self::alloc_vector_aligned(host + BIOSROMSZ + EXROMSIZE + 4096, BX_MEM_VECTOR_ALIGN);
         tracing::info!(
             "allocated memory at {:p}. after alignment, vector={:p}, block_size = {}k",
@@ -79,6 +79,14 @@ impl BxMemoryStubC {
         let allocated = host;
         let rom_offset = host;
         let bogus_offset = host + BIOSROMSZ + EXROMSIZE;
+
+        // Initialize ROM and bogus memory with 0xFF (matching C++ memset)
+        // Matching C++ line 124: memset(BX_MEM_THIS rom, 0xff, BIOSROMSZ + EXROMSIZE + 4096);
+        let rom_start = vector_offset + rom_offset;
+        let rom_end = rom_start + BIOSROMSZ + EXROMSIZE + 4096;
+        if rom_end <= actual_vector.len() {
+            actual_vector[rom_start..rom_end].fill(0xFF);
+        }
 
         // block must be large enough to fit num_blocks in 32-bit
         assert!((len / block_size) <= 0xffffffff);
@@ -199,16 +207,15 @@ impl BxMemoryStubC {
 
                     used_for_tlb = false;
 
-                    let buffer_end;
-                    {
-                        let Block::Block { offset: buffer } = buffer else {
+                    let (buffer_offset, buffer_end) = {
+                        let Block::Block { offset } = buffer else {
                             unreachable!()
                         };
-                        buffer_end = buffer + self.block_size
-                    }
+                        (offset, offset + self.block_size)
+                    };
 
                     for cpu in cpus {
-                        used_for_tlb = cpu.check_addr_in_tlb_buffers(&buffer, buffer_end);
+                        used_for_tlb = cpu.check_addr_in_tlb_buffers(buffer_offset, buffer_end);
                     }
 
                     if !used_for_tlb {
@@ -358,7 +365,7 @@ impl BxMemoryStubC {
         }
     }
 
-    fn write_physical_page<'a, I: BxCpuIdTrait>(
+    pub(crate) fn write_physical_page<'a, I: BxCpuIdTrait>(
         &'a mut self,
         cpus: &[&BxCpuC<I>],
         page_write_stamp_table: &mut BxPageWriteStampTable,
@@ -457,7 +464,7 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    fn read_physical_page<'a, I: BxCpuIdTrait>(
+    pub(crate) fn read_physical_page<'a, I: BxCpuIdTrait>(
         &'a mut self,
         cpus: &[&BxCpuC<I>],
         addr: BxPhyAddress,
@@ -492,20 +499,62 @@ impl BxMemoryStubC {
                 return Ok(());
             }
             // len == other, just fall thru to special cases handling
-
-            let _data_ptr_offset = if cfg!(feature = "bx_little_endian") {
-                0
-            } else {
-                len - 1
-            };
-
-            todo!()
+            // Handle non-standard lengths by copying byte-by-byte or in chunks
+            let mem_vector = self.get_vector(a20_addr, cpus)?;
+            
+            #[cfg(feature = "bx_little_endian")]
+            {
+                // For little endian, copy directly
+                let mut remaining = len;
+                let mut offset = 0;
+                let mut addr_offset = 0;
+                
+                // Read in chunks of 8 bytes if possible
+                while remaining >= 8 {
+                    let val = read_host_qword_to_little_endian(
+                        &mem_vector[addr_offset..addr_offset + 8]
+                    );
+                    LittleEndian::write_u64(&mut data[offset..offset + 8], val);
+                    remaining -= 8;
+                    offset += 8;
+                    addr_offset += 8;
+                }
+                
+                // Handle remaining bytes
+                if remaining > 0 {
+                    data[offset..offset + remaining]
+                        .copy_from_slice(&mem_vector[addr_offset..addr_offset + remaining]);
+                }
+            }
+            
+            #[cfg(not(feature = "bx_little_endian"))]
+            {
+                // For big endian, copy in reverse order
+                let mut remaining = len;
+                let mut data_ptr_offset = len - 1;
+                let mut addr_offset = 0;
+                
+                while remaining > 0 {
+                    data[data_ptr_offset] = mem_vector[addr_offset];
+                    remaining -= 1;
+                    if remaining > 0 {
+                        data_ptr_offset -= 1;
+                        addr_offset += 1;
+                    }
+                }
+            }
+            
+            Ok(())
         } else {
             // access outside limits of physical memory
             let bogus = self.bogus();
-            bogus.fill(0xff);
+            let fill_len = len.min(bogus.len());
+            data[..fill_len].copy_from_slice(&bogus[..fill_len]);
+            if len > fill_len {
+                data[fill_len..].fill(0xff);
+            }
+            Ok(())
         }
-        todo!()
     }
 
     #[cfg(feature = "bx_support_monitor_mwait")]

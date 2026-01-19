@@ -26,6 +26,7 @@ use super::cmos::{self, BxCmosC, CMOS_ADDR, CMOS_DATA};
 use super::dma::{self, BxDmaC};
 use super::keyboard::{self, BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT, SYSTEM_CONTROL_B};
 use super::harddrv::{self, BxHardDriveC};
+use super::vga::{self, BxVgaC};
 
 /// Port 0x92 - System Control Port
 /// Bit 0: Fast A20 gate control (1 = A20 enabled)
@@ -57,6 +58,8 @@ pub struct DeviceManager {
     pub keyboard: BxKeyboardC,
     /// ATA/IDE Hard Drive Controller
     pub harddrv: BxHardDriveC,
+    /// VGA Display Controller
+    pub vga: BxVgaC,
 }
 
 impl Default for DeviceManager {
@@ -75,26 +78,44 @@ impl DeviceManager {
             dma: BxDmaC::new(),
             keyboard: BxKeyboardC::new(),
             harddrv: BxHardDriveC::new(),
+            vga: BxVgaC::new(),
         }
     }
 
     /// Initialize all devices and register I/O handlers
-    pub fn init(&mut self, io: &mut BxDevicesC) -> Result<()> {
+    /// 
+    /// Matches device loading order from cpp_orig/bochs/iodev/devices.cc:250-277:
+    /// 1. CMOS (line 250)
+    /// 2. DMA (line 251)
+    /// 3. PIC (line 252)
+    /// 4. PIT (line 253)
+    /// 5. VGA (line 254-256)
+    /// 6. Keyboard (line 262)
+    /// 7. Hard drive (line 275-277)
+    pub fn init(&mut self, io: &mut BxDevicesC, mem: &mut BxMemC) -> Result<()> {
         tracing::info!("Initializing device manager");
 
-        // Initialize each device
-        self.pic.init();
-        self.pit.init();
+        // Initialize each device in original Bochs order
+        // 1. CMOS
         self.cmos.init();
+        // 2. DMA
         self.dma.init();
+        // 3. PIC
+        self.pic.init();
+        // 4. PIT
+        self.pit.init();
+        // 5. VGA
+        self.vga.init(io, mem)?;
+        // 6. Keyboard
         self.keyboard.init();
+        // 7. Hard drive
         self.harddrv.init();
 
-        // Register I/O handlers for each device
-        self.register_pic_handlers(io);
-        self.register_pit_handlers(io);
+        // Register I/O handlers for each device (order doesn't matter for handlers)
         self.register_cmos_handlers(io);
         self.register_dma_handlers(io);
+        self.register_pic_handlers(io);
+        self.register_pit_handlers(io);
         self.register_keyboard_handlers(io);
         self.register_harddrv_handlers(io);
 
@@ -112,6 +133,7 @@ impl DeviceManager {
         self.dma.reset();
         self.keyboard.reset();
         self.harddrv.reset();
+        self.vga.reset();
 
         Ok(())
     }
@@ -288,7 +310,7 @@ impl DeviceManager {
 
     /// Simulate time passing for timer-based devices
     /// Returns true if any interrupt is pending
-    pub fn tick(&mut self, usec: u64) -> bool {
+    pub fn tick(&mut self, _usec: u64) -> bool {
         // Tick PIT and check for IRQ0
         if self.pit.check_irq0() {
             self.pic.raise_irq(0);
@@ -344,14 +366,17 @@ impl BxDevicesC {
     /// 
     /// # Arguments
     /// * `mem` - Memory subsystem reference
-    pub fn init(&mut self, _mem: &mut BxMemC) -> Result<()> {
+    /// * `port92_state` - Optional pointer to SystemControlPort for Port 92h handling
+    pub fn init(&mut self, _mem: &mut BxMemC, port92_state: Option<*mut SystemControlPort>) -> Result<()> {
         tracing::info!("Initializing device subsystem");
 
         // Register Port 92h - System Control Port (A20 gate, fast reset)
-        // Note: We use a static handler function; the actual state is managed
-        // externally by the Emulator struct
+        // Pass pointer to SystemControlPort if provided
+        let port92_ptr = port92_state
+            .map(|p| p as *mut c_void)
+            .unwrap_or(core::ptr::null_mut());
         self.register_io_handler(
-            core::ptr::null_mut(),
+            port92_ptr,
             port92_read_handler,
             port92_write_handler,
             PORT_92H,
@@ -378,13 +403,14 @@ impl BxDevicesC {
         &mut self,
         _mem: &mut BxMemC,
         _pc_system: &mut BxPcSystemC,
+        port92_state: Option<*mut SystemControlPort>,
     ) -> Result<()> {
-        // For now, delegate to the basic init
-        // In the future, we could pass pc_system pointer to handlers
-        self.init(_mem)
+        self.init(_mem, port92_state)
     }
 
     /// Reset all devices
+    /// 
+    /// Matches bx_devices_c::reset() from cpp_orig/bochs/iodev/devices.cc:398-411
     /// 
     /// # Arguments
     /// * `reset_type` - Type of reset (Hardware or Software)
@@ -394,9 +420,13 @@ impl BxDevicesC {
                 tracing::info!("Device hardware reset");
                 #[cfg(feature = "bx_support_pci")]
                 {
-                    // Clear PCI configuration address
+                    // Clear PCI configuration address (line 402)
                     self.pci_conf_addr = 0;
                 }
+                // Note: mem->disable_smram() at line 405 - SMRAM disable not yet implemented
+                // Note: bx_reset_plugins(type) at line 406 - done via device_manager.reset()
+                // Note: release_keys() at line 407 - keyboard key release not yet implemented
+                // Note: paste.stop = 1 at line 409 - paste buffer stop not yet implemented
             }
             ResetReason::Software => {
                 tracing::info!("Device software reset");
@@ -415,38 +445,32 @@ impl BxDevicesC {
 /// Port 92h read handler
 /// 
 /// Returns the current state of the System Control Port
-fn port92_read_handler(_this_ptr: *mut c_void, _port: u16, _io_len: u8) -> u32 {
-    // In a full implementation, this would read from stored state
-    // For now, return A20 enabled (bit 0 = 1)
-    tracing::trace!("Port 92h read");
-    0x02 // A20 enabled, no reset pending
+fn port92_read_handler(this_ptr: *mut c_void, _port: u16, _io_len: u8) -> u32 {
+    if this_ptr.is_null() {
+        // No state available, return default
+        tracing::trace!("Port 92h read (no state)");
+        return 0x01; // A20 enabled
+    }
+    
+    let port92 = unsafe { &*(this_ptr as *const SystemControlPort) };
+    port92.read() as u32
 }
 
 /// Port 92h write handler
 /// 
 /// Handles A20 gate control and fast reset
-fn port92_write_handler(_this_ptr: *mut c_void, _port: u16, value: u32, _io_len: u8) {
+fn port92_write_handler(this_ptr: *mut c_void, _port: u16, value: u32, _io_len: u8) {
     let value = value as u8;
-    tracing::debug!("Port 92h write: value={:#04x}", value);
-
-    // Bit 0: A20 gate (directly controls A20 line)
-    let a20_enabled = (value & 0x01) != 0;
-    if a20_enabled {
-        tracing::debug!("Port 92h: A20 line enabled via fast gate");
-    } else {
-        tracing::debug!("Port 92h: A20 line disabled via fast gate");
+    
+    if this_ptr.is_null() {
+        tracing::debug!("Port 92h write: value={:#04x} (no state handler)", value);
+        return;
     }
-    // Note: In a full implementation, this would call pc_system.set_enable_a20()
-    // The Emulator struct coordinates this by monitoring port 92h state
-
-    // Bit 1: Fast reset (pulse triggers CPU reset)
-    if (value & 0x02) != 0 {
-        tracing::warn!("Port 92h: Fast reset requested (bit 1 set)");
-        // Note: In a full implementation, this would trigger a CPU reset
-        // The Emulator struct handles this by checking the reset flag
-    }
-
-    // Other bits are typically undefined/reserved
+    
+    let port92 = unsafe { &mut *(this_ptr as *mut SystemControlPort) };
+    port92.write(value);
+    tracing::debug!("Port 92h write: value={:#04x}, a20={}, reset={}", 
+                    value, port92.a20_gate, port92.reset_request);
 }
 
 /// Helper structure for managing Port 92h state

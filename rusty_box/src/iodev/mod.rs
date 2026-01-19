@@ -16,7 +16,7 @@
 //! - **Keyboard (8042)**: PS/2 keyboard and mouse controller
 //! - **HardDrive (ATA/IDE)**: Hard disk controller
 
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{string::String, vec::Vec};
 use core::ffi::c_void;
 
 pub mod devices;
@@ -26,6 +26,7 @@ pub mod cmos;
 pub mod dma;
 pub mod keyboard;
 pub mod harddrv;
+pub mod vga;
 
 // Re-export device types for convenience
 pub use pic::BxPicC;
@@ -34,6 +35,7 @@ pub use cmos::BxCmosC;
 pub use dma::BxDmaC;
 pub use keyboard::BxKeyboardC;
 pub use harddrv::BxHardDriveC;
+// BxVgaC is pub(crate) - not exported outside the crate
 
 /// Number of I/O ports (0x0000 - 0xFFFF)
 pub const IO_PORTS: usize = 0x10000;

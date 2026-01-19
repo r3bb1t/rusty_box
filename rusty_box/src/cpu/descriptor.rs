@@ -94,15 +94,15 @@ pub(super) struct DescriptorSegment {
 }
 
 #[derive(Clone, Copy)]
-struct DescriptorGate {
+pub(super) struct DescriptorGate {
     pub param_count: u8, // 5 bits (0..31) #words/dword to copy
     pub dest_selector: u16,
     pub dest_offset: u32,
 }
 
 #[derive(Clone, Copy, Default)]
-struct DescriptorTaskGate {
-    tss_selector: u16, // TSS segment selector
+pub(super) struct DescriptorTaskGate {
+    pub(super) tss_selector: u16, // TSS segment selector
 }
 
 impl Default for Descriptor {
@@ -149,11 +149,31 @@ pub(crate) struct BxDescriptor {
 impl BxDescriptor {
     #[inline]
     pub fn is_present(&self) -> bool {
-        self.segment
+        self.p
     }
 
     pub fn is_long64_segment(&self) -> bool {
         unsafe { self.u.segment.l }
+    }
+
+    /// Get Access Rights byte from descriptor
+    /// Based on get_ar_byte in segment_ctrl_pro.cc:380
+    pub(super) fn get_ar_byte(&self) -> u8 {
+        let mut ar_byte = 0;
+        if self.p { ar_byte |= 0x80; }
+        ar_byte |= (self.dpl & 0x03) << 5;
+        if self.segment { ar_byte |= 0x10; }
+        ar_byte |= self.r#type & 0x0f;
+        ar_byte
+    }
+
+    /// Set Access Rights byte in descriptor
+    /// Based on set_ar_byte in segment_ctrl_pro.cc:395
+    pub(super) fn set_ar_byte(&mut self, ar_byte: u8) {
+        self.p = (ar_byte & 0x80) != 0;
+        self.dpl = (ar_byte >> 5) & 0x03;
+        self.segment = (ar_byte & 0x10) != 0;
+        self.r#type = ar_byte & 0x0f;
     }
 }
 

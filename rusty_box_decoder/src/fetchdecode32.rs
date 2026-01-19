@@ -1151,4 +1151,13 @@ mod tests {
         let i = fetch_decode32(&[0x66, 0x0F, 0x38, 0x00, 0xC1], true).unwrap(); // PSHUFB
         assert_eq!(i.ilen(), 5);
     }
+
+    #[test]
+    fn test_out_instruction() {
+        let i = fetch_decode32(&[0xE6, 0x0d], false).unwrap(); // OUT 0x0D, AL
+        assert_eq!(i.ilen(), 2);
+        assert_eq!(i.get_ia_opcode(), Opcode::OutIbAl);
+        assert_eq!(i.modrm_form.operand_data.id(), 0x0d);
+        assert_eq!(i.modrm_form.displacement.displ32u(), 0x00);
+    }
 }

@@ -60,14 +60,17 @@ pub struct BxMemoryStubC {
 
 type Unsigned = u32;
 
-type MemoryHandlerT = fn(BxPhyAddress, u32, &dyn core::any::Any, &dyn core::any::Any) -> bool;
-type MemoryDirectAccessHandlerT<'a> =
+// Memory handler signature: (addr, len, data, param) -> bool
+// data is mutable for reads (handler writes to it) and const for writes (handler reads from it)
+// Using *mut for both to match C void* semantics
+pub(super) type MemoryHandlerT = fn(BxPhyAddress, u32, *mut core::ffi::c_void, *const core::ffi::c_void) -> bool;
+pub(super) type MemoryDirectAccessHandlerT<'a> =
     fn(&dyn core::any::Any, BxPhyAddress, MemoryAccessType, &dyn core::any::Any) -> &'a mut [u8];
 
 #[derive(Debug)]
 pub(super) struct MemoryHandlerStruct<'a> {
     next: Option<Box<MemoryHandlerStruct<'a>>>, // Correctly represent the linked list
-    param: Box<dyn core::any::Any>,
+    param: *const core::ffi::c_void, // Pointer to device instance (like I/O handlers)
     begin: BxPhyAddress,
     end: BxPhyAddress,
     bitmap: u16,
@@ -124,6 +127,15 @@ impl BxMemC<'_> {
     pub fn a20_mask(&self) -> BxPhyAddress {
         self.a20_mask
     }
+
+    /// Disable SMRAM (System Management RAM)
+    /// 
+    /// Matches BX_MEM_C::disable_smram() from cpp_orig/bochs/memory/misc_mem.cc:888-893
+    pub fn disable_smram(&mut self) {
+        self.smram_available = false;
+        self.smram_enable = false;
+        self.smram_restricted = false;
+    }
 }
 
 // implement getters and setters for memory stub
@@ -161,7 +173,7 @@ impl BxMemoryStubC {
     pub fn block_by_index(&self, index: usize) -> Option<&mut [u8]> {
         if let Some(Block::Block { offset }) = self.blocks_offsets().get(index) {
             let start = self.vector_offset + *offset;
-            let end = start + self.block_size;
+            let _end = start + self.block_size;
             // SAFETY: We're accessing within bounds of actual_vector via interior mutability pattern
             let vec_ptr = self.actual_vector.as_ptr() as *mut u8;
             let slice = unsafe { core::slice::from_raw_parts_mut(vec_ptr.add(start), self.block_size) };

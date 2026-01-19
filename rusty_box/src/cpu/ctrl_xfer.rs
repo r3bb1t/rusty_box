@@ -16,33 +16,46 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// Branch to a near 16-bit address
+    /// Matching C++ ctrl_xfer16.cc:27-44 branch_near16
     fn branch_near16(&mut self, new_ip: u16) {
-        // Check CS limit in real mode
+        // Check CS limit (matching C++ line 32-36)
         let limit = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.limit_scaled };
         if (new_ip as u32) > limit {
             tracing::error!("branch_near16: offset {:#06x} outside of CS limits {:#010x}", new_ip, limit);
-            // In a full implementation, this would trigger a #GP exception
+            // In C++, this calls exception(BX_GP_EXCEPTION, 0) which doesn't return
+            // In Rust, we should handle this properly
         }
         
+        // Matching C++ line 38: EIP = new_IP;
         self.set_eip(new_ip as u32);
         
-        // Invalidate prefetch
-        self.eip_fetch_ptr = None;
-        self.eip_page_window_size = 0;
+        // Matching C++ lines 40-43: Set STOP_TRACE when handlers chaining is disabled
+        // In C++, this is conditional on BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS == 0
+        // Since we don't have handlers chaining yet, we always set it
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        // Note: C++ branch_near16/32 don't call invalidate_prefetch_q() - only far jumps do
+        // The STOP_TRACE flag is enough to break the trace loop, and getICacheEntry will fetch from new location
     }
 
     /// Branch to a near 32-bit address
+    /// Matching C++ ctrl_xfer32.cc:29-46 branch_near32
     fn branch_near32(&mut self, new_eip: u32) {
+        // Check CS limit (matching C++ line 34-38)
         let limit = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.limit_scaled };
         if new_eip > limit {
             tracing::error!("branch_near32: offset {:#010x} outside of CS limits {:#010x}", new_eip, limit);
+            // In C++, this calls exception(BX_GP_EXCEPTION, 0) which doesn't return
         }
         
+        // Matching C++ line 40: EIP = new_EIP;
         self.set_eip(new_eip);
         
-        // Invalidate prefetch
-        self.eip_fetch_ptr = None;
-        self.eip_page_window_size = 0;
+        // Matching C++ lines 42-45: Set STOP_TRACE when handlers chaining is disabled
+        // In C++, this is conditional on BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS == 0
+        // Since we don't have handlers chaining yet, we always set it
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        // Note: C++ branch_near16/32 don't call invalidate_prefetch_q() - only far jumps do
+        // The STOP_TRACE flag is enough to break the trace loop, and getICacheEntry will fetch from new location
     }
 
     // =========================================================================

@@ -36,4 +36,10 @@ pub enum CpuError {
 
     #[error(transparent)]
     Memory(#[from] crate::memory::MemoryError),
+
+    #[error("Unimplemented instruction or feature")]
+    UnimplementedInstruction,
+
+    #[error("Unimplemented opcode: {opcode}")]
+    UnimplementedOpcode { opcode: String },
 }

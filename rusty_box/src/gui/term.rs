@@ -1,0 +1,420 @@
+//! Terminal/Text GUI implementation
+//!
+//! A simple text-based GUI that displays VGA text mode output to the terminal.
+//! Based on the "term" GUI from original Bochs.
+
+use super::gui_trait::{BxGui, DisplayMode, VgaTextModeInfo};
+use super::keymap::char_to_scancode_sequence;
+use alloc::collections::VecDeque;
+
+#[cfg(unix)]
+use std::os::unix::io::AsRawFd;
+
+/// Terminal GUI implementation
+pub struct TermGui {
+    display_mode: DisplayMode,
+    screen_width: u32,
+    screen_height: u32,
+    text_buffer: Vec<u8>,
+    cursor_x: u32,
+    cursor_y: u32,
+    pending_scancodes: alloc::collections::VecDeque<u8>,
+    #[cfg(unix)]
+    original_termios: Option<libc::termios>,
+    #[cfg(windows)]
+    original_console_mode: Option<u32>,
+}
+
+impl TermGui {
+    pub fn new() -> Self {
+        Self {
+            display_mode: DisplayMode::Sim,
+            screen_width: 80,
+            screen_height: 25,
+            text_buffer: vec![0; 80 * 25 * 2], // 80x25, 2 bytes per char (char + attr)
+            cursor_x: 0,
+            cursor_y: 0,
+            pending_scancodes: alloc::collections::VecDeque::new(),
+            #[cfg(unix)]
+            original_termios: None,
+            #[cfg(windows)]
+            original_console_mode: None,
+        }
+    }
+
+
+    /// Setup terminal for raw input mode
+    fn setup_raw_mode(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::io::{stdin, Read};
+            let stdin_fd = stdin().as_raw_fd();
+            unsafe {
+                let mut termios: libc::termios = std::mem::zeroed();
+                if libc::tcgetattr(stdin_fd, &mut termios) == 0 {
+                    self.original_termios = Some(termios);
+                    // Disable canonical mode, echo, and line buffering
+                    termios.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ECHONL);
+                    termios.c_cc[libc::VMIN] = 0; // Non-blocking reads
+                    termios.c_cc[libc::VTIME] = 0;
+                    let _ = libc::tcsetattr(stdin_fd, libc::TCSANOW, &termios);
+                }
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            use winapi::um::consoleapi::{GetConsoleMode, SetConsoleMode};
+            use winapi::um::processenv::GetStdHandle;
+            use winapi::um::winbase::STD_INPUT_HANDLE;
+            use winapi::um::wincon::{
+                ENABLE_ECHO_INPUT, ENABLE_LINE_INPUT, ENABLE_PROCESSED_INPUT,
+            };
+
+            unsafe {
+                let handle = GetStdHandle(STD_INPUT_HANDLE);
+                if handle != winapi::um::handleapi::INVALID_HANDLE_VALUE {
+                    let mut mode: u32 = 0;
+                    if GetConsoleMode(handle, &mut mode) != 0 {
+                        self.original_console_mode = Some(mode);
+                        // Disable echo, line input, and processed input
+                        let new_mode = mode
+                            & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
+                        let _ = SetConsoleMode(handle, new_mode);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Restore terminal to original mode
+    fn restore_terminal_mode(&mut self) {
+        #[cfg(unix)]
+        {
+            use std::io::stdin;
+            if let Some(termios) = self.original_termios.take() {
+                let stdin_fd = stdin().as_raw_fd();
+                unsafe {
+                    let _ = libc::tcsetattr(stdin_fd, libc::TCSANOW, &termios);
+                }
+            }
+        }
+
+        #[cfg(windows)]
+        {
+            use winapi::um::consoleapi::SetConsoleMode;
+            use winapi::um::processenv::GetStdHandle;
+            use winapi::um::winbase::STD_INPUT_HANDLE;
+
+            if let Some(mode) = self.original_console_mode.take() {
+                unsafe {
+                    let handle = GetStdHandle(STD_INPUT_HANDLE);
+                    if handle != winapi::um::handleapi::INVALID_HANDLE_VALUE {
+                        let _ = SetConsoleMode(handle, mode);
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl Default for TermGui {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl BxGui for TermGui {
+    fn specific_init(&mut self, _argc: i32, _argv: &[String], _header_bar_y: u32) {
+        tracing::info!("TermGUI: Initialized (terminal text mode)");
+        // Clear terminal and set up for text mode
+        print!("\x1b[2J\x1b[H"); // Clear screen and move cursor to home
+        // Setup raw mode for keyboard input
+        self.setup_raw_mode();
+    }
+
+    fn text_update(
+        &mut self,
+        old_text: &[u8],
+        new_text: &[u8],
+        cursor_x: u32,
+        cursor_y: u32,
+        _tm_info: &VgaTextModeInfo,
+    ) {
+        // Update text buffer
+        if new_text.len() == self.text_buffer.len() {
+            self.text_buffer.copy_from_slice(new_text);
+        }
+
+        // Update cursor position
+        self.cursor_x = cursor_x;
+        self.cursor_y = cursor_y;
+
+        // Check if anything actually changed
+        let changed = old_text.len() != new_text.len() || 
+                     old_text != new_text;
+        
+        if changed {
+            // Mark that we need to render on next flush
+            // For now, we'll render immediately if there's a change
+            self.render_text_mode();
+        }
+    }
+
+    fn graphics_tile_update(&mut self, _tile: &[u8], _x: u32, _y: u32) {
+        // Text mode only for now
+        tracing::trace!("TermGUI: Graphics tile update (not implemented)");
+    }
+
+    fn handle_events(&mut self) {
+        // Read keyboard input non-blocking and queue scancodes
+        use std::io::{Read, stdin};
+        
+        let mut stdin = stdin();
+        let mut buffer = [0u8; 16];
+        
+        // Try to read available input (non-blocking)
+        loop {
+            #[cfg(unix)]
+            {
+                use std::os::unix::io::AsRawFd;
+                
+                // Use poll/select for non-blocking read on Unix
+                let fd = stdin.as_raw_fd();
+                let mut readfds: libc::fd_set = unsafe { std::mem::zeroed() };
+                unsafe {
+                    libc::FD_ZERO(&mut readfds);
+                    libc::FD_SET(fd, &mut readfds);
+                    let mut timeout = libc::timeval {
+                        tv_sec: 0,
+                        tv_usec: 0, // Immediate return
+                    };
+                    let result = libc::select(
+                        fd + 1,
+                        &mut readfds,
+                        std::ptr::null_mut(),
+                        std::ptr::null_mut(),
+                        &mut timeout,
+                    );
+                    if result <= 0 {
+                        break; // No data available
+                    }
+                }
+            }
+            
+            #[cfg(windows)]
+            {
+                use winapi::um::consoleapi::GetNumberOfConsoleInputEvents;
+                use winapi::um::processenv::GetStdHandle;
+                use winapi::um::winbase::STD_INPUT_HANDLE;
+                
+                unsafe {
+                    let handle = GetStdHandle(STD_INPUT_HANDLE);
+                    if handle != winapi::um::handleapi::INVALID_HANDLE_VALUE {
+                        let mut num_events: u32 = 0;
+                        if GetNumberOfConsoleInputEvents(handle, &mut num_events) == 0
+                            || num_events == 0
+                        {
+                            break; // No input available
+                        }
+                    } else {
+                        break;
+                    }
+                }
+            }
+            
+            // Read available input
+            match stdin.read(&mut buffer) {
+                Ok(0) => break, // EOF
+                Ok(n) => {
+                    // Process each byte as a character
+                    for &byte in &buffer[..n] {
+                        if let Some(ch) = char::from_u32(byte as u32) {
+                            // Convert character to scancode sequence
+                            let scancodes = char_to_scancode_sequence(ch);
+                            for scancode in scancodes {
+                                self.pending_scancodes.push_back(scancode);
+                            }
+                        }
+                    }
+                }
+                Err(_) => break, // Error or no data
+            }
+        }
+    }
+
+    fn flush(&mut self) {
+        // Render the text buffer to terminal
+        // This is called periodically, but we also render on text_update if changed
+        self.render_text_mode();
+    }
+
+    fn clear_screen(&mut self) {
+        print!("\x1b[2J\x1b[H"); // Clear screen and move cursor to home
+        self.text_buffer.fill(0);
+    }
+
+    fn palette_change(&mut self, _index: u8, _red: u8, _green: u8, _blue: u8) -> bool {
+        // Text mode doesn't use palette
+        true
+    }
+
+    fn dimension_update(
+        &mut self,
+        x: u32,
+        y: u32,
+        _fheight: u32,
+        _fwidth: u32,
+        _bpp: u32,
+    ) {
+        self.screen_width = x;
+        self.screen_height = y;
+        self.text_buffer.resize((x * y * 2) as usize, 0);
+        tracing::debug!("TermGUI: Dimensions updated to {}x{}", x, y);
+    }
+
+    fn create_bitmap(&mut self, _bmap: &[u8], _xdim: u32, _ydim: u32) -> u32 {
+        // Not supported in text mode
+        0
+    }
+
+    fn headerbar_bitmap(
+        &mut self,
+        _bmap_id: u32,
+        _alignment: u32,
+        _callback: Box<dyn Fn()>,
+    ) -> u32 {
+        // Not supported in text mode
+        0
+    }
+
+    fn replace_bitmap(&mut self, _hbar_id: u32, _bmap_id: u32) {
+        // No-op
+    }
+
+    fn show_headerbar(&mut self) {
+        // No-op for text mode
+    }
+
+    fn get_clipboard_text(&mut self) -> Option<Vec<u8>> {
+        None
+    }
+
+    fn set_clipboard_text(&mut self, _text: &str) -> bool {
+        false
+    }
+
+    fn mouse_enabled_changed_specific(&mut self, _val: bool) {
+        // No-op
+    }
+
+    fn exit(&mut self) {
+        // Restore terminal mode
+        self.restore_terminal_mode();
+        // Restore terminal
+        print!("\x1b[0m\x1b[2J\x1b[H"); // Reset colors, clear screen, home cursor
+        tracing::info!("TermGUI: Exiting");
+    }
+
+    fn set_display_mode(&mut self, mode: DisplayMode) {
+        self.display_mode = mode;
+        tracing::debug!("TermGUI: Display mode changed to {:?}", mode);
+    }
+
+    fn show_ips(&mut self, ips_count: u32) {
+        // Show IPS in status line (if we had one)
+        tracing::trace!("TermGUI: IPS = {}", ips_count);
+    }
+
+    fn get_pending_scancodes(&mut self) -> Vec<u8> {
+        let mut result = Vec::new();
+        while let Some(scancode) = self.pending_scancodes.pop_front() {
+            result.push(scancode);
+        }
+        result
+    }
+}
+
+impl TermGui {
+    /// Render text mode buffer to terminal
+    fn render_text_mode(&mut self) {
+        use std::io::Write;
+        
+        // Move cursor to top-left to start drawing (similar to curses move(0,0))
+        print!("\x1b[H");
+
+        // Render each character
+        for row in 0..self.screen_height {
+            for col in 0..self.screen_width {
+                let idx = ((row * self.screen_width + col) * 2) as usize;
+                if idx + 1 < self.text_buffer.len() {
+                    let ch = self.text_buffer[idx] as char;
+                    let attr = self.text_buffer[idx + 1];
+
+                    // Extract color from attribute byte
+                    let fg_color = attr & 0x0F;
+                    let bright = (fg_color & 0x08) != 0;
+
+                    // Set color (simplified - only basic colors)
+                    if bright {
+                        print!("\x1b[1m"); // Bold for bright
+                    }
+                    // Map VGA colors to ANSI (simplified)
+                    let ansi_fg = match fg_color & 0x07 {
+                        0 => 30, // Black
+                        1 => 34, // Blue
+                        2 => 32, // Green
+                        3 => 36, // Cyan
+                        4 => 31, // Red
+                        5 => 35, // Magenta
+                        6 => 33, // Yellow
+                        7 => 37, // White
+                        _ => 37,
+                    };
+                    print!("\x1b[{}m", ansi_fg);
+
+                    // Print character (handle special cases)
+                    let ch_to_print = match ch {
+                        '\0' => ' ',
+                        '\n' => {
+                            // Just skip - we'll handle newlines by row
+                            continue;
+                        }
+                        _ => {
+                            if ch.is_ascii() && !ch.is_control() {
+                                ch
+                            } else {
+                                ' '
+                            }
+                        }
+                    };
+                    print!("{}", ch_to_print);
+                }
+            }
+            // Newline after each row (or move to next row if using absolute positioning)
+            // Using newline for simplicity - this ensures output is visible
+            print!("\n");
+        }
+
+        // Reset colors
+        print!("\x1b[0m");
+
+        // Move cursor to actual BIOS cursor position (similar to curses move(cursor_y, cursor_x))
+        // This ensures the cursor is visible at the correct position where BIOS expects it
+        // Don't restore to a saved position - move to the actual cursor position
+        if self.cursor_x < self.screen_width && self.cursor_y < self.screen_height {
+            // Cursor is within visible area - position it (1-based for ANSI)
+            print!("\x1b[{};{}H", self.cursor_y + 1, self.cursor_x + 1);
+            // Show cursor (equivalent to curs_set(1) or curs_set(2) in curses)
+            print!("\x1b[?25h");
+        } else {
+            // Cursor is outside visible area - hide it (equivalent to curs_set(0) in curses)
+            print!("\x1b[?25l");
+            // Move to bottom right to avoid interfering
+            print!("\x1b[{};{}H", self.screen_height, self.screen_width);
+        }
+
+        // Flush output immediately to ensure it's visible
+        let _ = std::io::stdout().flush();
+    }
+}

@@ -5,6 +5,17 @@ use crate::cpu::{
 
 use super::{cpuid::BxCpuIdTrait, BxCpuC, Result};
 
+/// Interrupt type, based on BX_INTERRUPT_TYPE in Bochs
+#[derive(Debug, Clone, Copy)]
+pub(super) enum InterruptType {
+    SoftwareInterrupt = 0,
+    PrivilegedSoftwareInterrupt = 1,
+    SoftwareException = 2,
+    ExternalInterrupt = 3,
+    Nmi = 4,
+    HardwareException = 5,
+}
+
 /* Exception types.  These are used as indexes into the 'is_exception_OK'
  * array below, and are stored in the 'exception' array also
  */
@@ -221,19 +232,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // vector:     0..255: vector in IDT
     // error_code: if exception generates and error, push this error code
     pub(super) fn exception(&mut self, vector: Exception, mut error_code: u16) -> Result<()> {
-        let mut exception_type = ExceptionType::Benign;
-        let mut exception_class = ExceptionClass::Fault;
-        let mut push_error = false;
-
-        if (vector.clone() as usize) < BX_CPU_HANDLED_EXCEPTIONS {
-            push_error = self.exception_push_error(vector.clone() as usize);
+        let mut push_error = if (vector as usize) < BX_CPU_HANDLED_EXCEPTIONS {
+            self.exception_push_error(vector as usize)
         } else {
             return Err(super::error::CpuError::BadVector { vector });
-        }
+        };
         /* Excluding page faults and double faults, error_code may not have the
-        * least significant bit set correctly. This correction is applied first
-             todo!()   * to make the change transparent to any instrumentation.
-         }   */
+         * least significant bit set correctly. This correction is applied first
+         * to make the change transparent to any instrumentation.
+         */
         if push_error {
             if vector != Exception::Pf
                 && vector != Exception::Df
@@ -244,7 +251,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        tracing::debug!("exception({:?}): error_code={:#x}", vector, error_code);
+        // Reduce verbosity for common exceptions (#GP(0) is very common during boot)
+        if vector != Exception::Gp || error_code != 0 {
+            tracing::debug!("exception({:?}): error_code={:#x}", vector, error_code);
+        }
 
         if self.real_mode() {
             push_error = false; // not INT, no error code pushed
@@ -263,6 +273,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // #if BX_SUPPORT_SVM
         // SvmInterceptException(BX_HARDWARE_EXCEPTION, vector, error_code, push_error);
         // #endif
+
+        // Call interrupt handler based on CPU mode
+        let vector_u8 = vector as u8;
+        
+        // Invalidate prefetch queue
+        self.eip_fetch_ptr = None;
+        self.eip_page_window_size = 0;
+
+        if self.real_mode() {
+            // Real mode interrupt handling (already implemented in soft_int.rs)
+            self.interrupt_real_mode(vector_u8);
+        } else {
+            // Protected mode interrupt handling
+            self.protected_mode_int(vector_u8, false, push_error, error_code)?;
+        }
 
         Ok(())
     }

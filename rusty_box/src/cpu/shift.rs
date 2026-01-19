@@ -61,6 +61,33 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
+    // SAR - Shift Arithmetic Right (8-bit)
+    // =========================================================================
+    
+    /// SAR r/m8, imm8
+    /// Opcode: 0xC0/7 or 0xD0/7 with imm8
+    /// Matches BX_CPU_C::SAR_EbR (for imm8 case)
+    pub fn sar_eb_ib(&mut self, instr: &BxInstructionGenerated) {
+        let count = instr.ib() & 0x1F;
+        
+        if count == 0 {
+            return;
+        }
+        
+        let dst = instr.meta_data[0] as usize;
+        let op1_8 = self.get_gpr8(dst);
+        let result_8 = ((op1_8 as i8) >> count) as u8;
+        
+        self.set_gpr8(dst, result_8);
+        
+        let cf = (((op1_8 as i8) >> (count - 1)) & 0x1) != 0;
+        
+        // SET_FLAGS_OSZAPC_LOGIC_8(result_8) + set CF
+        self.update_flags_logic8(result_8);
+        self.set_cf_of(cf, false);  // CF from shift, OF = 0 for SAR
+    }
+
+    // =========================================================================
     // SHL - Shift Left (16-bit)
     // =========================================================================
     

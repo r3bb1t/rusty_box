@@ -6,10 +6,9 @@ use crate::{
         cpuid::{SVMExtensions, VMXExtensions},
         crregs::BxEfer,
         decoder::{features::X86Feature, BxSegregs, BX_64BIT_REG_RIP},
-        paging::translate_linear,
         rusty_box::MemoryAccessType,
         smm::SMMRAM_Fields,
-        tlb::{lpf_of, page_offset, ppf_of, Tlb},
+        tlb::{lpf_of, page_offset, ppf_of, TLBEntry, Tlb},
         CpuError,
     },
     impl_eflag,
@@ -21,10 +20,13 @@ use super::{
     cpuid::BxCpuIdTrait,
     cpustats::BxCpuStatistics,
     crregs::{BxCr0, BxCr4, BxDr6, BxDr7, Xcr0, MSR},
-    decoder::{BX_GENERAL_REGISTERS, BX_ISA_EXTENSIONS_ARRAY_SIZE, BX_XMM_REGISTERS, BxInstructionGenerated},
+    decoder::{
+        BxInstructionGenerated, BX_GENERAL_REGISTERS, BX_ISA_EXTENSIONS_ARRAY_SIZE,
+        BX_XMM_REGISTERS,
+    },
     descriptor::{BxGlobalSegmentReg, BxSegmentReg},
     i387::{BxPackedRegister, I387},
-    icache::{BxIcache, BxIcacheEntry},
+    icache::{BxICache, BxICacheEntry as BxIcacheEntry, BX_ICACHE_MEM_POOL},
     lazy_flags::BxLazyflagsEntry,
     segment_ctrl_pro::parse_selector,
     svm::VmcbCache,
@@ -34,7 +36,7 @@ use super::{
     Result,
 };
 
-use crate::cpu::decoder::{decode_simple_32, fetch_decode32_chatgpt_generated_instr};
+use crate::cpu::decoder::{decode_simple_32, fetchdecode32, fetchdecode64};
 
 pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
 
@@ -231,7 +233,7 @@ pub(super) enum AccessReason {
     SMRAMAccess,
 }
 
-#[derive(PartialEq, Clone, Debug)]
+#[derive(PartialEq, Clone, Debug, Copy)]
 pub enum Exception {
     /// Divide error (fault)
     De = 0,
@@ -297,6 +299,7 @@ impl_eflag!(ac, 18);
 impl_eflag!(vm, 17);
 impl_eflag!(rf, 16);
 impl_eflag!(nt, 14);
+impl_eflag!(if, 9); // Interrupt Flag (bit 9)
 
 #[derive(Debug, Default)]
 pub(super) enum CpuActivityState {
@@ -606,8 +609,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     /// An instruction cache.  Each entry should be exactly 32 bytes, and
     /// this structure should be aligned on a 32-byte boundary to be friendly
     /// with the host cache lines.
-    //pub(super) i_cache: BxIcache,
-    pub(super) i_cache: super::i_cache_v2::BxICache,
+    pub(super) i_cache: BxICache,
     pub(super) fetch_mode_mask: u32,
 
     pub(super) address_xlation: AddressXlation,
@@ -628,7 +630,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
 }
 
-// Note: Memory access is done through mem_ptr/mem_len raw pointer 
+// Note: Memory access is done through mem_ptr/mem_len raw pointer
 // which is set during cpu_loop. See string.rs for mem_read_byte/mem_write_byte helpers.
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -807,7 +809,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
-    fn get_laddr32(&self, seg: usize, offset: u32) -> u32 {
+    pub(super) fn get_laddr32(&self, seg: usize, offset: u32) -> u32 {
         (unsafe { self.sregs[seg].cache.u.segment.base } + u64::from(offset)) as u32
     }
 }
@@ -815,8 +817,60 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 #[cfg(feature = "bx_support_monitor_mwait")]
 #[derive(Debug, Default)]
 pub struct MonitorAddr {
-    monitor_addr: BxPhyAddress,
+    pub(super) monitor_addr: BxPhyAddress,
     armed_by: u32,
+}
+
+#[cfg(feature = "bx_support_monitor_mwait")]
+const BX_MONITOR_NOT_ARMED: u32 = 0;
+#[cfg(feature = "bx_support_monitor_mwait")]
+const BX_MONITOR_ARMED_BY_MONITOR: u32 = 1;
+#[cfg(feature = "bx_support_monitor_mwait")]
+const BX_MONITOR_ARMED_BY_MONITORX: u32 = 2;
+#[cfg(feature = "bx_support_monitor_mwait")]
+const BX_MONITOR_ARMED_BY_UMONITOR: u32 = 3;
+
+#[cfg(feature = "bx_support_monitor_mwait")]
+impl MonitorAddr {
+    const CACHE_LINE_SIZE: u64 = 64;
+
+    pub fn arm(&mut self, addr: BxPhyAddress, by: u32) {
+        // align to cache line
+        self.monitor_addr = addr & !(Self::CACHE_LINE_SIZE - 1);
+        self.armed_by = by;
+    }
+
+    pub fn reset_monitor(&mut self) {
+        self.armed_by = BX_MONITOR_NOT_ARMED;
+    }
+
+    pub fn reset_umonitor(&mut self) {
+        if self.armed_by == BX_MONITOR_ARMED_BY_UMONITOR {
+            self.armed_by = BX_MONITOR_NOT_ARMED;
+        }
+    }
+
+    pub fn reset_monitorx(&mut self) {
+        if self.armed_by == BX_MONITOR_ARMED_BY_MONITORX {
+            self.armed_by = BX_MONITOR_NOT_ARMED;
+        }
+    }
+
+    pub fn armed(&self) -> bool {
+        self.armed_by != BX_MONITOR_NOT_ARMED
+    }
+
+    pub fn armed_by_monitor(&self) -> bool {
+        self.armed_by == BX_MONITOR_ARMED_BY_MONITOR
+    }
+
+    pub fn armed_by_monitorx(&self) -> bool {
+        self.armed_by == BX_MONITOR_ARMED_BY_MONITORX
+    }
+
+    pub fn armed_by_umonitor(&self) -> bool {
+        self.armed_by == BX_MONITOR_ARMED_BY_UMONITOR
+    }
 }
 
 #[derive(Debug, Default)]
@@ -900,7 +954,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     /// Execute CPU loop with a maximum instruction count
-    /// 
+    ///
     /// Returns Ok(instructions_executed) when limit is reached or async event occurs.
     pub fn cpu_loop_n(
         &mut self,
@@ -913,40 +967,280 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
         self.mem_ptr = Some(mem_vector);
         self.mem_len = mem_len;
-        
+
         let mut iteration = 0u64;
+        let mut stuck_counter = 0u64;
+        let mut last_rip = self.rip();
+        let mut rip_history = [0u64; 16]; // Track last 16 RIP values
+        let mut history_idx = 0usize;
+        const STUCK_THRESHOLD: u64 = 100000; // Warn if RIP doesn't change for this many instructions
+
         let result = loop {
             iteration += 1;
-            
+
             // Safety limit - pause when instruction limit is reached
             if iteration > max_instructions {
                 break Ok(iteration - 1);
             }
-            
+
             // check on events which occurred for previous instructions (traps)
             // and ones which are asynchronous to the CPU (hardware interrupts)
+            // Matches Bochs cpu.cc:170-175
             if self.async_event != 0 {
-                self.handle_async_event();
-                // If request to return to caller ASAP.
-                break Ok(iteration);
+                if self.handle_async_event() {
+                    // If request to return to caller ASAP (e.g., CPU halted).
+                    break Ok(iteration);
+                }
             }
+
+            // Get raw pointer to mem before the loop to work around borrow checker
+            // SAFETY: We'll use this raw pointer to create new references after borrows are released
+            let mem_ptr: *mut BxMemC<'c> = mem;
 
             // SAFETY: We extend the lifetime of mem temporarily for this call only.
             // The borrow is released at the end of the expression.
-            let entry = unsafe {
-                let mem_extended: &'c mut BxMemC<'c> = 
-                    core::mem::transmute::<&mut BxMemC<'c>, &'c mut BxMemC<'c>>(mem);
+            let current_rip = self.rip();
+            let mut entry = unsafe {
+                let mem_extended: &'c mut BxMemC<'c> = &mut *mem_ptr;
                 self.get_icache_entry(mem_extended, cpus)?
             };
-            let mut i = entry.i;
+            tracing::debug!("get_icache_entry: RIP={:#x}, entry.tlen={}", current_rip, entry.tlen);
 
-            self.before_execution(self.bx_cpuid);
-            let old_rip = self.rip();
-            self.set_rip(old_rip + u64::from(i.ilen()));
+            // Get trace start index from entry (stored when trace was created)
+            // In C++, entry->i is a pointer directly into mpool, so we can do pointer arithmetic
+            // In Rust, we store the mpool index explicitly
+            let mut trace_start_idx = entry.mpool_start_idx;
 
-            // Execute decoded instruction (simple executor for mov/add/sub)
-            if let Err(e) = self.execute_instruction(&mut i) {
-                tracing::warn!("instruction execution returned error: {:?}", e);
+            // If mpool_start_idx is 0 and this is NOT the first trace (mpindex > tlen),
+            // it might be an old entry created before we added this field.
+            // However, index 0 is valid for the very first trace, so we need to be careful.
+            // Only use fallback if mpindex suggests this is a cached entry (mpindex > tlen)
+            // and trace_start_idx is 0, which would be wrong for a cached entry.
+            if trace_start_idx == 0 && entry.tlen > 0 && self.i_cache.mpindex > entry.tlen {
+                // Fallback: calculate from current mpindex (this is what we used to do)
+                // This might be wrong for cached entries, but it's better than 0
+                let calculated = self.i_cache.mpindex.saturating_sub(entry.tlen);
+                if calculated != 0 {
+                    trace_start_idx = calculated;
+                    tracing::warn!("mpool_start_idx was 0 for cached entry, calculated fallback: {}", trace_start_idx);
+                }
+            }
+
+            // Bounds check: ensure trace_start_idx is valid
+            if trace_start_idx >= BX_ICACHE_MEM_POOL {
+                tracing::warn!(
+                    "trace_start_idx ({}) >= BX_ICACHE_MEM_POOL ({})",
+                    trace_start_idx,
+                    BX_ICACHE_MEM_POOL
+                );
+                // Reset to start of mpool as fallback
+                trace_start_idx = 0;
+            }
+            
+            tracing::info!("Initial trace: RIP={:#x}, trace_start_idx={}, tlen={}, mpool_start_idx={}", 
+                current_rip, trace_start_idx, entry.tlen, entry.mpool_start_idx);
+
+            // Loop through all instructions in the trace (matching C++ cpu.cc:196-222)
+            let mut instr_idx = 0usize;
+            let mut prev_rip_in_loop = self.rip(); // Track previous RIP for loop detection
+            loop {
+                // Bounds check before accessing mpool
+                if trace_start_idx + instr_idx >= BX_ICACHE_MEM_POOL {
+                    tracing::warn!(
+                        "trace_start_idx + instr_idx ({}) >= BX_ICACHE_MEM_POOL, breaking",
+                        trace_start_idx + instr_idx
+                    );
+                    break;
+                }
+
+                // Get instruction from trace
+                let mpool_idx = trace_start_idx + instr_idx;
+                if mpool_idx >= BX_ICACHE_MEM_POOL {
+                    tracing::error!("mpool_idx ({}) >= BX_ICACHE_MEM_POOL ({})", mpool_idx, BX_ICACHE_MEM_POOL);
+                    break;
+                }
+                let mut i = self.i_cache.mpool[mpool_idx];
+                tracing::trace!("Fetching instruction: trace_start_idx={}, instr_idx={}, mpool_idx={}, opcode={:?}, RIP={:#x}", 
+                    trace_start_idx, instr_idx, mpool_idx, i.get_ia_opcode(), self.rip());
+
+                // want to allow changing of the instruction inside instrumentation callback
+                // Matching C++ line 201: BX_INSTR_BEFORE_EXECUTION(BX_CPU_ID, i);
+                self.before_execution(self.bx_cpuid);
+
+                // Check for end-of-trace opcode (InsertedOpcode) before executing
+                // InsertedOpcode has length 0 and is used to mark the end of a trace
+                use crate::cpu::decoder::Opcode;
+                if i.get_ia_opcode() == Opcode::InsertedOpcode {
+                    // This is an end-of-trace opcode inserted by gen_dummy_icache_entry
+                    // Call bx_end_trace to set the stop trace flag (matching C++ BxEndTrace)
+                    self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
+                    // For InsertedOpcode, we still need to set prev_rip and increment icount
+                    self.prev_rip = self.rip();
+                    self.icount += 1;
+                    iteration += 1;
+                    instr_idx += 1;
+                    if instr_idx >= entry.tlen {
+                        // Get new entry (matching C++ line 218-220)
+                        entry = unsafe {
+                            let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
+                            self.get_icache_entry(mem_reborrowed, cpus)?
+                        };
+                        trace_start_idx = entry.mpool_start_idx;
+                        instr_idx = 0;
+                    }
+                    continue;
+                }
+
+                    // For normal instructions, check instruction length
+                    let ilen = i.ilen();
+                    if ilen == 0 {
+                    tracing::error!("Instruction length is 0 for opcode {:?} at RIP={:#x}!", i.get_ia_opcode(), self.rip());
+                        return Err(crate::cpu::CpuError::UnimplementedOpcode { 
+                            opcode: format!("{:?}", i.get_ia_opcode()) 
+                        });
+                    }
+
+                // Matching C++ line 202: RIP += i->ilen();
+                // Advance RIP BEFORE execution (instruction handlers may read RIP and expect it to be advanced)
+                let current_rip = self.rip();
+                let next_rip = current_rip + u64::from(ilen);
+                self.set_rip(next_rip);
+
+                tracing::info!("Executing opcode: {:?} at RIP={:#x}, ilen={}, next_rip={:#x}, trace_start_idx={}, instr_idx={}", 
+                    i.get_ia_opcode(), current_rip, ilen, next_rip, trace_start_idx, instr_idx);
+
+                // Matching C++ line 203: BX_CPU_CALL_METHOD(i->execute1, (i));
+                // might iterate repeat instruction
+                    match self.execute_instruction(&mut i) {
+                        Ok(()) => {
+                            // Instruction executed successfully
+                        }
+                        Err(crate::cpu::CpuError::CpuNotInitialized) => {
+                            // Prefetch queue invalidated - need to break and get new trace
+                            tracing::debug!("execute_instruction returned CpuNotInitialized, breaking trace");
+                            break;
+                        }
+                        Err(e) => {
+                            tracing::warn!("instruction execution returned error: {:?}", e);
+                            // For other errors, continue but the instruction may not have executed correctly
+                            // RIP has already been advanced, so we'll move to next instruction
+                    }
+                }
+
+                // Matching C++ line 204: BX_CPU_THIS_PTR prev_rip = RIP; // commit new RIP
+                self.prev_rip = self.rip();
+
+                // Matching C++ line 205: BX_INSTR_AFTER_EXECUTION(BX_CPU_ID, i);
+                // TODO: Implement BX_INSTR_AFTER_EXECUTION if needed
+
+                // Matching C++ line 206: BX_CPU_THIS_PTR icount++;
+                self.icount += 1;
+                iteration += 1;
+
+                // Matching C++ line 208: BX_SYNC_TIME_IF_SINGLE_PROCESSOR(0);
+                // TODO: Implement BX_SYNC_TIME_IF_SINGLE_PROCESSOR if needed
+
+                // note instructions generating exceptions never reach this point
+                // Matching C++ line 211-213: gdbstub_instruction_epilog check
+                // TODO: Implement gdbstub_instruction_epilog if needed
+
+                // Matching C++ line 215: if (BX_CPU_THIS_PTR async_event) break;
+                if self.async_event != 0 {
+                    tracing::info!("Async event detected, breaking trace loop");
+                    break;
+                }
+
+                // Matching C++ line 217: if (++i == last)
+                // Move to next instruction in trace (increment pointer/index)
+                instr_idx += 1;
+                tracing::trace!("Moved to next instruction: instr_idx={}, tlen={}", instr_idx, entry.tlen);
+
+                // If we've executed all instructions in the trace, get a new entry
+                // Matching C++ lines 217-221: if (++i == last) { entry = getICacheEntry(); i = entry->i; last = i + (entry->tlen); }
+                if instr_idx >= entry.tlen {
+                    tracing::info!("Trace complete: instr_idx={} >= tlen={}, getting new entry at RIP={:#x}", 
+                        instr_idx, entry.tlen, self.rip());
+                    // Get new entry (matching C++ line 218-220)
+                    // SAFETY: We use the raw pointer we got earlier to work around borrow checker
+                    // The borrow from the previous get_icache_entry is released, so we can safely create a new reference
+                    entry = unsafe {
+                        let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
+                        self.get_icache_entry(mem_reborrowed, cpus)?
+                    };
+
+                    // Get trace start index from entry (stored when trace was created)
+                    trace_start_idx = entry.mpool_start_idx;
+                    tracing::info!("New trace: RIP={:#x}, trace_start_idx={}, tlen={}, mpool_start_idx={}", 
+                        self.rip(), trace_start_idx, entry.tlen, entry.mpool_start_idx);
+
+                    // Reset for new trace
+                    instr_idx = 0;
+                }
+            }
+
+            // Clear stop trace magic indication (matching C++ line 226)
+            self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+
+            // Use the last executed instruction for loop detection
+            // If we broke early due to async_event, use the last instruction we executed
+            // Otherwise, use the last instruction in the trace
+            let last_instr_idx = if instr_idx > 0 { instr_idx - 1 } else { 0 };
+            let mut i = self.i_cache.mpool[trace_start_idx + last_instr_idx];
+
+            // Detect infinite loops - check multiple patterns:
+            // 1. RIP doesn't change (direct infinite loop)
+            // 2. RIP cycles through same small set of addresses (loop with multiple instructions)
+            let current_rip = self.rip();
+
+            // Update RIP history (circular buffer)
+            rip_history[history_idx] = current_rip;
+            history_idx = (history_idx + 1) % rip_history.len();
+
+            // Check if we're stuck at same RIP (jumped back to same instruction)
+            if current_rip == prev_rip_in_loop {
+                stuck_counter += 1;
+                if stuck_counter == STUCK_THRESHOLD {
+                    tracing::warn!(
+                        "CPU appears stuck in infinite loop at RIP={:#x} (0x{:x}) after {} instructions. Last instruction: {:?}",
+                        current_rip, current_rip, stuck_counter, i.get_ia_opcode()
+                    );
+                } else if stuck_counter > STUCK_THRESHOLD && (stuck_counter % 100000) == 0 {
+                    tracing::warn!(
+                        "CPU still stuck at RIP={:#x} after {} instructions total",
+                        current_rip,
+                        stuck_counter
+                    );
+                }
+            }
+            // Check if RIP is cycling (pattern repeats in history)
+            else if iteration > rip_history.len() as u64 {
+                let unique_rips: std::collections::HashSet<u64> =
+                    rip_history.iter().copied().collect();
+                if unique_rips.len() <= 4 && stuck_counter > 10000 {
+                    // Very few unique RIPs suggests a tight loop
+                    stuck_counter += 1;
+                    if stuck_counter == STUCK_THRESHOLD {
+                        tracing::warn!(
+                            "CPU appears stuck in tight loop (cycling through {} addresses) after {} instructions. Recent RIPs: {:?}",
+                            unique_rips.len(), stuck_counter,
+                            rip_history.iter().take(8).copied().collect::<Vec<_>>()
+                        );
+                    }
+                } else {
+                    stuck_counter = 0; // Reset if pattern breaks
+                }
+            } else {
+                stuck_counter = 0; // Reset counter when RIP changes normally
+            }
+
+            // Also log every 10 million instructions to show progress
+            if iteration > 0 && (iteration % 10_000_000) == 0 {
+                // Log progress periodically
+                tracing::info!(
+                    "Executed {} instructions, current RIP={:#x}",
+                    iteration,
+                    current_rip
+                );
             }
 
             // TODO: And syncing of time
@@ -955,7 +1249,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
             }
         };
-        
+
         // Clear memory pointer when done
         self.mem_ptr = None;
         result
@@ -966,7 +1260,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         mem: &'c mut BxMemC<'c>,
         cpus: &[&Self],
     ) -> Result<BxInstructionGenerated> {
-        let entry = self.get_icache_entry(mem, cpus)?;
+        // Get raw pointer to work around borrow checker if needed
+        let mem_ptr: *mut BxMemC<'c> = mem;
+        let entry = unsafe {
+            let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
+            self.get_icache_entry(mem_reborrowed, cpus)?
+        };
         Ok(entry.i)
     }
 
@@ -975,81 +1274,120 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         mem: &'c mut BxMemC<'c>,
         cpus: &[&Self],
     ) -> Result<BxIcacheEntry> {
-        // Check if we need to prefetch a new page
-        // eip_page_window_size == 0 means we haven't prefetched yet
-        if self.eip_page_window_size == 0 || self.eip_fetch_ptr.is_none() {
-            self.prefetch(mem, cpus)?;
+        // Check if we need to prefetch a new page (matching C++ lines 289-292)
+        // If eip_page_window_size is 0, we haven't prefetched yet, so do it now
+        let needs_prefetch = self.eip_page_window_size == 0 || {
+            // Calculate eip_biased = RIP + eip_page_bias (matching C++ line 287)
+            let eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
+            eip_biased >= self.eip_page_window_size
+        };
+
+        // Get raw pointer to mem before calling prefetch() to work around borrow checker
+        // SAFETY: We're getting a raw pointer, which doesn't create a new borrow
+        let mem_ptr: *mut BxMemC<'c> = unsafe { core::ptr::addr_of_mut!(*mem) };
+
+        // Matching C++ cpu.cc:287-292
+        let mut eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
+
+        if needs_prefetch {
+            // Matching C++ cpu.cc:289-291 - call prefetch() and recalculate eip_biased after
+            // Retry loop: if prefetch raises an exception, the handler invalidates the queue
+            // and we need to retry prefetch with the new CPU state
+            // Get raw pointer before loop to work around borrow checker
+            let mem_ptr: *mut BxMemC<'c> = unsafe { core::ptr::addr_of_mut!(*mem) };
+            let mut retry_count = 0;
+            loop {
+                // SAFETY: We're reborrowing mem in each loop iteration, but prefetch() releases the borrow
+                let mem_reborrowed: &'c mut BxMemC<'c> = unsafe { &mut *mem_ptr };
+                self.prefetch(mem_reborrowed, cpus)?;
+
+                // After prefetch, check if it completed successfully
+                // In C++, exception() uses longjmp so if it fails, we never return here
+                // In Rust, exception() returns Ok(()) but invalidates the prefetch queue
+                if self.eip_page_window_size == 0 || self.eip_fetch_ptr.is_none() {
+                    // Prefetch queue was invalidated (likely due to exception handler)
+                    // Retry prefetch with new CPU state (exception handler may have changed RIP/CS)
+                    retry_count += 1;
+                    if retry_count > 10 {
+                        tracing::error!("prefetch retry limit exceeded, RIP={:#x}", self.rip());
+                        return Err(crate::cpu::CpuError::CpuNotInitialized);
+                    }
+                    tracing::debug!(
+                        "prefetch queue invalidated after exception, retrying (attempt {})",
+                        retry_count
+                    );
+                    continue; // Retry prefetch
+                }
+
+                // Recalculate eip_biased after prefetch (matching C++ line 291)
+                eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
+
+                // If RIP changed, eip_page_bias should still be valid (it's recalculated in prefetch)
+                // But verify it's within bounds
+                if eip_biased >= self.eip_page_window_size {
+                    tracing::debug!("eip_biased ({}) >= eip_page_window_size ({}) after prefetch, RIP={:#x}, retrying", 
+                        eip_biased, self.eip_page_window_size, self.rip());
+                    // eip_page_bias might be wrong - invalidate and retry
+                    self.eip_fetch_ptr = None;
+                    self.eip_page_window_size = 0;
+                    retry_count += 1;
+                    if retry_count > 10 {
+                        tracing::error!("prefetch eip_biased retry limit exceeded");
+                        return Err(crate::cpu::CpuError::CpuNotInitialized);
+                    }
+                    continue; // Retry prefetch
+                }
+
+                // Prefetch successful
+                break;
+            }
         }
 
-        // Calculate the offset within the current page
-        // In real/protected mode: laddr = CS.base + EIP
-        // page_offset = laddr & 0xFFF
-        let laddr = if self.long64_mode() {
-            self.rip()
-        } else {
-            BxAddress::from(self.get_laddr32(BxSegregs::Cs as _, self.eip()))
-        };
-        let page_offset = (laddr & 0xFFF) as usize;
-        
         // Physical address for this instruction
-        let p_addr: BxPhyAddress = self.p_addr_fetch_page | (page_offset as u64);
-        
-        tracing::debug!("get_icache_entry: laddr={:#x}, page_offset={:#x}, p_addr={:#x}", 
-            laddr, page_offset, p_addr);
+        let p_addr: BxPhyAddress = self.p_addr_fetch_page | (eip_biased as u64);
 
+        // Find entry in cache
         let entry_option = self.i_cache.find_entry(p_addr, self.fetch_mode_mask.into());
 
-        if entry_option.is_none() {
-            // iCache miss. Try a tiny inline decoder first (simple cases)
-            tracing::trace!("iCache miss at {p_addr:#x}, attempting decode");
-            // try to use direct fetch pointer if available
-            if let Some(fetch_ptr) = self.eip_fetch_ptr {
-                if page_offset < fetch_ptr.len() {
-                    let slice = &fetch_ptr[page_offset..];
-                    tracing::trace!("Decoding from fetch_ptr, first bytes: {:02x?}", 
-                        &slice[..core::cmp::min(16, slice.len())]);
-                    
-                    // Try simple decoder first (faster for common instructions)
-                    if let Some(decoded) = decode_simple_32(slice) {
-                        let tlen = decoded.meta_info.ilen as u32;
-                        tracing::trace!("Simple decoded: opcode={:?}, ilen={}", 
-                            decoded.meta_info.ia_opcode, decoded.meta_info.ilen);
-                        return Ok(BxIcacheEntry { p_addr, trace_mask: 0, tlen, i: decoded });
-                    }
-                    
-                    // Fallback to full decoder
-                    // Use 16-bit mode for real mode (no protected mode yet)
-                    let is_32bit = false; // Real mode is 16-bit
-                    match fetch_decode32_chatgpt_generated_instr(slice, is_32bit) {
-                        Ok(decoded) => {
-                            let tlen = decoded.meta_info.ilen as u32;
-                            tracing::trace!("Full decoded: opcode={:?}, ilen={}", 
-                                decoded.meta_info.ia_opcode, decoded.meta_info.ilen);
-                            return Ok(BxIcacheEntry { p_addr, trace_mask: 0, tlen, i: decoded });
-                        }
-                        Err(e) => {
-                            tracing::trace!("Decode failed at {p_addr:#x}: {:?}, bytes: {:02x?}", 
-                                e, &slice[..core::cmp::min(8, slice.len())]);
-                        }
-                    }
-                }
-            }
+        // Check if cache miss or entry has invalid instruction (matching C++ line 299)
+        if entry_option.is_none() || entry_option.as_ref().unwrap().i.meta_info.ilen == 0 {
+            // iCache miss. Call serve_icache_miss
+            // Create a dummy page_write_stamp_table for now (matches prefetch approach)
+            let mut dummy_mapping: [u32; 0] = [];
+            let mut dummy_stamp_table = crate::cpu::icache::BxPageWriteStampTable {
+                fine_granularity_mapping: &mut dummy_mapping,
+            };
 
-            // Fallback: return a NOP instruction as a stub (should not happen normally)
-            tracing::trace!("All decoding failed at {p_addr:#x}, returning NOP stub (advancing by 1 byte)");
+            // Work around borrow checker: prefetch() borrows mem, but that borrow is released when it returns.
+            // However, Rust's borrow checker is conservative and doesn't allow us to borrow mem again immediately.
+            // We use unsafe to work around this limitation.
+            // SAFETY:
+            // 1. prefetch() returns before we call serve_icache_miss, so the borrows don't overlap at runtime
+            // 2. serve_icache_miss only uses mem for boundary_fetch (error case), not in the common path
+            // 3. We're not actually creating overlapping borrows - the borrow from prefetch is released
+            // 4. We use the raw pointer we got before prefetch() to create a new reference
+            // The borrow checker sees that `mem` is borrowed in the function signature and also used in prefetch(),
+            // but it can't prove that the borrow from prefetch() is released before we call serve_icache_miss.
+            // We know this is safe because prefetch() returns before serve_icache_miss is called.
+            // SAFETY: The borrow from prefetch() is released when it returns, so we can safely create a new reference.
+            let entry = unsafe {
+                // Create a new mutable reference from the raw pointer we got before prefetch()
+                // This is safe because prefetch() has already returned, releasing its borrow
+                // We're not actually creating overlapping borrows - the borrow from prefetch is released
+                let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
+                self.serve_icache_miss(
+                    eip_biased,
+                    p_addr,
+                    mem_reborrowed,
+                    cpus,
+                    &mut dummy_stamp_table,
+                )?
+            };
+            return Ok(entry);
         }
 
-        // FIXME: Return actual decoded instruction from iCache or decode from memory
-        // For now, return a stub entry with NOP (0x90), ilen=1 to advance RIP
-        let mut stub = BxInstructionGenerated::default();
-        stub.meta_info.ilen = 1; // Ensure RIP advances by 1 byte
-        stub.meta_info.ia_opcode = crate::cpu::decoder::Opcode::Nop;
-        Ok(BxIcacheEntry {
-            p_addr,
-            trace_mask: 0,
-            tlen: 1,
-            i: stub,
-        })
+        // Return cached entry
+        Ok(entry_option.unwrap())
     }
 
     pub(super) fn get_gpr32(&self, idx: usize) -> u32 {
@@ -1099,12 +1437,24 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
         self.eflags &= !MASK;
 
-        if cf { self.eflags |= 1 << 0; }
-        if parity { self.eflags |= 1 << 2; }
-        if af { self.eflags |= 1 << 4; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
-        if of { self.eflags |= 1 << 11; }
+        if cf {
+            self.eflags |= 1 << 0;
+        }
+        if parity {
+            self.eflags |= 1 << 2;
+        }
+        if af {
+            self.eflags |= 1 << 4;
+        }
+        if zf {
+            self.eflags |= 1 << 6;
+        }
+        if sf {
+            self.eflags |= 1 << 7;
+        }
+        if of {
+            self.eflags |= 1 << 11;
+        }
     }
 
     pub(super) fn update_flags_sub32(&mut self, op1: u32, op2: u32, res: u32) {
@@ -1121,19 +1471,31 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
         self.eflags &= !MASK;
 
-        if cf { self.eflags |= 1 << 0; }
-        if parity { self.eflags |= 1 << 2; }
-        if af { self.eflags |= 1 << 4; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
-        if of { self.eflags |= 1 << 11; }
+        if cf {
+            self.eflags |= 1 << 0;
+        }
+        if parity {
+            self.eflags |= 1 << 2;
+        }
+        if af {
+            self.eflags |= 1 << 4;
+        }
+        if zf {
+            self.eflags |= 1 << 6;
+        }
+        if sf {
+            self.eflags |= 1 << 7;
+        }
+        if of {
+            self.eflags |= 1 << 11;
+        }
     }
 
     fn execute_instruction(&mut self, instr: &mut BxInstructionGenerated) -> Result<()> {
-        use crate::cpu::decoder::Opcode;
         use crate::cpu::arith;
         use crate::cpu::data_xfer;
-        
+        use crate::cpu::decoder::Opcode;
+
         match instr.get_ia_opcode() {
             // =========================================================================
             // Data transfer (MOV) instructions - 32-bit
@@ -1150,65 +1512,83 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 data_xfer::MOV_EdId_R(self, instr);
                 Ok(())
             }
-            
+
             // =========================================================================
             // Data transfer (MOV) instructions - 8-bit
             // =========================================================================
-            Opcode::MovGbEb => { self.mov_gb_eb_r(instr); Ok(()) }
-            Opcode::MovEbGb => { self.mov_eb_gb_r(instr); Ok(()) }
-            Opcode::MovEbIb => { self.mov_rb_ib(instr); Ok(()) }
-            
+            Opcode::MovGbEb => {
+                self.mov_gb_eb_r(instr);
+                Ok(())
+            }
+            Opcode::MovEbGb => {
+                self.mov_eb_gb_r(instr);
+                Ok(())
+            }
+            Opcode::MovEbIb => {
+                self.mov_rb_ib(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // 8-bit Arithmetic instructions (ADD, SUB, etc.)
+            // =========================================================================
+            Opcode::AddEbGb => {
+                use crate::cpu::arith;
+                arith::ADD_EbGb(self, instr)
+            }
+            Opcode::AddGbEb => {
+                use crate::cpu::arith;
+                arith::ADD_GbEb(self, instr)
+            }
+            Opcode::AdcEbGb => {
+                use crate::cpu::arith;
+                arith::ADC_EbGb(self, instr)
+            }
+            Opcode::AdcGwEw => {
+                use crate::cpu::arith;
+                arith::ADC_GwEw(self, instr)
+            }
+            Opcode::AndEbGb => {
+                use crate::cpu::arith;
+                arith::AND_EbGb(self, instr)
+            }
+
             // =========================================================================
             // Data transfer (MOV) instructions - 16-bit
             // =========================================================================
-            Opcode::MovGwEw => { self.mov_gw_ew_r(instr); Ok(()) }
-            Opcode::MovEwGw => { self.mov_ew_gw_r(instr); Ok(()) }
-            Opcode::MovEwIw => { self.mov_rw_iw(instr); Ok(()) }
-            
+            Opcode::MovGwEw => {
+                self.mov_gw_ew_r(instr);
+                Ok(())
+            }
+            Opcode::MovEwGw => {
+                self.mov_ew_gw_r(instr);
+                Ok(())
+            }
+            Opcode::MovEwIw => {
+                self.mov_rw_iw(instr);
+                Ok(())
+            }
+
             // =========================================================================
             // Segment register MOV
             // =========================================================================
-            Opcode::MovEwSw => { self.mov_ew_sw(instr); Ok(()) }
-            Opcode::MovSwEw => { self.mov_sw_ew(instr); Ok(()) }
-            
+            Opcode::MovEwSw => {
+                self.mov_ew_sw(instr);
+                Ok(())
+            }
+            Opcode::MovSwEw => {
+                self.mov_sw_ew(instr);
+                Ok(())
+            }
+
             // =========================================================================
             // MOV with direct memory offset
             // =========================================================================
-            Opcode::MovAlod => {
-                // MOV AL, moffs8 - Load AL from memory
-                let offset = instr.id() as u64;
-                let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
-                let addr = ds_base.wrapping_add(offset);
-                let val = self.mem_read_byte(addr);
-                self.set_al(val);
-                Ok(())
-            }
-            Opcode::MovAxod => {
-                // MOV AX, moffs16 - Load AX from memory
-                let offset = instr.id() as u64;
-                let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
-                let addr = ds_base.wrapping_add(offset);
-                let val = self.mem_read_word(addr);
-                self.set_ax(val);
-                Ok(())
-            }
-            Opcode::MovOdAl => {
-                // MOV moffs8, AL - Store AL to memory
-                let offset = instr.id() as u64;
-                let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
-                let addr = ds_base.wrapping_add(offset);
-                self.mem_write_byte(addr, self.al());
-                Ok(())
-            }
-            Opcode::MovOdAx => {
-                // MOV moffs16, AX - Store AX to memory
-                let offset = instr.id() as u64;
-                let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
-                let addr = ds_base.wrapping_add(offset);
-                self.mem_write_word(addr, self.ax());
-                Ok(())
-            }
-            
+            Opcode::MovAlod => data_xfer::MOV_ALOd(self, instr),
+            Opcode::MovAxod => data_xfer::MOV_AXOd(self, instr),
+            Opcode::MovOdAl => data_xfer::MOV_OdAL(self, instr),
+            Opcode::MovOdAx => data_xfer::MOV_OdAX(self, instr),
+
             // =========================================================================
             // PUSH/POP segment registers
             // =========================================================================
@@ -1244,23 +1624,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::AddAlib => {
-                // ADD AL, imm8
-                let al = self.al();
-                let imm = instr.ib();
-                let result = al.wrapping_add(imm);
-                self.set_al(result);
-                self.update_flags_add8(al, imm, result);
-                Ok(())
+                use crate::cpu::arith;
+                arith::ADD_EbIb(self, instr)
             }
             Opcode::AddEwsIb => {
-                // ADD r/m16, imm8 (sign-extended)
-                let dst = instr.meta_data[0] as usize;
-                let op1 = self.get_gpr16(dst);
-                let op2 = (instr.ib() as i8 as i16 as u16);
-                let result = op1.wrapping_add(op2);
-                self.set_gpr16(dst, result);
-                self.update_flags_add16(op1, op2, result);
-                Ok(())
+                use crate::cpu::arith;
+                arith::ADD_EwIbR(self, instr)
             }
             // Arithmetic (SUB) instructions
             Opcode::SubGdEd => {
@@ -1319,33 +1688,36 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.update_flags_logic16(result);
                 Ok(())
             }
+            Opcode::XorEwGwZeroIdiom | Opcode::XorGwEwZeroIdiom => {
+                self.zero_idiom_gw_r(instr);
+                Ok(())
+            }
             Opcode::XorAlib => {
-                // XOR AL, imm8
-                let al = self.al();
-                let imm = instr.ib();
-                let result = al ^ imm;
-                self.set_al(result);
-                self.update_flags_logic8(result);
+                // XOR AL, imm8 (XOR r/m8, imm8 register form)
+                self.xor_eb_ib_r(instr);
                 Ok(())
             }
             // FAR JMP - Jump to absolute address with segment change
             Opcode::JmpfAp => {
-                // Operand contains segment:offset (segment in upper 16 bits)
-                let operand: u32 = unsafe { core::mem::transmute(instr.modrm_form.operand_data) };
-                let offset = (operand & 0xFFFF) as u16;
-                let segment = ((operand >> 16) & 0xFFFF) as u16;
-                tracing::debug!("FAR JMP to {:04x}:{:04x}", segment, offset);
-                
+                // For JMP FAR Ap, offset is in Iw() and segment is in Iw2()
+                // Matching Bochs: i->Iw() for offset, i->Iw2() for segment
+                let offset = instr.iw();
+                let segment = instr.iw2();
+                tracing::info!("FAR JMP to {:04x}:{:04x}", segment, offset);
+
                 // In real mode, just update CS and EIP
                 // CS.base = segment << 4
                 let cs_index = BxSegregs::Cs as usize;
                 parse_selector(segment, &mut self.sregs[cs_index].selector);
                 self.sregs[cs_index].cache.u.segment.base = ((segment as u32) << 4) as u64;
                 self.set_rip(offset as u64);
-                
+
+                // Matching C++ jmp_far16: invalidate_prefetch_q() and BX_TRACE_END
                 // Invalidate prefetch since we jumped
                 self.eip_fetch_ptr = None;
                 self.eip_page_window_size = 0;
+                // Set STOP_TRACE flag to break trace loop (matching BX_TRACE_END)
+                self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
                 Ok(())
             }
             // Flag manipulation instructions
@@ -1426,63 +1798,180 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.out_dx_eax(instr);
                 Ok(())
             }
-            
+
             // =========================================================================
             // Conditional jumps (8-bit displacement, 16-bit mode)
             // =========================================================================
-            Opcode::JoJbw => { self.jo_jb(instr); Ok(()) }
-            Opcode::JnoJbw => { self.jno_jb(instr); Ok(()) }
-            Opcode::JbJbw => { self.jb_jb(instr); Ok(()) }
-            Opcode::JnbJbw => { self.jnb_jb(instr); Ok(()) }
-            Opcode::JzJbw => { self.jz_jb(instr); Ok(()) }
-            Opcode::JnzJbw => { self.jnz_jb(instr); Ok(()) }
-            Opcode::JbeJbw => { self.jbe_jb(instr); Ok(()) }
-            Opcode::JnbeJbw => { self.jnbe_jb(instr); Ok(()) }
-            Opcode::JsJbw => { self.js_jb(instr); Ok(()) }
-            Opcode::JnsJbw => { self.jns_jb(instr); Ok(()) }
-            Opcode::JpJbw => { self.jp_jb(instr); Ok(()) }
-            Opcode::JnpJbw => { self.jnp_jb(instr); Ok(()) }
-            Opcode::JlJbw => { self.jl_jb(instr); Ok(()) }
-            Opcode::JnlJbw => { self.jnl_jb(instr); Ok(()) }
-            Opcode::JleJbw => { self.jle_jb(instr); Ok(()) }
-            Opcode::JnleJbw => { self.jnle_jb(instr); Ok(()) }
-            
+            Opcode::JoJbw => {
+                self.jo_jb(instr);
+                Ok(())
+            }
+            Opcode::JnoJbw => {
+                self.jno_jb(instr);
+                Ok(())
+            }
+            Opcode::JbJbw => {
+                self.jb_jb(instr);
+                Ok(())
+            }
+            Opcode::JnbJbw => {
+                self.jnb_jb(instr);
+                Ok(())
+            }
+            Opcode::JzJbw => {
+                self.jz_jb(instr);
+                Ok(())
+            }
+            Opcode::JnzJbw => {
+                self.jnz_jb(instr);
+                Ok(())
+            }
+            Opcode::JbeJbw => {
+                self.jbe_jb(instr);
+                Ok(())
+            }
+            Opcode::JnbeJbw => {
+                self.jnbe_jb(instr);
+                Ok(())
+            }
+            Opcode::JsJbw => {
+                self.js_jb(instr);
+                Ok(())
+            }
+            Opcode::JnsJbw => {
+                self.jns_jb(instr);
+                Ok(())
+            }
+            Opcode::JpJbw => {
+                self.jp_jb(instr);
+                Ok(())
+            }
+            Opcode::JnpJbw => {
+                self.jnp_jb(instr);
+                Ok(())
+            }
+            Opcode::JlJbw => {
+                self.jl_jb(instr);
+                Ok(())
+            }
+            Opcode::JnlJbw => {
+                self.jnl_jb(instr);
+                Ok(())
+            }
+            Opcode::JleJbw => {
+                self.jle_jb(instr);
+                Ok(())
+            }
+            Opcode::JnleJbw => {
+                self.jnle_jb(instr);
+                Ok(())
+            }
+
             // Conditional jumps (16-bit displacement)
-            Opcode::JzJw => { self.jz_jw(instr); Ok(()) }
-            Opcode::JnzJw => { self.jnz_jw(instr); Ok(()) }
-            
+            Opcode::JzJw => {
+                self.jz_jw(instr);
+                Ok(())
+            }
+            Opcode::JnzJw => {
+                self.jnz_jw(instr);
+                Ok(())
+            }
+
             // JMP instructions
-            Opcode::JmpJbw => { self.jmp_jb(instr); Ok(()) }
-            Opcode::JmpJw => { self.jmp_jw(instr); Ok(()) }
-            Opcode::JmpJd => { self.jmp_jd(instr); Ok(()) }
-            Opcode::JmpEw => { self.jmp_ew_r(instr); Ok(()) }
-            Opcode::JmpEd => { self.jmp_ed_r(instr); Ok(()) }
-            
+            Opcode::JmpJbw => {
+                self.jmp_jb(instr);
+                Ok(())
+            }
+            Opcode::JmpJw => {
+                self.jmp_jw(instr);
+                Ok(())
+            }
+            Opcode::JmpJd => {
+                self.jmp_jd(instr);
+                Ok(())
+            }
+            Opcode::JmpEw => {
+                self.jmp_ew_r(instr);
+                Ok(())
+            }
+            Opcode::JmpEd => {
+                self.jmp_ed_r(instr);
+                Ok(())
+            }
+
             // CALL instructions
-            Opcode::CallJw => { self.call_jw(instr); Ok(()) }
-            Opcode::CallJd => { self.call_jd(instr); Ok(()) }
-            Opcode::CallEw => { self.call_ew_r(instr); Ok(()) }
-            Opcode::CallEd => { self.call_ed_r(instr); Ok(()) }
-            
+            Opcode::CallJw => {
+                self.call_jw(instr);
+                Ok(())
+            }
+            Opcode::CallJd => {
+                self.call_jd(instr);
+                Ok(())
+            }
+            Opcode::CallEw => {
+                self.call_ew_r(instr);
+                Ok(())
+            }
+            Opcode::CallEd => {
+                self.call_ed_r(instr);
+                Ok(())
+            }
+
             // RET instructions
-            Opcode::RetOp16 => { self.ret_near16(instr); Ok(()) }
-            Opcode::RetOp16Iw => { self.ret_near16_iw(instr); Ok(()) }
-            Opcode::RetOp32 => { self.ret_near32(instr); Ok(()) }
-            Opcode::RetOp32Iw => { self.ret_near32_iw(instr); Ok(()) }
-            
+            Opcode::RetOp16 => {
+                self.ret_near16(instr);
+                Ok(())
+            }
+            Opcode::RetOp16Iw => {
+                self.ret_near16_iw(instr);
+                Ok(())
+            }
+            Opcode::RetOp32 => {
+                self.ret_near32(instr);
+                Ok(())
+            }
+            Opcode::RetOp32Iw => {
+                self.ret_near32_iw(instr);
+                Ok(())
+            }
+
             // LOOP instructions
-            Opcode::LoopJbw => { self.loop16_jb(instr); Ok(()) }
-            Opcode::LoopeJbw => { self.loope16_jb(instr); Ok(()) }
-            Opcode::LoopneJbw => { self.loopne16_jb(instr); Ok(()) }
-            Opcode::JcxzJbw => { self.jcxz_jb(instr); Ok(()) }
-            
+            Opcode::LoopJbw => {
+                self.loop16_jb(instr);
+                Ok(())
+            }
+            Opcode::LoopeJbw => {
+                self.loope16_jb(instr);
+                Ok(())
+            }
+            Opcode::LoopneJbw => {
+                self.loopne16_jb(instr);
+                Ok(())
+            }
+            Opcode::JcxzJbw => {
+                self.jcxz_jb(instr);
+                Ok(())
+            }
+
             // =========================================================================
             // CMP instructions
             // =========================================================================
-            Opcode::CmpGbEb => { self.cmp_gb_eb_r(instr); Ok(()) }
-            Opcode::CmpGwEw => { self.cmp_gw_ew_r(instr); Ok(()) }
-            Opcode::CmpGdEd => { self.cmp_gd_ed_r(instr); Ok(()) }
-            Opcode::CmpAlib => { self.cmp_al_ib(instr); Ok(()) }
+            Opcode::CmpGbEb => {
+                self.cmp_gb_eb_r(instr);
+                Ok(())
+            }
+            Opcode::CmpGwEw => {
+                self.cmp_gw_ew_r(instr);
+                Ok(())
+            }
+            Opcode::CmpGdEd => {
+                self.cmp_gd_ed_r(instr);
+                Ok(())
+            }
+            Opcode::CmpAlib => {
+                self.cmp_al_ib(instr);
+                Ok(())
+            }
             Opcode::CmpEbIb => {
                 // CMP r/m8, imm8
                 let dst = instr.meta_data[0] as usize;
@@ -1502,118 +1991,357 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.update_flags_sub8(op1, op2, result);
                 Ok(())
             }
-            Opcode::CmpAxiw => { self.cmp_ax_iw(instr); Ok(()) }
-            Opcode::CmpEaxid => { self.cmp_eax_id(instr); Ok(()) }
-            Opcode::CmpEwIw => { self.cmp_ew_iw_r(instr); Ok(()) }
-            Opcode::CmpEdId => { self.cmp_ed_id_r(instr); Ok(()) }
-            
+            Opcode::CmpAxiw => {
+                self.cmp_ax_iw(instr);
+                Ok(())
+            }
+            Opcode::CmpEaxid => {
+                self.cmp_eax_id(instr);
+                Ok(())
+            }
+            Opcode::CmpEwIw => {
+                self.cmp_ew_iw_r(instr);
+                Ok(())
+            }
+            Opcode::CmpEdId => {
+                self.cmp_ed_id_r(instr);
+                Ok(())
+            }
+
             // TEST instructions
-            Opcode::TestEbGb => { self.test_eb_gb_r(instr); Ok(()) }
-            Opcode::TestEwGw => { self.test_ew_gw_r(instr); Ok(()) }
-            Opcode::TestEdGd => { self.test_ed_gd_r(instr); Ok(()) }
-            Opcode::TestAlib => { self.test_al_ib(instr); Ok(()) }
-            Opcode::TestAxiw => { self.test_ax_iw(instr); Ok(()) }
-            Opcode::TestEaxid => { self.test_eax_id(instr); Ok(()) }
-            Opcode::TestEwIw => { self.test_ew_iw_r(instr); Ok(()) }
-            Opcode::TestEdId => { self.test_ed_id_r(instr); Ok(()) }
-            
+            Opcode::TestEbGb => {
+                self.test_eb_gb_r(instr);
+                Ok(())
+            }
+            Opcode::TestEwGw => {
+                self.test_ew_gw_r(instr);
+                Ok(())
+            }
+            Opcode::TestEdGd => {
+                self.test_ed_gd_r(instr);
+                Ok(())
+            }
+            Opcode::TestAlib => {
+                self.test_al_ib(instr);
+                Ok(())
+            }
+            Opcode::TestAxiw => {
+                self.test_ax_iw(instr);
+                Ok(())
+            }
+            Opcode::TestEaxid => {
+                self.test_eax_id(instr);
+                Ok(())
+            }
+            Opcode::TestEwIw => {
+                self.test_ew_iw_r(instr);
+                Ok(())
+            }
+            Opcode::TestEdId => {
+                self.test_ed_id_r(instr);
+                Ok(())
+            }
+
             // =========================================================================
             // AND/OR/NOT instructions
             // =========================================================================
-            Opcode::AndGbEb => { self.and_gb_eb_r(instr); Ok(()) }
-            Opcode::AndGwEw => { self.and_gw_ew_r(instr); Ok(()) }
-            Opcode::AndGdEd => { self.and_gd_ed_r(instr); Ok(()) }
-            Opcode::AndAlib => { self.and_al_ib(instr); Ok(()) }
-            Opcode::AndAxiw => { self.and_ax_iw(instr); Ok(()) }
-            Opcode::AndEaxid => { self.and_eax_id(instr); Ok(()) }
-            Opcode::AndEwIw => { self.and_ew_iw_r(instr); Ok(()) }
-            Opcode::AndEdId => { self.and_ed_id_r(instr); Ok(()) }
-            
-            Opcode::OrGbEb => { self.or_gb_eb_r(instr); Ok(()) }
-            Opcode::OrGwEw => { self.or_gw_ew_r(instr); Ok(()) }
-            Opcode::OrGdEd => { self.or_gd_ed_r(instr); Ok(()) }
-            Opcode::OrAlib => { self.or_al_ib(instr); Ok(()) }
-            Opcode::OrAxiw => { self.or_ax_iw(instr); Ok(()) }
-            Opcode::OrEaxid => { self.or_eax_id(instr); Ok(()) }
-            
+            Opcode::AndGbEb => {
+                self.and_gb_eb_r(instr);
+                Ok(())
+            }
+            Opcode::AndGwEw => {
+                self.and_gw_ew_r(instr);
+                Ok(())
+            }
+            Opcode::AndGdEd => {
+                self.and_gd_ed_r(instr);
+                Ok(())
+            }
+            Opcode::AndAlib => {
+                self.and_al_ib(instr);
+                Ok(())
+            }
+            Opcode::AndAxiw => {
+                self.and_ax_iw(instr);
+                Ok(())
+            }
+            Opcode::AndEaxid => {
+                self.and_eax_id(instr);
+                Ok(())
+            }
+            Opcode::AndEwIw => {
+                self.and_ew_iw_r(instr);
+                Ok(())
+            }
+            Opcode::AndEdId => {
+                self.and_ed_id_r(instr);
+                Ok(())
+            }
+
+            Opcode::OrGbEb => {
+                self.or_gb_eb_r(instr);
+                Ok(())
+            }
+            Opcode::OrGwEw => {
+                self.or_gw_ew_r(instr);
+                Ok(())
+            }
+            Opcode::OrGdEd => {
+                self.or_gd_ed_r(instr);
+                Ok(())
+            }
+            Opcode::OrAlib => {
+                self.or_al_ib(instr);
+                Ok(())
+            }
+            Opcode::OrAxiw => {
+                self.or_ax_iw(instr);
+                Ok(())
+            }
+            Opcode::OrEaxid => {
+                self.or_eax_id(instr);
+                Ok(())
+            }
+
             // =========================================================================
             // INC/DEC instructions
             // =========================================================================
-            Opcode::IncEw => { self.inc_ew_r(instr); Ok(()) }
-            Opcode::IncEd => { self.inc_ed_r(instr); Ok(()) }
-            Opcode::DecEw => { self.dec_ew_r(instr); Ok(()) }
-            Opcode::DecEd => { self.dec_ed_r(instr); Ok(()) }
-            
+            Opcode::IncEw => {
+                self.inc_ew_r(instr);
+                Ok(())
+            }
+            Opcode::IncEd => {
+                self.inc_ed_r(instr);
+                Ok(())
+            }
+            Opcode::DecEw => {
+                self.dec_ew_r(instr);
+                Ok(())
+            }
+            Opcode::DecEd => {
+                self.dec_ed_r(instr);
+                Ok(())
+            }
+
             // =========================================================================
             // PUSH/POP instructions
             // =========================================================================
-            Opcode::PushEw => { self.push_ew_r(instr); Ok(()) }
-            Opcode::PushEd => { self.push_ed_r(instr); Ok(()) }
-            Opcode::PopEw => { self.pop_ew_r(instr); Ok(()) }
-            Opcode::PopEd => { self.pop_ed_r(instr); Ok(()) }
-            Opcode::PushaOp16 => { self.pusha16(instr); Ok(()) }
-            Opcode::PopaOp16 => { self.popa16(instr); Ok(()) }
-            Opcode::PushfFw => { self.pushf_fw(instr); Ok(()) }
-            Opcode::PopfFw => { self.popf_fw(instr); Ok(()) }
-            Opcode::PushfFd => { self.pushf_fd(instr); Ok(()) }
-            Opcode::PopfFd => { self.popf_fd(instr); Ok(()) }
-            
+            Opcode::PushEw => {
+                self.push_ew_r(instr);
+                Ok(())
+            }
+            Opcode::PushEd => {
+                self.push_ed_r(instr);
+                Ok(())
+            }
+            Opcode::PopEw => {
+                self.pop_ew_r(instr);
+                Ok(())
+            }
+            Opcode::PopEd => {
+                self.pop_ed_r(instr);
+                Ok(())
+            }
+            Opcode::PushaOp16 => {
+                self.pusha16(instr);
+                Ok(())
+            }
+            Opcode::PopaOp16 => {
+                self.popa16(instr);
+                Ok(())
+            }
+            Opcode::PushfFw => {
+                self.pushf_fw(instr);
+                Ok(())
+            }
+            Opcode::PopfFw => {
+                self.popf_fw(instr);
+                Ok(())
+            }
+            Opcode::PushfFd => {
+                self.pushf_fd(instr);
+                Ok(())
+            }
+            Opcode::PopfFd => {
+                self.popf_fd(instr);
+                Ok(())
+            }
+
             // =========================================================================
             // String instructions
             // =========================================================================
-            Opcode::RepMovsbYbXb => { self.rep_movsb16(instr); Ok(()) }
-            Opcode::RepStosbYbAl => { self.rep_stosb16(instr); Ok(()) }
-            Opcode::RepStoswYwAx => { self.rep_stosw16(instr); Ok(()) }
-            Opcode::RepLodsbAlxb => { self.rep_lodsb16(instr); Ok(()) }
-            
+            Opcode::RepMovsbYbXb => {
+                self.rep_movsb16(instr);
+                Ok(())
+            }
+            Opcode::RepStosbYbAl => {
+                self.rep_stosb16(instr);
+                Ok(())
+            }
+            Opcode::RepStoswYwAx => {
+                self.rep_stosw16(instr);
+                Ok(())
+            }
+            Opcode::RepLodsbAlxb => {
+                self.rep_lodsb16(instr);
+                Ok(())
+            }
+
             // =========================================================================
             // Software interrupts
             // =========================================================================
-            Opcode::IntIb => { self.int_ib(instr); Ok(()) }
-            Opcode::INT3 => { self.int3(instr); Ok(()) }
-            Opcode::IretOp16 => { self.iret16(instr); Ok(()) }
-            Opcode::IretOp32 => { self.iret32(instr); Ok(()) }
-            Opcode::Hlt => { self.hlt(instr); Ok(()) }
-            
+            Opcode::IntIb => {
+                self.int_ib(instr);
+                Ok(())
+            }
+            Opcode::INT3 => {
+                self.int3(instr);
+                Ok(())
+            }
+            Opcode::IretOp16 => {
+                self.iret16(instr);
+                Ok(())
+            }
+            Opcode::IretOp32 => {
+                self.iret32(instr);
+                Ok(())
+            }
+            Opcode::Hlt => {
+                self.hlt(instr);
+                Ok(())
+            }
+
             // =========================================================================
             // Shift/Rotate instructions
             // =========================================================================
-            Opcode::ShlEbI1 => { self.shl_eb_1(instr); Ok(()) }
-            Opcode::ShlEb => { self.shl_eb_cl(instr); Ok(()) }
-            Opcode::ShlEbIb => { self.shl_eb_ib(instr); Ok(()) }
-            Opcode::ShlEwI1 => { self.shl_ew_1(instr); Ok(()) }
-            Opcode::ShlEw => { self.shl_ew_cl(instr); Ok(()) }
-            Opcode::ShlEwIb => { self.shl_ew_ib(instr); Ok(()) }
-            Opcode::ShlEdI1 => { self.shl_ed_1(instr); Ok(()) }
-            Opcode::ShlEd => { self.shl_ed_cl(instr); Ok(()) }
-            Opcode::ShlEdIb => { self.shl_ed_ib(instr); Ok(()) }
-            
-            Opcode::ShrEbI1 => { self.shr_eb_1(instr); Ok(()) }
-            Opcode::ShrEb => { self.shr_eb_cl(instr); Ok(()) }
-            Opcode::ShrEwI1 => { self.shr_ew_1(instr); Ok(()) }
-            Opcode::ShrEw => { self.shr_ew_cl(instr); Ok(()) }
-            Opcode::ShrEwIb => { self.shr_ew_ib(instr); Ok(()) }
-            Opcode::ShrEdI1 => { self.shr_ed_1(instr); Ok(()) }
-            Opcode::ShrEd => { self.shr_ed_cl(instr); Ok(()) }
-            
+            Opcode::ShlEbI1 => {
+                self.shl_eb_1(instr);
+                Ok(())
+            }
+            Opcode::ShlEb => {
+                self.shl_eb_cl(instr);
+                Ok(())
+            }
+            Opcode::ShlEbIb => {
+                self.shl_eb_ib(instr);
+                Ok(())
+            }
+            Opcode::ShlEwI1 => {
+                self.shl_ew_1(instr);
+                Ok(())
+            }
+            Opcode::ShlEw => {
+                self.shl_ew_cl(instr);
+                Ok(())
+            }
+            Opcode::ShlEwIb => {
+                self.shl_ew_ib(instr);
+                Ok(())
+            }
+            Opcode::ShlEdI1 => {
+                self.shl_ed_1(instr);
+                Ok(())
+            }
+            Opcode::ShlEd => {
+                self.shl_ed_cl(instr);
+                Ok(())
+            }
+            Opcode::ShlEdIb => {
+                self.shl_ed_ib(instr);
+                Ok(())
+            }
+            Opcode::SarEbIb => {
+                self.sar_eb_ib(instr);
+                Ok(())
+            }
+
+            Opcode::ShrEbI1 => {
+                self.shr_eb_1(instr);
+                Ok(())
+            }
+            Opcode::ShrEb => {
+                self.shr_eb_cl(instr);
+                Ok(())
+            }
+            Opcode::ShrEwI1 => {
+                self.shr_ew_1(instr);
+                Ok(())
+            }
+            Opcode::ShrEw => {
+                self.shr_ew_cl(instr);
+                Ok(())
+            }
+            Opcode::ShrEwIb => {
+                self.shr_ew_ib(instr);
+                Ok(())
+            }
+            Opcode::ShrEdI1 => {
+                self.shr_ed_1(instr);
+                Ok(())
+            }
+            Opcode::ShrEd => {
+                self.shr_ed_cl(instr);
+                Ok(())
+            }
+
             // =========================================================================
             // Data transfer extensions
             // =========================================================================
-            Opcode::LeaGwM => { self.lea_gw_m(instr); Ok(()) }
-            Opcode::LeaGdM => { self.lea_gd_m(instr); Ok(()) }
-            Opcode::XchgEwGw => { self.xchg_ew_gw(instr); Ok(()) }
-            Opcode::XchgEdGd => { self.xchg_ed_gd(instr); Ok(()) }
-            Opcode::Cbw => { self.cbw(instr); Ok(()) }
-            Opcode::Cwd => { self.cwd(instr); Ok(()) }
-            Opcode::Cwde => { self.cwde(instr); Ok(()) }
-            Opcode::Cdq => { self.cdq(instr); Ok(()) }
-            Opcode::Xlat => { self.xlat(instr); Ok(()) }
-            Opcode::Lahf => { self.lahf(instr); Ok(()) }
-            Opcode::Sahf => { self.sahf(instr); Ok(()) }
-            
+            Opcode::LeaGwM => {
+                self.lea_gw_m(instr);
+                Ok(())
+            }
+            Opcode::LeaGdM => {
+                self.lea_gd_m(instr);
+                Ok(())
+            }
+            Opcode::XchgEwGw => {
+                self.xchg_ew_gw(instr);
+                Ok(())
+            }
+            Opcode::XchgEdGd => {
+                self.xchg_ed_gd(instr);
+                Ok(())
+            }
+            Opcode::Cbw => {
+                self.cbw(instr);
+                Ok(())
+            }
+            Opcode::Cwd => {
+                self.cwd(instr);
+                Ok(())
+            }
+            Opcode::Cwde => {
+                self.cwde(instr);
+                Ok(())
+            }
+            Opcode::Cdq => {
+                self.cdq(instr);
+                Ok(())
+            }
+            Opcode::Xlat => {
+                self.xlat(instr);
+                Ok(())
+            }
+            Opcode::Lahf => {
+                self.lahf(instr);
+                Ok(())
+            }
+            Opcode::Sahf => {
+                self.sahf(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // BCD (Binary Coded Decimal) instructions
+            // =========================================================================
+            Opcode::Das => crate::cpu::bcd::DAS(self, instr),
+
             _ => {
-                tracing::trace!("Unimplemented opcode: {:?}", instr.get_ia_opcode());
-                Ok(()) // unsupported -- treat as NOP for now
+                tracing::error!("Unimplemented opcode: {:?}", instr.get_ia_opcode());
+                Err(crate::cpu::CpuError::UnimplementedOpcode {
+                    opcode: format!("{:?}", instr.get_ia_opcode()),
+                })
             }
         }
     }
@@ -1630,12 +2358,24 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
         self.eflags &= !MASK;
 
-        if cf { self.eflags |= 1 << 0; }
-        if pf { self.eflags |= 1 << 2; }
-        if af { self.eflags |= 1 << 4; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
-        if of { self.eflags |= 1 << 11; }
+        if cf {
+            self.eflags |= 1 << 0;
+        }
+        if pf {
+            self.eflags |= 1 << 2;
+        }
+        if af {
+            self.eflags |= 1 << 4;
+        }
+        if zf {
+            self.eflags |= 1 << 6;
+        }
+        if sf {
+            self.eflags |= 1 << 7;
+        }
+        if of {
+            self.eflags |= 1 << 11;
+        }
     }
 
     pub(super) fn update_flags_add16(&mut self, op1: u16, op2: u16, result: u16) {
@@ -1649,12 +2389,24 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
         self.eflags &= !MASK;
 
-        if cf { self.eflags |= 1 << 0; }
-        if pf { self.eflags |= 1 << 2; }
-        if af { self.eflags |= 1 << 4; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
-        if of { self.eflags |= 1 << 11; }
+        if cf {
+            self.eflags |= 1 << 0;
+        }
+        if pf {
+            self.eflags |= 1 << 2;
+        }
+        if af {
+            self.eflags |= 1 << 4;
+        }
+        if zf {
+            self.eflags |= 1 << 6;
+        }
+        if sf {
+            self.eflags |= 1 << 7;
+        }
+        if of {
+            self.eflags |= 1 << 11;
+        }
     }
 
     pub(super) fn update_flags_sub8(&mut self, op1: u8, op2: u8, result: u8) {
@@ -1668,12 +2420,24 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
         self.eflags &= !MASK;
 
-        if cf { self.eflags |= 1 << 0; }
-        if pf { self.eflags |= 1 << 2; }
-        if af { self.eflags |= 1 << 4; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
-        if of { self.eflags |= 1 << 11; }
+        if cf {
+            self.eflags |= 1 << 0;
+        }
+        if pf {
+            self.eflags |= 1 << 2;
+        }
+        if af {
+            self.eflags |= 1 << 4;
+        }
+        if zf {
+            self.eflags |= 1 << 6;
+        }
+        if sf {
+            self.eflags |= 1 << 7;
+        }
+        if of {
+            self.eflags |= 1 << 11;
+        }
     }
 
     pub(super) fn update_flags_sub16(&mut self, op1: u16, op2: u16, result: u16) {
@@ -1687,46 +2451,82 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
         self.eflags &= !MASK;
 
-        if cf { self.eflags |= 1 << 0; }
-        if pf { self.eflags |= 1 << 2; }
-        if af { self.eflags |= 1 << 4; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
-        if of { self.eflags |= 1 << 11; }
+        if cf {
+            self.eflags |= 1 << 0;
+        }
+        if pf {
+            self.eflags |= 1 << 2;
+        }
+        if af {
+            self.eflags |= 1 << 4;
+        }
+        if zf {
+            self.eflags |= 1 << 6;
+        }
+        if sf {
+            self.eflags |= 1 << 7;
+        }
+        if of {
+            self.eflags |= 1 << 11;
+        }
     }
 
     pub(super) fn update_flags_logic8(&mut self, result: u8) {
         self.eflags &= !((1 << 11) | (1 << 0)); // OF=0, CF=0
-        if (result & 0x80) != 0 { self.eflags |= 1 << 7; } else { self.eflags &= !(1 << 7); }
-        if result == 0 { self.eflags |= 1 << 6; } else { self.eflags &= !(1 << 6); }
-        if (result.count_ones() % 2) == 0 { self.eflags |= 1 << 2; } else { self.eflags &= !(1 << 2); }
+        if (result & 0x80) != 0 {
+            self.eflags |= 1 << 7;
+        } else {
+            self.eflags &= !(1 << 7);
+        }
+        if result == 0 {
+            self.eflags |= 1 << 6;
+        } else {
+            self.eflags &= !(1 << 6);
+        }
+        if (result.count_ones() % 2) == 0 {
+            self.eflags |= 1 << 2;
+        } else {
+            self.eflags &= !(1 << 2);
+        }
     }
 
     pub(super) fn update_flags_logic16(&mut self, result: u16) {
         self.eflags &= !((1 << 11) | (1 << 0)); // OF=0, CF=0
-        if (result & 0x8000) != 0 { self.eflags |= 1 << 7; } else { self.eflags &= !(1 << 7); }
-        if result == 0 { self.eflags |= 1 << 6; } else { self.eflags &= !(1 << 6); }
-        if (((result & 0xFF) as u8).count_ones() % 2) == 0 { self.eflags |= 1 << 2; } else { self.eflags &= !(1 << 2); }
+        if (result & 0x8000) != 0 {
+            self.eflags |= 1 << 7;
+        } else {
+            self.eflags &= !(1 << 7);
+        }
+        if result == 0 {
+            self.eflags |= 1 << 6;
+        } else {
+            self.eflags &= !(1 << 6);
+        }
+        if (((result & 0xFF) as u8).count_ones() % 2) == 0 {
+            self.eflags |= 1 << 2;
+        } else {
+            self.eflags &= !(1 << 2);
+        }
     }
 
     pub(super) fn update_flags_logic32(&mut self, result: u32) {
         // Clear OF, CF (always 0 for logical operations)
         self.eflags &= !((1 << 11) | (1 << 0)); // OF=0, CF=0
-        
+
         // Set SF (sign flag) - bit 7 of result for 32-bit
         if (result & 0x80000000) != 0 {
             self.eflags |= 1 << 7;
         } else {
             self.eflags &= !(1 << 7);
         }
-        
+
         // Set ZF (zero flag) - bit 6
         if result == 0 {
             self.eflags |= 1 << 6;
         } else {
             self.eflags &= !(1 << 6);
         }
-        
+
         // Set PF (parity flag) - bit 2, based on low 8 bits
         let low_byte = (result & 0xFF) as u8;
         let ones = low_byte.count_ones();
@@ -1749,7 +2549,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     //  * page boundary:            4k
     //  * ROM boundary:             2k (dont care since we are only reading)
     //  * segment boundary:         any
-    fn prefetch(&mut self, mem: &'c mut BxMemC<'c>, cpus: &[&Self]) -> Result<()> {
+    pub(super) fn prefetch(&mut self, mem: &'c mut BxMemC<'c>, cpus: &[&Self]) -> Result<()> {
         // let cpus = [&self];
         let mut laddr: BxAddress;
         let mut page_offset;
@@ -1779,11 +2579,29 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
             self.bx_clear_64bit_high(BX_64BIT_REG_RIP); /* avoid 32-bit EIP wrap */
 
-            laddr = BxAddress::from(self.get_laddr32(BxSegregs::Cs as _, self.eip()));
+            // In real mode, EIP is 16-bit - mask it to prevent overflow
+            // Matching behavior: ensure EIP doesn't exceed 16-bit range in real mode
+            let eip_raw = self.eip();
+            let eip = if self.real_mode() {
+                // In real mode, EIP is effectively 16-bit (though stored as 32-bit)
+                // Mask to 16 bits to match original behavior
+                eip_raw & 0xFFFF
+            } else {
+                eip_raw
+            };
+
+            // If EIP was masked, update it (matching C++ vm8086.cc:109: EIP = new_eip & 0xffff)
+            if self.real_mode() && eip != eip_raw {
+                self.set_eip(eip);
+            }
+
+            laddr = BxAddress::from(self.get_laddr32(BxSegregs::Cs as _, eip));
+            let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+            tracing::info!("prefetch: CS.base={:#x}, EIP={:#x}, laddr={:#x}", cs_base, eip, laddr);
             page_offset = super::tlb::page_offset(laddr);
 
             // Calculate RIP at the beginning of the page.
-            self.eip_page_bias = BxAddress::from(page_offset.wrapping_sub(self.eip()));
+            let eip_page_bias_calc = BxAddress::from(page_offset.wrapping_sub(eip));
 
             let limit: u32 = unsafe {
                 self.sregs[BxSegregs::Cs as usize]
@@ -1792,12 +2610,35 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     .segment
                     .limit_scaled
             };
-
-            let eip = self.eip();
             if eip > limit {
+                // Matching C++ cpu.cc:656-659 - raise exception (does not return normally)
                 tracing::error!("prefetch: EIP [{eip:#x}] > CS.limit [{limit:#x}]",);
+                // In C++, exception() uses setjmp/longjmp and doesn't return here
+                // In Rust, exception() returns Ok(()), but control was transferred to handler
+                self.eip_page_bias = 0; // Reset to prevent using stale value
                 self.exception(Exception::Gp, 0)?;
+                // After exception handler runs, check if the new EIP is valid
+                // If not, we're in a loop (exception handler also has invalid EIP)
+                let new_eip = self.eip();
+                let new_limit: u32 = unsafe {
+                    self.sregs[BxSegregs::Cs as usize]
+                        .cache
+                        .u
+                        .segment
+                        .limit_scaled
+                };
+                if new_eip > new_limit {
+                    // Exception handler set invalid EIP - this would cause double-fault in real hardware
+                    tracing::error!("prefetch: exception handler set invalid EIP [{new_eip:#x}] > CS.limit [{new_limit:#x}] - double-fault condition");
+                    // Return error to stop infinite loop - this is a serious error condition
+                    return Err(crate::cpu::CpuError::CpuNotInitialized);
+                }
+                // Control was transferred - abort prefetch and let retry logic handle it
+                return Ok(());
             }
+
+            // Only set eip_page_bias if limit check passed (matching C++ order)
+            self.eip_page_bias = eip_page_bias_calc;
 
             self.eip_page_window_size = 4096;
 
@@ -1811,18 +2652,49 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // '''
         self.clear_rf();
         let lpf = lpf_of(laddr);
-        let tlb_entry = self.itlb.get_entry_of(laddr, 0);
 
-        let fetch_ptr_option = if (tlb_entry.lpf == lpf)
-            && (tlb_entry.access_bits & (1 << u32::from(self.user_pl))) != 0
-        {
-            self.p_addr_fetch_page = tlb_entry.ppf;
-            Some(tlb_entry.host_page_addr)
+        // Check TLB entry - extract values to avoid holding mutable borrow
+        let (tlb_hit, tlb_ppf, tlb_host_addr) = {
+            let tlb_entry = self.itlb.get_entry_of(laddr, 0);
+            let hit = (tlb_entry.lpf == lpf)
+                && (tlb_entry.access_bits & (1 << u32::from(self.user_pl))) != 0;
+            (hit, tlb_entry.ppf, tlb_entry.host_page_addr)
+        };
+
+        let fetch_ptr_option = if tlb_hit {
+            self.p_addr_fetch_page = tlb_ppf;
+            Some(tlb_host_addr)
         } else {
-            let p_addr =
-                translate_linear(tlb_entry, laddr, self.user_pl, MemoryAccessType::Execute, mem.a20_mask());
-            self.p_addr_fetch_page = ppf_of(p_addr);
-            None
+            // TLB miss - need to walk page tables
+            // Create a dummy page_write_stamp_table for page table walking
+            let mut dummy_mapping: [u32; 0] = [];
+            let mut dummy_stamp_table = crate::cpu::icache::BxPageWriteStampTable {
+                fine_granularity_mapping: &mut dummy_mapping,
+            };
+            // Get a20_mask before borrowing mem mutably
+            let a20_mask = mem.a20_mask();
+            // Create a dummy TLB entry (not actually used for page walk)
+            let dummy_tlb_entry = unsafe { core::mem::zeroed::<TLBEntry>() };
+            match self.translate_linear(
+                &dummy_tlb_entry,
+                laddr,
+                self.user_pl,
+                MemoryAccessType::Execute,
+                a20_mask,
+                mem,
+                &mut dummy_stamp_table,
+            ) {
+                Ok(p_addr) => {
+                    self.p_addr_fetch_page = ppf_of(p_addr);
+                    tracing::info!("prefetch: translate_linear OK, p_addr={:#x}, p_addr_fetch_page={:#x}", p_addr, self.p_addr_fetch_page);
+                    None
+                }
+                Err(_) => {
+                    // Page fault occurred, exception was raised
+                    // Return None to indicate we need to handle the exception
+                    None
+                }
+            }
         };
 
         if let Some(fetch_ptr) = fetch_ptr_option {
@@ -1837,9 +2709,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             let p_addr_fetch_page = self.p_addr_fetch_page.clone();
 
             match self.get_host_mem_addr(p_addr_fetch_page, MemoryAccessType::Execute, mem) {
-                Ok(Some(fetch_ptr)) => {
-                    self.eip_fetch_ptr = Some(fetch_ptr)
-                }
+                Ok(Some(fetch_ptr)) => self.eip_fetch_ptr = Some(fetch_ptr),
                 Ok(None) => {
                     self.eip_fetch_ptr = None;
                 }
@@ -1869,4 +2739,3 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.in_smm
     }
 }
-

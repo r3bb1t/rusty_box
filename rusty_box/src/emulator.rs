@@ -8,6 +8,7 @@
 
 use crate::{
     cpu::{builder::BxCpuBuilder, BxCpuC, BxCpuIdTrait, ResetReason},
+    gui::BxGui,
     iodev::{devices::{SystemControlPort, DeviceManager}, BxDevicesC},
     memory::{BxMemC, BxMemoryStubC},
     params::BxParams,
@@ -86,6 +87,8 @@ pub struct Emulator<'a, I: BxCpuIdTrait> {
     config: EmulatorConfig,
     /// Whether the emulator has been initialized
     initialized: bool,
+    /// GUI instance (optional, can be None for headless operation)
+    gui: Option<Box<dyn BxGui>>,
 }
 
 impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
@@ -97,23 +100,14 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Create PC system
         let pc_system = BxPcSystemC::new();
 
-        // Create memory
+        // Create memory (but don't initialize yet - that's done in initialize() to match original)
+        // In original Bochs, BX_MEM(0) is created first, then init_memory() is called in bx_init_hardware()
         let mem_stub = BxMemoryStubC::create_and_init(
             config.guest_memory_size,
             config.host_memory_size,
             config.memory_block_size,
         )?;
-        let mut memory = BxMemC::new(mem_stub, config.pci_enabled);
-
-        // Initialize memory with the same parameters
-        memory.init_memory(
-            config.guest_memory_size,
-            config.host_memory_size,
-            config.memory_block_size,
-        )?;
-
-        // Sync A20 mask from PC system
-        memory.set_a20_mask(pc_system.a20_mask());
+        let memory = BxMemC::new(mem_stub, config.pci_enabled);
 
         // Create devices (I/O port handlers)
         let devices = BxDevicesC::new();
@@ -134,17 +128,27 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             system_control: SystemControlPort::new(),
             config,
             initialized: false,
+            gui: None,
         })
     }
 
     /// Initialize the emulator
     ///
-    /// This runs the full initialization sequence from Bochs main.cc:1300-1363:
-    /// 1. PC system initialization (timers, IPS)
-    /// 2. Memory initialization (already done in new())
-    /// 3. CPU initialization
-    /// 4. Device initialization
-    /// 5. State registration
+    /// This runs the full initialization sequence from Bochs main.cc:1192-1401 (bx_init_hardware):
+    /// 1. PC system initialization (timers, IPS) - line 1201
+    /// 2. Memory initialization - line 1312
+    /// 3. BIOS load - line 1315-1316 (done via load_bios() after this call)
+    /// 4. Optional ROM load - line 1319-1325 (done via load_optional_rom())
+    /// 5. Optional RAM load - line 1328-1334 (done via load_ram())
+    /// 6. CPU initialization - line 1337
+    /// 7. CPU sanity checks - line 1338
+    /// 8. CPU register state - line 1339
+    /// 9. Device initialization - line 1353
+    /// 10. PC system register state - line 1356
+    /// 11. Device register state - line 1357
+    /// 12. Reset - line 1363 (done via reset() after this call)
+    /// 13. GUI signal handlers - line 1383 (done via init_gui() or after reset)
+    /// 14. Start timers - line 1384 (done in reset())
     ///
     /// After this, call `load_bios()` to load a BIOS image, then `reset()` and `run()`.
     pub fn initialize(&mut self) -> Result<()> {
@@ -155,34 +159,163 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
         tracing::info!("Initializing emulator");
 
-        // Step 1: Initialize PC system with IPS
+        // Step 1: Initialize PC system with IPS (line 1201)
         self.pc_system.initialize(self.config.ips);
         tracing::debug!("PC system initialized with {} IPS", self.config.ips);
 
-        // Step 2: Memory is already initialized in new()
-        // Sync A20 mask
+        // Step 2: Memory initialization (line 1312)
+        // In original: BX_MEM(0)->init_memory(memSize, hostMemSize, memBlockSize);
+        self.memory.init_memory(
+            self.config.guest_memory_size,
+            self.config.host_memory_size,
+            self.config.memory_block_size,
+        )?;
+        
+        // Sync A20 mask from PC system (after memory init, matching original)
         self.memory.set_a20_mask(self.pc_system.a20_mask());
+        tracing::debug!("Memory initialized and A20 mask synced");
 
-        // Step 3: Initialize CPU
+        // Step 3-5: BIOS/ROM/RAM loading is done via separate methods (load_bios, load_optional_rom, load_ram)
+        // These should be called after initialize() but before reset()
+
+        // Step 6: Initialize CPU (line 1337)
         self.cpu.initialize(self.config.cpu_params.clone())?;
         tracing::debug!("CPU initialized");
-
-        // Step 4: Initialize devices (I/O port handlers)
-        self.devices.init(&mut self.memory)?;
         
-        // Step 4b: Initialize device manager (actual hardware + I/O handler registration)
-        self.device_manager.init(&mut self.devices)?;
+        // Step 7: CPU sanity checks (line 1338) - separate call to match original
+        self.cpu.sanity_checks()?;
+        tracing::debug!("CPU sanity checks passed");
+        
+        // Step 8: Register CPU state (line 1339)
+        self.cpu.register_state();
+        tracing::debug!("CPU state registered");
+
+        // Note: BX_INSTR_INITIALIZE(0) at line 1340 is instrumentation initialization
+        // This is optional and not yet implemented in Rust version
+
+        // Step 9: Initialize devices (line 1353)
+        // Pass pointer to system_control for Port 92h handling
+        let port92_ptr = &mut self.system_control as *mut SystemControlPort;
+        self.devices.init(&mut self.memory, Some(port92_ptr))?;
+        
+        // Initialize device manager (actual hardware + I/O handler registration)
+        self.device_manager.init(&mut self.devices, &mut self.memory)?;
         tracing::debug!("Devices initialized");
 
-        // Step 5: Register state for save/restore
+        // Note: SIM->opt_plugin_ctrl("*", 0) at line 1355 unloads unused optional plugins
+        // This is optional plugin management, not yet implemented in Rust version
+
+        // Step 10: PC system register state (line 1356)
         self.pc_system.register_state();
+        
+        // Step 11: Device register state (line 1357)
         self.devices.register_state()?;
         tracing::debug!("State registered");
+        
+        // Note: bx_set_log_actions_by_device(1) at line 1359 sets up logging per device
+        // This is only called if not restoring state, and is optional logging setup
 
         self.initialized = true;
         tracing::info!("Emulator initialization complete");
 
+        // Note: Steps 12-14 (Reset, GUI signal handlers, Start timers) are done via:
+        // - reset() method (called after BIOS loading)
+        // - init_gui() method (calls init_signal_handlers)
+        // - reset() also calls start_timers()
+
         Ok(())
+    }
+
+    /// Set the GUI instance
+    ///
+    /// Based on load_and_init_display_lib() in main.cc:964-1006
+    pub fn set_gui<G: BxGui + 'static>(&mut self, gui: G) {
+        self.gui = Some(Box::new(gui));
+        tracing::info!("GUI set");
+    }
+
+    /// Initialize the GUI
+    ///
+    /// Based on bx_init_hardware() GUI initialization in main.cc:1017-1020
+    /// This calls specific_init() to set up the GUI, but signal handlers are
+    /// initialized separately via init_gui_signal_handlers() after reset.
+    pub fn init_gui(&mut self, argc: i32, argv: &[String]) -> Result<()> {
+        if let Some(ref mut gui) = self.gui {
+            gui.specific_init(argc, argv, 32); // BX_HEADER_BAR_Y = 32
+            gui.update_drive_status_buttons();
+            
+            // Connect keyboard callback if GUI supports it
+            self.connect_keyboard_callback();
+            
+            tracing::info!("GUI initialized (signal handlers will be set up after reset)");
+        } else {
+            tracing::warn!("No GUI set, running headless");
+        }
+        Ok(())
+    }
+
+    /// Connect keyboard callback from GUI to keyboard device
+    /// (No-op now - we use queue-based approach instead)
+    fn connect_keyboard_callback(&mut self) {
+        // Keyboard input is now handled via get_pending_scancodes() in the event loop
+    }
+
+    /// Get mutable reference to GUI (if set)
+    pub fn gui_mut(&mut self) -> Option<&mut (dyn BxGui + 'static)> {
+        self.gui.as_deref_mut()
+    }
+
+    /// Get reference to GUI (if set)
+    pub fn gui(&self) -> Option<&(dyn BxGui + 'static)> {
+        self.gui.as_deref()
+    }
+
+    /// Update GUI with VGA text mode changes
+    ///
+    /// Call this periodically to refresh the display
+    /// Update GUI with current VGA state
+    /// Always updates (periodic refresh like Bochs timer)
+    pub fn update_gui(&mut self) {
+        // Check dirty flag for logging, but always update (like Bochs periodic timer)
+        let is_dirty = self.device_manager.vga.is_text_dirty();
+        if is_dirty {
+            tracing::debug!("update_gui: Text is dirty, updating display");
+        }
+
+        if let Some(ref mut gui) = self.gui {
+            // Get VGA text memory
+            let text_mem = self.device_manager.vga.get_text_memory();
+            
+            // Create VGA text mode info
+            use crate::gui::VgaTextModeInfo;
+            let tm_info = VgaTextModeInfo {
+                start_address: 0,
+                cs_start: 0,
+                cs_end: 0,
+                line_offset: 160, // 80 columns * 2 bytes
+                line_compare: 0,
+                h_panning: 0,
+                v_panning: 0,
+                line_graphics: false,
+                split_hpanning: false,
+                blink_flags: 0,
+                actl_palette: [0; 16],
+            };
+
+            // Get cursor position from VGA
+            let (cursor_row, cursor_col) = self.device_manager.vga.get_cursor_position();
+            
+            // Create a zero-initialized buffer as old_text for comparison
+            // The GUI will compare this with new_text to detect changes
+            // For the first call, this will be all zeros, so all characters will be rendered
+            let old_text = vec![0u8; text_mem.len()];
+            
+            gui.text_update(&old_text, text_mem, cursor_col, cursor_row, &tm_info);
+            gui.flush();
+            
+            // Clear dirty flag after updating GUI
+            self.device_manager.vga.clear_text_dirty();
+        }
     }
 
     /// Load a BIOS ROM image
@@ -207,6 +340,19 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         Ok(())
     }
 
+    /// Load an optional RAM image
+    ///
+    /// Based on `BX_MEM(0)->load_RAM()` in Bochs main.cc
+    ///
+    /// # Arguments
+    /// * `ram_data` - Raw RAM image data
+    /// * `address` - Load address in physical memory
+    pub fn load_ram(&mut self, ram_data: &[u8], address: u64) -> Result<()> {
+        self.memory.load_RAM(ram_data, address)?;
+        tracing::info!("Loaded RAM image ({} bytes) at {:#x}", ram_data.len(), address);
+        Ok(())
+    }
+
     /// Perform a system reset
     ///
     /// This corresponds to `bx_pc_system.Reset()` in Bochs.
@@ -226,18 +372,51 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.cpu.reset(reset_type);
 
         // Reset devices (only on hardware reset)
+        // Matches original: DEV_reset_devices(type) at pc_system.cc:201
+        // which calls bx_devices_c::reset() at devices.cc:398-411
         if matches!(reset_type, ResetReason::Hardware) {
+            // Original bx_devices_c::reset() does (in order):
+            // 1. Clear PCI confAddr if PCI enabled (line 402) - done in devices.reset()
+            // 2. mem->disable_smram() (line 405) - disable SMRAM
+            // 3. bx_reset_plugins(type) (line 406) - reset all device plugins
+            // 4. release_keys() (line 407) - release keyboard keys
+            // 5. paste.stop = 1 (line 409) - stop paste buffer
+            
+            // Step 1: Clear PCI confAddr (done in devices.reset())
             self.devices.reset(reset_type)?;
+            
+            // Step 2: Disable SMRAM (matches original line 405: mem->disable_smram())
+            self.memory.disable_smram();
+            
+            // Step 3: Reset all device plugins (matches original line 406: bx_reset_plugins())
+            // This resets all devices: PIC, PIT, CMOS, DMA, Keyboard, HardDrive, VGA
             self.device_manager.reset(reset_type)?;
+            
+            // Note: release_keys() at line 407 and paste.stop at line 409 not yet implemented
         }
 
         // Reset system control port state
         self.system_control = SystemControlPort::new();
 
+        // Note: start_timers() is called separately after GUI signal handlers
+        // to match original Bochs order: reset -> init_signal_handlers -> start_timers
+
         Ok(())
     }
 
+    /// Initialize GUI signal handlers
+    ///
+    /// This should be called after reset() and before start_timers() to match
+    /// original Bochs sequence (line 1383).
+    pub fn init_gui_signal_handlers(&mut self) {
+        if let Some(ref mut gui) = self.gui {
+            gui.init_signal_handlers();
+            tracing::debug!("GUI signal handlers initialized");
+        }
+    }
+
     /// Start timers and prepare for execution
+    /// Note: Timers are now started in reset(), so this is mostly for compatibility
     pub fn start(&mut self) {
         self.pc_system.start_timers();
         tracing::debug!("Timers started");
@@ -348,6 +527,111 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     /// Configure CMOS hard drive
     pub fn configure_disk_in_cmos(&mut self, drive_num: u8, drive_type: u8) {
         self.device_manager.cmos.set_hard_drive(drive_num, drive_type);
+    }
+
+    /// Run emulator interactively with GUI event handling
+    ///
+    /// This method integrates CPU execution with GUI event processing:
+    /// - Handles keyboard input from GUI
+    /// - Updates GUI display periodically
+    /// - Processes device interrupts
+    /// - Executes CPU instructions in batches
+    ///
+    /// Returns the number of instructions executed, or an error.
+    pub fn run_interactive(&mut self, max_instructions: u64) -> Result<u64> 
+    where
+        'a: 'static, // Required for unsafe transmute
+    {
+        self.prepare_run();
+        
+        // Force initial GUI update to show initial state
+        // Mark as dirty to force initial render
+        self.device_manager.vga.force_text_dirty();
+        self.update_gui(); // Force initial update
+        
+        let mut instructions_executed = 0u64;
+        let mut last_gui_update = std::time::Instant::now();
+        const GUI_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100); // Update every 100ms
+        
+        const INSTRUCTION_BATCH_SIZE: u64 = 10000; // Larger batch size for better performance
+        
+        tracing::info!("Starting interactive execution loop");
+        tracing::warn!("[Emulator] Starting execution... (instructions will be processed in batches)");
+        
+        while instructions_executed < max_instructions {
+            // 1. Handle GUI events (keyboard input) - do this first to avoid borrow conflicts
+            let mut scancodes_to_send = Vec::new();
+            if let Some(ref mut gui) = self.gui {
+                gui.handle_events();
+                scancodes_to_send = gui.get_pending_scancodes();
+            }
+            
+            // Send scancodes to keyboard device
+            for scancode in scancodes_to_send {
+                self.device_manager.keyboard.send_scancode(scancode);
+            }
+            
+            // 2. Check for keyboard interrupts and raise via PIC
+            if self.device_manager.keyboard.check_irq1() {
+                self.device_manager.pic.raise_irq(1);
+            }
+            
+            // 3. Execute CPU instructions in batches
+            let batch_size = (max_instructions - instructions_executed).min(INSTRUCTION_BATCH_SIZE);
+            // Use unsafe to work around lifetime issues - the memory borrow is safe because
+            // we control the lifetime and the CPU doesn't outlive the memory
+            let result = unsafe {
+                let mem_extended: &'a mut BxMemC<'a> = 
+                    core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory);
+                self.cpu.cpu_loop_n(mem_extended, &[], batch_size)
+            };
+            
+            let should_update_gui = match result {
+                Ok(executed) => {
+                    instructions_executed += executed;
+                    
+                    // Progress logging removed per user request
+                    
+                    // 4. Check if GUI should be updated
+                    // Update when text is dirty, or periodically to catch any missed updates
+                    let text_dirty = self.device_manager.vga.is_text_dirty();
+                    let time_since_update = last_gui_update.elapsed();
+                    // Update if text changed OR periodically (like Bochs timer-based updates)
+                    let should_update = text_dirty || time_since_update >= GUI_UPDATE_INTERVAL;
+                    
+                    // Update timestamp if we're going to update
+                    if should_update {
+                        last_gui_update = std::time::Instant::now();
+                    }
+                    
+                    should_update
+                }
+                Err(e) => {
+                    tracing::error!("CPU execution error: {:?}", e);
+                    tracing::warn!("[Emulator] ERROR: {:?}", e);
+                    return Err(crate::Error::Cpu(e));
+                }
+            };
+            
+            // Check for interrupts from devices (after CPU execution completes)
+            if self.has_interrupt() {
+                let _vector = self.iac();
+                // CPU will handle interrupt in its async event processing
+                // For now, we rely on CPU checking interrupts itself
+            }
+            
+            // Update GUI after CPU execution (outside the match to avoid borrow conflicts)
+            // Update more frequently if text is dirty OR periodically (like Bochs timer)
+            if should_update_gui {
+                self.update_gui();
+            }
+            
+            // 5. Check if we should exit (e.g., shutdown requested)
+            // TODO: Add shutdown flag check
+        }
+        
+        tracing::warn!("Interactive execution completed: {} instructions", instructions_executed);
+        Ok(instructions_executed)
     }
 }
 

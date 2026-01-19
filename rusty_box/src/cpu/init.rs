@@ -55,7 +55,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.svm_extensions_bitmask = self.cpuid.get_svm_extensions_bitmask();
         self.svm_extensions_bitmask = self.cpuid.get_svm_extensions_bitmask();
 
-        self.sanity_checks()?;
+        // Note: sanity_checks() is called separately after initialize() to match original Bochs
+        // Original order: initialize() -> sanity_checks() -> register_state()
 
         self.init_fetch_decode_tables()?;
 
@@ -453,9 +454,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Not now
     }
 
-    fn sanity_checks(&mut self) -> Result<()> {
+    /// Perform CPU sanity checks
+    /// 
+    /// Called after initialize() and before register_state() to match original Bochs order.
+    /// Original: BX_CPU(0)->initialize(); BX_CPU(0)->sanity_checks(); BX_CPU(0)->register_state();
+    pub fn sanity_checks(&mut self) -> Result<()> {
         // Late
         Ok(())
+    }
+
+    /// Register state for save/restore functionality
+    /// Called after initialize() and sanity_checks() in original Bochs
+    pub fn register_state(&self) {
+        // TODO: Implement state registration for save/restore
+        tracing::debug!("CPU state registered");
     }
 
     /// Sets the VMCS pointer and performs associated memory mapping setup

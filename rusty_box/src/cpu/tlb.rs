@@ -197,6 +197,20 @@ impl<const SIZE: usize> Tlb<SIZE> {
             entry.invalidate();
         }
     }
+
+    /// Check if any TLB entry's host page address falls within the given range
+    /// Used for large RAM file feature to check if address is in TLB buffers
+    pub fn check_addr_in_tlb_buffers(&self, addr_ptr: usize, end_ptr: usize) -> bool {
+        for entry in &self.entries {
+            if entry.valid() {
+                let host_page_addr = entry.host_page_addr as usize;
+                if host_page_addr >= addr_ptr && host_page_addr < end_ptr {
+                    return true;
+                }
+            }
+        }
+        false
+    }
 }
 
 #[inline]

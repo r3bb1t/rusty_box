@@ -47,4 +47,18 @@ pub enum MemoryError {
     RomAddressOutOfRange,
     #[error("ROM address space {0:#x} already in use")]
     RomAddressAlreadyInUse(usize),
+
+    // Memory handlers
+    #[error("Invalid address range for memory handler")]
+    InvalidAddressRange,
+    #[error("Invalid memory handler")]
+    InvalidHandler,
+    #[error("Overlapping memory handlers")]
+    OverlappingHandlers,
+
+    // Paging errors (converted to CPU page faults)
+    #[error("Page not present")]
+    PageNotPresent,
+    #[error("Page protection violation")]
+    PageProtectionViolation,
 }

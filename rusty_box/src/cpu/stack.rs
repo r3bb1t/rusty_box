@@ -23,59 +23,73 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b }
     }
 
-    /// Push a 16-bit value onto the stack (register-only version)
-    pub fn push_16(&mut self, _value: u16) {
+    /// Push a 16-bit value onto the stack
+    /// Based on BX_CPU_C::push_16 in stack.h:27
+    pub fn push_16(&mut self, value: u16) {
         if self.is_stack_32bit() {
             let esp = self.esp();
-            self.set_esp(esp.wrapping_sub(2));
+            let new_esp = esp.wrapping_sub(2);
+            self.stack_write_word(new_esp as u32, value);
+            self.set_esp(new_esp);
         } else {
             let sp = self.sp();
-            self.set_sp(sp.wrapping_sub(2));
+            let new_sp = sp.wrapping_sub(2);
+            self.stack_write_word(new_sp as u32, value);
+            self.set_sp(new_sp);
         }
-        // Note: Memory write would go here with full implementation
-        tracing::trace!("PUSH16: value would be written to stack");
+        tracing::trace!("PUSH16: value {:#x} written to stack", value);
     }
 
-    /// Pop a 16-bit value from the stack (register-only version)
+    /// Pop a 16-bit value from the stack
+    /// Based on BX_CPU_C::pop_16 in stack.h:81
     pub fn pop_16(&mut self) -> u16 {
-        // Note: Memory read would go here with full implementation
-        let value: u16 = 0; // Placeholder
-        
-        if self.is_stack_32bit() {
+        let value = if self.is_stack_32bit() {
             let esp = self.esp();
+            let value = self.stack_read_word(esp as u32);
             self.set_esp(esp.wrapping_add(2));
+            value
         } else {
             let sp = self.sp();
+            let value = self.stack_read_word(sp as u32);
             self.set_sp(sp.wrapping_add(2));
-        }
-        tracing::trace!("POP16: value would be read from stack");
+            value
+        };
+        tracing::trace!("POP16: value {:#x} read from stack", value);
         value
     }
 
-    /// Push a 32-bit value onto the stack (register-only version)
-    pub fn push_32(&mut self, _value: u32) {
+    /// Push a 32-bit value onto the stack
+    /// Based on BX_CPU_C::push_32 in stack.h:48
+    pub fn push_32(&mut self, value: u32) {
         if self.is_stack_32bit() {
             let esp = self.esp();
-            self.set_esp(esp.wrapping_sub(4));
+            let new_esp = esp.wrapping_sub(4);
+            self.stack_write_dword(new_esp, value);
+            self.set_esp(new_esp);
         } else {
             let sp = self.sp();
-            self.set_sp(sp.wrapping_sub(4));
+            let new_sp = sp.wrapping_sub(4);
+            self.stack_write_dword(new_sp as u32, value);
+            self.set_sp(new_sp);
         }
-        tracing::trace!("PUSH32: value would be written to stack");
+        tracing::trace!("PUSH32: value {:#x} written to stack", value);
     }
 
-    /// Pop a 32-bit value from the stack (register-only version)
+    /// Pop a 32-bit value from the stack
+    /// Based on BX_CPU_C::pop_32 in stack.h:105
     pub fn pop_32(&mut self) -> u32 {
-        let value: u32 = 0; // Placeholder
-        
-        if self.is_stack_32bit() {
+        let value = if self.is_stack_32bit() {
             let esp = self.esp();
+            let value = self.stack_read_dword(esp);
             self.set_esp(esp.wrapping_add(4));
+            value
         } else {
             let sp = self.sp();
+            let value = self.stack_read_dword(sp as u32);
             self.set_sp(sp.wrapping_add(4));
-        }
-        tracing::trace!("POP32: value would be read from stack");
+            value
+        };
+        tracing::trace!("POP32: value {:#x} read from stack", value);
         value
     }
 
@@ -231,5 +245,45 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         
         self.eflags = (self.eflags & !CHANGE_MASK) | (flags & CHANGE_MASK);
         tracing::trace!("POPFD: {:#010x}", flags);
+    }
+
+    // =========================================================================
+    // Stack memory access functions
+    // =========================================================================
+
+    /// Write a 16-bit value to stack at given offset (SS:offset)
+    /// Based on BX_CPU_C::stack_write_word in stack.cc:161
+    fn stack_write_word(&mut self, offset: u32, value: u16) {
+        // Get linear address from SS:offset using get_laddr32
+        let laddr = self.get_laddr32(BxSegregs::Ss as usize, offset);
+        // Write through memory subsystem
+        self.mem_write_word(laddr as u64, value);
+    }
+
+    /// Write a 32-bit value to stack at given offset (SS:offset)
+    /// Based on BX_CPU_C::stack_write_dword in stack.cc:194
+    fn stack_write_dword(&mut self, offset: u32, value: u32) {
+        // Get linear address from SS:offset using get_laddr32
+        let laddr = self.get_laddr32(BxSegregs::Ss as usize, offset);
+        // Write through memory subsystem
+        self.mem_write_dword(laddr as u64, value);
+    }
+
+    /// Read a 16-bit value from stack at given offset (SS:offset)
+    /// Based on BX_CPU_C::stack_read_word in stack.cc:282
+    fn stack_read_word(&self, offset: u32) -> u16 {
+        // Get linear address from SS:offset using get_laddr32
+        let laddr = self.get_laddr32(BxSegregs::Ss as usize, offset);
+        // Read through memory subsystem
+        self.mem_read_word(laddr as u64)
+    }
+
+    /// Read a 32-bit value from stack at given offset (SS:offset)
+    /// Based on BX_CPU_C::stack_read_dword in stack.cc:313
+    fn stack_read_dword(&self, offset: u32) -> u32 {
+        // Get linear address from SS:offset using get_laddr32
+        let laddr = self.get_laddr32(BxSegregs::Ss as usize, offset);
+        // Read through memory subsystem
+        self.mem_read_dword(laddr as u64)
     }
 }

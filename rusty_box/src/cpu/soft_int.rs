@@ -6,7 +6,7 @@
 //! Implements INT, INT3, INTO, IRET instructions
 
 use super::{
-    cpu::BxCpuC,
+    cpu::{BxCpuC, CpuActivityState, BX_ASYNC_EVENT_STOP_TRACE},
     cpuid::BxCpuIdTrait,
     decoder::{BxInstructionGenerated, BxSegregs},
     segment_ctrl_pro::parse_selector,
@@ -103,7 +103,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     
     /// Handle interrupt in real mode using IVT
-    fn interrupt_real_mode(&mut self, vector: u8) {
+    pub(super) fn interrupt_real_mode(&mut self, vector: u8) {
         // Save current FLAGS, CS, IP on stack
         let flags = (self.eflags & 0xFFFF) as u16;
         let cs = self.sregs[BxSegregs::Cs as usize].selector.value;
@@ -134,7 +134,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
         
-        tracing::debug!("INT {:#04x}: vector at {:04x}:{:04x}", vector, new_cs, new_ip);
+        // Only log non-exception interrupts to reduce spam (exceptions are logged in exception.rs)
+        if vector != 0x0d && vector != 0x0e && vector != 0x08 && vector < 0x20 {
+            tracing::debug!("INT {:#04x}: vector at {:04x}:{:04x}", vector, new_cs, new_ip);
+        }
     }
 
     // =========================================================================
@@ -142,9 +145,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     
     /// HLT - Halt CPU until interrupt
+    /// In Bochs: Sets activity_state to ActivityStateHlt and raises async_event
     pub fn hlt(&mut self, _instr: &BxInstructionGenerated) {
-        tracing::debug!("HLT: CPU halted");
-        // In a real emulator, we'd set a flag to indicate halted state
-        // For now, just log it - activity_state would need proper CpuActivityState handling
+        // Check if interrupts are disabled (IF=0) - matches Bochs proc_ctrl.cc:206
+        if self.get_if() == 0 {
+            tracing::warn!("HLT: CPU halted with IF=0 (interrupts disabled) - CPU will be stuck!");
+        }
+        
+        tracing::debug!("HLT: CPU halted, IF={}", self.get_b_if());
+        
+        // Set activity state to halted (matches Bochs proc_ctrl.cc:203)
+        self.activity_state = CpuActivityState::Hlt;
+        
+        // Set async event to indicate we need to sync and check for interrupts
+        // In Bochs, this causes the CPU to return from cpu_loop and check for interrupts
+        self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
     }
 }

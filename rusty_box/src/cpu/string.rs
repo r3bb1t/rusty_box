@@ -107,6 +107,32 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("MOVSD16: dword={:#010x}", dword);
     }
 
+    /// MOVSD - Move dword from DS:ESI to ES:EDI (32-bit address mode)
+    /// Based on BX_CPU_C::MOVSD32_YdXd in string.cc
+    pub fn movsd32(&mut self, _instr: &BxInstructionGenerated) {
+        let esi = self.esi() as u64;
+        let edi = self.edi() as u64;
+        
+        let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
+        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
+        
+        let src_addr = ds_base.wrapping_add(esi);
+        let dst_addr = es_base.wrapping_add(edi);
+        
+        let dword = self.mem_read_dword(src_addr);
+        self.mem_write_dword(dst_addr, dword);
+        
+        let increment = if self.get_df() { -4i32 } else { 4i32 };
+        let new_esi = (esi as i64).wrapping_add(increment as i64) as u32;
+        let new_edi = (edi as i64).wrapping_add(increment as i64) as u32;
+        
+        // Zero extension of RSI/RDI (matching original behavior)
+        self.set_rsi(new_esi as u64);
+        self.set_rdi(new_edi as u64);
+        
+        tracing::trace!("MOVSD32: dword={:#010x}, ESI={:#x}, EDI={:#x}", dword, new_esi, new_edi);
+    }
+
     // =========================================================================
     // STOSB - Store String Byte
     // =========================================================================
@@ -163,6 +189,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         
         tracing::trace!("STOSD16: EAX={:#010x} -> ES:{:04x}", eax, di);
+    }
+
+    /// STOSD - Store EAX at ES:EDI (32-bit address mode)
+    /// Based on BX_CPU_C::STOSD32_Yd in string.cc
+    pub fn stosd32(&mut self, _instr: &BxInstructionGenerated) {
+        let edi = self.edi() as u64;
+        let eax = self.eax();
+        
+        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
+        let dst_addr = es_base.wrapping_add(edi);
+        self.mem_write_dword(dst_addr, eax);
+        
+        let increment = if self.get_df() { -4i32 } else { 4i32 };
+        let new_edi = (edi as i64).wrapping_add(increment as i64) as u32;
+        
+        // Zero extension of RDI (matching original behavior)
+        self.set_rdi(new_edi as u64);
+        
+        tracing::trace!("STOSD32: EAX={:#010x} -> ES:{:#x}", eax, new_edi);
     }
 
     // =========================================================================
@@ -287,6 +332,63 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("CMPSW16: [{:#06x}] vs [{:#06x}]", op1, op2);
     }
 
+    /// CMPSD - Compare dwords at DS:SI and ES:DI (16-bit address mode)
+    pub fn cmpsd16(&mut self, _instr: &BxInstructionGenerated) {
+        let si = self.si() as u64;
+        let di = self.di() as u64;
+        
+        let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
+        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
+        
+        let src_addr = ds_base.wrapping_add(si);
+        let dst_addr = es_base.wrapping_add(di);
+        
+        let op1 = self.mem_read_dword(src_addr);
+        let op2 = self.mem_read_dword(dst_addr);
+        
+        let result = op1.wrapping_sub(op2);
+        self.update_flags_sub32(op1, op2, result);
+        
+        if self.get_df() {
+            self.set_si(self.si().wrapping_sub(4));
+            self.set_di(self.di().wrapping_sub(4));
+        } else {
+            self.set_si(self.si().wrapping_add(4));
+            self.set_di(self.di().wrapping_add(4));
+        }
+        
+        tracing::trace!("CMPSD16: [{:#010x}] vs [{:#010x}]", op1, op2);
+    }
+
+    /// CMPSD - Compare dwords at DS:ESI and ES:EDI (32-bit address mode)
+    /// Based on BX_CPU_C::CMPSD32_XdYd in string.cc
+    pub fn cmpsd32(&mut self, _instr: &BxInstructionGenerated) {
+        let esi = self.esi() as u64;
+        let edi = self.edi() as u64;
+        
+        let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
+        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
+        
+        let src_addr = ds_base.wrapping_add(esi);
+        let dst_addr = es_base.wrapping_add(edi);
+        
+        let op1 = self.mem_read_dword(src_addr);
+        let op2 = self.mem_read_dword(dst_addr);
+        
+        let result = op1.wrapping_sub(op2);
+        self.update_flags_sub32(op1, op2, result);
+        
+        let increment = if self.get_df() { -4i32 } else { 4i32 };
+        let new_esi = (esi as i64).wrapping_add(increment as i64) as u32;
+        let new_edi = (edi as i64).wrapping_add(increment as i64) as u32;
+        
+        // Zero extension of RSI/RDI (matching original behavior)
+        self.set_rsi(new_esi as u64);
+        self.set_rdi(new_edi as u64);
+        
+        tracing::trace!("CMPSD32: [{:#010x}] vs [{:#010x}]", op1, op2);
+    }
+
     // =========================================================================
     // SCASB - Scan String Byte
     // =========================================================================
@@ -331,6 +433,49 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         
         tracing::trace!("SCASW16: AX={:#06x} vs [{:#06x}]", ax, op2);
+    }
+
+    /// SCASD - Compare EAX with dword at ES:DI (16-bit address mode)
+    pub fn scasd16(&mut self, _instr: &BxInstructionGenerated) {
+        let di = self.di() as u64;
+        let eax = self.eax();
+        
+        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
+        let dst_addr = es_base.wrapping_add(di);
+        let op2 = self.mem_read_dword(dst_addr);
+        
+        let result = eax.wrapping_sub(op2);
+        self.update_flags_sub32(eax, op2, result);
+        
+        if self.get_df() {
+            self.set_di(self.di().wrapping_sub(4));
+        } else {
+            self.set_di(self.di().wrapping_add(4));
+        }
+        
+        tracing::trace!("SCASD16: EAX={:#010x} vs [{:#010x}]", eax, op2);
+    }
+
+    /// SCASD - Compare EAX with dword at ES:EDI (32-bit address mode)
+    /// Based on BX_CPU_C::SCASD32_EAXYd in string.cc
+    pub fn scasd32(&mut self, _instr: &BxInstructionGenerated) {
+        let edi = self.edi() as u64;
+        let eax = self.eax();
+        
+        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
+        let dst_addr = es_base.wrapping_add(edi);
+        let op2 = self.mem_read_dword(dst_addr);
+        
+        let result = eax.wrapping_sub(op2);
+        self.update_flags_sub32(eax, op2, result);
+        
+        let increment = if self.get_df() { -4i32 } else { 4i32 };
+        let new_edi = (edi as i64).wrapping_add(increment as i64) as u32;
+        
+        // Zero extension of RDI (matching original behavior)
+        self.set_rdi(new_edi as u64);
+        
+        tracing::trace!("SCASD32: EAX={:#010x} vs [{:#010x}]", eax, op2);
     }
 
     // =========================================================================

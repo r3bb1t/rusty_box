@@ -60,6 +60,33 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if sf { self.eflags |= 1 << 7; }
     }
 
+    // =========================================================================
+    // ZERO_IDIOM - XOR register with itself (optimization: set to 0)
+    // =========================================================================
+
+    /// ZERO_IDIOM_GwR: XOR r16, r16 (zero idiom - set register to 0)
+    /// Opcode: XOR_EwGw_ZERO_IDIOM or XOR_GwEw_ZERO_IDIOM
+    /// Matches BX_CPU_C::ZERO_IDIOM_GwR
+    pub fn zero_idiom_gw_r(&mut self, instr: &BxInstructionGenerated) {
+        let dst = instr.meta_data[0] as usize;
+        self.set_gpr16(dst, 0);
+        self.set_flags_oszapc_logic_16(0);
+    }
+
+    /// XOR_EbIbR: XOR r/m8, imm8 (register form)
+    /// Opcode: 0x80/6 or 0x83/6 (8-bit)
+    /// Matches BX_CPU_C::XOR_EbIbR
+    /// This covers XOR AL, imm8 (XorAlib opcode)
+    pub fn xor_eb_ib_r(&mut self, instr: &BxInstructionGenerated) {
+        // For XOR AL, imm8, we can use AL directly
+        let op1 = self.al();
+        let op2 = instr.ib();
+        let result = op1 ^ op2;
+        
+        self.set_al(result);
+        self.set_flags_oszapc_logic_8(result);
+    }
+
     /// Update flags for 8-bit subtraction (CMP, SUB)
     fn set_flags_oszapc_sub_8(&mut self, op1: u8, op2: u8, result: u8) {
         let cf = op1 < op2;

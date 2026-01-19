@@ -18,7 +18,7 @@ pub use rusty_box_decoder::{
 
 // Re-export commonly used functions and types
 pub use rusty_box_decoder::{
-    fetchdecode32::fetch_decode32 as fetch_decode32_chatgpt_generated_instr,
+    fetchdecode32::fetch_decode32,
     fetchdecode64::fetch_decode64,
     simple_decoder::decode_simple_32,
     ia_opcodes::Opcode,

@@ -1,4 +1,5 @@
 use alloc::vec::Vec;
+use core::ffi::c_void;
 
 use crate::{
     config::BxPhyAddress,
@@ -9,6 +10,8 @@ use crate::{
     },
 };
 
+use super::Result;
+
 pub(super) const FLASH_READ_ARRAY: u8 = 0xff;
 pub(super) const FLASH_INT_ID: u8 = 0x90;
 pub(super) const FLASH_READ_STATUS: u8 = 0x70;
@@ -17,8 +20,6 @@ pub(super) const FLASH_ERASE_SETUP: u8 = 0x20;
 pub(super) const FLASH_ERASE_SUSP: u8 = 0xb0;
 pub(super) const FLASH_PROG_SETUP: u8 = 0x40;
 pub(super) const FLASH_ERASE: u8 = 0xd0;
-
-use super::Result;
 
 const BX_PHY_ADDRESS_WIDTH: u64 = 40;
 const BX_MEM_HANDLERS: usize = ((1u64 << BX_PHY_ADDRESS_WIDTH) >> 20) as usize;
@@ -50,7 +51,7 @@ impl BxMemC<'_> {
             memory_type,
 
             bios_rom_access: 0, // idk tbh
-            
+
             // A20 enabled by default (full 64-bit addressing)
             a20_mask: 0xFFFF_FFFF_FFFF_FFFFu64,
         }
@@ -65,9 +66,10 @@ impl<'c> BxMemC<'c> {
         rw: MemoryAccessType,
         cpus: &[&BxCpuC<I>],
     ) -> Result<Option<&mut [u8]>> {
-        tracing::debug!("get_host_mem_addr addr: {addr:?} ({:#x}) rw: {rw:?}", addr);
+        // Only log on trace level to avoid spam - debug was too verbose
+        // tracing::trace!("get_host_mem_addr addr: {addr:?} ({:#x}) rw: {rw:?}", addr);
         let a20_addr: BxPhyAddress = self.a20_addr(addr);
-        tracing::debug!("after A20 masking: {a20_addr:?} ({:#x})", a20_addr);
+        // tracing::trace!("after A20 masking: {a20_addr:?} ({:#x})", a20_addr);
 
         let mut is_bios = a20_addr > self.bios_rom_addr.into();
 
@@ -93,56 +95,72 @@ impl<'c> BxMemC<'c> {
             return Ok(None);
         }
 
-        // Access the memory handler at the specified index
-        if let Some(handler_struct) = &self.memory_handlers[(a20_addr >> 20) as usize] {
-            let mut memory_handler = handler_struct.next.as_ref();
+        // Check memory handlers BEFORE vetoing VGA memory
+        // Based on BX_MEM_C::readPhysicalPage/writePhysicalPage in memory.cc
+        let page_idx = (a20_addr >> 20) as usize;
+        if page_idx < self.memory_handlers.len() {
+            if let Some(handler_struct) = &self.memory_handlers[page_idx] {
+                // Traverse the handler linked list
+                let mut current_handler: Option<&super::MemoryHandlerStruct> = Some(handler_struct);
 
-            while let Some(handler) = memory_handler {
-                // Check if the address is within the range
-                if handler.begin <= a20_addr && handler.end >= a20_addr {
-                    // Call the direct access handler if it exists
-                    if let Some(da_handler) = handler.da_handler {
-                        return Ok(Some(da_handler(
-                            &handler.param,
-                            a20_addr,
-                            rw,
-                            &handler.param,
-                        )));
-                    } else {
-                        return Ok(None); // Vetoed! No handler available
+                while let Some(handler) = current_handler {
+                    // Check if the address is within this handler's range
+                    if handler.begin <= a20_addr && handler.end >= a20_addr {
+                        // Try direct access handler first (for get_host_mem_addr)
+                        if let Some(da_handler) = handler.da_handler {
+                            return Ok(Some(da_handler(
+                                &handler.param,
+                                a20_addr,
+                                rw,
+                                &handler.param,
+                            )));
+                        }
+                        // If no direct access handler, the read/write handlers will be called
+                        // from readPhysicalPage/writePhysicalPage methods
+                        // For get_host_mem_addr, return None to veto (handler will process it)
+                        if !write && (handler.read_handler as usize) != 0 {
+                            return Ok(None); // Vetoed - handler will process via readPhysicalPage
+                        }
+                        if write && (handler.write_handler as usize) != 0 {
+                            return Ok(None); // Vetoed - handler will process via writePhysicalPage
+                        }
                     }
+                    // Move to next handler in the list
+                    current_handler = handler.next.as_ref().map(|b| b.as_ref());
                 }
-                // Move to the next handler
-                memory_handler = handler.next.as_ref();
             }
         }
-        //let mut memory_handler = self.memory_handlers[a20_addr as usize >> 20];
-        //
-        //loop {
-        //    if memory_handler.begin <= a20_addr && memory_handler.end >= a20_addr {
-        //        if let Some(da_handler) = memory_handler.da_handler {
-        //            let to_return = da_handler(&mut (), a20_addr, rw, &memory_handler.param);
-        //            return Ok(Some(to_return));
-        //        } else {
-        //            return Ok(None); // Vetoed! memory handler for i/o apic, vram, mmio and PCI PnP
-        //        }
-        //    }
-        //    if let Some(new_memory_handler) = *memory_handler.next {
-        //        memory_handler = new_memory_handler;
-        //    } else {
-        //        break;
-        //    }
-        //}
 
         if !write {
             if a20_addr >= 0x000a0000 && a20_addr < 0x000c0000 {
-                // VGA memory area - vetoed
+                // VGA memory area - vetoed (no handler registered)
                 Ok(None)
             } else if (a20_addr & 0xfffe0000) == 0x000e0000 {
                 // last 128K of BIOS ROM mapped to 0xE0000-0xFFFFF - handle first
+                // Matching C++ line 737-739 and 721: return (Bit8u *) &BX_MEM_THIS rom[BIOS_MAP_LAST128K(a20addr)];
+                // The C++ code uses BIOS_MAP_LAST128K(a20addr) directly where a20addr is pAddrFetchPage (page-aligned).
+                // When CPU accesses bytes, it uses eipFetchPtr[pageOffset], which correctly accesses the actual byte.
+                // BIOS_MAP_LAST128K(0xFF000) + 0x55A = BIOS_MAP_LAST128K(0xFF55A), so this works correctly.
+                let mapped = bios_map_last128k(a20_addr.try_into()?);
+                let final_offset = mapped;
+                let rom = self.inherited_memory_stub.rom();
+                // Log access to 0xFFFF0 (reset vector) for debugging
+                if a20_addr == 0xFF000 {
+                    let bios_load_offset = (self.bios_rom_addr as usize) & (BIOSROMSZ - 1);
+                    let offset_from_bios = final_offset - bios_load_offset;
+                    if offset_from_bios < rom.len() - bios_load_offset {
+                        let check_offset = bios_load_offset + offset_from_bios;
+                        if check_offset + 0xFF0 < rom.len() {
+                            let reset_vector_bytes = &rom[check_offset + 0xFF0..check_offset + 0xFF0 + 16];
+                            tracing::info!(
+                                "get_host_mem_addr: a20_addr={:#x}, mapped={:#x}, final_offset={:#x}, offset_from_bios={:#x}, reset_vector_bytes={:02x?}",
+                                a20_addr, mapped, final_offset, offset_from_bios, reset_vector_bytes
+                            );
+                        }
+                    }
+                }
                 Ok(Some(
-                    &mut self.inherited_memory_stub.rom()
-                        [bios_map_last128k(a20_addr.try_into()?)..],
+                    &mut self.inherited_memory_stub.rom()[final_offset..],
                 ))
             } else if cfg!(feature = "bx_support_pci")
                 && self.pci_enabled
@@ -167,8 +185,19 @@ impl<'c> BxMemC<'c> {
                 if a20_addr < 0x000c0000 || a20_addr >= 0x00100000 {
                     Ok(Some(self.get_vector(cpus, a20_addr)?))
                 }
-                // must be in C0000 - FFFFF range (non-last-128K)
-                else {
+                // must be in C0000 - FFFFF range
+                // Matching C++ line 737-743: check for 0xE0000-0xFFFFF range first
+                else if (a20_addr & 0xfffe0000) == 0x000e0000 {
+                    // last 128K of BIOS ROM mapped to 0xE0000-0xFFFFF
+                    // Matching C++ line 739: return (Bit8u *) &BX_MEM_THIS rom[BIOS_MAP_LAST128K(a20addr)];
+                    let mapped = bios_map_last128k(a20_addr.try_into()?);
+                    let final_offset = mapped;
+                    Ok(Some(
+                        &mut self.inherited_memory_stub.rom()[final_offset..],
+                    ))
+                } else {
+                    // non-last-128K ROM (C0000-DFFFF)
+                    // Matching C++ line 742: return((Bit8u *) &BX_MEM_THIS rom[(a20addr & EXROM_MASK) + BIOSROMSZ]);
                     Ok(Some(
                         &mut self.inherited_memory_stub.rom()[((a20_addr
                             & EXROM_MASK as BxPhyAddress)
@@ -217,28 +246,353 @@ impl<'c> BxMemC<'c> {
 }
 
 impl BxMemC<'_> {
-    pub fn load_ROM(&mut self, rom_data: &[u8], rom_address: BxPhyAddress, rom_type: u8) -> Result<()> {
+    pub fn load_ROM(
+        &mut self,
+        rom_data: &[u8],
+        rom_address: BxPhyAddress,
+        rom_type: u8,
+    ) -> Result<()> {
         use crate::memory::error::MemoryError;
         let size = rom_data.len();
-        if size == 0 { return Err(MemoryError::RomTooLarge(0).into()); }
-        if rom_type == 0 { // system BIOS
-            let offset = BIOSROMSZ - size;
+        if size == 0 {
+            return Err(MemoryError::RomTooLarge(0).into());
+        }
+        if rom_type == 0 {
+            // system BIOS
+            // Matching C++ line 365: offset = romaddress & BIOS_MASK;
+            let offset = (rom_address as usize) & (BIOSROMSZ - 1);
             let rom = self.inherited_memory_stub.rom();
-            if offset + size > rom.len() { return Err(MemoryError::RomTooLarge(rom.len()).into()); }
-            rom[offset..offset+size].copy_from_slice(rom_data);
+            if offset + size > rom.len() {
+                return Err(MemoryError::RomTooLarge(rom.len()).into());
+            }
+            rom[offset..offset + size].copy_from_slice(rom_data);
             self.bios_rom_addr = rom_address as u32;
-            for i in 64..65 { self.rom_present[i] = true; }
+            for i in 64..65 {
+                self.rom_present[i] = true;
+            }
+            tracing::info!(
+                "BIOS loaded: rom_address={:#x}, offset={:#x}, size={}, bios_rom_addr={:#x}",
+                rom_address, offset, size, self.bios_rom_addr
+            );
+            // Verify first few bytes are not all zeros
+            if size > 16 {
+                let first_bytes = &rom[offset..offset + 16];
+                let all_zeros = first_bytes.iter().all(|&b| b == 0);
+                if all_zeros {
+                    tracing::error!(
+                        "BIOS first 16 bytes at offset {:#x} are ALL ZEROS! BIOS may not be loaded correctly.",
+                        offset
+                    );
+                } else {
+                    tracing::info!(
+                        "BIOS first 16 bytes at offset {:#x}: {:02x?}",
+                        offset,
+                        first_bytes
+                    );
+                }
+            }
+            // Also verify bytes at a few key locations
+            // Check bytes at 0xFF55A (offset 0x155A from BIOS start)
+            if size > 0x155A {
+                let check_offset = offset + 0x155A;
+                if check_offset < rom.len() {
+                    let check_bytes = &rom[check_offset..check_offset + 16.min(rom.len() - check_offset)];
+                    tracing::info!(
+                        "BIOS bytes at offset {:#x} (corresponds to 0xFF55A): {:02x?}",
+                        check_offset,
+                        check_bytes
+                    );
+                }
+            }
+            // Check bytes at 0xFFFF0 (last 16 bytes of BIOS) - this is where the reset vector should be
+            if size > 0x1FFF0 {
+                let check_offset = offset + 0x1FFF0;
+                if check_offset < rom.len() {
+                    let check_bytes = &rom[check_offset..check_offset + 16.min(rom.len() - check_offset)];
+                    tracing::info!(
+                        "BIOS bytes at offset {:#x} (corresponds to 0xFFFF0, reset vector): {:02x?}",
+                        check_offset,
+                        check_bytes
+                    );
+                    // The reset vector should be: EA 5B E0 00 F0 (ljmp 0xf000:0xe05b)
+                    if check_bytes.len() >= 5 {
+                        let expected = [0xEA, 0x5B, 0xE0, 0x00, 0xF0];
+                        let matches = check_bytes[0..5] == expected;
+                        if matches {
+                            tracing::info!("Reset vector at 0xFFFF0 is correct!");
+                        } else {
+                            tracing::warn!(
+                                "Reset vector at 0xFFFF0 mismatch! Expected {:02x?}, got {:02x?}",
+                                expected,
+                                &check_bytes[0..5]
+                            );
+                        }
+                    }
+                }
+            }
             return Ok(());
         }
         // vga/option roms
-        if (size % 512) != 0 { return Err(MemoryError::RomSizeNotMultipleOf512.into()); }
-        if (rom_address % 2048) != 0 { return Err(MemoryError::RomNot2kAligned.into()); }
-        if rom_address < 0xc0000 { return Err(MemoryError::RomAddressOutOfRange.into()); }
-        let offset = if rom_address < 0xe0000 { ((rom_address & EXROM_MASK as BxPhyAddress) + BIOSROMSZ as BxPhyAddress) as usize } else { (rom_address & BIOS_MASK as BxPhyAddress) as usize };
+        if (size % 512) != 0 {
+            return Err(MemoryError::RomSizeNotMultipleOf512.into());
+        }
+        if (rom_address % 2048) != 0 {
+            return Err(MemoryError::RomNot2kAligned.into());
+        }
+        if rom_address < 0xc0000 {
+            return Err(MemoryError::RomAddressOutOfRange.into());
+        }
+        let offset = if rom_address < 0xe0000 {
+            ((rom_address & EXROM_MASK as BxPhyAddress) + BIOSROMSZ as BxPhyAddress) as usize
+        } else {
+            (rom_address & BIOS_MASK as BxPhyAddress) as usize
+        };
         let rom = self.inherited_memory_stub.rom();
-        if offset + size > rom.len() { return Err(MemoryError::RomTooLarge(rom.len()).into()); }
-        rom[offset..offset+size].copy_from_slice(rom_data);
+        if offset + size > rom.len() {
+            return Err(MemoryError::RomTooLarge(rom.len()).into());
+        }
+        rom[offset..offset + size].copy_from_slice(rom_data);
+        Ok(())
+    }
+
+    /// Load optional RAM image into memory
+    ///
+    /// Based on BX_MEM_C::load_RAM() in misc_mem.cc
+    /// This loads a RAM image directly into the memory vector at the specified address.
+    /// Unlike ROMs, RAM images are loaded into regular memory space (not ROM space).
+    ///
+    /// # Arguments
+    /// * `ram_data` - Raw RAM image data
+    /// * `ram_address` - Physical address where to load the RAM image
+    pub fn load_RAM(&mut self, ram_data: &[u8], ram_address: BxPhyAddress) -> Result<()> {
+        use crate::memory::error::MemoryError;
+
+        let size = ram_data.len();
+        if size == 0 {
+            return Err(MemoryError::RomTooLarge(0).into());
+        }
+
+        // RAM images are loaded directly into memory at the specified address
+        // We need to write to the memory vector using get_vector
+        let a20_addr = self.a20_addr(ram_address);
+
+        // For simplicity, we'll write directly to the memory stub
+        // In the original Bochs, it calls get_vector() which returns a pointer to memory
+        // We need to access the memory vector and write at the offset
+        let mem_stub = &mut self.inherited_memory_stub;
+        let vector = mem_stub.vector();
+
+        let offset = a20_addr as usize;
+        if offset + size > vector.len() {
+            return Err(MemoryError::RomTooLarge(vector.len()).into());
+        }
+
+        vector[offset..offset + size].copy_from_slice(ram_data);
+
+        tracing::info!("ram at {:#05x}/{} ({})", ram_address, size, "RAM image");
+
+        Ok(())
+    }
+
+    /// Write physical page with memory handler support
+    /// Based on BX_MEM_C::writePhysicalPage in memory.cc
+    pub fn write_physical_page<I: BxCpuIdTrait>(
+        &mut self,
+        cpus: &[&BxCpuC<I>],
+        page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
+        addr: BxPhyAddress,
+        len: usize,
+        data: &mut [u8],
+    ) -> Result<()> {
+        let a20_addr = self.a20_addr(addr);
+
+        // Debug: Log first 10 writes to VGA memory range
+        static mut VGA_WRITE_COUNT: u32 = 0;
+        if a20_addr >= 0xA0000 && a20_addr <= 0xBFFFF {
+            unsafe {
+                if VGA_WRITE_COUNT < 10 {
+                    tracing::info!(
+                        "write_physical_page: VGA range write #{}: addr={:#x}, len={}",
+                        VGA_WRITE_COUNT,
+                        a20_addr,
+                        len
+                    );
+                    VGA_WRITE_COUNT += 1;
+                }
+            }
+        }
+
+        // Check memory handlers first (before vetoing VGA memory)
+        let page_idx = (a20_addr >> 20) as usize;
+        if page_idx < self.memory_handlers.len() {
+            if let Some(handler_struct) = &self.memory_handlers[page_idx] {
+                let mut current_handler: Option<&super::MemoryHandlerStruct> = Some(handler_struct);
+
+                while let Some(handler) = current_handler {
+                    if handler.begin <= a20_addr && handler.end >= a20_addr {
+                        // Call write handler if it exists
+                        let write_handler = handler.write_handler;
+                        if (write_handler as usize) != 0 {
+                            // Call handler once for the entire length (matching original behavior)
+                            // The handler will process all bytes internally
+                            if write_handler(
+                                a20_addr,
+                                len as u32,
+                                data.as_mut_ptr() as *mut c_void,
+                                handler.param,
+                            ) {
+                                return Ok(()); // Handler processed the write
+                            }
+                        }
+                    }
+                    current_handler = handler.next.as_ref().map(|b| b.as_ref());
+                }
+            }
+        }
+
+        // No handler processed it, delegate to stub implementation
+        self.inherited_memory_stub.write_physical_page(
+            cpus,
+            page_write_stamp_table,
+            addr,
+            len,
+            data,
+            self.a20_mask,
+        )
+    }
+
+    /// Read physical page with memory handler support
+    /// Based on BX_MEM_C::readPhysicalPage in memory.cc
+    pub fn read_physical_page<I: BxCpuIdTrait>(
+        &mut self,
+        cpus: &[&BxCpuC<I>],
+        addr: BxPhyAddress,
+        len: usize,
+        data: &mut [u8],
+    ) -> Result<()> {
+        let a20_addr = self.a20_addr(addr);
+
+        // Check memory handlers first (before vetoing VGA memory)
+        let page_idx = (a20_addr >> 20) as usize;
+        if page_idx < self.memory_handlers.len() {
+            if let Some(handler_struct) = &self.memory_handlers[page_idx] {
+                let mut current_handler: Option<&super::MemoryHandlerStruct> = Some(handler_struct);
+
+                while let Some(handler) = current_handler {
+                    if handler.begin <= a20_addr && handler.end >= a20_addr {
+                        // Call read handler if it exists
+                        let read_handler = handler.read_handler;
+                        if (read_handler as usize) != 0 {
+                            // Call handler once for the entire length (matching original behavior)
+                            // The handler will process all bytes internally
+                            if read_handler(
+                                a20_addr,
+                                len as u32,
+                                data.as_mut_ptr() as *mut c_void,
+                                handler.param,
+                            ) {
+                                return Ok(()); // Handler processed the read
+                            }
+                        }
+                    }
+                    current_handler = handler.next.as_ref().map(|b| b.as_ref());
+                }
+            }
+        }
+
+        // No handler processed it, delegate to stub implementation
+        self.inherited_memory_stub
+            .read_physical_page(cpus, addr, len, data, self.a20_mask)
+    }
+
+    /// Register memory handlers for a specific address range
+    ///
+    /// Based on BX_MEM_C::registerMemoryHandlers in misc_mem.cc
+    ///
+    /// # Arguments
+    /// * `param` - Pointer to device instance (e.g., VGA controller)
+    /// * `read_handler` - Function to handle memory reads
+    /// * `write_handler` - Function to handle memory writes (can be null)
+    /// * `begin_addr` - Start address of the range
+    /// * `end_addr` - End address of the range (inclusive)
+    pub fn register_memory_handlers(
+        &mut self,
+        param: *const core::ffi::c_void,
+        read_handler: super::MemoryHandlerT,
+        write_handler: super::MemoryHandlerT,
+        begin_addr: BxPhyAddress,
+        end_addr: BxPhyAddress,
+    ) -> Result<()> {
+        use crate::memory::error::MemoryError;
+
+        if end_addr < begin_addr {
+            return Err(MemoryError::InvalidAddressRange.into());
+        }
+
+        if read_handler as usize == 0 {
+            return Err(MemoryError::InvalidHandler.into());
+        }
+
+        tracing::info!(
+            "Register memory access handlers: {:#x} - {:#x}",
+            begin_addr,
+            end_addr
+        );
+
+        // Register handlers for each 1MB page in the range
+        let start_page = (begin_addr >> 20) as usize;
+        let end_page = (end_addr >> 20) as usize;
+
+        // Ensure handlers vector is large enough
+        let required_len = end_page + 1;
+        if required_len > self.memory_handlers.len() {
+            // Extend the handlers vector if needed
+            let current_len = self.memory_handlers.len();
+            self.memory_handlers.reserve(required_len - current_len);
+            for _ in current_len..required_len {
+                self.memory_handlers.push(None);
+            }
+        }
+
+        for page_idx in start_page..=end_page {
+            // Calculate bitmap for 64KB sub-ranges within this page
+            let mut bitmap = 0xFFFFu16;
+            let page_base = (page_idx as BxPhyAddress) << 20;
+
+            if begin_addr > page_base {
+                let sub_page = ((begin_addr >> 16) & 0xF) as u16;
+                bitmap &= 0xFFFFu16 << sub_page;
+            }
+
+            if end_addr < page_base + 0x100000 {
+                let sub_page = ((end_addr >> 16) & 0xF) as u16;
+                bitmap &= 0xFFFFu16 >> (0x0F - sub_page);
+            }
+
+            // Check for overlapping handlers
+            if let Some(existing) = &self.memory_handlers[page_idx] {
+                if (bitmap & existing.bitmap) != 0 {
+                    tracing::error!("Register failed: overlapping memory handlers!");
+                    return Err(MemoryError::OverlappingHandlers.into());
+                }
+                bitmap |= existing.bitmap;
+            }
+
+            // Create new handler struct
+            // Store handler on each page that the range covers
+            let handler = super::MemoryHandlerStruct {
+                next: self.memory_handlers[page_idx].take().map(Box::new),
+                param, // Pointer can be copied
+                begin: begin_addr,
+                end: end_addr,
+                bitmap,
+                read_handler,
+                write_handler,
+                da_handler: None,
+            };
+            self.memory_handlers[page_idx] = Some(handler);
+        }
+
         Ok(())
     }
 }
-
