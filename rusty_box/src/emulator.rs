@@ -272,49 +272,41 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
     /// Update GUI with VGA text mode changes
     ///
-    /// Call this periodically to refresh the display
-    /// Update GUI with current VGA state
-    /// Always updates (periodic refresh like Bochs timer)
+    /// Call this periodically to refresh the display (matching vgacore.cc:2413-2430)
+    /// Uses VGA update() function to process text mode and get update data
     pub fn update_gui(&mut self) {
-        // Check dirty flag for logging, but always update (like Bochs periodic timer)
-        let is_dirty = self.device_manager.vga.is_text_dirty();
-        if is_dirty {
-            tracing::debug!("update_gui: Text is dirty, updating display");
-        }
-
         if let Some(ref mut gui) = self.gui {
-            // Get VGA text memory
-            let text_mem = self.device_manager.vga.get_text_memory();
+            // Call VGA update() to process text mode (matching vgacore.cc:2427)
+            if let Some(update_result) = self.device_manager.vga.update() {
+                // Calculate cursor position from cursor address
+                let cursor_x = if update_result.cursor_address < 0x7fff {
+                    // Cursor address is byte offset, convert to column
+                    let offset_from_start = update_result.cursor_address.saturating_sub(update_result.tm_info.start_address);
+                    (offset_from_start % update_result.tm_info.line_offset) / 2
+                } else {
+                    0xffff
+                };
+                
+                let cursor_y = if update_result.cursor_address < 0x7fff {
+                    // Cursor address is byte offset, convert to row
+                    let offset_from_start = update_result.cursor_address.saturating_sub(update_result.tm_info.start_address);
+                    (offset_from_start / update_result.tm_info.line_offset) as u32
+                } else {
+                    0xffff
+                };
+                
+                // Call GUI text_update with old snapshot and new buffer (matching vgacore.cc:1685)
+                gui.text_update(
+                    &update_result.text_snapshot,
+                    &update_result.text_buffer,
+                    cursor_x as u32,
+                    cursor_y as u32,
+                    &update_result.tm_info,
+                );
+            }
             
-            // Create VGA text mode info
-            use crate::gui::VgaTextModeInfo;
-            let tm_info = VgaTextModeInfo {
-                start_address: 0,
-                cs_start: 0,
-                cs_end: 0,
-                line_offset: 160, // 80 columns * 2 bytes
-                line_compare: 0,
-                h_panning: 0,
-                v_panning: 0,
-                line_graphics: false,
-                split_hpanning: false,
-                blink_flags: 0,
-                actl_palette: [0; 16],
-            };
-
-            // Get cursor position from VGA
-            let (cursor_row, cursor_col) = self.device_manager.vga.get_cursor_position();
-            
-            // Create a zero-initialized buffer as old_text for comparison
-            // The GUI will compare this with new_text to detect changes
-            // For the first call, this will be all zeros, so all characters will be rendered
-            let old_text = vec![0u8; text_mem.len()];
-            
-            gui.text_update(&old_text, text_mem, cursor_col, cursor_row, &tm_info);
+            // Flush display (matching vgacore.cc:2429)
             gui.flush();
-            
-            // Clear dirty flag after updating GUI
-            self.device_manager.vga.clear_text_dirty();
         }
     }
 
@@ -545,8 +537,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.prepare_run();
         
         // Force initial GUI update to show initial state
-        // Mark as dirty to force initial render
-        self.device_manager.vga.force_text_dirty();
+        self.device_manager.vga.force_initial_update();
         self.update_gui(); // Force initial update
         
         let mut instructions_executed = 0u64;

@@ -5,7 +5,6 @@
 
 use super::gui_trait::{BxGui, DisplayMode, VgaTextModeInfo};
 use super::keymap::char_to_scancode_sequence;
-use alloc::collections::VecDeque;
 
 #[cfg(unix)]
 use std::os::unix::io::AsRawFd;
@@ -141,7 +140,7 @@ impl BxGui for TermGui {
         cursor_y: u32,
         _tm_info: &VgaTextModeInfo,
     ) {
-        // Update text buffer
+        // Update text buffer (matching term.cc:551-608)
         if new_text.len() == self.text_buffer.len() {
             self.text_buffer.copy_from_slice(new_text);
         }
@@ -150,13 +149,34 @@ impl BxGui for TermGui {
         self.cursor_x = cursor_x;
         self.cursor_y = cursor_y;
 
-        // Check if anything actually changed
-        let changed = old_text.len() != new_text.len() || 
-                     old_text != new_text;
+        // Byte-by-byte comparison (matching term.cc:573-574)
+        // Only update characters that changed
+        let mut needs_render = false;
+        let rows = self.screen_height as usize;
+        let cols = self.screen_width as usize;
         
-        if changed {
-            // Mark that we need to render on next flush
-            // For now, we'll render immediately if there's a change
+        for row in 0..rows {
+            for col in 0..cols {
+                let idx = (row * cols + col) * 2;
+                if idx + 1 < old_text.len() && idx + 1 < new_text.len() {
+                    // Compare both character and attribute bytes (matching term.cc:573-574)
+                    if old_text[idx] != new_text[idx] || old_text[idx + 1] != new_text[idx + 1] {
+                        needs_render = true;
+                        break;
+                    }
+                }
+            }
+            if needs_render {
+                break;
+            }
+        }
+        
+        // Also check if cursor position changed
+        if self.cursor_x != cursor_x || self.cursor_y != cursor_y {
+            needs_render = true;
+        }
+        
+        if needs_render {
             self.render_text_mode();
         }
     }
@@ -337,29 +357,29 @@ impl BxGui for TermGui {
 
 impl TermGui {
     /// Render text mode buffer to terminal
+    /// Matching term.cc:551-608 - byte-by-byte comparison and rendering
     fn render_text_mode(&mut self) {
         use std::io::Write;
         
         // Move cursor to top-left to start drawing (similar to curses move(0,0))
         print!("\x1b[H");
 
-        // Render each character
+        // Render each character (matching term.cc:567-592)
         for row in 0..self.screen_height {
             for col in 0..self.screen_width {
                 let idx = ((row * self.screen_width + col) * 2) as usize;
                 if idx + 1 < self.text_buffer.len() {
-                    let ch = self.text_buffer[idx] as char;
-                    let attr = self.text_buffer[idx + 1];
+                    let ch_byte = self.text_buffer[idx];
+                    let attr_byte = self.text_buffer[idx + 1];
 
-                    // Extract color from attribute byte
-                    let fg_color = attr & 0x0F;
+                    // Extract colors from attribute byte (matching term.cc:474-479)
+                    // VGA attribute: bits 0-3 = foreground, bits 4-6 = background, bit 7 = blink
+                    let fg_color = attr_byte & 0x0F;
+                    let bg_color = (attr_byte >> 4) & 0x07;
                     let bright = (fg_color & 0x08) != 0;
+                    let blink = (attr_byte & 0x80) != 0;
 
-                    // Set color (simplified - only basic colors)
-                    if bright {
-                        print!("\x1b[1m"); // Bold for bright
-                    }
-                    // Map VGA colors to ANSI (simplified)
+                    // Map VGA colors to ANSI (matching term.cc:71-80)
                     let ansi_fg = match fg_color & 0x07 {
                         0 => 30, // Black
                         1 => 34, // Blue
@@ -371,37 +391,56 @@ impl TermGui {
                         7 => 37, // White
                         _ => 37,
                     };
-                    print!("\x1b[{}m", ansi_fg);
-
-                    // Print character (handle special cases)
-                    let ch_to_print = match ch {
-                        '\0' => ' ',
-                        '\n' => {
-                            // Just skip - we'll handle newlines by row
-                            continue;
-                        }
-                        _ => {
-                            if ch.is_ascii() && !ch.is_control() {
-                                ch
-                            } else {
-                                ' '
-                            }
-                        }
+                    
+                    let ansi_bg = match bg_color {
+                        0 => 40, // Black
+                        1 => 44, // Blue
+                        2 => 42, // Green
+                        3 => 46, // Cyan
+                        4 => 41, // Red
+                        5 => 45, // Magenta
+                        6 => 43, // Yellow
+                        7 => 47, // White
+                        _ => 47,
                     };
+
+                    // Build ANSI escape sequence
+                    let mut ansi_seq = String::new();
+                    if bright {
+                        ansi_seq.push_str("\x1b[1m"); // Bold for bright
+                    }
+                    if blink {
+                        ansi_seq.push_str("\x1b[5m"); // Blink
+                    }
+                    ansi_seq.push_str(&format!("\x1b[{};{}m", ansi_fg, ansi_bg));
+                    print!("{}", ansi_seq);
+
+                    // Convert character byte to printable character (matching term.cc:481-549)
+                    // For now, handle basic ASCII and control characters
+                    let ch_to_print = if ch_byte == 0 {
+                        ' '
+                    } else if ch_byte.is_ascii() && !ch_byte.is_ascii_control() {
+                        ch_byte as char
+                    } else if ch_byte == 0x0A || ch_byte == 0x0D {
+                        // Skip newline/carriage return - handled by row structure
+                        ' '
+                    } else {
+                        // Non-printable or extended - show as space
+                        ' '
+                    };
+                    
                     print!("{}", ch_to_print);
                 }
             }
-            // Newline after each row (or move to next row if using absolute positioning)
-            // Using newline for simplicity - this ensures output is visible
+            // Newline after each row
             print!("\n");
         }
 
         // Reset colors
         print!("\x1b[0m");
 
-        // Move cursor to actual BIOS cursor position (similar to curses move(cursor_y, cursor_x))
-        // This ensures the cursor is visible at the correct position where BIOS expects it
-        // Don't restore to a saved position - move to the actual cursor position
+        // Position cursor (matching term.cc:594-607)
+        // Check cursor visibility based on cursor start/end registers
         if self.cursor_x < self.screen_width && self.cursor_y < self.screen_height {
             // Cursor is within visible area - position it (1-based for ANSI)
             print!("\x1b[{};{}H", self.cursor_y + 1, self.cursor_x + 1);

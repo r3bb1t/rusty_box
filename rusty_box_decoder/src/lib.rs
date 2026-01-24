@@ -314,6 +314,25 @@ pub fn is_null_seg_reg(seg: u8) -> bool {
     seg == BxSegregs::Null as _
 }
 
+impl From<u8> for BxSegregs {
+    fn from(val: u8) -> Self {
+        match val {
+            0 => BxSegregs::Es,
+            1 => BxSegregs::Cs,
+            2 => BxSegregs::Ss,
+            3 => BxSegregs::Ds,
+            4 => BxSegregs::Fs,
+            5 => BxSegregs::Gs,
+            7 => BxSegregs::Null,
+            _ => {
+                // Invalid segment register value - default to DS for safety
+                // This matches Bochs behavior where invalid values are handled gracefully
+                BxSegregs::Ds
+            }
+        }
+    }
+}
+
 #[derive(Debug)]
 enum BxRegs8L {
     Bx8bitRegAl,

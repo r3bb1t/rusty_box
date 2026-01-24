@@ -175,7 +175,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn xlat(&mut self, _instr: &BxInstructionGenerated) {
         let bx = self.bx() as u64;
         let al = self.al() as u64;
-        let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
+        let ds_base = self.get_segment_base(BxSegregs::Ds);
         let addr = ds_base.wrapping_add(bx).wrapping_add(al);
         
         let new_al = self.mem_read_byte(addr);
@@ -261,6 +261,77 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
+    // 8-bit MOV memory forms (matching C++ data_xfer8.cc)
+    // =========================================================================
+
+    /// MOV r/m8, imm8 (memory form)
+    /// Matching C++ data_xfer8.cc:75-82 MOV_EbIbM
+    pub fn mov_eb_ib_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+
+        self.write_virtual_byte(seg, eaddr, instr.ib());
+        tracing::trace!("MOV8 mem: [{:?}:{:#x}] = {:#04x}", seg, eaddr, instr.ib());
+    }
+
+    /// MOV r/m8, r8 (memory form)
+    /// Matching C++ data_xfer8.cc:34-41 MOV_EbGbM
+    pub fn mov_eb_gb_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let src_reg = instr.src() as usize;
+        let extend8bit_l = instr.extend8bit_l();
+        let val8 = self.read_8bit_regx(src_reg, extend8bit_l);
+
+        self.write_virtual_byte(seg, eaddr, val8);
+        tracing::trace!("MOV8 mem: [{:?}:{:#x}] = reg{} ({:#04x})", seg, eaddr, src_reg, val8);
+    }
+
+    /// MOV r8, r/m8 (memory form)
+    /// Matching C++ data_xfer8.cc:43-51 MOV_GbEbM
+    pub fn mov_gb_eb_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let val8 = self.read_virtual_byte(seg, eaddr);
+        let dst_reg = instr.dst() as usize;
+        let extend8bit_l = instr.extend8bit_l();
+
+        self.write_8bit_regx(dst_reg, extend8bit_l, val8);
+        tracing::trace!("MOV8 mem: reg{} = [{:?}:{:#x}] ({:#04x})", dst_reg, seg, eaddr, val8);
+    }
+
+    /// XCHG r/m8, r8 (memory form)
+    /// Matching C++ data_xfer8.cc:99-110 XCHG_EbGbM
+    /// Note: always locked (read_RMW_virtual_byte)
+    pub fn xchg_eb_gb_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let (op1, laddr) = self.read_rmw_virtual_byte(seg, eaddr); // always locked
+        let src_reg = instr.src() as usize;
+        let extend8bit_l = instr.extend8bit_l();
+        let op2 = self.read_8bit_regx(src_reg, extend8bit_l);
+
+        self.write_rmw_linear_byte(laddr, op2);
+        self.write_8bit_regx(src_reg, extend8bit_l, op1);
+        tracing::trace!("XCHG8 mem: [{:?}:{:#x}]={:#04x} <-> reg{}={:#04x}", seg, eaddr, op2, src_reg, op1);
+    }
+
+    // =========================================================================
+    // Helper functions for 8-bit memory operations
+    // =========================================================================
+
+    /// Write byte to virtual address (matches write_virtual_byte)
+    fn write_virtual_byte(&mut self, seg: BxSegregs, eaddr: u32, val: u8) {
+        let laddr = self.get_laddr32_seg(seg, eaddr);
+        self.mem_write_byte(laddr as u64, val);
+    }
+
+    // write_8bit_regx is defined in logical8.rs to avoid duplicate definitions
+
+    // Helper methods (resolve_addr32, read_8bit_regx, etc.) are defined in logical8.rs
+    // to avoid duplicate definitions across multiple impl blocks
+
+    // =========================================================================
     // MOVZX/MOVSX - Move with Zero/Sign Extension
     // =========================================================================
     
@@ -311,5 +382,744 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val = self.get_gpr16(src) as i16 as i32 as u32;
         self.set_gpr32(dst, val);
     }
+
+    // =========================================================================
+    // 16-bit MOV memory forms (matching C++ data_xfer16.cc)
+    // =========================================================================
+
+    /// MOV r/m16, imm16 (memory form)
+    /// Matching C++ data_xfer16.cc:27-33 MOV_EwIwM
+    pub fn mov_ew_iw_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+
+        self.write_virtual_word(seg, eaddr, instr.iw());
+        tracing::trace!("MOV16 mem: [{:?}:{:#x}] = {:#06x}", seg, eaddr, instr.iw());
+    }
+
+    /// MOV r16, imm16 (register form)
+    /// Matching C++ data_xfer16.cc:35-40 MOV_EwIwR
+    pub fn mov_ew_iw_r(&mut self, instr: &BxInstructionGenerated) {
+        let dst = instr.dst() as usize;
+
+        self.set_gpr16(dst, instr.iw());
+        tracing::trace!("MOV16: reg{} = {:#06x}", dst, instr.iw());
+    }
+
+    /// MOV r/m16, r16 (memory form)
+    /// Matching C++ data_xfer16.cc:42-49 MOV_EwGwM
+    pub fn mov_ew_gw_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let src_reg = instr.src() as usize;
+        let val16 = self.get_gpr16(src_reg);
+
+        self.write_virtual_word(seg, eaddr, val16);
+        tracing::trace!("MOV16 mem: [{:?}:{:#x}] = reg{} ({:#06x})", seg, eaddr, src_reg, val16);
+    }
+
+    /// MOV r16, r/m16 (memory form)
+    /// Matching C++ data_xfer16.cc:58-65 MOV_GwEwM
+    pub fn mov_gw_ew_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let val16 = self.read_virtual_word(seg, eaddr);
+        let dst_reg = instr.dst() as usize;
+
+        self.set_gpr16(dst_reg, val16);
+        tracing::trace!("MOV16 mem: reg{} = [{:?}:{:#x}] ({:#06x})", dst_reg, seg, eaddr, val16);
+    }
+
+    /// XCHG r/m16, r16 (memory form)
+    /// Matching C++ data_xfer16.cc:202-210 XCHG_EwGwM
+    /// Note: always locked (read_RMW_virtual_word)
+    pub fn xchg_ew_gw_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let (op1, laddr) = self.read_rmw_virtual_word(seg, eaddr); // always locked
+        let src_reg = instr.src() as usize;
+        let op2 = self.get_gpr16(src_reg);
+
+        self.write_rmw_linear_word(laddr, op2);
+        self.set_gpr16(src_reg, op1);
+        tracing::trace!("XCHG16 mem: [{:?}:{:#x}]={:#06x} <-> reg{}={:#06x}", seg, eaddr, op2, src_reg, op1);
+    }
+
+    /// MOVZX r16, r/m8 (memory form)
+    /// Matching C++ data_xfer16.cc:158-168 MOVZX_GwEbM
+    /// Zero extend byte op2 into word op1
+    pub fn movzx_gw_eb_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let op2_8 = self.read_virtual_byte(seg, eaddr);
+        let dst_reg = instr.dst() as usize;
+
+        self.set_gpr16(dst_reg, op2_8 as u16);
+        tracing::trace!("MOVZX16 mem: reg{} = [{:?}:{:#x}] ({:#04x})", dst_reg, seg, eaddr, op2_8);
+    }
+
+    /// MOVZX r16, r8 (register form)
+    /// Matching C++ data_xfer16.cc:170-178 MOVZX_GwEbR
+    /// Zero extend byte op2 into word op1
+    pub fn movzx_gw_eb_r(&mut self, instr: &BxInstructionGenerated) {
+        let src_reg = instr.src() as usize;
+        let extend8bit_l = instr.extend8bit_l();
+        let op2_8 = self.read_8bit_regx(src_reg, extend8bit_l);
+        let dst_reg = instr.dst() as usize;
+
+        self.set_gpr16(dst_reg, op2_8 as u16);
+        tracing::trace!("MOVZX16: reg{} = reg{} ({:#04x})", dst_reg, src_reg, op2_8);
+    }
+
+    /// MOVSX r16, r/m8 (memory form)
+    /// Matching C++ data_xfer16.cc:180-190 MOVSX_GwEbM
+    /// Sign extend byte op2 into word op1
+    pub fn movsx_gw_eb_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let op2_8 = self.read_virtual_byte(seg, eaddr);
+        let dst_reg = instr.dst() as usize;
+        let val16 = (op2_8 as i8 as i16) as u16; // sign extend byte to word
+
+        self.set_gpr16(dst_reg, val16);
+        tracing::trace!("MOVSX16 mem: reg{} = [{:?}:{:#x}] ({:#04x} -> {:#06x})", dst_reg, seg, eaddr, op2_8, val16);
+    }
+
+    /// MOVSX r16, r8 (register form)
+    /// Matching C++ data_xfer16.cc:192-200 MOVSX_GwEbR
+    /// Sign extend byte op2 into word op1
+    pub fn movsx_gw_eb_r(&mut self, instr: &BxInstructionGenerated) {
+        let src_reg = instr.src() as usize;
+        let extend8bit_l = instr.extend8bit_l();
+        let op2_8 = self.read_8bit_regx(src_reg, extend8bit_l);
+        let dst_reg = instr.dst() as usize;
+        let val16 = (op2_8 as i8 as i16) as u16; // sign extend byte to word
+
+        self.set_gpr16(dst_reg, val16);
+        tracing::trace!("MOVSX16: reg{} = reg{} ({:#04x} -> {:#06x})", dst_reg, src_reg, op2_8, val16);
+    }
+
+    // =========================================================================
+    // CMOV - Conditional Move (16-bit)
+    // =========================================================================
+    // Note: CMOV accesses a memory source operand (read), regardless
+    //       of whether condition is true or not.  Thus, exceptions may
+    //       occur even if the MOV does not take place.
+    // Matching C++ data_xfer16.cc:241-371
+
+    /// Conditional move if overflow (OF=1)
+    /// Matching C++ data_xfer16.cc:245-251 CMOVO_GwEwR
+    pub fn cmovo_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_of() {
+            let src_reg = instr.src() as usize;
+            let val16 = self.get_gpr16(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr16(dst_reg, val16);
+        }
+    }
+
+    /// CMOVNO_GwEwR - Conditional move if not overflow (OF=0)
+    pub fn cmovno_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        if !self.get_of() {
+            let src_reg = instr.src() as usize;
+            let val16 = self.get_gpr16(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr16(dst_reg, val16);
+        }
+    }
+
+    /// CMOVB_GwEwR - Conditional move if below/carry (CF=1)
+    pub fn cmovb_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_cf() {
+            let src_reg = instr.src() as usize;
+            let val16 = self.get_gpr16(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr16(dst_reg, val16);
+        }
+    }
+
+    /// CMOVNB_GwEwR - Conditional move if not below/no carry (CF=0)
+    pub fn cmovnb_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        if !self.get_cf() {
+            let src_reg = instr.src() as usize;
+            let val16 = self.get_gpr16(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr16(dst_reg, val16);
+        }
+    }
+
+    /// CMOVZ_GwEwR - Conditional move if zero/equal (ZF=1)
+    pub fn cmovz_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_zf() {
+            let src_reg = instr.src() as usize;
+            let val16 = self.get_gpr16(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr16(dst_reg, val16);
+        }
+    }
+
+    /// CMOVNZ_GwEwR - Conditional move if not zero/not equal (ZF=0)
+    pub fn cmovnz_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        if !self.get_zf() {
+            let src_reg = instr.src() as usize;
+            let val16 = self.get_gpr16(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr16(dst_reg, val16);
+        }
+    }
+
+    /// CMOVBE_GwEwR - Conditional move if below or equal (CF=1 or ZF=1)
+    pub fn cmovbe_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_cf() || self.get_zf() {
+            let src_reg = instr.src() as usize;
+            let val16 = self.get_gpr16(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr16(dst_reg, val16);
+        }
+    }
+
+    /// CMOVNBE_GwEwR - Conditional move if not below or equal/above (CF=0 and ZF=0)
+    pub fn cmovnbe_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        if !self.get_cf() && !self.get_zf() {
+            let src_reg = instr.src() as usize;
+            let val16 = self.get_gpr16(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr16(dst_reg, val16);
+        }
+    }
+
+    /// CMOVS_GwEwR - Conditional move if sign (SF=1)
+    pub fn cmovs_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_sf() {
+            let src_reg = instr.src() as usize;
+            let val16 = self.get_gpr16(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr16(dst_reg, val16);
+        }
+    }
+
+    /// CMOVNS_GwEwR - Conditional move if not sign (SF=0)
+    pub fn cmovns_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        if !self.get_sf() {
+            let src_reg = instr.src() as usize;
+            let val16 = self.get_gpr16(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr16(dst_reg, val16);
+        }
+    }
+
+    /// CMOVP_GwEwR - Conditional move if parity/parity even (PF=1)
+    pub fn cmovp_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_pf() {
+            let src_reg = instr.src() as usize;
+            let val16 = self.get_gpr16(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr16(dst_reg, val16);
+        }
+    }
+
+    /// CMOVNP_GwEwR - Conditional move if no parity/parity odd (PF=0)
+    pub fn cmovnp_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        if !self.get_pf() {
+            let src_reg = instr.src() as usize;
+            let val16 = self.get_gpr16(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr16(dst_reg, val16);
+        }
+    }
+
+    /// CMOVL_GwEwR - Conditional move if less (SF != OF)
+    pub fn cmovl_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_sf() != self.get_of() {
+            let src_reg = instr.src() as usize;
+            let val16 = self.get_gpr16(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr16(dst_reg, val16);
+        }
+    }
+
+    /// CMOVNL_GwEwR - Conditional move if not less/greater or equal (SF == OF)
+    pub fn cmovnl_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_sf() == self.get_of() {
+            let src_reg = instr.src() as usize;
+            let val16 = self.get_gpr16(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr16(dst_reg, val16);
+        }
+    }
+
+    /// CMOVLE_GwEwR - Conditional move if less or equal (ZF=1 or SF!=OF)
+    pub fn cmovle_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_zf() || (self.get_sf() != self.get_of()) {
+            let src_reg = instr.src() as usize;
+            let val16 = self.get_gpr16(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr16(dst_reg, val16);
+        }
+    }
+
+    /// CMOVNLE_GwEwR - Conditional move if not less or equal/greater (ZF=0 and SF==OF)
+    pub fn cmovnle_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        if !self.get_zf() && (self.get_sf() == self.get_of()) {
+            let src_reg = instr.src() as usize;
+            let val16 = self.get_gpr16(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr16(dst_reg, val16);
+        }
+    }
+
+    // =========================================================================
+    // Helper functions for 16-bit memory operations
+    // =========================================================================
+
+    /// Write word to virtual address (matches write_virtual_word)
+    fn write_virtual_word(&mut self, seg: BxSegregs, eaddr: u32, val: u16) {
+        let laddr = self.get_laddr32_seg(seg, eaddr);
+        self.mem_write_word(laddr as u64, val);
+    }
+
+    /// Read word from virtual address (matches read_virtual_word)
+    // read_virtual_word is defined in logical16.rs to avoid duplicate definitions
+
+    // read_rmw_virtual_word is defined in logical16.rs to avoid duplicate definitions
+
+    // write_rmw_linear_word is defined in logical16.rs to avoid duplicate definitions
+
+    // =========================================================================
+    // 32-bit MOV memory forms (matching C++ data_xfer32.cc)
+    // =========================================================================
+
+    /// MOV r/m32, imm32 (memory form)
+    /// Matching C++ data_xfer32.cc:27-33 MOV_EdIdM
+    pub fn mov_ed_id_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+
+        self.write_virtual_dword(seg, eaddr, instr.id());
+        tracing::trace!("MOV32 mem: [{:?}:{:#x}] = {:#010x}", seg, eaddr, instr.id());
+    }
+
+    /// MOV r32, imm32 (register form)
+    /// Matching C++ data_xfer32.cc:35-40 MOV_EdIdR
+    /// Note: BX_CLEAR_64BIT_HIGH is handled in set_gpr32
+    pub fn mov_ed_id_r(&mut self, instr: &BxInstructionGenerated) {
+        let dst = instr.dst() as usize;
+
+        self.set_gpr32(dst, instr.id());
+        tracing::trace!("MOV32: reg{} = {:#010x}", dst, instr.id());
+    }
+
+    /// MOV r/m32, r32 (memory form)
+    ///
+    /// Writes a 32-bit value from the source register to memory.
+    /// The memory address is computed from the ModRM byte and segment register.
+    ///
+    /// Matching C++ data_xfer32.cc:42-49 BX_CPU_C::MOV32_EdGdM
+    pub fn mov32_ed_gd_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let src_reg = instr.src() as usize;
+        let val32 = self.get_gpr32(src_reg);
+
+        self.write_virtual_dword(seg, eaddr, val32);
+        tracing::trace!("MOV32 mem: [{:?}:{:#x}] = reg{} ({:#010x})", seg, eaddr, src_reg, val32);
+    }
+
+    /// MOV r32, r/m32 (memory form)
+    /// Matching C++ data_xfer32.cc:67-75 MOV32_GdEdM
+    /// Note: BX_CLEAR_64BIT_HIGH is handled in set_gpr32
+    pub fn mov32_gd_ed_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let val32 = self.read_virtual_dword(seg, eaddr);
+        let dst_reg = instr.dst() as usize;
+
+        self.set_gpr32(dst_reg, val32);
+        tracing::trace!("MOV32 mem: reg{} = [{:?}:{:#x}] ({:#010x})", dst_reg, seg, eaddr, val32);
+    }
+
+    /// MOV r32, r/m32 (memory form with SS segment override)
+    /// Matching C++ data_xfer32.cc:77-85 MOV32S_GdEdM
+    /// Uses stack_read_dword instead of read_virtual_dword
+    pub fn mov32s_gd_ed_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let val32 = self.stack_read_dword(eaddr);
+        let dst_reg = instr.dst() as usize;
+
+        self.set_gpr32(dst_reg, val32);
+        tracing::trace!("MOV32S mem: reg{} = [SS:{:#x}] ({:#010x})", dst_reg, eaddr, val32);
+    }
+
+    /// MOV r/m32, r32 (memory form with SS segment override)
+    ///
+    /// This handler is used when MOV instruction has an SS segment override prefix.
+    /// It uses stack_write_dword instead of write_virtual_dword to write memory through
+    /// the SS segment, which is important for stack operations.
+    ///
+    /// Matching C++ data_xfer32.cc:51-58 BX_CPU_C::MOV32S_EdGdM
+    ///
+    /// # Operation
+    /// Writes a 32-bit value from the source register to SS:offset.
+    pub fn mov32s_ed_gd_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let src_reg = instr.src() as usize;
+        let val32 = self.get_gpr32(src_reg);
+
+        self.stack_write_dword(eaddr, val32);
+        tracing::trace!("MOV32S mem: [SS:{:#x}] = reg{} ({:#010x})", eaddr, src_reg, val32);
+    }
+
+    /// XCHG r/m32, r32 (memory form)
+    /// Matching C++ data_xfer32.cc:198-207 XCHG_EdGdM
+    /// Note: always locked (read_RMW_virtual_dword)
+    pub fn xchg_ed_gd_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let (op1, laddr) = self.read_rmw_virtual_dword(seg, eaddr); // always locked
+        let src_reg = instr.src() as usize;
+        let op2 = self.get_gpr32(src_reg);
+
+        self.write_rmw_linear_dword(laddr, op2);
+        self.set_gpr32(src_reg, op1);
+        tracing::trace!("XCHG32 mem: [{:?}:{:#x}]={:#010x} <-> reg{}={:#010x}", seg, eaddr, op2, src_reg, op1);
+    }
+
+    /// MOVZX r32, r/m8 (memory form)
+    /// Matching C++ data_xfer32.cc:110-120 MOVZX_GdEbM
+    /// Zero extend byte op2 into dword op1
+    pub fn movzx_gd_eb_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let op2_8 = self.read_virtual_byte(seg, eaddr);
+        let dst_reg = instr.dst() as usize;
+
+        self.set_gpr32(dst_reg, op2_8 as u32);
+        tracing::trace!("MOVZX32 mem: reg{} = [{:?}:{:#x}] ({:#04x})", dst_reg, seg, eaddr, op2_8);
+    }
+
+    /// MOVZX r32, r8 (register form)
+    /// Matching C++ data_xfer32.cc:122-130 MOVZX_GdEbR
+    /// Zero extend byte op2 into dword op1
+    pub fn movzx_gd_eb_r(&mut self, instr: &BxInstructionGenerated) {
+        let src_reg = instr.src() as usize;
+        let extend8bit_l = instr.extend8bit_l();
+        let op2_8 = self.read_8bit_regx(src_reg, extend8bit_l);
+        let dst_reg = instr.dst() as usize;
+
+        self.set_gpr32(dst_reg, op2_8 as u32);
+        tracing::trace!("MOVZX32: reg{} = reg{} ({:#04x})", dst_reg, src_reg, op2_8);
+    }
+
+    /// MOVZX r32, r/m16 (memory form)
+    /// Matching C++ data_xfer32.cc:132-142 MOVZX_GdEwM
+    /// Zero extend word op2 into dword op1
+    pub fn movzx_gd_ew_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let op2_16 = self.read_virtual_word(seg, eaddr);
+        let dst_reg = instr.dst() as usize;
+
+        self.set_gpr32(dst_reg, op2_16 as u32);
+        tracing::trace!("MOVZX32 mem: reg{} = [{:?}:{:#x}] ({:#06x})", dst_reg, seg, eaddr, op2_16);
+    }
+
+    /// MOVZX r32, r16 (register form)
+    /// Matching C++ data_xfer32.cc:144-152 MOVZX_GdEwR
+    /// Zero extend word op2 into dword op1
+    pub fn movzx_gd_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        let src_reg = instr.src() as usize;
+        let op2_16 = self.get_gpr16(src_reg);
+        let dst_reg = instr.dst() as usize;
+
+        self.set_gpr32(dst_reg, op2_16 as u32);
+        tracing::trace!("MOVZX32: reg{} = reg{} ({:#06x})", dst_reg, src_reg, op2_16);
+    }
+
+    /// MOVSX r32, r/m8 (memory form)
+    /// Matching C++ data_xfer32.cc:154-164 MOVSX_GdEbM
+    /// Sign extend byte op2 into dword op1
+    pub fn movsx_gd_eb_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let op2_8 = self.read_virtual_byte(seg, eaddr);
+        let dst_reg = instr.dst() as usize;
+        let val32 = (op2_8 as i8 as i32) as u32; // sign extend byte to dword
+
+        self.set_gpr32(dst_reg, val32);
+        tracing::trace!("MOVSX32 mem: reg{} = [{:?}:{:#x}] ({:#04x} -> {:#010x})", dst_reg, seg, eaddr, op2_8, val32);
+    }
+
+    /// MOVSX r32, r8 (register form)
+    /// Matching C++ data_xfer32.cc:166-174 MOVSX_GdEbR
+    /// Sign extend byte op2 into dword op1
+    pub fn movsx_gd_eb_r(&mut self, instr: &BxInstructionGenerated) {
+        let src_reg = instr.src() as usize;
+        let extend8bit_l = instr.extend8bit_l();
+        let op2_8 = self.read_8bit_regx(src_reg, extend8bit_l);
+        let dst_reg = instr.dst() as usize;
+        let val32 = (op2_8 as i8 as i32) as u32; // sign extend byte to dword
+
+        self.set_gpr32(dst_reg, val32);
+        tracing::trace!("MOVSX32: reg{} = reg{} ({:#04x} -> {:#010x})", dst_reg, src_reg, op2_8, val32);
+    }
+
+    /// MOVSX r32, r/m16 (memory form)
+    /// Matching C++ data_xfer32.cc:176-186 MOVSX_GdEwM
+    /// Sign extend word op2 into dword op1
+    pub fn movsx_gd_ew_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let op2_16 = self.read_virtual_word(seg, eaddr);
+        let dst_reg = instr.dst() as usize;
+        let val32 = (op2_16 as i16 as i32) as u32; // sign extend word to dword
+
+        self.set_gpr32(dst_reg, val32);
+        tracing::trace!("MOVSX32 mem: reg{} = [{:?}:{:#x}] ({:#06x} -> {:#010x})", dst_reg, seg, eaddr, op2_16, val32);
+    }
+
+    /// MOVSX r32, r16 (register form)
+    /// Matching C++ data_xfer32.cc:188-196 MOVSX_GdEwR
+    /// Sign extend word op2 into dword op1
+    pub fn movsx_gd_ew_r(&mut self, instr: &BxInstructionGenerated) {
+        let src_reg = instr.src() as usize;
+        let op2_16 = self.get_gpr16(src_reg);
+        let dst_reg = instr.dst() as usize;
+        let val32 = (op2_16 as i16 as i32) as u32; // sign extend word to dword
+
+        self.set_gpr32(dst_reg, val32);
+        tracing::trace!("MOVSX32: reg{} = reg{} ({:#06x} -> {:#010x})", dst_reg, src_reg, op2_16, val32);
+    }
+
+    // =========================================================================
+    // CMOV - Conditional Move (32-bit)
+    // =========================================================================
+    // Note: CMOV accesses a memory source operand (read), regardless
+    //       of whether condition is true or not.  Thus, exceptions may
+    //       occur even if the MOV does not take place.
+    // Matching C++ data_xfer32.cc:219-381
+
+    /// Conditional move if overflow (OF=1)
+    /// Matching C++ data_xfer32.cc:223-231 CMOVO_GdEdR
+    /// Always clear upper part of the register (BX_CLEAR_64BIT_HIGH)
+    pub fn cmovo_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_of() {
+            let src_reg = instr.src() as usize;
+            let val32 = self.get_gpr32(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr32(dst_reg, val32);
+        }
+        // Always clear high 64 bits (matching C++ line 228)
+        self.bx_clear_64bit_high(instr.dst() as usize);
+    }
+
+    /// Conditional move if not overflow (OF=0)
+    /// Matching C++ data_xfer32.cc:233-241 CMOVNO_GdEdR
+    /// Always clear upper part of the register
+    pub fn cmovno_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        if !self.get_of() {
+            let src_reg = instr.src() as usize;
+            let val32 = self.get_gpr32(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr32(dst_reg, val32);
+        }
+        self.bx_clear_64bit_high(instr.dst() as usize);
+    }
+
+    /// Conditional move if below/carry (CF=1)
+    /// Matching C++ data_xfer32.cc:243-251 CMOVB_GdEdR
+    /// Always clear upper part of the register
+    pub fn cmovb_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_cf() {
+            let src_reg = instr.src() as usize;
+            let val32 = self.get_gpr32(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr32(dst_reg, val32);
+        }
+        self.bx_clear_64bit_high(instr.dst() as usize);
+    }
+
+    /// Conditional move if not below/no carry (CF=0)
+    /// Matching C++ data_xfer32.cc:253-261 CMOVNB_GdEdR
+    /// Always clear upper part of the register
+    pub fn cmovnb_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        if !self.get_cf() {
+            let src_reg = instr.src() as usize;
+            let val32 = self.get_gpr32(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr32(dst_reg, val32);
+        }
+        self.bx_clear_64bit_high(instr.dst() as usize);
+    }
+
+    /// Conditional move if zero/equal (ZF=1)
+    /// Matching C++ data_xfer32.cc:263-271 CMOVZ_GdEdR
+    /// Always clear upper part of the register
+    pub fn cmovz_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_zf() {
+            let src_reg = instr.src() as usize;
+            let val32 = self.get_gpr32(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr32(dst_reg, val32);
+        }
+        self.bx_clear_64bit_high(instr.dst() as usize);
+    }
+
+    /// Conditional move if not zero/not equal (ZF=0)
+    /// Matching C++ data_xfer32.cc:273-281 CMOVNZ_GdEdR
+    /// Always clear upper part of the register
+    pub fn cmovnz_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        if !self.get_zf() {
+            let src_reg = instr.src() as usize;
+            let val32 = self.get_gpr32(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr32(dst_reg, val32);
+        }
+        self.bx_clear_64bit_high(instr.dst() as usize);
+    }
+
+    /// Conditional move if below or equal (CF=1 or ZF=1)
+    /// Matching C++ data_xfer32.cc:283-291 CMOVBE_GdEdR
+    /// Always clear upper part of the register
+    pub fn cmovbe_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_cf() || self.get_zf() {
+            let src_reg = instr.src() as usize;
+            let val32 = self.get_gpr32(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr32(dst_reg, val32);
+        }
+        self.bx_clear_64bit_high(instr.dst() as usize);
+    }
+
+    /// Conditional move if not below or equal/above (CF=0 and ZF=0)
+    /// Matching C++ data_xfer32.cc:293-301 CMOVNBE_GdEdR
+    /// Always clear upper part of the register
+    pub fn cmovnbe_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        if !self.get_cf() && !self.get_zf() {
+            let src_reg = instr.src() as usize;
+            let val32 = self.get_gpr32(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr32(dst_reg, val32);
+        }
+        self.bx_clear_64bit_high(instr.dst() as usize);
+    }
+
+    /// Conditional move if sign (SF=1)
+    /// Matching C++ data_xfer32.cc:303-311 CMOVS_GdEdR
+    /// Always clear upper part of the register
+    pub fn cmovs_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_sf() {
+            let src_reg = instr.src() as usize;
+            let val32 = self.get_gpr32(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr32(dst_reg, val32);
+        }
+        self.bx_clear_64bit_high(instr.dst() as usize);
+    }
+
+    /// Conditional move if not sign (SF=0)
+    /// Matching C++ data_xfer32.cc:313-321 CMOVNS_GdEdR
+    /// Always clear upper part of the register
+    pub fn cmovns_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        if !self.get_sf() {
+            let src_reg = instr.src() as usize;
+            let val32 = self.get_gpr32(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr32(dst_reg, val32);
+        }
+        self.bx_clear_64bit_high(instr.dst() as usize);
+    }
+
+    /// Conditional move if parity/parity even (PF=1)
+    /// Matching C++ data_xfer32.cc:323-331 CMOVP_GdEdR
+    /// Always clear upper part of the register
+    pub fn cmovp_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_pf() {
+            let src_reg = instr.src() as usize;
+            let val32 = self.get_gpr32(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr32(dst_reg, val32);
+        }
+        self.bx_clear_64bit_high(instr.dst() as usize);
+    }
+
+    /// Conditional move if no parity/parity odd (PF=0)
+    /// Matching C++ data_xfer32.cc:333-341 CMOVNP_GdEdR
+    /// Always clear upper part of the register
+    pub fn cmovnp_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        if !self.get_pf() {
+            let src_reg = instr.src() as usize;
+            let val32 = self.get_gpr32(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr32(dst_reg, val32);
+        }
+        self.bx_clear_64bit_high(instr.dst() as usize);
+    }
+
+    /// Conditional move if less (SF != OF)
+    /// Matching C++ data_xfer32.cc:343-351 CMOVL_GdEdR
+    /// Always clear upper part of the register
+    pub fn cmovl_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_sf() != self.get_of() {
+            let src_reg = instr.src() as usize;
+            let val32 = self.get_gpr32(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr32(dst_reg, val32);
+        }
+        self.bx_clear_64bit_high(instr.dst() as usize);
+    }
+
+    /// Conditional move if not less/greater or equal (SF == OF)
+    /// Matching C++ data_xfer32.cc:353-361 CMOVNL_GdEdR
+    /// Always clear upper part of the register
+    pub fn cmovnl_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_sf() == self.get_of() {
+            let src_reg = instr.src() as usize;
+            let val32 = self.get_gpr32(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr32(dst_reg, val32);
+        }
+        self.bx_clear_64bit_high(instr.dst() as usize);
+    }
+
+    /// Conditional move if less or equal (ZF=1 or SF!=OF)
+    /// Matching C++ data_xfer32.cc:363-371 CMOVLE_GdEdR
+    /// Always clear upper part of the register
+    pub fn cmovle_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        if self.get_zf() || (self.get_sf() != self.get_of()) {
+            let src_reg = instr.src() as usize;
+            let val32 = self.get_gpr32(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr32(dst_reg, val32);
+        }
+        self.bx_clear_64bit_high(instr.dst() as usize);
+    }
+
+    /// Conditional move if not less or equal/greater (ZF=0 and SF==OF)
+    /// Matching C++ data_xfer32.cc:373-381 CMOVNLE_GdEdR
+    /// Always clear upper part of the register
+    pub fn cmovnle_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+        if !self.get_zf() && (self.get_sf() == self.get_of()) {
+            let src_reg = instr.src() as usize;
+            let val32 = self.get_gpr32(src_reg);
+            let dst_reg = instr.dst() as usize;
+            self.set_gpr32(dst_reg, val32);
+        }
+        self.bx_clear_64bit_high(instr.dst() as usize);
+    }
+
+
+    // =========================================================================
+    // Helper functions for 32-bit memory operations
+    // =========================================================================
+
+    /// Write dword to virtual address (matches write_virtual_dword)
+    fn write_virtual_dword(&mut self, seg: BxSegregs, eaddr: u32, val: u32) {
+        let laddr = self.get_laddr32_seg(seg, eaddr);
+        self.mem_write_dword(laddr as u64, val);
+    }
+
+    // read_virtual_dword is defined in logical32.rs to avoid duplicate definitions
+
+    // Helper methods (read_rmw_virtual_dword, write_rmw_linear_dword) are defined in logical32.rs to avoid duplicate definitions
 }
 

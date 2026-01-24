@@ -16,7 +16,7 @@
 use rusty_box::{
     cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
     emulator::{Emulator, EmulatorConfig},
-    gui::TermGui,
+    gui::{NoGui, TermGui},
     Result,
 };
 use std::time::Instant;
@@ -55,7 +55,8 @@ fn run_dlxlinux() -> Result<()> {
     //     .without_time()
     //     .with_target(false)
     //     // .with_max_level(Level::INFO)
-    //     .with_max_level(Level::TRACE)
+    //     // .with_max_level(Level::TRACE)
+    //     .with_max_level(Level::INFO)
     //     .init();
 
     println!("╔════════════════════════════════════════════════════════════╗");
@@ -310,8 +311,8 @@ fn run_dlxlinux() -> Result<()> {
     let start_time = Instant::now();
 
     // Run with instruction limit to allow debugging
-    // const MAX_INSTRUCTIONS: u64 = 1_000_000; // 1M instructions - reasonable limit for testing
-    const MAX_INSTRUCTIONS: u64 = 1_000_000; // 1M instructions - reasonable limit for testing
+    const MAX_INSTRUCTIONS: u64 = 1_000_000_000; // 1M instructions - reasonable limit for testing
+                                                 // const MAX_INSTRUCTIONS: u64 = 100; // 100k instructions - reasonable limit for testing
 
     // Use interactive loop that handles GUI events
     let result = emu.run_interactive(MAX_INSTRUCTIONS);

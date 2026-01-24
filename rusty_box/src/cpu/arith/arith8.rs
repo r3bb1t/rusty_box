@@ -5,89 +5,9 @@ use crate::cpu::decoder::{BxInstructionGenerated, BxSegregs};
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 use crate::config::BxAddress;
 
-impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
-    /// Resolve effective address from ModRM (matches BX_CPU_RESOLVE_ADDR/BxResolve32)
-    fn resolve_addr32(&self, instr: &BxInstructionGenerated) -> u32 {
-        // Calculate: base + (index << scale) + displacement
-        let base_reg = instr.sib_base() as usize;
-        let mut eaddr = if base_reg < 16 {
-            self.get_gpr32(base_reg)
-        } else {
-            0
-        };
-        
-        eaddr = eaddr.wrapping_add(instr.displ32s() as u32);
-        
-        let index_reg = instr.sib_index();
-        if index_reg != 4 {  // 4 means no index
-            let index_val = if index_reg < 16 {
-                self.get_gpr32(index_reg as usize)
-            } else {
-                0
-            };
-            let scale = instr.sib_scale();
-            eaddr = eaddr.wrapping_add(index_val << scale);
-        }
-        
-        // Apply address size mask
-        if instr.as32_l() == 0 {
-            // 16-bit address size
-            eaddr & 0xFFFF
-        } else {
-            // 32-bit address size
-            eaddr
-        }
-    }
-
-    /// Get linear address from segment and offset
-    fn get_laddr32_seg(&self, seg: BxSegregs, offset: u32) -> u32 {
-        let seg_base = unsafe { self.sregs[seg as usize].cache.u.segment.base };
-        (seg_base.wrapping_add(offset as u64)) as u32
-    }
-
-    /// Read byte from virtual address (matches read_virtual_byte)
-    fn read_virtual_byte(&self, seg: BxSegregs, eaddr: u32) -> u8 {
-        let laddr = self.get_laddr32_seg(seg, eaddr);
-        self.mem_read_byte(laddr as u64)
-    }
-
-    /// Read-Modify-Write: Read byte, return it and linear address for write back
-    /// (matches read_RMW_virtual_byte)
-    fn read_rmw_virtual_byte(&mut self, seg: BxSegregs, eaddr: u32) -> (u8, u32) {
-        let laddr = self.get_laddr32_seg(seg, eaddr);
-        let val = self.mem_read_byte(laddr as u64);
-        (val, laddr)
-    }
-
-    /// Write byte to linear address (for RMW operations, matches write_RMW_linear_byte)
-    fn write_rmw_linear_byte(&mut self, laddr: u32, val: u8) {
-        self.mem_write_byte(laddr as u64, val);
-    }
-
-    /// Read 8-bit register with extend8bitL support (matches BX_READ_8BIT_REGx)
-    fn read_8bit_regx(&self, reg_idx: usize, extend8bit_l: u8) -> u8 {
-        if extend8bit_l != 0 || (reg_idx & 4) == 0 {
-            // Use low 8 bits (AL, BL, CL, DL, or extended regs)
-            self.get_gpr8(reg_idx)
-        } else {
-            // Use high 8 bits (AH, BH, CH, DH)
-            (self.get_gpr16((reg_idx - 4) + 8) >> 8) as u8
-        }
-    }
-
-    /// Write 8-bit register with extend8bitL support (matches BX_WRITE_8BIT_REGx)
-    fn write_8bit_regx(&mut self, reg_idx: usize, extend8bit_l: u8, val: u8) {
-        if extend8bit_l != 0 || (reg_idx & 4) == 0 {
-            // Write to low 8 bits
-            self.set_gpr8(reg_idx, val);
-        } else {
-            // Write to high 8 bits
-            let reg16_idx = (reg_idx - 4) + 8;
-            let current = self.get_gpr16(reg16_idx);
-            self.set_gpr16(reg16_idx, (current & !0xFF00) | ((val as u16) << 8));
-        }
-    }
-}
+// Helper methods are defined in logical8.rs and data_xfer_ext.rs
+// Free functions below use cpu.resolve_addr32(), cpu.read_8bit_regx(), etc.
+// which call the public methods from those modules
 
 /// ADD_EbGbM: ADD r/m8, r8 (memory form)
 /// Opcode: 0x00, ModRM: r/m8, r8 (memory)

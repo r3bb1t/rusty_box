@@ -84,7 +84,7 @@ fn inner_main() -> Result<()> {
 
     // === Step 5: Initialize Devices ===
     let mut devices = BxDevicesC::new();
-    devices.init(&mut mem)?;
+    devices.init(&mut mem, None)?;
     devices.register_state()?;
 
     // === Step 6: Register state for save/restore ===

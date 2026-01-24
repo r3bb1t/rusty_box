@@ -262,6 +262,11 @@ pub struct Xcr0 {
 
 impl Xcr0 {
     #[inline]
+    pub(super) fn get32(&self) -> u32 {
+        self.value
+    }
+    
+    #[inline]
     pub(super) fn set32(&mut self, val: u32) {
         self.value = val
     }

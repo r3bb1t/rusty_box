@@ -803,7 +803,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn bx_write_64bit_reg(&mut self, index: usize, val: u64) {
         self.gen_reg[index].rrx = val;
     }
-    fn bx_clear_64bit_high(&mut self, index: usize) {
+    pub(super) fn bx_clear_64bit_high(&mut self, index: usize) {
         unsafe {
             self.gen_reg[index].dword.hrx = 0;
         }
@@ -811,6 +811,41 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub(super) fn get_laddr32(&self, seg: usize, offset: u32) -> u32 {
         (unsafe { self.sregs[seg].cache.u.segment.base } + u64::from(offset)) as u32
+    }
+
+    /// Get linear address in 64-bit mode (matching get_laddr64)
+    pub(super) fn get_laddr64(&self, seg: usize, offset: u64) -> u64 {
+        unsafe { self.sregs[seg].cache.u.segment.base.wrapping_add(offset) }
+    }
+
+    /// Read 64-bit qword from memory (matching mem_read_qword)
+    pub(super) fn mem_read_qword(&self, laddr: u64) -> u64 {
+        // Read 8 bytes from memory
+        let bytes = [
+            self.mem_read_byte(laddr),
+            self.mem_read_byte(laddr + 1),
+            self.mem_read_byte(laddr + 2),
+            self.mem_read_byte(laddr + 3),
+            self.mem_read_byte(laddr + 4),
+            self.mem_read_byte(laddr + 5),
+            self.mem_read_byte(laddr + 6),
+            self.mem_read_byte(laddr + 7),
+        ];
+        u64::from_le_bytes(bytes)
+    }
+
+    /// Write 64-bit qword to memory (matching mem_write_qword)
+    pub(super) fn mem_write_qword(&mut self, laddr: u64, value: u64) {
+        // Write 8 bytes to memory
+        let bytes = value.to_le_bytes();
+        self.mem_write_byte(laddr, bytes[0]);
+        self.mem_write_byte(laddr + 1, bytes[1]);
+        self.mem_write_byte(laddr + 2, bytes[2]);
+        self.mem_write_byte(laddr + 3, bytes[3]);
+        self.mem_write_byte(laddr + 4, bytes[4]);
+        self.mem_write_byte(laddr + 5, bytes[5]);
+        self.mem_write_byte(laddr + 6, bytes[6]);
+        self.mem_write_byte(laddr + 7, bytes[7]);
     }
 }
 
@@ -916,6 +951,9 @@ struct BxGuardFound {
     iaddr_index: u32,
     guard_state: BxDbgGuardState,
 }
+
+/// Type alias for instruction handler function pointer
+type InstructionHandler<I> = fn(&mut BxCpuC<'_, I>, &BxInstructionGenerated) -> Result<()>;
 
 impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     pub fn cpu_loop(&mut self, mem: &'c mut BxMemC<'c>, cpus: &[&Self]) -> super::Result<()> {
@@ -1102,8 +1140,22 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
                 // Matching C++ line 202: RIP += i->ilen();
                 // Advance RIP BEFORE execution (instruction handlers may read RIP and expect it to be advanced)
+                // In C++, RIP is a 64-bit register accessed directly: RIP += i->ilen()
                 let current_rip = self.rip();
-                let next_rip = current_rip + u64::from(ilen);
+                let mut next_rip = current_rip + u64::from(ilen);
+                
+                // In real mode, EIP is 16-bit and should wrap at 0xFFFF
+                // Matching C++ vm8086.cc:109: EIP = new_eip & 0xffff
+                // We need to mask EIP immediately to prevent incorrect values from being used
+                // The high 32 bits will be cleared in prefetch() via BX_CLEAR_64BIT_HIGH
+                if self.real_mode() {
+                    // Extract low 32 bits (EIP) and mask to 16 bits, then combine with high 32 bits
+                    let eip_32bit = (next_rip & 0xFFFFFFFF) as u32;
+                    let eip_16bit = eip_32bit & 0xFFFF;
+                    // Preserve high 32 bits (will be cleared in prefetch), set low 32 bits to masked EIP
+                    next_rip = (next_rip & 0xFFFFFFFF00000000) | u64::from(eip_16bit);
+                }
+                
                 self.set_rip(next_rip);
 
                 tracing::info!("Executing opcode: {:?} at RIP={:#x}, ilen={}, next_rip={:#x}, trace_start_idx={}, instr_idx={}", 
@@ -1111,7 +1163,37 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
                 // Matching C++ line 203: BX_CPU_CALL_METHOD(i->execute1, (i));
                 // might iterate repeat instruction
-                    match self.execute_instruction(&mut i) {
+                
+                // Assign handler for this instruction (matching original assignHandler logic)
+                // This checks feature flags, assigns handler, and determines if trace should end
+                let fetch_mode_mask = self.fetch_mode_mask;
+                match self.assign_handler(&mut i, fetch_mode_mask) {
+                    Ok((should_stop_trace, handler_opt)) => {
+                        if should_stop_trace {
+                            tracing::debug!("assign_handler returned true, stopping trace");
+                            break;
+                        }
+                        
+                        // Execute the instruction using assigned handler if available
+                        if let Some(handler) = handler_opt {
+                            // Call handler function pointer directly (matching C++ i->execute1(i))
+                            match handler(self, &i) {
+                                Ok(()) => {
+                                    // Instruction executed successfully
+                                }
+                                Err(crate::cpu::CpuError::CpuNotInitialized) => {
+                                    // Prefetch queue invalidated - need to break and get new trace
+                                    tracing::debug!("handler returned CpuNotInitialized, breaking trace");
+                                    break;
+                                }
+                                Err(e) => {
+                                    tracing::warn!("handler execution returned error: {:?}", e);
+                                    // Continue but instruction may not have executed correctly
+                                }
+                            }
+                        } else {
+                            // Handler not in table yet - use execute_instruction match statement
+                            match self.execute_instruction(&mut i) {
                         Ok(()) => {
                             // Instruction executed successfully
                         }
@@ -1120,10 +1202,124 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                             tracing::debug!("execute_instruction returned CpuNotInitialized, breaking trace");
                             break;
                         }
-                        Err(e) => {
-                            tracing::warn!("instruction execution returned error: {:?}", e);
-                            // For other errors, continue but the instruction may not have executed correctly
-                            // RIP has already been advanced, so we'll move to next instruction
+                        Err(crate::cpu::CpuError::UnimplementedOpcode { opcode }) => {
+                            // Panic on unimplemented opcode with detailed information
+                            let rip = current_rip;
+                            let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+                            let laddr = cs_base + rip;
+                            let cs_value = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
+                            
+                            // Try to get instruction bytes for debugging
+                            let instr_bytes = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
+                                let page_base = cs_base + (self.eip_page_bias as u64);
+                                let offset = (rip.wrapping_sub(page_base)) as usize;
+                                if offset < fetch_ptr.len() && offset + ilen as usize <= fetch_ptr.len() {
+                                    fetch_ptr[offset..offset + ilen as usize].to_vec()
+                                } else {
+                                    vec![]
+                                }
+                            } else {
+                                vec![]
+                            };
+                            
+                            panic!(
+                                "\n\
+                                ╔════════════════════════════════════════════════════════════╗\n\
+                                ║          UNIMPLEMENTED OPCODE DETECTED                      ║\n\
+                                ╠════════════════════════════════════════════════════════════╣\n\
+                                ║  Opcode:      {}                                    ║\n\
+                                ║  RIP:         {:#018x}                          ║\n\
+                                ║  CS:IP:       {:#04x}:{:#04x}                              ║\n\
+                                ║  Linear Addr: {:#018x}                          ║\n\
+                                ║  Length:      {} bytes                                    ║\n\
+                                ║  Bytes:       {:02x?}                                      ║\n\
+                                ╠════════════════════════════════════════════════════════════╣\n\
+                                ║  Please implement this instruction in:                    ║\n\
+                                ║    rusty_box/src/cpu/cpu.rs::execute_instruction()       ║\n\
+                                ║                                                             ║\n\
+                                ║  Check original C++ implementation in:                     ║\n\
+                                ║    cpp_orig/bochs/cpu/decoder/ia_opcodes.def              ║\n\
+                                ╚════════════════════════════════════════════════════════════╝\n",
+                                opcode,
+                                rip,
+                                cs_value,
+                                rip,
+                                laddr,
+                                ilen,
+                                instr_bytes
+                            );
+                        }
+                                Err(e) => {
+                                    tracing::warn!("instruction execution returned error: {:?}", e);
+                                    // For other errors, continue but the instruction may not have executed correctly
+                                    // RIP has already been advanced, so we'll move to next instruction
+                                }
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        tracing::warn!("assign_handler returned error: {:?}", e);
+                        // Fall back to execute_instruction match statement
+                        match self.execute_instruction(&mut i) {
+                            Ok(()) => {
+                                // Instruction executed successfully
+                            }
+                            Err(crate::cpu::CpuError::CpuNotInitialized) => {
+                                tracing::debug!("execute_instruction returned CpuNotInitialized, breaking trace");
+                                break;
+                            }
+                            Err(crate::cpu::CpuError::UnimplementedOpcode { opcode }) => {
+                                // Panic on unimplemented opcode with detailed information
+                                let rip = current_rip;
+                                let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+                                let laddr = cs_base + rip;
+                                let cs_value = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
+                                
+                                // Try to get instruction bytes for debugging
+                                let instr_bytes = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
+                                    let page_base = cs_base + (self.eip_page_bias as u64);
+                                    let offset = (rip.wrapping_sub(page_base)) as usize;
+                                    if offset < fetch_ptr.len() && offset + ilen as usize <= fetch_ptr.len() {
+                                        fetch_ptr[offset..offset + ilen as usize].to_vec()
+                                    } else {
+                                        vec![]
+                                    }
+                                } else {
+                                    vec![]
+                                };
+                                
+                                panic!(
+                                    "\n\
+                                    ╔════════════════════════════════════════════════════════════╗\n\
+                                    ║          UNIMPLEMENTED OPCODE DETECTED                      ║\n\
+                                    ╠════════════════════════════════════════════════════════════╣\n\
+                                    ║  Opcode:      {}                                    ║\n\
+                                    ║  RIP:         {:#018x}                          ║\n\
+                                    ║  CS:IP:       {:#04x}:{:#04x}                              ║\n\
+                                    ║  Linear Addr: {:#018x}                          ║\n\
+                                    ║  Length:      {} bytes                                    ║\n\
+                                    ║  Bytes:       {:02x?}                                      ║\n\
+                                    ╠════════════════════════════════════════════════════════════╣\n\
+                                    ║  Please implement this instruction in:                    ║\n\
+                                    ║    rusty_box/src/cpu/cpu.rs::execute_instruction()       ║\n\
+                                    ║                                                             ║\n\
+                                    ║  Check original C++ implementation in:                     ║\n\
+                                    ║    cpp_orig/bochs/cpu/decoder/ia_opcodes.def              ║\n\
+                                    ╚════════════════════════════════════════════════════════════╝\n",
+                                    opcode,
+                                    rip,
+                                    cs_value,
+                                    rip,
+                                    laddr,
+                                    ilen,
+                                    instr_bytes
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!("instruction execution returned error: {:?}", e);
+                                // Continue but instruction may not have executed correctly
+                            }
+                        }
                     }
                 }
 
@@ -1549,8 +1745,79 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 arith::ADC_GwEw(self, instr)
             }
             Opcode::AndEbGb => {
-                use crate::cpu::arith;
-                arith::AND_EbGb(self, instr)
+                // Memory form - register form is handled separately
+                self.and_eb_gb_m(instr);
+                Ok(())
+            }
+            Opcode::AndGbEb => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.and_gb_eb_r(instr);
+                } else {
+                    // Memory form
+                    self.and_gb_eb_m(instr);
+                }
+                Ok(())
+            }
+            Opcode::AndEbIb => {
+                // Memory form
+                self.and_eb_ib_m(instr);
+                Ok(())
+            }
+            Opcode::OrEbGb => {
+                // Memory form
+                self.or_eb_gb_m(instr);
+                Ok(())
+            }
+            Opcode::OrGbEb => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.or_gb_eb_r(instr);
+                } else {
+                    // Memory form
+                    self.or_gb_eb_m(instr);
+                }
+                Ok(())
+            }
+            Opcode::OrEbIb => {
+                // Memory form
+                self.or_eb_ib_m(instr);
+                Ok(())
+            }
+            Opcode::XorEbGb => {
+                // Memory form
+                self.xor_eb_gb_m(instr);
+                Ok(())
+            }
+            Opcode::XorGbEb => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.xor_gb_eb_r(instr);
+                } else {
+                    // Memory form
+                    self.xor_gb_eb_m(instr);
+                }
+                Ok(())
+            }
+            Opcode::XorEbIb => {
+                // Memory form
+                self.xor_eb_ib_m(instr);
+                Ok(())
+            }
+            Opcode::NotEb => {
+                // Memory form
+                self.not_eb_m(instr);
+                Ok(())
+            }
+            Opcode::TestEbGb => {
+                // Memory form
+                self.test_eb_gb_m(instr);
+                Ok(())
+            }
+            Opcode::TestEbIb => {
+                // Memory form
+                self.test_eb_ib_m(instr);
+                Ok(())
             }
 
             // =========================================================================
@@ -1645,25 +1912,23 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             // XOR instructions
-            Opcode::XorEdGd | Opcode::XorEdGdZeroIdiom => {
-                let dst = instr.meta_data[0] as usize;
-                let src = instr.meta_data[1] as usize;
-                let val1 = self.get_gpr32(dst);
-                let val2 = self.get_gpr32(src);
-                let result = val1 ^ val2;
-                self.set_gpr32(dst, result);
-                // Update flags for XOR
-                self.update_flags_logic32(result);
+            Opcode::XorEdGd => {
+                // Memory form
+                self.xor_ed_gd_m(instr);
                 Ok(())
             }
-            Opcode::XorGdEd | Opcode::XorGdEdZeroIdiom => {
-                let dst = instr.meta_data[0] as usize;
-                let src = instr.meta_data[1] as usize;
-                let val1 = self.get_gpr32(dst);
-                let val2 = self.get_gpr32(src);
-                let result = val1 ^ val2;
-                self.set_gpr32(dst, result);
-                self.update_flags_logic32(result);
+            Opcode::XorEdGdZeroIdiom | Opcode::XorGdEdZeroIdiom => {
+                self.zero_idiom_gd_r(instr);
+                Ok(())
+            }
+            Opcode::XorGdEd => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.xor_gd_ed_r(instr);
+                } else {
+                    // Memory form
+                    self.xor_gd_ed_m(instr);
+                }
                 Ok(())
             }
             Opcode::XorEbGb | Opcode::XorGbEb => {
@@ -1677,15 +1942,19 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.update_flags_logic8(result);
                 Ok(())
             }
-            Opcode::XorEwGw | Opcode::XorGwEw => {
-                // XOR r16, r/m16
-                let dst = instr.meta_data[0] as usize;
-                let src = instr.meta_data[1] as usize;
-                let val1 = self.get_gpr16(dst);
-                let val2 = self.get_gpr16(src);
-                let result = val1 ^ val2;
-                self.set_gpr16(dst, result);
-                self.update_flags_logic16(result);
+            Opcode::XorEwGw => {
+                // Memory form
+                self.xor_ew_gw_m(instr);
+                Ok(())
+            }
+            Opcode::XorGwEw => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.xor_gw_ew_r(instr);
+                } else {
+                    // Memory form
+                    self.xor_gw_ew_m(instr);
+                }
                 Ok(())
             }
             Opcode::XorEwGwZeroIdiom | Opcode::XorGwEwZeroIdiom => {
@@ -1952,6 +2221,197 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.jcxz_jb(instr);
                 Ok(())
             }
+            Opcode::JecxzJbd => {
+                self.jecxz_jb(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // Far CALL instructions (32-bit)
+            // =========================================================================
+            Opcode::CallfOp32Ap => {
+                self.call32_ap(instr)
+            }
+            Opcode::CallfOp32Ep => {
+                self.call32_ep(instr)
+            }
+
+            // =========================================================================
+            // Far JMP instructions (32-bit)
+            // =========================================================================
+            Opcode::JmpfOp32Ep => {
+                self.jmp32_ep(instr)
+            }
+
+            // =========================================================================
+            // Far RET instructions (32-bit)
+            // =========================================================================
+            Opcode::RetfOp32 => {
+                self.retfar32(instr)
+            }
+            Opcode::RetfOp32Iw => {
+                self.retfar32_iw(instr)
+            }
+
+            // =========================================================================
+            // Conditional jumps with 32-bit displacement (Jd variants)
+            // =========================================================================
+            Opcode::JoJd => {
+                self.jo_jd(instr);
+                Ok(())
+            }
+            Opcode::JnoJd => {
+                self.jno_jd(instr);
+                Ok(())
+            }
+            Opcode::JbJd => {
+                self.jb_jd(instr);
+                Ok(())
+            }
+            Opcode::JnbJd => {
+                self.jnb_jd(instr);
+                Ok(())
+            }
+            Opcode::JzJd => {
+                self.jz_jd(instr);
+                Ok(())
+            }
+            Opcode::JnzJd => {
+                self.jnz_jd(instr);
+                Ok(())
+            }
+            Opcode::JbeJd => {
+                self.jbe_jd(instr);
+                Ok(())
+            }
+            Opcode::JnbeJd => {
+                self.jnbe_jd(instr);
+                Ok(())
+            }
+            Opcode::JsJd => {
+                self.js_jd(instr);
+                Ok(())
+            }
+            Opcode::JnsJd => {
+                self.jns_jd(instr);
+                Ok(())
+            }
+            Opcode::JpJd => {
+                self.jp_jd(instr);
+                Ok(())
+            }
+            Opcode::JnpJd => {
+                self.jnp_jd(instr);
+                Ok(())
+            }
+            Opcode::JlJd => {
+                self.jl_jd(instr);
+                Ok(())
+            }
+            Opcode::JnlJd => {
+                self.jnl_jd(instr);
+                Ok(())
+            }
+            Opcode::JleJd => {
+                self.jle_jd(instr);
+                Ok(())
+            }
+            Opcode::JnleJd => {
+                self.jnle_jd(instr);
+                Ok(())
+            }
+
+            // Note: LOOP instructions in 32-bit mode use the same opcodes as 16-bit mode
+            // (LoopJbw, LoopeJbw, LoopneJbw) but behavior is determined by operand size
+            // The existing loop16_jb, loope16_jb, loopne16_jb functions already handle 32-bit mode
+
+            // =========================================================================
+            // Far CALL instructions (16-bit)
+            // =========================================================================
+            Opcode::CallfOp16Ap => {
+                self.call16_ap(instr)
+            }
+            Opcode::CallfOp16Ep => {
+                self.call16_ep(instr)
+            }
+
+            // =========================================================================
+            // Far JMP instructions (16-bit)
+            // =========================================================================
+            Opcode::JmpfOp16Ep => {
+                self.jmp16_ep(instr)
+            }
+            // JmpfAp is already implemented above
+
+            // =========================================================================
+            // Far RET instructions (16-bit)
+            // =========================================================================
+            Opcode::RetfOp16 => {
+                self.retfar16(instr)
+            }
+            Opcode::RetfOp16Iw => {
+                self.retfar16_iw(instr)
+            }
+
+            // =========================================================================
+            // Conditional jumps with 16-bit displacement (Jw variants)
+            // =========================================================================
+            Opcode::JoJw => {
+                self.jo_jw(instr);
+                Ok(())
+            }
+            Opcode::JnoJw => {
+                self.jno_jw(instr);
+                Ok(())
+            }
+            Opcode::JbJw => {
+                self.jb_jw(instr);
+                Ok(())
+            }
+            Opcode::JnbJw => {
+                self.jnb_jw(instr);
+                Ok(())
+            }
+            Opcode::JbeJw => {
+                self.jbe_jw(instr);
+                Ok(())
+            }
+            Opcode::JnbeJw => {
+                self.jnbe_jw(instr);
+                Ok(())
+            }
+            Opcode::JsJw => {
+                self.js_jw(instr);
+                Ok(())
+            }
+            Opcode::JnsJw => {
+                self.jns_jw(instr);
+                Ok(())
+            }
+            Opcode::JpJw => {
+                self.jp_jw(instr);
+                Ok(())
+            }
+            Opcode::JnpJw => {
+                self.jnp_jw(instr);
+                Ok(())
+            }
+            Opcode::JlJw => {
+                self.jl_jw(instr);
+                Ok(())
+            }
+            Opcode::JnlJw => {
+                self.jnl_jw(instr);
+                Ok(())
+            }
+            Opcode::JleJw => {
+                self.jle_jw(instr);
+                Ok(())
+            }
+            Opcode::JnleJw => {
+                self.jnle_jw(instr);
+                Ok(())
+            }
 
             // =========================================================================
             // CMP instructions
@@ -2010,15 +2470,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
             // TEST instructions
             Opcode::TestEbGb => {
-                self.test_eb_gb_r(instr);
+                // Memory form
+                self.test_eb_gb_m(instr);
                 Ok(())
             }
             Opcode::TestEwGw => {
-                self.test_ew_gw_r(instr);
+                // Memory form
+                self.test_ew_gw_m(instr);
                 Ok(())
             }
             Opcode::TestEdGd => {
-                self.test_ed_gd_r(instr);
+                // Memory form
+                self.test_ed_gd_m(instr);
                 Ok(())
             }
             Opcode::TestAlib => {
@@ -2034,27 +2497,57 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::TestEwIw => {
-                self.test_ew_iw_r(instr);
+                if instr.mod_c0() {
+                    // Register form
+                    self.test_ew_iw_r(instr);
+                } else {
+                    // Memory form
+                    self.test_ew_iw_m(instr);
+                }
                 Ok(())
             }
             Opcode::TestEdId => {
-                self.test_ed_id_r(instr);
+                if instr.mod_c0() {
+                    // Register form
+                    self.test_ed_id_r(instr);
+                } else {
+                    // Memory form
+                    self.test_ed_id_m(instr);
+                }
                 Ok(())
             }
 
             // =========================================================================
             // AND/OR/NOT instructions
             // =========================================================================
-            Opcode::AndGbEb => {
-                self.and_gb_eb_r(instr);
+            Opcode::AndGwEw => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.and_gw_ew_r(instr);
+                } else {
+                    // Memory form
+                    self.and_gw_ew_m(instr);
+                }
                 Ok(())
             }
-            Opcode::AndGwEw => {
-                self.and_gw_ew_r(instr);
+            Opcode::AndEwGw => {
+                // Memory form
+                self.and_ew_gw_m(instr);
                 Ok(())
             }
             Opcode::AndGdEd => {
-                self.and_gd_ed_r(instr);
+                if instr.mod_c0() {
+                    // Register form
+                    self.and_gd_ed_r(instr);
+                } else {
+                    // Memory form
+                    self.and_gd_ed_m(instr);
+                }
+                Ok(())
+            }
+            Opcode::AndEdGd => {
+                // Memory form
+                self.and_ed_gd_m(instr);
                 Ok(())
             }
             Opcode::AndAlib => {
@@ -2070,24 +2563,54 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::AndEwIw => {
-                self.and_ew_iw_r(instr);
+                if instr.mod_c0() {
+                    // Register form
+                    self.and_ew_iw_r(instr);
+                } else {
+                    // Memory form
+                    self.and_ew_iw_m(instr);
+                }
                 Ok(())
             }
             Opcode::AndEdId => {
-                self.and_ed_id_r(instr);
+                if instr.mod_c0() {
+                    // Register form
+                    self.and_ed_id_r(instr);
+                } else {
+                    // Memory form
+                    self.and_ed_id_m(instr);
+                }
                 Ok(())
             }
 
-            Opcode::OrGbEb => {
-                self.or_gb_eb_r(instr);
+            Opcode::OrGwEw => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.or_gw_ew_r(instr);
+                } else {
+                    // Memory form
+                    self.or_gw_ew_m(instr);
+                }
                 Ok(())
             }
-            Opcode::OrGwEw => {
-                self.or_gw_ew_r(instr);
+            Opcode::OrEwGw => {
+                // Memory form
+                self.or_ew_gw_m(instr);
                 Ok(())
             }
             Opcode::OrGdEd => {
-                self.or_gd_ed_r(instr);
+                if instr.mod_c0() {
+                    // Register form
+                    self.or_gd_ed_r(instr);
+                } else {
+                    // Memory form
+                    self.or_gd_ed_m(instr);
+                }
+                Ok(())
+            }
+            Opcode::OrEdGd => {
+                // Memory form
+                self.or_ed_gd_m(instr);
                 Ok(())
             }
             Opcode::OrAlib => {
@@ -2100,6 +2623,190 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::OrEaxid => {
                 self.or_eax_id(instr);
+                Ok(())
+            }
+            Opcode::OrEwIw => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.or_ew_iw_r(instr);
+                } else {
+                    // Memory form
+                    self.or_ew_iw_m(instr);
+                }
+                Ok(())
+            }
+            Opcode::OrEdId => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.or_ed_id_r(instr);
+                } else {
+                    // Memory form
+                    self.or_ed_id_m(instr);
+                }
+                Ok(())
+            }
+            Opcode::XorEwIw => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.xor_ew_iw_r(instr);
+                } else {
+                    // Memory form
+                    self.xor_ew_iw_m(instr);
+                }
+                Ok(())
+            }
+            Opcode::XorEdId => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.xor_ed_id_r(instr);
+                } else {
+                    // Memory form
+                    self.xor_ed_id_m(instr);
+                }
+                Ok(())
+            }
+            Opcode::NotEw => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.not_ew_r(instr);
+                } else {
+                    // Memory form
+                    self.not_ew_m(instr);
+                }
+                Ok(())
+            }
+            Opcode::NotEd => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.not_ed_r(instr);
+                } else {
+                    // Memory form
+                    self.not_ed_m(instr);
+                }
+                Ok(())
+            }
+
+            // =========================================================================
+            // Multiplication and Division instructions
+            // =========================================================================
+            Opcode::MulAleb => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.mul_al_eb_r(instr)?;
+                } else {
+                    // Memory form
+                    self.mul_al_eb_m(instr)?;
+                }
+                Ok(())
+            }
+            Opcode::ImulAleb => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.imul_al_eb_r(instr)?;
+                } else {
+                    // Memory form
+                    self.imul_al_eb_m(instr)?;
+                }
+                Ok(())
+            }
+            Opcode::DivAleb => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.div_al_eb_r(instr)?;
+                } else {
+                    // Memory form
+                    self.div_al_eb_m(instr)?;
+                }
+                Ok(())
+            }
+            Opcode::IdivAleb => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.idiv_al_eb_r(instr)?;
+                } else {
+                    // Memory form
+                    self.idiv_al_eb_m(instr)?;
+                }
+                Ok(())
+            }
+            Opcode::MulAxew => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.mul_ax_ew_r(instr)?;
+                } else {
+                    // Memory form
+                    self.mul_ax_ew_m(instr)?;
+                }
+                Ok(())
+            }
+            Opcode::ImulAxew => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.imul_ax_ew_r(instr)?;
+                } else {
+                    // Memory form
+                    self.imul_ax_ew_m(instr)?;
+                }
+                Ok(())
+            }
+            Opcode::DivAxew => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.div_ax_ew_r(instr)?;
+                } else {
+                    // Memory form
+                    self.div_ax_ew_m(instr)?;
+                }
+                Ok(())
+            }
+            Opcode::IdivAxew => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.idiv_ax_ew_r(instr)?;
+                } else {
+                    // Memory form
+                    self.idiv_ax_ew_m(instr)?;
+                }
+                Ok(())
+            }
+            Opcode::MulEaxed => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.mul_eax_ed_r(instr)?;
+                } else {
+                    // Memory form
+                    self.mul_eax_ed_m(instr)?;
+                }
+                Ok(())
+            }
+            Opcode::ImulEaxed => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.imul_eax_ed_r(instr)?;
+                } else {
+                    // Memory form
+                    self.imul_eax_ed_m(instr)?;
+                }
+                Ok(())
+            }
+            Opcode::DivEaxed => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.div_eax_ed_r(instr)?;
+                } else {
+                    // Memory form
+                    self.div_eax_ed_m(instr)?;
+                }
+                Ok(())
+            }
+            Opcode::IdivEaxed => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.idiv_eax_ed_r(instr)?;
+                } else {
+                    // Memory form
+                    self.idiv_eax_ed_m(instr)?;
+                }
                 Ok(())
             }
 
@@ -2206,6 +2913,113 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.iret32(instr);
                 Ok(())
             }
+
+            // =========================================================================
+            // 64-bit control transfer instructions
+            // =========================================================================
+            Opcode::CallJq => {
+                self.call_jq(instr)
+            }
+            Opcode::CallEq => {
+                self.call_eq_r(instr)
+            }
+            Opcode::CallfOp64Ep => {
+                self.call64_ep(instr)
+            }
+            Opcode::JmpJq => {
+                self.jmp_jq(instr)
+            }
+            Opcode::JmpEq => {
+                self.jmp_eq_r(instr)
+            }
+            Opcode::JmpfOp64Ep => {
+                self.jmp64_ep(instr)
+            }
+            Opcode::RetOp64Iw => {
+                self.retnear64_iw(instr)
+            }
+            Opcode::RetfOp64 => {
+                self.retfar64(instr)
+            }
+            Opcode::RetfOp64Iw => {
+                self.retfar64_iw(instr)
+            }
+            Opcode::IretOp64 => {
+                self.iret64(instr)
+            }
+            Opcode::JrcxzJbq => {
+                self.jrcxz_jb(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // Conditional jumps with 64-bit displacement (Jq variants)
+            // =========================================================================
+            Opcode::JoJq => {
+                self.jo_jq(instr);
+                Ok(())
+            }
+            Opcode::JnoJq => {
+                self.jno_jq(instr);
+                Ok(())
+            }
+            Opcode::JbJq => {
+                self.jb_jq(instr);
+                Ok(())
+            }
+            Opcode::JnbJq => {
+                self.jnb_jq(instr);
+                Ok(())
+            }
+            Opcode::JzJq => {
+                self.jz_jq(instr);
+                Ok(())
+            }
+            Opcode::JnzJq => {
+                self.jnz_jq(instr);
+                Ok(())
+            }
+            Opcode::JbeJq => {
+                self.jbe_jq(instr);
+                Ok(())
+            }
+            Opcode::JnbeJq => {
+                self.jnbe_jq(instr);
+                Ok(())
+            }
+            Opcode::JsJq => {
+                self.js_jq(instr);
+                Ok(())
+            }
+            Opcode::JnsJq => {
+                self.jns_jq(instr);
+                Ok(())
+            }
+            Opcode::JpJq => {
+                self.jp_jq(instr);
+                Ok(())
+            }
+            Opcode::JnpJq => {
+                self.jnp_jq(instr);
+                Ok(())
+            }
+            Opcode::JlJq => {
+                self.jl_jq(instr);
+                Ok(())
+            }
+            Opcode::JnlJq => {
+                self.jnl_jq(instr);
+                Ok(())
+            }
+            Opcode::JleJq => {
+                self.jle_jq(instr);
+                Ok(())
+            }
+            Opcode::JnleJq => {
+                self.jnle_jq(instr);
+                Ok(())
+            }
+
             Opcode::Hlt => {
                 self.hlt(instr);
                 Ok(())
@@ -2329,6 +3143,158 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::Sahf => {
                 self.sahf(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // Data transfer (64-bit) instructions
+            // =========================================================================
+            Opcode::MovRrxiq => {
+                self.mov_rrxiq(instr);
+                Ok(())
+            }
+            Opcode::MovOp64GdEd => {
+                self.mov64_gd_ed_m(instr);
+                Ok(())
+            }
+            Opcode::MovOp64EdGd => {
+                self.mov64_ed_gd_m(instr);
+                Ok(())
+            }
+            Opcode::MovEqGq => {
+                self.mov_eq_gq_m(instr);
+                Ok(())
+            }
+            Opcode::MovGqEq => {
+                self.mov_gq_eq_m(instr);
+                Ok(())
+            }
+            Opcode::LeaGqM => {
+                self.lea_gq_m(instr);
+                Ok(())
+            }
+            Opcode::MovAloq => {
+                self.mov_aloq(instr);
+                Ok(())
+            }
+            Opcode::MovOqAl => {
+                self.mov_oq_al(instr);
+                Ok(())
+            }
+            Opcode::MovAxoq => {
+                self.mov_ax_oq(instr);
+                Ok(())
+            }
+            Opcode::MovOqAx => {
+                self.mov_oq_ax(instr);
+                Ok(())
+            }
+            Opcode::MovEaxoq => {
+                self.mov_eax_oq(instr);
+                Ok(())
+            }
+            Opcode::MovOqEax => {
+                self.mov_oq_eax(instr);
+                Ok(())
+            }
+            Opcode::MovRaxoq => {
+                self.mov_rax_oq(instr);
+                Ok(())
+            }
+            Opcode::MovOqRax => {
+                self.mov_oq_rax(instr);
+                Ok(())
+            }
+            Opcode::MovEqId => {
+                self.mov_eq_id_r(instr);
+                Ok(())
+            }
+            Opcode::MovzxGqEb => {
+                self.movzx_gq_eb_r(instr);
+                Ok(())
+            }
+            Opcode::MovzxGqEw => {
+                self.movzx_gq_ew_r(instr);
+                Ok(())
+            }
+            Opcode::MovsxGqEb => {
+                self.movsx_gq_eb_r(instr);
+                Ok(())
+            }
+            Opcode::MovsxGqEw => {
+                self.movsx_gq_ew_r(instr);
+                Ok(())
+            }
+            Opcode::MovsxdGqEd => {
+                self.movsx_gq_ed_r(instr);
+                Ok(())
+            }
+            Opcode::XchgEqGq => {
+                self.xchg_eq_gq_r(instr);
+                Ok(())
+            }
+            Opcode::CmovoGqEq => {
+                self.cmovo_gq_eq_r(instr);
+                Ok(())
+            }
+            Opcode::CmovnoGqEq => {
+                self.cmovno_gq_eq_r(instr);
+                Ok(())
+            }
+            Opcode::CmovbGqEq => {
+                self.cmovb_gq_eq_r(instr);
+                Ok(())
+            }
+            Opcode::CmovnbGqEq => {
+                self.cmovnb_gq_eq_r(instr);
+                Ok(())
+            }
+            Opcode::CmovzGqEq => {
+                self.cmovz_gq_eq_r(instr);
+                Ok(())
+            }
+            Opcode::CmovnzGqEq => {
+                self.cmovnz_gq_eq_r(instr);
+                Ok(())
+            }
+            Opcode::CmovbeGqEq => {
+                self.cmovbe_gq_eq_r(instr);
+                Ok(())
+            }
+            Opcode::CmovnbeGqEq => {
+                self.cmovnbe_gq_eq_r(instr);
+                Ok(())
+            }
+            Opcode::CmovsGqEq => {
+                self.cmovs_gq_eq_r(instr);
+                Ok(())
+            }
+            Opcode::CmovnsGqEq => {
+                self.cmovns_gq_eq_r(instr);
+                Ok(())
+            }
+            Opcode::CmovpGqEq => {
+                self.cmovp_gq_eq_r(instr);
+                Ok(())
+            }
+            Opcode::CmovnpGqEq => {
+                self.cmovnp_gq_eq_r(instr);
+                Ok(())
+            }
+            Opcode::CmovlGqEq => {
+                self.cmovl_gq_eq_r(instr);
+                Ok(())
+            }
+            Opcode::CmovnlGqEq => {
+                self.cmovnl_gq_eq_r(instr);
+                Ok(())
+            }
+            Opcode::CmovleGqEq => {
+                self.cmovle_gq_eq_r(instr);
+                Ok(())
+            }
+            Opcode::CmovnleGqEq => {
+                self.cmovnle_gq_eq_r(instr);
                 Ok(())
             }
 
@@ -2506,6 +3472,40 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             self.eflags |= 1 << 2;
         } else {
             self.eflags &= !(1 << 2);
+        }
+    }
+
+    /// Get segment base address safely
+    /// This is a safe wrapper around the unsafe union access
+    pub(super) fn get_segment_base(&self, seg: super::decoder::BxSegregs) -> BxAddress {
+        // Safe: We know seg is a valid BxSegregs enum value (0-5, 7)
+        // and sregs array has 6 elements, so seg as usize is always in bounds
+        unsafe { self.sregs[seg as usize].cache.u.segment.base }
+    }
+
+    /// Get segment limit safely
+    /// This is a safe wrapper around the unsafe union access
+    pub(super) fn get_segment_limit(&self, seg: super::decoder::BxSegregs) -> u32 {
+        // Safe: We know seg is a valid BxSegregs enum value (0-5, 7)
+        // and sregs array has 6 elements, so seg as usize is always in bounds
+        unsafe { self.sregs[seg as usize].cache.u.segment.limit_scaled }
+    }
+
+    /// Get segment d_b flag safely
+    /// This is a safe wrapper around the unsafe union access
+    pub(super) fn get_segment_d_b(&self, seg: super::decoder::BxSegregs) -> bool {
+        // Safe: We know seg is a valid BxSegregs enum value (0-5, 7)
+        // and sregs array has 6 elements, so seg as usize is always in bounds
+        unsafe { self.sregs[seg as usize].cache.u.segment.d_b }
+    }
+
+    /// Set segment base address safely
+    /// This is a safe wrapper around the unsafe union access
+    pub(super) fn set_segment_base(&mut self, seg: super::decoder::BxSegregs, base: BxAddress) {
+        // Safe: We know seg is a valid BxSegregs enum value (0-5, 7)
+        // and sregs array has 6 elements, so seg as usize is always in bounds
+        unsafe {
+            self.sregs[seg as usize].cache.u.segment.base = base;
         }
     }
 
@@ -2737,5 +3737,489 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
     pub(crate) fn smm_mode(&self) -> bool {
         self.in_smm
+    }
+
+    // =========================================================================
+    // Error handlers matching original C++ BxError, BxNoFPU, etc.
+    // =========================================================================
+
+    /// BxError - Invalid instruction handler
+    /// Matches BX_CPU_C::BxError from proc_ctrl.cc:40
+    /// Raises #UD (Undefined Instruction) exception
+    pub(super) fn bx_error(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        let opcode = instr.get_ia_opcode();
+        
+        if opcode == crate::cpu::decoder::Opcode::IaError {
+            tracing::debug!("BxError: Encountered an unknown instruction (signalling #UD)");
+        } else {
+            tracing::debug!(
+                "{:?}: instruction not supported - signalling #UD",
+                opcode
+            );
+        }
+
+        self.exception(Exception::Ud, 0)?;
+        Ok(())
+    }
+
+    /// BxNoFPU - FPU not available handler
+    /// Matches BX_CPU_C::BxNoFPU from proc_ctrl.cc:463
+    /// Raises #NM (Device Not Available) if CR0.EM or CR0.TS is set
+    pub(super) fn bx_no_fpu(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        let cr0 = self.cr0.get32();
+        let cr0_em = (cr0 & (1 << 2)) != 0; // CR0.EM bit 2
+        let cr0_ts = (cr0 & (1 << 3)) != 0; // CR0.TS bit 3
+
+        if cr0_em || cr0_ts {
+            self.exception(Exception::Nm, 0)?;
+        }
+
+        // BX_ASSERT(0) in original - this should not be reached in normal operation
+        tracing::warn!("BxNoFPU: FPU instruction executed but FPU not available");
+        Ok(())
+    }
+
+    /// BxNoMMX - MMX not available handler
+    /// Matches BX_CPU_C::BxNoMMX from proc_ctrl.cc:473
+    /// Raises #UD if CR0.EM is set, #NM if CR0.TS is set
+    pub(super) fn bx_no_mmx(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        let cr0 = self.cr0.get32();
+        let cr0_em = (cr0 & (1 << 2)) != 0; // CR0.EM bit 2
+        let cr0_ts = (cr0 & (1 << 3)) != 0; // CR0.TS bit 3
+
+        if cr0_em {
+            self.exception(Exception::Ud, 0)?;
+        }
+
+        if cr0_ts {
+            self.exception(Exception::Nm, 0)?;
+        }
+
+        // BX_ASSERT(0) in original - this should not be reached in normal operation
+        tracing::warn!("BxNoMMX: MMX instruction executed but MMX not available");
+        Ok(())
+    }
+
+    /// BxNoSSE - SSE not available handler
+    /// Matches BX_CPU_C::BxNoSSE from proc_ctrl.cc:502
+    /// Only available if CPU_LEVEL >= 6
+    /// Raises #UD if CR0.EM is set or CR4.OSFXSR is clear, #NM if CR0.TS is set
+    #[cfg(feature = "bx_support_sse")]
+    pub(super) fn bx_no_sse(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        let cr0 = self.cr0.get32();
+        let cr4 = self.cr4.get32();
+        let cr0_em = (cr0 & (1 << 2)) != 0; // CR0.EM bit 2
+        let cr0_ts = (cr0 & (1 << 3)) != 0; // CR0.TS bit 3
+        let cr4_osfxsr = (cr4 & (1 << 9)) != 0; // CR4.OSFXSR bit 9
+
+        if cr0_em || !cr4_osfxsr {
+            self.exception(Exception::Ud, 0)?;
+        }
+
+        if cr0_ts {
+            self.exception(Exception::Nm, 0)?;
+        }
+
+        // BX_ASSERT(0) in original - this should not be reached in normal operation
+        tracing::warn!("BxNoSSE: SSE instruction executed but SSE not available");
+        Ok(())
+    }
+
+    /// BxNoAVX - AVX not available handler
+    /// Matches BX_CPU_C::BxNoAVX from proc_ctrl.cc:557
+    /// Only available if BX_SUPPORT_AVX
+    /// Raises #UD if not in protected mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
+    /// Raises #NM if CR0.TS is set
+    #[cfg(feature = "bx_support_avx")]
+    pub(super) fn bx_no_avx(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        // Check if in protected mode (CR0.PE = 1)
+        let cr0 = self.cr0.get32();
+        let cr0_pe = (cr0 & (1 << 0)) != 0; // CR0.PE bit 0
+        if !cr0_pe {
+            self.exception(Exception::Ud, 0)?;
+            return Ok(());
+        }
+
+        let cr4 = self.cr4.get32();
+        let cr4_osxsave = (cr4 & (1 << 18)) != 0; // CR4.OSXSAVE bit 18
+
+        if !cr4_osxsave {
+            self.exception(Exception::Ud, 0)?;
+            return Ok(());
+        }
+
+        // Check XCR0 for SSE and YMM masks
+        let xcr0 = self.xcr0.get32();
+        const XCR0_SSE_MASK: u32 = 1 << 0;
+        const XCR0_YMM_MASK: u32 = 1 << 2;
+        if (xcr0 & (XCR0_SSE_MASK | XCR0_YMM_MASK)) != (XCR0_SSE_MASK | XCR0_YMM_MASK) {
+            self.exception(Exception::Ud, 0)?;
+            return Ok(());
+        }
+
+        let cr0_ts = (cr0 & (1 << 3)) != 0; // CR0.TS bit 3
+        if cr0_ts {
+            self.exception(Exception::Nm, 0)?;
+        }
+
+        // BX_ASSERT(0) in original - this should not be reached in normal operation
+        tracing::warn!("BxNoAVX: AVX instruction executed but AVX not available");
+        Ok(())
+    }
+
+    /// BxNoOpMask - Opmask not available handler
+    /// Matches BX_CPU_C::BxNoOpMask from proc_ctrl.cc:575
+    /// Only available if BX_SUPPORT_EVEX
+    /// Raises #UD if not in protected mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
+    /// Raises #NM if CR0.TS is set
+    #[cfg(feature = "bx_support_evex")]
+    pub(super) fn bx_no_opmask(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        // Check if in protected mode (CR0.PE = 1)
+        let cr0 = self.cr0.get32();
+        let cr0_pe = (cr0 & (1 << 0)) != 0; // CR0.PE bit 0
+        if !cr0_pe {
+            self.exception(Exception::Ud, 0)?;
+            return Ok(());
+        }
+
+        let cr4 = self.cr4.get32();
+        let cr4_osxsave = (cr4 & (1 << 18)) != 0; // CR4.OSXSAVE bit 18
+
+        if !cr4_osxsave {
+            self.exception(Exception::Ud, 0)?;
+            return Ok(());
+        }
+
+        // Check XCR0 for SSE, YMM, and OPMASK masks
+        let xcr0 = self.xcr0.get32();
+        const XCR0_SSE_MASK: u32 = 1 << 0;
+        const XCR0_YMM_MASK: u32 = 1 << 2;
+        const XCR0_OPMASK_MASK: u32 = 1 << 5;
+        if (xcr0 & (XCR0_SSE_MASK | XCR0_YMM_MASK | XCR0_OPMASK_MASK))
+            != (XCR0_SSE_MASK | XCR0_YMM_MASK | XCR0_OPMASK_MASK)
+        {
+            self.exception(Exception::Ud, 0)?;
+            return Ok(());
+        }
+
+        let cr0_ts = (cr0 & (1 << 3)) != 0; // CR0.TS bit 3
+        if cr0_ts {
+            self.exception(Exception::Nm, 0)?;
+        }
+
+        // BX_ASSERT(0) in original - this should not be reached in normal operation
+        tracing::warn!("BxNoOpMask: Opmask instruction executed but Opmask not available");
+        Ok(())
+    }
+
+    /// BxNoEVEX - EVEX not available handler
+    /// Matches BX_CPU_C::BxNoEVEX from proc_ctrl.cc:591
+    /// Only available if BX_SUPPORT_EVEX
+    /// Raises #UD if not in protected mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
+    /// Raises #NM if CR0.TS is set
+    #[cfg(feature = "bx_support_evex")]
+    pub(super) fn bx_no_evex(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        // Check if in protected mode (CR0.PE = 1)
+        let cr0 = self.cr0.get32();
+        let cr0_pe = (cr0 & (1 << 0)) != 0; // CR0.PE bit 0
+        if !cr0_pe {
+            self.exception(Exception::Ud, 0)?;
+            return Ok(());
+        }
+
+        let cr4 = self.cr4.get32();
+        let cr4_osxsave = (cr4 & (1 << 18)) != 0; // CR4.OSXSAVE bit 18
+
+        if !cr4_osxsave {
+            self.exception(Exception::Ud, 0)?;
+            return Ok(());
+        }
+
+        // Check XCR0 for SSE, YMM, OPMASK, ZMM_HI256, and HI_ZMM masks
+        let xcr0 = self.xcr0.get32();
+        const XCR0_SSE_MASK: u32 = 1 << 0;
+        const XCR0_YMM_MASK: u32 = 1 << 2;
+        const XCR0_OPMASK_MASK: u32 = 1 << 5;
+        const XCR0_ZMM_HI256_MASK: u32 = 1 << 6;
+        const XCR0_HI_ZMM_MASK: u32 = 1 << 7;
+        if (xcr0 & (XCR0_SSE_MASK | XCR0_YMM_MASK | XCR0_OPMASK_MASK | XCR0_ZMM_HI256_MASK | XCR0_HI_ZMM_MASK))
+            != (XCR0_SSE_MASK | XCR0_YMM_MASK | XCR0_OPMASK_MASK | XCR0_ZMM_HI256_MASK | XCR0_HI_ZMM_MASK)
+        {
+            self.exception(Exception::Ud, 0)?;
+            return Ok(());
+        }
+
+        let cr0_ts = (cr0 & (1 << 3)) != 0; // CR0.TS bit 3
+        if cr0_ts {
+            self.exception(Exception::Nm, 0)?;
+        }
+
+        // BX_ASSERT(0) in original - this should not be reached in normal operation
+        tracing::warn!("BxNoEVEX: EVEX instruction executed but EVEX not available");
+        Ok(())
+    }
+
+    /// BxNoAMX - AMX not available handler
+    /// Matches BX_CPU_C::BxNoAMX from proc_ctrl.cc:609
+    /// Only available if BX_SUPPORT_AMX
+    /// Raises #UD if not in long64 mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
+    #[cfg(feature = "bx_support_amx")]
+    pub(super) fn bx_no_amx(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        if !self.long64_mode() {
+            self.exception(Exception::Ud, 0)?;
+            return Ok(());
+        }
+
+        let cr4 = self.cr4.get32();
+        let cr4_osxsave = (cr4 & (1 << 18)) != 0; // CR4.OSXSAVE bit 18
+
+        if !cr4_osxsave {
+            self.exception(Exception::Ud, 0)?;
+            return Ok(());
+        }
+
+        // Check XCR0 for XTILECFG and XTILEDATA masks
+        let xcr0 = self.xcr0.get32();
+        const XCR0_XTILECFG_MASK: u32 = 1 << 17;
+        const XCR0_XTILEDATA_MASK: u32 = 1 << 18;
+        if (xcr0 & (XCR0_XTILECFG_MASK | XCR0_XTILEDATA_MASK))
+            != (XCR0_XTILECFG_MASK | XCR0_XTILEDATA_MASK)
+        {
+            self.exception(Exception::Ud, 0)?;
+            return Ok(());
+        }
+
+        // BX_ASSERT(0) in original - this should not be reached in normal operation
+        tracing::warn!("BxNoAMX: AMX instruction executed but AMX not available");
+        Ok(())
+    }
+
+    // =========================================================================
+    // Handler assignment (assign_handler) matching original C++ assignHandler
+    // =========================================================================
+
+    /// Assign handler function for instruction execution
+    ///
+    /// This function selects the appropriate handler function for an instruction based on:
+    /// - The instruction opcode
+    /// - Whether it's a memory form (modC0 == false) or register form (modC0 == true)
+    /// - Special cases (e.g., MOV with SS segment override)
+    /// - Feature availability (FPU, MMX, SSE, AVX, EVEX, OPMASK, AMX)
+    /// - EVEX-specific rules (broadcast, SAE)
+    ///
+    /// Matching C++ `BX_CPU_C::assignHandler` in fetchdecode32.cc:2041-2139
+    ///
+    /// # Parameters
+    /// - `instr`: The instruction to assign a handler for
+    /// - `fetch_mode_mask`: Bitmask indicating which features are currently available
+    ///
+    /// # Returns
+    /// - `Ok((should_stop_trace, handler_opt))`:
+    ///   - `should_stop_trace`: `true` if trace should end (TRACE_END flag set or error handler assigned)
+    ///   - `handler_opt`: The selected handler function, or `None` if opcode not in table
+    ///
+    /// # Special Cases
+    /// - MOV with SS segment override uses MOV32S handlers (stack_read_dword/stack_write_dword)
+    /// - Instructions requiring unavailable features get error handlers (BxNoFPU, BxNoMMX, etc.)
+    /// - EVEX instructions with invalid broadcast/SAE get BxError handler
+    pub(crate) fn assign_handler(
+        &mut self,
+        instr: &mut BxInstructionGenerated,
+        fetch_mode_mask: u32,
+    ) -> Result<(bool, Option<InstructionHandler<I>>)> {
+        use super::opcodes_table::{FetchModeMask, OpFlags, get_opcode_entry};
+        use crate::cpu::decoder::Opcode;
+
+        let ia_opcode = instr.get_ia_opcode();
+        let opcode_entry = get_opcode_entry(ia_opcode);
+        
+        // Get opflags from table entry, or use empty if not in table yet
+        let op_flags = opcode_entry.as_ref()
+            .map(|e| e.opflags)
+            .unwrap_or(OpFlags::empty());
+        
+        // Check modC0 (register form vs memory form)
+        let is_reg_form = instr.mod_c0();
+        
+        // Handler assignment logic (matching original lines 2045-2061)
+        let mut selected_handler: Option<InstructionHandler<I>> = None;
+        let mut is_bx_error = false; // Track if BxError handler was assigned
+        
+        if let Some(entry) = &opcode_entry {
+            // Handler assignment from table
+            if !is_reg_form {
+                // Memory form: use execute1 from table (matching line 2046)
+                selected_handler = Some(entry.execute1);
+                
+                // Special case: MOV with SS segment override (matching lines 2049-2056)
+                if ia_opcode == Opcode::MovOp32GdEd {
+                    if instr.seg() == BxSegregs::Ss as u8 {
+                        // Use MOV32S_GdEdM handler (matching C++ line 2051)
+                        use super::opcodes_table::mov32s_gd_ed_m_wrapper;
+                        selected_handler = Some(mov32s_gd_ed_m_wrapper);
+                    }
+                }
+                if ia_opcode == Opcode::MovOp32EdGd {
+                    if instr.seg() == BxSegregs::Ss as u8 {
+                        // Use MOV32S_EdGdM handler (matching C++ line 2055)
+                        use super::opcodes_table::mov32s_ed_gd_m_wrapper;
+                        selected_handler = Some(mov32s_ed_gd_m_wrapper);
+                    }
+                }
+            } else {
+                // Register form: use execute2 from table as execute1 (matching line 2059)
+                if let Some(execute2) = entry.execute2 {
+                    selected_handler = Some(execute2);
+                } else {
+                    // No register form handler - fall back to execute_instruction
+                    return Ok((false, None));
+                }
+            }
+        } else {
+            // Opcode not in table yet - will use execute_instruction match statement
+            return Ok((false, None));
+        }
+        
+        // EVEX-specific checks (matching lines 2067-2084)
+        // These checks assign BxError IMMEDIATELY if EVEX rules are violated
+        #[cfg(feature = "bx_support_evex")]
+        {
+            if op_flags.contains(OpFlags::PREPARE_EVEX) {
+                if instr.get_evex_b() != 0 {
+                    if !is_reg_form {
+                        // Memory form: check NO_BROADCAST
+                        if op_flags.contains(OpFlags::PREPARE_EVEX_NO_BROADCAST) {
+                            tracing::debug!(
+                                "{:?}: broadcast is not supported for this instruction",
+                                ia_opcode
+                            );
+                            // Matching C++ line 2073: assign BxError immediately
+                            selected_handler = Some(Self::bx_error);
+                            is_bx_error = true;
+                        }
+                    } else {
+                        // Register form: check NO_SAE
+                        if op_flags.contains(OpFlags::PREPARE_EVEX_NO_SAE) {
+                            tracing::debug!(
+                                "{:?}: EVEX.b in reg form is not allowed for instructions which cannot cause floating point exception",
+                                ia_opcode
+                            );
+                                // Matching C++ line 2079: assign BxError immediately
+                                use super::opcodes_table::bx_error_wrapper;
+                                selected_handler = Some(bx_error_wrapper);
+                                is_bx_error = true;
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Feature availability checks (matching lines 2086-2133)
+        // These checks only assign error handlers if execute1 != BxError (matching C++ lines 2088, 2092, etc.)
+        let fetch_mode = FetchModeMask::from_bits_truncate(fetch_mode_mask);
+        
+        // Check FPU/MMX availability
+        if !fetch_mode.contains(FetchModeMask::FETCH_MODE_FPU_MMX_OK) {
+            if op_flags.contains(OpFlags::PREPARE_FPU) {
+                // Matching C++ line 2088: only assign if execute1 != BxError
+                if !is_bx_error {
+                    use super::opcodes_table::bx_no_fpu_wrapper;
+                    selected_handler = Some(bx_no_fpu_wrapper);
+                }
+                return Ok((true, selected_handler)); // Stop trace
+            }
+            if op_flags.contains(OpFlags::PREPARE_MMX) {
+                // Matching C++ line 2092: only assign if execute1 != BxError
+                if !is_bx_error {
+                    use super::opcodes_table::bx_no_mmx_wrapper;
+                    selected_handler = Some(bx_no_mmx_wrapper);
+                }
+                return Ok((true, selected_handler)); // Stop trace
+            }
+        }
+        
+        // Check SSE availability (CPU_LEVEL >= 6)
+        #[cfg(feature = "bx_support_sse")]
+        {
+            if !fetch_mode.contains(FetchModeMask::FETCH_MODE_SSE_OK) {
+                if op_flags.contains(OpFlags::PREPARE_SSE) {
+                    // Matching C++ line 2099: only assign if execute1 != BxError
+                    if !is_bx_error {
+                        use super::opcodes_table::bx_no_sse_wrapper;
+                        selected_handler = Some(bx_no_sse_wrapper);
+                    }
+                    return Ok((true, selected_handler)); // Stop trace
+                }
+            }
+        }
+        
+        // Check AVX availability
+        #[cfg(feature = "bx_support_avx")]
+        {
+            if !fetch_mode.contains(FetchModeMask::FETCH_MODE_AVX_OK) {
+                if op_flags.contains(OpFlags::PREPARE_AVX) {
+                    // Matching C++ line 2106: only assign if execute1 != BxError
+                    if !is_bx_error {
+                        use super::opcodes_table::bx_no_avx_wrapper;
+                        selected_handler = Some(bx_no_avx_wrapper);
+                    }
+                    return Ok((true, selected_handler)); // Stop trace
+                }
+            }
+        }
+        
+        // Check OPMASK availability
+        #[cfg(feature = "bx_support_evex")]
+        {
+            if !fetch_mode.contains(FetchModeMask::FETCH_MODE_OPMASK_OK) {
+                if op_flags.contains(OpFlags::PREPARE_OPMASK) {
+                    // Matching C++ line 2113: only assign if execute1 != BxError
+                    if !is_bx_error {
+                        use super::opcodes_table::bx_no_opmask_wrapper;
+                        selected_handler = Some(bx_no_opmask_wrapper);
+                    }
+                    return Ok((true, selected_handler)); // Stop trace
+                }
+            }
+        }
+        
+        // Check EVEX availability
+        #[cfg(feature = "bx_support_evex")]
+        {
+            if !fetch_mode.contains(FetchModeMask::FETCH_MODE_EVEX_OK) {
+                if op_flags.contains(OpFlags::PREPARE_EVEX) {
+                    // Matching C++ line 2119: only assign if execute1 != BxError
+                    if !is_bx_error {
+                        use super::opcodes_table::bx_no_evex_wrapper;
+                        selected_handler = Some(bx_no_evex_wrapper);
+                    }
+                    return Ok((true, selected_handler)); // Stop trace
+                }
+            }
+        }
+        
+        // Check AMX availability
+        #[cfg(feature = "bx_support_amx")]
+        {
+            if !fetch_mode.contains(FetchModeMask::FETCH_MODE_AMX_OK) {
+                if op_flags.contains(OpFlags::PREPARE_AMX) {
+                    // Matching C++ line 2126: only assign if execute1 != BxError
+                    if !is_bx_error {
+                        use super::opcodes_table::bx_no_amx_wrapper;
+                        selected_handler = Some(bx_no_amx_wrapper);
+                    }
+                    return Ok((true, selected_handler)); // Stop trace
+                }
+            }
+        }
+        
+        // Check if trace should end (matching line 2135)
+        // Original: if ((op_flags & BX_TRACE_END) != 0 || i->execute1 == &BX_CPU_C::BxError)
+        if op_flags.contains(OpFlags::TRACE_END) || is_bx_error {
+            return Ok((true, selected_handler)); // Stop trace
+        }
+        
+        // Return handler for execution
+        Ok((false, selected_handler))
     }
 }

@@ -49,6 +49,21 @@ const TEXT_ROWS: usize = 25;
 const BYTES_PER_CHAR: usize = 2;
 const BYTES_PER_ROW: usize = TEXT_COLS * BYTES_PER_CHAR;
 
+/// VGA update result - contains data needed for GUI update
+/// This is returned by update() to allow no_std compatibility
+pub(crate) struct VgaUpdateResult {
+    /// Whether an update is needed
+    pub needs_update: bool,
+    /// Text buffer (new state)
+    pub text_buffer: Vec<u8>,
+    /// Text snapshot (old state) for comparison
+    pub text_snapshot: Vec<u8>,
+    /// Cursor address in text buffer
+    pub cursor_address: u16,
+    /// Text mode info
+    pub tm_info: crate::gui::VgaTextModeInfo,
+}
+
 /// VGA controller state
 #[derive(Debug)]
 pub(crate) struct BxVgaC {
@@ -80,6 +95,17 @@ pub(crate) struct BxVgaC {
     cursor_pos: (usize, usize),
     /// Flag indicating text memory has changed (dirty)
     text_dirty: bool,
+    /// Text buffer for GUI updates (new state)
+    /// This is extracted from text_memory when update() is called
+    text_buffer: Vec<u8>,
+    /// Text snapshot for comparison (old state)
+    /// Used to detect what changed between updates
+    text_snapshot: Vec<u8>,
+    /// Flag indicating VGA memory has been updated (matching vgacore.cc vga_mem_updated)
+    vga_mem_updated: u8,
+    /// Flag indicating text buffer needs to be updated from VGA memory
+    /// Set when text mode parameters change
+    text_buffer_update: bool,
 }
 
 impl Default for BxVgaC {
@@ -106,6 +132,10 @@ impl BxVgaC {
             text_memory: vec![0; VGA_TEXT_MEM_SIZE],
             cursor_pos: (0, 0),
             text_dirty: false,
+            text_buffer: vec![0; TEXT_COLS * TEXT_ROWS * BYTES_PER_CHAR],
+            text_snapshot: vec![0; TEXT_COLS * TEXT_ROWS * BYTES_PER_CHAR],
+            vga_mem_updated: 0,
+            text_buffer_update: true, // Initial update needed
         };
 
         // Initialize CRTC registers for 80x25 text mode
@@ -465,6 +495,137 @@ impl BxVgaC {
     pub(crate) fn force_text_dirty(&mut self) {
         self.text_dirty = true;
     }
+
+    /// Force initial update (for first GUI render)
+    pub(crate) fn force_initial_update(&mut self) {
+        self.vga_mem_updated = 1;
+        self.text_buffer_update = true;
+    }
+
+    /// Update VGA display (matching vgacore.cc:1598-1693)
+    /// This processes text mode and prepares data for GUI update
+    /// Returns update result if an update is needed
+    /// Must be no_std compatible (only uses core + alloc)
+    pub(crate) fn update(&mut self) -> Option<VgaUpdateResult> {
+        // Check if we're in text mode
+        // graphics_regs[5] bit 4 = 0 means text mode (graphics_alpha = 0)
+        // graphics_regs[6] bits 2-3 indicate memory mapping:
+        //   00 = A0000-AFFFF, 01 = A0000-BFFFF, 10 = B0000-B7FFF, 11 = B8000-BFFFF (text mode)
+        let graphics_alpha = (self.graphics_regs[5] & 0x10) == 0;
+        let memory_mapping = (self.graphics_regs[6] >> 2) & 0x03;
+        let is_text_mode = graphics_alpha && (memory_mapping == 3);
+        
+        if !is_text_mode {
+            return None;
+        }
+
+        // Calculate text mode parameters (matching vgacore.cc:1601-1632)
+        let start_addr = ((self.crtc_regs[12] as u16) << 8) | (self.crtc_regs[13] as u16);
+        let start_address = (start_addr << 1) as u16;
+        
+        let cs_start = self.crtc_regs[10] & 0x3f;
+        let cs_end = self.crtc_regs[11] & 0x1f;
+        
+        // Line offset: CRTC reg[19] is offset register
+        let mut line_offset = (self.crtc_regs[19] as u16) * 2; // Convert to bytes
+        if line_offset == 0 {
+            // Default to 80 columns * 2 bytes
+            line_offset = (TEXT_COLS * BYTES_PER_CHAR) as u16;
+        }
+        
+        let line_compare = 0; // TODO: Calculate from CRTC registers if needed
+        let h_panning = self.attr_regs[19] & 0x0f;
+        let v_panning = self.crtc_regs[8] & 0x1f;
+        let line_graphics = (self.attr_regs[16] & 0x04) != 0;
+        let split_hpanning = (self.attr_regs[16] & 0x20) != 0;
+        let blink_flags = 0u8; // TODO: Calculate from attribute controller
+        
+        // Build palette (matching vgacore.cc:1629-1632)
+        let mut actl_palette = [0u8; 16];
+        for i in 0..16 {
+            actl_palette[i] = self.attr_regs[i] & 0x0f; // Simplified - no pel.mask for now
+        }
+        
+        // Calculate rows and cols (matching vgacore.cc:1634-1648)
+        let mut cols = (self.crtc_regs[1] + 1) as usize;
+        let mut msl = (self.crtc_regs[9] & 0x1f) as usize;
+        let vde = (self.crtc_regs[18] as usize) + 
+                  (((self.crtc_regs[7] & 0x02) as usize) << 7) +
+                  (((self.crtc_regs[7] & 0x40) as usize) << 3);
+        
+        // Workaround for update() calls before VGABIOS init (matching vgacore.cc:1639-1643)
+        if cols == 1 || msl == 0 {
+            cols = TEXT_COLS;
+        }
+        if msl == 0 {
+            msl = 15;
+        }
+        
+        let rows = if msl > 0 { (vde + 1) / (msl + 1) } else { TEXT_ROWS };
+        let rows = rows.min(TEXT_ROWS); // Cap at 25 rows
+        
+        // Calculate cursor address (matching vgacore.cc:1671-1676)
+        let cursor_addr = ((self.crtc_regs[14] as u16) << 8) | (self.crtc_regs[15] as u16);
+        let cursor_address = cursor_addr * 2; // Convert to byte offset
+        
+        // Validate cursor address
+        let max_addr = start_address + (line_offset * rows as u16);
+        let cursor_address = if cursor_address < start_address || cursor_address > max_addr {
+            0x7fff // Invalid cursor
+        } else {
+            cursor_address
+        };
+        
+        // Copy from VGA memory to text_buffer if needed (matching vgacore.cc:1677-1683)
+        if self.text_buffer_update {
+            // For text mode (memory_mapping = 3), text_snap_size[3] = 0x8000 (32KB)
+            // In original: copies from s.memory[i*4] (char) and s.memory[i*4+1] (attr)
+            // Our text_memory is already 2-byte format, so copy directly
+            let size = 0x8000.min(self.text_buffer.len()).min(self.text_memory.len());
+            self.text_buffer[..size].copy_from_slice(&self.text_memory[..size]);
+            self.text_buffer_update = false;
+        }
+        
+        // Create text mode info
+        let tm_info = crate::gui::VgaTextModeInfo {
+            start_address,
+            cs_start,
+            cs_end,
+            line_offset,
+            line_compare,
+            h_panning,
+            v_panning,
+            line_graphics,
+            split_hpanning,
+            blink_flags,
+            actl_palette,
+        };
+        
+        // Always return update result if in text mode (original always calls text_update_common)
+        // The GUI will compare old and new to determine what actually changed
+        let needs_update = self.vga_mem_updated > 0;
+        
+        // Copy buffer to snapshot if memory was updated (matching vgacore.cc:1687-1691)
+        if self.vga_mem_updated > 0 {
+            let copy_size = (start_address as usize + (line_offset as usize * rows))
+                .min(self.text_buffer.len())
+                .min(self.text_snapshot.len());
+            if copy_size > start_address as usize {
+                let start = start_address as usize;
+                self.text_snapshot[start..copy_size]
+                    .copy_from_slice(&self.text_buffer[start..copy_size]);
+            }
+            self.vga_mem_updated = 0;
+        }
+        
+        Some(VgaUpdateResult {
+            needs_update,
+            text_buffer: self.text_buffer.clone(),
+            text_snapshot: self.text_snapshot.clone(),
+            cursor_address,
+            tm_info,
+        })
+    }
 }
 
 /// VGA read handler (called from I/O port system)
@@ -568,6 +729,9 @@ pub(super) fn vga_mem_write_handler(
                         vga.text_memory[offset] = *data_ptr;
                         if old_val != *data_ptr {
                             vga.text_dirty = true; // Mark text memory as dirty
+                            // Set vga_mem_updated flag (matching vgacore.cc:1852, 2180)
+                            // For text mode, we set bit 0 (plane 0) or appropriate bit
+                            vga.vga_mem_updated |= 1; // Mark that text memory was updated
                             if WRITE_COUNT <= 5 {
                                 tracing::info!("  offset={:#x}: {:#02x} -> {:#02x}", offset, old_val, *data_ptr);
                             }

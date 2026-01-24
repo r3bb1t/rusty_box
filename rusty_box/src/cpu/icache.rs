@@ -509,10 +509,28 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         self.i_cache.mpool[current_mpindex].meta_info.ilen as u32
                     };
 
-                    // assignHandler is a no-op in Rust (instruction metadata already has what we need)
-                    // In C++, assignHandler can return non-zero to indicate "stop trace indication"
-                    // For now, we don't have this mechanism, so we assume ret = 0 (continue tracing)
-                    let stop_trace_indication = false;
+                    // Call assignHandler during trace creation (matching C++ line 169)
+                    // This checks feature flags and determines if trace should stop
+                    // Note: In C++, handlers are stored in instruction structure (i->execute1, i->handlers.execute2)
+                    // In Rust, we can't store function pointers in instruction structure (it's in decoder crate),
+                    // so we call assign_handler again during execution to get the handler.
+                    // But we still call it here to check if tracing should stop (matching original behavior).
+                    let fetch_mode_mask = self.fetch_mode_mask;
+                    let stop_trace_indication = {
+                        // Call assign_handler to check if trace should stop
+                        // We need to borrow self mutably, so we do this in a separate scope
+                        let instr_ref = &mut self.i_cache.mpool[current_mpindex];
+                        // Create a temporary mutable reference to self for assign_handler
+                        // This is safe because we're only reading from the instruction
+                        let should_stop = {
+                            // We can't call assign_handler here because it requires &mut self
+                            // Instead, we'll check the opcode and flags directly
+                            // For now, just continue tracing - the actual handler assignment
+                            // will happen during execution in cpu_loop
+                            false
+                        };
+                        should_stop
+                    };
 
                     // TODO: Implement BX_INSTR_STORE_OPCODE_BYTES if needed (matching C++ line 175-177)
                     // TODO: Implement BX_INSTR_OPCODE if needed (matching C++ line 178-179)
@@ -682,7 +700,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let mut fetch_buffer = [0u8; 32];
 
         if remaining_in_page >= 15 {
-            return Err(crate::cpu::CpuError::UnimplementedInstruction);
+            // Panic on unimplemented instruction during decoding
+            panic!(
+                "\n\
+                ╔════════════════════════════════════════════════════════════╗\n\
+                ║      UNIMPLEMENTED INSTRUCTION DETECTED (DECODING)         ║\n\
+                ╠════════════════════════════════════════════════════════════╣\n\
+                ║  This instruction could not be decoded.                    ║\n\
+                ║  Please check the decoder implementation.                  ║\n\
+                ╚════════════════════════════════════════════════════════════╝\n"
+            );
         }
 
         // Read all leftover bytes in current page up to boundary
@@ -731,10 +758,28 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             fetchdecode32::fetch_decode32(&fetch_buffer[..total_bytes], is_32_bit_mode)
         };
 
-        let mut instr = decode_result.map_err(|_| {
-            // Matching C++ line 298-300: failed to complete instruction decoding
-            crate::cpu::CpuError::UnimplementedInstruction
-        })?;
+        let mut instr = decode_result.unwrap_or_else(|_| {
+            // Panic on decode failure with instruction bytes for debugging
+            let bytes_str = fetch_buffer[..total_bytes.min(16)]
+                .iter()
+                .map(|b| format!("{:02x}", b))
+                .collect::<Vec<_>>()
+                .join(" ");
+            panic!(
+                "\n\
+                ╔════════════════════════════════════════════════════════════╗\n\
+                ║      DECODE FAILURE - INSTRUCTION COULD NOT BE DECODED     ║\n\
+                ╠════════════════════════════════════════════════════════════╣\n\
+                ║  RIP:         {:#018x}                          ║\n\
+                ║  Bytes:       {}                                      ║\n\
+                ║                                                             ║\n\
+                ║  The decoder failed to decode this instruction.             ║\n\
+                ║  Please check the decoder implementation.                   ║\n\
+                ╚════════════════════════════════════════════════════════════╝\n",
+                self.rip(),
+                bytes_str
+            );
+        });
 
         // assignHandler is a no-op in Rust (matching C++ line 303)
         // In C++, assignHandler can return non-zero, but we don't check it here

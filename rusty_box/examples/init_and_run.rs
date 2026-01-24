@@ -69,7 +69,7 @@ fn inner_main() {
 
     // Create devices
     let mut devices = BxDevicesC::new();
-    let _ = devices.init(&mut mem);
+    let _ = devices.init(&mut mem, None);
 
     // Reset sequence
     pc_system.reset(ResetReason::Hardware).unwrap();

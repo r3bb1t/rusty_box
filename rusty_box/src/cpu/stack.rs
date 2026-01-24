@@ -262,7 +262,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Write a 32-bit value to stack at given offset (SS:offset)
     /// Based on BX_CPU_C::stack_write_dword in stack.cc:194
-    fn stack_write_dword(&mut self, offset: u32, value: u32) {
+    pub(super) fn stack_write_dword(&mut self, offset: u32, value: u32) {
         // Get linear address from SS:offset using get_laddr32
         let laddr = self.get_laddr32(BxSegregs::Ss as usize, offset);
         // Write through memory subsystem
@@ -280,10 +280,52 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Read a 32-bit value from stack at given offset (SS:offset)
     /// Based on BX_CPU_C::stack_read_dword in stack.cc:313
-    fn stack_read_dword(&self, offset: u32) -> u32 {
+    pub(super) fn stack_read_dword(&self, offset: u32) -> u32 {
         // Get linear address from SS:offset using get_laddr32
         let laddr = self.get_laddr32(BxSegregs::Ss as usize, offset);
         // Read through memory subsystem
         self.mem_read_dword(laddr as u64)
+    }
+
+    // =========================================================================
+    // 64-bit stack operations
+    // =========================================================================
+
+    /// Push a 64-bit value onto the stack
+    /// Based on BX_CPU_C::push_64 in stack.h (64-bit mode)
+    pub fn push_64(&mut self, value: u64) {
+        // In 64-bit mode, stack is always 64-bit
+        let rsp = self.rsp();
+        let new_rsp = rsp.wrapping_sub(8);
+        self.stack_write_qword(new_rsp, value);
+        self.set_rsp(new_rsp);
+        tracing::trace!("PUSH64: value {:#x} written to stack", value);
+    }
+
+    /// Pop a 64-bit value from the stack
+    /// Based on BX_CPU_C::pop_64 in stack.h (64-bit mode)
+    pub fn pop_64(&mut self) -> u64 {
+        // In 64-bit mode, stack is always 64-bit
+        let rsp = self.rsp();
+        let value = self.stack_read_qword(rsp);
+        self.set_rsp(rsp.wrapping_add(8));
+        tracing::trace!("POP64: value {:#x} read from stack", value);
+        value
+    }
+
+    /// Write a 64-bit value to stack at given offset (SS:offset)
+    pub(super) fn stack_write_qword(&mut self, offset: u64, value: u64) {
+        // Get linear address from SS:offset
+        let laddr = self.get_laddr64(BxSegregs::Ss as usize, offset);
+        // Write through memory subsystem
+        self.mem_write_qword(laddr, value);
+    }
+
+    /// Read a 64-bit value from stack at given offset (SS:offset)
+    pub(super) fn stack_read_qword(&self, offset: u64) -> u64 {
+        // Get linear address from SS:offset
+        let laddr = self.get_laddr64(BxSegregs::Ss as usize, offset);
+        // Read through memory subsystem
+        self.mem_read_qword(laddr)
     }
 }
