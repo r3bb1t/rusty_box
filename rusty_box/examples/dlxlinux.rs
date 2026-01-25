@@ -20,7 +20,8 @@ use rusty_box::{
     Result,
 };
 use std::time::Instant;
-use tracing::Level;
+
+// Note: this example requires the `std` feature (terminal GUI + disk access).
 
 /// DLX Linux disk geometry (from bochsrc.bxrc)
 const DLX_CYLINDERS: u16 = 306;
@@ -105,8 +106,14 @@ fn run_dlxlinux() -> Result<()> {
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
     let bios_paths = [
+        // Prefer the mirrored Bochs BIOS directory in this repo
         workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-latest"),
+        workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-legacy"),
+        workspace_root.join("cpp_orig/bochs/bios/bios.bin-1.13.0"),
+        // Fallbacks (if user has BIOS copied elsewhere)
         workspace_root.join("BIOS-bochs-latest"),
+        workspace_root.join("BIOS-bochs-legacy"),
+        workspace_root.join("bios.bin-1.13.0"),
         workspace_root.join("../cpp_orig/bochs/bios/BIOS-bochs-latest"),
         workspace_root.join("../BIOS-bochs-latest"),
         std::path::PathBuf::from("BIOS-bochs-latest"),
@@ -115,7 +122,15 @@ fn run_dlxlinux() -> Result<()> {
     ];
 
     let vga_bios_paths = [
+        // Prefer user-provided binaries folder (if present)
+        workspace_root.join("binaries/bios/VGABIOS-lgpl-latest.bin"),
+        workspace_root.join("binaries/bios/VGABIOS-lgpl-latest-cirrus.bin"),
+        workspace_root.join("binaries/bios/VGABIOS-lgpl-latest-debug.bin"),
+        // Mirrored Bochs BIOS directory
         workspace_root.join("cpp_orig/bochs/bios/VGABIOS-lgpl-latest.bin"),
+        workspace_root.join("cpp_orig/bochs/bios/VGABIOS-lgpl-latest-cirrus.bin"),
+        workspace_root.join("cpp_orig/bochs/bios/VGABIOS-lgpl-latest-debug.bin"),
+        // Fallbacks
         workspace_root.join("VGABIOS-lgpl-latest.bin"),
         workspace_root.join("../cpp_orig/bochs/bios/VGABIOS-lgpl-latest.bin"),
         workspace_root.join("../VGABIOS-lgpl-latest.bin"),
@@ -141,13 +156,23 @@ fn run_dlxlinux() -> Result<()> {
         .expect("Could not find BIOS file (BIOS-bochs-latest)");
     println!("✓ BIOS loaded: {} bytes", bios_data.len());
 
-    let vga_bios_data = vga_bios_paths.iter().find_map(|path| {
+    // Option ROMs (like VGABIOS) must be sized in 512-byte blocks (Bochs behavior).
+    // Skip any readable file that doesn't satisfy this, and keep searching.
+    let vga_bios = vga_bios_paths.iter().find_map(|path| {
         println!("  Trying VGA BIOS: {}", path.display());
-        std::fs::read(path).ok()
+        let data = std::fs::read(path).ok()?;
+        if data.len() % 512 != 0 {
+            println!(
+                "    Skipping VGA BIOS (invalid option ROM size: {} bytes, not multiple of 512)",
+                data.len()
+            );
+            return None;
+        }
+        Some((path.clone(), data))
     });
 
-    if let Some(ref vga) = vga_bios_data {
-        println!("✓ VGA BIOS loaded: {} bytes", vga.len());
+    if let Some((ref vga_path, ref vga)) = vga_bios {
+        println!("✓ VGA BIOS loaded: {} bytes ({})", vga.len(), vga_path.display());
     } else {
         println!("⚠ VGA BIOS not found (optional)");
     }
@@ -186,9 +211,16 @@ fn run_dlxlinux() -> Result<()> {
     // =========================================================================
     // Set up GUI (must be done BEFORE initialize() to match original Bochs)
     // =========================================================================
-    let term_gui = TermGui::new();
-    emu.set_gui(term_gui);
-    tracing::info!("✓ GUI set (TermGui)");
+    let headless = std::env::var_os("RUSTY_BOX_HEADLESS").is_some();
+    if headless {
+        emu.set_gui(NoGui::new());
+        tracing::info!("✓ GUI set (NoGui / headless)");
+        println!("(headless) RUSTY_BOX_HEADLESS=1: terminal repaint disabled");
+    } else {
+        let term_gui = TermGui::new();
+        emu.set_gui(term_gui);
+        tracing::info!("✓ GUI set (TermGui)");
+    }
 
     // =========================================================================
     // Initialize hardware
@@ -211,7 +243,7 @@ fn run_dlxlinux() -> Result<()> {
     tracing::info!("✓ Loaded system BIOS at 0xFFFE0000");
 
     // Load VGA BIOS at 0xC0000 (optional)
-    if let Some(vga_data) = vga_bios_data {
+    if let Some((_vga_path, vga_data)) = vga_bios {
         emu.load_optional_rom(&vga_data, 0xC0000)?;
         tracing::info!("✓ Loaded VGA BIOS at 0xC0000");
     }
@@ -311,8 +343,9 @@ fn run_dlxlinux() -> Result<()> {
     let start_time = Instant::now();
 
     // Run with instruction limit to allow debugging
-    const MAX_INSTRUCTIONS: u64 = 1_000_000_000; // 1M instructions - reasonable limit for testing
-                                                 // const MAX_INSTRUCTIONS: u64 = 100; // 100k instructions - reasonable limit for testing
+    // const MAX_INSTRUCTIONS: u64 = 1_000_000_000; // 1M instructions - reasonable limit for testing
+    // BIOS + VGABIOS can take tens of millions of instructions to reach visible VGA output.
+    const MAX_INSTRUCTIONS: u64 = 50_000_000;
 
     // Use interactive loop that handles GUI events
     let result = emu.run_interactive(MAX_INSTRUCTIONS);
@@ -347,6 +380,15 @@ fn run_dlxlinux() -> Result<()> {
         }
     }
 
+    // In headless mode (and even with GUI), also print any remaining Bochs-style
+    // debug-port output that might not have been drained during execution.
+    let e9 = emu.devices.take_port_e9_output();
+    if !e9.is_empty() {
+        println!();
+        println!("===== BOCHS DEBUG PORT OUTPUT (0xE9/0x402/0x403/0x500) =====");
+        print!("{}", String::from_utf8_lossy(&e9));
+    }
+
     println!("╠════════════════════════════════════════════════════════════╣");
     println!(
         "║  Final RIP:   {:#018x}                          ║",
@@ -371,6 +413,34 @@ fn run_dlxlinux() -> Result<()> {
     // Cleanup: restore terminal if GUI was used
     if let Some(ref mut gui) = emu.gui_mut() {
         gui.exit();
+    }
+
+    // In headless mode, dump the current VGA text screen once at the end.
+    // This avoids terminal repaint while still letting you see BIOS/VGABIOS output.
+    if headless {
+        println!();
+        println!("===== VGA TEXT DUMP (headless) =====");
+        println!("{}", emu.vga_text_dump());
+
+        println!();
+        println!("===== VGA WRITE PROBE (headless) =====");
+        println!("{}", emu.vga_probe_dump());
+
+        // BIOS POST codes are non-ASCII; print as hex so we can see progress.
+        let post = emu.devices.take_port80_output();
+        if !post.is_empty() {
+            print!("===== BIOS POST CODES (port 0x80/0x84) =====\n");
+            for (i, b) in post.iter().enumerate() {
+                if i != 0 && (i % 16) == 0 {
+                    print!("\n");
+                }
+                print!("{:02x} ", b);
+            }
+            print!("\n");
+        } else {
+            println!("===== BIOS POST CODES (port 0x80/0x84) =====");
+            println!("<none captured>");
+        }
     }
 
     Ok(())

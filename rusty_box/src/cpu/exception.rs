@@ -19,12 +19,21 @@ pub(super) enum InterruptType {
 /* Exception types.  These are used as indexes into the 'is_exception_OK'
  * array below, and are stored in the 'exception' array also
  */
+#[derive(Clone, Copy)]
 enum ExceptionType {
     Benign = 0,
     Contributory = 1,
     PageFault = 2,
     DoubleFault = 10,
 }
+
+// Match Bochs `is_exception_OK[3][3]` (cpu/exception.cc:851..855).
+// Indexes are {Benign, Contributory, PageFault}.
+const IS_EXCEPTION_OK: [[bool; 3]; 3] = [
+    [true, true, true],   // 1st exception is BENIGN
+    [true, false, true],  // 1st exception is CONTRIBUTORY
+    [true, false, false], // 1st exception is PAGE_FAULT
+];
 
 struct BxExceptionInfo {
     exception_type: ExceptionType,
@@ -247,7 +256,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 && vector != Exception::Cp
                 && vector != Exception::Sx
             {
-                error_code = (error_code & 0xfffe) | (self.ext as u16);
+                // Bochs ORs in EXT (0/1) into bit0 of the error code.
+                // Our `ext` is a bool, so convert explicitly.
+                error_code = (error_code & 0xfffe) | (u16::from(self.ext));
             }
         }
 
@@ -260,6 +271,48 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             push_error = false; // not INT, no error code pushed
             error_code = 0;
         }
+
+        // Mirror Bochs cpu/exception.cc:984..1052.
+        let info = &EXCEPTIONS_INFO[vector as usize];
+        let exception_type = info.exception_type as u32;
+        let exception_class = info.exception_class;
+
+        if matches!(exception_class, ExceptionClass::Fault) {
+            // restore RIP/RSP to value before error occurred
+            self.set_rip(self.prev_rip);
+            if self.speculative_rsp {
+                self.set_rsp(self.prev_rsp);
+                self.set_ssp(self.prev_ssp);
+            }
+            self.speculative_rsp = false;
+
+            // Bochs: if (vector != #DB) assert_RF();
+            if vector != Exception::Db {
+                self.eflags |= 1 << 16; // RF bit
+            }
+
+            // Triple fault: 3rd exception with no resolution after #DF.
+            if self.last_exception_type == ExceptionType::DoubleFault as u32 {
+                self.debug_puts(b"[TRIPLE_FAULT]\n");
+                self.activity_state = super::cpu::CpuActivityState::Shutdown;
+                self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                return Err(super::error::CpuError::CpuLoopRestart);
+            }
+        }
+
+        // Bochs: EXT = 1 for exceptions.
+        self.ext = true;
+
+        // If we've already had 1st exception, see if 2nd causes a Double Fault.
+        if exception_type != ExceptionType::DoubleFault as u32 {
+            let last = self.last_exception_type as usize;
+            let newt = exception_type as usize;
+            if last < 3 && newt < 3 && !IS_EXCEPTION_OK[last][newt] {
+                return self.exception(Exception::Df, 0);
+            }
+        }
+
+        self.last_exception_type = exception_type;
 
         // #if BX_DEBUGGER
         // if (bx_dbg.debugger_active)
@@ -289,7 +342,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.protected_mode_int(vector_u8, false, push_error, error_code)?;
         }
 
-        Ok(())
+        // error resolved
+        self.last_exception_type = 0;
+
+        // Bochs longjmps back to the main decode loop after delivering the exception.
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Err(super::error::CpuError::CpuLoopRestart)
     }
 
     fn exception_push_error(&mut self, vector: usize) -> bool {

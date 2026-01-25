@@ -1,4 +1,4 @@
-use core::{cell::UnsafeCell, marker::PhantomData};
+use core::{cell::UnsafeCell, marker::PhantomData, ptr::NonNull};
 
 use crate::{
     config::{BxAddress, BxPhyAddress, BxPtrEquiv},
@@ -274,6 +274,7 @@ pub(super) enum CpExceptionErrorCode {
 
 pub(super) const BX_CPU_HANDLED_EXCEPTIONS: usize = 32;
 
+#[derive(Clone, Copy)]
 pub(super) enum ExceptionClass {
     Trap = 0,
     Fault = 1,
@@ -624,6 +625,26 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     /// SAFETY: Must only be used during cpu_loop when memory is valid
     pub(super) mem_ptr: Option<*mut u8>,
     pub(super) mem_len: usize,
+
+    /// Optional memory system pointer (MMIO/ROM handler access), wired during execution.
+    ///
+    /// This mirrors Bochs' v2h/getHostMemAddr model: the CPU can attempt direct host access
+    /// when allowed, and fall back to handler-aware reads/writes when access is vetoed.
+    ///
+    /// It must only be set for the duration of a CPU execution call and cleared afterwards.
+    pub(super) mem_bus: Option<NonNull<crate::memory::BxMemC<'c>>>,
+
+    /// Optional I/O bus (device port handlers), wired by the emulator during execution.
+    ///
+    /// This is a raw pointer to avoid borrow checker overhead in the hot path.
+    /// It must only be set for the duration of a CPU execution call and cleared afterwards.
+    pub(super) io_bus: Option<NonNull<crate::iodev::BxDevicesC>>,
+
+    /// Debug flags for one-time boot diagnostics (no globals).
+    ///
+    /// Bit 0: reported unsupported opcode
+    /// Bit 1: reported real-mode IVT vector to 0000:0000
+    pub(super) boot_debug_flags: u8,
 }
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -956,6 +977,110 @@ struct BxGuardFound {
 type InstructionHandler<I> = fn(&mut BxCpuC<'_, I>, &BxInstructionGenerated) -> Result<()>;
 
 impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
+    #[inline]
+    pub(crate) fn set_io_bus_ptr(&mut self, io: NonNull<crate::iodev::BxDevicesC>) {
+        self.io_bus = Some(io);
+    }
+
+    #[inline]
+    pub(crate) fn clear_io_bus(&mut self) {
+        self.io_bus = None;
+    }
+
+    #[inline]
+    pub(crate) fn set_mem_bus_ptr(&mut self, mem: NonNull<crate::memory::BxMemC<'c>>) {
+        self.mem_bus = Some(mem);
+    }
+
+    #[inline]
+    pub(crate) fn clear_mem_bus(&mut self) {
+        self.mem_bus = None;
+    }
+
+    #[inline]
+    pub(crate) fn debug_putc(&mut self, ch: u8) {
+        if let Some(mut io_bus) = self.io_bus {
+            // SAFETY: io_bus is execution-scoped and single-CPU today.
+            unsafe { io_bus.as_mut().outp(0x00E9, ch as u32, 1) };
+        }
+    }
+
+    #[inline]
+    pub(crate) fn debug_puts(&mut self, s: &[u8]) {
+        for &b in s {
+            self.debug_putc(b);
+        }
+    }
+
+    #[inline]
+    fn debug_put_hex_u8(&mut self, v: u8) {
+        #[inline]
+        fn nybble(n: u8) -> u8 {
+            match n & 0x0f {
+                0..=9 => b'0' + (n & 0x0f),
+                10..=15 => b'a' + ((n & 0x0f) - 10),
+                _ => b'?',
+            }
+        }
+        self.debug_putc(nybble(v >> 4));
+        self.debug_putc(nybble(v));
+    }
+
+    #[inline]
+    fn debug_put_hex_u16(&mut self, v: u16) {
+        self.debug_put_hex_u8((v >> 8) as u8);
+        self.debug_put_hex_u8(v as u8);
+    }
+
+    /// Inject an external (hardware) interrupt vector into the CPU.
+    ///
+    /// This is used by the outer emulator loop to deliver PIC interrupts and
+    /// wake the CPU from `HLT`, mirroring Bochs' event/timer driven flow.
+    ///
+    /// Note: callers must ensure the memory bus is wired (`mem_bus` set) so that
+    /// stack pushes and IVT/IDT reads work correctly.
+    pub(crate) fn inject_external_interrupt(&mut self, vector: u8) -> Result<()> {
+        // Wake from halt/wait state.
+        self.activity_state = CpuActivityState::Active;
+        // Clear stop-trace so execution can resume.
+        self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+
+        if self.real_mode() {
+            // Real-mode external interrupts use the IVT at 0000:0000.
+            self.interrupt_real_mode(vector);
+            Ok(())
+        } else {
+            // Protected-mode external interrupts go through the IDT gate.
+            // `soft_int=false`, no error code pushed for external IRQs.
+            self.protected_mode_int(vector, false, false, 0)
+        }
+    }
+
+    /// True if the CPU is halted or waiting for an event.
+    ///
+    /// We use this to decide when the outer emulator loop should inject
+    /// PIC interrupts (wake-from-HLT), matching Bochs' wait-for-event flow.
+    pub(crate) fn is_waiting_for_event(&self) -> bool {
+        !matches!(self.activity_state, CpuActivityState::Active)
+    }
+
+    /// Execute CPU loop with an attached I/O bus (port handlers).
+    ///
+    /// This sets the bus pointer for the duration of the call and clears it afterwards.
+    #[inline]
+    pub fn cpu_loop_n_with_io(
+        &mut self,
+        mem: &'c mut BxMemC<'c>,
+        cpus: &[&Self],
+        max_instructions: u64,
+        io: NonNull<crate::iodev::BxDevicesC>,
+    ) -> super::Result<u64> {
+        self.set_io_bus_ptr(io);
+        let result = self.cpu_loop_n(mem, cpus, max_instructions);
+        self.clear_io_bus();
+        result
+    }
+
     pub fn cpu_loop(&mut self, mem: &'c mut BxMemC<'c>, cpus: &[&Self]) -> super::Result<()> {
         let stack_anchor = 0;
 
@@ -1000,11 +1125,35 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         cpus: &[&Self],
         max_instructions: u64,
     ) -> super::Result<u64> {
+        // Wire the memory system pointer for the duration of this execution call.
+        // This enables Bochs-style "host-pointer-or-fallback" access in mem_read/mem_write.
+        // Reborrow `mem` so we don't move the `&mut` binding.
+        self.set_mem_bus_ptr(NonNull::from(&mut *mem));
+
         // Set memory pointer for instruction execution
         // Store raw pointer to the memory vector for direct access
         let (mem_vector, mem_len) = mem.get_raw_memory_ptr();
         self.mem_ptr = Some(mem_vector);
         self.mem_len = mem_len;
+
+        // One-time boot breadcrumb: prove the 0xE9 output pipeline works and show
+        // the very first bytes the CPU sees at the current CS:IP.
+        if (self.boot_debug_flags & 0x80) == 0 {
+            self.boot_debug_flags |= 0x80;
+            self.debug_puts(b"[cpu_loop start] ");
+
+            // In reset/real-mode BIOS, RIP is effectively CS.base + IP.
+            let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+            let ip = self.get_ip() as u64;
+            let paddr = cs_base.wrapping_add(ip);
+
+            // Dump 8 bytes from the current instruction stream.
+            for i in 0..8u64 {
+                let b = self.mem_read_byte(paddr.wrapping_add(i));
+                self.debug_put_hex_u8(b);
+                self.debug_putc(if i == 7 { b'\n' } else { b' ' });
+            }
+        }
 
         let mut iteration = 0u64;
         let mut stuck_counter = 0u64;
@@ -1013,7 +1162,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let mut history_idx = 0usize;
         const STUCK_THRESHOLD: u64 = 100000; // Warn if RIP doesn't change for this many instructions
 
-        let result = loop {
+        let result = 'cpu_loop: loop {
             iteration += 1;
 
             // Safety limit - pause when instruction limit is reached
@@ -1038,9 +1187,40 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // SAFETY: We extend the lifetime of mem temporarily for this call only.
             // The borrow is released at the end of the expression.
             let current_rip = self.rip();
+
+            // One-time breadcrumb if execution ever reaches RIP=0 (common symptom of
+            // bogus far transfer / bad stack / uninitialized IVT/IDT target).
+            if current_rip == 0 && (self.boot_debug_flags & 0x40) == 0 {
+                self.boot_debug_flags |= 0x40;
+                self.debug_puts(b"[RIP=0 cs:ip=");
+                let cs_sel = self.sregs[BxSegregs::Cs as usize].selector.value;
+                let ip = self.get_ip();
+                self.debug_put_hex_u16(cs_sel);
+                self.debug_putc(b':');
+                self.debug_put_hex_u16(ip);
+                self.debug_puts(b"] ");
+
+                // Dump 8 bytes from the current instruction stream using real-mode CS base.
+                let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+                let paddr = cs_base.wrapping_add(ip as u64);
+                for i in 0..8u64 {
+                    let b = self.mem_read_byte(paddr.wrapping_add(i));
+                    self.debug_put_hex_u8(b);
+                    self.debug_putc(if i == 7 { b'\n' } else { b' ' });
+                }
+            }
+
             let mut entry = unsafe {
                 let mem_extended: &'c mut BxMemC<'c> = &mut *mem_ptr;
-                self.get_icache_entry(mem_extended, cpus)?
+                match self.get_icache_entry(mem_extended, cpus) {
+                    Ok(e) => e,
+                    Err(crate::cpu::CpuError::CpuLoopRestart) => {
+                        // Exception delivery during prefetch/fetch: restart decode (Bochs longjmp).
+                        self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+                        continue 'cpu_loop;
+                    }
+                    Err(e) => break 'cpu_loop Err(e),
+                }
             };
             tracing::debug!("get_icache_entry: RIP={:#x}, entry.tlen={}", current_rip, entry.tlen);
 
@@ -1081,6 +1261,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // Loop through all instructions in the trace (matching C++ cpu.cc:196-222)
             let mut instr_idx = 0usize;
             let mut prev_rip_in_loop = self.rip(); // Track previous RIP for loop detection
+            let mut restart_decode = false;
             loop {
                 // Bounds check before accessing mpool
                 if trace_start_idx + instr_idx >= BX_ICACHE_MEM_POOL {
@@ -1249,13 +1430,23 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                                 instr_bytes
                             );
                         }
-                                Err(e) => {
-                                    tracing::warn!("instruction execution returned error: {:?}", e);
-                                    // For other errors, continue but the instruction may not have executed correctly
-                                    // RIP has already been advanced, so we'll move to next instruction
-                                }
+                            Err(crate::cpu::CpuError::CpuLoopRestart) => {
+                                // Bochs longjmp: restart decode/trace immediately, do not
+                                // commit RIP or increment instruction counters for this instruction.
+                                restart_decode = true;
+                                break;
+                            }
+                            Err(e) => {
+                                // Unlike the old placeholder logic, do NOT continue on CPU errors.
+                                // This corrupts guest execution and quickly leads to bogus RIP=0.
+                                break 'cpu_loop Err(e);
+                            }
                             }
                         }
+                    }
+                    Err(crate::cpu::CpuError::CpuLoopRestart) => {
+                        restart_decode = true;
+                        break;
                     }
                     Err(e) => {
                         tracing::warn!("assign_handler returned error: {:?}", e);
@@ -1315,12 +1506,21 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                                     instr_bytes
                                 );
                             }
+                            Err(crate::cpu::CpuError::CpuLoopRestart) => {
+                                restart_decode = true;
+                                break;
+                            }
                             Err(e) => {
-                                tracing::warn!("instruction execution returned error: {:?}", e);
-                                // Continue but instruction may not have executed correctly
+                                break 'cpu_loop Err(e);
                             }
                         }
                     }
+                }
+
+                if restart_decode {
+                    // Clear STOP_TRACE marker; we're explicitly restarting decode now.
+                    self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+                    continue 'cpu_loop;
                 }
 
                 // Matching C++ line 204: BX_CPU_THIS_PTR prev_rip = RIP; // commit new RIP
@@ -1361,7 +1561,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     // The borrow from the previous get_icache_entry is released, so we can safely create a new reference
                     entry = unsafe {
                         let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
-                        self.get_icache_entry(mem_reborrowed, cpus)?
+                        match self.get_icache_entry(mem_reborrowed, cpus) {
+                            Ok(e) => e,
+                            Err(crate::cpu::CpuError::CpuLoopRestart) => {
+                                self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+                                continue 'cpu_loop;
+                            }
+                            Err(e) => break 'cpu_loop Err(e),
+                        }
                     };
 
                     // Get trace start index from entry (stored when trace was created)
@@ -1410,16 +1617,26 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             // Check if RIP is cycling (pattern repeats in history)
             else if iteration > rip_history.len() as u64 {
-                let unique_rips: std::collections::HashSet<u64> =
-                    rip_history.iter().copied().collect();
-                if unique_rips.len() <= 4 && stuck_counter > 10000 {
+                // Count unique RIPs without heap allocations (no_std-friendly).
+                let mut unique = [0u64; 16];
+                let mut unique_len = 0usize;
+                for &rip in rip_history.iter() {
+                    if !unique[..unique_len].iter().any(|&x| x == rip) {
+                        unique[unique_len] = rip;
+                        unique_len += 1;
+                        if unique_len > 4 {
+                            break;
+                        }
+                    }
+                }
+
+                if unique_len <= 4 && stuck_counter > 10000 {
                     // Very few unique RIPs suggests a tight loop
                     stuck_counter += 1;
                     if stuck_counter == STUCK_THRESHOLD {
                         tracing::warn!(
                             "CPU appears stuck in tight loop (cycling through {} addresses) after {} instructions. Recent RIPs: {:?}",
-                            unique_rips.len(), stuck_counter,
-                            rip_history.iter().take(8).copied().collect::<Vec<_>>()
+                            unique_len, stuck_counter, rip_history
                         );
                     }
                 } else {
@@ -1448,6 +1665,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Clear memory pointer when done
         self.mem_ptr = None;
+        self.clear_mem_bus();
         result
     }
 
@@ -3756,6 +3974,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 "{:?}: instruction not supported - signalling #UD",
                 opcode
             );
+        }
+
+        // Boot diagnostic: report the first unsupported opcode via port 0xE9.
+        // If BIOS hits #UD early, it may vector to 0000:0000 and appear to “do nothing”.
+        if (self.boot_debug_flags & 0x01) == 0 {
+            self.boot_debug_flags |= 0x01;
+            self.debug_puts(b"[UD]\n");
         }
 
         self.exception(Exception::Ud, 0)?;

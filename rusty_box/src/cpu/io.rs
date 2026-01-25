@@ -103,58 +103,39 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // ========================================================================
-    // Port I/O helpers (stub implementations - need device connection)
+    // Port I/O helpers
     // ========================================================================
 
-    /// Read from I/O port (stub - returns 0xFF for unhandled ports)
-    fn port_in(&self, port: u16, len: u8) -> u32 {
-        // TODO: Connect to device manager for actual I/O
-        // For now, return typical values for common ports
-        match port {
-            // POST diagnostic port
-            0x80 => 0x00,
-            // PIC master command/data
-            0x20 => 0x00,
-            0x21 => 0xFF, // All IRQs masked
-            // PIC slave
-            0xA0 => 0x00,
-            0xA1 => 0xFF,
-            // RTC/CMOS
-            0x70 => 0x00,
-            0x71 => 0x00,
-            // Keyboard controller status
-            0x64 => 0x00, // Not busy, no data
-            // Keyboard data
-            0x60 => 0x00,
-            // Default
-            _ => {
-                tracing::trace!("port_in: unhandled port {:#x}, len={}", port, len);
-                match len {
-                    1 => 0xFF,
-                    2 => 0xFFFF,
-                    4 => 0xFFFFFFFF,
-                    _ => 0xFF,
-                }
-            }
+    /// Read from I/O port.
+    ///
+    /// When the emulator wires an I/O bus, this dispatches to `BxDevicesC::inp`.
+    /// Otherwise it falls back to conservative defaults (useful for unit tests
+    /// that don't wire devices and never execute real firmware).
+    fn port_in(&mut self, port: u16, len: u8) -> u32 {
+        if let Some(io_bus) = self.io_bus {
+            // SAFETY: `io_bus` is set by the emulator for the duration of execution
+            // and cleared afterwards. Single-CPU execution avoids concurrent access.
+            return unsafe { io_bus.as_ref().inp(port, len) };
+        }
+
+        // Fallback (no bus wired)
+        match len {
+            1 => 0xFF,
+            2 => 0xFFFF,
+            4 => 0xFFFFFFFF,
+            _ => 0xFF,
         }
     }
 
-    /// Write to I/O port (stub - logs the operation)
-    fn port_out(&self, port: u16, value: u32, len: u8) {
-        // TODO: Connect to device manager for actual I/O
-        match port {
-            // POST diagnostic port - commonly written during BIOS POST
-            0x80 => tracing::debug!("POST code: {:#04x}", value as u8),
-            // PIC master
-            0x20 | 0x21 => tracing::trace!("PIC master write: port={:#x}, value={:#x}", port, value),
-            // PIC slave
-            0xA0 | 0xA1 => tracing::trace!("PIC slave write: port={:#x}, value={:#x}", port, value),
-            // RTC/CMOS
-            0x70 | 0x71 => tracing::trace!("CMOS write: port={:#x}, value={:#x}", port, value),
-            // Keyboard controller
-            0x60 | 0x64 => tracing::trace!("Keyboard write: port={:#x}, value={:#x}", port, value),
-            // Default
-            _ => tracing::trace!("port_out: unhandled port {:#x}, value={:#x}, len={}", port, value, len),
+    /// Write to I/O port.
+    ///
+    /// When the emulator wires an I/O bus, this dispatches to `BxDevicesC::outp`.
+    /// Otherwise it is ignored (useful for unit tests without devices).
+    fn port_out(&mut self, port: u16, value: u32, len: u8) {
+        if let Some(mut io_bus) = self.io_bus {
+            // SAFETY: `io_bus` is set by the emulator for the duration of execution
+            // and cleared afterwards. Single-CPU execution avoids concurrent access.
+            unsafe { io_bus.as_mut().outp(port, value, len) };
         }
     }
 }

@@ -122,6 +122,9 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             phantom: Default::default(),
             mem_ptr: None,
             mem_len: 0,
+            mem_bus: None,
+            io_bus: None,
+            boot_debug_flags: 0,
         };
 
         let config = Default::default();

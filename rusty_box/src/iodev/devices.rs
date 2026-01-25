@@ -20,13 +20,15 @@ use crate::{
 };
 
 use super::BxDevicesC;
-use super::pic::{self, BxPicC, PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA, PIC_ELCR1, PIC_ELCR2};
-use super::pit::{self, BxPitC, PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2, PIT_CONTROL};
-use super::cmos::{self, BxCmosC, CMOS_ADDR, CMOS_DATA};
-use super::dma::{self, BxDmaC};
-use super::keyboard::{self, BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT, SYSTEM_CONTROL_B};
-use super::harddrv::{self, BxHardDriveC};
-use super::vga::{self, BxVgaC};
+use super::pic::{
+    BxPicC, PIC_ELCR1, PIC_ELCR2, PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA,
+};
+use super::pit::{BxPitC, PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2, PIT_CONTROL};
+use super::cmos::{BxCmosC, CMOS_ADDR, CMOS_DATA};
+use super::dma::BxDmaC;
+use super::keyboard::{BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT, SYSTEM_CONTROL_B};
+use super::harddrv::BxHardDriveC;
+use super::vga::BxVgaC;
 
 /// Port 0x92 - System Control Port
 /// Bit 0: Fast A20 gate control (1 = A20 enabled)
@@ -145,8 +147,8 @@ impl DeviceManager {
         for port in [PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA, PIC_ELCR1, PIC_ELCR2] {
             io.register_io_handler(
                 pic_ptr,
-                pic::pic_read_handler,
-                pic::pic_write_handler,
+                super::pic::pic_read_handler,
+                super::pic::pic_write_handler,
                 port,
                 "8259 PIC",
                 0x1,
@@ -161,8 +163,8 @@ impl DeviceManager {
         for port in [PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2, PIT_CONTROL] {
             io.register_io_handler(
                 pit_ptr,
-                pit::pit_read_handler,
-                pit::pit_write_handler,
+                super::pit::pit_read_handler,
+                super::pit::pit_write_handler,
                 port,
                 "8254 PIT",
                 0x1,
@@ -176,16 +178,16 @@ impl DeviceManager {
         
         io.register_io_handler(
             cmos_ptr,
-            cmos::cmos_read_handler,
-            cmos::cmos_write_handler,
+            super::cmos::cmos_read_handler,
+            super::cmos::cmos_write_handler,
             CMOS_ADDR,
             "CMOS Address",
             0x1,
         );
         io.register_io_handler(
             cmos_ptr,
-            cmos::cmos_read_handler,
-            cmos::cmos_write_handler,
+            super::cmos::cmos_read_handler,
+            super::cmos::cmos_write_handler,
             CMOS_DATA,
             "CMOS Data",
             0x1,
@@ -200,8 +202,8 @@ impl DeviceManager {
         for port in 0x00..=0x0F_u16 {
             io.register_io_handler(
                 dma_ptr,
-                dma::dma_read_handler,
-                dma::dma_write_handler,
+                super::dma::dma_read_handler,
+                super::dma::dma_write_handler,
                 port,
                 "DMA1",
                 0x1,
@@ -212,8 +214,8 @@ impl DeviceManager {
         for port in 0xC0..=0xDF_u16 {
             io.register_io_handler(
                 dma_ptr,
-                dma::dma_read_handler,
-                dma::dma_write_handler,
+                super::dma::dma_read_handler,
+                super::dma::dma_write_handler,
                 port,
                 "DMA2",
                 0x1,
@@ -224,8 +226,8 @@ impl DeviceManager {
         for port in [0x81_u16, 0x82, 0x83, 0x87, 0x89, 0x8A, 0x8B, 0x8F] {
             io.register_io_handler(
                 dma_ptr,
-                dma::dma_read_handler,
-                dma::dma_write_handler,
+                super::dma::dma_read_handler,
+                super::dma::dma_write_handler,
                 port,
                 "DMA Page",
                 0x1,
@@ -239,24 +241,24 @@ impl DeviceManager {
         
         io.register_io_handler(
             kbd_ptr,
-            keyboard::keyboard_read_handler,
-            keyboard::keyboard_write_handler,
+            super::keyboard::keyboard_read_handler,
+            super::keyboard::keyboard_write_handler,
             KBD_DATA_PORT,
             "Keyboard Data",
             0x1,
         );
         io.register_io_handler(
             kbd_ptr,
-            keyboard::keyboard_read_handler,
-            keyboard::keyboard_write_handler,
+            super::keyboard::keyboard_read_handler,
+            super::keyboard::keyboard_write_handler,
             KBD_STATUS_PORT,
             "Keyboard Status/Command",
             0x1,
         );
         io.register_io_handler(
             kbd_ptr,
-            keyboard::keyboard_read_handler,
-            keyboard::keyboard_write_handler,
+            super::keyboard::keyboard_read_handler,
+            super::keyboard::keyboard_write_handler,
             SYSTEM_CONTROL_B,
             "System Control B",
             0x1,
@@ -271,8 +273,8 @@ impl DeviceManager {
         for port in 0x1F0..=0x1F7_u16 {
             io.register_io_handler(
                 hd_ptr,
-                harddrv::harddrv_read_handler,
-                harddrv::harddrv_write_handler,
+                super::harddrv::harddrv_read_handler,
+                super::harddrv::harddrv_write_handler,
                 port,
                 "ATA Primary",
                 0x7, // 1, 2, 4 byte access
@@ -280,8 +282,8 @@ impl DeviceManager {
         }
         io.register_io_handler(
             hd_ptr,
-            harddrv::harddrv_read_handler,
-            harddrv::harddrv_write_handler,
+            super::harddrv::harddrv_read_handler,
+            super::harddrv::harddrv_write_handler,
             0x3F6,
             "ATA Primary Control",
             0x1,
@@ -291,8 +293,8 @@ impl DeviceManager {
         for port in 0x170..=0x177_u16 {
             io.register_io_handler(
                 hd_ptr,
-                harddrv::harddrv_read_handler,
-                harddrv::harddrv_write_handler,
+                super::harddrv::harddrv_read_handler,
+                super::harddrv::harddrv_write_handler,
                 port,
                 "ATA Secondary",
                 0x7,
@@ -300,8 +302,8 @@ impl DeviceManager {
         }
         io.register_io_handler(
             hd_ptr,
-            harddrv::harddrv_read_handler,
-            harddrv::harddrv_write_handler,
+            super::harddrv::harddrv_read_handler,
+            super::harddrv::harddrv_write_handler,
             0x376,
             "ATA Secondary Control",
             0x1,
@@ -310,17 +312,20 @@ impl DeviceManager {
 
     /// Simulate time passing for timer-based devices
     /// Returns true if any interrupt is pending
-    pub fn tick(&mut self, _usec: u64) -> bool {
-        // Tick PIT and check for IRQ0
+    pub fn tick(&mut self, usec: u64) -> bool {
+        // Tick PIT/RTC first to generate periodic interrupts (Bochs-like behavior).
+        // PIT drives IRQ0, CMOS/RTC drives IRQ8 when enabled.
+        let _ = self.pit.tick(usec);
         if self.pit.check_irq0() {
             self.pic.raise_irq(0);
         }
-        
-        // Tick CMOS/RTC and check for IRQ8
+
+        let _ = self.cmos.tick(usec);
         if self.cmos.check_irq8() {
             self.pic.raise_irq(8);
         }
-        
+
+        // Tick PIT and check for IRQ0
         // Check keyboard IRQ1
         if self.keyboard.check_irq1() {
             self.pic.raise_irq(1);

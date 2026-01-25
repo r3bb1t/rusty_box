@@ -11,7 +11,7 @@
 //! - Multiple pages can be stored in the 32KB region
 
 use core::ffi::c_void;
-use alloc::vec::Vec;
+use alloc::{string::String, vec::Vec};
 
 use crate::{
     config::BxPhyAddress,
@@ -19,16 +19,20 @@ use crate::{
     Result,
 };
 
-use super::{BxDevicesC, IoReadHandlerT, IoWriteHandlerT};
+use super::BxDevicesC;
 
 /// VGA text mode memory base address
 const VGA_TEXT_MEM_BASE: BxPhyAddress = 0xB8000;
 const VGA_TEXT_MEM_SIZE: usize = 0x8000; // 32KB
+const VGA_TEXT_MEM_BASE_MONO: BxPhyAddress = 0xB0000;
 
 /// VGA I/O ports
 const VGA_CRTC_INDEX: u16 = 0x3D4;
 const VGA_CRTC_DATA: u16 = 0x3D5;
 const VGA_STATUS: u16 = 0x3DA;
+const VGA_CRTC_INDEX_MONO: u16 = 0x3B4;
+const VGA_CRTC_DATA_MONO: u16 = 0x3B5;
+const VGA_STATUS_MONO: u16 = 0x3BA;
 const VGA_ATTRIB_ADDR: u16 = 0x3C0;
 const VGA_ATTRIB_DATA: u16 = 0x3C1;
 const VGA_MISC_OUTPUT: u16 = 0x3CC;
@@ -89,7 +93,11 @@ pub(crate) struct BxVgaC {
     status_reg: u8,
     /// Misc output register
     misc_output: u8,
-    /// Text mode memory buffer
+    /// VGA text aperture backing store (Bochs: `s.memory` aliased by mapping window).
+    ///
+    /// Bochs does *not* keep separate B0000 vs B8000 buffers; instead, the Graphics
+    /// Controller `memory_mapping` selects which address range maps to the same memory.
+    /// See `cpp_orig/bochs/iodev/display/vgacore.cc` `mem_read`/`mem_write` mapping switch.
     text_memory: Vec<u8>,
     /// Current cursor position (row, col)
     cursor_pos: (usize, usize),
@@ -106,6 +114,18 @@ pub(crate) struct BxVgaC {
     /// Flag indicating text buffer needs to be updated from VGA memory
     /// Set when text mode parameters change
     text_buffer_update: bool,
+
+    // =====================================================================
+    // Bochs-aligned observability (debug-only but always-on, no globals)
+    // =====================================================================
+    /// Count of writes that were accepted by current `memory_mapping` window gating.
+    probe_mapped_writes: u64,
+    /// Count of writes that were ignored because they fell outside the selected window.
+    probe_unmapped_writes: u64,
+    /// First mapped write observed: (phys_addr, value, memory_mapping)
+    probe_first_mapped: Option<(BxPhyAddress, u8, u8)>,
+    /// First unmapped write observed: (phys_addr, value, memory_mapping)
+    probe_first_unmapped: Option<(BxPhyAddress, u8, u8)>,
 }
 
 impl Default for BxVgaC {
@@ -132,10 +152,16 @@ impl BxVgaC {
             text_memory: vec![0; VGA_TEXT_MEM_SIZE],
             cursor_pos: (0, 0),
             text_dirty: false,
-            text_buffer: vec![0; TEXT_COLS * TEXT_ROWS * BYTES_PER_CHAR],
-            text_snapshot: vec![0; TEXT_COLS * TEXT_ROWS * BYTES_PER_CHAR],
+            // Bochs keeps text buffers sized for the whole aperture (0x8000 for mapping 2/3).
+            text_buffer: vec![0; VGA_TEXT_MEM_SIZE],
+            text_snapshot: vec![0; VGA_TEXT_MEM_SIZE],
             vga_mem_updated: 0,
             text_buffer_update: true, // Initial update needed
+
+            probe_mapped_writes: 0,
+            probe_unmapped_writes: 0,
+            probe_first_mapped: None,
+            probe_first_unmapped: None,
         };
 
         // Initialize CRTC registers for 80x25 text mode
@@ -179,7 +205,9 @@ impl BxVgaC {
         vga.graphics_regs[3] = 0x00; // Data Rotate
         vga.graphics_regs[4] = 0x00; // Read Map Select
         vga.graphics_regs[5] = 0x10; // Graphics Mode (text mode)
-        vga.graphics_regs[6] = 0x0E; // Misc (text mode, B8000)
+        // Match Bochs `vgacore.cc:init_standard_vga()` default:
+        // graphics_alpha=0 (text), memory_mapping=2 (monochrome text window B0000-B7FFF)
+        vga.graphics_regs[6] = 0x08;
         vga.graphics_regs[7] = 0x00; // Color Don't Care
         vga.graphics_regs[8] = 0xFF; // Bit Mask
 
@@ -197,12 +225,52 @@ impl BxVgaC {
         vga
     }
 
+    /// Summary of VGA memory write activity (for headless debugging).
+    pub(crate) fn probe_summary(&self) -> String {
+        use core::fmt::Write;
+        let mut s = String::new();
+        let _ = writeln!(
+            s,
+            "mapped_writes={} unmapped_writes={}",
+            self.probe_mapped_writes, self.probe_unmapped_writes
+        );
+        if let Some((addr, val, mm)) = self.probe_first_mapped {
+            let _ = writeln!(s, "first_mapped: addr={:#x} val={:#02x} memory_mapping={}", addr, val, mm);
+        } else {
+            let _ = writeln!(s, "first_mapped: <none>");
+        }
+        if let Some((addr, val, mm)) = self.probe_first_unmapped {
+            let _ = writeln!(s, "first_unmapped: addr={:#x} val={:#02x} memory_mapping={}", addr, val, mm);
+        } else {
+            let _ = writeln!(s, "first_unmapped: <none>");
+        }
+        s
+    }
+
     /// Initialize VGA device
     pub(crate) fn init(&mut self, io: &mut BxDevicesC, mem: &mut BxMemC) -> Result<()> {
         tracing::info!("Initializing VGA text mode");
 
         // Register I/O port handlers
         let vga_ptr = self as *mut BxVgaC as *mut c_void;
+
+        // CRTC registers (mono) (0x3B4-0x3B5)
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_CRTC_INDEX_MONO,
+            "VGA CRTC Index (mono)",
+            0x1,
+        );
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_CRTC_DATA_MONO,
+            "VGA CRTC Data (mono)",
+            0x1,
+        );
 
         // CRTC registers (0x3D4-0x3D5)
         io.register_io_handler(
@@ -229,6 +297,16 @@ impl BxVgaC {
             vga_write_handler,
             VGA_STATUS,
             "VGA Status",
+            0x1,
+        );
+
+        // Status register (mono) (0x3BA)
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_STATUS_MONO,
+            "VGA Status (mono)",
             0x1,
         );
 
@@ -319,15 +397,15 @@ impl BxVgaC {
     /// Read from I/O port
     pub(crate) fn read_port(&mut self, port: u16, _io_len: u8) -> u32 {
         match port {
-            VGA_CRTC_INDEX => self.crtc_index as u32,
-            VGA_CRTC_DATA => {
+            VGA_CRTC_INDEX | VGA_CRTC_INDEX_MONO => self.crtc_index as u32,
+            VGA_CRTC_DATA | VGA_CRTC_DATA_MONO => {
                 if self.crtc_index < 25 {
                     self.crtc_regs[self.crtc_index as usize] as u32
                 } else {
                     0
                 }
             }
-            VGA_STATUS => {
+            VGA_STATUS | VGA_STATUS_MONO => {
                 // Status register: bit 0 = display enable, bit 3 = vertical retrace
                 // Toggle bit 0 for display enable status
                 self.status_reg ^= 0x01;
@@ -376,10 +454,10 @@ impl BxVgaC {
     pub(crate) fn write_port(&mut self, port: u16, value: u32, _io_len: u8) {
         let value = value as u8;
         match port {
-            VGA_CRTC_INDEX => {
+            VGA_CRTC_INDEX | VGA_CRTC_INDEX_MONO => {
                 self.crtc_index = value & 0x1F; // Only 5 bits
             }
-            VGA_CRTC_DATA => {
+            VGA_CRTC_DATA | VGA_CRTC_DATA_MONO => {
                 if self.crtc_index < 25 {
                     self.crtc_regs[self.crtc_index as usize] = value;
                     
@@ -439,9 +517,14 @@ impl BxVgaC {
 
     /// Read from text mode memory
     pub(crate) fn read_memory(&self, addr: BxPhyAddress, len: usize) -> Vec<u8> {
-        let offset = (addr - VGA_TEXT_MEM_BASE) as usize;
-        if offset + len <= self.text_memory.len() {
-            self.text_memory[offset..offset + len].to_vec()
+        // Debug helper: expose the backing text memory (no window gating).
+        // The actual emulated mapping behavior is enforced by mem_{read,write}_handler.
+        let offset = (addr as usize) & (VGA_TEXT_MEM_SIZE - 1);
+        let end = (offset + len).min(self.text_memory.len());
+        if offset < self.text_memory.len() && end > offset {
+            let mut out = vec![0u8; len];
+            out[..(end - offset)].copy_from_slice(&self.text_memory[offset..end]);
+            out
         } else {
             vec![0; len]
         }
@@ -449,22 +532,40 @@ impl BxVgaC {
 
     /// Write to text mode memory
     pub(crate) fn write_memory(&mut self, addr: BxPhyAddress, data: &[u8]) {
-        let offset = (addr - VGA_TEXT_MEM_BASE) as usize;
-        if offset + data.len() <= self.text_memory.len() {
-            self.text_memory[offset..offset + data.len()].copy_from_slice(data);
+        // Debug helper: write into backing text memory (no window gating).
+        let offset = (addr as usize) & (VGA_TEXT_MEM_SIZE - 1);
+        let end = (offset + data.len()).min(self.text_memory.len());
+        if offset < self.text_memory.len() && end > offset {
+            self.text_memory[offset..end].copy_from_slice(&data[..(end - offset)]);
         }
     }
 
     /// Get text mode screen contents as a string
     pub(crate) fn get_text_screen(&self) -> String {
         let mut result = String::new();
+
+        // Mirror Bochs text rendering: use CRTC start address and line offset.
+        // See `cpp_orig/bochs/iodev/display/vgacore.cc` text_update_common().
+        let start_addr_words =
+            ((self.crtc_regs[12] as u16) << 8) | (self.crtc_regs[13] as u16);
+        let start_address = (start_addr_words as usize) << 1; // words -> bytes
+
+        // Line offset: CRTC reg[19] is in words. Convert to bytes.
+        let mut line_offset = (self.crtc_regs[19] as usize) * 2;
+        if line_offset == 0 {
+            line_offset = BYTES_PER_ROW;
+        }
+
+        // Bochs uses different snapshot sizes based on mapping; our backing store is 0x8000.
+        // Wrap accesses inside this aperture.
+        let mem_mask = VGA_TEXT_MEM_SIZE - 1; // 0x7fff
+
         for row in 0..TEXT_ROWS {
+            let row_base = start_address + row * line_offset;
             for col in 0..TEXT_COLS {
-                let offset = (row * BYTES_PER_ROW) + (col * BYTES_PER_CHAR);
-                if offset + 1 < self.text_memory.len() {
-                    let ch = self.text_memory[offset] as char;
-                    result.push(ch);
-                }
+                let off = (row_base + col * BYTES_PER_CHAR) & mem_mask;
+                let ch = self.text_memory.get(off).copied().unwrap_or(0);
+                result.push(ch as char);
             }
             result.push('\n');
         }
@@ -507,17 +608,26 @@ impl BxVgaC {
     /// Returns update result if an update is needed
     /// Must be no_std compatible (only uses core + alloc)
     pub(crate) fn update(&mut self) -> Option<VgaUpdateResult> {
-        // Check if we're in text mode
-        // graphics_regs[5] bit 4 = 0 means text mode (graphics_alpha = 0)
-        // graphics_regs[6] bits 2-3 indicate memory mapping:
-        //   00 = A0000-AFFFF, 01 = A0000-BFFFF, 10 = B0000-B7FFF, 11 = B8000-BFFFF (text mode)
-        let graphics_alpha = (self.graphics_regs[5] & 0x10) == 0;
+        // Check if we're in text mode (match Bochs `vgacore.cc` semantics).
+        //
+        // In Bochs, `s.graphics_ctrl.graphics_alpha` and `s.graphics_ctrl.memory_mapping`
+        // are derived from the Graphics Controller register index 0x06:
+        //   graphics_alpha = value & 0x01
+        //   memory_mapping = (value >> 2) & 0x03
+        //
+        // Text mode when `graphics_alpha == 0`. Memory mapping selects which aperture
+        // is active (B0000 vs B8000 for mono/color text).
+        let graphics_alpha = (self.graphics_regs[6] & 0x01) != 0;
         let memory_mapping = (self.graphics_regs[6] >> 2) & 0x03;
-        let is_text_mode = graphics_alpha && (memory_mapping == 3);
+        let is_text_mode = (!graphics_alpha) && (memory_mapping == 2 || memory_mapping == 3);
         
         if !is_text_mode {
             return None;
         }
+
+        // Keep a copy of the previous snapshot for the GUI diff.
+        // We'll update `self.text_snapshot` to the new state at the end of this call.
+        let old_snapshot = self.text_snapshot.clone();
 
         // Calculate text mode parameters (matching vgacore.cc:1601-1632)
         let start_addr = ((self.crtc_regs[12] as u16) << 8) | (self.crtc_regs[13] as u16);
@@ -576,13 +686,16 @@ impl BxVgaC {
             cursor_address
         };
         
-        // Copy from VGA memory to text_buffer if needed (matching vgacore.cc:1677-1683)
-        if self.text_buffer_update {
-            // For text mode (memory_mapping = 3), text_snap_size[3] = 0x8000 (32KB)
-            // In original: copies from s.memory[i*4] (char) and s.memory[i*4+1] (attr)
-            // Our text_memory is already 2-byte format, so copy directly
-            let size = 0x8000.min(self.text_buffer.len()).min(self.text_memory.len());
-            self.text_buffer[..size].copy_from_slice(&self.text_memory[..size]);
+        // Copy from VGA memory to text_buffer if needed.
+        // We update the visible page whenever memory changed since the last update,
+        // or when parameters request a full refresh.
+        let need_refresh = self.text_buffer_update || (self.vga_mem_updated > 0);
+        let visible_size = 0x8000.min(self.text_buffer.len());
+
+        // Bochs maps the selected window to the same underlying memory backing store.
+        let visible_size = visible_size.min(self.text_memory.len());
+        if need_refresh {
+            self.text_buffer[..visible_size].copy_from_slice(&self.text_memory[..visible_size]);
             self.text_buffer_update = false;
         }
         
@@ -601,27 +714,24 @@ impl BxVgaC {
             actl_palette,
         };
         
-        // Always return update result if in text mode (original always calls text_update_common)
-        // The GUI will compare old and new to determine what actually changed
+        // Always return update result if in text mode (original always calls text_update_common).
+        // The GUI will compare old/new to determine what actually changed.
         let needs_update = self.vga_mem_updated > 0;
-        
-        // Copy buffer to snapshot if memory was updated (matching vgacore.cc:1687-1691)
+
+        // Prepare new state for the GUI.
+        let new_buffer = self.text_buffer.clone();
+
+        // Update internal snapshot after preparing the return values.
         if self.vga_mem_updated > 0 {
-            let copy_size = (start_address as usize + (line_offset as usize * rows))
-                .min(self.text_buffer.len())
-                .min(self.text_snapshot.len());
-            if copy_size > start_address as usize {
-                let start = start_address as usize;
-                self.text_snapshot[start..copy_size]
-                    .copy_from_slice(&self.text_buffer[start..copy_size]);
-            }
+            self.text_snapshot[..visible_size].copy_from_slice(&self.text_buffer[..visible_size]);
             self.vga_mem_updated = 0;
+            self.text_dirty = false;
         }
         
         Some(VgaUpdateResult {
             needs_update,
-            text_buffer: self.text_buffer.clone(),
-            text_snapshot: self.text_snapshot.clone(),
+            text_buffer: new_buffer,
+            text_snapshot: old_snapshot,
             cursor_address,
             tm_info,
         })
@@ -654,28 +764,36 @@ pub(super) fn vga_mem_read_handler(
     }
     
     let vga = unsafe { &*(param as *const BxVgaC) };
-    
-    // For text mode (memory_mapping = 3), handle 0xB8000-0xBFFFF
-    if addr >= VGA_TEXT_MEM_BASE && addr < VGA_TEXT_MEM_BASE + VGA_TEXT_MEM_SIZE as u64 {
-        let mut current_addr = addr;
-        let mut data_ptr = data as *mut u8;
-        
-        // Process each byte (matching original mem_read_handler loop)
-        for _ in 0..len {
-            let offset = (current_addr - VGA_TEXT_MEM_BASE) as usize;
-            if offset < vga.text_memory.len() {
-                unsafe {
-                    *data_ptr = vga.text_memory[offset];
-                    data_ptr = data_ptr.add(1);
-                }
-            }
-            current_addr += 1;
+
+    // Match Bochs window gating (vgacore.cc:1723..1738):
+    // only the selected window maps to VGA memory; others read as 0xff.
+    let memory_mapping = (vga.graphics_regs[6] >> 2) & 0x03;
+    let mut current_addr = addr;
+    let mut data_ptr = data as *mut u8;
+
+    for _ in 0..len {
+        let mapped = match memory_mapping {
+            2 => current_addr >= 0xB0000 && current_addr <= 0xB7FFF,
+            3 => current_addr >= 0xB8000 && current_addr <= 0xBFFFF,
+            1 => current_addr >= 0xA0000 && current_addr <= 0xAFFFF,
+            _ => current_addr >= 0xA0000 && current_addr <= 0xBFFFF,
+        };
+
+        let val = if mapped {
+            let offset = (current_addr as usize) & (VGA_TEXT_MEM_SIZE - 1);
+            vga.text_memory.get(offset).copied().unwrap_or(0xff)
+        } else {
+            0xff
+        };
+
+        unsafe {
+            *data_ptr = val;
+            data_ptr = data_ptr.add(1);
         }
-        tracing::trace!("VGA mem read: addr={:#x}, len={}", addr, len);
-        return true;
+        current_addr += 1;
     }
-    
-    false
+
+    true
 }
 
 /// VGA memory write handler (called from memory system)
@@ -687,67 +805,61 @@ pub(super) fn vga_mem_write_handler(
     data: *mut c_void,
     param: *const c_void,
 ) -> bool {
-    // Log ALL VGA memory writes to see if handler is being called
-    static mut TOTAL_WRITES: u64 = 0;
-    unsafe {
-        TOTAL_WRITES += 1;
-        if TOTAL_WRITES <= 20 {
-            tracing::info!("VGA mem_write_handler called #{}: addr={:#x}, len={}", TOTAL_WRITES, addr, len);
-        }
-    }
-    
     if param.is_null() || data.is_null() {
-        tracing::warn!("VGA mem_write_handler: null param or data");
         return false;
     }
     
     let vga = unsafe { &mut *(param as *mut BxVgaC) };
-    
-    // Handle all VGA memory range (0xA0000-0xBFFFF)
-    // For text mode, BIOS writes to 0xB8000-0xBFFFF
-    if addr >= 0xA0000 && addr <= 0xBFFFF {
-        // Check if this is text mode memory (0xB8000-0xBFFFF)
-        if addr >= VGA_TEXT_MEM_BASE && addr < VGA_TEXT_MEM_BASE + VGA_TEXT_MEM_SIZE as u64 {
-            let mut current_addr = addr;
-            let mut data_ptr = data as *const u8;
-            
-            // Log first few writes to see if we're getting any
-            static mut WRITE_COUNT: u64 = 0;
-            unsafe {
-                WRITE_COUNT += 1;
-                if WRITE_COUNT <= 10 {
-                    tracing::info!("VGA TEXT MEM WRITE #{}: addr={:#x}, len={}", WRITE_COUNT, addr, len);
-                }
-            }
-            
-            // Process each byte (matching original mem_write_handler loop)
-            for _ in 0..len {
-                let offset = (current_addr - VGA_TEXT_MEM_BASE) as usize;
-                if offset < vga.text_memory.len() {
-                    unsafe {
-                        let old_val = vga.text_memory[offset];
-                        vga.text_memory[offset] = *data_ptr;
-                        if old_val != *data_ptr {
-                            vga.text_dirty = true; // Mark text memory as dirty
-                            // Set vga_mem_updated flag (matching vgacore.cc:1852, 2180)
-                            // For text mode, we set bit 0 (plane 0) or appropriate bit
-                            vga.vga_mem_updated |= 1; // Mark that text memory was updated
-                            if WRITE_COUNT <= 5 {
-                                tracing::info!("  offset={:#x}: {:#02x} -> {:#02x}", offset, old_val, *data_ptr);
-                            }
-                        }
-                        data_ptr = data_ptr.add(1);
+
+    // Match Bochs window gating (vgacore.cc:1826..1842):
+    // only the selected window maps to VGA memory; writes outside the window are ignored.
+    let memory_mapping = (vga.graphics_regs[6] >> 2) & 0x03;
+
+    let mut current_addr = addr;
+    let mut data_ptr = data as *const u8;
+
+    for _ in 0..len {
+        let mapped = match memory_mapping {
+            2 => current_addr >= 0xB0000 && current_addr <= 0xB7FFF,
+            3 => current_addr >= 0xB8000 && current_addr <= 0xBFFFF,
+            1 => current_addr >= 0xA0000 && current_addr <= 0xAFFFF,
+            _ => current_addr >= 0xA0000 && current_addr <= 0xBFFFF,
+        };
+
+        if mapped {
+            let offset = (current_addr as usize) & (VGA_TEXT_MEM_SIZE - 1);
+            if offset < vga.text_memory.len() {
+                unsafe {
+                    let new_val = *data_ptr;
+                    vga.probe_mapped_writes = vga.probe_mapped_writes.wrapping_add(1);
+                    if vga.probe_first_mapped.is_none() {
+                        vga.probe_first_mapped = Some((current_addr, new_val, memory_mapping));
                     }
+                    let old_val = vga.text_memory[offset];
+                    vga.text_memory[offset] = new_val;
+                    if old_val != new_val {
+                        vga.text_dirty = true;
+                        vga.vga_mem_updated |= 1;
+                    }
+                    data_ptr = data_ptr.add(1);
                 }
-                current_addr += 1;
+            } else {
+                unsafe { data_ptr = data_ptr.add(1) };
             }
-            return true;
         } else {
-            // Other VGA memory ranges (graphics mode, etc.) - for now just acknowledge
-            tracing::trace!("VGA mem write (non-text): addr={:#x}, len={}", addr, len);
-            return true;
+            // Ignore write (Bochs returns early for unmapped address)
+            unsafe {
+                let new_val = *data_ptr;
+                vga.probe_unmapped_writes = vga.probe_unmapped_writes.wrapping_add(1);
+                if vga.probe_first_unmapped.is_none() {
+                    vga.probe_first_unmapped = Some((current_addr, new_val, memory_mapping));
+                }
+                data_ptr = data_ptr.add(1);
+            };
         }
+
+        current_addr += 1;
     }
-    
-    false
+
+    true
 }

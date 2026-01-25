@@ -14,6 +14,11 @@ use super::{
     decoder::{BxInstructionGenerated, BxSegregs},
 };
 
+use crate::{
+    config::BxPhyAddress,
+    cpu::{icache::BxPageWriteStampTable, rusty_box::MemoryAccessType},
+};
+
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     // Helper: Get direction flag (DF)
@@ -589,18 +594,69 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     
     pub(super) fn mem_read_byte(&self, addr: u64) -> u8 {
+        // Prefer Bochs-style host access through the memory system when available:
+        // - If direct host access is allowed, get_host_mem_addr returns Some(&mut [u8])
+        // - If access is vetoed (MMIO/VGA/ROM handler), fall back to read_physical_page
+        if let Some(mem_bus) = self.mem_bus {
+            // SAFETY:
+            // - `mem_bus` is only set for the duration of a CPU execution call.
+            // - We only run one CPU today, so we rely on execution-time exclusivity.
+            // - This intentionally uses interior mutability via raw pointer to avoid borrow overhead.
+            let mem = unsafe { &mut *mem_bus.as_ptr() };
+            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            let paddr: BxPhyAddress = addr as BxPhyAddress;
+
+            if let Ok(Some(slice)) = mem.get_host_mem_addr(paddr, MemoryAccessType::Read, &[cpu_ref]) {
+                return slice.get(0).copied().unwrap_or(0);
+            }
+
+            let mut data = [0u8; 1];
+            if mem.read_physical_page(&[cpu_ref], paddr, 1, &mut data).is_ok() {
+                return data[0];
+            }
+
+            return 0;
+        }
+
+        // Fallback: raw pointer access (best-effort) when not running inside cpu_loop.
         if let Some(ptr) = self.mem_ptr {
             let addr = addr as usize;
             if addr < self.mem_len {
-                unsafe {
-                    return *ptr.add(addr);
-                }
+                return unsafe { *ptr.add(addr) };
             }
         }
+
         0
     }
 
     pub(super) fn mem_write_byte(&mut self, addr: u64, value: u8) {
+        // Prefer Bochs-style host access through the memory system when available.
+        if let Some(mem_bus) = self.mem_bus {
+            // SAFETY: see mem_read_byte.
+            let mem = unsafe { &mut *mem_bus.as_ptr() };
+            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            let paddr: BxPhyAddress = addr as BxPhyAddress;
+
+            if let Ok(Some(slice)) =
+                mem.get_host_mem_addr(paddr, MemoryAccessType::Write, &[cpu_ref])
+            {
+                if let Some(b) = slice.get_mut(0) {
+                    *b = value;
+                }
+                return;
+            }
+
+            // Vetoed: go through handler-aware physical write.
+            let mut dummy_mapping: [u32; 0] = [];
+            let mut stamp = BxPageWriteStampTable::new(&mut dummy_mapping);
+            let mut data = [value];
+            let _ = mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 1, &mut data);
+            return;
+        }
+
+        // Fallback: raw pointer access (best-effort) when not running inside cpu_loop.
         if let Some(ptr) = self.mem_ptr {
             let addr = addr as usize;
             if addr < self.mem_len {

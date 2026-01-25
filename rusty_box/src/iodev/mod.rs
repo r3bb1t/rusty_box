@@ -16,7 +16,7 @@
 //! - **Keyboard (8042)**: PS/2 keyboard and mouse controller
 //! - **HardDrive (ATA/IDE)**: Hard disk controller
 
-use alloc::{string::String, vec::Vec};
+use alloc::{collections::VecDeque, string::String, vec::Vec};
 use core::ffi::c_void;
 
 pub mod devices;
@@ -105,6 +105,22 @@ pub struct BxDevicesC {
     /// PCI configuration address register (port 0xCF8)
     #[cfg(feature = "bx_support_pci")]
     pci_conf_addr: u32,
+
+    /// Bochs BIOS/debug output ports (always-on).
+    ///
+    /// Bochs' rombios uses:
+    /// - `INFO_PORT`  0x402
+    /// - `DEBUG_PORT` 0x403
+    /// VGABIOS also supports an info port (0x500).
+    ///
+    /// We funnel these into a single byte stream buffer. Host code (examples/GUI)
+    /// can drain and print it.
+    port_e9_output: VecDeque<u8>,
+
+    /// Bochs BIOS POST codes (port 0x80, sometimes 0x84).
+    ///
+    /// These are not ASCII; they are diagnostic progress codes used by many BIOSes.
+    port80_output: VecDeque<u8>,
 }
 
 impl Default for BxDevicesC {
@@ -131,6 +147,8 @@ impl BxDevicesC {
             pci_enabled: false,
             #[cfg(feature = "bx_support_pci")]
             pci_conf_addr: 0,
+            port_e9_output: VecDeque::new(),
+            port80_output: VecDeque::new(),
         }
     }
 
@@ -236,17 +254,51 @@ impl BxDevicesC {
 
     /// Default read handler - returns 0xFFFFFFFF for unhandled ports
     fn default_read_handler(&self, address: u16, io_len: u8) -> u32 {
-        tracing::trace!("Unhandled I/O read: port={:#06x}, len={}", address, io_len);
+        // Bochs port 0xE9 hack (mirrors `cpp_orig/bochs/iodev/unmapped.cc` behavior when enabled):
+        // - reading returns 0xE9 (casted to io_len)
+        let mut retval: u32 = 0xFFFF_FFFF;
+        if address == 0x00E9 {
+            retval = 0xE9;
+        } else {
+            tracing::trace!("Unhandled I/O read: port={:#06x}, len={}", address, io_len);
+        }
+
         match io_len {
-            1 => 0xFF,
-            2 => 0xFFFF,
-            4 => 0xFFFFFFFF,
-            _ => 0xFFFFFFFF,
+            1 => retval & 0xFF,
+            2 => retval & 0xFFFF,
+            4 => retval,
+            _ => retval,
         }
     }
 
     /// Default write handler - ignores writes to unhandled ports
-    fn default_write_handler(&self, address: u16, value: u32, io_len: u8) {
+    fn default_write_handler(&mut self, address: u16, value: u32, io_len: u8) {
+        // Bochs-style BIOS POST code port (0x80). Some BIOSes also use 0x84.
+        if io_len == 1 && matches!(address, 0x0080 | 0x0084) {
+            const PORT80_CAPACITY: usize = 4096;
+            if self.port80_output.len() >= PORT80_CAPACITY {
+                let _ = self.port80_output.pop_front();
+            }
+            self.port80_output.push_back(value as u8);
+            return;
+        }
+
+        // Bochs-style debug output ports: capture bytes into a host-drainable buffer.
+        //
+        // - 0xE9: Bochs debug console (optional in upstream; always-on here)
+        // - 0x402/0x403: Bochs rombios INFO/DEBUG ports (cpp_orig/bochs/bios/rombios.h)
+        // - 0x500: VGABIOS info port (cpp_orig/bochs/bios/VGABIOS-lgpl-README)
+        if io_len == 1
+            && matches!(address, 0x00E9 | 0x0402 | 0x0403 | 0x0500)
+        {
+            const PORT_E9_CAPACITY: usize = 4096;
+            if self.port_e9_output.len() >= PORT_E9_CAPACITY {
+                let _ = self.port_e9_output.pop_front();
+            }
+            self.port_e9_output.push_back(value as u8);
+            return;
+        }
+
         tracing::trace!(
             "Unhandled I/O write: port={:#06x}, value={:#x}, len={}",
             address,
@@ -263,6 +315,18 @@ impl BxDevicesC {
     /// Set PCI enabled state
     pub fn set_pci_enabled(&mut self, enabled: bool) {
         self.pci_enabled = enabled;
+    }
+
+    /// Drain and return bytes written to port 0xE9.
+    ///
+    /// This is alloc-only; callers can print/interpret the bytes however they want.
+    pub fn take_port_e9_output(&mut self) -> Vec<u8> {
+        self.port_e9_output.drain(..).collect()
+    }
+
+    /// Drain and return BIOS POST codes written to port 0x80/0x84.
+    pub fn take_port80_output(&mut self) -> Vec<u8> {
+        self.port80_output.drain(..).collect()
     }
 }
 
@@ -283,7 +347,7 @@ mod tests {
     #[test]
     fn test_multiple_instances() {
         let mut dev1 = BxDevicesC::new();
-        let mut dev2 = BxDevicesC::new();
+        let dev2 = BxDevicesC::new();
 
         // Custom handler that returns port number
         fn custom_read(_: *mut c_void, port: u16, _: u8) -> u32 {

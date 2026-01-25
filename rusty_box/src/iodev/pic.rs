@@ -496,6 +496,11 @@ impl BxPicC {
             self.slave.irr &= !(1 << self.slave.irq);
             self.slave.isr |= 1 << self.slave.irq;
             self.slave.int_pin = false;
+            // Re-arm edge-triggered IRQ line so future edges can be raised.
+            // (Bochs tracks IRQ_in separately; we use irq_in to suppress duplicates.)
+            if (self.slave.edge_level & (1 << self.slave.irq)) == 0 {
+                self.slave.irq_in[self.slave.irq as usize] = 0;
+            }
             
             if self.slave.auto_eoi != 0 {
                 self.slave.isr &= !(1 << self.slave.irq);
@@ -510,6 +515,9 @@ impl BxPicC {
         self.master.irr &= !(1 << self.master.irq);
         self.master.isr |= 1 << self.master.irq;
         self.master.int_pin = false;
+        if (self.master.edge_level & (1 << self.master.irq)) == 0 {
+            self.master.irq_in[self.master.irq as usize] = 0;
+        }
         
         if self.master.auto_eoi != 0 {
             self.master.isr &= !(1 << self.master.irq);

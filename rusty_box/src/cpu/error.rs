@@ -1,5 +1,7 @@
 use thiserror::Error;
 
+use alloc::string::String;
+
 use crate::{config::BxPhyAddress, cpu::cpu::Exception};
 
 pub type Result<T> = core::result::Result<T, CpuError>;
@@ -42,4 +44,10 @@ pub enum CpuError {
 
     #[error("Unimplemented opcode: {opcode}")]
     UnimplementedOpcode { opcode: String },
+
+    /// Bochs-style control flow: exceptions/interrupt delivery longjmp back to the
+    /// main decode loop. We model that by unwinding the current instruction/trace
+    /// and restarting decode.
+    #[error("cpu loop restart (bochs longjmp)")]
+    CpuLoopRestart,
 }

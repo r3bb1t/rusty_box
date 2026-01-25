@@ -121,6 +121,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let ivt_offset = (vector as u64) * 4;
         let new_ip = self.mem_read_word(ivt_offset);
         let new_cs = self.mem_read_word(ivt_offset + 2);
+
+        // Boot diagnostic: if we ever vector to 0000:0000 in real mode, BIOS likely
+        // hit an unexpected exception/IRQ before IVT was initialized (or IVT reads are broken).
+        // Emit a one-time marker to port 0xE9 so the host can see it in headless mode.
+        if new_ip == 0 && new_cs == 0 && (self.boot_debug_flags & 0x02) == 0 {
+            self.boot_debug_flags |= 0x02;
+            self.debug_puts(b"[IVT->0000:0000]\n");
+        }
         
         // Load CS:IP from IVT
         let cs_index = BxSegregs::Cs as usize;

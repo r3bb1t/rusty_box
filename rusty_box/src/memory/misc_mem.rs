@@ -406,22 +406,6 @@ impl BxMemC<'_> {
     ) -> Result<()> {
         let a20_addr = self.a20_addr(addr);
 
-        // Debug: Log first 10 writes to VGA memory range
-        static mut VGA_WRITE_COUNT: u32 = 0;
-        if a20_addr >= 0xA0000 && a20_addr <= 0xBFFFF {
-            unsafe {
-                if VGA_WRITE_COUNT < 10 {
-                    tracing::info!(
-                        "write_physical_page: VGA range write #{}: addr={:#x}, len={}",
-                        VGA_WRITE_COUNT,
-                        a20_addr,
-                        len
-                    );
-                    VGA_WRITE_COUNT += 1;
-                }
-            }
-        }
-
         // Check memory handlers first (before vetoing VGA memory)
         let page_idx = (a20_addr >> 20) as usize;
         if page_idx < self.memory_handlers.len() {

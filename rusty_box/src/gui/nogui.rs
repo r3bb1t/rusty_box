@@ -3,6 +3,8 @@
 //! This is a stub implementation that provides no visual output.
 //! Useful for headless operation or testing.
 
+use alloc::{boxed::Box, string::String, vec::Vec};
+
 use super::gui_trait::{BxGui, DisplayMode, VgaTextModeInfo};
 
 /// No GUI implementation - all methods are no-ops

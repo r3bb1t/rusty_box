@@ -16,6 +16,8 @@ use crate::{
     Result,
 };
 
+use alloc::{boxed::Box, string::String, vec::Vec};
+
 /// Emulator configuration
 #[derive(Debug, Clone)]
 pub struct EmulatorConfig {
@@ -437,6 +439,17 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.cpu.rip()
     }
 
+    /// Return the current VGA text-mode screen as a string.
+    ///
+    /// This is useful for headless debugging (no terminal repaint).
+    pub fn vga_text_dump(&self) -> String {
+        self.device_manager.vga.get_text_screen()
+    }
+
+    pub fn vga_probe_dump(&self) -> String {
+        self.device_manager.vga.probe_summary()
+    }
+
     /// Check if the emulator has been initialized
     pub fn is_initialized(&self) -> bool {
         self.initialized
@@ -530,6 +543,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     /// - Executes CPU instructions in batches
     ///
     /// Returns the number of instructions executed, or an error.
+    #[cfg(feature = "std")]
     pub fn run_interactive(&mut self, max_instructions: u64) -> Result<u64> 
     where
         'a: 'static, // Required for unsafe transmute
@@ -543,6 +557,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         let mut instructions_executed = 0u64;
         let mut last_gui_update = std::time::Instant::now();
         const GUI_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100); // Update every 100ms
+        let mut last_port92_value: u8 = self.system_control.value;
         
         const INSTRUCTION_BATCH_SIZE: u64 = 10000; // Larger batch size for better performance
         
@@ -561,25 +576,82 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             for scancode in scancodes_to_send {
                 self.device_manager.keyboard.send_scancode(scancode);
             }
-            
-            // 2. Check for keyboard interrupts and raise via PIC
-            if self.device_manager.keyboard.check_irq1() {
-                self.device_manager.pic.raise_irq(1);
-            }
-            
-            // 3. Execute CPU instructions in batches
+
+            // 2. Execute CPU instructions in batches
             let batch_size = (max_instructions - instructions_executed).min(INSTRUCTION_BATCH_SIZE);
             // Use unsafe to work around lifetime issues - the memory borrow is safe because
             // we control the lifetime and the CPU doesn't outlive the memory
             let result = unsafe {
                 let mem_extended: &'a mut BxMemC<'a> = 
                     core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory);
-                self.cpu.cpu_loop_n(mem_extended, &[], batch_size)
+                let io_ptr = core::ptr::NonNull::from(&mut self.devices);
+                self.cpu
+                    .cpu_loop_n_with_io(mem_extended, &[], batch_size, io_ptr)
             };
             
             let should_update_gui = match result {
                 Ok(executed) => {
                     instructions_executed += executed;
+
+                    // Port 92h (System Control) may have changed A20 during execution.
+                    // Sync PC system + memory masks if any writes occurred.
+                    if self.system_control.value != last_port92_value {
+                        last_port92_value = self.system_control.value;
+                        self.sync_a20_state();
+                    }
+
+                    // Drain Bochs-style port 0xE9 output (if any) and print it.
+                    // This is useful for very early debug output before VGA is initialized.
+                    let e9 = self.devices.take_port_e9_output();
+                    if !e9.is_empty() {
+                        use std::io::Write;
+                        let mut out = std::io::stdout();
+                        let _ = out.write_all(&e9);
+                        let _ = out.flush();
+                    }
+
+                    // Advance virtual time (Bochs-like ticking).
+                    // Required so PIT can generate IRQ0 and BIOS can progress past HLT waits.
+                    if self.config.ips != 0 {
+                        let usec = if executed != 0 {
+                            // executed instructions -> microseconds at configured IPS
+                            (executed.saturating_mul(1_000_000)) / (self.config.ips as u64)
+                        } else {
+                            // If the CPU executed 0 instructions (e.g., HLT/wait), still advance
+                            // a small time quantum to allow timer interrupts to occur.
+                            10
+                        };
+                        if usec != 0 {
+                            self.tick_devices(usec);
+                        }
+                    }
+
+                    // Deliver pending PIC interrupts to the CPU (Bochs-like).
+                    //
+                    // Bochs checks/delivers external interrupts at instruction boundaries,
+                    // not only when HLT. Restricting injection to “waiting” can stall BIOS
+                    // code that relies on periodic timer IRQs while still executing.
+                    if self.has_interrupt() && self.cpu.get_b_if() != 0 {
+                        let vector = self.iac();
+
+                        // Temporarily wire the memory bus so the interrupt path can
+                        // read IVT/IDT and push stack frames correctly.
+                        let inject_result = unsafe {
+                            let mem_extended: &'a mut BxMemC<'a> =
+                                core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(
+                                    &mut self.memory,
+                                );
+                            self.cpu.set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_extended));
+                            let r = self.cpu.inject_external_interrupt(vector);
+                            self.cpu.clear_mem_bus();
+                            r
+                        };
+
+                        if let Err(e) = inject_result {
+                            tracing::error!("Interrupt injection error: {:?}", e);
+                            return Err(crate::Error::Cpu(e));
+                        }
+                    }
                     
                     // Progress logging removed per user request
                     
@@ -603,13 +675,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     return Err(crate::Error::Cpu(e));
                 }
             };
-            
-            // Check for interrupts from devices (after CPU execution completes)
-            if self.has_interrupt() {
-                let _vector = self.iac();
-                // CPU will handle interrupt in its async event processing
-                // For now, we rely on CPU checking interrupts itself
-            }
             
             // Update GUI after CPU execution (outside the match to avoid borrow conflicts)
             // Update more frequently if text is dirty OR periodically (like Bochs timer)

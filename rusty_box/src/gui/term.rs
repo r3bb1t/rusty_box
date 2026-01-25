@@ -14,10 +14,14 @@ pub struct TermGui {
     display_mode: DisplayMode,
     screen_width: u32,
     screen_height: u32,
+    /// Raw VGA text buffer (full aperture, e.g. 0x8000 bytes)
+    vga_text: Vec<u8>,
+    /// Derived visible window (screen_width * screen_height * 2)
     text_buffer: Vec<u8>,
     cursor_x: u32,
     cursor_y: u32,
     pending_scancodes: alloc::collections::VecDeque<u8>,
+    last_tm_info: Option<VgaTextModeInfo>,
     #[cfg(unix)]
     original_termios: Option<libc::termios>,
     #[cfg(windows)]
@@ -30,10 +34,12 @@ impl TermGui {
             display_mode: DisplayMode::Sim,
             screen_width: 80,
             screen_height: 25,
-            text_buffer: vec![0; 80 * 25 * 2], // 80x25, 2 bytes per char (char + attr)
+            vga_text: Vec::new(),
+            text_buffer: vec![0; 80 * 25 * 2], // visible window: 80x25, 2 bytes per char
             cursor_x: 0,
             cursor_y: 0,
             pending_scancodes: alloc::collections::VecDeque::new(),
+            last_tm_info: None,
             #[cfg(unix)]
             original_termios: None,
             #[cfg(windows)]
@@ -138,47 +144,22 @@ impl BxGui for TermGui {
         new_text: &[u8],
         cursor_x: u32,
         cursor_y: u32,
-        _tm_info: &VgaTextModeInfo,
+        tm_info: &VgaTextModeInfo,
     ) {
-        // Update text buffer (matching term.cc:551-608)
-        if new_text.len() == self.text_buffer.len() {
-            self.text_buffer.copy_from_slice(new_text);
-        }
+        // Store raw VGA text + tm_info (Bochs passes a full text buffer and uses line_offset).
+        self.vga_text.clear();
+        self.vga_text.extend_from_slice(new_text);
+        self.last_tm_info = Some(tm_info.clone());
 
         // Update cursor position
         self.cursor_x = cursor_x;
         self.cursor_y = cursor_y;
 
-        // Byte-by-byte comparison (matching term.cc:573-574)
-        // Only update characters that changed
-        let mut needs_render = false;
-        let rows = self.screen_height as usize;
-        let cols = self.screen_width as usize;
-        
-        for row in 0..rows {
-            for col in 0..cols {
-                let idx = (row * cols + col) * 2;
-                if idx + 1 < old_text.len() && idx + 1 < new_text.len() {
-                    // Compare both character and attribute bytes (matching term.cc:573-574)
-                    if old_text[idx] != new_text[idx] || old_text[idx + 1] != new_text[idx + 1] {
-                        needs_render = true;
-                        break;
-                    }
-                }
-            }
-            if needs_render {
-                break;
-            }
-        }
-        
-        // Also check if cursor position changed
-        if self.cursor_x != cursor_x || self.cursor_y != cursor_y {
-            needs_render = true;
-        }
-        
-        if needs_render {
-            self.render_text_mode();
-        }
+        // For correctness (Bochs uses line_offset and start_address), render using tm_info.
+        // This is fast enough for terminal output and avoids false negatives when buffers
+        // are larger than 80x25*2.
+        let _ = old_text; // old_text diffing is handled by VGA snapshotting; we render directly.
+        self.render_text_mode();
     }
 
     fn graphics_tile_update(&mut self, _tile: &[u8], _x: u32, _y: u32) {
@@ -364,7 +345,52 @@ impl TermGui {
         // Move cursor to top-left to start drawing (similar to curses move(0,0))
         print!("\x1b[H");
 
-        // Render each character (matching term.cc:567-592)
+        // Render each character (matching term.cc:567-592), but compute per-line
+        // offsets using tm_info->line_offset like Bochs when available.
+        let cols = self.screen_width as usize;
+        let rows = self.screen_height as usize;
+        let needed = cols * rows * 2;
+        if self.text_buffer.len() != needed {
+            self.text_buffer.resize(needed, 0);
+        }
+
+        if let Some(ref tm_info) = self.last_tm_info {
+            // Build visible window buffer from raw VGA text using Bochs logic:
+            // new_text starts at start_address and advances by line_offset each row.
+            if self.vga_text.len() >= 2 {
+                let base = tm_info.start_address as usize;
+                let stride = tm_info.line_offset as usize;
+                for row in 0..rows {
+                    let src_row = base + row * stride;
+                    for col in 0..cols {
+                        let dst = (row * cols + col) * 2;
+                        let src = src_row + col * 2;
+                        if src + 1 < self.vga_text.len() {
+                            self.text_buffer[dst] = self.vga_text[src];
+                            self.text_buffer[dst + 1] = self.vga_text[src + 1];
+                        } else {
+                            self.text_buffer[dst] = 0;
+                            self.text_buffer[dst + 1] = 0x07;
+                        }
+                    }
+                }
+            } else {
+                self.text_buffer.fill(0);
+            }
+        } else {
+            // No tm_info yet; best-effort sequential render.
+            if self.vga_text.len() >= self.text_buffer.len() {
+                let n = self.text_buffer.len();
+                self.text_buffer.copy_from_slice(&self.vga_text[..n]);
+            } else if !self.vga_text.is_empty() {
+                self.text_buffer.fill(0);
+                self.text_buffer[..self.vga_text.len()].copy_from_slice(&self.vga_text);
+            } else {
+                self.text_buffer.fill(0);
+            }
+        }
+
+        // Render each character from `self.text_buffer`
         for row in 0..self.screen_height {
             for col in 0..self.screen_width {
                 let idx = ((row * self.screen_width + col) * 2) as usize;
