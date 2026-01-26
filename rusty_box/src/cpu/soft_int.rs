@@ -41,6 +41,71 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
+    // BOUND - Check Array Index Against Bounds
+    // Based on Bochs soft_int.cc BOUND_GwMa and BOUND_GdMa
+    // =========================================================================
+
+    /// BOUND r16, m16&16 - Check 16-bit register against bounds in memory
+    ///
+    /// Compares the signed value in r16 against the signed lower and upper bounds
+    /// at memory location. If the index is out of bounds, generates #BR exception.
+    pub fn bound_gw_ma(&mut self, instr: &BxInstructionGenerated) {
+        // Get the 16-bit register value (signed)
+        let op1_16 = self.get_gpr16(instr.dst() as usize) as i16;
+
+        // Calculate effective address
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr32(instr);
+
+        // Read lower and upper bounds from memory (2 words)
+        let bound_min = self.read_virtual_word(seg, eaddr) as i16;
+        let bound_max = self.read_virtual_word(seg, eaddr.wrapping_add(2)) as i16;
+
+        tracing::trace!(
+            "BOUND r16: value={}, min={}, max={}",
+            op1_16, bound_min, bound_max
+        );
+
+        // Check if value is outside bounds
+        if op1_16 < bound_min || op1_16 > bound_max {
+            tracing::debug!("BOUND: fails bounds test (value {} not in [{}, {}])",
+                op1_16, bound_min, bound_max);
+            // Generate #BR exception (Bound Range Exceeded, vector 5)
+            self.interrupt_real_mode(5);
+        }
+    }
+
+    /// BOUND r32, m32&32 - Check 32-bit register against bounds in memory
+    ///
+    /// Compares the signed value in r32 against the signed lower and upper bounds
+    /// at memory location. If the index is out of bounds, generates #BR exception.
+    pub fn bound_gd_ma(&mut self, instr: &BxInstructionGenerated) {
+        // Get the 32-bit register value (signed)
+        let op1_32 = self.get_gpr32(instr.dst() as usize) as i32;
+
+        // Calculate effective address
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr32(instr);
+
+        // Read lower and upper bounds from memory (2 dwords)
+        let bound_min = self.read_virtual_dword(seg, eaddr) as i32;
+        let bound_max = self.read_virtual_dword(seg, eaddr.wrapping_add(4)) as i32;
+
+        tracing::trace!(
+            "BOUND r32: value={}, min={}, max={}",
+            op1_32, bound_min, bound_max
+        );
+
+        // Check if value is outside bounds
+        if op1_32 < bound_min || op1_32 > bound_max {
+            tracing::debug!("BOUND: fails bounds test (value {} not in [{}, {}])",
+                op1_32, bound_min, bound_max);
+            // Generate #BR exception (Bound Range Exceeded, vector 5)
+            self.interrupt_real_mode(5);
+        }
+    }
+
+    // =========================================================================
     // IRET - Interrupt Return
     // =========================================================================
     

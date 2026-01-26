@@ -3169,6 +3169,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
 
             // =========================================================================
+            // BOUND - Check Array Index Against Bounds
+            // =========================================================================
+            Opcode::BoundGwMa => {
+                self.bound_gw_ma(instr);
+                Ok(())
+            }
+            Opcode::BoundGdMa => {
+                self.bound_gd_ma(instr);
+                Ok(())
+            }
+
+            // =========================================================================
             // 64-bit control transfer instructions
             // =========================================================================
             Opcode::CallJq => self.call_jq(instr),

@@ -25,7 +25,8 @@
       "Bash(then tail -50 /tmp/rusty_box_output.txt)",
       "Bash(else echo \"Output file not found yet\")",
       "Bash(fi)",
-      "Bash(set RUST_BACKTRACE=full)"
+      "Bash(set RUST_BACKTRACE=full)",
+      "Bash(findstr:*)"
     ]
   }
 }

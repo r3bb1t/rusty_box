@@ -221,13 +221,12 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
         }
     }
 
-    if b1 == 0x62 {
-        // EVEX prefix - check if it's actually EVEX
-        if pos + 2 < max_len && (bytes[pos] & 0x0C) == 0 {
-            return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
-            // EVEX not fully supported in const
-        }
-    }
+    // Note: 0x62 is EVEX prefix in 64-bit mode, but BOUND instruction in 32/16-bit mode.
+    // In 32-bit mode, we need to check if it's actually EVEX or BOUND:
+    // - EVEX requires P0 bit 3 = 0 AND P1 bit 2 (EVEX.U) = 1
+    // - If these conditions aren't met, it's BOUND instruction
+    // For now, we don't support EVEX in 32-bit mode, so 0x62 is always BOUND.
+    // The BOUND instruction requires ModRM, which will be handled below.
 
     if b1 == 0x8F {
         // XOP prefix - check if it's actually XOP
@@ -630,6 +629,7 @@ const fn get_opcode_table_32(b1: u8) -> &'static [u64] {
         0x58..=0x5F => &BxOpcodeTable58x5F,
         0x60 => &BxOpcodeTable60,
         0x61 => &BxOpcodeTable61,
+        0x62 => &BxOpcodeTable62,  // BOUND instruction
         0x63 => &BxOpcodeTable63_32,
         0x68 => &BxOpcodeTable68,
         0x69 => &BxOpcodeTable69,
@@ -900,7 +900,7 @@ const fn opcode_needs_modrm_32(b1: u32, map: u8) -> bool {
             0x06 | 0x07 | 0x0E | 0x16 | 0x17 | 0x1E | 0x1F |
             0x27 | 0x2F | 0x37 | 0x3F |
             0x40..=0x5F |
-            0x60..=0x62 | 0x68 | 0x6A |
+            0x60..=0x61 | 0x68 | 0x6A |  // 0x62 (BOUND) needs ModRM, not in this list
             0x70..=0x7F |
             0x90..=0x9F |
             0xA0..=0xAF |

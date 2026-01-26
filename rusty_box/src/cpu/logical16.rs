@@ -18,13 +18,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let sf = (result & 0x8000) != 0;
         let zf = result == 0;
         let pf = (result as u8).count_ones() % 2 == 0;
-        
+
         const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 6) | (1 << 7) | (1 << 11);
         self.eflags &= !MASK;
-        
-        if pf { self.eflags |= 1 << 2; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
+
+        if pf {
+            self.eflags |= 1 << 2;
+        }
+        if zf {
+            self.eflags |= 1 << 6;
+        }
+        if sf {
+            self.eflags |= 1 << 7;
+        }
     }
 
     /// Update flags for 16-bit subtraction
@@ -35,16 +41,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let of = ((op1 ^ op2) & (op1 ^ result) & 0x8000) != 0;
         let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
         let pf = (result as u8).count_ones() % 2 == 0;
-        
+
         const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
         self.eflags &= !MASK;
-        
-        if cf { self.eflags |= 1 << 0; }
-        if pf { self.eflags |= 1 << 2; }
-        if af { self.eflags |= 1 << 4; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
-        if of { self.eflags |= 1 << 11; }
+
+        if cf {
+            self.eflags |= 1 << 0;
+        }
+        if pf {
+            self.eflags |= 1 << 2;
+        }
+        if af {
+            self.eflags |= 1 << 4;
+        }
+        if zf {
+            self.eflags |= 1 << 6;
+        }
+        if sf {
+            self.eflags |= 1 << 7;
+        }
+        if of {
+            self.eflags |= 1 << 11;
+        }
     }
 
     /// Update flags for INC (preserves CF)
@@ -54,16 +72,26 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let of = result == 0x8000; // Only overflow when 0x7FFF -> 0x8000
         let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
         let pf = (result as u8).count_ones() % 2 == 0;
-        
+
         // CF is not affected by INC
         const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
         self.eflags &= !MASK;
-        
-        if pf { self.eflags |= 1 << 2; }
-        if af { self.eflags |= 1 << 4; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
-        if of { self.eflags |= 1 << 11; }
+
+        if pf {
+            self.eflags |= 1 << 2;
+        }
+        if af {
+            self.eflags |= 1 << 4;
+        }
+        if zf {
+            self.eflags |= 1 << 6;
+        }
+        if sf {
+            self.eflags |= 1 << 7;
+        }
+        if of {
+            self.eflags |= 1 << 11;
+        }
     }
 
     /// Update flags for DEC (preserves CF)
@@ -73,15 +101,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let of = result == 0x7FFF && op1 == 0x8000;
         let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
         let pf = (result as u8).count_ones() % 2 == 0;
-        
+
         const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
         self.eflags &= !MASK;
-        
-        if pf { self.eflags |= 1 << 2; }
-        if af { self.eflags |= 1 << 4; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
-        if of { self.eflags |= 1 << 11; }
+
+        if pf {
+            self.eflags |= 1 << 2;
+        }
+        if af {
+            self.eflags |= 1 << 4;
+        }
+        if zf {
+            self.eflags |= 1 << 6;
+        }
+        if sf {
+            self.eflags |= 1 << 7;
+        }
+        if of {
+            self.eflags |= 1 << 11;
+        }
     }
 
     // =========================================================================
@@ -109,7 +147,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.get_gpr16(src);
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_16(op1, op2, result);
-        tracing::trace!("CMP r16, r16: {:#06x} - {:#06x} = {:#06x}", op1, op2, result);
+        tracing::trace!(
+            "CMP r16, r16: {:#06x} - {:#06x} = {:#06x}",
+            op1,
+            op2,
+            result
+        );
     }
 
     /// CMP AX, imm16
@@ -143,7 +186,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.get_gpr16(src);
         let result = op1 & op2;
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!("TEST r16, r16: {:#06x} & {:#06x} = {:#06x}", op1, op2, result);
+        tracing::trace!(
+            "TEST r16, r16: {:#06x} & {:#06x} = {:#06x}",
+            op1,
+            op2,
+            result
+        );
     }
 
     /// TEST AX, imm16
@@ -273,30 +321,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
-    // INC/DEC instructions
-    // =========================================================================
-
-    /// INC r16
-    pub fn inc_ew_r(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.dst() as usize;
-        let op1 = self.get_gpr16(dst);
-        let result = op1.wrapping_add(1);
-        self.set_gpr16(dst, result);
-        self.set_flags_oszap_inc_16(result, op1);
-        tracing::trace!("INC r16: {:#06x} + 1 = {:#06x}", op1, result);
-    }
-
-    /// DEC r16
-    pub fn dec_ew_r(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.dst() as usize;
-        let op1 = self.get_gpr16(dst);
-        let result = op1.wrapping_sub(1);
-        self.set_gpr16(dst, result);
-        self.set_flags_oszap_dec_16(result, op1);
-        tracing::trace!("DEC r16: {:#06x} - 1 = {:#06x}", op1, result);
-    }
-
-    // =========================================================================
     // Helper functions for memory operations
     // =========================================================================
 
@@ -338,7 +362,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_word(laddr, result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!("XOR16 mem: [{:?}:{:#x}] = {:#06x} ^ {:#06x} = {:#06x}", seg, eaddr, op1_16, op2_16, result);
+        tracing::trace!(
+            "XOR16 mem: [{:?}:{:#x}] = {:#06x} ^ {:#06x} = {:#06x}",
+            seg,
+            eaddr,
+            op1_16,
+            op2_16,
+            result
+        );
     }
 
     /// XOR_GwEwM: XOR r16, r/m16 (memory form)
@@ -353,7 +384,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr16(dst_reg, result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!("XOR16 mem: reg{} = {:#06x} ^ {:#06x} = {:#06x}", dst_reg, op1_16, op2_16, result);
+        tracing::trace!(
+            "XOR16 mem: reg{} = {:#06x} ^ {:#06x} = {:#06x}",
+            dst_reg,
+            op1_16,
+            op2_16,
+            result
+        );
     }
 
     /// XOR_EwIwM: XOR r/m16, imm16 (memory form)
@@ -367,7 +404,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_word(laddr, result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!("XOR16 mem: [{:?}:{:#x}] = {:#06x} ^ {:#06x} = {:#06x}", seg, eaddr, op1_16, op2_16, result);
+        tracing::trace!(
+            "XOR16 mem: [{:?}:{:#x}] = {:#06x} ^ {:#06x} = {:#06x}",
+            seg,
+            eaddr,
+            op1_16,
+            op2_16,
+            result
+        );
     }
 
     /// OR_EwGwM: OR r/m16, r16 (memory form)
@@ -382,7 +426,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_word(laddr, result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!("OR16 mem: [{:?}:{:#x}] = {:#06x} | {:#06x} = {:#06x}", seg, eaddr, op1_16, op2_16, result);
+        tracing::trace!(
+            "OR16 mem: [{:?}:{:#x}] = {:#06x} | {:#06x} = {:#06x}",
+            seg,
+            eaddr,
+            op1_16,
+            op2_16,
+            result
+        );
     }
 
     /// OR_GwEwM: OR r16, r/m16 (memory form)
@@ -397,7 +448,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr16(dst_reg, result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!("OR16 mem: reg{} = {:#06x} | {:#06x} = {:#06x}", dst_reg, op1_16, op2_16, result);
+        tracing::trace!(
+            "OR16 mem: reg{} = {:#06x} | {:#06x} = {:#06x}",
+            dst_reg,
+            op1_16,
+            op2_16,
+            result
+        );
     }
 
     /// OR_EwIwM: OR r/m16, imm16 (memory form)
@@ -411,7 +468,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_word(laddr, result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!("OR16 mem: [{:?}:{:#x}] = {:#06x} | {:#06x} = {:#06x}", seg, eaddr, op1_16, op2_16, result);
+        tracing::trace!(
+            "OR16 mem: [{:?}:{:#x}] = {:#06x} | {:#06x} = {:#06x}",
+            seg,
+            eaddr,
+            op1_16,
+            op2_16,
+            result
+        );
     }
 
     /// AND_EwGwM: AND r/m16, r16 (memory form)
@@ -426,7 +490,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_word(laddr, result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!("AND16 mem: [{:?}:{:#x}] = {:#06x} & {:#06x} = {:#06x}", seg, eaddr, op1_16, op2_16, result);
+        tracing::trace!(
+            "AND16 mem: [{:?}:{:#x}] = {:#06x} & {:#06x} = {:#06x}",
+            seg,
+            eaddr,
+            op1_16,
+            op2_16,
+            result
+        );
     }
 
     /// AND_GwEwM: AND r16, r/m16 (memory form)
@@ -441,7 +512,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr16(dst_reg, result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!("AND16 mem: reg{} = {:#06x} & {:#06x} = {:#06x}", dst_reg, op1_16, op2_16, result);
+        tracing::trace!(
+            "AND16 mem: reg{} = {:#06x} & {:#06x} = {:#06x}",
+            dst_reg,
+            op1_16,
+            op2_16,
+            result
+        );
     }
 
     /// AND_EwIwM: AND r/m16, imm16 (memory form)
@@ -455,7 +532,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_word(laddr, result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!("AND16 mem: [{:?}:{:#x}] = {:#06x} & {:#06x} = {:#06x}", seg, eaddr, op1_16, op2_16, result);
+        tracing::trace!(
+            "AND16 mem: [{:?}:{:#x}] = {:#06x} & {:#06x} = {:#06x}",
+            seg,
+            eaddr,
+            op1_16,
+            op2_16,
+            result
+        );
     }
 
     /// NOT_EwM: NOT r/m16 (memory form)
@@ -467,7 +551,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = !op1_16;
 
         self.write_rmw_linear_word(laddr, result);
-        tracing::trace!("NOT16 mem: [{:?}:{:#x}] = !{:#06x} = {:#06x}", seg, eaddr, op1_16, result);
+        tracing::trace!(
+            "NOT16 mem: [{:?}:{:#x}] = !{:#06x} = {:#06x}",
+            seg,
+            eaddr,
+            op1_16,
+            result
+        );
     }
 
     /// TEST_EwGwM: TEST r/m16, r16 (memory form)
@@ -481,7 +571,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op1_16 & op2_16;
 
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!("TEST16 mem: [{:?}:{:#x}] & reg{} = {:#06x} & {:#06x} = {:#06x}", seg, eaddr, src_reg, op1_16, op2_16, result);
+        tracing::trace!(
+            "TEST16 mem: [{:?}:{:#x}] & reg{} = {:#06x} & {:#06x} = {:#06x}",
+            seg,
+            eaddr,
+            src_reg,
+            op1_16,
+            op2_16,
+            result
+        );
     }
 
     /// TEST_EwIwM: TEST r/m16, imm16 (memory form)
@@ -494,6 +592,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op1_16 & op2_16;
 
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!("TEST16 mem: [{:?}:{:#x}] & {:#06x} = {:#06x} & {:#06x} = {:#06x}", seg, eaddr, op2_16, op1_16, op2_16, result);
+        tracing::trace!(
+            "TEST16 mem: [{:?}:{:#x}] & {:#06x} = {:#06x} & {:#06x} = {:#06x}",
+            seg,
+            eaddr,
+            op2_16,
+            op1_16,
+            op2_16,
+            result
+        );
     }
 }

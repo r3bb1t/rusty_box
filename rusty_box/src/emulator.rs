@@ -9,7 +9,10 @@
 use crate::{
     cpu::{builder::BxCpuBuilder, BxCpuC, BxCpuIdTrait, ResetReason},
     gui::BxGui,
-    iodev::{devices::{SystemControlPort, DeviceManager}, BxDevicesC},
+    iodev::{
+        devices::{DeviceManager, SystemControlPort},
+        BxDevicesC,
+    },
     memory::{BxMemC, BxMemoryStubC},
     params::BxParams,
     pc_system::BxPcSystemC,
@@ -38,10 +41,10 @@ pub struct EmulatorConfig {
 impl Default for EmulatorConfig {
     fn default() -> Self {
         Self {
-            guest_memory_size: 32 * 1024 * 1024,  // 32 MB
-            host_memory_size: 32 * 1024 * 1024,   // 32 MB
-            memory_block_size: 128 * 1024,         // 128 KB blocks
-            ips: 4_000_000,                        // 4 MIPS
+            guest_memory_size: 32 * 1024 * 1024, // 32 MB
+            host_memory_size: 32 * 1024 * 1024,  // 32 MB
+            memory_block_size: 128 * 1024,       // 128 KB blocks
+            ips: 4_000_000,                      // 4 MIPS
             pci_enabled: false,
             cpu_params: BxParams::default(),
         }
@@ -91,6 +94,9 @@ pub struct Emulator<'a, I: BxCpuIdTrait> {
     initialized: bool,
     /// GUI instance (optional, can be None for headless operation)
     gui: Option<Box<dyn BxGui>>,
+    /// BIOS output file for port 0x402/0x403/0xE9 messages (std feature only)
+    #[cfg(feature = "std")]
+    bios_output_file: Option<std::fs::File>,
 }
 
 impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
@@ -113,7 +119,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
         // Create devices (I/O port handlers)
         let devices = BxDevicesC::new();
-        
+
         // Create device manager (actual hardware)
         let device_manager = DeviceManager::new();
 
@@ -131,6 +137,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             config,
             initialized: false,
             gui: None,
+            #[cfg(feature = "std")]
+            bios_output_file: None,
         })
     }
 
@@ -172,7 +180,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             self.config.host_memory_size,
             self.config.memory_block_size,
         )?;
-        
+
         // Sync A20 mask from PC system (after memory init, matching original)
         self.memory.set_a20_mask(self.pc_system.a20_mask());
         tracing::debug!("Memory initialized and A20 mask synced");
@@ -183,11 +191,11 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Step 6: Initialize CPU (line 1337)
         self.cpu.initialize(self.config.cpu_params.clone())?;
         tracing::debug!("CPU initialized");
-        
+
         // Step 7: CPU sanity checks (line 1338) - separate call to match original
         self.cpu.sanity_checks()?;
         tracing::debug!("CPU sanity checks passed");
-        
+
         // Step 8: Register CPU state (line 1339)
         self.cpu.register_state();
         tracing::debug!("CPU state registered");
@@ -199,9 +207,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Pass pointer to system_control for Port 92h handling
         let port92_ptr = &mut self.system_control as *mut SystemControlPort;
         self.devices.init(&mut self.memory, Some(port92_ptr))?;
-        
+
         // Initialize device manager (actual hardware + I/O handler registration)
-        self.device_manager.init(&mut self.devices, &mut self.memory)?;
+        self.device_manager
+            .init(&mut self.devices, &mut self.memory)?;
         tracing::debug!("Devices initialized");
 
         // Note: SIM->opt_plugin_ctrl("*", 0) at line 1355 unloads unused optional plugins
@@ -209,11 +218,11 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
         // Step 10: PC system register state (line 1356)
         self.pc_system.register_state();
-        
+
         // Step 11: Device register state (line 1357)
         self.devices.register_state()?;
         tracing::debug!("State registered");
-        
+
         // Note: bx_set_log_actions_by_device(1) at line 1359 sets up logging per device
         // This is only called if not restoring state, and is optional logging setup
 
@@ -245,10 +254,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         if let Some(ref mut gui) = self.gui {
             gui.specific_init(argc, argv, 32); // BX_HEADER_BAR_Y = 32
             gui.update_drive_status_buttons();
-            
+
             // Connect keyboard callback if GUI supports it
             self.connect_keyboard_callback();
-            
+
             tracing::info!("GUI initialized (signal handlers will be set up after reset)");
         } else {
             tracing::warn!("No GUI set, running headless");
@@ -283,20 +292,24 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 // Calculate cursor position from cursor address
                 let cursor_x = if update_result.cursor_address < 0x7fff {
                     // Cursor address is byte offset, convert to column
-                    let offset_from_start = update_result.cursor_address.saturating_sub(update_result.tm_info.start_address);
+                    let offset_from_start = update_result
+                        .cursor_address
+                        .saturating_sub(update_result.tm_info.start_address);
                     (offset_from_start % update_result.tm_info.line_offset) / 2
                 } else {
                     0xffff
                 };
-                
+
                 let cursor_y = if update_result.cursor_address < 0x7fff {
                     // Cursor address is byte offset, convert to row
-                    let offset_from_start = update_result.cursor_address.saturating_sub(update_result.tm_info.start_address);
+                    let offset_from_start = update_result
+                        .cursor_address
+                        .saturating_sub(update_result.tm_info.start_address);
                     (offset_from_start / update_result.tm_info.line_offset) as u32
                 } else {
                     0xffff
                 };
-                
+
                 // Call GUI text_update with old snapshot and new buffer (matching vgacore.cc:1685)
                 gui.text_update(
                     &update_result.text_snapshot,
@@ -306,7 +319,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     &update_result.tm_info,
                 );
             }
-            
+
             // Flush display (matching vgacore.cc:2429)
             gui.flush();
         }
@@ -330,7 +343,11 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     /// * `address` - Load address (must be in 0xC0000-0xFFFFF range)
     pub fn load_optional_rom(&mut self, rom_data: &[u8], address: u64) -> Result<()> {
         self.memory.load_ROM(rom_data, address, 2)?;
-        tracing::info!("Loaded optional ROM ({} bytes) at {:#x}", rom_data.len(), address);
+        tracing::info!(
+            "Loaded optional ROM ({} bytes) at {:#x}",
+            rom_data.len(),
+            address
+        );
         Ok(())
     }
 
@@ -343,7 +360,11 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     /// * `address` - Load address in physical memory
     pub fn load_ram(&mut self, ram_data: &[u8], address: u64) -> Result<()> {
         self.memory.load_RAM(ram_data, address)?;
-        tracing::info!("Loaded RAM image ({} bytes) at {:#x}", ram_data.len(), address);
+        tracing::info!(
+            "Loaded RAM image ({} bytes) at {:#x}",
+            ram_data.len(),
+            address
+        );
         Ok(())
     }
 
@@ -375,17 +396,17 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             // 3. bx_reset_plugins(type) (line 406) - reset all device plugins
             // 4. release_keys() (line 407) - release keyboard keys
             // 5. paste.stop = 1 (line 409) - stop paste buffer
-            
+
             // Step 1: Clear PCI confAddr (done in devices.reset())
             self.devices.reset(reset_type)?;
-            
+
             // Step 2: Disable SMRAM (matches original line 405: mem->disable_smram())
             self.memory.disable_smram();
-            
+
             // Step 3: Reset all device plugins (matches original line 406: bx_reset_plugins())
             // This resets all devices: PIC, PIT, CMOS, DMA, Keyboard, HardDrive, VGA
             self.device_manager.reset(reset_type)?;
-            
+
             // Note: release_keys() at line 407 and paste.stop at line 409 not yet implemented
         }
 
@@ -427,7 +448,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     }
 
     /// Prepare for execution (start timers and log)
-    /// 
+    ///
     /// Call this before entering the CPU loop.
     pub fn prepare_run(&mut self) {
         tracing::info!("Starting CPU execution at RIP={:#x}", self.cpu.rip());
@@ -487,6 +508,14 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.system_control.read()
     }
 
+    /// Set BIOS output file for port 0x402/0x403/0xE9 messages (requires std feature)
+    ///
+    /// When set, BIOS debug output will be written to this file instead of stdout.
+    #[cfg(feature = "std")]
+    pub fn set_bios_output_file(&mut self, file: std::fs::File) {
+        self.bios_output_file = Some(file);
+    }
+
     /// Attach a hard disk image (requires std feature)
     ///
     /// # Arguments
@@ -506,7 +535,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         heads: u8,
         spt: u8,
     ) -> std::io::Result<()> {
-        self.device_manager.harddrv.attach_disk(channel, drive, path, cylinders, heads, spt)
+        self.device_manager
+            .harddrv
+            .attach_disk(channel, drive, path, cylinders, heads, spt)
     }
 
     /// Check if an interrupt is pending
@@ -526,12 +557,16 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
     /// Configure CMOS memory size
     pub fn configure_memory_in_cmos(&mut self, base_kb: u16, extended_kb: u16) {
-        self.device_manager.cmos.set_memory_size(base_kb, extended_kb);
+        self.device_manager
+            .cmos
+            .set_memory_size(base_kb, extended_kb);
     }
 
     /// Configure CMOS hard drive
     pub fn configure_disk_in_cmos(&mut self, drive_num: u8, drive_type: u8) {
-        self.device_manager.cmos.set_hard_drive(drive_num, drive_type);
+        self.device_manager
+            .cmos
+            .set_hard_drive(drive_num, drive_type);
     }
 
     /// Run emulator interactively with GUI event handling
@@ -544,34 +579,38 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     ///
     /// Returns the number of instructions executed, or an error.
     #[cfg(feature = "std")]
-    pub fn run_interactive(&mut self, max_instructions: u64) -> Result<u64> 
+    pub fn run_interactive(&mut self, max_instructions: u64) -> Result<u64>
     where
         'a: 'static, // Required for unsafe transmute
     {
         self.prepare_run();
-        
+
         // Force initial GUI update to show initial state
         self.device_manager.vga.force_initial_update();
         self.update_gui(); // Force initial update
-        
+
         let mut instructions_executed = 0u64;
         let mut last_gui_update = std::time::Instant::now();
         const GUI_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100); // Update every 100ms
         let mut last_port92_value: u8 = self.system_control.value;
-        
+
         const INSTRUCTION_BATCH_SIZE: u64 = 10000; // Larger batch size for better performance
-        
+
         tracing::info!("Starting interactive execution loop");
-        tracing::warn!("[Emulator] Starting execution... (instructions will be processed in batches)");
-        
+        tracing::warn!(
+            "[Emulator] Starting execution... (instructions will be processed in batches)"
+        );
+
+        use std::collections::HashSet;
         while instructions_executed < max_instructions {
             // 1. Handle GUI events (keyboard input) - do this first to avoid borrow conflicts
+
             let mut scancodes_to_send = Vec::new();
             if let Some(ref mut gui) = self.gui {
                 gui.handle_events();
                 scancodes_to_send = gui.get_pending_scancodes();
             }
-            
+
             // Send scancodes to keyboard device
             for scancode in scancodes_to_send {
                 self.device_manager.keyboard.send_scancode(scancode);
@@ -582,13 +621,13 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             // Use unsafe to work around lifetime issues - the memory borrow is safe because
             // we control the lifetime and the CPU doesn't outlive the memory
             let result = unsafe {
-                let mem_extended: &'a mut BxMemC<'a> = 
+                let mem_extended: &'a mut BxMemC<'a> =
                     core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory);
                 let io_ptr = core::ptr::NonNull::from(&mut self.devices);
                 self.cpu
                     .cpu_loop_n_with_io(mem_extended, &[], batch_size, io_ptr)
             };
-            
+
             let should_update_gui = match result {
                 Ok(executed) => {
                     instructions_executed += executed;
@@ -605,9 +644,23 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     let e9 = self.devices.take_port_e9_output();
                     if !e9.is_empty() {
                         use std::io::Write;
-                        let mut out = std::io::stdout();
-                        let _ = out.write_all(&e9);
-                        let _ = out.flush();
+                        // Write to BIOS output file if configured, otherwise to stdout
+                        #[cfg(feature = "std")]
+                        if let Some(ref mut bios_file) = self.bios_output_file {
+                            let _ = bios_file.write_all(&e9);
+                            let _ = bios_file.flush();
+                        } else {
+                            let mut out = std::io::stdout();
+                            let _ = out.write_all(&e9);
+                            let _ = out.flush();
+                        }
+
+                        #[cfg(not(feature = "std"))]
+                        {
+                            let mut out = std::io::stdout();
+                            let _ = out.write_all(&e9);
+                            let _ = out.flush();
+                        }
                     }
 
                     // Advance virtual time (Bochs-like ticking).
@@ -641,7 +694,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(
                                     &mut self.memory,
                                 );
-                            self.cpu.set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_extended));
+                            self.cpu
+                                .set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_extended));
                             let r = self.cpu.inject_external_interrupt(vector);
                             self.cpu.clear_mem_bus();
                             r
@@ -652,21 +706,21 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             return Err(crate::Error::Cpu(e));
                         }
                     }
-                    
+
                     // Progress logging removed per user request
-                    
+
                     // 4. Check if GUI should be updated
                     // Update when text is dirty, or periodically to catch any missed updates
                     let text_dirty = self.device_manager.vga.is_text_dirty();
                     let time_since_update = last_gui_update.elapsed();
                     // Update if text changed OR periodically (like Bochs timer-based updates)
                     let should_update = text_dirty || time_since_update >= GUI_UPDATE_INTERVAL;
-                    
+
                     // Update timestamp if we're going to update
                     if should_update {
                         last_gui_update = std::time::Instant::now();
                     }
-                    
+
                     should_update
                 }
                 Err(e) => {
@@ -675,18 +729,22 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     return Err(crate::Error::Cpu(e));
                 }
             };
-            
+
             // Update GUI after CPU execution (outside the match to avoid borrow conflicts)
             // Update more frequently if text is dirty OR periodically (like Bochs timer)
             if should_update_gui {
                 self.update_gui();
             }
-            
+
             // 5. Check if we should exit (e.g., shutdown requested)
             // TODO: Add shutdown flag check
         }
-        
-        tracing::warn!("Interactive execution completed: {} instructions", instructions_executed);
+
+        tracing::warn!(
+            "Interactive execution completed: {} instructions",
+            instructions_executed
+        );
+
         Ok(instructions_executed)
     }
 }
@@ -712,7 +770,7 @@ mod tests {
         let config = EmulatorConfig::default();
         let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
         assert!(!emu.is_initialized());
-        
+
         let result = emu.initialize();
         assert!(result.is_ok());
         assert!(emu.is_initialized());
@@ -721,12 +779,12 @@ mod tests {
     #[test]
     fn test_multiple_instances_independent() {
         let config = EmulatorConfig::default();
-        
+
         let mut emu1 = Emulator::<Corei7SkylakeX>::new(config.clone()).unwrap();
         let emu2 = Emulator::<Corei7SkylakeX>::new(config).unwrap();
 
         emu1.initialize().unwrap();
-        
+
         // emu2 should still be uninitialized
         assert!(emu1.is_initialized());
         assert!(!emu2.is_initialized());
@@ -737,4 +795,3 @@ mod tests {
         assert_eq!(emu2.ticks(), 0);
     }
 }
-

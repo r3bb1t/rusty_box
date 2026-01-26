@@ -1,2 +1,5 @@
 [env]
 RUST_BACKTRACE="1"
+# BIOS_OUTPUT_FILE="bios_out.txt"
+# BIOS_QUIET_MODE="1"
+# RUSTY_BOX_HEADLESS="1"

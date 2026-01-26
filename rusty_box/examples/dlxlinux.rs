@@ -51,12 +51,21 @@ fn main() {
 }
 
 fn run_dlxlinux() -> Result<()> {
-    // Initialize tracing (INFO level for cleaner output)
+    // Check for BIOS output configuration
+    let bios_output_file = std::env::var("BIOS_OUTPUT_FILE").ok();
+    let bios_quiet_mode = std::env::var("BIOS_QUIET_MODE").is_ok();
+
+    // Initialize tracing (reduce verbosity in BIOS quiet mode)
+    let log_level = if bios_quiet_mode {
+        tracing::Level::WARN // Suppress INFO logs when viewing BIOS output
+    } else {
+        tracing::Level::INFO
+    };
+
     tracing_subscriber::fmt()
         .without_time()
         .with_target(false)
-        // .with_max_level(Level::TRACE)
-        .with_max_level(tracing::Level::INFO)
+        .with_max_level(log_level)
         .init();
 
     println!("╔════════════════════════════════════════════════════════════╗");
@@ -337,6 +346,37 @@ fn run_dlxlinux() -> Result<()> {
     // =========================================================================
     tracing::info!("Starting BIOS execution...");
     println!();
+
+    // Open BIOS output file if specified
+    let bios_file_handle = if let Some(ref path) = bios_output_file {
+        match std::fs::File::create(path) {
+            Ok(file) => {
+                println!("BIOS output will be written to: {}", path);
+                Some(file)
+            }
+            Err(e) => {
+                eprintln!("Failed to create BIOS output file '{}': {}", path, e);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // Set BIOS output file in emulator
+    if let Some(file) = bios_file_handle {
+        emu.set_bios_output_file(file);
+    }
+
+    // Show BIOS output section header
+    if bios_quiet_mode || bios_output_file.is_some() {
+        println!();
+        println!("╔════════════════════════════════════════════════════════════╗");
+        println!("║           BIOS OUTPUT (ports 0x402/0x403/0xE9)             ║");
+        println!("╚════════════════════════════════════════════════════════════╝");
+        println!();
+    }
+
     println!("╔════════════════════════════════════════════════════════════╗");
     println!("║  Starting emulation - keyboard input enabled               ║");
     println!("║  Type 'root' and press Enter to login                     ║");
@@ -346,9 +386,9 @@ fn run_dlxlinux() -> Result<()> {
     let start_time = Instant::now();
 
     // Run with instruction limit to allow debugging
-    // const MAX_INSTRUCTIONS: u64 = 1_000_000_000; // 1M instructions - reasonable limit for testing
-    // BIOS + VGABIOS can take hundreds of millions of instructions to reach visible VGA output.
-    const MAX_INSTRUCTIONS: u64 = 5_000_000;
+    const MAX_INSTRUCTIONS: u64 = 10_000_000; // 10M instructions - reasonable limit for testing
+                                              // BIOS + VGABIOS can take hundreds of millions of instructions to reach visible VGA output.
+                                              // const MAX_INSTRUCTIONS: u64 = 5_000_000;
 
     // Use interactive loop that handles GUI events
     let result = emu.run_interactive(MAX_INSTRUCTIONS);

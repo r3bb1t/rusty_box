@@ -26,7 +26,7 @@ macro_rules! back_to_enum {
 back_to_enum! {
     #[allow(unused)]
     #[repr(u16)]
-    #[derive(Debug, Clone, Copy, PartialEq)]
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
      pub enum Opcode {
 
         IaError,
@@ -4385,7 +4385,7 @@ impl Default for Opcode {
 
 impl Opcode {
     /// Convert from u16 in const context
-    /// 
+    ///
     /// This uses transmute which is unsafe but valid because:
     /// 1. Opcode is repr(u16)
     /// 2. All u16 values map to valid Opcode variants (IaError for unknown)

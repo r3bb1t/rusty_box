@@ -466,6 +466,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let mut current_p_addr = p_addr;
         let mut current_page_offset = page_offset;
         let mut current_fetch_ptr = fetch_ptr;
+        // Preserve original remaining_in_page for boundary_fetch
+        let original_remaining_in_page = remaining_in_page;
         let mut remaining = remaining_in_page as u32;
         let mut tlen = 0usize;
 
@@ -594,13 +596,38 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         }
                     }
                 }
-                Err(_) => {
+                Err(decode_err) => {
                     // Fetching instruction on segment/page boundary (matching C++ line 138)
                     // If this is not the first instruction (n > 0), drop the boundary instruction and stop tracing
                     if n > 0 {
                         // The trace is already valid, it has several instructions inside,
                         // in this case just drop the boundary instruction and stop tracing (matching C++ line 140-144)
                         break;
+                    }
+
+                    // Calculate remaining bytes for THIS instruction position
+                    // For n=0, this equals original_remaining_in_page
+                    // For later instructions (if we ever get here), it would be decremented
+                    let current_remaining = remaining as usize;
+
+                    // If there are >= 15 bytes remaining, the instruction SHOULD have fit
+                    // in the page. Decode failure with >= 15 bytes means it's NOT a boundary
+                    // issue - it's an invalid/unsupported instruction.
+                    if current_remaining >= 15 {
+                        tracing::error!(
+                            "Decode failed with {} bytes remaining (not a boundary issue)\n\
+                             RIP={:#x}, CS.base={:#x}, EIP={:#x}\n\
+                             Decode error: {:?}\n\
+                             First 16 bytes: {:02x?}",
+                            current_remaining,
+                            self.rip(),
+                            unsafe { self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize].cache.u.segment.base },
+                            self.eip(),
+                            decode_err,
+                            &current_fetch_ptr[..core::cmp::min(16, current_fetch_ptr.len())]
+                        );
+                        // Return the decode error instead of calling boundary_fetch
+                        return Err(crate::cpu::CpuError::Decoder(decode_err));
                     }
 
                     // First instruction is boundary fetch, leave the trace cache entry
@@ -612,9 +639,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         entry.mpool_start_idx = current_mpindex; // Store where this trace starts
                     }
 
+                    // Debug logging before boundary_fetch
+                    tracing::debug!(
+                        "boundary_fetch: n={}, current_remaining={}, p_addr={:#x}",
+                        n,
+                        current_remaining,
+                        current_p_addr
+                    );
+
                     // Call boundary_fetch (matching C++ line 150)
+                    // Pass the current remaining bytes to page boundary
                     let boundary_instr =
-                        self.boundary_fetch(current_fetch_ptr, remaining as usize, mem, cpus)?;
+                        self.boundary_fetch(current_fetch_ptr, current_remaining, mem, cpus)?;
 
                     // Store instruction in mpool (check bounds first)
                     if current_mpindex >= BX_ICACHE_MEM_POOL {
@@ -704,8 +740,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // This condition indicates too many instruction prefixes -> #GP(0)
         if remaining_in_page >= 15 {
             tracing::error!(
-                "boundaryFetch #GP(0): too many instruction prefixes (remainingInPage={})",
-                remaining_in_page
+                "boundaryFetch #GP(0): too many instruction prefixes\n\
+                 remainingInPage={}, RIP={:#x}, CS.base={:#x}, EIP={:#x}\n\
+                 This indicates the instruction has too many prefixes (>15 bytes)\n\
+                 or boundary_fetch was called with an incorrect remaining_in_page value.",
+                remaining_in_page,
+                self.rip(),
+                unsafe { self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize].cache.u.segment.base },
+                self.eip()
             );
             self.exception(crate::cpu::cpu::Exception::Gp, 0)?;
         }
