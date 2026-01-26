@@ -2156,6 +2156,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 use crate::cpu::arith;
                 arith::ADD_EwIbR(self, instr)
             }
+            Opcode::AddEwIw => {
+                use crate::cpu::arith;
+                arith::ADD_EwIw(self, instr)
+            }
             // Arithmetic (SUB) instructions
             Opcode::SubGdEd => {
                 arith::SUB_GdEd_R(self, instr);
@@ -3125,6 +3129,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::RepStoswYwAx => {
                 self.rep_stosw16(instr);
+                Ok(())
+            }
+            Opcode::RepStosdYdEax => {
+                // REP STOSD - Store EAX at ES:DI/EDI with repeat
+                // Based on BX_CPU_C::REP_STOSD_YdEAX in string.cc
+                if instr.as32_l() != 0 {
+                    // 32-bit address mode
+                    self.rep_stosd32(instr);
+                } else {
+                    // 16-bit address mode
+                    self.rep_stosd16(instr);
+                }
                 Ok(())
             }
             Opcode::RepLodsbAlxb => {

@@ -699,17 +699,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     ) -> Result<BxInstructionGenerated> {
         let mut fetch_buffer = [0u8; 32];
 
+        // Based on BX_CPU_C::boundaryFetch in icache.cc
+        // If remainingInPage >= 15, instruction should fit in current page
+        // This condition indicates too many instruction prefixes -> #GP(0)
         if remaining_in_page >= 15 {
-            // Panic on unimplemented instruction during decoding
-            panic!(
-                "\n\
-                ╔════════════════════════════════════════════════════════════╗\n\
-                ║      UNIMPLEMENTED INSTRUCTION DETECTED (DECODING)         ║\n\
-                ╠════════════════════════════════════════════════════════════╣\n\
-                ║  This instruction could not be decoded.                    ║\n\
-                ║  Please check the decoder implementation.                  ║\n\
-                ╚════════════════════════════════════════════════════════════╝\n"
+            tracing::error!(
+                "boundaryFetch #GP(0): too many instruction prefixes (remainingInPage={})",
+                remaining_in_page
             );
+            self.exception(crate::cpu::cpu::Exception::Gp, 0)?;
         }
 
         // Read all leftover bytes in current page up to boundary

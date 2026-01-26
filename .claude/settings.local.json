@@ -20,7 +20,12 @@
       "Bash(ls:*)",
       "Bash(find:*)",
       "Bash(RUST_LOG=info RUSTY_BOX_HEADLESS=1 timeout 90 cargo run:*)",
-      "Bash(grep:*)"
+      "Bash(grep:*)",
+      "Bash(if [ -f /tmp/rusty_box_output.txt ])",
+      "Bash(then tail -50 /tmp/rusty_box_output.txt)",
+      "Bash(else echo \"Output file not found yet\")",
+      "Bash(fi)",
+      "Bash(set RUST_BACKTRACE=full)"
     ]
   }
 }

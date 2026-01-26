@@ -100,9 +100,82 @@ pub fn ADD_EwIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
     let op1 = cpu.get_gpr16(dst);
     let op2 = (instr.ib() as i8 as i16 as u16); // Sign-extend imm8 to u16
     let result = op1.wrapping_add(op2);
-    
+
     cpu.set_gpr16(dst, result);
     cpu.update_flags_add16(op1, op2, result);
-    
+
     Ok(())
+}
+
+/// ADD_EwIwR: ADD r16, imm16 (register form)
+/// Opcode: 0x81/0
+/// Based on BX_CPU_C::ADD_EwIwR in arith16.cc
+pub fn ADD_EwIwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    let dst = instr.dst() as usize;
+    let op1_16 = cpu.get_gpr16(dst);
+    let op2_16 = instr.iw();  // Read 16-bit immediate
+    let sum_16 = op1_16.wrapping_add(op2_16);
+
+    cpu.set_gpr16(dst, sum_16);
+    cpu.update_flags_add16(op1_16, op2_16, sum_16);
+
+    Ok(())
+}
+
+/// ADD_EwIwM: ADD m16, imm16 (memory form)
+/// Opcode: 0x81/0
+/// Based on BX_CPU_C::ADD_EwIwM in arith16.cc
+pub fn ADD_EwIwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    // Resolve address manually (same logic as ADC_GwEwM)
+    let base_reg = instr.sib_base() as usize;
+    let mut eaddr = if base_reg < 16 {
+        cpu.get_gpr32(base_reg)
+    } else {
+        0
+    };
+
+    eaddr = eaddr.wrapping_add(instr.displ32s() as u32);
+
+    let index_reg = instr.sib_index();
+    if index_reg != 4 {  // 4 means no index
+        let index_val = if index_reg < 16 {
+            cpu.get_gpr32(index_reg as usize)
+        } else {
+            0
+        };
+        let scale = instr.sib_scale();
+        eaddr = eaddr.wrapping_add(index_val << scale);
+    }
+
+    // Apply address size mask
+    let eaddr = if instr.as32_l() == 0 {
+        eaddr & 0xFFFF  // 16-bit address size
+    } else {
+        eaddr           // 32-bit address size
+    };
+
+    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let op1_16 = cpu.read_virtual_word_arith16(seg, eaddr);
+    let op2_16 = instr.iw();  // Read 16-bit immediate
+    let sum_16 = op1_16.wrapping_add(op2_16);
+
+    // Write result back to memory
+    let laddr = cpu.get_laddr32_seg_arith16(seg, eaddr);
+    cpu.mem_write_word(laddr as u64, sum_16);
+
+    cpu.update_flags_add16(op1_16, op2_16, sum_16);
+
+    Ok(())
+}
+
+/// ADD_EwIw: ADD r/m16, imm16
+/// Dispatches to memory or register form based on ModRM
+pub fn ADD_EwIw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        // Register form
+        ADD_EwIwR(cpu, instr)
+    } else {
+        // Memory form
+        ADD_EwIwM(cpu, instr)
+    }
 }

@@ -527,6 +527,31 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
+    /// REP STOSD - Repeat store string dword CX times (16-bit address mode)
+    /// Based on BX_CPU_C::REP_STOSD_YdEAX in string.cc
+    pub fn rep_stosd16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.stosd16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+        }
+    }
+
+    /// REP STOSD - Repeat store string dword ECX times (32-bit address mode)
+    /// Based on BX_CPU_C::REP_STOSD_YdEAX in string.cc
+    pub fn rep_stosd32(&mut self, instr: &BxInstructionGenerated) {
+        let mut ecx = self.ecx();
+        while ecx != 0 {
+            self.stosd32(instr);
+            ecx = ecx.wrapping_sub(1);
+            self.set_ecx(ecx);
+        }
+
+        // Clear upper 32 bits of RCX (zero extension)
+        self.set_rcx(self.ecx() as u64);
+    }
+
     /// REP LODSB - Repeat load string byte CX times
     pub fn rep_lodsb16(&mut self, instr: &BxInstructionGenerated) {
         let mut cx = self.cx();
