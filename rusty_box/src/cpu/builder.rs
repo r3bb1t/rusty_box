@@ -78,6 +78,8 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             in_smm_vmx: Default::default(),
             in_smm_vmx_guest: Default::default(),
             vmcsptr: Default::default(),
+            #[cfg(feature = "bx_support_memtype")]
+            vmcs_memtype: Default::default(),
             vmxonptr: Default::default(),
             vmcs: Default::default(),
             vmx_cap: Default::default(),
@@ -86,6 +88,8 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             svm_gif: Default::default(),
             vmcbptr: Default::default(),
             vmcbhostptr: Default::default(),
+            #[cfg(feature = "bx_support_memtype")]
+            vmcb_memtype: Default::default(),
             vmcb: Default::default(),
             in_event: Default::default(),
             nmi_unblocking_iret: Default::default(),
@@ -109,9 +113,15 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             esp_page_window_size: Default::default(),
             esp_host_ptr: Default::default(),
             p_addr_stack_page: Default::default(),
+            #[cfg(feature = "bx_support_memtype")]
+            espPageMemtype: Default::default(),
+            #[cfg(not(feature = "bx_support_smp"))]
             esp_page_fine_granularity_mapping: Default::default(),
+            #[cfg(feature = "bx_support_alignment_check")]
             alignment_check_mask: Default::default(),
             stats: Default::default(),
+            #[cfg(feature = "bx_instrumentation")]
+            far_branch: Default::default(),
             dtlb: Tlb::new(),
             itlb: Tlb::new(),
             pdptrcache: Default::default(),

@@ -220,6 +220,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn mov_rb_ib(&mut self, instr: &BxInstructionGenerated) {
         let dst = instr.meta_data[0] as usize;
         let imm = instr.ib();
+        // Debug: log MOV AL, 0x0F (instruction for CMOS address selection)
+        if self.icount < 20 || (dst == 0 && (imm == 0x0f || imm == 0xc0)) {
+            tracing::info!("MOV r8, imm8 [#{}]: reg{} = {:#04x}, AL before={:#04x}",
+                self.icount, dst, imm, self.al());
+        }
         self.set_gpr8(dst, imm);
         tracing::trace!("MOV: reg{} = {:#04x}", dst, imm);
     }
@@ -234,9 +239,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r/m16, r16 (register to register)
+    /// For opcode 89: Ew (r/m) is destination, Gw (nnn) is source
     pub fn mov_ew_gw_r(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let src = instr.meta_data[1] as usize;
+        // For MOV Ew, Gw: r/m (meta_data[1]) is destination, nnn (meta_data[0]) is source
+        let src = instr.meta_data[0] as usize;  // nnn = Gw = source
+        let dst = instr.meta_data[1] as usize;  // rm = Ew = destination
         let val = self.get_gpr16(src);
         self.set_gpr16(dst, val);
         tracing::trace!("MOV16: reg{} = reg{} ({:#06x})", dst, src, val);
@@ -252,9 +259,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r/m8, r8 (register to register)
+    /// For opcode 88: Eb (r/m) is destination, Gb (nnn) is source
     pub fn mov_eb_gb_r(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let src = instr.meta_data[1] as usize;
+        // For MOV Eb, Gb: r/m (meta_data[1]) is destination, nnn (meta_data[0]) is source
+        let src = instr.meta_data[0] as usize;  // nnn = Gb = source
+        let dst = instr.meta_data[1] as usize;  // rm = Eb = destination
         let val = self.get_gpr8(src);
         self.set_gpr8(dst, val);
         tracing::trace!("MOV8: reg{} = reg{} ({:#04x})", dst, src, val);

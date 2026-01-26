@@ -185,6 +185,12 @@ impl BxCmosC {
                         self.irq8_pending = false;
                         val
                     }
+                    REG_SHUTDOWN => {
+                        // Debug: log shutdown status read
+                        let val = self.ram[addr];
+                        tracing::info!("CMOS: Read shutdown status [{:#04x}] = {:#04x}", addr, val);
+                        val
+                    }
                     _ => {
                         if addr < CMOS_SIZE {
                             self.ram[addr]

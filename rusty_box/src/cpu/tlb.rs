@@ -32,7 +32,7 @@ pub(super) struct TLBEntry {
     pub(super) memtype: MemType, // (note from bochs)  // keep it Bit32u for alignment
 }
 
-#[derive(Default)]
+#[derive(Default, Copy, Clone)]
 enum MemType {
     #[default]
     UC = 0,

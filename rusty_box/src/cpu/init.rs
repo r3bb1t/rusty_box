@@ -5,6 +5,7 @@ use super::Result;
 use crate::{
     cpu::{
         apic::BX_LAPIC_BASE_ADDR,
+        avx::amx::AMX,
         cpu::{CpuActivityState, CpuMode},
         decoder::{features::X86Feature, BxSegregs, BX_GENERAL_REGISTERS, BX_NIL_REGISTER},
         descriptor::{
@@ -65,7 +66,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         #[cfg(feature = "bx_support_amx")]
         {
             self.amx = if self.bx_cpuid_support_isa_extension(X86Feature::IsaAMX) {
-                Some(Amx::default())
+                Some(AMX::default())
             } else {
                 None
             };
@@ -342,17 +343,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.esp_page_window_size = 0;
         self.esp_host_ptr = None;
 
-        self.esp_page_fine_granularity_mapping = 0;
+        #[cfg(not(feature = "bx_support_smp"))]
+        {
+            self.esp_page_fine_granularity_mapping = 0;
+        }
 
         #[cfg(feature = "bx_debugger")]
         {
             self.stop_reason = 0;
             self.magic_break = 0;
-            self.trace = 0;
-            self.trace_reg = 0;
-            self.trace_mem = 0;
-            self.mode_break = 0;
-            self.vmexit_break = 0;
+            self.trace = false;
+            self.trace_reg = false;
+            self.trace_mem = false;
+            self.mode_break = false;
+            self.vmexit_break = false;
         }
 
         // Reset the Floating Point Unit

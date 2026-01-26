@@ -73,7 +73,7 @@ pub struct BxGenRegDword {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union BxGenRegWordInner {
-    pub rx: y16,
+    pub rx: u16,
     pub byte: BxWordByte,
 }
 
@@ -498,7 +498,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) vmcsptr: u64,
 
     #[cfg(feature = "bx_support_memtype")]
-    vmcs_memtype: BxMemType,
+    pub(super) vmcs_memtype: BxMemType,
 
     pub(super) vmxonptr: u64,
 
@@ -512,7 +512,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) vmcbptr: BxPhyAddress,
     pub(super) vmcbhostptr: BxHostpageaddr,
     #[cfg(feature = "bx_support_memtype")]
-    vmcb_memtype: BxMemType,
+    pub(super) vmcb_memtype: BxMemType,
 
     pub(super) vmcb: Option<VmcbCache>,
 
@@ -564,7 +564,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) p_addr_stack_page: BxPhyAddress,
 
     #[cfg(feature = "bx_support_memtype")]
-    espPageMemtype: BxMemType,
+    pub(super) espPageMemtype: BxMemType,
 
     #[cfg(not(feature = "bx_support_smp"))]
     pub(super) esp_page_fine_granularity_mapping: u32,
@@ -600,7 +600,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) guard_found: BxGuardFound,
 
     #[cfg(feature = "bx_instrumentation")]
-    far_branch: FarBranch,
+    pub(super) far_branch: FarBranch,
 
     pub(super) dtlb: Tlb<BX_DTLB_SIZE>,
     pub(super) itlb: Tlb<BX_ITLB_SIZE>,
@@ -716,8 +716,8 @@ pub(super) struct PdptrCache {
     pub entry: [u64; 4],
 }
 
-#[derive(Debug)]
-struct FarBranch {
+#[derive(Debug, Default)]
+pub(super) struct FarBranch {
     pub rev_cs: u16,
     pub rev_rip: BxAddress,
 }
@@ -1222,7 +1222,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     Err(e) => break 'cpu_loop Err(e),
                 }
             };
-            tracing::debug!("get_icache_entry: RIP={:#x}, entry.tlen={}", current_rip, entry.tlen);
+            tracing::debug!(
+                "get_icache_entry: RIP={:#x}, entry.tlen={}",
+                current_rip,
+                entry.tlen
+            );
 
             // Get trace start index from entry (stored when trace was created)
             // In C++, entry->i is a pointer directly into mpool, so we can do pointer arithmetic
@@ -1240,7 +1244,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 let calculated = self.i_cache.mpindex.saturating_sub(entry.tlen);
                 if calculated != 0 {
                     trace_start_idx = calculated;
-                    tracing::warn!("mpool_start_idx was 0 for cached entry, calculated fallback: {}", trace_start_idx);
+                    tracing::warn!(
+                        "mpool_start_idx was 0 for cached entry, calculated fallback: {}",
+                        trace_start_idx
+                    );
                 }
             }
 
@@ -1254,9 +1261,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // Reset to start of mpool as fallback
                 trace_start_idx = 0;
             }
-            
-            tracing::info!("Initial trace: RIP={:#x}, trace_start_idx={}, tlen={}, mpool_start_idx={}", 
-                current_rip, trace_start_idx, entry.tlen, entry.mpool_start_idx);
+
+            tracing::trace!(
+                "Initial trace: RIP={:#x}, trace_start_idx={}, tlen={}, mpool_start_idx={}",
+                current_rip,
+                trace_start_idx,
+                entry.tlen,
+                entry.mpool_start_idx
+            );
 
             // Loop through all instructions in the trace (matching C++ cpu.cc:196-222)
             let mut instr_idx = 0usize;
@@ -1275,7 +1287,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // Get instruction from trace
                 let mpool_idx = trace_start_idx + instr_idx;
                 if mpool_idx >= BX_ICACHE_MEM_POOL {
-                    tracing::error!("mpool_idx ({}) >= BX_ICACHE_MEM_POOL ({})", mpool_idx, BX_ICACHE_MEM_POOL);
+                    tracing::error!(
+                        "mpool_idx ({}) >= BX_ICACHE_MEM_POOL ({})",
+                        mpool_idx,
+                        BX_ICACHE_MEM_POOL
+                    );
                     break;
                 }
                 let mut i = self.i_cache.mpool[mpool_idx];
@@ -1310,21 +1326,25 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     continue;
                 }
 
-                    // For normal instructions, check instruction length
-                    let ilen = i.ilen();
-                    if ilen == 0 {
-                    tracing::error!("Instruction length is 0 for opcode {:?} at RIP={:#x}!", i.get_ia_opcode(), self.rip());
-                        return Err(crate::cpu::CpuError::UnimplementedOpcode { 
-                            opcode: format!("{:?}", i.get_ia_opcode()) 
-                        });
-                    }
+                // For normal instructions, check instruction length
+                let ilen = i.ilen();
+                if ilen == 0 {
+                    tracing::error!(
+                        "Instruction length is 0 for opcode {:?} at RIP={:#x}!",
+                        i.get_ia_opcode(),
+                        self.rip()
+                    );
+                    return Err(crate::cpu::CpuError::UnimplementedOpcode {
+                        opcode: format!("{:?}", i.get_ia_opcode()),
+                    });
+                }
 
                 // Matching C++ line 202: RIP += i->ilen();
                 // Advance RIP BEFORE execution (instruction handlers may read RIP and expect it to be advanced)
                 // In C++, RIP is a 64-bit register accessed directly: RIP += i->ilen()
                 let current_rip = self.rip();
                 let mut next_rip = current_rip + u64::from(ilen);
-                
+
                 // In real mode, EIP is 16-bit and should wrap at 0xFFFF
                 // Matching C++ vm8086.cc:109: EIP = new_eip & 0xffff
                 // We need to mask EIP immediately to prevent incorrect values from being used
@@ -1336,15 +1356,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     // Preserve high 32 bits (will be cleared in prefetch), set low 32 bits to masked EIP
                     next_rip = (next_rip & 0xFFFFFFFF00000000) | u64::from(eip_16bit);
                 }
-                
+
                 self.set_rip(next_rip);
 
-                tracing::info!("Executing opcode: {:?} at RIP={:#x}, ilen={}, next_rip={:#x}, trace_start_idx={}, instr_idx={}", 
+                tracing::trace!("Executing opcode: {:?} at RIP={:#x}, ilen={}, next_rip={:#x}, trace_start_idx={}, instr_idx={}", 
                     i.get_ia_opcode(), current_rip, ilen, next_rip, trace_start_idx, instr_idx);
 
                 // Matching C++ line 203: BX_CPU_CALL_METHOD(i->execute1, (i));
                 // might iterate repeat instruction
-                
+
                 // Assign handler for this instruction (matching original assignHandler logic)
                 // This checks feature flags, assigns handler, and determines if trace should end
                 let fetch_mode_mask = self.fetch_mode_mask;
@@ -1354,7 +1374,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                             tracing::debug!("assign_handler returned true, stopping trace");
                             break;
                         }
-                        
+
                         // Execute the instruction using assigned handler if available
                         if let Some(handler) = handler_opt {
                             // Call handler function pointer directly (matching C++ i->execute1(i))
@@ -1364,7 +1384,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                                 }
                                 Err(crate::cpu::CpuError::CpuNotInitialized) => {
                                     // Prefetch queue invalidated - need to break and get new trace
-                                    tracing::debug!("handler returned CpuNotInitialized, breaking trace");
+                                    tracing::debug!(
+                                        "handler returned CpuNotInitialized, breaking trace"
+                                    );
                                     break;
                                 }
                                 Err(e) => {
@@ -1375,36 +1397,42 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         } else {
                             // Handler not in table yet - use execute_instruction match statement
                             match self.execute_instruction(&mut i) {
-                        Ok(()) => {
-                            // Instruction executed successfully
-                        }
-                        Err(crate::cpu::CpuError::CpuNotInitialized) => {
-                            // Prefetch queue invalidated - need to break and get new trace
-                            tracing::debug!("execute_instruction returned CpuNotInitialized, breaking trace");
-                            break;
-                        }
-                        Err(crate::cpu::CpuError::UnimplementedOpcode { opcode }) => {
-                            // Panic on unimplemented opcode with detailed information
-                            let rip = current_rip;
-                            let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-                            let laddr = cs_base + rip;
-                            let cs_value = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
-                            
-                            // Try to get instruction bytes for debugging
-                            let instr_bytes = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
-                                let page_base = cs_base + (self.eip_page_bias as u64);
-                                let offset = (rip.wrapping_sub(page_base)) as usize;
-                                if offset < fetch_ptr.len() && offset + ilen as usize <= fetch_ptr.len() {
-                                    fetch_ptr[offset..offset + ilen as usize].to_vec()
-                                } else {
-                                    vec![]
+                                Ok(()) => {
+                                    // Instruction executed successfully
                                 }
-                            } else {
-                                vec![]
-                            };
-                            
-                            panic!(
-                                "\n\
+                                Err(crate::cpu::CpuError::CpuNotInitialized) => {
+                                    // Prefetch queue invalidated - need to break and get new trace
+                                    tracing::debug!("execute_instruction returned CpuNotInitialized, breaking trace");
+                                    break;
+                                }
+                                Err(crate::cpu::CpuError::UnimplementedOpcode { opcode }) => {
+                                    // Panic on unimplemented opcode with detailed information
+                                    let rip = current_rip;
+                                    let cs_base = unsafe {
+                                        self.sregs[BxSegregs::Cs as usize].cache.u.segment.base
+                                    };
+                                    let laddr = cs_base + rip;
+                                    let cs_value = unsafe {
+                                        self.sregs[BxSegregs::Cs as usize].selector.value
+                                    };
+
+                                    // Try to get instruction bytes for debugging
+                                    let instr_bytes = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
+                                        let page_base = cs_base + (self.eip_page_bias as u64);
+                                        let offset = (rip.wrapping_sub(page_base)) as usize;
+                                        if offset < fetch_ptr.len()
+                                            && offset + ilen as usize <= fetch_ptr.len()
+                                        {
+                                            fetch_ptr[offset..offset + ilen as usize].to_vec()
+                                        } else {
+                                            vec![]
+                                        }
+                                    } else {
+                                        vec![]
+                                    };
+
+                                    panic!(
+                                        "\n\
                                 ╔════════════════════════════════════════════════════════════╗\n\
                                 ║          UNIMPLEMENTED OPCODE DETECTED                      ║\n\
                                 ╠════════════════════════════════════════════════════════════╣\n\
@@ -1421,26 +1449,20 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                                 ║  Check original C++ implementation in:                     ║\n\
                                 ║    cpp_orig/bochs/cpu/decoder/ia_opcodes.def              ║\n\
                                 ╚════════════════════════════════════════════════════════════╝\n",
-                                opcode,
-                                rip,
-                                cs_value,
-                                rip,
-                                laddr,
-                                ilen,
-                                instr_bytes
-                            );
-                        }
-                            Err(crate::cpu::CpuError::CpuLoopRestart) => {
-                                // Bochs longjmp: restart decode/trace immediately, do not
-                                // commit RIP or increment instruction counters for this instruction.
-                                restart_decode = true;
-                                break;
-                            }
-                            Err(e) => {
-                                // Unlike the old placeholder logic, do NOT continue on CPU errors.
-                                // This corrupts guest execution and quickly leads to bogus RIP=0.
-                                break 'cpu_loop Err(e);
-                            }
+                                        opcode, rip, cs_value, rip, laddr, ilen, instr_bytes
+                                    );
+                                }
+                                Err(crate::cpu::CpuError::CpuLoopRestart) => {
+                                    // Bochs longjmp: restart decode/trace immediately, do not
+                                    // commit RIP or increment instruction counters for this instruction.
+                                    restart_decode = true;
+                                    break;
+                                }
+                                Err(e) => {
+                                    // Unlike the old placeholder logic, do NOT continue on CPU errors.
+                                    // This corrupts guest execution and quickly leads to bogus RIP=0.
+                                    break 'cpu_loop Err(e);
+                                }
                             }
                         }
                     }
@@ -1462,15 +1484,20 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                             Err(crate::cpu::CpuError::UnimplementedOpcode { opcode }) => {
                                 // Panic on unimplemented opcode with detailed information
                                 let rip = current_rip;
-                                let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+                                let cs_base = unsafe {
+                                    self.sregs[BxSegregs::Cs as usize].cache.u.segment.base
+                                };
                                 let laddr = cs_base + rip;
-                                let cs_value = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
-                                
+                                let cs_value =
+                                    unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
+
                                 // Try to get instruction bytes for debugging
                                 let instr_bytes = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
                                     let page_base = cs_base + (self.eip_page_bias as u64);
                                     let offset = (rip.wrapping_sub(page_base)) as usize;
-                                    if offset < fetch_ptr.len() && offset + ilen as usize <= fetch_ptr.len() {
+                                    if offset < fetch_ptr.len()
+                                        && offset + ilen as usize <= fetch_ptr.len()
+                                    {
                                         fetch_ptr[offset..offset + ilen as usize].to_vec()
                                     } else {
                                         vec![]
@@ -1478,7 +1505,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                                 } else {
                                     vec![]
                                 };
-                                
+
                                 panic!(
                                     "\n\
                                     ╔════════════════════════════════════════════════════════════╗\n\
@@ -1542,20 +1569,28 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
                 // Matching C++ line 215: if (BX_CPU_THIS_PTR async_event) break;
                 if self.async_event != 0 {
-                    tracing::info!("Async event detected, breaking trace loop");
+                    tracing::trace!("Async event detected, breaking trace loop");
                     break;
                 }
 
                 // Matching C++ line 217: if (++i == last)
                 // Move to next instruction in trace (increment pointer/index)
                 instr_idx += 1;
-                tracing::trace!("Moved to next instruction: instr_idx={}, tlen={}", instr_idx, entry.tlen);
+                tracing::trace!(
+                    "Moved to next instruction: instr_idx={}, tlen={}",
+                    instr_idx,
+                    entry.tlen
+                );
 
                 // If we've executed all instructions in the trace, get a new entry
                 // Matching C++ lines 217-221: if (++i == last) { entry = getICacheEntry(); i = entry->i; last = i + (entry->tlen); }
                 if instr_idx >= entry.tlen {
-                    tracing::info!("Trace complete: instr_idx={} >= tlen={}, getting new entry at RIP={:#x}", 
-                        instr_idx, entry.tlen, self.rip());
+                    tracing::trace!(
+                        "Trace complete: instr_idx={} >= tlen={}, getting new entry at RIP={:#x}",
+                        instr_idx,
+                        entry.tlen,
+                        self.rip()
+                    );
                     // Get new entry (matching C++ line 218-220)
                     // SAFETY: We use the raw pointer we got earlier to work around borrow checker
                     // The borrow from the previous get_icache_entry is released, so we can safely create a new reference
@@ -1573,8 +1608,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
                     // Get trace start index from entry (stored when trace was created)
                     trace_start_idx = entry.mpool_start_idx;
-                    tracing::info!("New trace: RIP={:#x}, trace_start_idx={}, tlen={}, mpool_start_idx={}", 
-                        self.rip(), trace_start_idx, entry.tlen, entry.mpool_start_idx);
+                    tracing::trace!(
+                        "New trace: RIP={:#x}, trace_start_idx={}, tlen={}, mpool_start_idx={}",
+                        self.rip(),
+                        trace_start_idx,
+                        entry.tlen,
+                        entry.mpool_start_idx
+                    );
 
                     // Reset for new trace
                     instr_idx = 0;
@@ -2447,29 +2487,19 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // =========================================================================
             // Far CALL instructions (32-bit)
             // =========================================================================
-            Opcode::CallfOp32Ap => {
-                self.call32_ap(instr)
-            }
-            Opcode::CallfOp32Ep => {
-                self.call32_ep(instr)
-            }
+            Opcode::CallfOp32Ap => self.call32_ap(instr),
+            Opcode::CallfOp32Ep => self.call32_ep(instr),
 
             // =========================================================================
             // Far JMP instructions (32-bit)
             // =========================================================================
-            Opcode::JmpfOp32Ep => {
-                self.jmp32_ep(instr)
-            }
+            Opcode::JmpfOp32Ep => self.jmp32_ep(instr),
 
             // =========================================================================
             // Far RET instructions (32-bit)
             // =========================================================================
-            Opcode::RetfOp32 => {
-                self.retfar32(instr)
-            }
-            Opcode::RetfOp32Iw => {
-                self.retfar32_iw(instr)
-            }
+            Opcode::RetfOp32 => self.retfar32(instr),
+            Opcode::RetfOp32Iw => self.retfar32_iw(instr),
 
             // =========================================================================
             // Conditional jumps with 32-bit displacement (Jd variants)
@@ -2546,30 +2576,20 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // =========================================================================
             // Far CALL instructions (16-bit)
             // =========================================================================
-            Opcode::CallfOp16Ap => {
-                self.call16_ap(instr)
-            }
-            Opcode::CallfOp16Ep => {
-                self.call16_ep(instr)
-            }
+            Opcode::CallfOp16Ap => self.call16_ap(instr),
+            Opcode::CallfOp16Ep => self.call16_ep(instr),
 
             // =========================================================================
             // Far JMP instructions (16-bit)
             // =========================================================================
-            Opcode::JmpfOp16Ep => {
-                self.jmp16_ep(instr)
-            }
+            Opcode::JmpfOp16Ep => self.jmp16_ep(instr),
             // JmpfAp is already implemented above
 
             // =========================================================================
             // Far RET instructions (16-bit)
             // =========================================================================
-            Opcode::RetfOp16 => {
-                self.retfar16(instr)
-            }
-            Opcode::RetfOp16Iw => {
-                self.retfar16_iw(instr)
-            }
+            Opcode::RetfOp16 => self.retfar16(instr),
+            Opcode::RetfOp16Iw => self.retfar16_iw(instr),
 
             // =========================================================================
             // Conditional jumps with 16-bit displacement (Jw variants)
@@ -3135,36 +3155,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // =========================================================================
             // 64-bit control transfer instructions
             // =========================================================================
-            Opcode::CallJq => {
-                self.call_jq(instr)
-            }
-            Opcode::CallEq => {
-                self.call_eq_r(instr)
-            }
-            Opcode::CallfOp64Ep => {
-                self.call64_ep(instr)
-            }
-            Opcode::JmpJq => {
-                self.jmp_jq(instr)
-            }
-            Opcode::JmpEq => {
-                self.jmp_eq_r(instr)
-            }
-            Opcode::JmpfOp64Ep => {
-                self.jmp64_ep(instr)
-            }
-            Opcode::RetOp64Iw => {
-                self.retnear64_iw(instr)
-            }
-            Opcode::RetfOp64 => {
-                self.retfar64(instr)
-            }
-            Opcode::RetfOp64Iw => {
-                self.retfar64_iw(instr)
-            }
-            Opcode::IretOp64 => {
-                self.iret64(instr)
-            }
+            Opcode::CallJq => self.call_jq(instr),
+            Opcode::CallEq => self.call_eq_r(instr),
+            Opcode::CallfOp64Ep => self.call64_ep(instr),
+            Opcode::JmpJq => self.jmp_jq(instr),
+            Opcode::JmpEq => self.jmp_eq_r(instr),
+            Opcode::JmpfOp64Ep => self.jmp64_ep(instr),
+            Opcode::RetOp64Iw => self.retnear64_iw(instr),
+            Opcode::RetfOp64 => self.retfar64(instr),
+            Opcode::RetfOp64Iw => self.retfar64_iw(instr),
+            Opcode::IretOp64 => self.iret64(instr),
             Opcode::JrcxzJbq => {
                 self.jrcxz_jb(instr);
                 Ok(())
@@ -3815,7 +3815,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
             laddr = BxAddress::from(self.get_laddr32(BxSegregs::Cs as _, eip));
             let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-            tracing::info!("prefetch: CS.base={:#x}, EIP={:#x}, laddr={:#x}", cs_base, eip, laddr);
+            tracing::info!(
+                "prefetch: CS.base={:#x}, EIP={:#x}, laddr={:#x}",
+                cs_base,
+                eip,
+                laddr
+            );
             page_offset = super::tlb::page_offset(laddr);
 
             // Calculate RIP at the beginning of the page.
@@ -3904,7 +3909,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             ) {
                 Ok(p_addr) => {
                     self.p_addr_fetch_page = ppf_of(p_addr);
-                    tracing::info!("prefetch: translate_linear OK, p_addr={:#x}, p_addr_fetch_page={:#x}", p_addr, self.p_addr_fetch_page);
+                    tracing::info!(
+                        "prefetch: translate_linear OK, p_addr={:#x}, p_addr_fetch_page={:#x}",
+                        p_addr,
+                        self.p_addr_fetch_page
+                    );
                     None
                 }
                 Err(_) => {
@@ -3966,14 +3975,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Raises #UD (Undefined Instruction) exception
     pub(super) fn bx_error(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let opcode = instr.get_ia_opcode();
-        
+
         if opcode == crate::cpu::decoder::Opcode::IaError {
             tracing::debug!("BxError: Encountered an unknown instruction (signalling #UD)");
         } else {
-            tracing::debug!(
-                "{:?}: instruction not supported - signalling #UD",
-                opcode
-            );
+            tracing::debug!("{:?}: instruction not supported - signalling #UD", opcode);
         }
 
         // Boot diagnostic: report the first unsupported opcode via port 0xE9.
@@ -4167,8 +4173,17 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         const XCR0_OPMASK_MASK: u32 = 1 << 5;
         const XCR0_ZMM_HI256_MASK: u32 = 1 << 6;
         const XCR0_HI_ZMM_MASK: u32 = 1 << 7;
-        if (xcr0 & (XCR0_SSE_MASK | XCR0_YMM_MASK | XCR0_OPMASK_MASK | XCR0_ZMM_HI256_MASK | XCR0_HI_ZMM_MASK))
-            != (XCR0_SSE_MASK | XCR0_YMM_MASK | XCR0_OPMASK_MASK | XCR0_ZMM_HI256_MASK | XCR0_HI_ZMM_MASK)
+        if (xcr0
+            & (XCR0_SSE_MASK
+                | XCR0_YMM_MASK
+                | XCR0_OPMASK_MASK
+                | XCR0_ZMM_HI256_MASK
+                | XCR0_HI_ZMM_MASK))
+            != (XCR0_SSE_MASK
+                | XCR0_YMM_MASK
+                | XCR0_OPMASK_MASK
+                | XCR0_ZMM_HI256_MASK
+                | XCR0_HI_ZMM_MASK)
         {
             self.exception(Exception::Ud, 0)?;
             return Ok(());
@@ -4252,30 +4267,31 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         instr: &mut BxInstructionGenerated,
         fetch_mode_mask: u32,
     ) -> Result<(bool, Option<InstructionHandler<I>>)> {
-        use super::opcodes_table::{FetchModeMask, OpFlags, get_opcode_entry};
+        use super::opcodes_table::{get_opcode_entry, FetchModeMask, OpFlags};
         use crate::cpu::decoder::Opcode;
 
         let ia_opcode = instr.get_ia_opcode();
         let opcode_entry = get_opcode_entry(ia_opcode);
-        
+
         // Get opflags from table entry, or use empty if not in table yet
-        let op_flags = opcode_entry.as_ref()
+        let op_flags = opcode_entry
+            .as_ref()
             .map(|e| e.opflags)
             .unwrap_or(OpFlags::empty());
-        
+
         // Check modC0 (register form vs memory form)
         let is_reg_form = instr.mod_c0();
-        
+
         // Handler assignment logic (matching original lines 2045-2061)
         let mut selected_handler: Option<InstructionHandler<I>> = None;
         let mut is_bx_error = false; // Track if BxError handler was assigned
-        
+
         if let Some(entry) = &opcode_entry {
             // Handler assignment from table
             if !is_reg_form {
                 // Memory form: use execute1 from table (matching line 2046)
                 selected_handler = Some(entry.execute1);
-                
+
                 // Special case: MOV with SS segment override (matching lines 2049-2056)
                 if ia_opcode == Opcode::MovOp32GdEd {
                     if instr.seg() == BxSegregs::Ss as u8 {
@@ -4304,7 +4320,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // Opcode not in table yet - will use execute_instruction match statement
             return Ok((false, None));
         }
-        
+
         // EVEX-specific checks (matching lines 2067-2084)
         // These checks assign BxError IMMEDIATELY if EVEX rules are violated
         #[cfg(feature = "bx_support_evex")]
@@ -4329,20 +4345,20 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                                 "{:?}: EVEX.b in reg form is not allowed for instructions which cannot cause floating point exception",
                                 ia_opcode
                             );
-                                // Matching C++ line 2079: assign BxError immediately
-                                use super::opcodes_table::bx_error_wrapper;
-                                selected_handler = Some(bx_error_wrapper);
-                                is_bx_error = true;
+                            // Matching C++ line 2079: assign BxError immediately
+                            use super::opcodes_table::bx_error_wrapper;
+                            selected_handler = Some(bx_error_wrapper);
+                            is_bx_error = true;
                         }
                     }
                 }
             }
         }
-        
+
         // Feature availability checks (matching lines 2086-2133)
         // These checks only assign error handlers if execute1 != BxError (matching C++ lines 2088, 2092, etc.)
         let fetch_mode = FetchModeMask::from_bits_truncate(fetch_mode_mask);
-        
+
         // Check FPU/MMX availability
         if !fetch_mode.contains(FetchModeMask::FETCH_MODE_FPU_MMX_OK) {
             if op_flags.contains(OpFlags::PREPARE_FPU) {
@@ -4362,7 +4378,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 return Ok((true, selected_handler)); // Stop trace
             }
         }
-        
+
         // Check SSE availability (CPU_LEVEL >= 6)
         #[cfg(feature = "bx_support_sse")]
         {
@@ -4377,7 +4393,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 }
             }
         }
-        
+
         // Check AVX availability
         #[cfg(feature = "bx_support_avx")]
         {
@@ -4392,7 +4408,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 }
             }
         }
-        
+
         // Check OPMASK availability
         #[cfg(feature = "bx_support_evex")]
         {
@@ -4407,7 +4423,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 }
             }
         }
-        
+
         // Check EVEX availability
         #[cfg(feature = "bx_support_evex")]
         {
@@ -4422,7 +4438,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 }
             }
         }
-        
+
         // Check AMX availability
         #[cfg(feature = "bx_support_amx")]
         {
@@ -4437,13 +4453,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 }
             }
         }
-        
+
         // Check if trace should end (matching line 2135)
         // Original: if ((op_flags & BX_TRACE_END) != 0 || i->execute1 == &BX_CPU_C::BxError)
         if op_flags.contains(OpFlags::TRACE_END) || is_bx_error {
             return Ok((true, selected_handler)); // Stop trace
         }
-        
+
         // Return handler for execution
         Ok((false, selected_handler))
     }

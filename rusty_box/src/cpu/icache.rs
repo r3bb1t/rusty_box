@@ -429,7 +429,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
         let fetch_ptr = &fetch_ptr_slice[eip_biased as usize..];
         let page_offset = page_offset(p_addr as u32);
-        tracing::info!("serve_icache_miss: p_addr_fetch_page={:#x}, eip_biased={}, p_addr={:#x}, page_offset={}, RIP={:#x}", 
+        tracing::trace!("serve_icache_miss: p_addr_fetch_page={:#x}, eip_biased={}, p_addr={:#x}, page_offset={}, RIP={:#x}", 
             self.p_addr_fetch_page, eip_biased, p_addr, page_offset, self.rip());
         let mut trace_mask = 0u32;
 
@@ -499,7 +499,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                             .map(|b| format!("{:02x}", b))
                             .collect::<Vec<_>>()
                             .join(" ");
-                        tracing::info!("Decoding instruction #{}: p_addr={:#x}, page_offset={}, bytes=[{}], opcode={:?}", 
+                        tracing::trace!("Decoding instruction #{}: p_addr={:#x}, page_offset={}, bytes=[{}], opcode={:?}", 
                             tlen, current_p_addr, current_page_offset, bytes_str, instr.get_ia_opcode());
                     }
 
@@ -566,7 +566,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
                     // Debug: verify fetch pointer is advancing
                     if tlen < 3 {
-                        tracing::info!("After instruction #{}: new p_addr={:#x}, new page_offset={}, remaining={}, fetch_ptr_len={}", 
+                        tracing::trace!("After instruction #{}: new p_addr={:#x}, new page_offset={}, remaining={}, fetch_ptr_len={}", 
                             tlen, current_p_addr, current_page_offset, remaining, current_fetch_ptr.len());
                     }
 

@@ -34,6 +34,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             let sp = self.sp();
             let new_sp = sp.wrapping_sub(2);
+            // Debug: log first 100 push operations or when SP wraps
+            if self.icount < 100 || (sp < 0x10 && new_sp > 0xFFF0) {
+                let ss = self.sregs[super::decoder::BxSegregs::Ss as usize].selector.value;
+                tracing::info!("PUSH16[{}]: SP {:04x}->{:04x}, val={:04x}, SS={:04x}",
+                    self.icount, sp, new_sp, value, ss);
+            }
             self.stack_write_word(new_sp as u32, value);
             self.set_sp(new_sp);
         }
@@ -51,6 +57,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             let sp = self.sp();
             let value = self.stack_read_word(sp as u32);
+            // Debug: log when popping 0 (potential issue indicator)
+            if value == 0 && sp < 0x100 {
+                let ss = self.sregs[super::decoder::BxSegregs::Ss as usize].selector.value;
+                let laddr = self.get_laddr32(super::decoder::BxSegregs::Ss as usize, sp as u32);
+                tracing::warn!("POP16: popped 0 from SS:SP={:04x}:{:04x} (laddr={:#x})", ss, sp, laddr);
+            }
             self.set_sp(sp.wrapping_add(2));
             value
         };

@@ -52,13 +52,12 @@ fn main() {
 
 fn run_dlxlinux() -> Result<()> {
     // Initialize tracing (INFO level for cleaner output)
-    // tracing_subscriber::fmt()
-    //     .without_time()
-    //     .with_target(false)
-    //     // .with_max_level(Level::INFO)
-    //     // .with_max_level(Level::TRACE)
-    //     .with_max_level(Level::INFO)
-    //     .init();
+    tracing_subscriber::fmt()
+        .without_time()
+        .with_target(false)
+        // .with_max_level(Level::TRACE)
+        .with_max_level(tracing::Level::INFO)
+        .init();
 
     println!("╔════════════════════════════════════════════════════════════╗");
     println!("║              DLX Linux Boot - Rusty Box Emulator           ║");
@@ -172,7 +171,11 @@ fn run_dlxlinux() -> Result<()> {
     });
 
     if let Some((ref vga_path, ref vga)) = vga_bios {
-        println!("✓ VGA BIOS loaded: {} bytes ({})", vga.len(), vga_path.display());
+        println!(
+            "✓ VGA BIOS loaded: {} bytes ({})",
+            vga.len(),
+            vga_path.display()
+        );
     } else {
         println!("⚠ VGA BIOS not found (optional)");
     }
@@ -344,8 +347,8 @@ fn run_dlxlinux() -> Result<()> {
 
     // Run with instruction limit to allow debugging
     // const MAX_INSTRUCTIONS: u64 = 1_000_000_000; // 1M instructions - reasonable limit for testing
-    // BIOS + VGABIOS can take tens of millions of instructions to reach visible VGA output.
-    const MAX_INSTRUCTIONS: u64 = 50_000_000;
+    // BIOS + VGABIOS can take hundreds of millions of instructions to reach visible VGA output.
+    const MAX_INSTRUCTIONS: u64 = 5_000_000;
 
     // Use interactive loop that handles GUI events
     let result = emu.run_interactive(MAX_INSTRUCTIONS);

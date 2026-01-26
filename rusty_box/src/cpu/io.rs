@@ -34,6 +34,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn out_ib_al(&mut self, instr: &BxInstructionGenerated) {
         let port = instr.ib() as u16;
         let value = self.al();
+        // Debug: log early BIOS I/O (first 20 instructions or important ports)
+        if self.icount < 20 || port == 0x70 || port == 0x71 || port == 0x0D || port == 0xDA || port == 0xD4 || port == 0xD6 {
+            tracing::info!("OUT {:#04x}, AL ({:#04x}) [instr #{}] EIP={:#x}",
+                port, value, self.icount, self.eip());
+        }
         self.port_out(port, value as u32, 1);
         tracing::trace!("OUT {:#x}, AL ({:#x})", port, value);
     }

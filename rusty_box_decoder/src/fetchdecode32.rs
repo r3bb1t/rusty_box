@@ -399,13 +399,36 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
             }
         }
     } else {
-        // No ModRM - instruction uses register encoded in opcode
+        // No ModRM - instruction uses register encoded in opcode (low 3 bits = rm)
         metainfo1_bits |= MetaInfoFlags::ModC0.bits();
     }
 
     // Store register fields
-    instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
-    instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
+    // For ModRM instructions: DST=nnn (reg field), SRC1=rm (r/m field)
+    // For non-ModRM instructions: depends on opcode encoding:
+    //   - Most opcodes (B0-BF, 50-5F, 40-4F, 90-97): register in bits 0-2 (rm)
+    //   - Segment push/pop (06,07,0E,16,17,1E,1F): segment in bits 3-5 (nnn)
+    // Bochs uses assign_srcs() with source types (BX_SRC_NNN, BX_SRC_RM) to determine this
+    if needs_modrm {
+        instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
+        instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
+    } else {
+        // Check if this is a segment push/pop opcode (uses nnn for segment)
+        // 06=PUSH ES, 07=POP ES, 0E=PUSH CS, 16=PUSH SS, 17=POP SS, 1E=PUSH DS, 1F=POP DS
+        // Also 0FA0=PUSH FS, 0FA1=POP FS, 0FA8=PUSH GS, 0FA9=POP GS (two-byte)
+        let is_segment_push_pop = matches!(b1, 0x06 | 0x07 | 0x0E | 0x16 | 0x17 | 0x1E | 0x1F)
+            || (opcode_map == 1 && matches!(b1 & 0xFF, 0xA0 | 0xA1 | 0xA8 | 0xA9));
+
+        if is_segment_push_pop {
+            // Segment is in bits 3-5 (nnn)
+            instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
+            instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
+        } else {
+            // Most non-ModRM: register in bits 0-2 (rm)
+            instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
+            instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
+        }
+    }
 
     // === Phase 4: Parse immediate ===
     let imm_size = get_immediate_size_32(b1, opcode_map, os_32);

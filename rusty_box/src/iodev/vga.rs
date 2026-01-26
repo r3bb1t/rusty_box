@@ -126,6 +126,56 @@ pub(crate) struct BxVgaC {
     probe_first_mapped: Option<(BxPhyAddress, u8, u8)>,
     /// First unmapped write observed: (phys_addr, value, memory_mapping)
     probe_first_unmapped: Option<(BxPhyAddress, u8, u8)>,
+
+    // =====================================================================
+    // VGA Enable and PEL/DAC registers (ports 0x3C3, 0x3C6-0x3C9)
+    // See vgacore.cc state variables in bx_vgacore_s struct
+    // =====================================================================
+    /// VGA enable (port 0x3C3) - bit 0 enables VGA display
+    vga_enabled: bool,
+
+    /// PEL mask register (port 0x3C6)
+    pel_mask: u8,
+
+    /// DAC state (port 0x3C7 read): 0x00 = write mode, 0x03 = read mode
+    dac_state: u8,
+
+    /// PEL write address register (port 0x3C8)
+    pel_write_addr: u8,
+
+    /// PEL read address register (port 0x3C7 write)
+    pel_read_addr: u8,
+
+    /// PEL write cycle counter (0, 1, 2 for R, G, B)
+    pel_write_cycle: u8,
+
+    /// PEL read cycle counter (0, 1, 2 for R, G, B)
+    pel_read_cycle: u8,
+
+    /// PEL data (256 colors × [R, G, B])
+    pel_data: [[u8; 3]; 256],
+
+    // =====================================================================
+    // Misc output register parsed fields (for easier access)
+    // Written via port 0x3C2, read via port 0x3CC
+    // =====================================================================
+    /// Bit 0: color_emulation - 1=color (CRTC at 0x3D4), 0=mono (CRTC at 0x3B4)
+    misc_color_emulation: bool,
+
+    /// Bit 1: enable_ram - 1=VGA memory access enabled
+    misc_enable_ram: bool,
+
+    /// Bits 2-3: clock_select
+    misc_clock_select: u8,
+
+    /// Bit 5: select_high_bank (ODD/EVEN page select)
+    misc_select_high_bank: bool,
+
+    /// Bit 6: horiz_sync_pol - horizontal sync polarity
+    misc_horiz_sync_pol: bool,
+
+    /// Bit 7: vert_sync_pol - vertical sync polarity
+    misc_vert_sync_pol: bool,
 }
 
 impl Default for BxVgaC {
@@ -162,6 +212,24 @@ impl BxVgaC {
             probe_unmapped_writes: 0,
             probe_first_mapped: None,
             probe_first_unmapped: None,
+
+            // VGA Enable and PEL/DAC registers
+            vga_enabled: true,       // VGA enabled by default
+            pel_mask: 0xFF,          // All palette entries visible
+            dac_state: 0x01,         // Initial state
+            pel_write_addr: 0,
+            pel_read_addr: 0,
+            pel_write_cycle: 0,
+            pel_read_cycle: 0,
+            pel_data: [[0; 3]; 256], // Will be initialized by BIOS
+
+            // Misc output parsed fields (matching misc_output = 0x67)
+            misc_color_emulation: true,   // Bit 0: color mode (use 0x3D4/0x3D5)
+            misc_enable_ram: true,        // Bit 1: RAM enabled
+            misc_clock_select: 1,         // Bits 2-3: clock select = 1
+            misc_select_high_bank: true,  // Bit 5: high bank
+            misc_horiz_sync_pol: true,    // Bit 6
+            misc_vert_sync_pol: false,    // Bit 7
         };
 
         // Initialize CRTC registers for 80x25 text mode
@@ -364,13 +432,100 @@ impl BxVgaC {
             0x1,
         );
 
-        // Misc output (0x3CC)
+        // Misc output READ (0x3CC) - reads the misc output register
         io.register_io_handler(
             vga_ptr,
             vga_read_handler,
             vga_write_handler,
             VGA_MISC_OUTPUT,
-            "VGA Misc Output",
+            "VGA Misc Output Read",
+            0x1,
+        );
+
+        // Misc output WRITE (0x3C2) - CRITICAL for BIOS to set color mode
+        // Note: VGA has asymmetric ports - write to 0x3C2, read from 0x3CC
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            0x3C2,
+            "VGA Misc Output Write",
+            0x1,
+        );
+
+        // VGA Enable (0x3C3) - bit 0 enables VGA display
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            0x3C3,
+            "VGA Enable",
+            0x1,
+        );
+
+        // PEL Mask (0x3C6)
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            0x3C6,
+            "VGA PEL Mask",
+            0x1,
+        );
+
+        // DAC State Read / PEL Address Read Mode Write (0x3C7)
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            0x3C7,
+            "VGA DAC State",
+            0x1,
+        );
+
+        // PEL Address Write Mode (0x3C8)
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            0x3C8,
+            "VGA PEL Address Write",
+            0x1,
+        );
+
+        // PEL Data Register (0x3C9)
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            0x3C9,
+            "VGA PEL Data",
+            0x1,
+        );
+
+        // EGA compatibility ports (0x3CA, 0x3CB, 0x3CD) - stub handlers
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            0x3CA,
+            "VGA EGA Compat",
+            0x1,
+        );
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            0x3CB,
+            "VGA EGA Compat",
+            0x1,
+        );
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            0x3CD,
+            "VGA EGA Compat",
             0x1,
         );
 
@@ -443,6 +598,42 @@ impl BxVgaC {
                 }
             }
             VGA_MISC_OUTPUT => self.misc_output as u32,
+
+            // Misc Output Write port (0x3C2) - write-only, return 0xFF on read
+            0x3C2 => 0xFF,
+
+            // VGA Enable (0x3C3)
+            0x3C3 => self.vga_enabled as u32,
+
+            // PEL Mask (0x3C6)
+            0x3C6 => self.pel_mask as u32,
+
+            // DAC State (0x3C7) - returns 0x00 for write mode, 0x03 for read mode
+            0x3C7 => self.dac_state as u32,
+
+            // PEL Address Write (0x3C8)
+            0x3C8 => self.pel_write_addr as u32,
+
+            // PEL Data (0x3C9) - read palette data
+            0x3C9 => {
+                // Only read if in read mode (dac_state == 0x03)
+                if self.dac_state == 0x03 {
+                    let color = self.pel_data[self.pel_read_addr as usize];
+                    let val = color[self.pel_read_cycle as usize];
+                    self.pel_read_cycle += 1;
+                    if self.pel_read_cycle >= 3 {
+                        self.pel_read_cycle = 0;
+                        self.pel_read_addr = self.pel_read_addr.wrapping_add(1);
+                    }
+                    val as u32
+                } else {
+                    0x3F // Return 0x3F if not in read mode
+                }
+            }
+
+            // EGA compatibility ports - return 0
+            0x3CA | 0x3CB | 0x3CD => 0x00,
+
             _ => {
                 tracing::trace!("VGA read from unhandled port {:#x}", port);
                 0xFF
@@ -503,12 +694,92 @@ impl BxVgaC {
             }
             VGA_GRAPHICS_DATA => {
                 if self.graphics_index < 9 {
+                    let old_value = self.graphics_regs[self.graphics_index as usize];
                     self.graphics_regs[self.graphics_index as usize] = value;
+
+                    // Special handling for register 6 (Miscellaneous Graphics)
+                    // This controls memory_mapping which affects which address range is active
+                    if self.graphics_index == 6 {
+                        let old_mapping = (old_value >> 2) & 0x03;
+                        let new_mapping = (value >> 2) & 0x03;
+                        if old_mapping != new_mapping {
+                            tracing::info!(
+                                "VGA memory_mapping changed: {} -> {} (value: {:#04x} -> {:#04x})",
+                                old_mapping, new_mapping, old_value, value
+                            );
+                            self.text_buffer_update = true;
+                        }
+                    }
                 }
             }
+
+            // Misc Output Read port (0x3CC) - also accept writes for compatibility
             VGA_MISC_OUTPUT => {
                 self.misc_output = value;
+                self.misc_color_emulation = (value & 0x01) != 0;
+                self.misc_enable_ram = (value & 0x02) != 0;
+                self.misc_clock_select = (value >> 2) & 0x03;
+                self.misc_select_high_bank = (value & 0x20) != 0;
+                self.misc_horiz_sync_pol = (value & 0x40) != 0;
+                self.misc_vert_sync_pol = (value & 0x80) != 0;
             }
+
+            // Misc Output Write port (0x3C2) - CRITICAL for BIOS color mode setup
+            0x3C2 => {
+                self.misc_color_emulation = (value & 0x01) != 0;
+                self.misc_enable_ram = (value & 0x02) != 0;
+                self.misc_clock_select = (value >> 2) & 0x03;
+                self.misc_select_high_bank = (value & 0x20) != 0;
+                self.misc_horiz_sync_pol = (value & 0x40) != 0;
+                self.misc_vert_sync_pol = (value & 0x80) != 0;
+                // Update combined misc_output for reads at 0x3CC
+                self.misc_output = value;
+                tracing::info!(
+                    "VGA Misc Output Write: {:#04x} (color_emulation={}, enable_ram={})",
+                    value, self.misc_color_emulation, self.misc_enable_ram
+                );
+            }
+
+            // VGA Enable (0x3C3)
+            0x3C3 => {
+                self.vga_enabled = (value & 0x01) != 0;
+                tracing::debug!("VGA Enable: {}", self.vga_enabled);
+            }
+
+            // PEL Mask (0x3C6)
+            0x3C6 => {
+                self.pel_mask = value;
+            }
+
+            // PEL Address Read Mode (0x3C7)
+            0x3C7 => {
+                self.pel_read_addr = value;
+                self.pel_read_cycle = 0;
+                self.dac_state = 0x03; // Set to read mode
+            }
+
+            // PEL Address Write Mode (0x3C8)
+            0x3C8 => {
+                self.pel_write_addr = value;
+                self.pel_write_cycle = 0;
+                self.dac_state = 0x00; // Set to write mode
+            }
+
+            // PEL Data (0x3C9) - write palette data
+            0x3C9 => {
+                self.pel_data[self.pel_write_addr as usize][self.pel_write_cycle as usize] = value;
+                self.pel_write_cycle += 1;
+                if self.pel_write_cycle >= 3 {
+                    self.pel_write_cycle = 0;
+                    self.pel_write_addr = self.pel_write_addr.wrapping_add(1);
+                }
+            }
+
+            // EGA compatibility ports - ignore writes
+            0x3CA | 0x3CB | 0x3CD => {
+                // Ignore (EGA compatibility)
+            }
+
             _ => {
                 tracing::trace!("VGA write to unhandled port {:#x} = {:#x}", port, value);
             }

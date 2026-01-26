@@ -4,7 +4,23 @@
       "Bash(cd:*)",
       "Bash(git add:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(cargo build:*)",
+      "Bash(RUST_LOG=info RUSTY_BOX_HEADLESS=1 cargo run:*)",
+      "Bash(RUSTY_BOX_HEADLESS=1 timeout 60 cargo run:*)",
+      "Bash(RUST_BACKTRACE=1 RUSTY_BOX_HEADLESS=1 timeout 30 cargo run:*)",
+      "Bash(xxd:*)",
+      "Bash(RUST_LOG=info RUSTY_BOX_HEADLESS=1 timeout 30 cargo run:*)",
+      "Bash(RUSTY_BOX_HEADLESS=1 timeout 30 cargo run:*)",
+      "Bash(RUSTY_BOX_HEADLESS=1 timeout 20 cargo run:*)",
+      "Bash(RUSTY_BOX_HEADLESS=1 cargo run:*)",
+      "Bash(RUST_LOG=info RUSTY_BOX_HEADLESS=1 timeout 60 cargo run:*)",
+      "Bash(RUST_LOG=warn RUSTY_BOX_HEADLESS=1 timeout 30 cargo run:*)",
+      "Bash(RUST_LOG=warn RUSTY_BOX_HEADLESS=1 timeout 60 cargo run:*)",
+      "Bash(ls:*)",
+      "Bash(find:*)",
+      "Bash(RUST_LOG=info RUSTY_BOX_HEADLESS=1 timeout 90 cargo run:*)",
+      "Bash(grep:*)"
     ]
   }
 }
