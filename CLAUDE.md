@@ -71,16 +71,20 @@ emu.cpu.cpu_loop(&mut emu.memory, &[])?;
 
 ### CPU Module Organization
 
-Instructions are organized by category:
-- `cpu/arith/`: ADD, SUB, ADC, SBB, DEC, INC
+Instructions are organized by category (matching original Bochs cpp_orig/bochs/cpu/ structure):
+- `cpu/arith/`: ADD, SUB, ADC, SBB, DEC, INC (arith8.rs, arith16.rs, arith32.rs)
 - `cpu/logical*/`: AND, OR, XOR, NOT (8/16/32/64-bit variants)
-- `cpu/mult*/`: MUL, IMUL
+- `cpu/mult*/`: MUL, IMUL (8/16/32/64-bit variants)
 - `cpu/shift.rs`: SHL, SHR, SAR, ROR, ROL
-- `cpu/ctrl_xfer*/`: JMP, CALL, RET, loops
-- `cpu/data_xfer/`: MOV, LEA, XCHG
-- `cpu/string.rs`: MOVSB, STOSB, LODSB, etc.
+- `cpu/ctrl_xfer*/`: JMP, CALL, RET, loops (ctrl_xfer16.rs, ctrl_xfer32.rs, ctrl_xfer64.rs)
+- `cpu/data_xfer/`: MOV, LEA, XCHG (data_xfer8.rs, data_xfer16.rs, data_xfer32.rs, data_xfer64.rs)
+- `cpu/stack.rs`: Common stack primitives (push_16/32, pop_16/32, stack memory access)
+- `cpu/stack16.rs`: 16-bit stack ops (PUSH/POP r16, PUSHA16, POPA16, PUSHF, POPF)
+- `cpu/stack32.rs`: 32-bit stack ops (PUSH/POP r32, PUSHAD, POPAD, PUSHFD, POPFD)
+- `cpu/stack64.rs`: 64-bit stack ops (PUSH/POP r64, PUSHFQ, POPFQ)
+- `cpu/string.rs`: MOVSB, STOSB, LODSB, REP string operations
 - `cpu/io.rs`: IN, OUT, INS, OUTS
-- `cpu/soft_int.rs`: INT, IRET, INTO
+- `cpu/soft_int.rs`: INT, IRET, INTO, BOUND, HLT
 
 ### CPU State Access
 

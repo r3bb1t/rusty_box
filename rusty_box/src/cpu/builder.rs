@@ -72,7 +72,10 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             lapic: Default::default(),
             smbase: Default::default(),
             msr: Default::default(),
+            #[cfg(feature = "bx_configure_msrs")]
             msrs: [Default::default(); BX_MSR_MAX_INDEX],
+            #[cfg(feature = "bx_support_amx")]
+            amx: Default::default(),
             in_vmx: Default::default(),
             in_vmx_guest: Default::default(),
             in_smm_vmx: Default::default(),
@@ -120,6 +123,28 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             #[cfg(feature = "bx_support_alignment_check")]
             alignment_check_mask: Default::default(),
             stats: Default::default(),
+            #[cfg(feature = "bx_debugger")]
+            watchpoint: Default::default(),
+            #[cfg(feature = "bx_debugger")]
+            break_point: Default::default(),
+            #[cfg(feature = "bx_debugger")]
+            magic_break: Default::default(),
+            #[cfg(feature = "bx_debugger")]
+            stop_reason: Default::default(),
+            #[cfg(feature = "bx_debugger")]
+            trace: Default::default(),
+            #[cfg(feature = "bx_debugger")]
+            trace_reg: Default::default(),
+            #[cfg(feature = "bx_debugger")]
+            trace_mem: Default::default(),
+            #[cfg(feature = "bx_debugger")]
+            mode_break: Default::default(),
+            #[cfg(feature = "bx_debugger")]
+            vmexit_break: Default::default(),
+            #[cfg(feature = "bx_debugger")]
+            show_flag: Default::default(),
+            #[cfg(feature = "bx_debugger")]
+            guard_found: Default::default(),
             #[cfg(feature = "bx_instrumentation")]
             far_branch: Default::default(),
             dtlb: Tlb::new(),

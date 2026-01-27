@@ -954,8 +954,8 @@ impl Uintr {
 }
 
 #[cfg(feature = "bx_debugger")]
-#[derive(Debug)]
-struct BxDbgGuardState {
+#[derive(Debug, Default)]
+pub(super) struct BxDbgGuardState {
     /// cs:eip and linear addr of instruction at guard point
     cs: u32,
     eip: BxAddress,
@@ -965,8 +965,8 @@ struct BxDbgGuardState {
 }
 
 #[cfg(feature = "bx_debugger")]
-#[derive(Debug)]
-struct BxGuardFound {
+#[derive(Debug, Default)]
+pub(super) struct BxGuardFound {
     guard_found: u32,
     icount_max: u64, // stop after completing this many instructions
     iaddr_index: u32,
@@ -3095,8 +3095,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.pusha16(instr);
                 Ok(())
             }
+            Opcode::PushaOp32 => {
+                self.pusha32(instr);
+                Ok(())
+            }
             Opcode::PopaOp16 => {
                 self.popa16(instr);
+                Ok(())
+            }
+            Opcode::PopaOp32 => {
+                self.popa32(instr);
                 Ok(())
             }
             Opcode::PushfFw => {
