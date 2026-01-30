@@ -312,3 +312,195 @@ fn disassemble_sequence_64bit(
 
     instructions
 }
+
+// =============================================================================
+// 3DNow! instruction tests
+// =============================================================================
+
+#[test]
+fn test_3dnow_pi2fd() {
+    init_tracing();
+    // 0F 0F /r 0D = PI2FD mm, mm/m64
+    // PI2FD MM0, MM1: 0F 0F C1 0D
+    // ModRM C1 = 11 000 001 (mod=3, reg=0, rm=1)
+    let data = [0x0F, 0x0F, 0xC1, 0x0D];
+    let i = fetch_decode32(&data, true).unwrap();
+    assert_eq!(i.ilen(), 4);
+    assert_eq!(i.get_ia_opcode(), Opcode::Pi2fdPqQq);
+    tracing::info!("PI2FD: {:?}", i.get_ia_opcode());
+}
+
+#[test]
+fn test_3dnow_pi2fw() {
+    init_tracing();
+    // 0F 0F /r 0C = PI2FW mm, mm/m64
+    // PI2FW MM0, MM2: 0F 0F C2 0C
+    let data = [0x0F, 0x0F, 0xC2, 0x0C];
+    let i = fetch_decode32(&data, true).unwrap();
+    assert_eq!(i.ilen(), 4);
+    assert_eq!(i.get_ia_opcode(), Opcode::Pi2fwPqQq);
+}
+
+#[test]
+fn test_3dnow_pf2id() {
+    init_tracing();
+    // 0F 0F /r 1D = PF2ID mm, mm/m64
+    let data = [0x0F, 0x0F, 0xC3, 0x1D];
+    let i = fetch_decode32(&data, true).unwrap();
+    assert_eq!(i.ilen(), 4);
+    assert_eq!(i.get_ia_opcode(), Opcode::Pf2idPqQq);
+}
+
+#[test]
+fn test_3dnow_pf2iw() {
+    init_tracing();
+    // 0F 0F /r 1C = PF2IW mm, mm/m64
+    let data = [0x0F, 0x0F, 0xC4, 0x1C];
+    let i = fetch_decode32(&data, true).unwrap();
+    assert_eq!(i.ilen(), 4);
+    assert_eq!(i.get_ia_opcode(), Opcode::Pf2iwPqQq);
+}
+
+#[test]
+fn test_3dnow_pfadd() {
+    init_tracing();
+    // 0F 0F /r 9E = PFADD mm, mm/m64
+    let data = [0x0F, 0x0F, 0xC5, 0x9E];
+    let i = fetch_decode32(&data, true).unwrap();
+    assert_eq!(i.ilen(), 4);
+    assert_eq!(i.get_ia_opcode(), Opcode::PfaddPqQq);
+}
+
+#[test]
+fn test_3dnow_pfmul() {
+    init_tracing();
+    // 0F 0F /r B4 = PFMUL mm, mm/m64
+    let data = [0x0F, 0x0F, 0xC6, 0xB4];
+    let i = fetch_decode32(&data, true).unwrap();
+    assert_eq!(i.ilen(), 4);
+    assert_eq!(i.get_ia_opcode(), Opcode::PfmulPqQq);
+}
+
+#[test]
+fn test_3dnow_with_memory_operand() {
+    init_tracing();
+    // 3DNow! with memory operand and disp8
+    // PI2FD MM0, [EBX+0x10]: 0F 0F 43 10 0D
+    // ModRM 43 = 01 000 011 (mod=1, reg=0, rm=3=EBX, disp8)
+    let data = [0x0F, 0x0F, 0x43, 0x10, 0x0D];
+    let i = fetch_decode32(&data, true).unwrap();
+    assert_eq!(i.ilen(), 5);
+    assert_eq!(i.get_ia_opcode(), Opcode::Pi2fdPqQq);
+    assert!(!i.mod_c0()); // Memory operand
+    assert_eq!(i.modrm_form.displacement.displ32u(), 0x10);
+}
+
+#[test]
+fn test_3dnow_invalid_suffix() {
+    init_tracing();
+    // 0F 0F /r 00 = Invalid (suffix 0x00 maps to IaError)
+    let data = [0x0F, 0x0F, 0xC0, 0x00];
+    let result = fetch_decode32(&data, true);
+    // Should fail because suffix 0x00 is IaError in BX3_DNOW_OPCODE
+    assert!(result.is_err());
+}
+
+#[test]
+fn test_3dnow_64bit() {
+    init_tracing();
+    // 3DNow! in 64-bit mode (still valid)
+    // PI2FD MM0, MM1: 0F 0F C1 0D
+    let data = [0x0F, 0x0F, 0xC1, 0x0D];
+    let i = fetch_decode64(&data).unwrap();
+    assert_eq!(i.ilen(), 4);
+    assert_eq!(i.get_ia_opcode(), Opcode::Pi2fdPqQq);
+}
+
+// =============================================================================
+// REX prefix interaction tests
+// =============================================================================
+
+#[test]
+fn test_rex_w_sets_os64() {
+    init_tracing();
+    // REX.W alone should set Os64
+    // 48 89 C0 = MOV RAX, RAX (64-bit)
+    let i = fetch_decode64(&[0x48, 0x89, 0xC0]).unwrap();
+    assert_eq!(i.ilen(), 3);
+    assert_ne!(i.os64_l(), 0, "Os64 should be set with REX.W");
+}
+
+#[test]
+fn test_rex_b_extends_rm() {
+    init_tracing();
+    // REX.B (0x41) extends the rm field to access R8-R15
+    // 41 89 C0 = MOV R8D, EAX (REX.B extends rm from 0 to 8)
+    let i = fetch_decode64(&[0x41, 0x89, 0xC0]).unwrap();
+    assert_eq!(i.ilen(), 3);
+    // The rm field (src1) should be extended by REX.B
+    // rm is stored in src1/meta_data[1]
+    assert_eq!(i.src1(), 8, "rm (src1) should be extended to R8 by REX.B");
+}
+
+#[test]
+fn test_rex_r_extends_nnn() {
+    init_tracing();
+    // REX.R (0x44) extends the reg/nnn field
+    // 44 89 C0 = MOV EAX, R8D (REX.R extends reg from 0 to 8)
+    let i = fetch_decode64(&[0x44, 0x89, 0xC0]).unwrap();
+    assert_eq!(i.ilen(), 3);
+    // The nnn field (dst) should be extended by REX.R
+    // nnn is stored in dst/meta_data[0]
+    assert_eq!(i.dst(), 8, "nnn (dst) should be extended to R8 by REX.R");
+}
+
+#[test]
+fn test_segment_prefix_before_rex() {
+    init_tracing();
+    // Segment override prefix (0x65 = GS:) BEFORE REX is valid and both apply
+    // 65 48 8B 00 = MOV RAX, GS:[RAX]
+    let i = fetch_decode64(&[0x65, 0x48, 0x8B, 0x00]).unwrap();
+    assert_eq!(i.ilen(), 4);
+    // REX.W should set Os64
+    assert_ne!(i.os64_l(), 0, "Os64 should be set with REX.W");
+    // GS segment override should be recorded
+    assert_eq!(i.seg(), 5, "Segment should be GS (5)");
+}
+
+// =============================================================================
+// RIP-relative addressing tests
+// =============================================================================
+
+#[test]
+fn test_rip_relative_addressing() {
+    init_tracing();
+    // MOV EAX, [RIP+0x12345678]: 8B 05 78 56 34 12
+    // ModRM 05 = 00 000 101 (mod=0, reg=0=EAX, rm=5=RIP-relative in 64-bit)
+    let i = fetch_decode64(&[0x8B, 0x05, 0x78, 0x56, 0x34, 0x12]).unwrap();
+    assert_eq!(i.ilen(), 6);
+    assert_eq!(i.sib_base(), 17, "Base should be BX_64BIT_REG_RIP (17)");
+    assert_eq!(i.modrm_form.displacement.displ32u(), 0x12345678);
+}
+
+#[test]
+fn test_rip_relative_with_rex() {
+    init_tracing();
+    // MOV RAX, [RIP+0x10]: 48 8B 05 10 00 00 00
+    let i = fetch_decode64(&[0x48, 0x8B, 0x05, 0x10, 0x00, 0x00, 0x00]).unwrap();
+    assert_eq!(i.ilen(), 7);
+    assert_eq!(i.sib_base(), 17, "Base should be BX_64BIT_REG_RIP (17)");
+    assert_eq!(i.modrm_form.displacement.displ32u(), 0x10);
+    assert_ne!(i.os64_l(), 0, "Should have 64-bit operand size");
+}
+
+#[test]
+fn test_not_rip_relative_in_32bit() {
+    init_tracing();
+    // In 32-bit mode, mod=0 rm=5 is [disp32], not RIP-relative
+    // MOV EAX, [0x12345678]: 8B 05 78 56 34 12
+    let i = fetch_decode32(&[0x8B, 0x05, 0x78, 0x56, 0x34, 0x12], true).unwrap();
+    assert_eq!(i.ilen(), 6);
+    // In 32-bit mode, this should be BX_NIL_REGISTER (19), not RIP
+    assert_eq!(i.sib_base(), 19, "Base should be BX_NIL_REGISTER (19) in 32-bit mode");
+    assert_eq!(i.modrm_form.displacement.displ32u(), 0x12345678);
+}

@@ -101,34 +101,34 @@ impl BxCmosC {
     fn init_defaults(&mut self) {
         // Status Register A: 32.768kHz timebase, no periodic interrupt
         self.ram[REG_STAT_A as usize] = 0x26;
-        
+
         // Status Register B: 24-hour mode, binary mode, DST disabled
         self.ram[REG_STAT_B as usize] = 0x02;
-        
+
         // Status Register C: Clear all interrupt flags
         self.ram[REG_STAT_C as usize] = 0x00;
-        
+
         // Status Register D: RTC valid, battery good
         self.ram[REG_STAT_D as usize] = 0x80;
-        
+
         // Equipment byte: 2 floppy drives, VGA display
         self.ram[REG_EQUIPMENT as usize] = 0x41;
-        
+
         // Set a default time (2025-01-01 12:00:00)
         self.set_time(0, 0, 12, 1, 1, 25);
         self.ram[REG_CENTURY as usize] = 0x20; // 20xx
         self.ram[REG_WEEK_DAY as usize] = 3; // Wednesday
-        
+
         // Base memory: 640KB
         self.ram[0x15] = 0x80;
         self.ram[0x16] = 0x02;
-        
+
         // Extended memory above 1MB: 31MB (32MB total - 1MB)
         self.ram[0x17] = 0x00;
         self.ram[0x18] = 0x7C; // 31*1024 = 31744 = 0x7C00
         self.ram[0x30] = 0x00;
         self.ram[0x31] = 0x7C;
-        
+
         // Update CMOS checksum
         self.update_checksum();
     }
@@ -144,7 +144,7 @@ impl BxCmosC {
         self.address = 0;
         self.nmi_mask = false;
         self.irq8_pending = false;
-        
+
         // Clear interrupt flags
         self.ram[REG_STAT_C as usize] = 0x00;
     }
@@ -152,7 +152,7 @@ impl BxCmosC {
     /// Set the current time
     pub fn set_time(&mut self, sec: u8, min: u8, hour: u8, day: u8, month: u8, year: u8) {
         let is_binary = (self.ram[REG_STAT_B as usize] & 0x04) != 0;
-        
+
         self.ram[REG_SEC as usize] = bin_to_bcd(sec, is_binary);
         self.ram[REG_MIN as usize] = bin_to_bcd(min, is_binary);
         self.ram[REG_HOUR as usize] = bin_to_bcd(hour, is_binary);
@@ -220,7 +220,7 @@ impl BxCmosC {
             CMOS_DATA => {
                 let addr = (self.address & 0x7F) as usize;
                 tracing::trace!("CMOS: Write [{:#04x}] = {:#04x}", addr, value);
-                
+
                 match addr as u8 {
                     REG_STAT_A => {
                         // Bits 0-6 are writable, bit 7 (UIP) is read-only
@@ -245,7 +245,11 @@ impl BxCmosC {
                 }
             }
             _ => {
-                tracing::warn!("CMOS: Unknown write port {:#06x} value={:#04x}", port, value);
+                tracing::warn!(
+                    "CMOS: Unknown write port {:#06x} value={:#04x}",
+                    port,
+                    value
+                );
             }
         }
     }
@@ -255,13 +259,13 @@ impl BxCmosC {
         // Base memory (in KB) - typically 640
         self.ram[0x15] = (base_kb & 0xFF) as u8;
         self.ram[0x16] = ((base_kb >> 8) & 0xFF) as u8;
-        
+
         // Extended memory above 1MB (in KB)
         self.ram[0x17] = (extended_kb & 0xFF) as u8;
         self.ram[0x18] = ((extended_kb >> 8) & 0xFF) as u8;
         self.ram[0x30] = (extended_kb & 0xFF) as u8;
         self.ram[0x31] = ((extended_kb >> 8) & 0xFF) as u8;
-        
+
         self.update_checksum();
     }
 
@@ -325,12 +329,12 @@ mod tests {
     #[test]
     fn test_cmos_address() {
         let mut cmos = BxCmosC::new();
-        
+
         // Write address with NMI mask
         cmos.write(CMOS_ADDR, 0x8A, 1); // Address 0x0A with NMI mask
         assert!(cmos.nmi_mask);
         assert_eq!(cmos.address, 0x0A);
-        
+
         // Read Status A
         let value = cmos.read(CMOS_DATA, 1);
         assert_eq!(value, cmos.ram[REG_STAT_A as usize] as u32);
@@ -339,12 +343,11 @@ mod tests {
     #[test]
     fn test_cmos_memory_config() {
         let mut cmos = BxCmosC::new();
-        
+
         // Set 32MB total memory
         cmos.set_memory_size(640, 31744); // 640KB base + 31MB extended
-        
+
         assert_eq!(cmos.ram[0x15], 0x80); // 640 low byte
         assert_eq!(cmos.ram[0x16], 0x02); // 640 high byte
     }
 }
-

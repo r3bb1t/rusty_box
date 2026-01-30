@@ -27,7 +27,9 @@
       "Bash(fi)",
       "Bash(set RUST_BACKTRACE=full)",
       "Bash(findstr:*)",
-      "Bash(cargo test:*)"
+      "Bash(cargo test:*)",
+      "Bash(wc:*)",
+      "Bash(env:*)"
     ]
   }
 }

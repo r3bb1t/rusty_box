@@ -17,6 +17,7 @@ use super::BxSegregs;
 use super::fetchdecode_opmap::*;
 use super::fetchdecode_opmap_0f38::BxOpcodeTable0F38;
 use super::fetchdecode_opmap_0f3a::BxOpcodeTable0F3A;
+use super::fetchdecode_x87::BX3_DNOW_OPCODE;
 
 // Decoding mask bit offsets (from fetchdecode_generated.rs)
 const OS32_OFFSET: u32 = 22;
@@ -68,6 +69,10 @@ const BX_INSTR_METADATA_SEG: usize = 4;
 const BX_INSTR_METADATA_BASE: usize = 5;
 const BX_INSTR_METADATA_INDEX: usize = 6;
 const BX_INSTR_METADATA_SCALE: usize = 7;
+
+// Register constants for clarity
+const BX_NIL_REGISTER: u8 = 19;
+const BX_NO_INDEX: u8 = 4;
 
 // 16-bit addressing mode base registers
 const RESOLVE16_BASE_REG: [u8; 8] = [
@@ -264,8 +269,9 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
             opcode_map = 3;
             pos += 1;
         } else if b2 == 0x0F {
-            // 3DNow! (0F 0F)
-            opcode_map = 1;
+            // 3DNow! (0F 0F) - use opcode_map = 4 to indicate 3DNow!
+            // The suffix byte will be read AFTER ModRM and displacement
+            opcode_map = 4;
             b1 = 0x10F;
         } else {
             b1 = 0x100 | (b2 as u32);
@@ -324,11 +330,11 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
                         let disp = read_u32_le(bytes, pos);
                         pos += 4;
                         instr.modrm_form.displacement.data32 = disp;
-                        instr.meta_data[BX_INSTR_METADATA_BASE] = 19; // BX_NIL_REGISTER
+                        instr.meta_data[BX_INSTR_METADATA_BASE] = BX_NIL_REGISTER;
                     }
                 } else {
                     instr.meta_data[BX_INSTR_METADATA_BASE] = rm as u8;
-                    instr.meta_data[BX_INSTR_METADATA_INDEX] = 4; // No index
+                    instr.meta_data[BX_INSTR_METADATA_INDEX] = BX_NO_INDEX;
 
                     // [disp32] when mod=0, rm=5
                     if mod_field == 0 && rm == 5 {
@@ -338,7 +344,7 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
                         let disp = read_u32_le(bytes, pos);
                         pos += 4;
                         instr.modrm_form.displacement.data32 = disp;
-                        instr.meta_data[BX_INSTR_METADATA_BASE] = 19; // BX_NIL_REGISTER
+                        instr.meta_data[BX_INSTR_METADATA_BASE] = BX_NIL_REGISTER;
                     }
                 }
 
@@ -404,13 +410,25 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
 
     // Store register fields
     // For ModRM instructions: DST=nnn (reg field), SRC1=rm (r/m field)
+    // EXCEPT for Group opcodes where nnn is the opcode extension, not an operand
     // For non-ModRM instructions: depends on opcode encoding:
     //   - Most opcodes (B0-BF, 50-5F, 40-4F, 90-97): register in bits 0-2 (rm)
     //   - Segment push/pop (06,07,0E,16,17,1E,1F): segment in bits 3-5 (nnn)
     // Bochs uses assign_srcs() with source types (BX_SRC_NNN, BX_SRC_RM) to determine this
     if needs_modrm {
-        instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
-        instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
+        // Group opcodes: C0, C1, D0-D3, F6, F7, FE, FF
+        // For these, nnn field is the opcode extension (which operation), rm is the operand
+        let is_group_opcode = matches!(b1, 0xC0 | 0xC1 | 0xD0 | 0xD1 | 0xD2 | 0xD3 | 0xF6 | 0xF7 | 0xFE | 0xFF);
+
+        if is_group_opcode {
+            // Group opcodes: operand is in rm, opcode extension in nnn
+            instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
+            instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
+        } else {
+            // Normal ModRM: nnn is dest register, rm is source
+            instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
+            instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
+        }
     } else {
         // Check if this is a segment push/pop opcode (uses nnn for segment)
         // 06=PUSH ES, 07=POP ES, 0E=PUSH CS, 16=PUSH SS, 17=POP SS, 1E=PUSH DS, 1F=POP DS
@@ -429,8 +447,19 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
         }
     }
 
-    // === Phase 4: Parse immediate ===
-    let imm_size = get_immediate_size_32(b1, opcode_map, os_32);
+    // === Phase 3.5: Read 3DNow! suffix byte (comes after ModRM/displacement) ===
+    let mut dnow_suffix: u8 = 0;
+    if opcode_map == 4 {
+        // 3DNow! instructions: suffix byte is read AFTER ModRM and displacement
+        if pos >= max_len {
+            return Err(DecodeError::ImmediateBufferUnderflow);
+        }
+        dnow_suffix = bytes[pos];
+        pos += 1;
+    }
+
+    // === Phase 4: Parse immediate and moffs (direct memory offset) ===
+    let imm_size = get_immediate_size_32(b1, opcode_map, os_32, as_32);
 
     if imm_size > 0 {
         if pos + (imm_size as usize) > max_len {
@@ -504,7 +533,12 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
         };
 
     // Look up opcode from tables
-    instr.meta_info.ia_opcode = lookup_opcode_32(b1, opcode_map, decmask, nnn);
+    if opcode_map == 4 {
+        // 3DNow! instruction: use suffix to look up opcode directly
+        instr.meta_info.ia_opcode = BX3_DNOW_OPCODE[dnow_suffix as usize];
+    } else {
+        instr.meta_info.ia_opcode = lookup_opcode_32(b1, opcode_map, decmask, nnn);
+    }
 
     // Check if opcode lookup failed
     if matches!(instr.meta_info.ia_opcode, Opcode::IaError) {
@@ -926,10 +960,24 @@ const fn opcode_needs_modrm_32(b1: u32, map: u8) -> bool {
 }
 
 /// Get immediate size for opcode (32-bit mode)
-const fn get_immediate_size_32(b1: u32, map: u8, os_32: bool) -> u8 {
+/// Also handles moffs (direct memory offset) for opcodes A0-A3
+const fn get_immediate_size_32(b1: u32, map: u8, os_32: bool, as_32: bool) -> u8 {
     if map == 0 {
         let opcode = b1 as u8;
         match opcode {
+            // moffs (direct memory offset) - depends on ADDRESS size, not operand size
+            // A0 = MOV AL, [moffs8]
+            // A1 = MOV AX/EAX, [moffs]
+            // A2 = MOV [moffs8], AL
+            // A3 = MOV [moffs], AX/EAX
+            0xA0 | 0xA1 | 0xA2 | 0xA3 => {
+                if as_32 {
+                    4 // 32-bit address = 4-byte offset
+                } else {
+                    2 // 16-bit address = 2-byte offset
+                }
+            }
+
             // Ib
             0x04
             | 0x0C

@@ -352,6 +352,63 @@ impl BxMemC<'_> {
             return Err(MemoryError::RomTooLarge(rom.len()).into());
         }
         rom[offset..offset + size].copy_from_slice(rom_data);
+
+        // === ROM Content Verification Logging ===
+        tracing::info!(
+            "ROM loaded: type={}, address={:#x}, size={:#x}, offset={:#x}",
+            rom_type, rom_address, size, offset
+        );
+
+        // Log first 16 bytes of ROM
+        let display_size = 16.min(size);
+        tracing::info!(
+            "ROM first 16 bytes at offset {:#x}: {:02X?}",
+            offset,
+            &rom[offset..offset + display_size]
+        );
+
+        // For option ROMs (type > 0), check signature and entry point
+        if rom_type > 0 {
+            if size >= 4 {
+                let signature = u16::from_le_bytes([rom[offset], rom[offset + 1]]);
+                if signature == 0xAA55 {
+                    tracing::info!("✓ Option ROM signature valid (55 AA)");
+
+                    // ROM entry point is at offset +3
+                    let init_size_blocks = rom[offset + 2];
+                    let init_offset = init_size_blocks as usize * 512;
+                    tracing::info!(
+                        "  ROM init size: {} blocks ({} bytes)",
+                        init_size_blocks,
+                        init_offset
+                    );
+
+                    // Calculate entry point address
+                    let entry_point = rom_address + 3;
+                    tracing::info!("  ROM entry point: {:#x}", entry_point);
+                } else {
+                    tracing::warn!(
+                        "⚠ Invalid option ROM signature: {:#04x} (expected 0xAA55)",
+                        signature
+                    );
+                }
+            }
+        }
+
+        // For system BIOS (type 0), verify reset vector
+        if rom_type == 0 && offset + 0x1FFF0 + 5 <= rom.len() {
+            let reset_vec = &rom[offset + 0x1FFF0..offset + 0x1FFF0 + 5];
+            if reset_vec[0] == 0xEA {
+                let target_offset = u16::from_le_bytes([reset_vec[1], reset_vec[2]]);
+                let target_segment = u16::from_le_bytes([reset_vec[3], reset_vec[4]]);
+                tracing::info!(
+                    "✓ BIOS reset vector: JMP FAR {:04X}:{:04X}",
+                    target_segment,
+                    target_offset
+                );
+            }
+        }
+
         Ok(())
     }
 

@@ -212,6 +212,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn mov_rw_iw(&mut self, instr: &BxInstructionGenerated) {
         let dst = instr.meta_data[0] as usize;
         let imm = instr.iw();
+
         self.set_gpr16(dst, imm);
         tracing::trace!("MOV: reg{} = {:#06x}", dst, imm);
     }

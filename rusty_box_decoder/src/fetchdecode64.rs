@@ -17,6 +17,7 @@ use super::BxSegregs;
 use super::fetchdecode_opmap::*;
 use super::fetchdecode_opmap_0f38::BxOpcodeTable0F38;
 use super::fetchdecode_opmap_0f3a::BxOpcodeTable0F3A;
+use super::fetchdecode_x87::BX3_DNOW_OPCODE;
 
 // Metadata array indices
 #[allow(dead_code)]
@@ -31,6 +32,11 @@ const BX_INSTR_METADATA_SEG: usize = 4;
 const BX_INSTR_METADATA_BASE: usize = 5;
 const BX_INSTR_METADATA_INDEX: usize = 6;
 const BX_INSTR_METADATA_SCALE: usize = 7;
+
+// Register constants for clarity
+const BX_NIL_REGISTER: u8 = 19;
+const BX_64BIT_REG_RIP: u8 = 17;
+const BX_NO_INDEX: u8 = 4;
 
 // Decoding mask bit offsets (from fetchdecode_generated.rs)
 const OS64_OFFSET: u32 = 23;
@@ -48,13 +54,22 @@ const fn find_opcode_in_table(table: &[u64], decmask: u32) -> Opcode {
     let mut i = 0;
     while i < table.len() {
         let entry = table[i];
+        // Match C++ exactly: Bit32u(op) & 0xFFFFFF and Bit32u(op >> 24)
         let ignmsk = (entry & 0xFFFFFF) as u32;
-        let opmsk = ((entry >> 24) & 0xFFFFFF) as u32;
+        let opmsk = (entry >> 24) as u32;
 
         if (opmsk & ignmsk) == (decmask & ignmsk) {
             let opcode_raw = ((entry >> 48) & 0x7FFF) as u16;
             return Opcode::from_u16_const(opcode_raw);
         }
+
+        // Check if this is the last opcode (sign bit set) - matches C++ do-while condition
+        // C++: while(Bit64s(op) > 0) means continue while sign bit is NOT set
+        // So we break when sign bit IS set (entry < 0)
+        if (entry as i64) < 0 {
+            break;
+        }
+
         i += 1;
     }
     Opcode::IaError
@@ -231,8 +246,9 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<InstructionGenerated> 
             opcode_map = 3;
             pos += 1;
         } else if b2 == 0x0F {
-            // 3DNow! (0F 0F) - handle specially
-            opcode_map = 1;
+            // 3DNow! (0F 0F) - use opcode_map = 4 to indicate 3DNow!
+            // The suffix byte will be read AFTER ModRM and displacement
+            opcode_map = 4;
             b1 = 0x10F; // 3DNow marker
         } else {
             b1 = 0x100 | (b2 as u32);
@@ -306,11 +322,11 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<InstructionGenerated> 
                     let disp = read_u32_le(bytes, pos);
                     pos += 4;
                     instr.modrm_form.displacement.data32 = disp;
-                    instr.meta_data[BX_INSTR_METADATA_BASE] = 19; // BX_NIL_REGISTER
+                    instr.meta_data[BX_INSTR_METADATA_BASE] = BX_NIL_REGISTER;
                 }
             } else {
                 instr.meta_data[BX_INSTR_METADATA_BASE] = (rm & 0xF) as u8;
-                instr.meta_data[BX_INSTR_METADATA_INDEX] = 4; // No index
+                instr.meta_data[BX_INSTR_METADATA_INDEX] = BX_NO_INDEX;
 
                 // Check for RIP-relative (mod=0, rm=5)
                 if mod_field == 0 && (rm & 0x7) == 5 {
@@ -321,7 +337,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<InstructionGenerated> 
                     let disp = read_u32_le(bytes, pos);
                     pos += 4;
                     instr.modrm_form.displacement.data32 = disp;
-                    instr.meta_data[BX_INSTR_METADATA_BASE] = 17; // BX_64BIT_REG_RIP
+                    instr.meta_data[BX_INSTR_METADATA_BASE] = BX_64BIT_REG_RIP;
                 }
             }
 
@@ -375,6 +391,17 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<InstructionGenerated> 
             instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
             instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
         }
+    }
+
+    // === Phase 3.5: Read 3DNow! suffix byte (comes after ModRM/displacement) ===
+    let mut dnow_suffix: u8 = 0;
+    if opcode_map == 4 {
+        // 3DNow! instructions: suffix byte is read AFTER ModRM and displacement
+        if pos >= max_len {
+            return Err(DecodeError::ImmediateBufferUnderflow);
+        }
+        dnow_suffix = bytes[pos];
+        pos += 1;
     }
 
     // === Phase 4: Parse immediate ===
@@ -433,7 +460,12 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<InstructionGenerated> 
         | if needs_modrm { ((rm & 0x7) << RRR_OFFSET) | ((nnn & 0x7) << NNN_OFFSET) } else { 0 };
 
     // Look up opcode from tables
-    instr.meta_info.ia_opcode = lookup_opcode_64(b1, opcode_map, decmask, nnn);
+    if opcode_map == 4 {
+        // 3DNow! instruction: use suffix to look up opcode directly
+        instr.meta_info.ia_opcode = BX3_DNOW_OPCODE[dnow_suffix as usize];
+    } else {
+        instr.meta_info.ia_opcode = lookup_opcode_64(b1, opcode_map, decmask, nnn);
+    }
 
     // Check if opcode lookup failed
     if matches!(instr.meta_info.ia_opcode, Opcode::IaError) {
@@ -856,10 +888,24 @@ const fn opcode_needs_modrm_64(b1: u32, map: u8) -> bool {
 const fn get_immediate_size_64(b1: u32, map: u8, _sse_prefix: u8, metainfo1: u8) -> u8 {
     let os32 = (metainfo1 & MetaInfoFlags::Os32.bits()) != 0;
     let os64 = (metainfo1 & MetaInfoFlags::Os64.bits()) != 0;
+    let as64 = (metainfo1 & MetaInfoFlags::As64.bits()) != 0;
 
     if map == 0 {
         let opcode = b1 as u8;
         match opcode {
+            // moffs (direct memory offset) - depends on ADDRESS size, not operand size
+            // A0 = MOV AL, [moffs8]
+            // A1 = MOV AX/EAX/RAX, [moffs]
+            // A2 = MOV [moffs8], AL
+            // A3 = MOV [moffs], AX/EAX/RAX
+            0xA0 | 0xA1 | 0xA2 | 0xA3 => {
+                if as64 {
+                    8 // 64-bit address = 8-byte offset
+                } else {
+                    4 // 32-bit address = 4-byte offset (16-bit not used in 64-bit mode)
+                }
+            }
+
             // Ib
             0x04
             | 0x0C

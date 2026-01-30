@@ -1359,8 +1359,29 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
                 self.set_rip(next_rip);
 
-                tracing::trace!("Executing opcode: {:?} at RIP={:#x}, ilen={}, next_rip={:#x}, trace_start_idx={}, instr_idx={}", 
-                    i.get_ia_opcode(), current_rip, ilen, next_rip, trace_start_idx, instr_idx);
+                // Enhanced instruction tracing with CS:IP and instruction bytes
+                let cs_selector = self.sregs[BxSegregs::Cs as usize].selector.value;
+                let ip_16 = (current_rip & 0xFFFF) as u16;
+                let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+                let paddr = cs_base.wrapping_add(current_rip);
+
+                // Read instruction bytes from memory for display
+                let mut instr_bytes = [0u8; 15]; // Max x86 instruction length
+                for idx in 0..ilen.min(15) as usize {
+                    instr_bytes[idx] = self.mem_read_byte(paddr + idx as u64);
+                }
+
+                tracing::trace!(
+                    "Execute: {:04X}:{:04X} (phys={:#x})  {:02X?}  {:?}",
+                    cs_selector,
+                    ip_16,
+                    paddr,
+                    &instr_bytes[..ilen as usize],
+                    i.get_ia_opcode()
+                );
+
+                tracing::trace!("{:#x} Executing opcode: {:?} at RIP={:#x}, ilen={}, next_rip={:#x}, trace_start_idx={}, instr_idx={}",
+                    self.rip(), i.get_ia_opcode(), current_rip, ilen, next_rip, trace_start_idx, instr_idx);
 
                 // Matching C++ line 203: BX_CPU_CALL_METHOD(i->execute1, (i));
                 // might iterate repeat instruction

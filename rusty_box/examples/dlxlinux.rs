@@ -61,6 +61,7 @@ fn run_dlxlinux() -> Result<()> {
     } else {
         tracing::Level::INFO
     };
+    // let log_level = tracing::Level::TRACE; // Enable detailed tracing for debugging
 
     tracing_subscriber::fmt()
         .without_time()
@@ -386,9 +387,10 @@ fn run_dlxlinux() -> Result<()> {
     let start_time = Instant::now();
 
     // Run with instruction limit to allow debugging
-    const MAX_INSTRUCTIONS: u64 = 10_000_000; // 10M instructions - reasonable limit for testing
-                                              // BIOS + VGABIOS can take hundreds of millions of instructions to reach visible VGA output.
-                                              // const MAX_INSTRUCTIONS: u64 = 5_000_000;
+    // const MAX_INSTRUCTIONS: u64 = 10_000_000; // 10M instructions - reasonable limit for testing
+    const MAX_INSTRUCTIONS: u64 = 1_000_000; // 1M - enough to see if BIOS progresses past the stack issue
+                                             // BIOS + VGABIOS can take hundreds of millions of instructions to reach visible VGA output.
+                                             // const MAX_INSTRUCTIONS: u64 = 5_000_000;
 
     // Use interactive loop that handles GUI events
     let result = emu.run_interactive(MAX_INSTRUCTIONS);

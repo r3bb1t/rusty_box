@@ -123,13 +123,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn shl_ew_ib(&mut self, instr: &BxInstructionGenerated) {
         let count = (instr.ib() & 0x1F) as u32;
         if count == 0 { return; }
-        
+
         let dst = instr.meta_data[0] as usize;
         let op1 = self.get_gpr16(dst);
-        
+
         let result = if count >= 16 { 0 } else { op1 << count };
         self.set_gpr16(dst, result);
-        
+
         let cf = if count >= 16 { false } else { ((op1 << (count - 1)) & 0x8000) != 0 };
         let of = if count == 1 { ((result ^ op1) & 0x8000) != 0 } else { false };
         self.update_flags_shl16(result, cf, of);
@@ -171,13 +171,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn shl_ed_ib(&mut self, instr: &BxInstructionGenerated) {
         let count = (instr.ib() & 0x1F) as u32;
         if count == 0 { return; }
-        
+
         let dst = instr.meta_data[0] as usize;
         let op1 = self.get_gpr32(dst);
-        
+
         let result = op1 << count;
         self.set_gpr32(dst, result);
-        
+
         let cf = ((op1 << (count - 1)) & 0x80000000) != 0;
         let of = if count == 1 { ((result ^ op1) & 0x80000000) != 0 } else { false };
         self.update_flags_shl32(result, cf, of);
