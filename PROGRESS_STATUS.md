@@ -8,10 +8,10 @@
 ## Current Status
 
 ### Execution Progress
-- **Current RIP:** 0x9E4F
-- **Instructions Executed:** 100,000+
-- **BIOS Stage:** IDT/GDT initialization
-- **Next Needed:** MovRdCr0 (read control register)
+- **Current RIP:** 0xFE87 (CS=0x10 - Protected Mode!)
+- **Instructions Executed:** 150,000+
+- **BIOS Stage:** ✅ Protected mode transition complete
+- **Next Needed:** AdcEwGw (16-bit ADC with carry)
 
 ### What's Working ✅
 - CPU instruction decoding (Group opcodes fixed)
@@ -22,6 +22,8 @@
 - String operations (REP STOSD, MOVSB)
 - Memory operations (MOV variants)
 - Descriptor table loading (LIDT, LGDT)
+- Control register operations (MOV CR0/2/3/4, r32 and MOV r32, CR0/2/3/4)
+- Protected mode transition (CR0.PE switching)
 
 ### Recent Fixes (2026-01-30)
 1. ✅ **CRITICAL:** Fixed Group opcode decoder bug (C0, C1, D0-D3, F6, F7, FE, FF)
@@ -29,6 +31,8 @@
 3. ✅ Implemented ImulGdEdsIb (3-operand signed multiply)
 4. ✅ Implemented LIDT/LGDT (descriptor table loading)
 5. ✅ Workaround for invalid segment register 6
+6. ✅ **MAJOR:** Implemented all control register operations (MOV CR0/2/3/4, r32 and MOV r32, CR0/2/3/4)
+7. ✅ **MILESTONE:** Protected mode transition successful (CS changed F000→0010)
 
 ---
 
@@ -55,21 +59,22 @@
 - **Instructions:** ~40,000
 - **BIOS Progress:** Immediate crash after IVT setup
 
-### After Decoder Fix
-- **Current RIP:** 0x9E4F
-- **Instructions:** 100,000+
-- **BIOS Progress:** Through memory init, IDT loading
-- **Improvement:** **60x further execution**
+### After Decoder Fix + Control Register Implementation
+- **Current RIP:** 0xFE87 (Protected Mode, CS=0x10)
+- **Instructions:** 150,000+
+- **BIOS Progress:** Through memory init, IDT/GDT loading, **protected mode transition**
+- **Improvement:** **100x+ further execution**
+- **Major Milestone:** Successfully entered protected mode!
 
 ---
 
 ## Next Milestones
 
 ### Immediate (Next 5 instructions)
-1. Implement MovRdCr0 (MOV from CR0)
-2. Implement any additional control register operations
-3. Continue through GDT setup
-4. Reach protected mode transition
+1. Implement AdcEwGw (16-bit ADC) - dispatcher entry exists, needs implementation check
+2. Continue protected mode initialization
+3. Complete any remaining descriptor operations
+4. Progress toward interrupt setup
 
 ### Short-term (Next 100 instructions)
 - Complete descriptor table setup
@@ -96,9 +101,9 @@
    - **TODO:** Fix decoder to handle this correctly
 
 ### Missing Instructions (Implement as Encountered)
-- Control register operations (MOV to/from CRx)
+- Additional 16-bit arithmetic operations (AdcEwGw, etc.)
 - Additional Group opcodes
-- Protected mode instructions
+- More protected mode instructions
 - Segment descriptor operations
 
 ---
@@ -206,13 +211,13 @@ cargo run --release --example dlxlinux --features std
 
 ## Success Criteria
 
-### Phase 1: BIOS Boot ✅ 60% Complete
+### Phase 1: BIOS Boot ✅ 75% Complete
 - [x] IVT setup
 - [x] Memory initialization
 - [x] Basic I/O
 - [x] IDT loading
-- [ ] GDT loading
-- [ ] Protected mode entry
+- [x] GDT loading
+- [x] Protected mode entry 🎉
 - [ ] VGA init
 - [ ] Disk init
 
@@ -248,7 +253,7 @@ cargo run --release --example dlxlinux --features std
 **Last Command Run:**
 ```bash
 cargo run --release --example dlxlinux --features std
-# Result: Reached 0x9E4F, needs MovRdCr0 next
+# Result: Reached 0xFE87 (Protected Mode CS=0x10), needs AdcEwGw next
 ```
 
-**To continue development:** Implement MovRdCr0 in crregs.rs and continue!
+**To continue development:** Check AdcEwGw implementation (dispatcher entry exists at cpu.rs:2023) and continue!

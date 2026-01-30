@@ -73,4 +73,152 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("LGDT: base={:#010x}, limit={:#06x}", base, limit);
         Ok(())
     }
+
+    // =========================================================================
+    // MOV Rd, CRn - Control Register Read Operations
+    // =========================================================================
+
+    /// MOV r32, CR0 - Read CR0 into register
+    pub fn mov_rd_cr0(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
+        // TODO: Add CPL check (CPL must be 0)
+        // For now, BIOS is always in ring 0 so this is safe
+
+        // Read CR0 value
+        let val_32 = self.cr0.get32();
+
+        // Write to destination register
+        let dst = instr.dst() as usize;
+        self.set_gpr32(dst, val_32);
+
+        tracing::trace!("MOV r32, CR0: {:#010x}", val_32);
+        Ok(())
+    }
+
+    /// MOV r32, CR2 - Read CR2 into register (page fault linear address)
+    pub fn mov_rd_cr2(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
+        // TODO: Add CPL check (CPL must be 0)
+        // For now, BIOS is always in ring 0 so this is safe
+
+        // Read CR2 value
+        let val_32 = self.cr2 as u32;
+
+        // Write to destination register
+        let dst = instr.dst() as usize;
+        self.set_gpr32(dst, val_32);
+
+        tracing::trace!("MOV r32, CR2: {:#010x}", val_32);
+        Ok(())
+    }
+
+    /// MOV r32, CR3 - Read CR3 into register (page directory base)
+    pub fn mov_rd_cr3(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
+        // TODO: Add CPL check (CPL must be 0)
+        // For now, BIOS is always in ring 0 so this is safe
+
+        // Read CR3 value
+        let val_32 = self.cr3 as u32;
+
+        // Write to destination register
+        let dst = instr.dst() as usize;
+        self.set_gpr32(dst, val_32);
+
+        tracing::trace!("MOV r32, CR3: {:#010x}", val_32);
+        Ok(())
+    }
+
+    /// MOV r32, CR4 - Read CR4 into register
+    pub fn mov_rd_cr4(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
+        // TODO: Add CPL check (CPL must be 0)
+        // For now, BIOS is always in ring 0 so this is safe
+
+        // Read CR4 value
+        let val_32 = self.cr4.get32();
+
+        // Write to destination register
+        let dst = instr.dst() as usize;
+        self.set_gpr32(dst, val_32);
+
+        tracing::trace!("MOV r32, CR4: {:#010x}", val_32);
+        Ok(())
+    }
+
+    // =========================================================================
+    // MOV CRn, Rd - Control Register Write Operations
+    // =========================================================================
+
+    /// MOV CR0, r32 - Write to CR0
+    pub fn mov_cr0_rd(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
+        // TODO: Add CPL check (CPL must be 0)
+        // For now, BIOS is always in ring 0 so this is safe
+
+        // Invalidate prefetch queue
+        self.eip_fetch_ptr = None;
+        self.eip_page_window_size = 0;
+
+        let src = instr.src1() as usize;
+        let val_32 = self.get_gpr32(src);
+
+        // Set CR0 (bit 4 is hardwired to 1)
+        self.cr0.set32(val_32);
+
+        // Update CPU mode based on CR0.PE
+        if self.cr0.pe() {
+            self.cpu_mode = super::cpu::CpuMode::Ia32Protected;
+        } else {
+            self.cpu_mode = super::cpu::CpuMode::Ia32Real;
+        }
+
+        tracing::trace!("MOV CR0, r32: {:#010x} (PE={})", val_32, self.cr0.pe());
+        Ok(())
+    }
+
+    /// MOV CR2, r32 - Write to CR2 (page fault linear address)
+    pub fn mov_cr2_rd(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
+        // TODO: Add CPL check (CPL must be 0)
+        // For now, BIOS is always in ring 0 so this is safe
+
+        let src = instr.src1() as usize;
+        let val_32 = self.get_gpr32(src);
+        self.cr2 = val_32 as u64;
+
+        tracing::trace!("MOV CR2, r32: {:#010x}", val_32);
+        Ok(())
+    }
+
+    /// MOV CR3, r32 - Write to CR3 (page directory base)
+    pub fn mov_cr3_rd(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
+        // TODO: Add CPL check (CPL must be 0)
+        // For now, BIOS is always in ring 0 so this is safe
+
+        // Invalidate prefetch queue
+        self.eip_fetch_ptr = None;
+        self.eip_page_window_size = 0;
+
+        let src = instr.src1() as usize;
+        let val_32 = self.get_gpr32(src);
+        self.cr3 = val_32 as u64;
+
+        // Invalidate TLB
+        // TODO: Implement TLB invalidation
+
+        tracing::trace!("MOV CR3, r32: {:#010x}", val_32);
+        Ok(())
+    }
+
+    /// MOV CR4, r32 - Write to CR4
+    pub fn mov_cr4_rd(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
+        // TODO: Add CPL check (CPL must be 0)
+        // For now, BIOS is always in ring 0 so this is safe
+
+        // Invalidate prefetch queue
+        self.eip_fetch_ptr = None;
+        self.eip_page_window_size = 0;
+
+        let src = instr.src1() as usize;
+        let val_32 = self.get_gpr32(src);
+        self.cr4.set32(val_32);
+
+        tracing::trace!("MOV CR4, r32: {:#010x}", val_32);
+        Ok(())
+    }
 }

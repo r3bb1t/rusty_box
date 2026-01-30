@@ -2293,6 +2293,47 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.lgdt_ms(instr)?;
                 Ok(())
             }
+
+            // =========================================================================
+            // Control Register Read Operations (MOV r32, CRx)
+            // =========================================================================
+            Opcode::MovRdCr0 => {
+                self.mov_rd_cr0(instr)?;
+                Ok(())
+            }
+            Opcode::MovRdCr2 => {
+                self.mov_rd_cr2(instr)?;
+                Ok(())
+            }
+            Opcode::MovRdCr3 => {
+                self.mov_rd_cr3(instr)?;
+                Ok(())
+            }
+            Opcode::MovRdCr4 => {
+                self.mov_rd_cr4(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // Control Register Write Operations (MOV CRx, r32)
+            // =========================================================================
+            Opcode::MovCr0rd => {
+                self.mov_cr0_rd(instr)?;
+                Ok(())
+            }
+            Opcode::MovCr2rd => {
+                self.mov_cr2_rd(instr)?;
+                Ok(())
+            }
+            Opcode::MovCr3rd => {
+                self.mov_cr3_rd(instr)?;
+                Ok(())
+            }
+            Opcode::MovCr4rd => {
+                self.mov_cr4_rd(instr)?;
+                Ok(())
+            }
+
             Opcode::Cld => {
                 // Clear Direction Flag
                 self.eflags &= !(1 << 10); // DF is bit 10
