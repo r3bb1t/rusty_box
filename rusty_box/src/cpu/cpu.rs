@@ -2285,6 +2285,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 tracing::debug!("STI: Interrupts enabled");
                 Ok(())
             }
+            Opcode::LidtMs => {
+                self.lidt_ms(instr)?;
+                Ok(())
+            }
+            Opcode::LgdtMs => {
+                self.lgdt_ms(instr)?;
+                Ok(())
+            }
             Opcode::Cld => {
                 // Clear Direction Flag
                 self.eflags &= !(1 << 10); // DF is bit 10
@@ -3052,6 +3060,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 }
                 Ok(())
             }
+            Opcode::ImulGdEdsIb => {
+                self.imul_gd_ed_ib(instr)?;
+                Ok(())
+            }
             Opcode::DivEaxed => {
                 if instr.mod_c0() {
                     // Register form
@@ -3350,6 +3362,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::ShrEb => {
                 self.shr_eb_cl(instr);
+                Ok(())
+            }
+            Opcode::ShrEbIb => {
+                self.shr_eb_ib(instr);
                 Ok(())
             }
             Opcode::ShrEwI1 => {

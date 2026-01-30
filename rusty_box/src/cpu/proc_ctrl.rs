@@ -45,4 +45,32 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // will return newval
         self.tsc_adjust = newval.wrapping_sub(system_ticks) as i64
     }
+
+    /// LIDT - Load Interrupt Descriptor Table Register
+    /// Loads IDTR from a 6-byte memory operand (2-byte limit, 4-byte base)
+    pub fn lidt_ms(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
+        use super::decoder::BxSegregs;
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr32(instr);
+        let limit = self.read_virtual_word(seg, eaddr);
+        let base = self.read_virtual_dword(seg, eaddr.wrapping_add(2)) as u64;
+        self.idtr.base = base;
+        self.idtr.limit = limit;
+        tracing::trace!("LIDT: base={:#010x}, limit={:#06x}", base, limit);
+        Ok(())
+    }
+
+    /// LGDT - Load Global Descriptor Table Register
+    /// Loads GDTR from a 6-byte memory operand (2-byte limit, 4-byte base)
+    pub fn lgdt_ms(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
+        use super::decoder::BxSegregs;
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr32(instr);
+        let limit = self.read_virtual_word(seg, eaddr);
+        let base = self.read_virtual_dword(seg, eaddr.wrapping_add(2)) as u64;
+        self.gdtr.base = base;
+        self.gdtr.limit = limit;
+        tracing::trace!("LGDT: base={:#010x}, limit={:#06x}", base, limit);
+        Ok(())
+    }
 }

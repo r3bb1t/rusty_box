@@ -203,13 +203,29 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn shr_eb_cl(&mut self, instr: &BxInstructionGenerated) {
         let count = self.cl() & 0x1F;
         if count == 0 { return; }
-        
+
         let dst = instr.meta_data[0] as usize;
         let op1 = self.get_gpr8(dst);
-        
+
         let result = if count >= 8 { 0 } else { op1 >> count };
         self.set_gpr8(dst, result);
-        
+
+        let cf = if count >= 8 { false } else { ((op1 >> (count - 1)) & 0x01) != 0 };
+        let of = if count == 1 { (op1 & 0x80) != 0 } else { false };
+        self.update_flags_shr8(result, cf, of);
+    }
+
+    /// SHR r/m8, imm8
+    pub fn shr_eb_ib(&mut self, instr: &BxInstructionGenerated) {
+        let count = instr.ib() & 0x1F;
+        if count == 0 { return; }
+
+        let dst = instr.meta_data[0] as usize;
+        let op1 = self.get_gpr8(dst);
+
+        let result = if count >= 8 { 0 } else { op1 >> count };
+        self.set_gpr8(dst, result);
+
         let cf = if count >= 8 { false } else { ((op1 >> (count - 1)) & 0x01) != 0 };
         let of = if count == 1 { (op1 & 0x80) != 0 } else { false };
         self.update_flags_shr8(result, cf, of);

@@ -263,6 +263,40 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
+    /// IMUL Gd, Ed, Ib - Three-operand signed multiply with 8-bit immediate
+    /// dst = src * sign_extend(imm8)
+    /// Opcode: 6B /r ib
+    pub fn imul_gd_ed_ib(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        let dst_reg = instr.dst() as usize;
+        let src_reg = instr.src() as usize;
+
+        // Get source operand (32-bit)
+        let op1 = self.get_gpr32(src_reg) as i32;
+
+        // Get immediate operand (8-bit, sign-extended to 32-bit)
+        let imm8 = instr.ib() as i8;
+        let op2 = imm8 as i32;
+
+        // Perform signed multiplication
+        let product_64 = (op1 as i64) * (op2 as i64);
+        let result_32 = product_64 as i32;
+
+        // Store result in destination register
+        self.set_gpr32(dst_reg, result_32 as u32);
+
+        // Set CF and OF if result doesn't fit in signed 32-bit
+        // (i.e., if sign-extension of result doesn't equal the full 64-bit product)
+        if product_64 != (result_32 as i64) {
+            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+        } else {
+            self.eflags &= !((1 << 0) | (1 << 11)); // CF=0, OF=0
+        }
+
+        tracing::trace!("IMUL32: reg{} ({:#010x}) * imm8 ({:#04x}) = reg{} ({:#010x})",
+            src_reg, op1 as u32, imm8 as u8, dst_reg, result_32 as u32);
+        Ok(())
+    }
+
     // =========================================================================
     // Helper functions
     // =========================================================================

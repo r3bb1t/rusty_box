@@ -98,8 +98,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn mov_ew_sw(&mut self, instr: &BxInstructionGenerated) {
         let dst = instr.meta_data[0] as usize;
         let src_seg = instr.meta_data[1] as usize;
-        
-        let seg_val = self.sregs[src_seg].selector.value;
+
+        // Workaround: segment register 6 is invalid, treat as DS (3)
+        // This is a decoder bug - opcode 8C with reg=6 is undefined in x86
+        // TODO: Fix the decoder to not generate MovEwSw for reg=6
+        let actual_seg = if src_seg == 6 {
+            tracing::warn!("Invalid segment register 6 in MOV Ew,Sw - using DS as workaround");
+            3 // DS
+        } else if src_seg == 7 {
+            3 // Null -> DS
+        } else {
+            src_seg
+        };
+
+        let seg_val = self.sregs[actual_seg].selector.value;
         self.set_gpr16(dst, seg_val);
         tracing::trace!("MOV: reg{} = seg{} ({:#06x})", dst, src_seg, seg_val);
     }
