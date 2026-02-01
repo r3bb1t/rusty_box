@@ -627,16 +627,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Far jump 16-bit (matching C++ jmp_far16)
     /// Called by JMP16_Ap and JMP16_Ep
-    fn jmp_far16(&mut self, instr: &BxInstructionGenerated, cs_raw: u16, disp16: u16) -> Result<()> {
+    pub(super) fn jmp_far16(&mut self, instr: &BxInstructionGenerated, cs_raw: u16, disp16: u16) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
-        if !self.real_mode() {
-            // TODO: Implement jump_protected for protected mode
-            return Err(CpuError::UnimplementedOpcode {
-                opcode: "jmp_far16 protected mode".to_string(),
-            });
+        let is_real_mode = self.real_mode();
+        tracing::info!("jmp_far16: cs={:#06x}, disp={:#06x}, real_mode={}, cpu_mode={:?}",
+                      cs_raw, disp16, is_real_mode, self.cpu_mode);
+
+        if !is_real_mode {
+            // Protected mode - use jump_protected
+            tracing::info!("Calling jump_protected");
+            self.jump_protected(cs_raw, disp16 as u64)?;
         } else {
             // Real mode
             let limit = self.get_segment_limit(BxSegregs::Cs);

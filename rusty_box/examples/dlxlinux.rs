@@ -59,7 +59,7 @@ fn run_dlxlinux() -> Result<()> {
     let log_level = if bios_quiet_mode {
         tracing::Level::WARN // Suppress INFO logs when viewing BIOS output
     } else {
-        tracing::Level::INFO
+        tracing::Level::TRACE
     };
     // let log_level = tracing::Level::TRACE; // Enable detailed tracing for debugging
 

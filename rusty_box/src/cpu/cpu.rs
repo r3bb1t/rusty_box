@@ -2251,25 +2251,22 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             // FAR JMP - Jump to absolute address with segment change
             Opcode::JmpfAp => {
-                // For JMP FAR Ap, offset is in Iw() and segment is in Iw2()
-                // Matching Bochs: i->Iw() for offset, i->Iw2() for segment
-                let offset = instr.iw();
+                // For JMP FAR Ap, offset size depends on operand size (os32)
+                // In 16-bit mode: offset is Iw (16-bit), in 32-bit mode: offset is Id (32-bit)
+                // Segment selector is always Iw2 (16-bit)
                 let segment = instr.iw2();
-                tracing::info!("FAR JMP to {:04x}:{:04x}", segment, offset);
 
-                // In real mode, just update CS and EIP
-                // CS.base = segment << 4
-                let cs_index = BxSegregs::Cs as usize;
-                parse_selector(segment, &mut self.sregs[cs_index].selector);
-                self.sregs[cs_index].cache.u.segment.base = ((segment as u32) << 4) as u64;
-                self.set_rip(offset as u64);
-
-                // Matching C++ jmp_far16: invalidate_prefetch_q() and BX_TRACE_END
-                // Invalidate prefetch since we jumped
-                self.eip_fetch_ptr = None;
-                self.eip_page_window_size = 0;
-                // Set STOP_TRACE flag to break trace loop (matching BX_TRACE_END)
-                self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
+                if instr.os32_l() != 0 {
+                    // 32-bit operand size: offset is Id (32-bit)
+                    let offset32 = instr.id();
+                    tracing::info!("FAR JMP to {:04x}:{:08x}", segment, offset32);
+                    self.jmp_far32(instr, segment, offset32)?;
+                } else {
+                    // 16-bit operand size: offset is Iw (16-bit)
+                    let offset16 = instr.iw();
+                    tracing::info!("FAR JMP to {:04x}:{:04x}", segment, offset16);
+                    self.jmp_far16(instr, segment, offset16)?;
+                }
                 Ok(())
             }
             // Flag manipulation instructions

@@ -86,3 +86,35 @@ pub fn SUB_EAX_Id<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
     cpu.set_eax(result);
     cpu.update_flags_sub32(eax, imm, result);
 }
+
+/// ADC_EdGd_R: ADC r/m32, r32 (register form)
+/// Original: bochs/cpu/arith32.cc ADC_EdGd (register case)
+/// Opcode: 0x11, ModRM: r/m32, r32 (register)
+pub fn ADC_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let dst_idx = instr.meta_data[0] as usize;
+    let src_idx = instr.meta_data[1] as usize;
+
+    let op1_32 = cpu.get_gpr32(dst_idx);
+    let op2_32 = cpu.get_gpr32(src_idx);
+    let cf = cpu.get_cf() as u32;
+    let sum_32 = op1_32.wrapping_add(op2_32).wrapping_add(cf);
+
+    cpu.set_gpr32(dst_idx, sum_32);
+    cpu.update_flags_add32(op1_32, op2_32, sum_32);
+}
+
+/// ADC_GdEd_R: ADC r32, r/m32 (register form)
+/// Original: bochs/cpu/arith32.cc ADC_GdEd (register case)
+/// Opcode: 0x13, ModRM: r32, r/m32 (register)
+pub fn ADC_GdEd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let dst_idx = instr.meta_data[0] as usize;
+    let src_idx = instr.meta_data[1] as usize;
+
+    let op1_32 = cpu.get_gpr32(dst_idx);
+    let op2_32 = cpu.get_gpr32(src_idx);
+    let cf = cpu.get_cf() as u32;
+    let sum_32 = op1_32.wrapping_add(op2_32).wrapping_add(cf);
+
+    cpu.set_gpr32(dst_idx, sum_32);
+    cpu.update_flags_add32(op1_32, op2_32, sum_32);
+}

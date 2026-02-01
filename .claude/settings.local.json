@@ -29,7 +29,10 @@
       "Bash(findstr:*)",
       "Bash(cargo test:*)",
       "Bash(wc:*)",
-      "Bash(env:*)"
+      "Bash(env:*)",
+      "Bash(tee:*)",
+      "Bash(cargo clean:*)",
+      "Bash(objdump:*)"
     ]
   }
 }

@@ -367,4 +367,177 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         self.mem_write_dword(laddr, data);
         Ok(())
     }
+
+    /// Check code segment descriptor validity
+    /// Based on BX_CPU_C::check_cs in ctrl_xfer_pro.cc:29
+    pub(super) fn check_cs(
+        &self,
+        descriptor: &BxDescriptor,
+        cs_raw: u16,
+        check_rpl: u8,
+        check_cpl: u8,
+    ) -> Result<()> {
+        use super::descriptor::{is_code_segment_non_conforming, is_data_segment};
+
+        // Descriptor must be valid and a code segment
+        if descriptor.valid == 0 || !descriptor.segment || is_data_segment(descriptor.r#type) {
+            tracing::error!("check_cs({:#06x}): not a valid code segment!", cs_raw);
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+            });
+        }
+
+        // Non-conforming code segment: DPL must = CPL
+        if is_code_segment_non_conforming(descriptor.r#type) {
+            if descriptor.dpl != check_cpl {
+                tracing::error!(
+                    "check_cs({:#06x}): non-conforming code seg descriptor dpl != cpl, dpl={}, cpl={}",
+                    cs_raw, descriptor.dpl, check_cpl
+                );
+                return Err(super::error::CpuError::BadVector {
+                    vector: Exception::Gp,
+                });
+            }
+
+            // RPL must be <= CPL
+            if check_rpl > check_cpl {
+                tracing::error!(
+                    "check_cs({:#06x}): non-conforming code seg selector rpl > cpl, rpl={}, cpl={}",
+                    cs_raw, check_rpl, check_cpl
+                );
+                return Err(super::error::CpuError::BadVector {
+                    vector: Exception::Gp,
+                });
+            }
+        } else {
+            // Conforming code segment: DPL must be <= CPL
+            if descriptor.dpl > check_cpl {
+                tracing::error!(
+                    "check_cs({:#06x}): conforming code seg descriptor dpl > cpl, dpl={}, cpl={}",
+                    cs_raw, descriptor.dpl, check_cpl
+                );
+                return Err(super::error::CpuError::BadVector {
+                    vector: Exception::Gp,
+                });
+            }
+        }
+
+        // Code segment must be present
+        if !descriptor.p {
+            tracing::error!("check_cs({:#06x}): code segment not present!", cs_raw);
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Np,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Load CS segment register
+    /// Based on BX_CPU_C::load_cs in ctrl_xfer_pro.cc:80
+    pub(super) fn load_cs(
+        &mut self,
+        selector: &mut BxSelector,
+        descriptor: &mut BxDescriptor,
+        cpl: u8,
+    ) -> Result<()> {
+        // Add cpl to the selector value
+        selector.value = (selector.value & 0xFFFC) | cpl as u16;
+        selector.rpl = cpl;
+
+        // Touch segment (set accessed bit)
+        self.touch_segment(selector, descriptor)?;
+
+        // Update CS segment register
+        self.sregs[BxSegregs::Cs as usize].selector = selector.clone();
+        self.sregs[BxSegregs::Cs as usize].cache = descriptor.clone();
+        self.sregs[BxSegregs::Cs as usize].cache.valid = super::descriptor::SEG_VALID_CACHE;
+
+        // Invalidate prefetch queue
+        self.eip_fetch_ptr = None;
+        self.eip_page_window_size = 0;
+
+        Ok(())
+    }
+
+    /// Branch to far code segment
+    /// Based on BX_CPU_C::branch_far in ctrl_xfer_pro.cc:115
+    pub(super) fn branch_far(
+        &mut self,
+        selector: &mut BxSelector,
+        descriptor: &mut BxDescriptor,
+        rip: u64,
+        cpl: u8,
+    ) -> Result<()> {
+        // Mask RIP to 32 bits for legacy mode
+        let rip = rip & 0xFFFFFFFF;
+
+        // Check RIP is within segment limit
+        let limit = unsafe { descriptor.u.segment.limit_scaled };
+        if rip as u32 > limit {
+            tracing::error!("branch_far: RIP {:#010x} > limit {:#010x}", rip, limit);
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+            });
+        }
+
+        // Load CS with new descriptor
+        self.load_cs(selector, descriptor, cpl)?;
+
+        // Update RIP
+        self.set_rip(rip);
+
+        Ok(())
+    }
+
+    /// Jump to protected mode code segment
+    /// Based on BX_CPU_C::jump_protected in jmp_far.cc:30
+    pub(super) fn jump_protected(
+        &mut self,
+        cs_raw: u16,
+        disp: u64,
+    ) -> Result<()> {
+        tracing::info!("jump_protected: cs={:#06x}, disp={:#010x}", cs_raw, disp);
+
+        // Selector must not be null
+        if (cs_raw & 0xFFFC) == 0 {
+            tracing::error!("jump_protected: cs == 0");
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+            });
+        }
+
+        // Parse selector
+        let mut selector = BxSelector::default();
+        parse_selector(cs_raw, &mut selector);
+
+        tracing::info!("jump_protected: selector index={}, ti={}, rpl={}",
+                      selector.index, selector.ti, selector.rpl);
+
+        // Fetch descriptor from GDT/LDT
+        let (dword1, dword2) = self.fetch_raw_descriptor(&selector)?;
+        let mut descriptor = self.parse_descriptor(dword1, dword2)?;
+
+        tracing::info!("jump_protected: descriptor segment={}, type={:#x}, dpl={}, p={}, base={:#010x}, limit={:#010x}",
+                      descriptor.segment, descriptor.r#type, descriptor.dpl, descriptor.p,
+                      unsafe { descriptor.u.segment.base }, unsafe { descriptor.u.segment.limit_scaled });
+
+        if descriptor.segment {
+            // Code segment descriptor
+            let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+            self.check_cs(&descriptor, cs_raw, selector.rpl, cpl)?;
+            self.branch_far(&mut selector, &mut descriptor, disp, cpl)?;
+            Ok(())
+        } else {
+            // System descriptor (call gate, task gate, TSS)
+            // For now, return error - these are complex and rarely used during BIOS boot
+            tracing::error!(
+                "jump_protected: system descriptor type {:#x} not yet implemented",
+                descriptor.r#type
+            );
+            Err(super::error::CpuError::UnimplementedOpcode {
+                opcode: format!("jump_protected with system descriptor type {:#x}", descriptor.r#type),
+            })
+        }
+    }
 }

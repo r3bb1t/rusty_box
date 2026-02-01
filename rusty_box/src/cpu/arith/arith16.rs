@@ -179,3 +179,79 @@ pub fn ADD_EwIw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruct
         ADD_EwIwM(cpu, instr)
     }
 }
+
+/// ADC_EwGwM: ADC r/m16, r16 (memory form)
+/// Original: bochs/cpu/arith16.cc lines 86-99
+/// Opcode: 0x11, ModRM: r/m16, r16 (memory)
+pub fn ADC_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    // Resolve address manually (same logic as other memory operations)
+    let base_reg = instr.sib_base() as usize;
+    let mut eaddr = if base_reg < 16 {
+        cpu.get_gpr32(base_reg)
+    } else {
+        0
+    };
+
+    eaddr = eaddr.wrapping_add(instr.displ32s() as u32);
+
+    let index_reg = instr.sib_index();
+    if index_reg != 4 {  // 4 means no index
+        let index_val = if index_reg < 16 {
+            cpu.get_gpr32(index_reg as usize)
+        } else {
+            0
+        };
+        let scale = instr.sib_scale();
+        eaddr = eaddr.wrapping_add(index_val << scale);
+    }
+
+    // Apply address size mask
+    let eaddr = if instr.as32_l() == 0 {
+        // 16-bit address size
+        eaddr & 0xFFFF
+    } else {
+        // 32-bit address size
+        eaddr
+    };
+
+    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let op1_16 = cpu.read_virtual_word_arith16(seg, eaddr);
+    let op2_16 = cpu.get_gpr16(instr.src1() as usize);
+    let cf = cpu.get_cf() as u16;
+    let sum_16 = op1_16.wrapping_add(op2_16).wrapping_add(cf);
+
+    // Write result back to memory
+    let laddr = cpu.get_laddr32_seg_arith16(seg, eaddr);
+    cpu.mem_write_word(laddr as u64, sum_16);
+
+    cpu.update_flags_add16(op1_16, op2_16, sum_16);
+
+    Ok(())
+}
+
+/// ADC_EwGwR: ADC r16, r16 (register form)
+/// Based on the pattern of ADC where destination is Ew (r/m16) and source is Gw (r16)
+/// When both operands are registers, this is functionally the same as ADC r16, r16
+pub fn ADC_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    let op1_16 = cpu.get_gpr16(instr.dst() as usize);
+    let op2_16 = cpu.get_gpr16(instr.src1() as usize);
+    let cf = cpu.get_cf() as u16;
+    let sum_16 = op1_16.wrapping_add(op2_16).wrapping_add(cf);
+
+    cpu.set_gpr16(instr.dst() as usize, sum_16);
+    cpu.update_flags_add16(op1_16, op2_16, sum_16);
+
+    Ok(())
+}
+
+/// ADC_EwGw: ADC r/m16, r16
+/// Dispatches to memory or register form based on ModRM
+pub fn ADC_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        // Register form
+        ADC_EwGwR(cpu, instr)
+    } else {
+        // Memory form
+        ADC_EwGwM(cpu, instr)
+    }
+}

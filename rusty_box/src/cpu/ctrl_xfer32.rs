@@ -392,16 +392,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Far jump 32-bit (matching C++ jmp_far32)
     /// Called by JMP32_Ap and JMP32_Ep
-    fn jmp_far32(&mut self, instr: &BxInstructionGenerated, cs_raw: u16, disp32: u32) -> Result<()> {
+    pub(super) fn jmp_far32(&mut self, instr: &BxInstructionGenerated, cs_raw: u16, disp32: u32) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
         if !self.real_mode() {
-            // TODO: Implement jump_protected for protected mode
-            return Err(CpuError::UnimplementedOpcode {
-                opcode: "jmp_far32 protected mode".to_string(),
-            });
+            // Protected mode: use jump_protected
+            tracing::info!("jmp_far32: cs={:#06x}, disp={:#010x}, real_mode={}, cpu_mode={:?}",
+                          cs_raw, disp32, self.real_mode(), self.cpu_mode);
+            tracing::info!("Calling jump_protected");
+            self.jump_protected(cs_raw, disp32 as u64)?;
         } else {
             // Real mode
             let limit = self.get_segment_limit(BxSegregs::Cs);

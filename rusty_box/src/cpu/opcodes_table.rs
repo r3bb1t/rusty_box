@@ -3,12 +3,7 @@
 //! This module defines the opcodes table structure matching the original C++ `BxOpcodesTable`
 //! from `fetchdecode32.cc`. It stores handler function pointers and opflags for each opcode.
 
-use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
-    decoder::BxInstructionGenerated,
-    Result,
-};
+use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::BxInstructionGenerated, Result};
 use bitflags::bitflags;
 
 /// Helper macro to create a type-safe wrapper for a handler function
@@ -53,37 +48,37 @@ bitflags! {
     pub(super) struct OpFlags: u16 {
         /// End of trace marker
         const TRACE_END = 0x01;
-        
+
         /// Instruction supports LOCK prefix
         const LOCKABLE = 0x02;
-        
+
         /// FPU (x87) instruction
         const PREPARE_FPU = 0x04;
-        
+
         /// MMX instruction
         const PREPARE_MMX = 0x08;
-        
+
         /// SSE instruction (requires CPU_LEVEL >= 6)
         const PREPARE_SSE = 0x10;
-        
+
         /// AVX instruction (requires BX_SUPPORT_AVX)
         const PREPARE_AVX = 0x20;
-        
+
         /// Opmask register instruction (requires BX_SUPPORT_EVEX)
         const PREPARE_OPMASK = 0x40;
-        
+
         /// EVEX instruction (requires BX_SUPPORT_EVEX)
         const PREPARE_EVEX = 0x80;
-        
+
         /// EVEX instruction that doesn't support SAE in register form
         const PREPARE_EVEX_NO_SAE = 0x100 | Self::PREPARE_EVEX.bits();
-        
+
         /// EVEX instruction that doesn't support broadcast
         const PREPARE_EVEX_NO_BROADCAST = 0x200 | Self::PREPARE_EVEX.bits();
-        
+
         /// EVEX instruction that ignores vector length
         const EVEX_VL_IGNORE = 0x400 | Self::PREPARE_EVEX.bits();
-        
+
         /// AMX instruction (requires BX_SUPPORT_AMX)
         const PREPARE_AMX = 0x800;
     }
@@ -101,19 +96,19 @@ bitflags! {
     pub(super) struct FetchModeMask: u32 {
         /// FPU/MMX available
         const FETCH_MODE_FPU_MMX_OK = 1 << 2;
-        
+
         /// SSE available (CPU_LEVEL >= 6)
         const FETCH_MODE_SSE_OK = 1 << 3;
-        
+
         /// AVX available (BX_SUPPORT_AVX)
         const FETCH_MODE_AVX_OK = 1 << 4;
-        
+
         /// Opmask available (BX_SUPPORT_EVEX)
         const FETCH_MODE_OPMASK_OK = 1 << 5;
-        
+
         /// EVEX available (BX_SUPPORT_EVEX)
         const FETCH_MODE_EVEX_OK = 1 << 6;
-        
+
         /// AMX available (BX_SUPPORT_AMX)
         const FETCH_MODE_AMX_OK = 1 << 7;
     }
@@ -139,11 +134,11 @@ pub(super) struct BxOpcodeEntry<I: BxCpuIdTrait> {
     /// Handler function for memory form or primary handler
     /// This is a function pointer that will be called with `&mut BxCpuC<I>` and `&BxInstructionGenerated`
     pub(super) execute1: fn(&mut BxCpuC<'_, I>, &BxInstructionGenerated) -> Result<()>,
-    
+
     /// Handler function for register form or secondary handler
     /// None if instruction doesn't have a register form
     pub(super) execute2: Option<fn(&mut BxCpuC<'_, I>, &BxInstructionGenerated) -> Result<()>>,
-    
+
     /// Feature requirements and special handling flags
     pub(super) opflags: OpFlags,
 }
@@ -171,7 +166,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
     opcode: crate::cpu::decoder::Opcode,
 ) -> Option<BxOpcodeEntry<I>> {
     use crate::cpu::decoder::Opcode;
-    
+
     // Wrapper functions to convert handlers to the correct signature
     fn mov_gd_ed_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
@@ -180,7 +175,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         crate::cpu::data_xfer::MOV_GdEd_R(cpu, instr);
         Ok(())
     }
-    
+
     fn mov_ed_gd_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -188,7 +183,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         crate::cpu::data_xfer::MOV_EdGd_R(cpu, instr);
         Ok(())
     }
-    
+
     fn mov_ed_id_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -196,21 +191,21 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         crate::cpu::data_xfer::MOV_EdId_R(cpu, instr);
         Ok(())
     }
-    
+
     fn add_eb_gb_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
         crate::cpu::arith::ADD_EbGb(cpu, instr)
     }
-    
+
     fn add_gb_eb_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
         crate::cpu::arith::ADD_GbEb(cpu, instr)
     }
-    
+
     fn add_gd_ed_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -218,7 +213,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         crate::cpu::arith::ADD_GdEd_R(cpu, instr);
         Ok(())
     }
-    
+
     fn add_ed_gd_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -226,7 +221,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         crate::cpu::arith::ADD_EdGd_R(cpu, instr);
         Ok(())
     }
-    
+
     fn add_eax_id_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -234,21 +229,21 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         crate::cpu::arith::ADD_EAX_Id(cpu, instr);
         Ok(())
     }
-    
+
     fn add_eb_ib_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
         crate::cpu::arith::ADD_EbIb(cpu, instr)
     }
-    
+
     fn add_ew_ib_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
         crate::cpu::arith::ADD_EwIbR(cpu, instr)
     }
-    
+
     fn sub_gd_ed_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -256,7 +251,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         crate::cpu::arith::SUB_GdEd_R(cpu, instr);
         Ok(())
     }
-    
+
     fn sub_ed_gd_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -264,7 +259,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         crate::cpu::arith::SUB_EdGd_R(cpu, instr);
         Ok(())
     }
-    
+
     fn sub_eax_id_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -272,7 +267,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         crate::cpu::arith::SUB_EAX_Id(cpu, instr);
         Ok(())
     }
-    
+
     // Wrapper functions for CMP instructions
     fn cmp_gb_eb_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
@@ -281,7 +276,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.cmp_gb_eb_r(instr);
         Ok(())
     }
-    
+
     fn cmp_gw_ew_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -289,7 +284,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.cmp_gw_ew_r(instr);
         Ok(())
     }
-    
+
     fn cmp_gd_ed_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -297,7 +292,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.cmp_gd_ed_r(instr);
         Ok(())
     }
-    
+
     fn cmp_al_ib_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -305,7 +300,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.cmp_al_ib(instr);
         Ok(())
     }
-    
+
     fn cmp_ax_iw_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -313,7 +308,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.cmp_ax_iw(instr);
         Ok(())
     }
-    
+
     fn cmp_eax_id_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -321,7 +316,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.cmp_eax_id(instr);
         Ok(())
     }
-    
+
     fn cmp_ew_iw_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -329,7 +324,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.cmp_ew_iw_r(instr);
         Ok(())
     }
-    
+
     fn cmp_ed_id_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -337,7 +332,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.cmp_ed_id_r(instr);
         Ok(())
     }
-    
+
     fn cmp_eb_ib_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -350,7 +345,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.update_flags_sub8(op1, op2, result);
         Ok(())
     }
-    
+
     // Error handler wrappers (these are used inside get_opcode_entry, so they stay here)
     pub(super) fn bx_error_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
@@ -358,7 +353,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
     ) -> Result<()> {
         cpu.bx_error(instr)
     }
-    
+
     fn bx_end_trace_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         _instr: &BxInstructionGenerated,
@@ -369,49 +364,72 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
-    
+
     fn adc_eb_gb_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
         crate::cpu::arith::ADC_EbGb(cpu, instr)
     }
-    
+
     fn adc_gw_ew_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
         crate::cpu::arith::ADC_GwEw(cpu, instr)
     }
-    
+
+    fn adc_ew_gw_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        crate::cpu::arith::ADC_EwGw(cpu, instr)
+    }
+
+    fn adc_ed_gd_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        crate::cpu::arith::ADC_EdGd_R(cpu, instr);
+        Ok(())
+    }
+
+    fn adc_gd_ed_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        crate::cpu::arith::ADC_GdEd_R(cpu, instr);
+        Ok(())
+    }
+
     fn mov_al_od_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
         crate::cpu::data_xfer::MOV_ALOd(cpu, instr)
     }
-    
+
     fn mov_ax_od_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
         crate::cpu::data_xfer::MOV_AXOd(cpu, instr)
     }
-    
+
     fn mov_od_al_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
         crate::cpu::data_xfer::MOV_OdAL(cpu, instr)
     }
-    
+
     fn mov_od_ax_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
         crate::cpu::data_xfer::MOV_OdAX(cpu, instr)
     }
-    
+
     // Wrapper functions for method-based handlers
     fn mov_gb_eb_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
@@ -420,7 +438,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.mov_gb_eb_r(instr);
         Ok(())
     }
-    
+
     fn mov_eb_gb_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -428,7 +446,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.mov_eb_gb_r(instr);
         Ok(())
     }
-    
+
     fn mov_rb_ib_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -436,7 +454,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.mov_rb_ib(instr);
         Ok(())
     }
-    
+
     fn mov_gw_ew_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -444,7 +462,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.mov_gw_ew_r(instr);
         Ok(())
     }
-    
+
     fn mov_ew_gw_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -452,7 +470,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.mov_ew_gw_r(instr);
         Ok(())
     }
-    
+
     fn mov_rw_iw_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -460,7 +478,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.mov_rw_iw(instr);
         Ok(())
     }
-    
+
     fn mov_ew_sw_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -468,7 +486,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.mov_ew_sw(instr);
         Ok(())
     }
-    
+
     fn mov_sw_ew_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -476,7 +494,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.mov_sw_ew(instr);
         Ok(())
     }
-    
+
     // Wrapper functions for logical instructions (8-bit)
     fn and_eb_gb_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
@@ -485,7 +503,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.and_eb_gb_m(instr);
         Ok(())
     }
-    
+
     fn and_gb_eb_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -493,7 +511,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.and_gb_eb_r(instr);
         Ok(())
     }
-    
+
     fn and_gb_eb_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -501,7 +519,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.and_gb_eb_m(instr);
         Ok(())
     }
-    
+
     fn and_eb_ib_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -509,7 +527,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.and_eb_ib_m(instr);
         Ok(())
     }
-    
+
     fn or_eb_gb_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -517,7 +535,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.or_eb_gb_m(instr);
         Ok(())
     }
-    
+
     fn or_gb_eb_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -525,7 +543,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.or_gb_eb_r(instr);
         Ok(())
     }
-    
+
     fn or_gb_eb_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -533,7 +551,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.or_gb_eb_m(instr);
         Ok(())
     }
-    
+
     fn or_eb_ib_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -541,7 +559,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.or_eb_ib_m(instr);
         Ok(())
     }
-    
+
     fn xor_eb_gb_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -549,7 +567,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.xor_eb_gb_m(instr);
         Ok(())
     }
-    
+
     fn xor_gb_eb_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -557,7 +575,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.xor_gb_eb_r(instr);
         Ok(())
     }
-    
+
     fn xor_gb_eb_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -565,7 +583,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.xor_gb_eb_m(instr);
         Ok(())
     }
-    
+
     fn xor_eb_ib_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -573,7 +591,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.xor_eb_ib_m(instr);
         Ok(())
     }
-    
+
     fn xor_eb_ib_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -581,7 +599,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.xor_eb_ib_r(instr);
         Ok(())
     }
-    
+
     fn not_eb_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -589,7 +607,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.not_eb_m(instr);
         Ok(())
     }
-    
+
     fn test_eb_gb_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -597,7 +615,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.test_eb_gb_m(instr);
         Ok(())
     }
-    
+
     fn test_eb_ib_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -605,7 +623,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.test_eb_ib_m(instr);
         Ok(())
     }
-    
+
     // Wrapper functions for 32-bit XOR instructions
     fn xor_ed_gd_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
@@ -614,7 +632,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.xor_ed_gd_m(instr);
         Ok(())
     }
-    
+
     fn xor_gd_ed_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -622,7 +640,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.xor_gd_ed_r(instr);
         Ok(())
     }
-    
+
     fn xor_gd_ed_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -630,7 +648,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.xor_gd_ed_m(instr);
         Ok(())
     }
-    
+
     fn zero_idiom_gd_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -638,7 +656,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.zero_idiom_gd_r(instr);
         Ok(())
     }
-    
+
     // Wrapper functions for 16-bit XOR instructions
     fn xor_ew_gw_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
@@ -647,7 +665,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.xor_ew_gw_m(instr);
         Ok(())
     }
-    
+
     fn xor_gw_ew_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -655,7 +673,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.xor_gw_ew_r(instr);
         Ok(())
     }
-    
+
     fn xor_gw_ew_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -663,7 +681,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.xor_gw_ew_m(instr);
         Ok(())
     }
-    
+
     fn zero_idiom_gw_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -671,7 +689,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.zero_idiom_gw_r(instr);
         Ok(())
     }
-    
+
     // Wrapper functions for flag manipulation
     fn cli_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
@@ -680,7 +698,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.eflags &= !(1 << 9); // Clear IF
         Ok(())
     }
-    
+
     fn sti_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         _instr: &BxInstructionGenerated,
@@ -688,7 +706,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.eflags |= 1 << 9; // Set IF
         Ok(())
     }
-    
+
     fn cld_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         _instr: &BxInstructionGenerated,
@@ -696,7 +714,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.eflags &= !(1 << 10); // Clear DF
         Ok(())
     }
-    
+
     fn std_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         _instr: &BxInstructionGenerated,
@@ -704,7 +722,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.eflags |= 1 << 10; // Set DF
         Ok(())
     }
-    
+
     // Wrapper functions for I/O instructions
     fn in_al_ib_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
@@ -713,7 +731,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.in_al_ib(instr);
         Ok(())
     }
-    
+
     fn in_ax_ib_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -721,7 +739,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.in_ax_ib(instr);
         Ok(())
     }
-    
+
     fn in_eax_ib_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -729,7 +747,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.in_eax_ib(instr);
         Ok(())
     }
-    
+
     fn out_ib_al_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -737,7 +755,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.out_ib_al(instr);
         Ok(())
     }
-    
+
     fn out_ib_ax_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -745,7 +763,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.out_ib_ax(instr);
         Ok(())
     }
-    
+
     fn out_ib_eax_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -753,7 +771,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.out_ib_eax(instr);
         Ok(())
     }
-    
+
     fn in_al_dx_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -761,7 +779,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.in_al_dx(instr);
         Ok(())
     }
-    
+
     fn in_ax_dx_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -769,7 +787,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.in_ax_dx(instr);
         Ok(())
     }
-    
+
     fn in_eax_dx_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -777,9 +795,9 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.in_eax_dx(instr);
         Ok(())
     }
-    
+
     // Wrapper functions for MOV32S handlers are now at module level (after get_opcode_entry)
-    
+
     fn out_dx_al_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -787,7 +805,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.out_dx_al(instr);
         Ok(())
     }
-    
+
     fn out_dx_ax_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -795,7 +813,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.out_dx_ax(instr);
         Ok(())
     }
-    
+
     fn out_dx_eax_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -803,7 +821,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.out_dx_eax(instr);
         Ok(())
     }
-    
+
     // Wrapper functions for PUSH/POP segment registers
     fn push_op16_sw_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
@@ -814,7 +832,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu.push_16(val);
         Ok(())
     }
-    
+
     fn pop_op16_sw_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -832,74 +850,64 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         }
         Ok(())
     }
-    
+
     // Wrapper function for FAR JMP (needs TRACE_END flag)
     fn jmpf_ap_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
-        use crate::cpu::decoder::BxSegregs;
-        use crate::cpu::segment_ctrl_pro::parse_selector;
-        use super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-        
         // For JMP FAR Ap, offset is in Iw() and segment is in Iw2()
         let offset = instr.iw();
         let segment = instr.iw2();
-        
-        // In real mode, just update CS and EIP
-        let cs_index = BxSegregs::Cs as usize;
-        parse_selector(segment, &mut cpu.sregs[cs_index].selector);
-        cpu.sregs[cs_index].cache.u.segment.base = ((segment as u32) << 4) as u64;
-        cpu.set_rip(offset as u64);
-        
-        // Matching C++ jmp_far16: invalidate_prefetch_q() and BX_TRACE_END
-        cpu.eip_fetch_ptr = None;
-        cpu.eip_page_window_size = 0;
-        // Set STOP_TRACE flag to break trace loop (matching BX_TRACE_END)
-        cpu.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
+
+        tracing::info!("FAR JMP to {:04x}:{:04x}", segment, offset);
+
+        // Call jmp_far16 which handles both real and protected mode
+        cpu.jmp_far16(instr, segment, offset)?;
+
         Ok(())
     }
-    
+
     // Match on opcode and return appropriate entry
     // This is a placeholder - will be extended with all opcodes
     match opcode {
         // Data transfer instructions - 32-bit
         Opcode::MovOp32GdEd => Some(BxOpcodeEntry {
-            execute1: mov_gd_ed_r_wrapper, // Memory form
+            execute1: mov_gd_ed_r_wrapper,       // Memory form
             execute2: Some(mov_gd_ed_r_wrapper), // Register form (same handler for now)
             opflags: OpFlags::empty(),
         }),
         Opcode::MovOp32EdGd => Some(BxOpcodeEntry {
-            execute1: mov_ed_gd_r_wrapper, // Memory form
+            execute1: mov_ed_gd_r_wrapper,       // Memory form
             execute2: Some(mov_ed_gd_r_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
         Opcode::MovEdId => Some(BxOpcodeEntry {
-            execute1: mov_ed_id_r_wrapper, // Memory form
+            execute1: mov_ed_id_r_wrapper,       // Memory form
             execute2: Some(mov_ed_id_r_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
-        
+
         // Arithmetic instructions - 8-bit
         Opcode::AddEbGb => Some(BxOpcodeEntry {
-            execute1: add_eb_gb_wrapper, // Memory form
+            execute1: add_eb_gb_wrapper,       // Memory form
             execute2: Some(add_gb_eb_wrapper), // Register form (ADD_GbEbR)
             opflags: OpFlags::LOCKABLE,
         }),
         Opcode::AddGbEb => Some(BxOpcodeEntry {
-            execute1: add_gb_eb_wrapper, // Memory form
+            execute1: add_gb_eb_wrapper,       // Memory form
             execute2: Some(add_gb_eb_wrapper), // Register form (same for now)
             opflags: OpFlags::empty(),
         }),
-        
+
         // Arithmetic instructions - 32-bit
         Opcode::AddGdEd => Some(BxOpcodeEntry {
-            execute1: add_gd_ed_r_wrapper, // Memory form
+            execute1: add_gd_ed_r_wrapper,       // Memory form
             execute2: Some(add_gd_ed_r_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
         Opcode::AddEdGd => Some(BxOpcodeEntry {
-            execute1: add_ed_gd_r_wrapper, // Memory form
+            execute1: add_ed_gd_r_wrapper,       // Memory form
             execute2: Some(add_ed_gd_r_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
@@ -918,7 +926,12 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: Some(add_ew_ib_r_wrapper),
             opflags: OpFlags::empty(),
         }),
-        
+        Opcode::AddEbIb => Some(BxOpcodeEntry {
+            execute1: add_eb_ib_wrapper,
+            execute2: Some(add_eb_ib_wrapper),
+            opflags: OpFlags::empty(),
+        }),
+
         // Arithmetic (SUB) instructions - 32-bit
         Opcode::SubGdEd => Some(BxOpcodeEntry {
             execute1: sub_gd_ed_r_wrapper,
@@ -935,7 +948,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: None,
             opflags: OpFlags::empty(),
         }),
-        
+
         // Arithmetic (ADC) instructions
         Opcode::AdcEbGb => Some(BxOpcodeEntry {
             execute1: adc_eb_gb_wrapper,
@@ -947,7 +960,22 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: Some(adc_gw_ew_wrapper),
             opflags: OpFlags::empty(),
         }),
-        
+        Opcode::AdcEwGw => Some(BxOpcodeEntry {
+            execute1: adc_ew_gw_wrapper,
+            execute2: Some(adc_ew_gw_wrapper),
+            opflags: OpFlags::empty(),
+        }),
+        Opcode::AdcEdGd => Some(BxOpcodeEntry {
+            execute1: adc_ed_gd_wrapper,
+            execute2: Some(adc_ed_gd_wrapper),
+            opflags: OpFlags::empty(),
+        }),
+        Opcode::AdcGdEd => Some(BxOpcodeEntry {
+            execute1: adc_gd_ed_wrapper,
+            execute2: Some(adc_gd_ed_wrapper),
+            opflags: OpFlags::empty(),
+        }),
+
         // Data transfer (MOV) instructions - direct memory
         Opcode::MovAlod => Some(BxOpcodeEntry {
             execute1: mov_al_od_wrapper,
@@ -969,7 +997,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: None,
             opflags: OpFlags::empty(),
         }),
-        
+
         // Data transfer (MOV) instructions - 8-bit
         Opcode::MovGbEb => Some(BxOpcodeEntry {
             execute1: mov_gb_eb_r_wrapper,
@@ -986,7 +1014,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: Some(mov_rb_ib_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
-        
+
         // Data transfer (MOV) instructions - 16-bit
         Opcode::MovGwEw => Some(BxOpcodeEntry {
             execute1: mov_gw_ew_r_wrapper,
@@ -1003,7 +1031,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: Some(mov_rw_iw_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
-        
+
         // Segment register MOV
         Opcode::MovEwSw => Some(BxOpcodeEntry {
             execute1: mov_ew_sw_wrapper,
@@ -1015,54 +1043,54 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: None,
             opflags: OpFlags::empty(),
         }),
-        
+
         // Logical instructions - 8-bit (AND)
         Opcode::AndEbGb => Some(BxOpcodeEntry {
             execute1: and_eb_gb_m_wrapper, // Memory form
-            execute2: None, // Register form handled separately
+            execute2: None,                // Register form handled separately
             opflags: OpFlags::empty(),
         }),
         Opcode::AndGbEb => Some(BxOpcodeEntry {
-            execute1: and_gb_eb_m_wrapper, // Memory form
+            execute1: and_gb_eb_m_wrapper,       // Memory form
             execute2: Some(and_gb_eb_r_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
         Opcode::AndEbIb => Some(BxOpcodeEntry {
             execute1: and_eb_ib_m_wrapper, // Memory form
-            execute2: None, // Register form handled separately
+            execute2: None,                // Register form handled separately
             opflags: OpFlags::empty(),
         }),
-        
+
         // Logical instructions - 8-bit (OR)
         Opcode::OrEbGb => Some(BxOpcodeEntry {
             execute1: or_eb_gb_m_wrapper, // Memory form
-            execute2: None, // Register form handled separately
+            execute2: None,               // Register form handled separately
             opflags: OpFlags::empty(),
         }),
         Opcode::OrGbEb => Some(BxOpcodeEntry {
-            execute1: or_gb_eb_m_wrapper, // Memory form
+            execute1: or_gb_eb_m_wrapper,       // Memory form
             execute2: Some(or_gb_eb_r_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
         Opcode::OrEbIb => Some(BxOpcodeEntry {
             execute1: or_eb_ib_m_wrapper, // Memory form
-            execute2: None, // Register form handled separately
+            execute2: None,               // Register form handled separately
             opflags: OpFlags::empty(),
         }),
-        
+
         // Logical instructions - 8-bit (XOR)
         Opcode::XorEbGb => Some(BxOpcodeEntry {
             execute1: xor_eb_gb_m_wrapper, // Memory form
-            execute2: None, // Register form handled separately
+            execute2: None,                // Register form handled separately
             opflags: OpFlags::empty(),
         }),
         Opcode::XorGbEb => Some(BxOpcodeEntry {
-            execute1: xor_gb_eb_m_wrapper, // Memory form
+            execute1: xor_gb_eb_m_wrapper,       // Memory form
             execute2: Some(xor_gb_eb_r_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
         Opcode::XorEbIb => Some(BxOpcodeEntry {
-            execute1: xor_eb_ib_m_wrapper, // Memory form
+            execute1: xor_eb_ib_m_wrapper,       // Memory form
             execute2: Some(xor_eb_ib_r_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
@@ -1071,15 +1099,15 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: None,
             opflags: OpFlags::empty(),
         }),
-        
+
         // Logical instructions - 32-bit (XOR)
         Opcode::XorEdGd => Some(BxOpcodeEntry {
             execute1: xor_ed_gd_m_wrapper, // Memory form
-            execute2: None, // Register form handled separately
+            execute2: None,                // Register form handled separately
             opflags: OpFlags::empty(),
         }),
         Opcode::XorGdEd => Some(BxOpcodeEntry {
-            execute1: xor_gd_ed_m_wrapper, // Memory form
+            execute1: xor_gd_ed_m_wrapper,       // Memory form
             execute2: Some(xor_gd_ed_r_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
@@ -1088,15 +1116,15 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: None,
             opflags: OpFlags::empty(),
         }),
-        
+
         // Logical instructions - 16-bit (XOR)
         Opcode::XorEwGw => Some(BxOpcodeEntry {
             execute1: xor_ew_gw_m_wrapper, // Memory form
-            execute2: None, // Register form handled separately
+            execute2: None,                // Register form handled separately
             opflags: OpFlags::empty(),
         }),
         Opcode::XorGwEw => Some(BxOpcodeEntry {
-            execute1: xor_gw_ew_m_wrapper, // Memory form
+            execute1: xor_gw_ew_m_wrapper,       // Memory form
             execute2: Some(xor_gw_ew_r_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
@@ -1105,42 +1133,42 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: None,
             opflags: OpFlags::empty(),
         }),
-        
+
         // Logical instructions - 8-bit (NOT, TEST)
         Opcode::NotEb => Some(BxOpcodeEntry {
             execute1: not_eb_m_wrapper, // Memory form
-            execute2: None, // Register form handled separately
+            execute2: None,             // Register form handled separately
             opflags: OpFlags::empty(),
         }),
         Opcode::TestEbGb => Some(BxOpcodeEntry {
             execute1: test_eb_gb_m_wrapper, // Memory form
-            execute2: None, // Register form handled separately
+            execute2: None,                 // Register form handled separately
             opflags: OpFlags::empty(),
         }),
         Opcode::TestEbIb => Some(BxOpcodeEntry {
             execute1: test_eb_ib_m_wrapper, // Memory form
-            execute2: None, // Register form handled separately
+            execute2: None,                 // Register form handled separately
             opflags: OpFlags::empty(),
         }),
-        
+
         // CMP (Compare) instructions
         Opcode::CmpGbEb => Some(BxOpcodeEntry {
-            execute1: cmp_gb_eb_r_wrapper, // Memory form
+            execute1: cmp_gb_eb_r_wrapper,       // Memory form
             execute2: Some(cmp_gb_eb_r_wrapper), // Register form (same handler)
             opflags: OpFlags::empty(),
         }),
         Opcode::CmpEbGb => Some(BxOpcodeEntry {
-            execute1: cmp_gb_eb_r_wrapper, // Memory form (CMP r/m8, r8)
+            execute1: cmp_gb_eb_r_wrapper,       // Memory form (CMP r/m8, r8)
             execute2: Some(cmp_gb_eb_r_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
         Opcode::CmpGwEw => Some(BxOpcodeEntry {
-            execute1: cmp_gw_ew_r_wrapper, // Memory form
+            execute1: cmp_gw_ew_r_wrapper,       // Memory form
             execute2: Some(cmp_gw_ew_r_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
         Opcode::CmpGdEd => Some(BxOpcodeEntry {
-            execute1: cmp_gd_ed_r_wrapper, // Memory form
+            execute1: cmp_gd_ed_r_wrapper,       // Memory form
             execute2: Some(cmp_gd_ed_r_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
@@ -1160,21 +1188,21 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             opflags: OpFlags::empty(),
         }),
         Opcode::CmpEwIw => Some(BxOpcodeEntry {
-            execute1: cmp_ew_iw_r_wrapper, // Memory form
+            execute1: cmp_ew_iw_r_wrapper,       // Memory form
             execute2: Some(cmp_ew_iw_r_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
         Opcode::CmpEdId => Some(BxOpcodeEntry {
-            execute1: cmp_ed_id_r_wrapper, // Memory form
+            execute1: cmp_ed_id_r_wrapper,       // Memory form
             execute2: Some(cmp_ed_id_r_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
         Opcode::CmpEbIb => Some(BxOpcodeEntry {
-            execute1: cmp_eb_ib_wrapper, // Memory form
+            execute1: cmp_eb_ib_wrapper,       // Memory form
             execute2: Some(cmp_eb_ib_wrapper), // Register form
             opflags: OpFlags::empty(),
         }),
-        
+
         // Error handlers (matching C++ BX_IA_ERROR and BX_INSERTED_OPCODE)
         Opcode::IaError => Some(BxOpcodeEntry {
             execute1: bx_error_wrapper,
@@ -1186,7 +1214,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: Some(bx_end_trace_wrapper),
             opflags: OpFlags::empty(),
         }),
-        
+
         // Flag manipulation instructions
         Opcode::Cli => Some(BxOpcodeEntry {
             execute1: cli_wrapper,
@@ -1208,7 +1236,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: None,
             opflags: OpFlags::empty(),
         }),
-        
+
         // I/O port instructions - immediate port
         Opcode::InAlib => Some(BxOpcodeEntry {
             execute1: in_al_ib_wrapper,
@@ -1240,7 +1268,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: None,
             opflags: OpFlags::empty(),
         }),
-        
+
         // I/O port instructions - DX port
         Opcode::InAlDx => Some(BxOpcodeEntry {
             execute1: in_al_dx_wrapper,
@@ -1272,7 +1300,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: None,
             opflags: OpFlags::empty(),
         }),
-        
+
         // PUSH/POP segment registers
         Opcode::PushOp16Sw => Some(BxOpcodeEntry {
             execute1: push_op16_sw_wrapper,
@@ -1284,14 +1312,14 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: None,
             opflags: OpFlags::empty(),
         }),
-        
+
         // FAR JMP (needs TRACE_END flag)
         Opcode::JmpfAp => Some(BxOpcodeEntry {
             execute1: jmpf_ap_wrapper,
             execute2: None,
             opflags: OpFlags::TRACE_END,
         }),
-        
+
         // NOP
         Opcode::Nop => Some(BxOpcodeEntry {
             execute1: |_cpu: &mut BxCpuC<'_, I>, _instr: &BxInstructionGenerated| -> Result<()> {
@@ -1300,7 +1328,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: None,
             opflags: OpFlags::empty(),
         }),
-        
+
         // Default: opcode not yet in table
         // Note: Many opcodes are handled by methods on BxCpuC (like mov_gb_eb_r, and_gb_eb_r, etc.)
         // These need to be wrapped differently. For now, they will fall through to execute_instruction

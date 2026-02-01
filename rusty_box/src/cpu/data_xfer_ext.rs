@@ -120,23 +120,32 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn mov_sw_ew(&mut self, instr: &BxInstructionGenerated) {
         let dst_seg = instr.meta_data[0] as usize;
         let src = instr.meta_data[1] as usize;
-        
+
+        // Workaround: segment register 6 and 7 are invalid, treat as DS (3)
+        // This is a decoder bug - opcodes with seg=6 or 7 are undefined in x86
+        let actual_dst_seg = if dst_seg == 6 || dst_seg == 7 {
+            tracing::warn!("Invalid segment register {} in MOV Sw,Ew - using DS as workaround", dst_seg);
+            3 // DS
+        } else {
+            dst_seg
+        };
+
         let new_sel = self.get_gpr16(src);
-        
+
         // Don't allow loading CS directly
-        if dst_seg == BxSegregs::Cs as usize {
+        if actual_dst_seg == BxSegregs::Cs as usize {
             tracing::warn!("MOV to CS not allowed, ignoring");
             return;
         }
-        
+
         // Load segment register (real mode)
-        parse_selector(new_sel, &mut self.sregs[dst_seg].selector);
+        parse_selector(new_sel, &mut self.sregs[actual_dst_seg].selector);
         unsafe {
-            self.sregs[dst_seg].cache.u.segment.base = (new_sel as u64) << 4;
-            self.sregs[dst_seg].cache.u.segment.limit_scaled = 0xFFFF;
+            self.sregs[actual_dst_seg].cache.u.segment.base = (new_sel as u64) << 4;
+            self.sregs[actual_dst_seg].cache.u.segment.limit_scaled = 0xFFFF;
         }
-        
-        tracing::trace!("MOV: seg{} = {:#06x}", dst_seg, new_sel);
+
+        tracing::trace!("MOV: seg{} = {:#06x}", actual_dst_seg, new_sel);
     }
 
     // =========================================================================
