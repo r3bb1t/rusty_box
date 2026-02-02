@@ -57,6 +57,17 @@ pub fn ADD_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
     let op2 = instr.id(); // Sign-extended immediate
     let result = op1.wrapping_add(op2);
 
+    // CRITICAL DEBUG: Print to stdout to see all ADD operations
+    if op2 == 0x400 {
+        eprintln!("★★★ ADD_EdId_R: dst_reg={}, op1={:#x}, op2={:#x}, result={:#x}",
+                    dst_reg, op1, op2, result);
+    }
+
+    // Log ESP operations for debugging stack issues
+    if dst_reg == 4 {
+        eprintln!("★★★ ADD ESP, {:#x}: ESP {:#x} -> {:#x}", op2, op1, result);
+    }
+
     cpu.set_gpr32(dst_reg, result);
     cpu.update_flags_add32(op1, op2, result);
 }
@@ -108,6 +119,17 @@ pub fn SUB_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
     let op1 = cpu.get_gpr32(dst_reg);
     let op2 = instr.id(); // Sign-extended immediate
     let result = op1.wrapping_sub(op2);
+
+    // CRITICAL DEBUG: Print to stdout to see all SUB operations
+    if op2 == 0x400 {
+        eprintln!("★★★ SUB_EdId_R: dst_reg={}, op1={:#x}, op2={:#x}, result={:#x}",
+                    dst_reg, op1, op2, result);
+    }
+
+    // Log ESP operations for debugging stack issues
+    if dst_reg == 4 {
+        eprintln!("★★★ SUB ESP, {:#x}: ESP {:#x} -> {:#x}", op2, op1, result);
+    }
 
     cpu.set_gpr32(dst_reg, result);
     cpu.update_flags_sub32(op1, op2, result);

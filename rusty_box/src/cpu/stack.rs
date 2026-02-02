@@ -93,11 +93,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let new_esp = esp.wrapping_sub(4);
             self.stack_write_dword(new_esp, value);
             self.set_esp(new_esp);
+            tracing::warn!("PUSH32: value {:#x}, ESP {:#x} -> {:#x}", value, esp, new_esp);
         } else {
             let sp = self.sp();
             let new_sp = sp.wrapping_sub(4);
             self.stack_write_dword(new_sp as u32, value);
             self.set_sp(new_sp);
+            tracing::warn!("PUSH32: value {:#x}, SP {:#x} -> {:#x}", value, sp, new_sp);
         }
         tracing::trace!("PUSH32: value {:#x} written to stack", value);
     }
@@ -108,12 +110,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let value = if self.is_stack_32bit() {
             let esp = self.esp();
             let value = self.stack_read_dword(esp);
-            self.set_esp(esp.wrapping_add(4));
+            let new_esp = esp.wrapping_add(4);
+            self.set_esp(new_esp);
+            tracing::warn!("POP32: value {:#x} from ESP {:#x} -> {:#x}", value, esp, new_esp);
             value
         } else {
             let sp = self.sp();
             let value = self.stack_read_dword(sp as u32);
-            self.set_sp(sp.wrapping_add(4));
+            let new_sp = sp.wrapping_add(4);
+            self.set_sp(new_sp);
+            tracing::warn!("POP32: value {:#x} from SP {:#x} -> {:#x}", value, sp, new_sp);
             value
         };
         tracing::trace!("POP32: value {:#x} read from stack", value);

@@ -2209,10 +2209,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::SubEdsIb => {
+                eprintln!("★★★ DISPATCH SubEdsIb with ib={:#x}, meta_data[0]={}", instr.ib(), instr.meta_data[0]);
                 arith::SUB_EdId_R(self, instr);
                 Ok(())
             }
             Opcode::SubEdId => {
+                eprintln!("★★★ DISPATCH SubEdId with id={:#x}, meta_data[0]={}", instr.id(), instr.meta_data[0]);
                 arith::SUB_EdId_R(self, instr);
                 Ok(())
             }
@@ -3401,6 +3403,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.hlt(instr);
                 Ok(())
             }
+            Opcode::Cpuid => {
+                self.cpuid(instr);
+                Ok(())
+            }
 
             // =========================================================================
             // Shift/Rotate instructions
@@ -3441,6 +3447,22 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.shl_ed_ib(instr);
                 Ok(())
             }
+            Opcode::ShldEdGdIb => {
+                self.shld_ed_gd_ib(instr);
+                Ok(())
+            }
+            Opcode::ShldEdGd => {
+                self.shld_ed_gd_cl(instr);
+                Ok(())
+            }
+            Opcode::ShrdEdGdIb => {
+                self.shrd_ed_gd_ib(instr);
+                Ok(())
+            }
+            Opcode::ShrdEdGd => {
+                self.shrd_ed_gd_cl(instr);
+                Ok(())
+            }
             Opcode::SarEbIb => {
                 self.sar_eb_ib(instr);
                 Ok(())
@@ -3478,6 +3500,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.shr_ed_cl(instr);
                 Ok(())
             }
+            Opcode::ShrEdIb => {
+                self.shr_ed_ib(instr);
+                Ok(())
+            }
 
             // =========================================================================
             // Data transfer extensions
@@ -3504,6 +3530,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::MovsxGdEb => {
                 self.movsx_gd_eb(instr);
+                Ok(())
+            }
+            Opcode::MovzxGdEb => {
+                data_xfer::MOVZX_GdEb(self, instr);
+                Ok(())
+            }
+            Opcode::MovzxGdEw => {
+                data_xfer::MOVZX_GdEw(self, instr);
                 Ok(())
             }
             Opcode::Cwd => {

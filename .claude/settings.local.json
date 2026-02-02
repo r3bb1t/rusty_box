@@ -35,7 +35,9 @@
       "Bash(objdump:*)",
       "Bash(echo:*)",
       "Bash(./target/release/examples/dlxlinux:*)",
-      "Bash(test:*)"
+      "Bash(test:*)",
+      "Bash(pkill:*)",
+      "Bash(taskkill:*)"
     ]
   }
 }

@@ -5,3 +5,6 @@
 /How the Bochs works under the hood 2nd edition.pdf
 /log*
 /*trace*
+/*out*
+/*log
+/*.txt

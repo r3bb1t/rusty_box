@@ -45,6 +45,40 @@ pub fn MOV_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 pub fn MOV_EAX_Id<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
     let dst_idx = instr.meta_data[0] as usize;
     let imm: u32 = instr.modrm_form.operand_data.id();
-    
+
     cpu.set_gpr32(dst_idx, imm);
+}
+
+/// MOVZX_GdEb: MOVZX r32, r/m8
+/// Opcode: 0x0F 0xB6, ModRM: r32, r/m8
+/// Original: bochs/cpu/data_xfer32.cc:110-130 MOVZX_GdEbM/MOVZX_GdEbR
+/// Zero extend byte operand into dword destination
+pub fn MOVZX_GdEb<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let dst_reg = instr.meta_data[0] as usize;
+    let src_reg = instr.meta_data[1] as usize;
+
+    // Read 8-bit operand (handles both memory and register based on decoder metadata)
+    let op2_8 = cpu.get_gpr8(src_reg);
+
+    // Zero extend byte op2 into dword op1
+    cpu.set_gpr32(dst_reg, op2_8 as u32);
+
+    tracing::trace!("MOVZX32 r{}, r{}b: {:#04x} -> {:#010x}", dst_reg, src_reg, op2_8, op2_8 as u32);
+}
+
+/// MOVZX_GdEw: MOVZX r32, r/m16
+/// Opcode: 0x0F 0xB7, ModRM: r32, r/m16
+/// Original: bochs/cpu/data_xfer32.cc:132-152 MOVZX_GdEwM/MOVZX_GdEwR
+/// Zero extend word operand into dword destination
+pub fn MOVZX_GdEw<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let dst_reg = instr.meta_data[0] as usize;
+    let src_reg = instr.meta_data[1] as usize;
+
+    // Read 16-bit operand (handles both memory and register based on decoder metadata)
+    let op2_16 = cpu.get_gpr16(src_reg);
+
+    // Zero extend word op2 into dword op1
+    cpu.set_gpr32(dst_reg, op2_16 as u32);
+
+    tracing::trace!("MOVZX32 r{}, r{}w: {:#06x} -> {:#010x}", dst_reg, src_reg, op2_16, op2_16 as u32);
 }

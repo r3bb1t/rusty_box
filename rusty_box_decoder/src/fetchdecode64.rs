@@ -382,10 +382,19 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<InstructionGenerated> 
             });
         }
 
+        // Group opcodes: 80, 81, 83, C0, C1, D0-D3, F6, F7, FE, FF
+        // For these, nnn field is the opcode extension (which operation), rm is the operand
+        let is_group_opcode = matches!(b1, 0x80 | 0x81 | 0x83 | 0xC0 | 0xC1 | 0xD0 | 0xD1 | 0xD2 | 0xD3 | 0xF6 | 0xF7 | 0xFE | 0xFF);
+
         // Segment register move instructions: 8C (MOV Ew,Sw) and 8E (MOV Sw,Ew)
         // For 0x8C: nnn=segment (source), rm=gpr (destination) -> DST=rm, SRC1=nnn
         // For 0x8E: nnn=segment (dest), rm=gpr (source) -> DST=nnn, SRC1=rm
-        if b1 == 0x8C {
+
+        if is_group_opcode {
+            // Group opcodes: operand is in rm, opcode extension in nnn
+            instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
+            instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
+        } else if b1 == 0x8C {
             // MOV Ew,Sw: rm is destination (gpr), nnn is source (segment)
             instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
             instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;

@@ -311,6 +311,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.update_flags_shr32(result, cf, of);
     }
 
+    /// SHR r/m32, imm8
+    pub fn shr_ed_ib(&mut self, instr: &BxInstructionGenerated) {
+        let count = (instr.ib() & 0x1F) as u32;
+        if count == 0 { return; }
+
+        let dst = instr.meta_data[0] as usize;
+        let op1 = self.get_gpr32(dst);
+
+        let result = op1 >> count;
+        self.set_gpr32(dst, result);
+
+        let cf = ((op1 >> (count - 1)) & 0x00000001) != 0;
+        let of = if count == 1 { (op1 & 0x80000000) != 0 } else { false };
+        self.update_flags_shr32(result, cf, of);
+    }
+
     // =========================================================================
     // SAR - Shift Arithmetic Right (preserves sign)
     // =========================================================================
@@ -575,6 +591,151 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn set_cf_of(&mut self, cf: bool, of: bool) {
         if cf { self.eflags |= 1; } else { self.eflags &= !1; }
         if of { self.eflags |= 1 << 11; } else { self.eflags &= !(1 << 11); }
+    }
+
+    // =========================================================================
+    // SHLD - Double Precision Shift Left
+    // Based on Bochs shift32.cc:30-93
+    // =========================================================================
+
+    /// SHLD r/m32, r32, imm8 (register form)
+    /// Opcode: 0x0F 0xA4
+    /// Original: bochs/cpu/shift32.cc:63-93 SHLD_EdGdR
+    /// Shift destination left by count, filling from source register
+    pub fn shld_ed_gd_ib(&mut self, instr: &BxInstructionGenerated) {
+        let dst_idx = instr.meta_data[0] as usize;
+        let src_idx = instr.meta_data[1] as usize;
+        let count = (instr.ib() & 0x1F) as u32; // Use only 5 LSBs
+
+        if count == 0 {
+            // If count is 0, do nothing (but still clear upper 32 bits in 64-bit mode)
+            // In 32-bit mode, this is a no-op
+            return;
+        }
+
+        let op1_32 = self.get_gpr32(dst_idx);
+        let op2_32 = self.get_gpr32(src_idx);
+
+        // Shift op1 left by count, fill low bits from high bits of op2
+        let result_32 = (op1_32 << count) | (op2_32 >> (32 - count));
+
+        self.set_gpr32(dst_idx, result_32);
+
+        // Set flags: OSZAPC (based on logic flags + CF/OF special)
+        self.update_flags_logic32(result_32);
+
+        // CF = bit shifted out of op1 (bit at position 32-count)
+        let cf = ((op1_32 >> (32 - count)) & 0x1) != 0;
+
+        // OF = CF XOR MSB of result
+        let of = cf ^ ((result_32 >> 31) != 0);
+
+        self.set_cf_of(cf, of);
+
+        tracing::trace!("SHLD r{}, r{}, {}: {:#x} << {} | {:#x} >> {} = {:#x}",
+            dst_idx, src_idx, count, op1_32, count, op2_32, 32 - count, result_32);
+    }
+
+    /// SHLD r/m32, r32, CL (register form)
+    /// Opcode: 0x0F 0xA5
+    /// Original: bochs/cpu/shift32.cc:63-93 SHLD_EdGdR
+    /// Shift destination left by CL, filling from source register
+    pub fn shld_ed_gd_cl(&mut self, instr: &BxInstructionGenerated) {
+        let dst_idx = instr.meta_data[0] as usize;
+        let src_idx = instr.meta_data[1] as usize;
+        let count = (self.cl() & 0x1F) as u32; // Use only 5 LSBs
+
+        if count == 0 {
+            return;
+        }
+
+        let op1_32 = self.get_gpr32(dst_idx);
+        let op2_32 = self.get_gpr32(src_idx);
+
+        let result_32 = (op1_32 << count) | (op2_32 >> (32 - count));
+
+        self.set_gpr32(dst_idx, result_32);
+
+        self.update_flags_logic32(result_32);
+
+        let cf = ((op1_32 >> (32 - count)) & 0x1) != 0;
+        let of = cf ^ ((result_32 >> 31) != 0);
+
+        self.set_cf_of(cf, of);
+
+        tracing::trace!("SHLD r{}, r{}, CL({}): {:#x} -> {:#x}",
+            dst_idx, src_idx, count, op1_32, result_32);
+    }
+
+    // =========================================================================
+    // SHRD - Double Precision Shift Right
+    // Based on Bochs shift32.cc:97-161
+    // =========================================================================
+
+    /// SHRD r/m32, r32, imm8 (register form)
+    /// Opcode: 0x0F 0xAC
+    /// Original: bochs/cpu/shift32.cc:130-161 SHRD_EdGdR
+    /// Shift destination right by count, filling from source register
+    pub fn shrd_ed_gd_ib(&mut self, instr: &BxInstructionGenerated) {
+        let dst_idx = instr.meta_data[0] as usize;
+        let src_idx = instr.meta_data[1] as usize;
+        let count = (instr.ib() & 0x1F) as u32; // Use only 5 LSBs
+
+        if count == 0 {
+            return;
+        }
+
+        let op1_32 = self.get_gpr32(dst_idx);
+        let op2_32 = self.get_gpr32(src_idx);
+
+        // Shift op1 right by count, fill high bits from low bits of op2
+        let result_32 = (op2_32 << (32 - count)) | (op1_32 >> count);
+
+        self.set_gpr32(dst_idx, result_32);
+
+        self.update_flags_logic32(result_32);
+
+        // CF = bit shifted out of op1 (bit at position count-1)
+        let cf = ((op1_32 >> (count - 1)) & 0x1) != 0;
+
+        // OF = result_bit30 XOR result_bit31
+        let of = (((result_32 << 1) ^ result_32) >> 31) != 0;
+
+        self.set_cf_of(cf, of);
+
+        tracing::trace!("SHRD r{}, r{}, {}: {:#x} >> {} | {:#x} << {} = {:#x}",
+            dst_idx, src_idx, count, op1_32, count, op2_32, 32 - count, result_32);
+    }
+
+    /// SHRD r/m32, r32, CL (register form)
+    /// Opcode: 0x0F 0xAD
+    /// Original: bochs/cpu/shift32.cc:130-161 SHRD_EdGdR
+    /// Shift destination right by CL, filling from source register
+    pub fn shrd_ed_gd_cl(&mut self, instr: &BxInstructionGenerated) {
+        let dst_idx = instr.meta_data[0] as usize;
+        let src_idx = instr.meta_data[1] as usize;
+        let count = (self.cl() & 0x1F) as u32;
+
+        if count == 0 {
+            return;
+        }
+
+        let op1_32 = self.get_gpr32(dst_idx);
+        let op2_32 = self.get_gpr32(src_idx);
+
+        let result_32 = (op2_32 << (32 - count)) | (op1_32 >> count);
+
+        self.set_gpr32(dst_idx, result_32);
+
+        self.update_flags_logic32(result_32);
+
+        let cf = ((op1_32 >> (count - 1)) & 0x1) != 0;
+        let of = (((result_32 << 1) ^ result_32) >> 31) != 0;
+
+        self.set_cf_of(cf, of);
+
+        tracing::trace!("SHRD r{}, r{}, CL({}): {:#x} -> {:#x}",
+            dst_idx, src_idx, count, op1_32, result_32);
     }
 }
 

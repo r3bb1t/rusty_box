@@ -388,9 +388,9 @@ fn run_dlxlinux() -> Result<()> {
 
     // Run with instruction limit to allow debugging
     // const MAX_INSTRUCTIONS: u64 = 10_000_000; // 10M instructions - reasonable limit for testing
-    const MAX_INSTRUCTIONS: u64 = 1_000_000; // 1M - enough to see if BIOS progresses past the stack issue
-                                             // BIOS + VGABIOS can take hundreds of millions of instructions to reach visible VGA output.
-                                             // const MAX_INSTRUCTIONS: u64 = 5_000_000;
+    const MAX_INSTRUCTIONS: u64 = 100_000_000; // 1M - enough to see if BIOS progresses past the stack issue
+                                               // BIOS + VGABIOS can take hundreds of millions of instructions to reach visible VGA output.
+                                               // const MAX_INSTRUCTIONS: u64 = 5_000_000;
 
     // Use interactive loop that handles GUI events
     let result = emu.run_interactive(MAX_INSTRUCTIONS);

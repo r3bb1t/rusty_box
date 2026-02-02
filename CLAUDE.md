@@ -11,12 +11,37 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 As of 2026-02-02, the emulator successfully executes BIOS code in protected mode:
 
 - ✅ Protected mode entry working (CS.base=0x0, GDT loaded correctly)
-- ✅ 80,000+ instructions executed in protected mode
-- ✅ Complex operations: function calls, conditional branches, arithmetic, stack operations
+- ✅ CRITICAL FIX: Decoder bug fixed - opcodes 0x80, 0x81, 0x83 (Group 1) now correctly recognized
+- ✅ Stack corruption resolved - function calls/returns work correctly
+- ✅ BIOS progresses significantly further - executing complex functions
 - ✅ HLT instruction properly halts CPU and returns control to emulator
-- ✅ BIOS executes until halting at RIP=0xff9e with IF=0 (expected behavior - awaiting interrupts)
+- ✅ CPUID implemented - BIOS can query CPU features
 
-### Recently Implemented Instructions (2026-02-01/02)
+### Major Fixes (2026-02-02)
+
+**Decoder Bug Fix:**
+- **Problem:** ModRM byte parsing incorrectly stored `reg` field instead of `r/m` field for Group 1 instructions (0x80, 0x81, 0x83)
+- **Impact:** `SUB ESP, 0x400` was modifying EBP instead of ESP, causing complete stack corruption
+- **Fix:** Added 0x80, 0x81, 0x83 to `is_group_opcode` list in both `fetchdecode32.rs` and `fetchdecode64.rs`
+- **Result:** Function calls/returns now work correctly, BIOS executes much further
+
+### Recently Implemented Instructions (2026-02-02)
+
+**Data Transfer:**
+- `MOVZX r32, r/m8` (MovzxGdEb) - Move byte to dword with zero extension
+- `MOVZX r32, r/m16` (MovzxGdEw) - Move word to dword with zero extension
+
+**Shift Instructions (Double Precision):**
+- `SHLD r32, r32, imm8` (ShldEdGdIb) - Shift left double precision with immediate
+- `SHLD r32, r32, CL` (ShldEdGd) - Shift left double precision with CL
+- `SHRD r32, r32, imm8` (ShrdEdGdIb) - Shift right double precision with immediate
+- `SHRD r32, r32, CL` (ShrdEdGd) - Shift right double precision with CL
+- `SHR r32, imm8` (ShrEdIb) - Logical shift right with immediate
+
+**CPU Identification:**
+- `CPUID` - Returns CPU vendor, family, and feature flags (basic implementation)
+
+### Previously Implemented Instructions (2026-02-01)
 
 **Stack Operations (32-bit):**
 - `PUSH imm32` (PushId) - Push 32-bit immediate value onto stack

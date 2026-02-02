@@ -234,4 +234,42 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // In Bochs, this causes the CPU to return from cpu_loop and check for interrupts
         self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
     }
+
+    /// CPUID - CPU Identification
+    /// Original: bochs/cpu/proc_ctrl.cc:101-131
+    /// Returns CPU identification and feature information in EAX, EBX, ECX, EDX
+    /// Input: EAX = function number, ECX = sub-function (for some functions)
+    pub fn cpuid(&mut self, _instr: &BxInstructionGenerated) {
+        let function = self.eax();
+        let _sub_function = self.ecx();
+
+        // Simplified CPUID implementation - returns basic values
+        // Real implementation would query BxCpuIdTrait::get_cpuid_leaf()
+        match function {
+            0 => {
+                // Function 0: Get vendor ID and max function number
+                self.set_eax(0x0000_0001); // Max basic function = 1
+                self.set_ebx(0x756e_6547); // "Genu" (part of "GenuineIntel")
+                self.set_edx(0x49656e69); // "ineI"
+                self.set_ecx(0x6c65_746e); // "ntel"
+            }
+            1 => {
+                // Function 1: Get CPU features
+                self.set_eax(0x0000_0f00); // Family 15, Model 0, Stepping 0
+                self.set_ebx(0x0000_0800); // Brand index, CLFLUSH size, etc.
+                self.set_ecx(0x0000_0001); // Feature flags (SSE3)
+                self.set_edx(0x0783_fbff); // Feature flags (FPU, VME, PSE, TSC, MSR, PAE, etc.)
+            }
+            _ => {
+                // Unknown function - return zeros
+                self.set_eax(0);
+                self.set_ebx(0);
+                self.set_ecx(0);
+                self.set_edx(0);
+            }
+        }
+
+        tracing::trace!("CPUID(EAX={:#x}): EAX={:#x}, EBX={:#x}, ECX={:#x}, EDX={:#x}",
+            function, self.eax(), self.ebx(), self.ecx(), self.edx());
+    }
 }
