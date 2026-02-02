@@ -50,4 +50,10 @@ pub enum CpuError {
     /// and restarting decode.
     #[error("cpu loop restart (bochs longjmp)")]
     CpuLoopRestart,
+
+    /// x86 exception generated during execution (e.g., #UD, #GP, #PF)
+    /// The exception has been delivered via IVT/IDT, but execution cannot continue
+    /// (e.g., unhandled exception handler address is 0000:0000)
+    #[error("x86 exception #{vector} delivered but unhandled")]
+    Exception { vector: u8 },
 }

@@ -82,3 +82,32 @@ pub fn MOVZX_GdEw<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 
     tracing::trace!("MOVZX32 r{}, r{}w: {:#06x} -> {:#010x}", dst_reg, src_reg, op2_16, op2_16 as u32);
 }
+
+/// MOV_EAXOd: MOV EAX, moffs32
+/// Opcode: 0xA1
+/// Original: bochs/cpu/data_xfer32.cc:96-101 MOV_EAXOd
+/// Load EAX from memory at direct address (seg:offset)
+pub fn MOV_EAXOd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    let offset = instr.id() as u64;
+    let ds_base = unsafe { cpu.sregs[crate::cpu::decoder::BxSegregs::Ds as usize].cache.u.segment.base };
+    let addr = ds_base.wrapping_add(offset);
+    let value = cpu.mem_read_dword(addr);
+    cpu.set_eax(value);
+
+    tracing::trace!("MOV EAX, [DS:{:#x}]: {:#x}", offset, value);
+    Ok(())
+}
+
+/// MOV_OdEAX: MOV moffs32, EAX
+/// Opcode: 0xA3
+/// Original: bochs/cpu/data_xfer32.cc:103-108 MOV_OdEAX
+/// Store EAX to memory at direct address (seg:offset)
+pub fn MOV_OdEAX<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    let offset = instr.id() as u64;
+    let ds_base = unsafe { cpu.sregs[crate::cpu::decoder::BxSegregs::Ds as usize].cache.u.segment.base };
+    let addr = ds_base.wrapping_add(offset);
+    cpu.mem_write_dword(addr, cpu.eax());
+
+    tracing::trace!("MOV [DS:{:#x}], EAX: {:#x}", offset, cpu.eax());
+    Ok(())
+}

@@ -626,8 +626,33 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                             decode_err,
                             &current_fetch_ptr[..core::cmp::min(16, current_fetch_ptr.len())]
                         );
-                        // Return the decode error instead of calling boundary_fetch
-                        return Err(crate::cpu::CpuError::Decoder(decode_err));
+
+                        // Check if this is an illegal opcode - if so, generate #UD exception
+                        // Based on Bochs exception.cc:937 and cpu.h:248 (Exception::Ud = 6)
+                        use crate::cpu::decoder::DecodeError;
+                        use rusty_box_decoder::fetchdecode_generated::BxDecodeError;
+                        match &decode_err {
+                            DecodeError::Decoder(BxDecodeError::BxIllegalOpcode) => {
+                                tracing::debug!("Illegal opcode detected, generating #UD exception (vector 6)");
+                                // Generate #UD exception which will vector through IVT in real mode
+                                // The exception() method will save CS:IP and jump to the #UD handler
+                                let exception_result = self.exception(crate::cpu::cpu::Exception::Ud, 0);
+
+                                // If the exception handler returns an error, propagate it
+                                if let Err(e) = exception_result {
+                                    return Err(e);
+                                }
+
+                                // After exception returns successfully, execution has been redirected
+                                // to the exception handler. We return an error to stop this decode path
+                                // and let the CPU continue from the new RIP (the exception handler)
+                                return Err(crate::cpu::CpuError::Exception { vector: 6 });
+                            }
+                            _ => {
+                                // Other decode errors are returned as-is
+                                return Err(crate::cpu::CpuError::Decoder(decode_err));
+                            }
+                        }
                     }
 
                     // First instruction is boundary fetch, leave the trace cache entry

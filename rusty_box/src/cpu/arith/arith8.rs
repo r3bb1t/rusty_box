@@ -235,3 +235,60 @@ pub fn ADD_EbIb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruct
     // For register form (including AL), use ADD_EbIbR
     ADD_EbIbR(cpu, instr)
 }
+
+/// INC_Eb: INC r/m8 (register form)
+/// Opcode: 0xFE/0
+/// Original: bochs/cpu/arith8.cc INC_EbR
+/// Increment 8-bit register by 1
+pub fn INC_Eb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    let dst = instr.dst() as usize;
+    let op1 = cpu.read_8bit_regx(dst, instr.extend8bit_l());
+    let result = op1.wrapping_add(1);
+    cpu.write_8bit_regx(dst, instr.extend8bit_l(), result);
+
+    // INC affects OF, SF, ZF, AF, PF but NOT CF
+    let zf = result == 0;
+    let sf = (result & 0x80) != 0;
+    let of = result == 0x80; // Overflow if we wrapped from 0x7F to 0x80
+    let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
+    let pf = result.count_ones() % 2 == 0;
+
+    // Update all flags except CF (bit 0)
+    const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
+    cpu.eflags &= !MASK;
+    if pf { cpu.eflags |= 1 << 2; }
+    if af { cpu.eflags |= 1 << 4; }
+    if zf { cpu.eflags |= 1 << 6; }
+    if sf { cpu.eflags |= 1 << 7; }
+    if of { cpu.eflags |= 1 << 11; }
+
+    Ok(())
+}
+
+/// DEC_Eb: DEC r/m8 (register form)
+/// Opcode: 0xFE/1
+/// Original: bochs/cpu/arith8.cc DEC_EbR
+/// Decrement 8-bit register by 1
+pub fn DEC_Eb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    let dst = instr.dst() as usize;
+    let op1 = cpu.read_8bit_regx(dst, instr.extend8bit_l());
+    let result = op1.wrapping_sub(1);
+    cpu.write_8bit_regx(dst, instr.extend8bit_l(), result);
+
+    // DEC affects OF, SF, ZF, AF, PF but NOT CF
+    let zf = result == 0;
+    let sf = (result & 0x80) != 0;
+    let of = result == 0x7F; // Overflow if we wrapped from 0x80 to 0x7F
+    let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
+    let pf = result.count_ones() % 2 == 0;
+
+    const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
+    cpu.eflags &= !MASK;
+    if pf { cpu.eflags |= 1 << 2; }
+    if af { cpu.eflags |= 1 << 4; }
+    if zf { cpu.eflags |= 1 << 6; }
+    if sf { cpu.eflags |= 1 << 7; }
+    if of { cpu.eflags |= 1 << 11; }
+
+    Ok(())
+}

@@ -1295,8 +1295,27 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     break;
                 }
                 let mut i = self.i_cache.mpool[mpool_idx];
-                tracing::trace!("Fetching instruction: trace_start_idx={}, instr_idx={}, mpool_idx={}, opcode={:?}, RIP={:#x}", 
-                    trace_start_idx, instr_idx, mpool_idx, i.get_ia_opcode(), self.rip());
+                let current_rip_for_log = self.rip();
+                tracing::trace!("Fetching instruction: trace_start_idx={}, instr_idx={}, mpool_idx={}, opcode={:?}, RIP={:#x}",
+                    trace_start_idx, instr_idx, mpool_idx, i.get_ia_opcode(), current_rip_for_log);
+
+                // Debug: Log instructions near the problematic address range
+                if current_rip_for_log >= 0xe1d00 && current_rip_for_log <= 0xe1dff {
+                    tracing::error!(
+                        "Executing near problem area: RIP={:#x}, opcode={:?}, ilen={}",
+                        current_rip_for_log,
+                        i.get_ia_opcode(),
+                        i.ilen()
+                    );
+                }
+                // Also log the instruction that might jump TO 0xe1d59
+                if current_rip_for_log >= 0xe1c00 && current_rip_for_log <= 0xe2000 {
+                    tracing::warn!(
+                        "RIP in BIOS area: RIP={:#x}, opcode={:?}",
+                        current_rip_for_log,
+                        i.get_ia_opcode()
+                    );
+                }
 
                 // want to allow changing of the instruction inside instrumentation callback
                 // Matching C++ line 201: BX_INSTR_BEFORE_EXECUTION(BX_CPU_ID, i);
@@ -1636,6 +1655,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         entry.tlen,
                         entry.mpool_start_idx
                     );
+
+                    // Debug: Log RIP transitions near the problematic address
+                    let rip = self.rip();
+                    if rip >= 0xe1d00 && rip <= 0xe1dff {
+                        tracing::warn!(
+                            "RIP in 0xe1d00 range: RIP={:#x}, prev_rip={:#x}",
+                            rip,
+                            last_rip
+                        );
+                    }
 
                     // Reset for new trace
                     instr_idx = 0;
@@ -2140,6 +2169,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             Opcode::MovAxod => data_xfer::MOV_AXOd(self, instr),
             Opcode::MovOdAl => data_xfer::MOV_OdAL(self, instr),
             Opcode::MovOdAx => data_xfer::MOV_OdAX(self, instr),
+            Opcode::MovEaxod => data_xfer::MOV_EAXOd(self, instr),
+            Opcode::MovOdEax => data_xfer::MOV_OdEAX(self, instr),
 
             // =========================================================================
             // PUSH/POP segment registers
@@ -3172,6 +3203,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // =========================================================================
             // INC/DEC instructions
             // =========================================================================
+            Opcode::IncEb => arith::INC_Eb(self, instr),
+            Opcode::DecEb => arith::DEC_Eb(self, instr),
             Opcode::IncEw => {
                 self.inc_ew_r(instr);
                 Ok(())

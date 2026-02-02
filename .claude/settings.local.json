@@ -37,7 +37,9 @@
       "Bash(./target/release/examples/dlxlinux:*)",
       "Bash(test:*)",
       "Bash(pkill:*)",
-      "Bash(taskkill:*)"
+      "Bash(taskkill:*)",
+      "Bash(1)",
+      "Bash(python:*)"
     ]
   }
 }
