@@ -1643,7 +1643,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
 
             // Clear stop trace magic indication (matching C++ line 226)
-            self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+            // BUT: Don't clear if CPU is halted - we need the flag to be checked by handle_async_event()
+            // in the outer loop (line 1176) so it can detect the halt state and return from cpu_loop.
+            // Only clear STOP_TRACE if activity_state is Active (normal execution).
+            if matches!(self.activity_state, CpuActivityState::Active) {
+                self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+            }
 
             // Use the last executed instruction for loop detection
             // If we broke early due to async_event, use the last instruction we executed
@@ -1718,8 +1723,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
 
             // TODO: And syncing of time
-            if self.async_event > 0 {
-                // clear stop trace magic indication that probably was set by repeat or branch32/64
+            // clear stop trace magic indication that probably was set by repeat or branch32/64
+            // BUT: Don't clear if CPU is halted - we need the flag for handle_async_event()
+            if self.async_event > 0 && matches!(self.activity_state, CpuActivityState::Active) {
                 self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
             }
         };
@@ -2181,6 +2187,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 use crate::cpu::arith;
                 arith::ADD_EwIw(self, instr)
             }
+            Opcode::AddEdsIb => {
+                arith::ADD_EdId_R(self, instr);
+                Ok(())
+            }
+            Opcode::AddEdId => {
+                arith::ADD_EdId_R(self, instr);
+                Ok(())
+            }
             // Arithmetic (SUB) instructions
             Opcode::SubGdEd => {
                 arith::SUB_GdEd_R(self, instr);
@@ -2192,6 +2206,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::SubEaxid => {
                 arith::SUB_EAX_Id(self, instr);
+                Ok(())
+            }
+            Opcode::SubEdsIb => {
+                arith::SUB_EdId_R(self, instr);
+                Ok(())
+            }
+            Opcode::SubEdId => {
+                arith::SUB_EdId_R(self, instr);
                 Ok(())
             }
             // XOR instructions
@@ -2595,7 +2617,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.jz_jd(instr);
                 Ok(())
             }
+            Opcode::JzJbd => {
+                self.jz_jd(instr);
+                Ok(())
+            }
             Opcode::JnzJd => {
+                self.jnz_jd(instr);
+                Ok(())
+            }
+            Opcode::JnzJbd => {
                 self.jnz_jd(instr);
                 Ok(())
             }
@@ -2776,6 +2806,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.cmp_ed_id_r(instr);
                 Ok(())
             }
+            Opcode::CmpEdsIb => {
+                self.cmp_ed_id_r(instr);
+                Ok(())
+            }
 
             // TEST instructions
             Opcode::TestEbGb => {
@@ -2882,6 +2916,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::AndEdId => {
+                if instr.mod_c0() {
+                    // Register form
+                    self.and_ed_id_r(instr);
+                } else {
+                    // Memory form
+                    self.and_ed_id_m(instr);
+                }
+                Ok(())
+            }
+            Opcode::AndEdsIb => {
                 if instr.mod_c0() {
                     // Register form
                     self.and_ed_id_r(instr);
@@ -3152,6 +3196,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::PushEd => {
                 self.push_ed_r(instr);
+                Ok(())
+            }
+            Opcode::PushId => {
+                self.push_id(instr);
+                Ok(())
+            }
+            Opcode::PushSIb32 => {
+                self.push_id(instr);
                 Ok(())
             }
             Opcode::PopEw => {
@@ -3448,6 +3500,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::Cbw => {
                 self.cbw(instr);
+                Ok(())
+            }
+            Opcode::MovsxGdEb => {
+                self.movsx_gd_eb(instr);
                 Ok(())
             }
             Opcode::Cwd => {

@@ -851,6 +851,15 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         Ok(())
     }
 
+    // Wrapper function for PUSH immediate 32-bit
+    fn push_id_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        cpu.push_id(instr);
+        Ok(())
+    }
+
     // Wrapper function for FAR JMP (needs TRACE_END flag)
     fn jmpf_ap_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
@@ -1309,6 +1318,13 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         }),
         Opcode::PopOp16Sw => Some(BxOpcodeEntry {
             execute1: pop_op16_sw_wrapper,
+            execute2: None,
+            opflags: OpFlags::empty(),
+        }),
+
+        // PUSH immediate 32-bit
+        Opcode::PushId => Some(BxOpcodeEntry {
+            execute1: push_id_wrapper,
             execute2: None,
             opflags: OpFlags::empty(),
         }),

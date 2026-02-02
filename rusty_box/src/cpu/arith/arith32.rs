@@ -48,6 +48,19 @@ pub fn ADD_EAX_Id<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
     cpu.update_flags_add32(eax, imm, result);
 }
 
+/// ADD_EdId_R: ADD r32, imm32 (register form, sign-extended immediate)
+/// Original: bochs/cpu/arith32.cc ADD_EdIdR
+/// Opcode: 0x81/0x83, ModRM: r/m32, imm32/imm8
+pub fn ADD_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let dst_reg = instr.meta_data[0] as usize;
+    let op1 = cpu.get_gpr32(dst_reg);
+    let op2 = instr.id(); // Sign-extended immediate
+    let result = op1.wrapping_add(op2);
+
+    cpu.set_gpr32(dst_reg, result);
+    cpu.update_flags_add32(op1, op2, result);
+}
+
 /// SUB_GdEd_R: SUB r32, r/m32 (register form)
 /// Opcode: 0x2B, ModRM: r32, r/m32 (register)
 pub fn SUB_GdEd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
@@ -85,6 +98,32 @@ pub fn SUB_EAX_Id<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 
     cpu.set_eax(result);
     cpu.update_flags_sub32(eax, imm, result);
+}
+
+/// SUB_EdId_R: SUB r32, imm32 (register form, sign-extended immediate)
+/// Original: bochs/cpu/arith32.cc SUB_EdIdR
+/// Opcode: 0x81/0x83, ModRM: r/m32, imm32/imm8
+pub fn SUB_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let dst_reg = instr.meta_data[0] as usize;
+    let op1 = cpu.get_gpr32(dst_reg);
+    let op2 = instr.id(); // Sign-extended immediate
+    let result = op1.wrapping_sub(op2);
+
+    cpu.set_gpr32(dst_reg, result);
+    cpu.update_flags_sub32(op1, op2, result);
+}
+
+/// CMP_EdId_R: CMP r32, imm32 (register form, sign-extended immediate)
+/// Original: bochs/cpu/arith32.cc CMP_EdIdR
+/// Opcode: 0x81/0x83, ModRM: r/m32, imm32/imm8
+pub fn CMP_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let dst_reg = instr.meta_data[0] as usize;
+    let op1 = cpu.get_gpr32(dst_reg);
+    let op2 = instr.id(); // Sign-extended immediate
+    let result = op1.wrapping_sub(op2);
+
+    // CMP only sets flags, doesn't write result
+    cpu.update_flags_sub32(op1, op2, result);
 }
 
 /// ADC_EdGd_R: ADC r/m32, r32 (register form)

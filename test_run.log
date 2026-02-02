@@ -1,0 +1,973 @@
+warning: unused variable: `is_seg_mov`
+   --> rusty_box_decoder\src\fetchdecode32.rs:436:13
+    |
+436 |         let is_seg_mov = matches!(b1, 0x8C | 0x8E);
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_is_seg_mov`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: enum `BxRegs8L` is never used
+   --> rusty_box_decoder\src\lib.rs:337:6
+    |
+337 | enum BxRegs8L {
+    |      ^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: enum `BxRegs8H` is never used
+   --> rusty_box_decoder\src\lib.rs:358:6
+    |
+358 | enum BxRegs8H {
+    |      ^^^^^^^^
+
+warning: enum `BxRegs16` is never used
+   --> rusty_box_decoder\src\lib.rs:366:6
+    |
+366 | enum BxRegs16 {
+    |      ^^^^^^^^
+
+warning: enum `BxRegs32` is never used
+   --> rusty_box_decoder\src\lib.rs:387:6
+    |
+387 | enum BxRegs32 {
+    |      ^^^^^^^^
+
+warning: enum `BxRegs64` is never used
+   --> rusty_box_decoder\src\lib.rs:408:6
+    |
+408 | enum BxRegs64 {
+    |      ^^^^^^^^
+
+warning: constant `BX_VECTOR_TMP_REGISTER` is never used
+   --> rusty_box_decoder\src\lib.rs:464:7
+    |
+464 | const BX_VECTOR_TMP_REGISTER: usize = BX_XMM_REGISTERS;
+    |       ^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_host_word_to_little_endian` is never used
+ --> rusty_box_decoder\src\bswap.rs:4:15
+  |
+4 | pub(super) fn read_host_word_to_little_endian(host_ptr: &[u8]) -> u16 {
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_host_dword_to_little_endian` is never used
+ --> rusty_box_decoder\src\bswap.rs:9:15
+  |
+9 | pub(super) fn read_host_dword_to_little_endian(host_ptr: &[u8]) -> u32 {
+  |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `read_host_qword_to_little_endian` is never used
+  --> rusty_box_decoder\src\bswap.rs:14:15
+   |
+14 | pub(super) fn read_host_qword_to_little_endian(host_ptr: &[u8]) -> u64 {
+   |               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `fetch_dword` is never used
+  --> rusty_box_decoder\src\fetchdecode.rs:39:15
+   |
+39 | pub(super) fn fetch_dword(iptr: &[u8]) -> u32 {
+   |               ^^^^^^^^^^^
+
+warning: function `fetch_word` is never used
+  --> rusty_box_decoder\src\fetchdecode.rs:43:15
+   |
+43 | pub(super) fn fetch_word(iptr: &[u8]) -> u16 {
+   |               ^^^^^^^^^^
+
+warning: function `fetch_qword` is never used
+  --> rusty_box_decoder\src\fetchdecode.rs:47:15
+   |
+47 | pub(super) fn fetch_qword(iptr: &[u8]) -> u64 {
+   |               ^^^^^^^^^^^
+
+warning: constant `BX_SRC_NONE` is never used
+  --> rusty_box_decoder\src\fetchdecode_generated.rs:78:18
+   |
+78 | pub(crate) const BX_SRC_NONE: BxSrc = BxSrc::BxSrcNone;
+   |                  ^^^^^^^^^^^
+
+warning: constant `BX_SRC_EAX` is never used
+  --> rusty_box_decoder\src\fetchdecode_generated.rs:79:18
+   |
+79 | pub(crate) const BX_SRC_EAX: BxSrc = BxSrc::BxSrcEax;
+   |                  ^^^^^^^^^^
+
+warning: constant `BX_SRC_NNN` is never used
+  --> rusty_box_decoder\src\fetchdecode_generated.rs:80:18
+   |
+80 | pub(crate) const BX_SRC_NNN: BxSrc = BxSrc::BxSrcNnn;
+   |                  ^^^^^^^^^^
+
+warning: constant `BX_SRC_RM` is never used
+  --> rusty_box_decoder\src\fetchdecode_generated.rs:81:18
+   |
+81 | pub(crate) const BX_SRC_RM: BxSrc = BxSrc::BxSrcRm;
+   |                  ^^^^^^^^^
+
+warning: constant `BX_SRC_VECTOR_RM` is never used
+  --> rusty_box_decoder\src\fetchdecode_generated.rs:82:18
+   |
+82 | pub(crate) const BX_SRC_VECTOR_RM: BxSrc = BxSrc::BxSrcVectorRm;
+   |                  ^^^^^^^^^^^^^^^^
+
+warning: constant `BX_SRC_VIB` is never used
+  --> rusty_box_decoder\src\fetchdecode_generated.rs:85:18
+   |
+85 | pub(crate) const BX_SRC_VIB: BxSrc = BxSrc::BxSrcVib;
+   |                  ^^^^^^^^^^
+
+warning: constant `BX_SRC_IMM` is never used
+  --> rusty_box_decoder\src\fetchdecode_generated.rs:88:18
+   |
+88 | pub(crate) const BX_SRC_IMM: BxSrc = BxSrc::BxSrcImm;
+   |                  ^^^^^^^^^^
+
+warning: constant `BX_SRC_BRANCH_OFFSET` is never used
+  --> rusty_box_decoder\src\fetchdecode_generated.rs:89:18
+   |
+89 | pub(crate) const BX_SRC_BRANCH_OFFSET: BxSrc = BxSrc::BxSrcBranchOffset;
+   |                  ^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_SRC_IMPLICIT` is never used
+  --> rusty_box_decoder\src\fetchdecode_generated.rs:90:18
+   |
+90 | pub(crate) const BX_SRC_IMPLICIT: BxSrc = BxSrc::BxSrcImplicit;
+   |                  ^^^^^^^^^^^^^^^
+
+warning: methods `osize`, `asize`, and `ilen` are never used
+  --> rusty_box_decoder\src\instr.rs:62:19
+   |
+60 | impl BxInstruction {
+   | ------------------ methods in this implementation
+61 |     #[inline]
+62 |     pub(super) fn osize(&self) -> u32 {
+   |                   ^^^^^
+...
+67 |     pub(super) fn asize(&self) -> u32 {
+   |                   ^^^^^
+...
+71 |     pub(crate) fn ilen(&self) -> u8 {
+   |                   ^^^^
+
+warning: enum `BxDisasmStyle` is never used
+  --> rusty_box_decoder\src\instr.rs:77:17
+   |
+77 | pub(super) enum BxDisasmStyle {
+   |                 ^^^^^^^^^^^^^
+
+warning: union `ModRmFirstForm` is never used
+  --> rusty_box_decoder\src\instr.rs:82:18
+   |
+82 | pub(super) union ModRmFirstForm {
+   |                  ^^^^^^^^^^^^^^
+
+warning: union `ModRmSecondForm` is never used
+  --> rusty_box_decoder\src\instr.rs:96:18
+   |
+96 | pub(super) union ModRmSecondForm {
+   |                  ^^^^^^^^^^^^^^^
+
+warning: struct `ModRmform` is never constructed
+   --> rusty_box_decoder\src\instr.rs:104:19
+    |
+104 | pub(super) struct ModRmform {
+    |                   ^^^^^^^^^
+
+warning: constant `BX_LOCK_PREFIX_USED` is never used
+   --> rusty_box_decoder\src\instr.rs:109:18
+    |
+109 | pub(crate) const BX_LOCK_PREFIX_USED: bool = true;
+    |                  ^^^^^^^^^^^^^^^^^^^
+
+warning: methods `set_os32_b`, `set_lock_rep_used`, and `mod_c0` are never used
+   --> rusty_box_decoder\src\instr.rs:172:19
+    |
+171 | impl MetaInfoFlags {
+    | ------------------ methods in this implementation
+172 |     pub(crate) fn set_os32_b(&mut self, bit: bool) {
+    |                   ^^^^^^^^^^
+...
+176 |     pub(super) fn set_lock_rep_used(&mut self, value: u32) {
+    |                   ^^^^^^^^^^^^^^^^^
+...
+183 |     pub(super) fn mod_c0(&self) -> u32 {
+    |                   ^^^^^^
+
+warning: constant `BX_OPCODE_INFO_FLOATING_POINT_D8` is never used
+   --> rusty_box_decoder\src\fetchdecode_x87.rs:269:18
+    |
+269 | pub(super) const BX_OPCODE_INFO_FLOATING_POINT_D8: [Opcode; 72] = [
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_OPCODE_INFO_FLOATING_POINT_D9` is never used
+   --> rusty_box_decoder\src\fetchdecode_x87.rs:292:18
+    |
+292 | pub(super) const BX_OPCODE_INFO_FLOATING_POINT_D9: [Opcode; 72] = [Opcode::IaError; 72];
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_OPCODE_INFO_FLOATING_POINT_DA` is never used
+   --> rusty_box_decoder\src\fetchdecode_x87.rs:295:18
+    |
+295 | pub(super) const BX_OPCODE_INFO_FLOATING_POINT_DA: [Opcode; 72] = [Opcode::IaError; 72];
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_OPCODE_INFO_FLOATING_POINT_DB` is never used
+   --> rusty_box_decoder\src\fetchdecode_x87.rs:298:18
+    |
+298 | pub(super) const BX_OPCODE_INFO_FLOATING_POINT_DB: [Opcode; 72] = [Opcode::IaError; 72];
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_OPCODE_INFO_FLOATING_POINT_DC` is never used
+   --> rusty_box_decoder\src\fetchdecode_x87.rs:301:18
+    |
+301 | pub(super) const BX_OPCODE_INFO_FLOATING_POINT_DC: [Opcode; 72] = [Opcode::IaError; 72];
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_OPCODE_INFO_FLOATING_POINT_DD` is never used
+   --> rusty_box_decoder\src\fetchdecode_x87.rs:304:18
+    |
+304 | pub(super) const BX_OPCODE_INFO_FLOATING_POINT_DD: [Opcode; 72] = [Opcode::IaError; 72];
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_OPCODE_INFO_FLOATING_POINT_DE` is never used
+   --> rusty_box_decoder\src\fetchdecode_x87.rs:307:18
+    |
+307 | pub(super) const BX_OPCODE_INFO_FLOATING_POINT_DE: [Opcode; 72] = [Opcode::IaError; 72];
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BX_OPCODE_INFO_FLOATING_POINT_DF` is never used
+   --> rusty_box_decoder\src\fetchdecode_x87.rs:310:18
+    |
+310 | pub(super) const BX_OPCODE_INFO_FLOATING_POINT_DF: [Opcode; 72] = [Opcode::IaError; 72];
+    |                  ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: constant `BxOpcodeGroup_ERR` should have an upper case name
+   --> rusty_box_decoder\src\fetchdecode_generated.rs:470:11
+    |
+470 | pub const BxOpcodeGroup_ERR: [u64; 1] = [last_opcode(0, super::ia_opcodes::Opcode::IaError)];
+    |           ^^^^^^^^^^^^^^^^^ help: convert the identifier to upper case: `BX_OPCODE_GROUP_ERR`
+    |
+    = note: `#[warn(non_upper_case_globals)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: structure field `Id` should have a snake case name
+  --> rusty_box_decoder\src\instr.rs:83:5
+   |
+83 |     Id: u32,
+   |     ^^ help: convert the identifier to snake case (notice the capitalization): `id`
+   |
+   = note: `#[warn(non_snake_case)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: structure field `Iw` should have a snake case name
+  --> rusty_box_decoder\src\instr.rs:84:5
+   |
+84 |     Iw: [u16; 2],
+   |     ^^ help: convert the identifier to snake case (notice the capitalization): `iw`
+
+warning: structure field `Ib` should have a snake case name
+  --> rusty_box_decoder\src\instr.rs:93:5
+   |
+93 |     Ib: [u8; 4],
+   |     ^^ help: convert the identifier to snake case (notice the capitalization): `ib`
+
+warning: structure field `Id2` should have a snake case name
+   --> rusty_box_decoder\src\instr.rs:100:5
+    |
+100 |     Id2: u32,
+    |     ^^^ help: convert the identifier to snake case (notice the capitalization): `id2`
+
+warning: structure field `Iw2` should have a snake case name
+   --> rusty_box_decoder\src\instr.rs:101:5
+    |
+101 |     Iw2: [u16; 2],
+    |     ^^^ help: convert the identifier to snake case (notice the capitalization): `iw2`
+
+warning: structure field `Ib2` should have a snake case name
+   --> rusty_box_decoder\src\instr.rs:102:5
+    |
+102 |     Ib2: [u8; 4],
+    |     ^^^ help: convert the identifier to snake case (notice the capitalization): `ib2`
+
+warning: `rusty_box_decoder` (lib) generated 44 warnings (run `cargo fix --lib -p rusty_box_decoder` to apply 1 suggestion)
+   Compiling rusty_box v0.0.1 (C:\Users\Aslan\claude_rusty_box\rusty_box)
+warning: unused import: `crate::config::BxAddress`
+ --> rusty_box\src\cpu\arith\arith16.rs:6:5
+  |
+6 | use crate::config::BxAddress;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary parentheses around assigned value
+   --> rusty_box\src\cpu\arith\arith16.rs:101:15
+    |
+101 |     let op2 = (instr.ib() as i8 as i16 as u16); // Sign-extend imm8 to u16
+    |               ^                              ^
+    |
+    = note: `#[warn(unused_parens)]` (part of `#[warn(unused)]`) on by default
+help: remove these parentheses
+    |
+101 -     let op2 = (instr.ib() as i8 as i16 as u16); // Sign-extend imm8 to u16
+101 +     let op2 = instr.ib() as i8 as i16 as u16; // Sign-extend imm8 to u16
+    |
+
+warning: unused import: `crate::config::BxAddress`
+ --> rusty_box\src\cpu\arith\arith8.rs:6:5
+  |
+6 | use crate::config::BxAddress;
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `BxSegregs`
+ --> rusty_box\src\cpu\arith16.rs:4:39
+  |
+4 |     decoder::{BxInstructionGenerated, BxSegregs},
+  |                                       ^^^^^^^^^
+
+warning: unused import: `cell::UnsafeCell`
+ --> rusty_box\src\cpu\cpu.rs:1:12
+  |
+1 | use core::{cell::UnsafeCell, marker::PhantomData, ptr::NonNull};
+  |            ^^^^^^^^^^^^^^^^
+
+warning: unused imports: `BxMemoryStubC` and `page_offset`
+  --> rusty_box\src\cpu\cpu.rs:11:23
+   |
+11 |         tlb::{lpf_of, page_offset, ppf_of, TLBEntry, Tlb},
+   |                       ^^^^^^^^^^^
+...
+15 |     memory::{BxMemC, BxMemoryStubC},
+   |                      ^^^^^^^^^^^^^
+
+warning: unused imports: `decode_simple_32`, `fetchdecode32`, and `fetchdecode64`
+  --> rusty_box\src\cpu\cpu.rs:39:27
+   |
+39 | use crate::cpu::decoder::{decode_simple_32, fetchdecode32, fetchdecode64};
+   |                           ^^^^^^^^^^^^^^^^  ^^^^^^^^^^^^^  ^^^^^^^^^^^^^
+
+warning: unexpected `cfg` condition value: `bx_support_sse`
+    --> rusty_box\src\cpu\cpu.rs:4199:11
+     |
+4199 |     #[cfg(feature = "bx_support_sse")]
+     |           ^^^^^^^^^^----------------
+     |                     |
+     |                     help: there is a expected value with a similar name: `"bx_support_smp"`
+     |
+     = note: expected values for `feature` are: `bx_big_endian`, `bx_configure_msrs`, `bx_debugger`, `bx_full`, `bx_gdb_stub`, `bx_instrumentation`, `bx_large_ram_file`, `bx_little_endian`, `bx_phy_address_long`, `bx_support_alignment_check`, `bx_support_amx`, `bx_support_apic`, `bx_support_handlers_chaining_speedups`, `bx_support_memtype`, `bx_support_monitor_mwait`, `bx_support_pci`, `bx_support_pkeys`, `bx_support_smp`, `default`, `gui-egui`, `libc`, `std`, `tempfile`, and `winapi`
+     = help: consider adding `bx_support_sse` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+     = note: `#[warn(unexpected_cfgs)]` on by default
+
+warning: unexpected `cfg` condition value: `bx_support_avx`
+    --> rusty_box\src\cpu\cpu.rs:4225:11
+     |
+4225 |     #[cfg(feature = "bx_support_avx")]
+     |           ^^^^^^^^^^----------------
+     |                     |
+     |                     help: there is a expected value with a similar name: `"bx_support_amx"`
+     |
+     = note: expected values for `feature` are: `bx_big_endian`, `bx_configure_msrs`, `bx_debugger`, `bx_full`, `bx_gdb_stub`, `bx_instrumentation`, `bx_large_ram_file`, `bx_little_endian`, `bx_phy_address_long`, `bx_support_alignment_check`, `bx_support_amx`, `bx_support_apic`, `bx_support_handlers_chaining_speedups`, `bx_support_memtype`, `bx_support_monitor_mwait`, `bx_support_pci`, `bx_support_pkeys`, `bx_support_smp`, `default`, `gui-egui`, `libc`, `std`, `tempfile`, and `winapi`
+     = help: consider adding `bx_support_avx` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `bx_support_evex`
+    --> rusty_box\src\cpu\cpu.rs:4267:11
+     |
+4267 |     #[cfg(feature = "bx_support_evex")]
+     |           ^^^^^^^^^^-----------------
+     |                     |
+     |                     help: there is a expected value with a similar name: `"bx_support_amx"`
+     |
+     = note: expected values for `feature` are: `bx_big_endian`, `bx_configure_msrs`, `bx_debugger`, `bx_full`, `bx_gdb_stub`, `bx_instrumentation`, `bx_large_ram_file`, `bx_little_endian`, `bx_phy_address_long`, `bx_support_alignment_check`, `bx_support_amx`, `bx_support_apic`, `bx_support_handlers_chaining_speedups`, `bx_support_memtype`, `bx_support_monitor_mwait`, `bx_support_pci`, `bx_support_pkeys`, `bx_support_smp`, `default`, `gui-egui`, `libc`, `std`, `tempfile`, and `winapi`
+     = help: consider adding `bx_support_evex` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `bx_support_evex`
+    --> rusty_box\src\cpu\cpu.rs:4312:11
+     |
+4312 |     #[cfg(feature = "bx_support_evex")]
+     |           ^^^^^^^^^^-----------------
+     |                     |
+     |                     help: there is a expected value with a similar name: `"bx_support_amx"`
+     |
+     = note: expected values for `feature` are: `bx_big_endian`, `bx_configure_msrs`, `bx_debugger`, `bx_full`, `bx_gdb_stub`, `bx_instrumentation`, `bx_large_ram_file`, `bx_little_endian`, `bx_phy_address_long`, `bx_support_alignment_check`, `bx_support_amx`, `bx_support_apic`, `bx_support_handlers_chaining_speedups`, `bx_support_memtype`, `bx_support_monitor_mwait`, `bx_support_pci`, `bx_support_pkeys`, `bx_support_smp`, `default`, `gui-egui`, `libc`, `std`, `tempfile`, and `winapi`
+     = help: consider adding `bx_support_evex` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `bx_support_evex`
+    --> rusty_box\src\cpu\cpu.rs:4487:15
+     |
+4487 |         #[cfg(feature = "bx_support_evex")]
+     |               ^^^^^^^^^^-----------------
+     |                         |
+     |                         help: there is a expected value with a similar name: `"bx_support_amx"`
+     |
+     = note: expected values for `feature` are: `bx_big_endian`, `bx_configure_msrs`, `bx_debugger`, `bx_full`, `bx_gdb_stub`, `bx_instrumentation`, `bx_large_ram_file`, `bx_little_endian`, `bx_phy_address_long`, `bx_support_alignment_check`, `bx_support_amx`, `bx_support_apic`, `bx_support_handlers_chaining_speedups`, `bx_support_memtype`, `bx_support_monitor_mwait`, `bx_support_pci`, `bx_support_pkeys`, `bx_support_smp`, `default`, `gui-egui`, `libc`, `std`, `tempfile`, and `winapi`
+     = help: consider adding `bx_support_evex` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `bx_support_sse`
+    --> rusty_box\src\cpu\cpu.rs:4544:15
+     |
+4544 |         #[cfg(feature = "bx_support_sse")]
+     |               ^^^^^^^^^^----------------
+     |                         |
+     |                         help: there is a expected value with a similar name: `"bx_support_smp"`
+     |
+     = note: expected values for `feature` are: `bx_big_endian`, `bx_configure_msrs`, `bx_debugger`, `bx_full`, `bx_gdb_stub`, `bx_instrumentation`, `bx_large_ram_file`, `bx_little_endian`, `bx_phy_address_long`, `bx_support_alignment_check`, `bx_support_amx`, `bx_support_apic`, `bx_support_handlers_chaining_speedups`, `bx_support_memtype`, `bx_support_monitor_mwait`, `bx_support_pci`, `bx_support_pkeys`, `bx_support_smp`, `default`, `gui-egui`, `libc`, `std`, `tempfile`, and `winapi`
+     = help: consider adding `bx_support_sse` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `bx_support_avx`
+    --> rusty_box\src\cpu\cpu.rs:4559:15
+     |
+4559 |         #[cfg(feature = "bx_support_avx")]
+     |               ^^^^^^^^^^----------------
+     |                         |
+     |                         help: there is a expected value with a similar name: `"bx_support_amx"`
+     |
+     = note: expected values for `feature` are: `bx_big_endian`, `bx_configure_msrs`, `bx_debugger`, `bx_full`, `bx_gdb_stub`, `bx_instrumentation`, `bx_large_ram_file`, `bx_little_endian`, `bx_phy_address_long`, `bx_support_alignment_check`, `bx_support_amx`, `bx_support_apic`, `bx_support_handlers_chaining_speedups`, `bx_support_memtype`, `bx_support_monitor_mwait`, `bx_support_pci`, `bx_support_pkeys`, `bx_support_smp`, `default`, `gui-egui`, `libc`, `std`, `tempfile`, and `winapi`
+     = help: consider adding `bx_support_avx` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `bx_support_evex`
+    --> rusty_box\src\cpu\cpu.rs:4574:15
+     |
+4574 |         #[cfg(feature = "bx_support_evex")]
+     |               ^^^^^^^^^^-----------------
+     |                         |
+     |                         help: there is a expected value with a similar name: `"bx_support_amx"`
+     |
+     = note: expected values for `feature` are: `bx_big_endian`, `bx_configure_msrs`, `bx_debugger`, `bx_full`, `bx_gdb_stub`, `bx_instrumentation`, `bx_large_ram_file`, `bx_little_endian`, `bx_phy_address_long`, `bx_support_alignment_check`, `bx_support_amx`, `bx_support_apic`, `bx_support_handlers_chaining_speedups`, `bx_support_memtype`, `bx_support_monitor_mwait`, `bx_support_pci`, `bx_support_pkeys`, `bx_support_smp`, `default`, `gui-egui`, `libc`, `std`, `tempfile`, and `winapi`
+     = help: consider adding `bx_support_evex` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `bx_support_evex`
+    --> rusty_box\src\cpu\cpu.rs:4589:15
+     |
+4589 |         #[cfg(feature = "bx_support_evex")]
+     |               ^^^^^^^^^^-----------------
+     |                         |
+     |                         help: there is a expected value with a similar name: `"bx_support_amx"`
+     |
+     = note: expected values for `feature` are: `bx_big_endian`, `bx_configure_msrs`, `bx_debugger`, `bx_full`, `bx_gdb_stub`, `bx_instrumentation`, `bx_large_ram_file`, `bx_little_endian`, `bx_phy_address_long`, `bx_support_alignment_check`, `bx_support_amx`, `bx_support_apic`, `bx_support_handlers_chaining_speedups`, `bx_support_memtype`, `bx_support_monitor_mwait`, `bx_support_pci`, `bx_support_pkeys`, `bx_support_smp`, `default`, `gui-egui`, `libc`, `std`, `tempfile`, and `winapi`
+     = help: consider adding `bx_support_evex` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: type `XSaveStateInUsePtr_tR` should have an upper camel case name
+   --> rusty_box\src\cpu\crregs.rs:330:6
+    |
+330 | type XSaveStateInUsePtr_tR = fn() -> bool;
+    |      ^^^^^^^^^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `XsaveStateInUsePtrTR`
+    |
+    = note: `#[warn(non_camel_case_types)]` (part of `#[warn(nonstandard_style)]`) on by default
+
+warning: type `XSavePtr_tR` should have an upper camel case name
+   --> rusty_box\src\cpu\crregs.rs:331:6
+    |
+331 | type XSavePtr_tR = fn(&BxInstructionGenerated, usize);
+    |      ^^^^^^^^^^^ help: convert the identifier to upper camel case: `XsavePtrTR`
+
+warning: type `XRestorPtr_tR` should have an upper camel case name
+   --> rusty_box\src\cpu\crregs.rs:332:6
+    |
+332 | type XRestorPtr_tR = fn(&BxInstructionGenerated, usize);
+    |      ^^^^^^^^^^^^^ help: convert the identifier to upper camel case: `XrestorPtrTR`
+
+warning: unused import: `segment_ctrl_pro::parse_selector`
+  --> rusty_box\src\cpu\ctrl_xfer16.rs:10:5
+   |
+10 |     segment_ctrl_pro::parse_selector,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `data_xfer64::*`
+  --> rusty_box\src\cpu\data_xfer\mod.rs:12:9
+   |
+12 | pub use data_xfer64::*;
+   |         ^^^^^^^^^^^^^^
+
+warning: unused imports: `default` and `ffi::c_uint`
+  --> rusty_box\src\cpu\descriptor.rs:16:12
+   |
+16 | use core::{default, ffi::c_uint};
+   |            ^^^^^^^  ^^^^^^^^^^^
+
+warning: unused import: `avx::amx::AMX`
+ --> rusty_box\src\cpu\init.rs:8:9
+  |
+8 |         avx::amx::AMX,
+  |         ^^^^^^^^^^^^^
+
+warning: unused import: `decoder::BxInstructionGenerated`
+ --> rusty_box\src\cpu\logical64.rs:9:5
+  |
+9 |     decoder::BxInstructionGenerated,
+  |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused imports: `CpuError`, `Exception`, `Result`, and `decoder::BxInstructionGenerated`
+  --> rusty_box\src\cpu\mult64.rs:7:19
+   |
+ 7 |     cpu::{BxCpuC, Exception},
+   |                   ^^^^^^^^^
+ 8 |     cpuid::BxCpuIdTrait,
+ 9 |     decoder::BxInstructionGenerated,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+10 |     error::{CpuError, Result},
+   |             ^^^^^^^^  ^^^^^^
+
+warning: unused doc comment
+  --> rusty_box\src\cpu\opcodes_table.rs:43:1
+   |
+43 | / /// OpFlags bitflags matching original C++ definitions from `fetchdecode.h`
+44 | | ///
+45 | | /// These flags indicate feature requirements and special handling for instructions.
+   | |_-----------------------------------------------------------------------------------^
+   |   |
+   |   rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+   = note: `#[warn(unused_doc_comments)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused doc comment
+  --> rusty_box\src\cpu\opcodes_table.rs:87:1
+   |
+87 | / /// FetchModeMask bitflags matching original C++ definitions from `cpu.h`
+88 | | ///
+89 | | /// These flags indicate which features are currently available/active in the CPU.
+90 | | /// They are checked against OpFlags to determine if an instruction can be executed
+91 | | /// or if an error handler should be assigned instead.
+92 | | ///
+93 | | /// Matching C++ definitions in cpu.h:5455-5462
+   | |_----------------------------------------------^
+   |   |
+   |   rustdoc does not generate documentation for macro invocations
+   |
+   = help: to document an item produced by a macro, the macro must produce the documentation as part of its expansion
+
+warning: unexpected `cfg` condition value: `bx_support_sse`
+    --> rusty_box\src\cpu\opcodes_table.rs:1370:7
+     |
+1370 | #[cfg(feature = "bx_support_sse")]
+     |       ^^^^^^^^^^----------------
+     |                 |
+     |                 help: there is a expected value with a similar name: `"bx_support_smp"`
+     |
+     = note: expected values for `feature` are: `bx_big_endian`, `bx_configure_msrs`, `bx_debugger`, `bx_full`, `bx_gdb_stub`, `bx_instrumentation`, `bx_large_ram_file`, `bx_little_endian`, `bx_phy_address_long`, `bx_support_alignment_check`, `bx_support_amx`, `bx_support_apic`, `bx_support_handlers_chaining_speedups`, `bx_support_memtype`, `bx_support_monitor_mwait`, `bx_support_pci`, `bx_support_pkeys`, `bx_support_smp`, `default`, `gui-egui`, `libc`, `std`, `tempfile`, and `winapi`
+     = help: consider adding `bx_support_sse` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `bx_support_avx`
+    --> rusty_box\src\cpu\opcodes_table.rs:1378:7
+     |
+1378 | #[cfg(feature = "bx_support_avx")]
+     |       ^^^^^^^^^^----------------
+     |                 |
+     |                 help: there is a expected value with a similar name: `"bx_support_amx"`
+     |
+     = note: expected values for `feature` are: `bx_big_endian`, `bx_configure_msrs`, `bx_debugger`, `bx_full`, `bx_gdb_stub`, `bx_instrumentation`, `bx_large_ram_file`, `bx_little_endian`, `bx_phy_address_long`, `bx_support_alignment_check`, `bx_support_amx`, `bx_support_apic`, `bx_support_handlers_chaining_speedups`, `bx_support_memtype`, `bx_support_monitor_mwait`, `bx_support_pci`, `bx_support_pkeys`, `bx_support_smp`, `default`, `gui-egui`, `libc`, `std`, `tempfile`, and `winapi`
+     = help: consider adding `bx_support_avx` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `bx_support_evex`
+    --> rusty_box\src\cpu\opcodes_table.rs:1386:7
+     |
+1386 | #[cfg(feature = "bx_support_evex")]
+     |       ^^^^^^^^^^-----------------
+     |                 |
+     |                 help: there is a expected value with a similar name: `"bx_support_amx"`
+     |
+     = note: expected values for `feature` are: `bx_big_endian`, `bx_configure_msrs`, `bx_debugger`, `bx_full`, `bx_gdb_stub`, `bx_instrumentation`, `bx_large_ram_file`, `bx_little_endian`, `bx_phy_address_long`, `bx_support_alignment_check`, `bx_support_amx`, `bx_support_apic`, `bx_support_handlers_chaining_speedups`, `bx_support_memtype`, `bx_support_monitor_mwait`, `bx_support_pci`, `bx_support_pkeys`, `bx_support_smp`, `default`, `gui-egui`, `libc`, `std`, `tempfile`, and `winapi`
+     = help: consider adding `bx_support_evex` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `bx_support_evex`
+    --> rusty_box\src\cpu\opcodes_table.rs:1394:7
+     |
+1394 | #[cfg(feature = "bx_support_evex")]
+     |       ^^^^^^^^^^-----------------
+     |                 |
+     |                 help: there is a expected value with a similar name: `"bx_support_amx"`
+     |
+     = note: expected values for `feature` are: `bx_big_endian`, `bx_configure_msrs`, `bx_debugger`, `bx_full`, `bx_gdb_stub`, `bx_instrumentation`, `bx_large_ram_file`, `bx_little_endian`, `bx_phy_address_long`, `bx_support_alignment_check`, `bx_support_amx`, `bx_support_apic`, `bx_support_handlers_chaining_speedups`, `bx_support_memtype`, `bx_support_monitor_mwait`, `bx_support_pci`, `bx_support_pkeys`, `bx_support_smp`, `default`, `gui-egui`, `libc`, `std`, `tempfile`, and `winapi`
+     = help: consider adding `bx_support_evex` as a feature in `Cargo.toml`
+     = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unused import: `Exception`
+ --> rusty_box\src\cpu\paging.rs:7:19
+  |
+7 |     cpu::{BxCpuC, Exception},
+  |                   ^^^^^^^^^
+
+warning: unused import: `BxHostpageaddr`
+  --> rusty_box\src\cpu\paging.rs:15:15
+   |
+15 |         tlb::{BxHostpageaddr, TLBEntry},
+   |               ^^^^^^^^^^^^^^
+
+warning: unexpected `cfg` condition value: `bx_support_vmx`
+  --> rusty_box\src\cpu\paging.rs:62:15
+   |
+62 |         #[cfg(feature = "bx_support_vmx")]
+   |               ^^^^^^^^^^----------------
+   |                         |
+   |                         help: there is a expected value with a similar name: `"bx_support_amx"`
+   |
+   = note: expected values for `feature` are: `bx_big_endian`, `bx_configure_msrs`, `bx_debugger`, `bx_full`, `bx_gdb_stub`, `bx_instrumentation`, `bx_large_ram_file`, `bx_little_endian`, `bx_phy_address_long`, `bx_support_alignment_check`, `bx_support_amx`, `bx_support_apic`, `bx_support_handlers_chaining_speedups`, `bx_support_memtype`, `bx_support_monitor_mwait`, `bx_support_pci`, `bx_support_pkeys`, `bx_support_smp`, `default`, `gui-egui`, `libc`, `std`, `tempfile`, and `winapi`
+   = help: consider adding `bx_support_vmx` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unexpected `cfg` condition value: `bx_support_svm`
+  --> rusty_box\src\cpu\paging.rs:74:15
+   |
+74 |         #[cfg(feature = "bx_support_svm")]
+   |               ^^^^^^^^^^----------------
+   |                         |
+   |                         help: there is a expected value with a similar name: `"bx_support_smp"`
+   |
+   = note: expected values for `feature` are: `bx_big_endian`, `bx_configure_msrs`, `bx_debugger`, `bx_full`, `bx_gdb_stub`, `bx_instrumentation`, `bx_large_ram_file`, `bx_little_endian`, `bx_phy_address_long`, `bx_support_alignment_check`, `bx_support_amx`, `bx_support_apic`, `bx_support_handlers_chaining_speedups`, `bx_support_memtype`, `bx_support_monitor_mwait`, `bx_support_pci`, `bx_support_pkeys`, `bx_support_smp`, `default`, `gui-egui`, `libc`, `std`, `tempfile`, and `winapi`
+   = help: consider adding `bx_support_svm` as a feature in `Cargo.toml`
+   = note: see <https://doc.rust-lang.org/nightly/rustc/check-cfg/cargo-specifics.html> for more information about checking conditional configuration
+
+warning: unused imports: `CpuMode` and `self`
+  --> rusty_box\src\cpu\protected_interrupts.rs:7:19
+   |
+ 7 |     cpu::{BxCpuC, CpuMode, Exception},
+   |                   ^^^^^^^
+...
+13 |     segment_ctrl_pro::{parse_selector, self},
+   |                                        ^^^^
+
+warning: unnecessary parentheses around block return value
+   --> rusty_box\src\cpu\shift.rs:340:13
+    |
+340 |             ((op1 >> count) as u8)
+    |             ^                    ^
+    |
+help: remove these parentheses
+    |
+340 -             ((op1 >> count) as u8)
+340 +             (op1 >> count) as u8
+    |
+
+warning: unnecessary parentheses around block return value
+   --> rusty_box\src\cpu\shift.rs:344:34
+    |
+344 |         let cf = if count >= 8 { (op1 < 0) } else { ((op1 >> (count - 1)) & 0x01) != 0 };
+    |                                  ^       ^
+    |
+help: remove these parentheses
+    |
+344 -         let cf = if count >= 8 { (op1 < 0) } else { ((op1 >> (count - 1)) & 0x01) != 0 };
+344 +         let cf = if count >= 8 { op1 < 0 } else { ((op1 >> (count - 1)) & 0x01) != 0 };
+    |
+
+warning: unnecessary parentheses around block return value
+   --> rusty_box\src\cpu\shift.rs:374:35
+    |
+374 |         let cf = if count >= 16 { (op1 < 0) } else { ((op1 >> (count - 1)) & 0x0001) != 0 };
+    |                                   ^       ^
+    |
+help: remove these parentheses
+    |
+374 -         let cf = if count >= 16 { (op1 < 0) } else { ((op1 >> (count - 1)) & 0x0001) != 0 };
+374 +         let cf = if count >= 16 { op1 < 0 } else { ((op1 >> (count - 1)) & 0x0001) != 0 };
+    |
+
+warning: unnecessary parentheses around assigned value
+   --> rusty_box\src\cpu\tlb.rs:168:28
+    |
+168 |         self.split_large = (lpf_mask_accum > 0xFFF);
+    |                            ^                      ^
+    |
+help: remove these parentheses
+    |
+168 -         self.split_large = (lpf_mask_accum > 0xFFF);
+168 +         self.split_large = lpf_mask_accum > 0xFFF ;
+    |
+
+warning: unused import: `std::collections::HashSet`
+   --> rusty_box\src\emulator.rs:604:13
+    |
+604 |         use std::collections::HashSet;
+    |             ^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `memory::misc_mem::FLASH_READ_ARRAY`
+  --> rusty_box\src\memory\mod.rs:13:5
+   |
+13 |     memory::misc_mem::FLASH_READ_ARRAY,
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `self`
+  --> rusty_box\src\memory\mod.rs:17:11
+   |
+17 |     vec::{self, Vec},
+   |           ^^^^
+
+warning: unnecessary `unsafe` block
+   --> rusty_box\src\cpu\cpu.rs:828:9
+    |
+828 |         unsafe {
+    |         ^^^^^^ unnecessary `unsafe` block
+    |
+    = note: `#[warn(unused_unsafe)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `stack_anchor`
+    --> rusty_box\src\cpu\cpu.rs:1085:13
+     |
+1085 |         let stack_anchor = 0;
+     |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_stack_anchor`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unnecessary `unsafe` block
+    --> rusty_box\src\cpu\cpu.rs:1436:52
+     |
+1436 | ...                   let cs_value = unsafe {
+     |                                      ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+    --> rusty_box\src\cpu\cpu.rs:1513:37
+     |
+1513 | ...                   unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
+     |                       ^^^^^^ unnecessary `unsafe` block
+
+warning: variable does not need to be mutable
+    --> rusty_box\src\cpu\cpu.rs:1160:13
+     |
+1160 |         let mut last_rip = self.rip();
+     |             ----^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+     |
+     = note: `#[warn(unused_mut)]` (part of `#[warn(unused)]`) on by default
+
+warning: variable does not need to be mutable
+    --> rusty_box\src\cpu\cpu.rs:1275:17
+     |
+1275 |             let mut prev_rip_in_loop = self.rip(); // Track previous RIP for loop detection
+     |                 ----^^^^^^^^^^^^^^^^
+     |                 |
+     |                 help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> rusty_box\src\cpu\cpu.rs:1652:17
+     |
+1652 |             let mut i = self.i_cache.mpool[trace_start_idx + last_instr_idx];
+     |                 ----^
+     |                 |
+     |                 help: remove this `mut`
+
+warning: unused variable: `last_rip`
+    --> rusty_box\src\cpu\cpu.rs:1160:13
+     |
+1160 |         let mut last_rip = self.rip();
+     |             ^^^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_last_rip`
+
+warning: value assigned to `restart_decode` is never read
+    --> rusty_box\src\cpu\cpu.rs:1479:37
+     |
+1479 | ...                   restart_decode = true;
+     |                       ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+     = note: `#[warn(unused_assignments)]` (part of `#[warn(unused)]`) on by default
+
+warning: value assigned to `restart_decode` is never read
+    --> rusty_box\src\cpu\cpu.rs:1491:25
+     |
+1491 |                         restart_decode = true;
+     |                         ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: value assigned to `restart_decode` is never read
+    --> rusty_box\src\cpu\cpu.rs:1558:33
+     |
+1558 | ...                   restart_decode = true;
+     |                       ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unnecessary `unsafe` block
+    --> rusty_box\src\cpu\cpu.rs:1762:40
+     |
+1762 |         let mem_ptr: *mut BxMemC<'c> = unsafe { core::ptr::addr_of_mut!(*mem) };
+     |                                        ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+    --> rusty_box\src\cpu\cpu.rs:1772:44
+     |
+1772 |             let mem_ptr: *mut BxMemC<'c> = unsafe { core::ptr::addr_of_mut!(*mem) };
+     |                                            ^^^^^^ unnecessary `unsafe` block
+
+warning: unreachable pattern
+    --> rusty_box\src\cpu\cpu.rs:2233:13
+     |
+2233 |             Opcode::XorEbGb | Opcode::XorGbEb => {
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ no value can reach this
+     |
+note: multiple earlier patterns match some of the same values
+    --> rusty_box\src\cpu\cpu.rs:2233:13
+     |
+2066 |             Opcode::XorEbGb => {
+     |             --------------- matches some of the same values
+...
+2071 |             Opcode::XorGbEb => {
+     |             --------------- matches some of the same values
+...
+2233 |             Opcode::XorEbGb | Opcode::XorGbEb => {
+     |             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^ collectively making this unreachable
+     = note: `#[warn(unreachable_patterns)]` (part of `#[warn(unused)]`) on by default
+
+warning: unreachable pattern
+    --> rusty_box\src\cpu\cpu.rs:2809:13
+     |
+2091 |             Opcode::TestEbGb => {
+     |             ---------------- matches all the relevant values
+...
+2809 |             Opcode::TestEbGb => {
+     |             ^^^^^^^^^^^^^^^^ no value can reach this
+
+warning: unnecessary `unsafe` block
+    --> rusty_box\src\cpu\cpu.rs:2153:21
+     |
+2153 |                     unsafe {
+     |                     ^^^^^^ unnecessary `unsafe` block
+
+warning: unnecessary `unsafe` block
+    --> rusty_box\src\cpu\cpu.rs:3886:9
+     |
+3886 |         unsafe {
+     |         ^^^^^^ unnecessary `unsafe` block
+
+warning: variable does not need to be mutable
+    --> rusty_box\src\cpu\cpu.rs:3933:13
+     |
+3933 |         let mut laddr: BxAddress;
+     |             ----^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: variable does not need to be mutable
+    --> rusty_box\src\cpu\cpu.rs:3934:13
+     |
+3934 |         let mut page_offset;
+     |             ----^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: unused variable: `cpus`
+    --> rusty_box\src\cpu\cpu.rs:3931:64
+     |
+3931 |     pub(super) fn prefetch(&mut self, mem: &'c mut BxMemC<'c>, cpus: &[&Self]) -> Result<()> {
+     |                                                                ^^^^ help: if this is intentional, prefix it with an underscore: `_cpus`
+
+warning: unused variable: `instr`
+    --> rusty_box\src\cpu\cpu.rs:4160:40
+     |
+4160 |     pub(super) fn bx_no_fpu(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+     |                                        ^^^^^ help: if this is intentional, prefix it with an underscore: `_instr`
+
+warning: unused variable: `instr`
+    --> rusty_box\src\cpu\cpu.rs:4177:40
+     |
+4177 |     pub(super) fn bx_no_mmx(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+     |                                        ^^^^^ help: if this is intentional, prefix it with an underscore: `_instr`
+
+warning: variable does not need to be mutable
+    --> rusty_box\src\cpu\cpu.rs:4448:13
+     |
+4448 |         let mut is_bx_error = false; // Track if BxError handler was assigned
+     |             ----^^^^^^^^^^^
+     |             |
+     |             help: remove this `mut`
+
+warning: value assigned to `selected_handler` is never read
+    --> rusty_box\src\cpu\cpu.rs:4447:67
+     |
+4447 |         let mut selected_handler: Option<InstructionHandler<I>> = None;
+     |                                                                   ^^^^
+     |
+     = help: maybe it is overwritten before being read?
+
+warning: unused variable: `instr`
+   --> rusty_box\src\cpu\ctrl_xfer16.rs:630:40
+    |
+630 |     pub(super) fn jmp_far16(&mut self, instr: &BxInstructionGenerated, cs_raw: u16, disp16: u16) -> Result<()> {
+    |                                        ^^^^^ help: if this is intentional, prefix it with an underscore: `_instr`
+
+warning: unused variable: `instr`
+   --> rusty_box\src\cpu\ctrl_xfer16.rs:662:30
+    |
+662 |     fn call_far16(&mut self, instr: &BxInstructionGenerated, cs_raw: u16, disp16: u16) -> Result<()> {
+    |                              ^^^^^ help: if this is intentional, prefix it with an underscore: `_instr`
+
+warning: unused variable: `instr`
+   --> rusty_box\src\cpu\ctrl_xfer32.rs:395:40
+    |
+395 |     pub(super) fn jmp_far32(&mut self, instr: &BxInstructionGenerated, cs_raw: u16, disp32: u32) -> Result<()> {
+    |                                        ^^^^^ help: if this is intentional, prefix it with an underscore: `_instr`
+
+warning: unused variable: `instr`
+   --> rusty_box\src\cpu\ctrl_xfer32.rs:425:30
+    |
+425 |     fn call_far32(&mut self, instr: &BxInstructionGenerated, cs_raw: u16, disp32: u32) -> Result<()> {
+    |                              ^^^^^ help: if this is intentional, prefix it with an underscore: `_instr`
+
+warning: unused variable: `op1_64`
+  --> rusty_box\src\cpu\ctrl_xfer64.rs:99:13
+   |
+99 |         let op1_64 = self.read_linear_qword(seg, laddr);
+   |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_op1_64`
+
+warning: unused variable: `cs_raw`
+   --> rusty_box\src\cpu\ctrl_xfer64.rs:101:13
+    |
+101 |         let cs_raw = self.read_linear_word(seg, self.get_laddr64(seg_idx, (eaddr.wrapping_add(8)) & asize_mask));
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_cs_raw`
+
+warning: unused variable: `op1_64`
+   --> rusty_box\src\cpu\ctrl_xfer64.rs:164:13
+    |
+164 |         let op1_64 = self.read_linear_qword(seg, laddr);
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_op1_64`
+
+warning: unused variable: `cs_raw`
+   --> rusty_box\src\cpu\ctrl_xfer64.rs:166:13
+    |
+166 |         let cs_raw = self.read_linear_word(seg, self.get_laddr64(seg_idx, (eaddr.wrapping_add(8)) & asize_mask));
+    |             ^^^^^^ help: if this is intentional, prefix it with an underscore: `_cs_raw`
+
+warning: unused variable: `instr`
+   --> rusty_box\src\cpu\ctrl_xfer64.rs:206:35
+    |
+206 |     pub fn retfar64_iw(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    |                                   ^^^^^ help: if this is intentional, prefix it with an underscore: `_instr`
+
+warning: unnecessary `unsafe` block
+   --> rusty_box\src\cpu\data_xfer_ext.rs:138:9
+    |
+138 |         unsafe {
+    |         ^^^^^^ unnecessary `unsafe` block
+
+warning: unused variable: `tlen`
+   --> rusty_box\src\cpu\icache.rs:207:36
+    |
+207 |     pub fn commit_trace(&mut self, tlen: usize) {
+    |                                    ^^^^ help: if this is intentional, prefix it with an underscore: `_tlen`
+
+warning: unused variable: `entry`
+   --> rusty_box\src\cpu\icache.rs:244:9
+    |
+244 |         entry: &BxICacheEntry,
+    |         ^^^^^ help: if this is intentional, prefix it with an underscore: `_entry`
+
+warning: unused variable: `entry_idx`
+   --> rusty_box\src\cpu\icache.rs:245:9
+    |
+245 |         entry_idx: usize,
+    |         ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_entry_idx`
+
+warning: `rusty_box` (lib) generated 80 warnings (run `cargo fix --lib -p rusty_box` to apply 46 suggestions)
+error: could not compile `rusty_box` (lib); 80 warnings emitted
+
+Caused by:
+  process didn't exit successfully: `C:\Users\Aslan\.rustup\toolchains\nightly-x86_64-pc-windows-msvc\bin\rustc.exe --crate-name rusty_box --edition=2021 'rusty_box\src\lib.rs' --error-format=json --json=diagnostic-rendered-ansi,artifacts,future-incompat --crate-type lib --emit=dep-info,metadata,link -C opt-level=3 -C embed-bitcode=no --cfg 'feature="bx_configure_msrs"' --cfg 'feature="bx_full"' --cfg 'feature="bx_large_ram_file"' --cfg 'feature="bx_little_endian"' --cfg 'feature="bx_phy_address_long"' --cfg 'feature="bx_support_alignment_check"' --cfg 'feature="bx_support_apic"' --cfg 'feature="bx_support_handlers_chaining_speedups"' --cfg 'feature="bx_support_monitor_mwait"' --cfg 'feature="bx_support_pci"' --cfg 'feature="bx_support_pkeys"' --cfg 'feature="default"' --cfg 'feature="libc"' --cfg 'feature="std"' --cfg 'feature="tempfile"' --cfg 'feature="winapi"' --check-cfg 'cfg(docsrs,test)' --check-cfg 'cfg(feature, values("bx_big_endian", "bx_configure_msrs", "bx_debugger", "bx_full", "bx_gdb_stub", "bx_instrumentation", "bx_large_ram_file", "bx_little_endian", "bx_phy_address_long", "bx_support_alignment_check", "bx_support_amx", "bx_support_apic", "bx_support_handlers_chaining_speedups", "bx_support_memtype", "bx_support_monitor_mwait", "bx_support_pci", "bx_support_pkeys", "bx_support_smp", "default", "gui-egui", "libc", "std", "tempfile", "winapi"))' -C metadata=f3deeb11614f596c -C extra-filename=-93bcdc035956d1ec --out-dir 'C:\Users\Aslan\claude_rusty_box\target\release\deps' -C strip=debuginfo -L 'dependency=C:\Users\Aslan\claude_rusty_box\target\release\deps' --extern 'bitflags=C:\Users\Aslan\claude_rusty_box\target\release\deps\libbitflags-90657e807445a227.rmeta' --extern 'byteorder=C:\Users\Aslan\claude_rusty_box\target\release\deps\libbyteorder-ddaac1ffb0efb8f2.rmeta' --extern 'libc=C:\Users\Aslan\claude_rusty_box\target\release\deps\liblibc-f3367a8030446ce3.rmeta' --extern 'paste=C:\Users\Aslan\claude_rusty_box\target\release\deps\paste-e9da0ccacd9fa0df.dll' --extern 'rusty_box_decoder=C:\Users\Aslan\claude_rusty_box\target\release\deps\librusty_box_decoder-79c08003e7adce8a.rmeta' --extern 'spin=C:\Users\Aslan\claude_rusty_box\target\release\deps\libspin-c9156209259822f2.rmeta' --extern 'tempfile=C:\Users\Aslan\claude_rusty_box\target\release\deps\libtempfile-d6fa48be81fd3661.rmeta' --extern 'thiserror=C:\Users\Aslan\claude_rusty_box\target\release\deps\libthiserror-491d3a37b9c953cc.rmeta' --extern 'tracing=C:\Users\Aslan\claude_rusty_box\target\release\deps\libtracing-7949977a83f8f6bd.rmeta' --extern 'winapi=C:\Users\Aslan\claude_rusty_box\target\release\deps\libwinapi-e918ec9a397e99a2.rmeta' -L 'native=C:\Users\Aslan\.cargo\registry\src\index.crates.io-1949cf8c6b5b557f\windows_x86_64_msvc-0.52.6\lib'` (exit code: 143)

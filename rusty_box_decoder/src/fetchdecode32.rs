@@ -416,14 +416,36 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
     //   - Segment push/pop (06,07,0E,16,17,1E,1F): segment in bits 3-5 (nnn)
     // Bochs uses assign_srcs() with source types (BX_SRC_NNN, BX_SRC_RM) to determine this
     if needs_modrm {
+        // Validate segment register for MOV Ew,Sw (0x8C) and MOV Sw,Ew (0x8E)
+        // Valid segment registers: ES(0), CS(1), SS(2), DS(3), FS(4), GS(5)
+        // Invalid indices (6-7) should cause #UD per x86 specification
+        if matches!(b1, 0x8C | 0x8E) && nnn > 5 {
+            return Err(DecodeError::InvalidSegmentRegister {
+                index: nnn as u8,
+                opcode: b1 as u8,
+            });
+        }
+
         // Group opcodes: C0, C1, D0-D3, F6, F7, FE, FF
         // For these, nnn field is the opcode extension (which operation), rm is the operand
         let is_group_opcode = matches!(b1, 0xC0 | 0xC1 | 0xD0 | 0xD1 | 0xD2 | 0xD3 | 0xF6 | 0xF7 | 0xFE | 0xFF);
+
+        // Segment register move instructions: 8C (MOV Ew,Sw) and 8E (MOV Sw,Ew)
+        // For 0x8C: nnn=segment (source), rm=gpr (destination) -> DST=rm, SRC1=nnn
+        // For 0x8E: nnn=segment (dest), rm=gpr (source) -> DST=nnn, SRC1=rm
 
         if is_group_opcode {
             // Group opcodes: operand is in rm, opcode extension in nnn
             instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
             instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
+        } else if b1 == 0x8C {
+            // MOV Ew,Sw: rm is destination (gpr), nnn is source (segment)
+            instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
+            instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
+        } else if b1 == 0x8E {
+            // MOV Sw,Ew: nnn is destination (segment), rm is source (gpr)
+            instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
+            instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
         } else {
             // Normal ModRM: nnn is dest register, rm is source
             instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
@@ -1230,5 +1252,69 @@ mod tests {
         assert_eq!(i.get_ia_opcode(), Opcode::OutIbAl);
         assert_eq!(i.modrm_form.operand_data.id(), 0x0d);
         assert_eq!(i.modrm_form.displacement.displ32u(), 0x00);
+    }
+
+    /// Test that valid segment registers (0-5) decode successfully for MOV Ew,Sw and MOV Sw,Ew
+    #[test]
+    fn test_mov_segment_valid() {
+        // Test opcodes 0x8C (MOV r/m16, Sreg) and 0x8E (MOV Sreg, r/m16) with nnn=0 through nnn=5
+        for seg in 0..=5 {
+            let modrm = 0xC0 | (seg << 3); // MOD=11, REG=seg, R/M=0 (AX)
+
+            // 0x8C: MOV r/m16, Sreg
+            let bytes = vec![0x8C, modrm];
+            let result = fetch_decode32(&bytes, true);
+            assert!(
+                result.is_ok(),
+                "Failed to decode MOV Ew,Sw with valid segment {} (0x8C {:#04x})",
+                seg,
+                modrm
+            );
+            let instr = result.unwrap();
+            assert_eq!(instr.get_ia_opcode(), Opcode::MovEwSw);
+            assert_eq!(instr.meta_data[1], seg); // Source segment register
+
+            // 0x8E: MOV Sreg, r/m16
+            let bytes = vec![0x8E, modrm];
+            let result = fetch_decode32(&bytes, true);
+            assert!(
+                result.is_ok(),
+                "Failed to decode MOV Sw,Ew with valid segment {} (0x8E {:#04x})",
+                seg,
+                modrm
+            );
+            let instr = result.unwrap();
+            assert_eq!(instr.get_ia_opcode(), Opcode::MovSwEw);
+            assert_eq!(instr.meta_data[0], seg); // Destination segment register
+        }
+    }
+
+    /// Test that invalid segment registers (6-7) are rejected with InvalidSegmentRegister error
+    #[test]
+    fn test_mov_segment_invalid() {
+        // Test opcodes 0x8C and 0x8E with nnn=6 and nnn=7
+        for seg in 6..=7 {
+            let modrm = 0xC0 | (seg << 3); // MOD=11, REG=seg, R/M=0
+
+            // 0x8C: MOV r/m16, Sreg - should fail with InvalidSegmentRegister
+            let bytes = vec![0x8C, modrm];
+            let result = fetch_decode32(&bytes, true);
+            assert!(
+                matches!(result, Err(DecodeError::InvalidSegmentRegister { index, opcode: 0x8C }) if index == seg),
+                "Should reject invalid segment register {} for opcode 0x8C, got: {:?}",
+                seg,
+                result
+            );
+
+            // 0x8E: MOV Sreg, r/m16 - should fail with InvalidSegmentRegister
+            let bytes = vec![0x8E, modrm];
+            let result = fetch_decode32(&bytes, true);
+            assert!(
+                matches!(result, Err(DecodeError::InvalidSegmentRegister { index, opcode: 0x8E }) if index == seg),
+                "Should reject invalid segment register {} for opcode 0x8E, got: {:?}",
+                seg,
+                result
+            );
+        }
     }
 }

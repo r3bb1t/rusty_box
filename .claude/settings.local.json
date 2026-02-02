@@ -32,7 +32,10 @@
       "Bash(env:*)",
       "Bash(tee:*)",
       "Bash(cargo clean:*)",
-      "Bash(objdump:*)"
+      "Bash(objdump:*)",
+      "Bash(echo:*)",
+      "Bash(./target/release/examples/dlxlinux:*)",
+      "Bash(test:*)"
     ]
   }
 }

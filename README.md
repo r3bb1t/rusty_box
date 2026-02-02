@@ -4,12 +4,16 @@ A Rust port of the Bochs x86 emulator - a complete CPU/system emulator targeting
 
 ## Project Status
 
-**Current State:** Active Development - BIOS Emulation Working
+**Current State:** Active Development - Protected Mode BIOS Execution
 
-- **RIP Address:** 0x9E4F
-- **Instructions Executed:** 100,000+
-- **BIOS Stage:** IDT/GDT initialization
-- **Recent Achievement:** Fixed critical decoder bug, 60x improvement in execution progress
+- **Mode:** Protected Mode (32-bit)
+- **Instructions Executed:** 80,000+ in protected mode
+- **Last Known RIP:** 0xff9e (CPU halted with IF=0, awaiting interrupts)
+- **BIOS Stage:** GDT/IDT setup complete, entering protected mode execution
+- **Recent Achievements:**
+  - Fixed segment register validation in decoder (invalid indices 6-7 now rejected)
+  - Fixed HLT instruction async_event handling (CPU now properly halts)
+  - Protected mode entry working correctly
 
 See [PROGRESS_STATUS.md](PROGRESS_STATUS.md) for detailed current status.
 
@@ -90,6 +94,20 @@ Memory subsystem uses block-based architecture supporting >4GB physical addresse
 
 ## Recent Achievements
 
+### Segment Register Validation & HLT Fix (2026-02-02)
+
+**Decoder Validation:** Fixed decoder bug where invalid segment register indices (6-7) were passed to CPU, violating x86 spec. Added validation in `fetchdecode32.rs` and `fetchdecode64.rs` to reject invalid encodings at decode time.
+
+**HLT Instruction Fix:** Fixed critical bug where HLT instruction wasn't properly halting CPU execution. Two locations in `cpu.rs` were unconditionally clearing `BX_ASYNC_EVENT_STOP_TRACE` flag, preventing the CPU from detecting halt state. Modified to preserve the flag when `activity_state != Active`.
+
+**Impact:**
+- Protected mode BIOS execution now works correctly
+- CPU properly halts and returns control to emulator
+- 80,000+ instructions executed in protected mode
+- BIOS progresses to RIP=0xff9e (halted awaiting interrupts)
+
+See [docs/DECODER_BUGS.md](docs/DECODER_BUGS.md) for decoder validation details.
+
 ### Critical Decoder Bug Fix (2026-01-30)
 
 Fixed a critical bug in x86 instruction decoding affecting all Group 2 instructions (shift/rotate operations). The decoder was using the ModR/M `nnn` field (opcode extension) as the destination register instead of the `rm` field (actual operand).
@@ -103,34 +121,39 @@ See [DECODER_BUG_FIX_SUMMARY.md](DECODER_BUG_FIX_SUMMARY.md) for complete techni
 
 ## What Works
 
-- CPU instruction decoding (Group opcodes fixed)
-- Basic arithmetic and logical operations
+- CPU instruction decoding (Group opcodes fixed, segment register validation)
+- Protected mode execution (GDT/IDT setup, segment loading)
+- Basic arithmetic and logical operations (8/16/32-bit variants)
 - Shift operations (SHL, SHR, SAR, ROL, ROR)
 - Multiply operations (IMUL variants)
-- Stack operations (PUSH, POP, CALL, RET)
+- Stack operations (PUSH, POP, CALL, RET) - 16/32-bit modes
 - String operations (REP STOSD, MOVSB)
-- Memory operations (MOV variants)
+- Memory operations (MOV variants, MOVSX)
+- Control flow (conditional jumps, loops)
 - Descriptor table loading (LIDT, LGDT)
-- BIOS initialization through IDT setup
+- HLT instruction (properly halts CPU)
+- BIOS initialization through protected mode entry
 
 ## What's Next
 
 ### Immediate (P0)
-1. Implement control register operations (MOV from/to CR0-CR4)
-2. Fix segment register 6 decoder issue
+1. Investigate why BIOS halts with IF=0 (interrupts disabled) - may need interrupt delivery implementation
+2. Implement missing I/O device responses (keyboard, timer, etc.) that BIOS expects
 3. Continue implementing missing instructions as BIOS encounters them
+4. Add execution bounds checking for memory regions
 
 ### Short-term (P1)
-- Complete Group opcode implementations (ROL, ROR, RCL, RCR variants)
-- Add unit tests for decoder
-- Complete descriptor table support
-- Protected mode transition
+- Complete interrupt handling (hardware interrupts, IRQ delivery)
+- Implement remaining I/O devices for BIOS interaction
+- Complete Group opcode implementations (RCL, RCR variants)
+- Add comprehensive unit tests for decoder edge cases
+- Performance profiling and optimization
 
 ### Long-term (P3)
 - Boot DLX Linux
 - Full BIOS POST completion
-- Performance optimization
 - JIT compilation
+- Multi-core emulation
 
 ## Contributing
 
@@ -174,6 +197,6 @@ See original Bochs licensing in `cpp_orig/bochs/`. This Rust port follows the sa
 
 ---
 
-**Last Updated:** 2026-01-30
-**Next Needed:** MovRdCr0 (MOV register from CR0)
-**Status:** 🟢 Active Development
+**Last Updated:** 2026-02-02
+**Current Focus:** Interrupt handling and I/O device responses
+**Status:** 🟢 Active Development - Protected Mode Working

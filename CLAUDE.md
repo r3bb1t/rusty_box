@@ -6,6 +6,39 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emulator targeting 32/64-bit x86 architecture with virtualization support (VMX/SVM). The original C++ Bochs source is in `cpp_orig/bochs/` for reference during porting.
 
+## Current BIOS Execution Status
+
+As of 2026-02-02, the emulator successfully executes BIOS code in protected mode:
+
+- ✅ Protected mode entry working (CS.base=0x0, GDT loaded correctly)
+- ✅ 80,000+ instructions executed in protected mode
+- ✅ Complex operations: function calls, conditional branches, arithmetic, stack operations
+- ✅ HLT instruction properly halts CPU and returns control to emulator
+- ✅ BIOS executes until halting at RIP=0xff9e with IF=0 (expected behavior - awaiting interrupts)
+
+### Recently Implemented Instructions (2026-02-01/02)
+
+**Stack Operations (32-bit):**
+- `PUSH imm32` (PushId) - Push 32-bit immediate value onto stack
+- `PUSH imm8` (PushSIb32) - Push sign-extended 8-bit immediate
+
+**Arithmetic (32-bit):**
+- `ADD r32, imm8` (AddEdsIb) - Add sign-extended 8-bit immediate to r32
+- `ADD r32, imm32` (AddEdId) - Add 32-bit immediate to r32
+- `SUB r32, imm8` (SubEdsIb) - Subtract sign-extended 8-bit immediate from r32
+- `SUB r32, imm32` (SubEdId) - Subtract 32-bit immediate from r32
+- `CMP r32, imm8` (CmpEdsIb) - Compare r32 with sign-extended 8-bit immediate
+
+**Logical (32-bit):**
+- `AND r32, imm8` (AndEdsIb) - Bitwise AND r32 with sign-extended 8-bit immediate
+
+**Control Flow:**
+- `JNZ rel8` (JnzJbd) - Jump if not zero (byte displacement)
+- `JZ rel8` (JzJbd) - Jump if zero (byte displacement)
+
+**Data Transfer:**
+- `MOVSX r32, r/m8` (MovsxGdEb) - Move byte to dword with sign extension
+
 ## Build Commands
 
 ```bash
@@ -119,6 +152,15 @@ instr.id()            // 32-bit immediate
 instr.get_ia_opcode() // decoded opcode
 instr.ilen()          // instruction length
 ```
+
+### Decoder Validation
+
+The decoder performs validation to ensure only valid x86 encodings are produced:
+
+- **Segment register indices** must be 0-5 (ES, CS, SS, DS, FS, GS)
+- Invalid segment register indices (6-7) cause `DecodeError::InvalidSegmentRegister`
+- This prevents undefined behavior and catches decoder bugs early
+- See `docs/DECODER_BUGS.md` for historical bug fixes and validation details
 
 ### Memory Layout
 

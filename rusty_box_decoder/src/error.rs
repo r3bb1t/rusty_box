@@ -79,12 +79,21 @@ pub enum DecodeError {
     DisplacementBufferUnderflow,
     
     /// Buffer underflow while parsing immediate value
-    /// 
+    ///
     /// Maps to: `return(-1)` from `fetchImmediate()` when insufficient bytes for immediate.
     /// C++ locations: fetchdecode64.cc lines 867, 876, 1023 (VEX/EVEX/XOP immediate)
     ///                 fetchdecode32.cc lines 906, 916, 926, 936, 945, 955, 979, 989, 999, etc. (fetchImmediate)
     #[error("buffer underflow while parsing immediate value")]
     ImmediateBufferUnderflow,
+
+    /// Invalid segment register index
+    ///
+    /// Occurs when decoding MOV r/m16, Sreg (0x8C) or MOV Sreg, r/m16 (0x8E) and the
+    /// ModRM.nnn field contains an invalid segment register index (6 or 7).
+    /// Valid segment registers are: ES(0), CS(1), SS(2), DS(3), FS(4), GS(5).
+    /// Per x86 specification, indices 6 and 7 should cause #UD (Undefined Opcode) exception.
+    #[error("Invalid segment register index {index} in opcode {opcode:#04x} (valid: 0-5)")]
+    InvalidSegmentRegister { index: u8, opcode: u8 },
 }
 
 // Implement Display for BxDecodeError to support #[error(transparent)]

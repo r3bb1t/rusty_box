@@ -99,19 +99,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst = instr.meta_data[0] as usize;
         let src_seg = instr.meta_data[1] as usize;
 
-        // Workaround: segment register 6 is invalid, treat as DS (3)
-        // This is a decoder bug - opcode 8C with reg=6 is undefined in x86
-        // TODO: Fix the decoder to not generate MovEwSw for reg=6
-        let actual_seg = if src_seg == 6 {
-            tracing::warn!("Invalid segment register 6 in MOV Ew,Sw - using DS as workaround");
-            3 // DS
-        } else if src_seg == 7 {
-            3 // Null -> DS
-        } else {
+        // Decoder should never give us invalid segment registers (6-7)
+        // Valid segment registers: ES(0), CS(1), SS(2), DS(3), FS(4), GS(5)
+        debug_assert!(
+            src_seg <= 5,
+            "Invalid segment register {} from decoder",
             src_seg
-        };
+        );
 
-        let seg_val = self.sregs[actual_seg].selector.value;
+        let seg_val = self.sregs[src_seg].selector.value;
         self.set_gpr16(dst, seg_val);
         tracing::trace!("MOV: reg{} = seg{} ({:#06x})", dst, src_seg, seg_val);
     }
@@ -121,31 +117,30 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_seg = instr.meta_data[0] as usize;
         let src = instr.meta_data[1] as usize;
 
-        // Workaround: segment register 6 and 7 are invalid, treat as DS (3)
-        // This is a decoder bug - opcodes with seg=6 or 7 are undefined in x86
-        let actual_dst_seg = if dst_seg == 6 || dst_seg == 7 {
-            tracing::warn!("Invalid segment register {} in MOV Sw,Ew - using DS as workaround", dst_seg);
-            3 // DS
-        } else {
+        // Decoder should never give us invalid segment registers (6-7)
+        // Valid segment registers: ES(0), CS(1), SS(2), DS(3), FS(4), GS(5)
+        debug_assert!(
+            dst_seg <= 5,
+            "Invalid segment register {} from decoder",
             dst_seg
-        };
+        );
 
         let new_sel = self.get_gpr16(src);
 
         // Don't allow loading CS directly
-        if actual_dst_seg == BxSegregs::Cs as usize {
+        if dst_seg == BxSegregs::Cs as usize {
             tracing::warn!("MOV to CS not allowed, ignoring");
             return;
         }
 
         // Load segment register (real mode)
-        parse_selector(new_sel, &mut self.sregs[actual_dst_seg].selector);
+        parse_selector(new_sel, &mut self.sregs[dst_seg].selector);
         unsafe {
-            self.sregs[actual_dst_seg].cache.u.segment.base = (new_sel as u64) << 4;
-            self.sregs[actual_dst_seg].cache.u.segment.limit_scaled = 0xFFFF;
+            self.sregs[dst_seg].cache.u.segment.base = (new_sel as u64) << 4;
+            self.sregs[dst_seg].cache.u.segment.limit_scaled = 0xFFFF;
         }
 
-        tracing::trace!("MOV: seg{} = {:#06x}", actual_dst_seg, new_sel);
+        tracing::trace!("MOV: seg{} = {:#06x}", dst_seg, new_sel);
     }
 
     // =========================================================================
