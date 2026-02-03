@@ -438,7 +438,8 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<InstructionGenerated> 
     }
 
     // === Phase 4: Parse immediate ===
-    let imm_size = get_immediate_size_64(b1, opcode_map, sse_prefix, metainfo1_bits);
+    // Pass nnn to distinguish Group 3a/3b variants (TEST vs NOT/NEG/etc)
+    let imm_size = get_immediate_size_64(b1, opcode_map, sse_prefix, metainfo1_bits, nnn);
 
     if imm_size > 0 {
         if pos + (imm_size as usize) > max_len {
@@ -918,7 +919,7 @@ const fn opcode_needs_modrm_64(b1: u32, map: u8) -> bool {
 }
 
 /// Get immediate size for opcode (64-bit mode)
-const fn get_immediate_size_64(b1: u32, map: u8, _sse_prefix: u8, metainfo1: u8) -> u8 {
+const fn get_immediate_size_64(b1: u32, map: u8, _sse_prefix: u8, metainfo1: u8, nnn: u32) -> u8 {
     let os32 = (metainfo1 & MetaInfoFlags::Os32.bits()) != 0;
     let os64 = (metainfo1 & MetaInfoFlags::Os64.bits()) != 0;
     let as64 = (metainfo1 & MetaInfoFlags::As64.bits()) != 0;
@@ -964,6 +965,31 @@ const fn get_immediate_size_64(b1: u32, map: u8, _sse_prefix: u8, metainfo1: u8)
             | 0xC0
             | 0xC1
             | 0xC6 => 1,
+
+            // Group 3a (F6): TEST (nnn=0,1) has Ib, others have no immediate
+            // Based on Bochs cpu/decoder/fetchdecode64.cc (fetchImmediate)
+            0xF6 => {
+                if nnn == 0 || nnn == 1 {
+                    1 // TEST r/m8, imm8
+                } else {
+                    0 // NOT/NEG/MUL/IMUL/DIV/IDIV - no immediate
+                }
+            }
+
+            // Group 3b (F7): TEST (nnn=0,1) has Iv, others have no immediate
+            0xF7 => {
+                if nnn == 0 || nnn == 1 {
+                    if os64 {
+                        4 // TEST r/m64, imm32 (sign-extended)
+                    } else if os32 {
+                        4 // TEST r/m32, imm32
+                    } else {
+                        2 // TEST r/m16, imm16
+                    }
+                } else {
+                    0 // NOT/NEG/MUL/IMUL/DIV/IDIV - no immediate
+                }
+            }
 
             // Iw
             0xC2 | 0xCA => 2,

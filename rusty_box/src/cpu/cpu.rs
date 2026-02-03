@@ -2158,7 +2158,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::MovSwEw => {
-                self.mov_sw_ew(instr);
+                self.mov_sw_ew(instr)?;
                 Ok(())
             }
 
@@ -2540,7 +2540,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::JmpJd => {
-                self.jmp_jd(instr);
+                self.jmp_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JmpJbd => {
+                // JMP rel8 in 32-bit mode - uses same implementation as JmpJd
+                // Decoder sign-extends byte displacement to dword in id()
+                self.jmp_jd(instr)?;
                 Ok(())
             }
             Opcode::JmpEw => {
@@ -2548,7 +2554,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::JmpEd => {
-                self.jmp_ed_r(instr);
+                self.jmp_ed_r(instr)?;
                 Ok(())
             }
 
@@ -2558,7 +2564,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::CallJd => {
-                self.call_jd(instr);
+                self.call_jd(instr)?;
                 Ok(())
             }
             Opcode::CallEw => {
@@ -2566,7 +2572,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::CallEd => {
-                self.call_ed_r(instr);
+                self.call_ed_r(instr)?;
                 Ok(())
             }
 
@@ -2580,11 +2586,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::RetOp32 => {
-                self.ret_near32(instr);
+                self.ret_near32(instr)?;
                 Ok(())
             }
             Opcode::RetOp32Iw => {
-                self.ret_near32_iw(instr);
+                self.ret_near32_iw(instr)?;
                 Ok(())
             }
 
@@ -2631,75 +2637,75 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // Conditional jumps with 32-bit displacement (Jd variants)
             // =========================================================================
             Opcode::JoJd => {
-                self.jo_jd(instr);
+                self.jo_jd(instr)?;
                 Ok(())
             }
             Opcode::JnoJd => {
-                self.jno_jd(instr);
+                self.jno_jd(instr)?;
                 Ok(())
             }
             Opcode::JbJd => {
-                self.jb_jd(instr);
+                self.jb_jd(instr)?;
                 Ok(())
             }
             Opcode::JnbJd => {
-                self.jnb_jd(instr);
+                self.jnb_jd(instr)?;
                 Ok(())
             }
             Opcode::JzJd => {
-                self.jz_jd(instr);
+                self.jz_jd(instr)?;
                 Ok(())
             }
             Opcode::JzJbd => {
-                self.jz_jd(instr);
+                self.jz_jd(instr)?;
                 Ok(())
             }
             Opcode::JnzJd => {
-                self.jnz_jd(instr);
+                self.jnz_jd(instr)?;
                 Ok(())
             }
             Opcode::JnzJbd => {
-                self.jnz_jd(instr);
+                self.jnz_jd(instr)?;
                 Ok(())
             }
             Opcode::JbeJd => {
-                self.jbe_jd(instr);
+                self.jbe_jd(instr)?;
                 Ok(())
             }
             Opcode::JnbeJd => {
-                self.jnbe_jd(instr);
+                self.jnbe_jd(instr)?;
                 Ok(())
             }
             Opcode::JsJd => {
-                self.js_jd(instr);
+                self.js_jd(instr)?;
                 Ok(())
             }
             Opcode::JnsJd => {
-                self.jns_jd(instr);
+                self.jns_jd(instr)?;
                 Ok(())
             }
             Opcode::JpJd => {
-                self.jp_jd(instr);
+                self.jp_jd(instr)?;
                 Ok(())
             }
             Opcode::JnpJd => {
-                self.jnp_jd(instr);
+                self.jnp_jd(instr)?;
                 Ok(())
             }
             Opcode::JlJd => {
-                self.jl_jd(instr);
+                self.jl_jd(instr)?;
                 Ok(())
             }
             Opcode::JnlJd => {
-                self.jnl_jd(instr);
+                self.jnl_jd(instr)?;
                 Ok(())
             }
             Opcode::JleJd => {
-                self.jle_jd(instr);
+                self.jle_jd(instr)?;
                 Ok(())
             }
             Opcode::JnleJd => {
-                self.jnle_jd(instr);
+                self.jnle_jd(instr)?;
                 Ok(())
             }
 
@@ -2841,6 +2847,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::CmpEdsIb => {
                 self.cmp_ed_id_r(instr);
+                Ok(())
+            }
+            Opcode::CmpEdGd => {
+                // CMP r/m32, r32 (register form) - Based on Bochs arith32.cc:274-285
+                arith::arith32::CMP_EdGd(self, instr);
                 Ok(())
             }
 
@@ -3249,6 +3260,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.pop_ed_r(instr);
                 Ok(())
             }
+            Opcode::PopOp32Sw => {
+                // POP segment register (32-bit mode) - Based on Bochs stack32.cc:87-111
+                self.pop32_sw(instr)?;
+                Ok(())
+            }
             Opcode::PushaOp16 => {
                 self.pusha16(instr);
                 Ok(())
@@ -3287,6 +3303,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // =========================================================================
             Opcode::RepMovsbYbXb => {
                 self.rep_movsb16(instr);
+                Ok(())
+            }
+            Opcode::RepMovsdYdXd => {
+                // REP MOVSD - Move dword from DS:SI/ESI to ES:DI/EDI with repeat
+                // Based on BX_CPU_C::REP_MOVSD_YdXd in string.cc:71-88
+                if instr.as32_l() != 0 {
+                    // 32-bit address mode
+                    self.rep_movsd32(instr);
+                } else {
+                    // 16-bit address mode
+                    self.rep_movsd16(instr);
+                }
                 Ok(())
             }
             Opcode::RepStosbYbAl => {

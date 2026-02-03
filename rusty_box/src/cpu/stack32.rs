@@ -46,6 +46,74 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("POP r32 (reg {}): {:#010x}", dst, value);
     }
 
+    /// POP segment register (32-bit mode)
+    /// Based on Bochs stack32.cc:87-111 POP32_Sw
+    /// Pops a 16-bit selector from stack (advancing ESP by 4) and loads it into segment register
+    pub fn pop32_sw(&mut self, instr: &BxInstructionGenerated) -> Result<(), super::error::CpuError> {
+        use crate::cpu::decoder::BxSegregs;
+        use crate::cpu::segment_ctrl_pro::parse_selector;
+
+        // Pop 16-bit selector from stack
+        // In 32-bit mode, ESP advances by 4 even though only 2 bytes are used
+        let selector_value = self.stack_read_word(self.esp()) as u16;
+
+        // Get destination segment register from instruction
+        let seg_idx = instr.dst() as usize;
+        let seg = BxSegregs::from(seg_idx as u8);
+
+        // Load segment register
+        // Original Bochs: load_seg_reg(&BX_CPU_THIS_PTR sregs[i->dst()], selector);
+        let in_real_mode = self.real_mode();
+        tracing::error!("🔍 POP seg{}: selector={:#x}, real_mode={}, cpu_mode={:?}, eip={:#x}",
+            seg_idx, selector_value, in_real_mode, self.cpu_mode, self.eip());
+
+        if in_real_mode {
+            // Real mode: simple base = selector << 4
+            self.load_seg_reg_real_mode(seg, selector_value);
+        } else {
+            // Protected mode: fetch descriptor and load with proper D/B bit
+            let mut selector = super::descriptor::BxSelector::default();
+            parse_selector(selector_value, &mut selector);
+
+            let (dword1, dword2) = self.fetch_raw_descriptor(&selector)?;
+            let mut descriptor = self.parse_descriptor(dword1, dword2)?;
+
+            if seg_idx == BxSegregs::Ss as usize {
+                // Load SS with proper checks and D/B bit
+                // CPL = Current Privilege Level = CS.selector.rpl
+                let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+
+                tracing::error!("⚠️ POP SS in protected mode: selector={:#x}, d_b={}, eip={:#x}",
+                    selector_value, unsafe { descriptor.u.segment.d_b }, self.eip());
+
+                self.load_ss(&mut selector, &mut descriptor, cpl)?;
+
+                let d_b_after = unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b };
+                tracing::error!("✅ After load_ss: SS.d_b={}, is_stack_32bit={}",
+                    d_b_after, self.is_stack_32bit());
+            } else {
+                // For other segments, just copy the descriptor
+                // TODO: Implement full load_seg_reg for DS, ES, FS, GS
+                self.sregs[seg as usize].selector = selector;
+                self.sregs[seg as usize].cache = descriptor;
+                self.sregs[seg as usize].cache.valid = super::descriptor::SEG_VALID_CACHE;
+            }
+        }
+
+        // Advance ESP by 4 (32-bit operand size, even though selector is 16-bit)
+        self.set_esp(self.esp().wrapping_add(4));
+
+        // POP SS inhibits interrupts until next instruction boundary
+        // (Bochs stack32.cc:102-108)
+        if seg_idx == BxSegregs::Ss as usize {
+            tracing::debug!("POP SS: inhibiting interrupts");
+            // TODO: Implement inhibit_interrupts(BX_INHIBIT_INTERRUPTS_BY_MOVSS)
+        }
+
+        tracing::trace!("POP seg{}: selector={:#06x}", seg_idx, selector_value);
+        Ok(())
+    }
+
     // =========================================================================
     // PUSHAD/POPAD instructions
     // Based on Bochs stack32.cc:120-193

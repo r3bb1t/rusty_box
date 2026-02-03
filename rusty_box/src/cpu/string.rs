@@ -552,6 +552,33 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rcx(self.ecx() as u64);
     }
 
+    /// REP MOVSD - Repeat move string dword ECX times (32-bit address mode)
+    /// Based on BX_CPU_C::REP_MOVSD_YdXd in string.cc:71-88
+    /// Original: Bochs cpu/string.cc:71-88 REP_MOVSD_YdXd with as32L() check
+    pub fn rep_movsd32(&mut self, instr: &BxInstructionGenerated) {
+        let mut ecx = self.ecx();
+        while ecx != 0 {
+            self.movsd32(instr);
+            ecx = ecx.wrapping_sub(1);
+            self.set_ecx(ecx);
+        }
+
+        // Clear upper 32 bits of RCX (zero extension)
+        // Original: Bochs cpu/string.cc:80-81 BX_CLEAR_64BIT_HIGH(BX_64BIT_REG_RSI/RDI)
+        self.set_rcx(self.ecx() as u64);
+    }
+
+    /// REP MOVSD - Repeat move string dword CX times (16-bit address mode)
+    /// Based on BX_CPU_C::REP_MOVSD_YdXd in string.cc:71-88
+    pub fn rep_movsd16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.movsd16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+        }
+    }
+
     /// REP LODSB - Repeat load string byte CX times
     pub fn rep_lodsb16(&mut self, instr: &BxInstructionGenerated) {
         let mut cx = self.cx();
@@ -706,10 +733,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn mem_read_dword(&self, addr: u64) -> u32 {
         let lo = self.mem_read_word(addr) as u32;
         let hi = self.mem_read_word(addr + 2) as u32;
-        lo | (hi << 16)
+        let value = lo | (hi << 16);
+
+        // Debug logging for problematic address range
+        if (addr >= 0xfffffb80 && addr <= 0xfffffc00) ||
+           (addr >= 0xffffffe0 && addr <= 0xfffffff0) {
+            let bogus_offset = (addr & 0xfff) as usize;
+            tracing::error!("📖 MEM_READ_DWORD: addr={:#x}, bogus_offset={:#x}, value={:#x}, eip={:#x}",
+                addr, bogus_offset, value, self.eip());
+        }
+
+        value
     }
 
     pub(super) fn mem_write_dword(&mut self, addr: u64, value: u32) {
+        // Debug logging for problematic address range
+        if (addr >= 0xfffffb80 && addr <= 0xfffffc00) ||
+           (addr >= 0xffffffe0 && addr <= 0xfffffff0) {
+            let bogus_offset = (addr & 0xfff) as usize;
+            tracing::error!("💾 MEM_WRITE_DWORD: addr={:#x}, bogus_offset={:#x}, value={:#x}, eip={:#x}",
+                addr, bogus_offset, value, self.eip());
+        }
         self.mem_write_word(addr, value as u16);
         self.mem_write_word(addr + 2, (value >> 16) as u16);
     }

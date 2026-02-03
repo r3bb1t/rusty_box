@@ -9,6 +9,7 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxInstructionGenerated, BxSegregs},
+    error::Result,
     segment_ctrl_pro::parse_selector,
 };
 
@@ -113,7 +114,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV Sreg, r/m16 - Move r/m16 to segment register
-    pub fn mov_sw_ew(&mut self, instr: &BxInstructionGenerated) {
+    pub fn mov_sw_ew(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let dst_seg = instr.meta_data[0] as usize;
         let src = instr.meta_data[1] as usize;
 
@@ -127,20 +128,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let new_sel = self.get_gpr16(src);
 
-        // Don't allow loading CS directly
+        // Don't allow loading CS directly (would need special handling)
         if dst_seg == BxSegregs::Cs as usize {
-            tracing::warn!("MOV to CS not allowed, ignoring");
-            return;
+            tracing::warn!("MOV to CS not allowed");
+            return Err(super::error::CpuError::UnimplementedOpcode {
+                opcode: "MOV CS, reg (use far jump/call instead)".to_string(),
+            });
         }
 
-        // Load segment register (real mode)
-        parse_selector(new_sel, &mut self.sregs[dst_seg].selector);
-        unsafe {
-            self.sregs[dst_seg].cache.u.segment.base = (new_sel as u64) << 4;
-            self.sregs[dst_seg].cache.u.segment.limit_scaled = 0xFFFF;
+        let seg = BxSegregs::from(dst_seg as u8);
+
+        // Call load_seg_reg which handles both real and protected mode
+        self.load_seg_reg(seg, new_sel)?;
+
+        // MOV SS inhibits interrupts until next instruction boundary
+        // (same as POP SS - Bochs data_xfer16.cc:124-129)
+        if dst_seg == BxSegregs::Ss as usize {
+            tracing::debug!("MOV SS: inhibiting interrupts");
+            // TODO: Implement inhibit_interrupts(BX_INHIBIT_INTERRUPTS_BY_MOVSS)
         }
 
         tracing::trace!("MOV: seg{} = {:#06x}", dst_seg, new_sel);
+        Ok(())
     }
 
     // =========================================================================

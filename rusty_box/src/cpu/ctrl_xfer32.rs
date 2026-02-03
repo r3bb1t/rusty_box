@@ -17,23 +17,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Branch to a near 32-bit address
     /// Matching C++ ctrl_xfer32.cc:29-46 branch_near32
-    fn branch_near32(&mut self, new_eip: u32) {
-        // Check CS limit (matching C++ line 34-38)
+    fn branch_near32(&mut self, new_eip: u32) -> Result<()> {
+        // Check CS limit (matching C++ line 33-37)
+        // Original: Bochs cpu/ctrl_xfer32.cc:33-37
         let limit = self.get_segment_limit(BxSegregs::Cs);
         if new_eip > limit {
             tracing::error!("branch_near32: offset {:#010x} outside of CS limits {:#010x}", new_eip, limit);
-            // In C++, this calls exception(BX_GP_EXCEPTION, 0) which doesn't return
+            // Original: Bochs calls exception(BX_GP_EXCEPTION, 0) which doesn't return
+            return Err(CpuError::BadVector { vector: Exception::Gp });
         }
-        
-        // Matching C++ line 40: EIP = new_EIP;
+
+        // Matching C++ line 39: EIP = new_EIP;
         self.set_eip(new_eip);
-        
-        // Matching C++ lines 42-45: Set STOP_TRACE when handlers chaining is disabled
+
+        // Matching C++ lines 41-44: Set STOP_TRACE when handlers chaining is disabled
         // In C++, this is conditional on BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS == 0
         // Since we don't have handlers chaining yet, we always set it
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         // Note: C++ branch_near16/32 don't call invalidate_prefetch_q() - only far jumps do
         // The STOP_TRACE flag is enough to break the trace loop, and getICacheEntry will fetch from new location
+
+        Ok(())
     }
 
     // =========================================================================
@@ -75,20 +79,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// JMP rel32 - Near jump with 32-bit signed displacement
-    pub fn jmp_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jmp_jd(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let disp = instr.id() as i32;
         let eip = self.eip();
         let new_eip = (eip as i32).wrapping_add(disp) as u32;
-        self.branch_near32(new_eip);
+        self.branch_near32(new_eip)?;
         tracing::trace!("JMP rel32: EIP = {:#010x}", new_eip);
+        Ok(())
     }
 
     /// JMP r/m32 - Indirect jump through register
-    pub fn jmp_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jmp_ed_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let dst = instr.dst() as usize;
         let new_eip = self.get_gpr32(dst);
-        self.branch_near32(new_eip);
+        self.branch_near32(new_eip)?;
         tracing::trace!("JMP r/m32: EIP = {:#010x}", new_eip);
+        Ok(())
     }
 
     // =========================================================================
@@ -96,27 +102,37 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// CALL rel32 - Near call with 32-bit displacement
-    pub fn call_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn call_jd(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let disp = instr.id() as i32;
         let eip = self.eip();
-        
+
         // Push return address
+        let esp_before = self.esp();
         self.push_32(eip);
-        
+        let esp_after = self.esp();
+
         let new_eip = (eip as i32).wrapping_add(disp) as u32;
-        self.branch_near32(new_eip);
+
+        if eip == 0 {
+            tracing::error!("CALL rel32 SUSPICIOUS: pushing return_addr={:#x}, ESP {:#x}->{:#x}, target={:#x}",
+                eip, esp_before, esp_after, new_eip);
+        }
+
+        self.branch_near32(new_eip)?;
         tracing::trace!("CALL rel32: EIP = {:#010x}, ret = {:#010x}", new_eip, eip);
+        Ok(())
     }
 
     /// CALL r/m32 - Indirect call through register
-    pub fn call_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn call_ed_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let dst = instr.dst() as usize;
         let new_eip = self.get_gpr32(dst);
         let eip = self.eip();
-        
+
         self.push_32(eip);
-        self.branch_near32(new_eip);
+        self.branch_near32(new_eip)?;
         tracing::trace!("CALL r/m32: EIP = {:#010x}, ret = {:#010x}", new_eip, eip);
+        Ok(())
     }
 
     // =========================================================================
@@ -124,19 +140,32 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// RET near - Return from procedure (32-bit)
-    pub fn ret_near32(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn ret_near32(&mut self, _instr: &BxInstructionGenerated) -> Result<()> {
+        let current_eip = self.eip();
+        let esp_before = self.esp();
+
+        // Read what's on stack before popping
+        let stack_val = self.stack_read_dword(esp_before);
+
         let return_eip = self.pop_32();
-        self.branch_near32(return_eip);
+
+        if return_eip == 0 || return_eip > 0xfffff {
+            tracing::error!("RET near32 SUSPICIOUS: current_eip={:#x}, return_eip={:#x}, ESP before={:#x}, stack_val={:#x}",
+                current_eip, return_eip, esp_before, stack_val);
+        }
+
+        self.branch_near32(return_eip)?;
         tracing::trace!("RET near32: EIP = {:#010x}", return_eip);
+        Ok(())
     }
 
     /// RET near imm16 - Return and pop imm16 bytes (32-bit)
-    pub fn ret_near32_iw(&mut self, instr: &BxInstructionGenerated) {
+    pub fn ret_near32_iw(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let return_eip = self.pop_32();
         let imm16 = instr.iw();
-        
-        self.branch_near32(return_eip);
-        
+
+        self.branch_near32(return_eip)?;
+
         let ss_d_b = self.get_segment_d_b(BxSegregs::Ss);
         if ss_d_b {
             let esp = self.get_gpr32(4);
@@ -146,6 +175,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_gpr16(4, sp.wrapping_add(imm16));
         }
         tracing::trace!("RET near32 imm16: EIP = {:#010x}, pop = {}", return_eip, imm16);
+        Ok(())
     }
 
     // =========================================================================
@@ -153,179 +183,195 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// JO rel32 - Jump if overflow (OF=1)
-    pub fn jo_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jo_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
         if self.get_of() {
             let disp = instr.id() as i32;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("JO rel32 taken: EIP = {:#010x}", new_eip);
         }
+        Ok(())
     }
 
     /// JNO rel32 - Jump if not overflow (OF=0)
-    pub fn jno_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jno_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
         if !self.get_of() {
             let disp = instr.id() as i32;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("JNO rel32 taken: EIP = {:#010x}", new_eip);
         }
+        Ok(())
     }
 
     /// JB/JC/JNAE rel32 - Jump if below/carry (CF=1)
-    pub fn jb_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jb_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
         if self.get_cf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("JB/JC rel32 taken: EIP = {:#010x}", new_eip);
         }
+        Ok(())
     }
 
     /// JNB/JNC/JAE rel32 - Jump if not below/no carry (CF=0)
-    pub fn jnb_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jnb_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
         if !self.get_cf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("JNB/JNC rel32 taken: EIP = {:#010x}", new_eip);
         }
+        Ok(())
     }
 
     /// JZ/JE rel32 - Jump if zero/equal (ZF=1)
-    pub fn jz_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jz_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
         if self.get_zf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("JZ/JE rel32 taken: EIP = {:#010x}", new_eip);
         }
+        Ok(())
     }
 
     /// JNZ/JNE rel32 - Jump if not zero/not equal (ZF=0)
-    pub fn jnz_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jnz_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
         if !self.get_zf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("JNZ/JNE rel32 taken: EIP = {:#010x}", new_eip);
         }
+        Ok(())
     }
 
     /// JBE/JNA rel32 - Jump if below or equal (CF=1 or ZF=1)
-    pub fn jbe_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jbe_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
         if self.get_cf() || self.get_zf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("JBE/JNA rel32 taken: EIP = {:#010x}", new_eip);
         }
+        Ok(())
     }
 
     /// JNBE/JA rel32 - Jump if not below or equal/above (CF=0 and ZF=0)
-    pub fn jnbe_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jnbe_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
         if !self.get_cf() && !self.get_zf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("JNBE/JA rel32 taken: EIP = {:#010x}", new_eip);
         }
+        Ok(())
     }
 
     /// JS rel32 - Jump if sign (SF=1)
-    pub fn js_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn js_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
         if self.get_sf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("JS rel32 taken: EIP = {:#010x}", new_eip);
         }
+        Ok(())
     }
 
     /// JNS rel32 - Jump if not sign (SF=0)
-    pub fn jns_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jns_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
         if !self.get_sf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("JNS rel32 taken: EIP = {:#010x}", new_eip);
         }
+        Ok(())
     }
 
     /// JP/JPE rel32 - Jump if parity/parity even (PF=1)
-    pub fn jp_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jp_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
         if self.get_pf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("JP/JPE rel32 taken: EIP = {:#010x}", new_eip);
         }
+        Ok(())
     }
 
     /// JNP/JPO rel32 - Jump if no parity/parity odd (PF=0)
-    pub fn jnp_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jnp_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
         if !self.get_pf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("JNP/JPO rel32 taken: EIP = {:#010x}", new_eip);
         }
+        Ok(())
     }
 
     /// JL/JNGE rel32 - Jump if less (SF != OF)
-    pub fn jl_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jl_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
         if self.get_sf() != self.get_of() {
             let disp = instr.id() as i32;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("JL/JNGE rel32 taken: EIP = {:#010x}", new_eip);
         }
+        Ok(())
     }
 
     /// JNL/JGE rel32 - Jump if not less/greater or equal (SF == OF)
-    pub fn jnl_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jnl_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
         if self.get_sf() == self.get_of() {
             let disp = instr.id() as i32;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("JNL/JGE rel32 taken: EIP = {:#010x}", new_eip);
         }
+        Ok(())
     }
 
     /// JLE/JNG rel32 - Jump if less or equal (ZF=1 or SF!=OF)
-    pub fn jle_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jle_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
         if self.get_zf() || (self.get_sf() != self.get_of()) {
             let disp = instr.id() as i32;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("JLE/JNG rel32 taken: EIP = {:#010x}", new_eip);
         }
+        Ok(())
     }
 
     /// JNLE/JG rel32 - Jump if not less or equal/greater (ZF=0 and SF==OF)
-    pub fn jnle_jd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jnle_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
         if !self.get_zf() && (self.get_sf() == self.get_of()) {
             let disp = instr.id() as i32;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("JNLE/JG rel32 taken: EIP = {:#010x}", new_eip);
         }
+        Ok(())
     }
 
     // =========================================================================
@@ -334,46 +380,49 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LOOP32 rel8 - Decrement ECX, jump if not zero (32-bit mode)
     /// Matching C++ ctrl_xfer32.cc (similar to LOOP16_Jb but 32-bit)
-    pub fn loop32_jb(&mut self, instr: &BxInstructionGenerated) {
+    pub fn loop32_jb(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let ecx = self.get_gpr32(1);
         let count = ecx.wrapping_sub(1);
         self.set_gpr32(1, count);
-        
+
         if count != 0 {
             let disp = instr.ib() as i8;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp as i32) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
             tracing::trace!("LOOP32 taken: EIP = {:#010x}, ECX = {}", new_eip, count);
         }
+        Ok(())
     }
 
     /// LOOPE32/LOOPZ32 rel8 - Decrement ECX, jump if not zero and ZF=1 (32-bit mode)
-    pub fn loope32_jb(&mut self, instr: &BxInstructionGenerated) {
+    pub fn loope32_jb(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let ecx = self.get_gpr32(1);
         let count = ecx.wrapping_sub(1);
         self.set_gpr32(1, count);
-        
+
         if count != 0 && self.get_zf() {
             let disp = instr.ib() as i8;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp as i32) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
         }
+        Ok(())
     }
 
     /// LOOPNE32/LOOPNZ32 rel8 - Decrement ECX, jump if not zero and ZF=0 (32-bit mode)
-    pub fn loopne32_jb(&mut self, instr: &BxInstructionGenerated) {
+    pub fn loopne32_jb(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let ecx = self.get_gpr32(1);
         let count = ecx.wrapping_sub(1);
         self.set_gpr32(1, count);
-        
+
         if count != 0 && !self.get_zf() {
             let disp = instr.ib() as i8;
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp as i32) as u32;
-            self.branch_near32(new_eip);
+            self.branch_near32(new_eip)?;
         }
+        Ok(())
     }
 
     // =========================================================================

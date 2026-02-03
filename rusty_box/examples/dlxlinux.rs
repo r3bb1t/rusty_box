@@ -204,9 +204,9 @@ fn run_dlxlinux() -> Result<()> {
     // Create and configure emulator
     // =========================================================================
     let config = EmulatorConfig {
-        guest_memory_size: 32 * 1024 * 1024, // 32 MB (from bochsrc.bxrc)
+        guest_memory_size: 512 * 1024 * 1024, // 512 MB
         // host_memory_size: 32 * 1024 * 1024,
-        host_memory_size: 32 * 1024 * 1024,
+        host_memory_size: 512 * 1024 * 1024, // 512 MB
         memory_block_size: 128 * 1024,
         ips: 15_000_000, // IPS from bochsrc.bxrc
         pci_enabled: false,

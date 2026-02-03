@@ -540,4 +540,148 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             })
         }
     }
+
+    /// Load segment register (handles both real and protected mode)
+    /// Based on BX_CPU_C::load_seg_reg in segment_ctrl_pro.cc:28-177
+    pub(super) fn load_seg_reg(&mut self, seg: BxSegregs, new_value: u16) -> Result<()> {
+        if !self.real_mode() {
+            // Protected mode
+            if seg as usize == BxSegregs::Ss as usize {
+                // Special handling for SS
+                let mut selector = BxSelector::default();
+                parse_selector(new_value, &mut selector);
+
+                // Null selector check
+                if (new_value & 0xfffc) == 0 {
+                    tracing::error!("load_seg_reg(SS): loading null selector");
+                    return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+                }
+
+                // Fetch descriptor from GDT/LDT
+                let (dword1, dword2) = self.fetch_raw_descriptor(&selector)?;
+
+                // Check selector RPL must equal CPL
+                let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+                if selector.rpl != cpl {
+                    tracing::error!("load_seg_reg(SS): rpl != CPL");
+                    return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+                }
+
+                let mut descriptor = self.parse_descriptor(dword1, dword2)?;
+
+                if descriptor.valid == 0 {
+                    tracing::error!("load_seg_reg(SS): valid bit cleared");
+                    return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+                }
+
+                // AR byte must indicate a writable data segment
+                if !descriptor.segment ||
+                   descriptor.r#type >= 8 || // IS_CODE_SEGMENT
+                   (descriptor.r#type & 2) == 0 // IS_DATA_SEGMENT_WRITEABLE
+                {
+                    tracing::error!("load_seg_reg(SS): not writable data segment");
+                    return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+                }
+
+                // DPL must equal CPL
+                if descriptor.dpl != cpl {
+                    tracing::error!("load_seg_reg(SS): dpl != CPL");
+                    return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+                }
+
+                // Segment must be PRESENT
+                if !descriptor.p {
+                    tracing::error!("load_seg_reg(SS): not present");
+                    return Err(super::error::CpuError::BadVector { vector: Exception::Ss });
+                }
+
+                self.touch_segment(&selector, &mut descriptor)?;
+
+                // Load SS with selector and descriptor (this sets D_B bit!)
+                self.load_ss(&mut selector, &mut descriptor, cpl)?;
+
+                tracing::debug!("load_seg_reg(SS): loaded selector {:#06x}, d_b={}",
+                    new_value, unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b });
+
+                return Ok(());
+            } else if matches!(seg, BxSegregs::Ds | BxSegregs::Es | BxSegregs::Fs | BxSegregs::Gs) {
+                // Handling for DS, ES, FS, GS
+
+                // Null selector is allowed for these segments
+                if (new_value & 0xfffc) == 0 {
+                    self.load_null_selector(seg, new_value);
+                    return Ok(());
+                }
+
+                let mut selector = BxSelector::default();
+                parse_selector(new_value, &mut selector);
+
+                let (dword1, dword2) = self.fetch_raw_descriptor(&selector)?;
+                let mut descriptor = self.parse_descriptor(dword1, dword2)?;
+
+                if descriptor.valid == 0 {
+                    tracing::error!("load_seg_reg({:?}, {:#06x}): invalid segment", seg, new_value);
+                    return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+                }
+
+                // AR byte must indicate data or readable code segment
+                let is_code = descriptor.r#type >= 8;
+                let is_readable = (descriptor.r#type & 2) != 0;
+                if !descriptor.segment || (is_code && !is_readable) {
+                    tracing::error!("load_seg_reg({:?}, {:#06x}): not data or readable code", seg, new_value);
+                    return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+                }
+
+                // If data or non-conforming code, RPL and CPL must be <= DPL
+                let is_data = descriptor.r#type < 8;
+                let is_conforming = (descriptor.r#type & 4) != 0;
+                if is_data || !is_conforming {
+                    let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+                    if selector.rpl > descriptor.dpl || cpl > descriptor.dpl {
+                        tracing::error!("load_seg_reg({:?}, {:#06x}): RPL & CPL must be <= DPL", seg, new_value);
+                        return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+                    }
+                }
+
+                // Segment must be PRESENT
+                if !descriptor.p {
+                    tracing::error!("load_seg_reg({:?}, {:#06x}): segment not present", seg, new_value);
+                    return Err(super::error::CpuError::BadVector { vector: Exception::Np });
+                }
+
+                self.touch_segment(&selector, &mut descriptor)?;
+
+                // Load segment register with selector and descriptor
+                let seg_idx = seg as usize;
+                self.sregs[seg_idx].selector = selector;
+                self.sregs[seg_idx].cache = descriptor;
+                self.sregs[seg_idx].cache.valid = super::descriptor::SEG_VALID_CACHE;
+
+                tracing::debug!("load_seg_reg({:?}): loaded selector {:#06x}", seg, new_value);
+
+                return Ok(());
+            } else {
+                tracing::error!("load_seg_reg(): invalid segment register {:?}", seg);
+                return Err(super::error::CpuError::UnimplementedOpcode {
+                    opcode: format!("load_seg_reg for segment {:?}", seg),
+                });
+            }
+        }
+
+        // Real mode or v8086 mode
+        self.load_seg_reg_real_mode(seg, new_value);
+        Ok(())
+    }
+
+    /// Load null selector for data segments (DS, ES, FS, GS)
+    /// Based on BX_CPU_C::load_null_selector
+    fn load_null_selector(&mut self, seg: BxSegregs, value: u16) {
+        let seg_idx = seg as usize;
+        self.sregs[seg_idx].selector.value = value;
+        self.sregs[seg_idx].selector.index = 0;
+        self.sregs[seg_idx].selector.ti = 0;
+        self.sregs[seg_idx].selector.rpl = (value & 3) as u8;
+        self.sregs[seg_idx].cache.valid = 0; // Invalid cache
+        tracing::debug!("load_null_selector({:?}): selector {:#06x}", seg, value);
+    }
 }

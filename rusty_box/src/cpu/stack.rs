@@ -91,6 +91,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if self.is_stack_32bit() {
             let esp = self.esp();
             let new_esp = esp.wrapping_sub(4);
+            let ss_base = unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.base };
+            let laddr = self.get_laddr32(BxSegregs::Ss as usize, new_esp);
+
+            if (new_esp >= 0xffffffe0 && new_esp <= 0xfffffff0) ||
+               (new_esp >= 0xfffffb80 && new_esp <= 0xfffffc00) {
+                tracing::error!("🟢 PUSH32: value={:#x}, ESP {:#x}->{:#x}, ss_base={:#x}, laddr={:#x}, eip={:#x}",
+                    value, esp, new_esp, ss_base, laddr, self.eip());
+            }
+
             self.stack_write_dword(new_esp, value);
             self.set_esp(new_esp);
             tracing::warn!("PUSH32: value {:#x}, ESP {:#x} -> {:#x}", value, esp, new_esp);
@@ -109,8 +118,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn pop_32(&mut self) -> u32 {
         let value = if self.is_stack_32bit() {
             let esp = self.esp();
+            let ss_base = unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.base };
+            let laddr = self.get_laddr32(BxSegregs::Ss as usize, esp);
             let value = self.stack_read_dword(esp);
             let new_esp = esp.wrapping_add(4);
+
+            if (esp >= 0xffffffe0 && esp <= 0xfffffff0) ||
+               (esp >= 0xfffffb80 && esp <= 0xfffffc00) {
+                tracing::error!("🔵 POP32: value={:#x}, ESP {:#x}->{:#x}, ss_base={:#x}, laddr={:#x}, eip={:#x}",
+                    value, esp, new_esp, ss_base, laddr, self.eip());
+            }
+
             self.set_esp(new_esp);
             tracing::warn!("POP32: value {:#x} from ESP {:#x} -> {:#x}", value, esp, new_esp);
             value
@@ -145,6 +163,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn stack_write_dword(&mut self, offset: u32, value: u32) {
         // Get linear address from SS:offset using get_laddr32
         let laddr = self.get_laddr32(BxSegregs::Ss as usize, offset);
+
+        // Log if writing to areas of interest
+        if (laddr >= 0xffffffe0 && laddr <= 0xfffffff0) ||
+           (laddr >= 0xfffffb80 && laddr <= 0xfffffc00) {
+            let ss_base = unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.base };
+            tracing::error!("🔴 STACK_WRITE_DWORD: laddr={:#x}, offset={:#x}, ss_base={:#x}, value={:#x}, eip={:#x}",
+                laddr, offset, ss_base, value, self.eip());
+        }
+
         // Write through memory subsystem
         self.mem_write_dword(laddr as u64, value);
     }

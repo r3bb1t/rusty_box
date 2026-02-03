@@ -481,7 +481,8 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
     }
 
     // === Phase 4: Parse immediate and moffs (direct memory offset) ===
-    let imm_size = get_immediate_size_32(b1, opcode_map, os_32, as_32);
+    // Pass nnn to distinguish Group 3a/3b variants (TEST vs NOT/NEG/etc)
+    let imm_size = get_immediate_size_32(b1, opcode_map, os_32, as_32, nnn);
 
     if imm_size > 0 {
         if pos + (imm_size as usize) > max_len {
@@ -983,7 +984,7 @@ const fn opcode_needs_modrm_32(b1: u32, map: u8) -> bool {
 
 /// Get immediate size for opcode (32-bit mode)
 /// Also handles moffs (direct memory offset) for opcodes A0-A3
-const fn get_immediate_size_32(b1: u32, map: u8, os_32: bool, as_32: bool) -> u8 {
+const fn get_immediate_size_32(b1: u32, map: u8, os_32: bool, as_32: bool, nnn: u32) -> u8 {
     if map == 0 {
         let opcode = b1 as u8;
         match opcode {
@@ -1025,6 +1026,30 @@ const fn get_immediate_size_32(b1: u32, map: u8, os_32: bool, as_32: bool) -> u8
             | 0xC0
             | 0xC1
             | 0xC6 => 1,
+
+            // Group 3a (F6): TEST (nnn=0,1) has Ib, others have no immediate
+            // Based on Bochs cpu/decoder/fetchdecode32.cc:888-1077 (fetchImmediate)
+            // and opcodes table entries for Group 3a
+            0xF6 => {
+                if nnn == 0 || nnn == 1 {
+                    1 // TEST r/m8, imm8
+                } else {
+                    0 // NOT/NEG/MUL/IMUL/DIV/IDIV - no immediate
+                }
+            }
+
+            // Group 3b (F7): TEST (nnn=0,1) has Iv, others have no immediate
+            0xF7 => {
+                if nnn == 0 || nnn == 1 {
+                    if os_32 {
+                        4 // TEST r/m32, imm32
+                    } else {
+                        2 // TEST r/m16, imm16
+                    }
+                } else {
+                    0 // NOT/NEG/MUL/IMUL/DIV/IDIV - no immediate
+                }
+            }
 
             // Iw
             0xC2 | 0xCA => 2,

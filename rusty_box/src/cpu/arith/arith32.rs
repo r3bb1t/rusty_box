@@ -148,6 +148,25 @@ pub fn CMP_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
     cpu.update_flags_sub32(op1, op2, result);
 }
 
+/// CMP_EdGd: CMP r/m32, r32 (register form)
+/// Original: Bochs cpu/arith32.cc:274-285 CMP_GdEdR (operands swapped in Bochs naming)
+/// Opcode: 0x39, ModRM: r/m32, r32 (both registers)
+/// meta_data[0] = destination (r/m32), meta_data[1] = source (r32)
+/// Performs op1 - op2 and sets flags without storing result
+pub fn CMP_EdGd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let dst_idx = instr.meta_data[0] as usize;
+    let src_idx = instr.meta_data[1] as usize;
+
+    let op1 = cpu.get_gpr32(dst_idx);
+    let op2 = cpu.get_gpr32(src_idx);
+    let diff = op1.wrapping_sub(op2);
+
+    cpu.update_flags_sub32(op1, op2, diff);
+
+    tracing::trace!("CMP r{}d, r{}d: {:#010x} - {:#010x}",
+        dst_idx, src_idx, op1, op2);
+}
+
 /// ADC_EdGd_R: ADC r/m32, r32 (register form)
 /// Original: bochs/cpu/arith32.cc ADC_EdGd (register case)
 /// Opcode: 0x11, ModRM: r/m32, r32 (register)

@@ -66,13 +66,20 @@ impl<'c> BxMemC<'c> {
         rw: MemoryAccessType,
         cpus: &[&BxCpuC<I>],
     ) -> Result<Option<&mut [u8]>> {
+        // Debug logging for stack address range
+        if addr >= 0xfffffb80 && addr <= 0xfffffc00 {
+            tracing::error!("🔎 get_host_mem_addr ENTRY: addr={:#x}, rw={:?}", addr, rw);
+        }
         // Only log on trace level to avoid spam - debug was too verbose
         // tracing::trace!("get_host_mem_addr addr: {addr:?} ({:#x}) rw: {rw:?}", addr);
         let a20_addr: BxPhyAddress = self.a20_addr(addr);
         // tracing::trace!("after A20 masking: {a20_addr:?} ({:#x})", a20_addr);
 
-        let mut is_bios = a20_addr > self.bios_rom_addr.into();
+        // Match original Bochs: is_bios = (a20addr >= bios_rom_addr)
+        // From cpp_orig/bochs/memory/misc_mem.cc:5
+        let mut is_bios = a20_addr >= self.bios_rom_addr.into();
 
+        #[cfg(feature = "bx_phy_address_long")]
         if a20_addr > 0xffffffffu64 {
             is_bios = false;
         }
@@ -211,19 +218,34 @@ impl<'c> BxMemC<'c> {
                     &mut self.inherited_memory_stub.bogus()[(a20_addr & 0xfff).try_into()?..],
                 ))
             } else if is_bios {
+                // BIOS ROM access
                 Ok(Some(
                     &mut self.inherited_memory_stub.rom()
                         [(a20_addr & BIOS_MASK as BxPhyAddress).try_into()?..],
                 ))
+            } else if a20_addr >= self.inherited_memory_stub.len.try_into()? {
+                // Out of bounds but not BIOS - use bogus buffer for consistency with writes
+                // This handles stack at high addresses like 0xfffffb84 with limited RAM
+                if a20_addr >= 0xfffffb80 && a20_addr <= 0xfffffc00 {
+                    let bogus_off = (a20_addr & 0xfff) as usize;
+                    tracing::error!("📖 get_host_mem_addr READ: addr={:#x}, bogus_offset={:#x}, returning bogus buffer",
+                        a20_addr, bogus_off);
+                }
+                Ok(Some(
+                    &mut self.inherited_memory_stub.bogus()[(a20_addr & 0xfff).try_into()?..],
+                ))
             } else {
-                // Error, requested addr is out of bounds.
+                // Should not reach here, but return bogus as fallback
                 Ok(Some(
                     &mut self.inherited_memory_stub.bogus()[(a20_addr & 0xfff).try_into()?..],
                 ))
             }
         } else {
             // op == {BX_WRITE, BX_RW}
+            // Match original Bochs: if ((a20addr >= len) || is_bios) return NULL
+            // From cpp_orig/bochs/memory/misc_mem.cc:95-96
             if (a20_addr >= self.inherited_memory_stub.len.try_into()?) || is_bios {
+                // Writes beyond RAM or to BIOS ROM are vetoed
                 Ok(None) // Error, requested addr is out of bounds.
             } else if a20_addr >= 0x000a0000 && a20_addr < 0x000c0000 {
                 Ok(None) // Vetoed!  Mem mapped IO (VGA)
