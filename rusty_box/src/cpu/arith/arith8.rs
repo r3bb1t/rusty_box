@@ -87,6 +87,83 @@ pub fn ADD_GbEb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruct
     }
 }
 
+/// SUB_EbGbM: SUB r/m8, r8 (memory form)
+/// Opcode: 0x28, ModRM: r/m8, r8 (memory)
+/// Matches BX_CPU_C::SUB_EbGbM
+pub fn SUB_EbGbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let (op1, laddr) = cpu.read_rmw_virtual_byte(seg, eaddr);
+    let op2 = cpu.read_8bit_regx(instr.src1() as usize, instr.extend8bit_l());
+    let diff = op1.wrapping_sub(op2);
+
+    cpu.write_rmw_linear_byte(laddr, diff);
+    cpu.update_flags_sub8(op1, op2, diff);
+
+    Ok(())
+}
+
+/// SUB_GbEbR: SUB r8, r/m8 (register form)
+/// Opcode: 0x2A, ModRM: r8, r/m8 (register)
+/// Matches BX_CPU_C::SUB_GbEbR
+pub fn SUB_GbEbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
+    let op2 = cpu.read_8bit_regx(instr.src1() as usize, instr.extend8bit_l());
+    let diff = op1.wrapping_sub(op2);
+
+    cpu.write_8bit_regx(instr.dst() as usize, instr.extend8bit_l(), diff);
+    cpu.update_flags_sub8(op1, op2, diff);
+
+    Ok(())
+}
+
+/// SUB_GbEbM: SUB r8, r/m8 (memory form)
+/// Opcode: 0x2A, ModRM: r8, r/m8 (memory)
+/// Matches BX_CPU_C::SUB_GbEbM
+pub fn SUB_GbEbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
+    let op2 = cpu.read_virtual_byte(seg, eaddr);
+    let diff = op1.wrapping_sub(op2);
+
+    cpu.write_8bit_regx(instr.dst() as usize, instr.extend8bit_l(), diff);
+    cpu.update_flags_sub8(op1, op2, diff);
+
+    Ok(())
+}
+
+/// SUB_EbGb: SUB r/m8, r8
+/// Dispatches to memory or register form based on ModRM
+pub fn SUB_EbGb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        // Register form: SUB r8, r8
+        let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
+        let op2 = cpu.read_8bit_regx(instr.src1() as usize, instr.extend8bit_l());
+        let diff = op1.wrapping_sub(op2);
+
+        cpu.write_8bit_regx(instr.dst() as usize, instr.extend8bit_l(), diff);
+        cpu.update_flags_sub8(op1, op2, diff);
+
+        Ok(())
+    } else {
+        // Memory form
+        SUB_EbGbM(cpu, instr)
+    }
+}
+
+/// SUB_GbEb: SUB r8, r/m8
+/// Dispatches to memory or register form based on ModRM
+pub fn SUB_GbEb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        // Register form
+        SUB_GbEbR(cpu, instr)
+    } else {
+        // Memory form
+        SUB_GbEbM(cpu, instr)
+    }
+}
+
 /// AND_EbGbM: AND r/m8, r8 (memory form)
 /// Opcode: 0x20, ModRM: r/m8, r8 (memory)
 /// Matches BX_CPU_C::AND_EbGbM

@@ -1140,19 +1140,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // the very first bytes the CPU sees at the current CS:IP.
         if (self.boot_debug_flags & 0x80) == 0 {
             self.boot_debug_flags |= 0x80;
-            self.debug_puts(b"[cpu_loop start] ");
-
-            // In reset/real-mode BIOS, RIP is effectively CS.base + IP.
-            let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-            let ip = self.get_ip() as u64;
-            let paddr = cs_base.wrapping_add(ip);
-
-            // Dump 8 bytes from the current instruction stream.
-            for i in 0..8u64 {
-                let b = self.mem_read_byte(paddr.wrapping_add(i));
-                self.debug_put_hex_u8(b);
-                self.debug_putc(if i == 7 { b'\n' } else { b' ' });
-            }
+            // Removed hardcoded "[cpu_loop start]" message and reset vector dump per user request
         }
 
         let mut iteration = 0u64;
@@ -1164,6 +1152,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         let result = 'cpu_loop: loop {
             iteration += 1;
+
+            // Periodic progress logging (every 1 million instructions)
+            if iteration % 1_000_000 == 0 {
+                let current_rip = self.rip();
+                let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+                println!("Progress: {} million instructions, RIP={:#x}, CS:base={:#x}", iteration / 1_000_000, current_rip, cs_base);
+            }
 
             // Safety limit - pause when instruction limit is reached
             if iteration > max_instructions {
@@ -1192,9 +1187,26 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // bogus far transfer / bad stack / uninitialized IVT/IDT target).
             if current_rip == 0 && (self.boot_debug_flags & 0x40) == 0 {
                 self.boot_debug_flags |= 0x40;
-                self.debug_puts(b"[RIP=0 cs:ip=");
+
+                // Log to both debug output and tracing
+                tracing::error!("╔════════════════════════════════════════════════════════════╗");
+                tracing::error!("║  EXECUTION JUMPED TO ADDRESS 0x0 (NULL POINTER)            ║");
+                tracing::error!("╠════════════════════════════════════════════════════════════╣");
+
                 let cs_sel = self.sregs[BxSegregs::Cs as usize].selector.value;
                 let ip = self.get_ip();
+                tracing::error!("║  CS:IP = {:#06x}:{:#06x}", cs_sel, ip);
+
+                // Show last 16 RIP values before jumping to 0
+                tracing::error!("║  Previous RIP values (most recent last):");
+                for (i, &rip) in rip_history.iter().enumerate() {
+                    if rip != 0 {
+                        tracing::error!("║    [{:2}] {:#018x}", i, rip);
+                    }
+                }
+                tracing::error!("╚════════════════════════════════════════════════════════════╝");
+
+                self.debug_puts(b"[RIP=0 cs:ip=");
                 self.debug_put_hex_u16(cs_sel);
                 self.debug_putc(b':');
                 self.debug_put_hex_u16(ip);
@@ -2058,6 +2070,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 use crate::cpu::arith;
                 arith::ADC_GwEw(self, instr)
             }
+            Opcode::SubEbGb => {
+                use crate::cpu::arith;
+                arith::SUB_EbGb(self, instr)
+            }
+            Opcode::SubGbEb => {
+                use crate::cpu::arith;
+                arith::SUB_GbEb(self, instr)
+            }
             Opcode::AndEbGb => {
                 // Memory form - register form is handled separately
                 self.and_eb_gb_m(instr);
@@ -2217,6 +2237,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             Opcode::AddEwIw => {
                 use crate::cpu::arith;
                 arith::ADD_EwIw(self, instr)
+            }
+            Opcode::AddEwGw => {
+                use crate::cpu::arith;
+                arith::ADD_EwGw(self, instr)
             }
             Opcode::AddEdsIb => {
                 arith::ADD_EdId_R(self, instr);
@@ -3563,6 +3587,28 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::ShrEdIb => {
                 self.shr_ed_ib(instr);
+                Ok(())
+            }
+
+            // ROL - Rotate Left
+            Opcode::RolEbI1 => {
+                self.rol_eb_1(instr);
+                Ok(())
+            }
+            Opcode::RolEb => {
+                self.rol_eb_cl(instr);
+                Ok(())
+            }
+            Opcode::RolEbIb => {
+                self.rol_eb_cl(instr);  // Uses same implementation
+                Ok(())
+            }
+            Opcode::RolEwI1 => {
+                self.rol_ew_1(instr);
+                Ok(())
+            }
+            Opcode::RolEw => {
+                self.rol_ew_cl(instr);
                 Ok(())
             }
 

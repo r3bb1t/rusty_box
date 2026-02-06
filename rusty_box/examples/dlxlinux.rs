@@ -33,7 +33,7 @@ fn main() {
     const THREAD_STACK_SIZE: usize = if cfg!(debug_assertions) {
         1500 * 1024 * 1024
     } else {
-        500 * 1024 * 1024
+        1500 * 1024 * 1024 // Increased to 1.5 GB for 1GB memory config
     };
 
     std::thread::Builder::new()
@@ -63,11 +63,11 @@ fn run_dlxlinux() -> Result<()> {
     };
     // let log_level = tracing::Level::TRACE; // Enable detailed tracing for debugging
 
-    tracing_subscriber::fmt()
-        .without_time()
-        .with_target(false)
-        .with_max_level(log_level)
-        .init();
+    // tracing_subscriber::fmt()
+    //     .without_time()
+    //     .with_target(false)
+    //     .with_max_level(log_level)
+    //     .init();
 
     println!("╔════════════════════════════════════════════════════════════╗");
     println!("║              DLX Linux Boot - Rusty Box Emulator           ║");
@@ -115,9 +115,9 @@ fn run_dlxlinux() -> Result<()> {
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
     let bios_paths = [
-        // Prefer the mirrored Bochs BIOS directory in this repo
-        workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-latest"),
+        // Try legacy BIOS first - works better with limited RAM configurations
         workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-legacy"),
+        workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-latest"),
         workspace_root.join("cpp_orig/bochs/bios/bios.bin-1.13.0"),
         // Fallbacks (if user has BIOS copied elsewhere)
         workspace_root.join("BIOS-bochs-latest"),
@@ -204,9 +204,9 @@ fn run_dlxlinux() -> Result<()> {
     // Create and configure emulator
     // =========================================================================
     let config = EmulatorConfig {
-        guest_memory_size: 512 * 1024 * 1024, // 512 MB
-        // host_memory_size: 32 * 1024 * 1024,
-        host_memory_size: 512 * 1024 * 1024, // 512 MB
+        // Match bochsrc.bxrc: 32 MB RAM
+        guest_memory_size: 32 * 1024 * 1024, // 32 MB
+        host_memory_size: 32 * 1024 * 1024,  // 32 MB
         memory_block_size: 128 * 1024,
         ips: 15_000_000, // IPS from bochsrc.bxrc
         pci_enabled: false,
@@ -241,8 +241,8 @@ fn run_dlxlinux() -> Result<()> {
     tracing::info!("Initializing hardware...");
     emu.initialize()?;
 
-    // Configure CMOS for 32MB memory
-    // Base: 640KB, Extended: 31MB (32MB - 1MB)
+    // Configure CMOS for 32 MB memory (matches bochsrc.bxrc)
+    // Base: 640KB, Extended: 31 MB = 31 * 1024 KB
     emu.configure_memory_in_cmos(640, 31 * 1024);
 
     // Configure hard drive in CMOS (drive type 47 = user-defined)

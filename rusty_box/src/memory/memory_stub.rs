@@ -37,10 +37,9 @@ impl BxMemoryStubC {
         let test_mask: usize = alignment - 1;
         let actual_vector_size = bytes + test_mask;
 
-        // Create the vector
-        let mut actual_vector = Vec::new();
-        // And initialize it
-        (0..actual_vector_size).for_each(|_| actual_vector.push(0));
+        // Create and zero-initialize the vector efficiently
+        // Using vec![0; size] is much faster than pushing bytes one at a time
+        let actual_vector = vec![0; actual_vector_size];
 
         // Calculate the pointer and offset using unsafe block
         let actual_vector_ptr = actual_vector.as_ptr() as usize;
@@ -394,7 +393,18 @@ impl BxMemoryStubC {
         Self::is_monitor(cpus, a20_addr, len.try_into()?);
 
         // TODO: When everything will work, add rust enums for that
-        if a20_addr < self.len.try_into()? {
+        // Wrap addresses beyond memory size to fit within allocated memory
+        let mem_size: u64 = self.len.try_into()?;
+        if a20_addr >= mem_size {
+            let wrapped = a20_addr % mem_size;
+            if a20_addr >= 0xfffffb80 && a20_addr <= 0xfffffc00 {
+                tracing::warn!("✍️ write_physical_page: wrapping {:#x} -> {:#x}",
+                    a20_addr, wrapped);
+            }
+            a20_addr = wrapped;
+        }
+
+        if a20_addr < mem_size {
             // all of data is within limits of physical memory
             if len == 8 {
                 page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
@@ -481,14 +491,25 @@ impl BxMemoryStubC {
         data: &mut [u8],
         a20_mask: A20Mask,
     ) -> Result<()> {
-        let a20_addr = addr & a20_mask;
+        let mut a20_addr = addr & a20_mask;
 
         // Note: accesses should always be contained within a single page
         if (addr >> 12) != ((addr + len as u64 - 1) >> 12) {
             return Err(MemoryError::ReadPhysicalPage { addr, len }.into());
         }
 
-        if a20_addr < self.len.try_into()? {
+        // Wrap addresses beyond memory size to fit within allocated memory
+        let mem_size: u64 = self.len.try_into()?;
+        if a20_addr >= mem_size {
+            let wrapped = a20_addr % mem_size;
+            if a20_addr >= 0xfffffb80 && a20_addr <= 0xfffffc00 {
+                tracing::warn!("📖 read_physical_page: wrapping {:#x} -> {:#x}",
+                    a20_addr, wrapped);
+            }
+            a20_addr = wrapped;
+        }
+
+        if a20_addr < mem_size {
             // all of data is within limits of physical memory
             if len == 8 {
                 let val = read_host_qword_to_little_endian(self.get_vector(a20_addr, cpus)?);

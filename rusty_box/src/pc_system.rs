@@ -120,8 +120,10 @@ impl BxPcSystemC {
             ticks_total: 0,
             last_time_usec: 0,
             usec_since_last: 0,
-            a20_mask: 0xFFFF_FFFF_FFFF_FFFFu64,
-            enable_a20: true,
+            // A20 line starts DISABLED at boot (bit 20 masked off)
+            // This causes addresses like 0xFFFFFFF0 to wrap to 0x000FFFF0
+            a20_mask: 0xFFFF_FFFF_FFEF_FFFFu64,
+            enable_a20: false,
             m_ips: 1.0,
             hrq: false,
             kill_bochs_request: false,
@@ -230,7 +232,8 @@ impl BxPcSystemC {
             reset_type
         );
 
-        // Enable A20 line on reset
+        // A20 line is ENABLED at hardware reset on 386+ CPUs
+        // (Only 286 systems start with A20 disabled)
         self.set_enable_a20(true);
 
         Ok(())

@@ -52,8 +52,8 @@ impl BxMemC<'_> {
 
             bios_rom_access: 0, // idk tbh
 
-            // A20 enabled by default (full 64-bit addressing)
-            a20_mask: 0xFFFF_FFFF_FFFF_FFFFu64,
+            // A20 starts DISABLED at boot (synced from PC system during init)
+            a20_mask: 0xFFFF_FFFF_FFEF_FFFFu64,
         }
     }
 }
@@ -72,12 +72,29 @@ impl<'c> BxMemC<'c> {
         }
         // Only log on trace level to avoid spam - debug was too verbose
         // tracing::trace!("get_host_mem_addr addr: {addr:?} ({:#x}) rw: {rw:?}", addr);
-        let a20_addr: BxPhyAddress = self.a20_addr(addr);
+        let mut a20_addr: BxPhyAddress = self.a20_addr(addr);
         // tracing::trace!("after A20 masking: {a20_addr:?} ({:#x})", a20_addr);
 
         // Match original Bochs: is_bios = (a20addr >= bios_rom_addr)
         // From cpp_orig/bochs/memory/misc_mem.cc:5
+        // Check BEFORE wrapping to identify BIOS ROM accesses
         let mut is_bios = a20_addr >= self.bios_rom_addr.into();
+
+        // Address wrapping: wrap addresses beyond memory size to fit within allocated memory
+        // BUT: Do NOT wrap BIOS ROM addresses! BIOS ROM is mapped at top of address space.
+        // Only wrap non-BIOS addresses that are beyond physical RAM.
+        let mem_size: u64 = self.inherited_memory_stub.len.try_into().unwrap_or(0);
+
+        if !is_bios && mem_size > 0 && a20_addr >= mem_size {
+            let wrapped = a20_addr % mem_size;
+            if a20_addr >= 0xfffffb80 && a20_addr <= 0xfffffc00 {
+                tracing::warn!("🔄 get_host_mem_addr: wrapping {:#x} -> {:#x} (mem_size={:#x})",
+                    a20_addr, wrapped, mem_size);
+            }
+            a20_addr = wrapped;
+            // After wrapping, address is no longer BIOS
+            is_bios = false;
+        }
 
         #[cfg(feature = "bx_phy_address_long")]
         if a20_addr > 0xffffffffu64 {
@@ -224,16 +241,19 @@ impl<'c> BxMemC<'c> {
                         [(a20_addr & BIOS_MASK as BxPhyAddress).try_into()?..],
                 ))
             } else if a20_addr >= self.inherited_memory_stub.len.try_into()? {
-                // Out of bounds but not BIOS - use bogus buffer for consistency with writes
-                // This handles stack at high addresses like 0xfffffb84 with limited RAM
+                // Out of bounds - wrap address to fit within memory size
+                // Real hardware with limited address lines naturally wraps addresses
+                // e.g., with 1GB RAM (30 bits), 0xFFFFFB84 wraps to 0x3FFFFB84
+                let mem_size: u64 = self.inherited_memory_stub.len.try_into()?;
+                let wrapped_addr = a20_addr % mem_size;
+
                 if a20_addr >= 0xfffffb80 && a20_addr <= 0xfffffc00 {
-                    let bogus_off = (a20_addr & 0xfff) as usize;
-                    tracing::error!("📖 get_host_mem_addr READ: addr={:#x}, bogus_offset={:#x}, returning bogus buffer",
-                        a20_addr, bogus_off);
+                    tracing::warn!("📖 Address wrapping: {:#x} -> {:#x} (mem_size={:#x})",
+                        a20_addr, wrapped_addr, mem_size);
                 }
-                Ok(Some(
-                    &mut self.inherited_memory_stub.bogus()[(a20_addr & 0xfff).try_into()?..],
-                ))
+
+                // Access wrapped address
+                Ok(Some(self.get_vector(cpus, wrapped_addr)?))
             } else {
                 // Should not reach here, but return bogus as fallback
                 Ok(Some(
@@ -242,11 +262,21 @@ impl<'c> BxMemC<'c> {
             }
         } else {
             // op == {BX_WRITE, BX_RW}
-            // Match original Bochs: if ((a20addr >= len) || is_bios) return NULL
-            // From cpp_orig/bochs/memory/misc_mem.cc:95-96
-            if (a20_addr >= self.inherited_memory_stub.len.try_into()?) || is_bios {
-                // Writes beyond RAM or to BIOS ROM are vetoed
-                Ok(None) // Error, requested addr is out of bounds.
+            if is_bios {
+                // Writes to BIOS ROM are vetoed
+                Ok(None)
+            } else if a20_addr >= self.inherited_memory_stub.len.try_into()? {
+                // Out of bounds - wrap address to fit within memory size
+                let mem_size: u64 = self.inherited_memory_stub.len.try_into()?;
+                let wrapped_addr = a20_addr % mem_size;
+
+                if a20_addr >= 0xfffffb80 && a20_addr <= 0xfffffc00 {
+                    tracing::warn!("✍️ Write address wrapping: {:#x} -> {:#x} (mem_size={:#x})",
+                        a20_addr, wrapped_addr, mem_size);
+                }
+
+                // Write to wrapped address
+                Ok(Some(self.get_vector(cpus, wrapped_addr)?))
             } else if a20_addr >= 0x000a0000 && a20_addr < 0x000c0000 {
                 Ok(None) // Vetoed!  Mem mapped IO (VGA)
             } else if cfg!(feature = "bx_support_pci")
