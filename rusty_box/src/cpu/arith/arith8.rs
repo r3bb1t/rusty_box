@@ -369,3 +369,21 @@ pub fn DEC_Eb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructio
 
     Ok(())
 }
+
+// =========================================================================
+// SUB - Accumulator optimized forms
+// =========================================================================
+
+/// SUB_AL_Ib: SUB AL, imm8
+/// Optimized form for accumulator
+/// Opcode: 0x2C
+pub fn SUB_AL_Ib<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    let al = cpu.al();
+    let imm8 = instr.ib();
+    let result = al.wrapping_sub(imm8);
+
+    cpu.set_al(result);
+    cpu.update_flags_sub8(al, imm8, result);
+
+    Ok(())
+}

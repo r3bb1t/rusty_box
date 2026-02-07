@@ -329,3 +329,63 @@ pub fn ADC_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruct
         ADC_EwGwM(cpu, instr)
     }
 }
+
+// =========================================================================
+// CMP - Compare (16-bit)
+// =========================================================================
+
+/// CMP_EwGwR: CMP r/m16, r16 (register form)
+/// Performs subtraction without storing result, only sets flags
+/// Opcode: 0x39, ModRM: r16, r16
+pub fn CMP_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    let op1_16 = cpu.get_gpr16(instr.dst() as usize);
+    let op2_16 = cpu.get_gpr16(instr.src1() as usize);
+    let result = op1_16.wrapping_sub(op2_16);
+
+    cpu.update_flags_sub16(op1_16, op2_16, result);
+
+    Ok(())
+}
+
+/// CMP_EwGwM: CMP r/m16, r16 (memory form)
+/// Opcode: 0x39, ModRM: r/m16 (memory), r16
+pub fn CMP_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    // Resolve address
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+
+    let op1_16 = cpu.read_virtual_word_arith16(seg, eaddr);
+    let op2_16 = cpu.get_gpr16(instr.src1() as usize);
+    let result = op1_16.wrapping_sub(op2_16);
+
+    cpu.update_flags_sub16(op1_16, op2_16, result);
+
+    Ok(())
+}
+
+/// CMP_EwGw: CMP r/m16, r16 - Dispatcher
+pub fn CMP_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        CMP_EwGwR(cpu, instr)
+    } else {
+        CMP_EwGwM(cpu, instr)
+    }
+}
+
+// =========================================================================
+// ADD - Accumulator optimized forms
+// =========================================================================
+
+/// ADD_Axiw: ADD AX, imm16
+/// Optimized form for accumulator
+/// Opcode: 0x05
+pub fn ADD_Axiw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    let ax = cpu.ax();
+    let imm16 = instr.iw();
+    let result = ax.wrapping_add(imm16);
+
+    cpu.set_ax(result);
+    cpu.update_flags_add16(ax, imm16, result);
+
+    Ok(())
+}

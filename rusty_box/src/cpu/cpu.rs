@@ -1150,26 +1150,30 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let mut history_idx = 0usize;
         const STUCK_THRESHOLD: u64 = 100000; // Warn if RIP doesn't change for this many instructions
 
+        tracing::info!("CPU loop starting at CS:IP = {:04X}:{:08X}",
+            unsafe { self.sregs[BxSegregs::Cs as usize].selector.value },
+            self.rip());
+
         let result = 'cpu_loop: loop {
             iteration += 1;
 
-            // Periodic progress logging (every 1 million instructions)
-            if iteration % 1_000_000 == 0 {
+            // Periodic progress logging (every 100k instructions for first 5M)
+            if iteration % 100_000 == 0 && iteration <= 5_000_000 {
                 let current_rip = self.rip();
                 let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
                 let linear_addr = cs_base + current_rip;
-                println!("Progress: {} million instructions, RIP={:#x}, Linear={:#x}", iteration / 1_000_000, current_rip, linear_addr);
+                tracing::info!("Progress: {}k instructions, RIP={:#x}, Linear={:#x}", iteration / 1000, current_rip, linear_addr);
             }
 
-            // Sample instruction execution every 100k instructions (first 1M only)
-            if iteration % 100_000 == 0 && iteration <= 1_000_000 {
+            // Sample instruction execution every 250k instructions (first 5M only)
+            if iteration % 250_000 == 0 && iteration <= 5_000_000 {
                 let current_rip = self.rip();
                 let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
                 let linear_addr = cs_base + current_rip;
 
                 // Read first few bytes of instruction
                 let bytes: Vec<u8> = (0..8).map(|i| self.mem_read_byte(linear_addr + i)).collect();
-                println!(
+                tracing::debug!(
                     "Trace [{}k]: RIP={:#010x}, Linear={:#010x}, Bytes=[{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}]",
                     iteration / 1000, current_rip, linear_addr,
                     bytes[0], bytes[1], bytes[2], bytes[3],
@@ -2230,6 +2234,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 }
                 Ok(())
             }
+            Opcode::PushIw => {
+                self.push_iw(instr);
+                Ok(())
+            }
+            Opcode::PushSIb16 => {
+                self.push_sib16(instr);
+                Ok(())
+            }
             // Arithmetic (ADD) instructions
             Opcode::AddGdEd => {
                 arith::ADD_GdEd_R(self, instr);
@@ -2242,6 +2254,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             Opcode::AddEaxid => {
                 arith::ADD_EAX_Id(self, instr);
                 Ok(())
+            }
+            Opcode::AddAxiw => {
+                use crate::cpu::arith;
+                arith::ADD_Axiw(self, instr)
             }
             Opcode::AddAlib => {
                 use crate::cpu::arith;
@@ -2279,6 +2295,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             Opcode::SubEaxid => {
                 arith::SUB_EAX_Id(self, instr);
                 Ok(())
+            }
+            Opcode::SubAlib => {
+                use crate::cpu::arith;
+                arith::SUB_AL_Ib(self, instr)
             }
             Opcode::SubEdsIb => {
                 eprintln!("★★★ DISPATCH SubEdsIb with ib={:#x}, meta_data[0]={}", instr.ib(), instr.meta_data[0]);
@@ -2847,6 +2867,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.cmp_gd_ed_r(instr);
                 Ok(())
             }
+            Opcode::CmpEwGw => {
+                use crate::cpu::arith;
+                arith::CMP_EwGw(self, instr)
+            }
             Opcode::CmpAlib => {
                 self.cmp_al_ib(instr);
                 Ok(())
@@ -3336,6 +3360,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::PopfFd => {
                 self.popf_fd(instr);
+                Ok(())
+            }
+            Opcode::LeaveOp16 => {
+                self.leave16(instr);
                 Ok(())
             }
 

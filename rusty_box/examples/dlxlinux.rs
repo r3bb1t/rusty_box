@@ -59,15 +59,14 @@ fn run_dlxlinux() -> Result<()> {
     let log_level = if bios_quiet_mode {
         tracing::Level::WARN // Suppress INFO logs when viewing BIOS output
     } else {
-        tracing::Level::TRACE
+        tracing::Level::DEBUG // Use DEBUG to capture execution traces
     };
-    // let log_level = tracing::Level::TRACE; // Enable detailed tracing for debugging
 
-    // tracing_subscriber::fmt()
-    //     .without_time()
-    //     .with_target(false)
-    //     .with_max_level(log_level)
-    //     .init();
+    tracing_subscriber::fmt()
+        .without_time()
+        .with_target(false)
+        .with_max_level(log_level)
+        .init();
 
     println!("╔════════════════════════════════════════════════════════════╗");
     println!("║              DLX Linux Boot - Rusty Box Emulator           ║");
@@ -251,9 +250,16 @@ fn run_dlxlinux() -> Result<()> {
     // =========================================================================
     // Load BIOS ROMs
     // =========================================================================
-    // Load main BIOS at 0xFFFE0000 (128KB BIOS)
-    emu.load_bios(&bios_data, 0xfffe0000)?;
-    tracing::info!("✓ Loaded system BIOS at 0xFFFE0000");
+    // Calculate correct BIOS load address based on size
+    // For x86, BIOS must end at 0x100000000 (4GB) so it's accessible at reset vector 0xFFFFFFF0
+    // 64KB BIOS:  load at 0xFFFF0000 (0xFFFF0000 + 0x10000 = 0x100000000)
+    // 128KB BIOS: load at 0xFFFE0000 (0xFFFE0000 + 0x20000 = 0x100000000)
+    let bios_size = bios_data.len() as u64;
+    let bios_load_addr = 0x100000000u64 - bios_size;
+    tracing::info!("BIOS size: {} bytes ({} KB), calculated load address: {:#x}",
+        bios_size, bios_size / 1024, bios_load_addr);
+    emu.load_bios(&bios_data, bios_load_addr)?;
+    tracing::info!("✓ Loaded system BIOS at {:#x}", bios_load_addr);
 
     // Load VGA BIOS at 0xC0000 (optional)
     if let Some((_vga_path, vga_data)) = vga_bios {

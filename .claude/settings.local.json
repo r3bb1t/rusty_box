@@ -39,7 +39,11 @@
       "Bash(pkill:*)",
       "Bash(taskkill:*)",
       "Bash(1)",
-      "Bash(python:*)"
+      "Bash(python:*)",
+      "Bash(timeout:*)",
+      "Bash(RUSTY_BOX_HEADLESS=1 timeout 5 ./target/release/examples/dlxlinux.exe:*)",
+      "Bash(set:*)",
+      "Bash(export RUSTY_BOX_HEADLESS=1:*)"
     ]
   }
 }

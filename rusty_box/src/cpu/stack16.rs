@@ -41,6 +41,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("PUSH imm16: {:#06x}", value);
     }
 
+    /// PUSH sign-extended imm8 (16-bit mode)
+    /// Based on Bochs stack16.cc PUSH_Ib
+    pub fn push_sib16(&mut self, instr: &BxInstructionGenerated) {
+        // Sign-extend 8-bit immediate to 16-bit
+        let imm8 = instr.ib() as i8;
+        let value = imm8 as i16 as u16;
+        self.push_16(value);
+        tracing::trace!("PUSH sign-extended imm8: {:#04x} -> {:#06x}", imm8, value);
+    }
+
     // =========================================================================
     // 16-bit POP instructions
     // Based on Bochs stack16.cc:72-101
@@ -194,5 +204,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.eflags = (self.eflags & !CHANGE_MASK) | ((flags as u32) & CHANGE_MASK);
         tracing::trace!("POPF: {:#06x}", flags);
+    }
+
+    /// LEAVE - High level procedure exit (16-bit)
+    /// Equivalent to: MOV SP, BP; POP BP
+    /// Based on Bochs stack16.cc:178-192
+    pub fn leave16(&mut self, _instr: &BxInstructionGenerated) {
+        // Load SP from BP
+        let bp = self.bp();
+        self.set_sp(bp);
+
+        // Pop BP from stack
+        let new_bp = self.pop_16();
+        self.set_bp(new_bp);
+
+        tracing::trace!("LEAVE16: BP restored to {:#06x}, SP = {:#06x}",
+            new_bp, self.sp());
     }
 }

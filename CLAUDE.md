@@ -8,33 +8,45 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 ## Current BIOS Execution Status
 
-### ✅ MAJOR BREAKTHROUGH (2026-02-06): Legacy BIOS Works!
+### 🎉 CRITICAL BREAKTHROUGH (2026-02-07): BIOS Address Bug Fixed!
 
-**SUCCESS**: Emulator now boots BIOS successfully with proper configuration:
+**ROOT CAUSE FOUND AND RESOLVED**: BIOS ROM was loading at incorrect address for 64KB BIOS!
 
-- ✅ **Configuration**: 32 MB RAM (matching original bochsrc.bxrc)
-- ✅ **BIOS**: BIOS-bochs-legacy (64 KB) - executes to RIP=0x6a00+
-- ✅ **Memory Implementation**: Verified correct - matches original Bochs exactly
-- ✅ **Protected mode entry**: Working (CS.base=0x0, GDT loaded correctly)
-- ✅ **Core emulator functions**: All verified correct
-- 🔄 **Current task**: Implementing remaining missing instructions as discovered
+**The Problem:**
+- BIOS load address was hardcoded to **0xFFFE0000** (correct for 128KB BIOS)
+- We're using **64KB BIOS** → correct address is **0xFFFF0000**
+- Reset vector at **0xFFFFFFF0** was reading **uninitialized 0xFF bytes**
+- Decoder immediately failed: "illegal opcode" on all 0xFF bytes
 
-### Progress Status (2026-02-06)
+**The Fix (dlxlinux.rs):**
+```rust
+// Calculate correct BIOS load address based on size
+// BIOS must end at 0x100000000 (4GB) for reset vector accessibility
+let bios_size = bios_data.len() as u64;
+let bios_load_addr = 0x100000000u64 - bios_size;  // 64KB → 0xFFFF0000
+```
 
-**Core Systems Complete:**
+**Results:**
+- ✅ **BIOS loads at correct address** - reset vector contains real BIOS code
+- ✅ **No decode errors** - BIOS executes actual x86 instructions
+- ✅ **Systematic progress** - implementing instructions as discovered
+- 🔄 **Still investigating** - no BIOS output to debug ports yet
+
+### Progress Status (2026-02-07)
+
+**Instructions Implemented This Session:**
+- ✅ `LEAVE` (LeaveOp16) - High level procedure exit (MOV SP,BP; POP BP)
+- ✅ `PUSH imm16` (PushIw) - Push 16-bit immediate
+- ✅ `PUSH imm8` (PushSIb16) - Push sign-extended 8-bit immediate
+- ✅ `CMP r/m16, r16` (CmpEwGw) - 16-bit comparison
+- 🔄 `ADD AX, imm16` (AddAxiw) - Next to implement
+
+**Core Systems Verified:**
 - ✅ Memory subsystem correct (4 MB ROM allocation, proper is_bios handling)
-- ✅ HLT instruction and async event handling
-- ✅ CPUID implementation
-- ✅ Decoder (Group 1 opcodes 0x80, 0x81, 0x83 fixed)
-
-**Recently Implemented (2026-02-06):**
-- ✅ `ADD r/m16, r16` (AddEwGw) - ADD with 16-bit operands
-- ✅ `ROL r/m8, 1` (RolEbI1) - Rotate left 8-bit by 1
-- ✅ `ROL r/m8, CL` (RolEb) - Rotate left 8-bit by CL
-- ✅ `ROL r/m16, 1` (RolEwI1) - Rotate left 16-bit by 1
-
-**Discovered Missing (implementing systematically):**
-- 🔄 `SUB r/m8, r8` (SubEbGb) - Next to implement
+- ✅ BIOS ROM mapping (address calculation based on size)
+- ✅ Reset vector access (0xFFFFFFF0)
+- ✅ Decoder (no illegal opcode errors)
+- ✅ Tracing infrastructure (using tracing crate)
 
 ### Key Findings (2026-02-06)
 

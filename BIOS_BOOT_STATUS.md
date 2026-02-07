@@ -1,11 +1,15 @@
 # BIOS Boot Status - Rusty Box Emulator
 
-**Last Updated**: 2026-02-06
-**Status**: ✅ MAJOR BREAKTHROUGH - BIOS Boots Successfully!
+**Last Updated**: 2026-02-07
+**Status**: 🎉 CRITICAL BREAKTHROUGH - BIOS Address Bug Fixed!
 
 ## Executive Summary
 
-The Rusty Box emulator now successfully boots a legacy BIOS and executes continuously for extended periods (50+ seconds, billions of instructions). The core emulator implementation has been verified correct through line-by-line comparison with original Bochs.
+**CRITICAL FIX (2026-02-07)**: Discovered and resolved BIOS loading address bug! The BIOS was loading at the wrong address (0xFFFE0000 for 128KB BIOS) but we're using a 64KB BIOS. The reset vector at 0xFFFFFFF0 was reading uninitialized 0xFF bytes instead of actual BIOS code.
+
+**Solution**: Calculate load address based on BIOS size: `0x100000000 - bios_size`. For 64KB BIOS, this gives 0xFFFF0000, placing the last 16 bytes exactly at the reset vector.
+
+**Result**: BIOS now executes real x86 instructions from the start. Systematically implementing missing instructions as they're discovered.
 
 ## Working Configuration
 
