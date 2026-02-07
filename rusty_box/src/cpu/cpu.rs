@@ -1157,7 +1157,24 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             if iteration % 1_000_000 == 0 {
                 let current_rip = self.rip();
                 let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-                println!("Progress: {} million instructions, RIP={:#x}, CS:base={:#x}", iteration / 1_000_000, current_rip, cs_base);
+                let linear_addr = cs_base + current_rip;
+                println!("Progress: {} million instructions, RIP={:#x}, Linear={:#x}", iteration / 1_000_000, current_rip, linear_addr);
+            }
+
+            // Sample instruction execution every 100k instructions (first 1M only)
+            if iteration % 100_000 == 0 && iteration <= 1_000_000 {
+                let current_rip = self.rip();
+                let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+                let linear_addr = cs_base + current_rip;
+
+                // Read first few bytes of instruction
+                let bytes: Vec<u8> = (0..8).map(|i| self.mem_read_byte(linear_addr + i)).collect();
+                println!(
+                    "Trace [{}k]: RIP={:#010x}, Linear={:#010x}, Bytes=[{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}]",
+                    iteration / 1000, current_rip, linear_addr,
+                    bytes[0], bytes[1], bytes[2], bytes[3],
+                    bytes[4], bytes[5], bytes[6], bytes[7]
+                );
             }
 
             // Safety limit - pause when instruction limit is reached
