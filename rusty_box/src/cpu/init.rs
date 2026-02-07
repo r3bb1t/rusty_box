@@ -103,6 +103,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.gen_reg[BX_NIL_REGISTER].rrx = 0;
 
+        // Initialize SP to a safe value for early BIOS execution
+        // Real x86 resets SP to 0, but BIOS needs some stack space immediately
+        // Place stack at conventional memory top (just below VGA at 0xA0000)
+        // Using 0x7000 as a safe location - below typical BIOS data area at 0x400-0x500
+        // and gives plenty of room for stack growth
+        self.gen_reg[4].rrx = 0x7000; // RSP/ESP/SP
+        tracing::info!("CPU reset: Initialized SP to {:#x}", unsafe { self.gen_reg[4].rrx });
+
         self.eflags = 0x2; // Bit1 is always set
 
         // clearEFlagsOSZAPC();

@@ -140,6 +140,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
     #[inline]
     pub fn set_sp(&mut self, val: u16) {
+        // Debug: detect when SP becomes 0 (indicates stack corruption)
+        if val == 0 && unsafe { self.gen_reg[4].word.rx } != 0 {
+            tracing::warn!("SP set to 0! Previous SP was {:#x}, RIP={:#x}",
+                unsafe { self.gen_reg[4].word.rx }, self.rip());
+        }
         self.gen_reg[4].word.rx = val
     }
     #[inline]

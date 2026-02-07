@@ -1204,43 +1204,51 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // The borrow is released at the end of the expression.
             let current_rip = self.rip();
 
-            // One-time breadcrumb if execution ever reaches RIP=0 (common symptom of
-            // bogus far transfer / bad stack / uninitialized IVT/IDT target).
-            if current_rip == 0 && (self.boot_debug_flags & 0x40) == 0 {
-                self.boot_debug_flags |= 0x40;
+            // Check for execution in dangerous low memory (IVT region 0x0000-0x03FF)
+            // This typically indicates uninitialized interrupt vectors or stack corruption
+            let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+            let linear_addr = cs_base + current_rip;
 
-                // Log to both debug output and tracing
-                tracing::error!("╔════════════════════════════════════════════════════════════╗");
-                tracing::error!("║  EXECUTION JUMPED TO ADDRESS 0x0 (NULL POINTER)            ║");
-                tracing::error!("╠════════════════════════════════════════════════════════════╣");
+            if linear_addr < 0x400 && (self.boot_debug_flags & 0x40) == 0 {
+                self.boot_debug_flags |= 0x40;
 
                 let cs_sel = self.sregs[BxSegregs::Cs as usize].selector.value;
                 let ip = self.get_ip();
-                tracing::error!("║  CS:IP = {:#06x}:{:#06x}", cs_sel, ip);
 
-                // Show last 16 RIP values before jumping to 0
+                tracing::error!("╔════════════════════════════════════════════════════════════╗");
+                tracing::error!("║  EXECUTION IN IVT REGION (0x0000-0x03FF)                  ║");
+                tracing::error!("╠════════════════════════════════════════════════════════════╣");
+                tracing::error!("║  CS:IP = {:#06x}:{:#06x}, Linear = {:#010x}", cs_sel, ip, linear_addr);
+                tracing::error!("║  This indicates uninitialized interrupt vector or corruption!");
+                tracing::error!("║");
                 tracing::error!("║  Previous RIP values (most recent last):");
                 for (i, &rip) in rip_history.iter().enumerate() {
                     if rip != 0 {
                         tracing::error!("║    [{:2}] {:#018x}", i, rip);
                     }
                 }
+                tracing::error!("╠════════════════════════════════════════════════════════════╣");
+                tracing::error!("║  STOPPING EXECUTION - This would infinite loop            ║");
                 tracing::error!("╚════════════════════════════════════════════════════════════╝");
 
-                self.debug_puts(b"[RIP=0 cs:ip=");
+                self.debug_puts(b"[IVT->0000:0000]\n[RIP=");
+                self.debug_put_hex_u16(ip);
+                self.debug_puts(b" cs:ip=");
                 self.debug_put_hex_u16(cs_sel);
                 self.debug_putc(b':');
                 self.debug_put_hex_u16(ip);
                 self.debug_puts(b"] ");
 
-                // Dump 8 bytes from the current instruction stream using real-mode CS base.
-                let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+                // Dump 8 bytes from the current instruction stream
                 let paddr = cs_base.wrapping_add(ip as u64);
                 for i in 0..8u64 {
                     let b = self.mem_read_byte(paddr.wrapping_add(i));
                     self.debug_put_hex_u8(b);
                     self.debug_putc(if i == 7 { b'\n' } else { b' ' });
                 }
+
+                // STOP execution instead of continuing - this prevents infinite loops
+                break Ok(iteration);
             }
 
             let mut entry = unsafe {
