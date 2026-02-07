@@ -1340,13 +1340,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 tracing::trace!("Fetching instruction: trace_start_idx={}, instr_idx={}, mpool_idx={}, opcode={:?}, RIP={:#x}",
                     trace_start_idx, instr_idx, mpool_idx, i.get_ia_opcode(), current_rip_for_log);
 
-                // Debug: Log instructions near the problematic address range
-                if current_rip_for_log >= 0xe1d00 && current_rip_for_log <= 0xe1dff {
-                    tracing::error!(
-                        "Executing near problem area: RIP={:#x}, opcode={:?}, ilen={}",
-                        current_rip_for_log,
-                        i.get_ia_opcode(),
-                        i.ilen()
+                // Debug: Log when entering the I/O function at 0x506
+                if current_rip_for_log == 0x506 {
+                    let sp = self.sp();
+                    let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+                    tracing::warn!(
+                        "Entering I/O function at F000:0506, SP={:#x}, CS.base={:#x}",
+                        sp, cs_base
                     );
                 }
                 // Also log the instruction that might jump TO 0xe1d59

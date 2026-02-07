@@ -140,11 +140,26 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
     #[inline]
     pub fn set_sp(&mut self, val: u16) {
-        // Debug: detect when SP becomes 0 (indicates stack corruption)
-        if val == 0 && unsafe { self.gen_reg[4].word.rx } != 0 {
-            tracing::warn!("SP set to 0! Previous SP was {:#x}, RIP={:#x}",
-                unsafe { self.gen_reg[4].word.rx }, self.rip());
+        let old_sp = unsafe { self.gen_reg[4].word.rx };
+
+        // Track when SP changes from initial 0x7000
+        if old_sp == 0x7000 && val != 0x7000 {
+            tracing::warn!("SP changed from initial 0x7000 to {:#x} at RIP={:#x}",
+                val, self.rip());
         }
+
+        // Track SP corruption: log significant changes
+        if old_sp > 0x1000 && val < 0x100 {
+            tracing::error!("SP CORRUPTION! {:#x} -> {:#x} at RIP={:#x}",
+                old_sp, val, self.rip());
+        }
+
+        // Debug: detect when SP becomes 0 (indicates stack corruption)
+        if val == 0 && old_sp != 0 {
+            tracing::warn!("SP set to 0! Previous SP was {:#x}, RIP={:#x}",
+                old_sp, self.rip());
+        }
+
         self.gen_reg[4].word.rx = val
     }
     #[inline]
@@ -232,6 +247,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
     #[inline]
     pub fn set_esp(&mut self, val: u32) {
+        let old_esp = unsafe { self.gen_reg[4].dword.erx };
+
+        // Track when ESP/SP changes from initial 0x7000
+        if (old_esp & 0xFFFF) == 0x7000 && (val & 0xFFFF) != 0x7000 {
+            tracing::warn!("ESP/SP changed from initial 0x7000 to {:#x} (SP={:#x}) at RIP={:#x}",
+                val, val & 0xFFFF, self.rip());
+        }
+
         self.gen_reg[4].dword.erx = val
     }
     #[inline]
