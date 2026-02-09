@@ -1494,6 +1494,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 tracing::trace!("{:#x} Executing opcode: {:?} at RIP={:#x}, ilen={}, next_rip={:#x}, trace_start_idx={}, instr_idx={}",
                     self.rip(), i.get_ia_opcode(), current_rip, ilen, next_rip, trace_start_idx, instr_idx);
 
+                // Track _start function execution (0xE0000-0xE0030)
+                if current_rip >= 0xE0000 && current_rip <= 0xE0030 {
+                    tracing::error!(
+                        "🎯 _start: RIP={:#x} opcode={:?} ilen={} next_rip={:#x} | EAX={:#x} ECX={:#x} ESI={:#x} EDI={:#x}",
+                        current_rip, i.get_ia_opcode(), ilen, next_rip,
+                        self.eax(), self.ecx(), self.esi(), self.edi()
+                    );
+                }
+
                 // Matching C++ line 203: BX_CPU_CALL_METHOD(i->execute1, (i));
                 // might iterate repeat instruction
 

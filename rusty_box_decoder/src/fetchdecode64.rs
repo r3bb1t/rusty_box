@@ -402,8 +402,16 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<InstructionGenerated> 
             // MOV Sw,Ew: nnn is destination (segment), rm is source (gpr)
             instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
             instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
+        } else if ((b1 & 0x0F) == 0x01) || ((b1 & 0x0F) == 0x09) || b1 == 0x89 {
+            // Ed,Gd format (opcodes 0x01, 0x09, 0x11, 0x19, 0x21, 0x29, 0x31, 0x89):
+            // rm (Ed) is destination, nnn (Gd) is source
+            // Examples: ADD Ed,Gd | SUB Ed,Gd | MOV Ed,Gd
+            instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
+            instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
         } else {
-            // Normal ModRM: nnn is dest register, rm is source
+            // Gd,Ed format (opcodes 0x03, 0x0B, 0x13, 0x1B, 0x23, 0x2B, 0x33, 0x8B):
+            // nnn (Gd) is destination, rm (Ed) is source
+            // Examples: ADD Gd,Ed | SUB Gd,Ed | MOV Gd,Ed
             instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
             instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
         }

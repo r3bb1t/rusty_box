@@ -129,6 +129,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let new_eip = self.get_gpr32(dst);
         let eip = self.eip();
 
+        // Track ALL CALL instructions to see what's happening
+        tracing::error!(
+            "🔥 CALL: eip={:#x}, target={:#x}, dst_reg={} | EAX={:#x}",
+            eip, new_eip, dst, self.eax()
+        );
+
         self.push_32(eip);
         self.branch_near32(new_eip)?;
         tracing::trace!("CALL r/m32: EIP = {:#010x}, ret = {:#010x}", new_eip, eip);
