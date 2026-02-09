@@ -71,32 +71,51 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Real mode: simple base = selector << 4
             self.load_seg_reg_real_mode(seg, selector_value);
         } else {
-            // Protected mode: fetch descriptor and load with proper D/B bit
-            let mut selector = super::descriptor::BxSelector::default();
-            parse_selector(selector_value, &mut selector);
+            // Protected mode: check for NULL selector first
+            // Based on Bochs segment_ctrl_pro.cc:40,108 - check (new_value & 0xfffc) == 0
+            let is_null_selector = (selector_value & 0xfffc) == 0;
 
-            let (dword1, dword2) = self.fetch_raw_descriptor(&selector)?;
-            let mut descriptor = self.parse_descriptor(dword1, dword2)?;
-
-            if seg_idx == BxSegregs::Ss as usize {
-                // Load SS with proper checks and D/B bit
-                // CPL = Current Privilege Level = CS.selector.rpl
-                let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
-
-                tracing::error!("⚠️ POP SS in protected mode: selector={:#x}, d_b={}, eip={:#x}",
-                    selector_value, unsafe { descriptor.u.segment.d_b }, self.eip());
-
-                self.load_ss(&mut selector, &mut descriptor, cpl)?;
-
-                let d_b_after = unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b };
-                tracing::error!("✅ After load_ss: SS.d_b={}, is_stack_32bit={}",
-                    d_b_after, self.is_stack_32bit());
+            if is_null_selector {
+                // NULL selector handling
+                if seg_idx == BxSegregs::Ss as usize {
+                    // SS cannot be NULL in protected mode (except 64-bit mode with special conditions)
+                    // Bochs segment_ctrl_pro.cc:48-49
+                    tracing::error!("⚠️ POP SS: loading NULL selector in protected mode - #GP");
+                    return Err(super::error::CpuError::BadVector { vector: super::cpu::Exception::Gp });
+                } else {
+                    // DS/ES/FS/GS can be NULL - just invalidate the segment
+                    // Based on Bochs load_null_selector() in segment_ctrl_pro.cc:212-234
+                    tracing::debug!("POP seg{}: loading NULL selector (allowed)", seg_idx);
+                    self.load_null_selector(seg, selector_value);
+                }
             } else {
-                // For other segments, just copy the descriptor
-                // TODO: Implement full load_seg_reg for DS, ES, FS, GS
-                self.sregs[seg as usize].selector = selector;
-                self.sregs[seg as usize].cache = descriptor;
-                self.sregs[seg as usize].cache.valid = super::descriptor::SEG_VALID_CACHE;
+                // Non-NULL selector: fetch descriptor and load
+                let mut selector = super::descriptor::BxSelector::default();
+                parse_selector(selector_value, &mut selector);
+
+                let (dword1, dword2) = self.fetch_raw_descriptor(&selector)?;
+                let mut descriptor = self.parse_descriptor(dword1, dword2)?;
+
+                if seg_idx == BxSegregs::Ss as usize {
+                    // Load SS with proper checks and D/B bit
+                    // CPL = Current Privilege Level = CS.selector.rpl
+                    let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+
+                    tracing::error!("⚠️ POP SS in protected mode: selector={:#x}, d_b={}, eip={:#x}",
+                        selector_value, unsafe { descriptor.u.segment.d_b }, self.eip());
+
+                    self.load_ss(&mut selector, &mut descriptor, cpl)?;
+
+                    let d_b_after = unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b };
+                    tracing::error!("✅ After load_ss: SS.d_b={}, is_stack_32bit={}",
+                        d_b_after, self.is_stack_32bit());
+                } else {
+                    // For other segments, just copy the descriptor
+                    // TODO: Implement full load_seg_reg for DS, ES, FS, GS
+                    self.sregs[seg as usize].selector = selector;
+                    self.sregs[seg as usize].cache = descriptor;
+                    self.sregs[seg as usize].cache.valid = super::descriptor::SEG_VALID_CACHE;
+                }
             }
         }
 

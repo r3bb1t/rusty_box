@@ -432,7 +432,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Load segment register in real mode (matching load_seg_reg for real mode)
     pub(super) fn load_seg_reg_real_mode(&mut self, seg: BxSegregs, selector: u16) {
         parse_selector(selector, &mut self.sregs[seg as usize].selector);
-        self.set_segment_base(seg, (selector as u64) << 4);
+        let new_base = (selector as u64) << 4;
+
+        // Track CS loads for debugging CS.base corruption
+        if matches!(seg, BxSegregs::Cs) {
+            let old_base = unsafe { self.sregs[seg as usize].cache.u.segment.base };
+            tracing::error!(
+                "🔴 CS LOAD (real mode): selector={:#x}, old_base={:#x}, new_base={:#x}, EIP={:#x}, real_mode={}",
+                selector, old_base, new_base, self.eip(), self.real_mode()
+            );
+        }
+
+        self.set_segment_base(seg, new_base);
     }
 
     // =========================================================================
@@ -448,12 +459,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         if !self.real_mode() {
             // Protected mode: use jump_protected
-            tracing::info!("jmp_far32: cs={:#06x}, disp={:#010x}, real_mode={}, cpu_mode={:?}",
-                          cs_raw, disp32, self.real_mode(), self.cpu_mode);
-            tracing::info!("Calling jump_protected");
+            tracing::error!("🟢 jmp_far32 CALLED: cs={:#06x}, disp={:#010x}, real_mode={}, cpu_mode={:?}, EIP={:#x}",
+                          cs_raw, disp32, self.real_mode(), self.cpu_mode, self.eip());
+            tracing::error!("🟢 Calling jump_protected");
             self.jump_protected(cs_raw, disp32 as u64)?;
         } else {
             // Real mode
+            tracing::error!("🟢 jmp_far32 real mode path: cs={:#06x}, disp={:#010x}, EIP={:#x}",
+                          cs_raw, disp32, self.eip());
             let limit = self.get_segment_limit(BxSegregs::Cs);
             if disp32 > limit {
                 tracing::error!("jmp_far32: offset {:#010x} outside of CS limits {:#010x}", disp32, limit);

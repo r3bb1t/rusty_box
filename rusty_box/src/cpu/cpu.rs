@@ -1348,6 +1348,47 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         "Entering I/O function at F000:0506, SP={:#x}, CS.base={:#x}",
                         sp, cs_base
                     );
+
+                    // Dump memory at addresses we're about to execute
+                    use crate::config::BxPhyAddress;
+                    for check_addr in [0x4b2, 0x506, 0x508, 0x50a, 0x50c] {
+                        let mut buf = [0u8; 16];
+                        if let Ok(_) = mem.read_physical_page(
+                            &[self],
+                            check_addr as BxPhyAddress,
+                            buf.len(),
+                            &mut buf,
+                        ) {
+                            tracing::error!("📍 Memory at {:#x}: {:02x?}", check_addr, &buf);
+                        }
+                    }
+                }
+
+                // Log instructions in I/O function to see parameter reads
+                if current_rip_for_log >= 0x506 && current_rip_for_log <= 0x520 {
+                    let sp = self.sp();
+                    let bp = self.bp();
+                    let dx = self.dx();
+                    let al = self.al();
+                    if current_rip_for_log == 0x50b || current_rip_for_log == 0x50e {
+                        tracing::warn!(
+                            "I/O func param read: RIP={:#x}, opcode={:?}, BP={:#x}, SP={:#x}, DX={:#x}, AL={:#x}",
+                            current_rip_for_log, i.get_ia_opcode(), bp, sp, dx, al
+                        );
+                    }
+                }
+
+                // Log caller regions to see if parameters are pushed
+                if (current_rip_for_log >= 0xc64 && current_rip_for_log <= 0xc80) ||
+                   (current_rip_for_log >= 0xcbe && current_rip_for_log <= 0xcda) {
+                    let sp = self.sp();
+                    let ax = self.ax();
+                    let dx = self.dx();
+                    let bp = self.bp();
+                    tracing::warn!(
+                        "Caller: RIP={:#x}, opcode={:?}, SP={:#x}, AX={:#x}, DX={:#x}, BP={:#x}",
+                        current_rip_for_log, i.get_ia_opcode(), sp, ax, dx, bp
+                    );
                 }
                 // Also log the instruction that might jump TO 0xe1d59
                 if current_rip_for_log >= 0xe1c00 && current_rip_for_log <= 0xe2000 {
@@ -1355,6 +1396,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         "RIP in BIOS area: RIP={:#x}, opcode={:?}",
                         current_rip_for_log,
                         i.get_ia_opcode()
+                    );
+                }
+
+                // Track CS.base corruption - log instructions around 0xe0bf0-0xe0c00
+                if current_rip_for_log >= 0xe0bf0 && current_rip_for_log <= 0xe0c00 {
+                    let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+                    let cs_selector = self.sregs[BxSegregs::Cs as usize].selector.value;
+                    tracing::error!(
+                        "🔍 CS tracking: RIP={:#x}, opcode={:?}, CS.selector={:#x}, CS.base={:#x}",
+                        current_rip_for_log, i.get_ia_opcode(), cs_selector, cs_base
                     );
                 }
 
@@ -2068,7 +2119,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // Data transfer (MOV) instructions - 8-bit
             // =========================================================================
             Opcode::MovGbEb => {
-                self.mov_gb_eb_r(instr);
+                if instr.mod_c0() {
+                    // Register form
+                    self.mov_gb_eb_r(instr);
+                } else {
+                    // Memory form
+                    self.mov_gb_eb_m(instr);
+                }
                 Ok(())
             }
             Opcode::MovEbGb => {
@@ -2187,7 +2244,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // Data transfer (MOV) instructions - 16-bit
             // =========================================================================
             Opcode::MovGwEw => {
-                self.mov_gw_ew_r(instr);
+                // Debug MOV DX, [BP+4] at 0x50B
+                if self.prev_rip >= 0x50b && self.prev_rip <= 0x50d {
+                    tracing::warn!("MOV DX,[BP+4] at {:#x}: mod_c0={}", self.prev_rip, instr.mod_c0());
+                }
+
+                if instr.mod_c0() {
+                    // Register form
+                    self.mov_gw_ew_r(instr);
+                } else {
+                    // Memory form
+                    self.mov_gw_ew_m(instr);
+                }
                 Ok(())
             }
             Opcode::MovEwGw => {
@@ -2380,15 +2448,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // Segment selector is always Iw2 (16-bit)
                 let segment = instr.iw2();
 
+                tracing::error!("🚀 JmpfAp HANDLER: os32_l={}, ilen={}, Id={:#x}, Iw={:#x}, Iw2={:#x}, EIP={:#x}",
+                    instr.os32_l(), instr.ilen(), instr.id(), instr.iw(), instr.iw2(), self.eip());
+
                 if instr.os32_l() != 0 {
                     // 32-bit operand size: offset is Id (32-bit)
                     let offset32 = instr.id();
-                    tracing::info!("FAR JMP to {:04x}:{:08x}", segment, offset32);
+                    tracing::error!("🚀 FAR JMP 32-BIT to {:04x}:{:08x}", segment, offset32);
                     self.jmp_far32(instr, segment, offset32)?;
                 } else {
                     // 16-bit operand size: offset is Iw (16-bit)
                     let offset16 = instr.iw();
-                    tracing::info!("FAR JMP to {:04x}:{:04x}", segment, offset16);
+                    tracing::error!("🚀 FAR JMP 16-BIT to {:04x}:{:04x}", segment, offset16);
                     self.jmp_far16(instr, segment, offset16)?;
                 }
                 Ok(())

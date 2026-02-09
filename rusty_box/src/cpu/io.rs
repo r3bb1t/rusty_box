@@ -87,6 +87,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn out_dx_al(&mut self, _instr: &BxInstructionGenerated) {
         let port = self.dx();
         let value = self.al();
+
+        // Log ALL port output during early boot for debugging
+        if self.icount < 1000000 {
+            if value >= 0x20 && value < 0x7F {
+                // Printable ASCII
+                tracing::info!("OUT DX: port {:#x}, char '{}' ({:#x})", port, value as char, value);
+            } else {
+                // Non-printable
+                tracing::info!("OUT DX: port {:#x}, byte {:#x}", port, value);
+            }
+        }
+
         self.port_out(port, value as u32, 1);
         tracing::trace!("OUT DX ({:#x}), AL ({:#x})", port, value);
     }

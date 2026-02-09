@@ -392,19 +392,7 @@ impl BxMemoryStubC {
         #[cfg(feature = "bx_support_monitor_mwait")]
         Self::is_monitor(cpus, a20_addr, len.try_into()?);
 
-        // TODO: When everything will work, add rust enums for that
-        // Wrap addresses beyond memory size to fit within allocated memory
-        let mem_size: u64 = self.len.try_into()?;
-        if a20_addr >= mem_size {
-            let wrapped = a20_addr % mem_size;
-            if a20_addr >= 0xfffffb80 && a20_addr <= 0xfffffc00 {
-                tracing::warn!("✍️ write_physical_page: wrapping {:#x} -> {:#x}",
-                    a20_addr, wrapped);
-            }
-            a20_addr = wrapped;
-        }
-
-        if a20_addr < mem_size {
+        if a20_addr < self.len.try_into()? {
             // all of data is within limits of physical memory
             if len == 8 {
                 page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
@@ -498,18 +486,7 @@ impl BxMemoryStubC {
             return Err(MemoryError::ReadPhysicalPage { addr, len }.into());
         }
 
-        // Wrap addresses beyond memory size to fit within allocated memory
-        let mem_size: u64 = self.len.try_into()?;
-        if a20_addr >= mem_size {
-            let wrapped = a20_addr % mem_size;
-            if a20_addr >= 0xfffffb80 && a20_addr <= 0xfffffc00 {
-                tracing::warn!("📖 read_physical_page: wrapping {:#x} -> {:#x}",
-                    a20_addr, wrapped);
-            }
-            a20_addr = wrapped;
-        }
-
-        if a20_addr < mem_size {
+        if a20_addr < self.len.try_into()? {
             // all of data is within limits of physical memory
             if len == 8 {
                 let val = read_host_qword_to_little_endian(self.get_vector(a20_addr, cpus)?);

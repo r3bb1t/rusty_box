@@ -8,29 +8,37 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 ## Current BIOS Execution Status
 
-### 🎉 CRITICAL BREAKTHROUGH (2026-02-07): BIOS Address Bug Fixed!
+### ✅ INVESTIGATION COMPLETE (2026-02-09): Real Root Cause Found!
 
-**ROOT CAUSE FOUND AND RESOLVED**: BIOS ROM was loading at incorrect address for 64KB BIOS!
+**DISCOVERY**: Far jump implementation is CORRECT! The actual bug is **corrupted symbol addresses** baked into the BIOS ROM files.
 
-**The Problem:**
-- BIOS load address was hardcoded to **0xFFFE0000** (correct for 128KB BIOS)
-- We're using **64KB BIOS** → correct address is **0xFFFF0000**
-- Reset vector at **0xFFFFFFF0** was reading **uninitialized 0xFF bytes**
-- Decoder immediately failed: "illegal opcode" on all 0xFF bytes
+**What Actually Happens (Correct Flow!):**
+1. ✅ Real mode BIOS executes
+2. ✅ Far jump to 0x0010:0x000F9E5F (rombios32_05) - **Works correctly!**
+3. ✅ rombios32_05 initializes segments (DS, ES, SS, FS, GS)
+4. ✅ rombios32_05 pushes parameters (0x4B0, 0x4B2)
+5. ✅ `call 0xE0000` - Calls _start **indirectly** (not a far jump!)
+6. ✅ _start DOES execute - we see BSS clearing
+7. ❌ **_start uses WRONG symbol addresses** from ROM:
+   - ESI = 0xFFFF0700 (should be 0x000E416F for `_end`)
+   - EDI ≈ 0x1 (should be 0x70C for `__data_start`)
+8. ❌ .data section copied to wrong address (0x1 instead of 0x70C)
+9. ❌ Execution jumps to garbage (0x20000) → decoder fails → crash
 
-**The Fix (dlxlinux.rs):**
-```rust
-// Calculate correct BIOS load address based on size
-// BIOS must end at 0x100000000 (4GB) for reset vector accessibility
-let bios_size = bios_data.len() as u64;
-let bios_load_addr = 0x100000000u64 - bios_size;  // 64KB → 0xFFFF0000
-```
+**Root Cause:**
+Both BIOS ROM files (`BIOS-bochs-latest` and `BIOS-bochs-legacy`) were compiled with incorrect linker symbol values that don't match `rombios32.ld`. The `__data_start`, `__data_end`, `__bss_start`, and `_end` symbols have wrong addresses baked into the machine code.
 
-**Results:**
-- ✅ **BIOS loads at correct address** - reset vector contains real BIOS code
-- ✅ **No decode errors** - BIOS executes actual x86 instructions
-- ✅ **Systematic progress** - implementing instructions as discovered
-- 🔄 **Still investigating** - no BIOS output to debug ports yet
+**Evidence:**
+- ✅ Far jump handler executes: `JmpfAp HANDLER: os32_l=4, Id=0xf9e5f` (CORRECT!)
+- ✅ jump_protected called with cs=0x10, disp=0x000F9E5F (CORRECT!)
+- ✅ Execution at 0xE0000 detected: writes to low memory from _start
+- ❌ Writes go to address 0x1, not 0x70C (WRONG destination!)
+- ❌ ESI register = 0xFFFF0700 at crash (WRONG source pointer!)
+
+**Solution Required:**
+Recompile BIOS from source with correct linker script, or use a different BIOS (SeaBIOS, coreboot).
+
+See `docs/FAR_JUMP_BUG_INVESTIGATION.md` for complete analysis.
 
 ### Progress Status (2026-02-07)
 

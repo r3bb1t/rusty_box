@@ -683,6 +683,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     pub(super) fn mem_write_byte(&mut self, addr: u64, value: u8) {
+        // Log ALL writes to low RAM (first 4KB) to track data section copy
+        if addr < 0x1000 {
+            tracing::warn!("💾 MEM_WRITE_BYTE: addr={:#x}, value={:#x}", addr, value);
+        }
+
         // Prefer Bochs-style host access through the memory system when available.
         if let Some(mem_bus) = self.mem_bus {
             // SAFETY: see mem_read_byte.
@@ -747,6 +752,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     pub(super) fn mem_write_dword(&mut self, addr: u64, value: u32) {
+        // Log ALL writes to low RAM (first 4KB) to track data section copy
+        if addr < 0x1000 {
+            tracing::warn!("💾 MEM_WRITE_DWORD: addr={:#x}, value={:#x}", addr, value);
+        }
+
         // Debug logging for problematic address range
         if (addr >= 0xfffffb80 && addr <= 0xfffffc00) ||
            (addr >= 0xffffffe0 && addr <= 0xfffffff0) {

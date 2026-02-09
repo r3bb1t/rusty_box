@@ -49,6 +49,14 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         let dword1 = (qword & 0xFFFFFFFF) as u32;
         let dword2 = ((qword >> 32) & 0xFFFFFFFF) as u32;
 
+        // Debug: log descriptor fetch for CS (selector index 2 = selector 0x10)
+        if selector.index == 2 && selector.ti == 0 {
+            tracing::error!(
+                "🔍 GDT fetch: selector={:#x}, index={}, offset={:#x}, dword1={:#x}, dword2={:#x}",
+                selector.value, selector.index, offset, dword1, dword2
+            );
+        }
+
         Ok((dword1, dword2))
     }
 
@@ -86,7 +94,15 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             let limit = (dword1 & 0xFFFF) | ((dword2 & 0x000F0000) << 16);
             let mut base = ((dword1 >> 16) as u64) | (((dword2 & 0xFF) as u64) << 16);
             base |= ((dword2 & 0xFF000000) as u64) << 8;
-            
+
+            // Debug: log descriptor parsing for code segments
+            if (r#type & 0x8) != 0 { // bit 3 = 1 means code segment
+                tracing::error!(
+                    "🔍 Descriptor parse: dword1={:#x}, dword2={:#x}, base={:#x}, limit={:#x}, type={:#x}, p={}, dpl={}",
+                    dword1, dword2, base, limit, r#type, p, dpl
+                );
+            }
+
             let g = (dword2 & 0x00800000) != 0;
             let d_b = (dword2 & 0x00400000) != 0;
             let avl = (dword2 & 0x00100000) != 0;
@@ -441,6 +457,15 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         descriptor: &mut BxDescriptor,
         cpl: u8,
     ) -> Result<()> {
+        // Track CS loads for debugging
+        let desc_base = unsafe { descriptor.u.segment.base };
+        let old_cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+        tracing::error!(
+            "🔴 CS LOAD (protected): selector={:#x}, old_base={:#x}, new_base={:#x}, EIP={:#x}, p={}, dpl={}, type={:#x}",
+            selector.value, old_cs_base, desc_base, self.eip(),
+            descriptor.p, descriptor.dpl, descriptor.r#type
+        );
+
         // Add cpl to the selector value
         selector.value = (selector.value & 0xFFFC) | cpl as u16;
         selector.rpl = cpl;
@@ -497,6 +522,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         cs_raw: u16,
         disp: u64,
     ) -> Result<()> {
+        tracing::error!("⚡ jump_protected CALLED: cs={:#06x}, disp={:#010x}, EIP={:#x}", cs_raw, disp, self.eip());
         tracing::info!("jump_protected: cs={:#06x}, disp={:#010x}", cs_raw, disp);
 
         // Selector must not be null
@@ -674,14 +700,32 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     }
 
     /// Load null selector for data segments (DS, ES, FS, GS)
-    /// Based on BX_CPU_C::load_null_selector
-    fn load_null_selector(&mut self, seg: BxSegregs, value: u16) {
+    /// Based on BX_CPU_C::load_null_selector in segment_ctrl_pro.cc:212-234
+    pub(super) fn load_null_selector(&mut self, seg: BxSegregs, value: u16) {
         let seg_idx = seg as usize;
+
+        // Set selector fields
         self.sregs[seg_idx].selector.value = value;
         self.sregs[seg_idx].selector.index = 0;
         self.sregs[seg_idx].selector.ti = 0;
         self.sregs[seg_idx].selector.rpl = (value & 3) as u8;
-        self.sregs[seg_idx].cache.valid = 0; // Invalid cache
-        tracing::debug!("load_null_selector({:?}): selector {:#06x}", seg, value);
+
+        // Clear cache - Bochs segment_ctrl_pro.cc:221-231
+        self.sregs[seg_idx].cache.valid = 0; // Invalidate null selector
+        self.sregs[seg_idx].cache.p = false;
+        self.sregs[seg_idx].cache.dpl = 0;
+        self.sregs[seg_idx].cache.segment = true; // Data/code segment
+        self.sregs[seg_idx].cache.r#type = 0;
+
+        // Zero segment descriptor fields
+        unsafe {
+            self.sregs[seg_idx].cache.u.segment.base = 0;
+            self.sregs[seg_idx].cache.u.segment.limit_scaled = 0;
+            self.sregs[seg_idx].cache.u.segment.g = false;
+            self.sregs[seg_idx].cache.u.segment.d_b = false;
+            self.sregs[seg_idx].cache.u.segment.avl = false;
+        }
+
+        tracing::debug!("load_null_selector({:?}): selector {:#06x}, cleared all cache fields", seg, value);
     }
 }

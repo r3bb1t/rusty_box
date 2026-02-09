@@ -45,7 +45,7 @@ impl Default for EmulatorConfig {
             host_memory_size: 32 * 1024 * 1024,  // 32 MB
             memory_block_size: 128 * 1024,       // 128 KB blocks
             ips: 4_000_000,                      // 4 MIPS
-            pci_enabled: false,
+            pci_enabled: true,                   // Enable PCI for shadow RAM support
             cpu_params: BxParams::default(),
         }
     }

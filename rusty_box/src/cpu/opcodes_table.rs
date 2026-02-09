@@ -865,14 +865,28 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
-        // For JMP FAR Ap, offset is in Iw() and segment is in Iw2()
-        let offset = instr.iw();
+        // Check if this is 16-bit or 32-bit far jump by examining instruction length
+        // Far jump encoding:
+        //   16-bit: EA <2-byte offset> <2-byte selector> = 5 bytes
+        //   32-bit: EA <4-byte offset> <2-byte selector> = 7 bytes
+        // With 0x66 prefix: add 1 byte
         let segment = instr.iw2();
 
-        tracing::info!("FAR JMP to {:04x}:{:04x}", segment, offset);
+        // Try reading as 32-bit first
+        let offset32 = instr.id();
+        let offset16 = instr.iw() as u32;
 
-        // Call jmp_far16 which handles both real and protected mode
-        cpu.jmp_far16(instr, segment, offset)?;
+        // If instruction length suggests 32-bit (>= 6 bytes including opcode),
+        // or if the 32-bit value is significantly different from 16-bit, use 32-bit
+        if instr.ilen() >= 6 && offset32 != offset16 {
+            // 32-bit far jump
+            tracing::info!("FAR JMP 32 to {:04x}:{:08x} (ilen={})", segment, offset32, instr.ilen());
+            cpu.jmp_far32(instr, segment, offset32)?;
+        } else {
+            // 16-bit far jump
+            tracing::info!("FAR JMP 16 to {:04x}:{:04x} (ilen={})", segment, offset16, instr.ilen());
+            cpu.jmp_far16(instr, segment, offset16 as u16)?;
+        }
 
         Ok(())
     }
