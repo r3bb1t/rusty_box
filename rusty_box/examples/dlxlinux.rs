@@ -114,10 +114,10 @@ fn run_dlxlinux() -> Result<()> {
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
     let bios_paths = [
-        // Use BIOS-bochs-legacy (64KB) - works correctly with rombios32.ld memory layout
-        // BIOS-bochs-latest (128KB) uses different memory layout and doesn't initialize .data section correctly
-        workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-legacy"),
+        // MUST use BIOS-bochs-latest (128KB) - contains 32-bit rombios32 code
+        // BIOS-bochs-legacy (64KB) is 16-bit only, missing _start function!
         workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-latest"),
+        workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-legacy"),
         workspace_root.join("cpp_orig/bochs/bios/bios.bin-1.13.0"),
         // Fallbacks (if user has BIOS copied elsewhere)
         workspace_root.join("BIOS-bochs-latest"),

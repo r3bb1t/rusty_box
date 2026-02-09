@@ -68,9 +68,10 @@ impl<'c> BxMemC<'c> {
     ) -> Result<Option<&mut [u8]>> {
         let a20_addr: BxPhyAddress = self.a20_addr(addr);
 
-        // Match original Bochs: is_bios = (a20addr >= bios_rom_addr)
-        // From cpp_orig/bochs/memory/misc_mem.cc:674
-        let is_bios = a20_addr >= self.bios_rom_addr.into();
+        // Match Bochs: 0xE0000-0xFFFFF is ALWAYS BIOS ROM, plus addresses >= bios_rom_addr
+        // This is critical for rombios32 which is linked to run at 0xE0000!
+        // From cpp_orig/bochs/memory/misc_mem.cc:674 and memory-bochs.h:40
+        let is_bios = (a20_addr >= 0xE0000 && a20_addr < 0x100000) || a20_addr >= self.bios_rom_addr.into();
 
         #[cfg(feature = "bx_phy_address_long")]
         let is_bios = if a20_addr > 0xffffffffu64 {
@@ -479,7 +480,9 @@ impl BxMemC<'_> {
         #[cfg(feature = "bx_support_monitor_mwait")]
         Self::is_monitor(cpus, a20_addr, len.try_into()?);
 
-        let is_bios = a20_addr >= self.bios_rom_addr.into();
+        // Match Bochs: 0xE0000-0xFFFFF is ALWAYS BIOS ROM, plus addresses >= bios_rom_addr
+        // This is critical for rombios32 which is linked to run at 0xE0000!
+        let is_bios = (a20_addr >= 0xE0000 && a20_addr < 0x100000) || a20_addr >= self.bios_rom_addr.into();
         #[cfg(feature = "bx_phy_address_long")]
         let is_bios = if a20_addr > 0xffffffffu64 { false } else { is_bios };
 
@@ -646,7 +649,9 @@ impl BxMemC<'_> {
             return Err(super::MemoryError::ReadPhysicalPage { addr, len }.into());
         }
 
-        let is_bios = a20_addr >= self.bios_rom_addr.into();
+        // Match Bochs: 0xE0000-0xFFFFF is ALWAYS BIOS ROM, plus addresses >= bios_rom_addr
+        // This is critical for rombios32 which is linked to run at 0xE0000!
+        let is_bios = (a20_addr >= 0xE0000 && a20_addr < 0x100000) || a20_addr >= self.bios_rom_addr.into();
         #[cfg(feature = "bx_phy_address_long")]
         let is_bios = if a20_addr > 0xffffffffu64 { false } else { is_bios };
 
