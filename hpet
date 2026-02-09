@@ -1,0 +1,23 @@
+hpet = {
+  config = 0x0
+  isr = 0x0
+  hpet_counter = 0x0
+  timer0 = {
+    config = 0xffffff00000030
+    cmp = 0xffffffffffffffff
+    fsb = 0x0
+    period = 18446744073709551615
+  }
+  timer1 = {
+    config = 0xffffff00000030
+    cmp = 0xffffffffffffffff
+    fsb = 0x0
+    period = 18446744073709551615
+  }
+  timer2 = {
+    config = 0xffffff00000030
+    cmp = 0xffffffffffffffff
+    fsb = 0x0
+    period = 18446744073709551615
+  }
+}

@@ -123,24 +123,70 @@ _end = . ;                   // _end = end of rodata in ROM
 9. ❌ _start uses **wrong symbol values** → copies .data to wrong address
 10. ❌ Jump to garbage address → decoder fails → crash
 
-## Solution Options
+## Progress (2026-02-09)
 
-### Option A: Recompile BIOS from Source ✅ RECOMMENDED
-Recompile the BIOS using the correct linker script to get proper symbol addresses:
-```bash
-cd cpp_orig/bochs/bios
-make clean
-make BIOS-bochs-legacy
+### ✅ ROM Mapping Fix Applied
+**Commit:** e79eed3 - "Fix BIOS ROM mapping: Include 0xE0000-0xFFFFF range"
+
+Modified `misc_mem.rs` to treat 0xE0000-0xFFFFF as BIOS ROM (matching Bochs behavior):
+```rust
+let is_bios = (a20_addr >= 0xE0000 && a20_addr < 0x100000) ||
+              a20_addr >= self.bios_rom_addr.into();
 ```
 
-### Option B: Patch BIOS ROM Binary
-Manually patch the instruction bytes in _start to use correct addresses (fragile, not recommended).
+**Impact:**
+- ✅ BIOS code at 0xE0000 is now accessible
+- ✅ Far jump to 0x0010:0x000F9E5F executes correctly
+- ✅ rombios32_05 executes (pushes 0x4B0, 0x4B2)
+- ✅ CALL to _start executes (pushes return address)
 
-### Option C: Pre-initialize .data Section
-Have emulator copy .data section before starting BIOS (defeats purpose of BIOS initialization).
+### ❌ Remaining Issue: Instruction Cache Bug (NOT Decoder)
+
+**Symptoms:**
+1. Return address pushed is 0xF9E91 (should be 0xF9E90) - **off by 1 byte**
+2. After CALL, writes go to addresses 0x0-0x5 instead of 0x700
+3. EDI appears to be 0 instead of 0x700
+
+**ROM Verification:**
+- ✅ ROM bytes at 0xF9E89-0xF9E8E are correct:
+  - `b8 00 00 0e 00` = MOV EAX, 0xE0000
+  - `ff d0` = CALL EAX
+- ✅ ROM bytes at 0xE0000 (_start) are correct:
+  - `bf 00 07 00 00` = MOV EDI, 0x700
+
+**Decoder Verification (2026-02-09):**
+- ✅ Tested `FF D0` (CALL EAX): Correctly decodes as **2 bytes**
+- ✅ Tested `B8 00 00 0E 00` (MOV EAX, 0xE0000): Correctly decodes as **5 bytes**
+- ✅ Decoder is working correctly! Bug is NOT in decoder.
+
+**Root Cause: Instruction Cache (icache) Bug**
+
+The issue is in the instruction cache/trace system (`rusty_box/src/cpu/icache.rs`), NOT the decoder:
+1. Decoder produces correct `ilen` values
+2. But when instructions are cached in traces, `ilen` might be calculated or stored incorrectly
+3. This causes RIP to advance by wrong amount (off by 1)
+4. Subsequent instructions decode from misaligned addresses
+5. Registers end up with garbage values
+
+**Next Steps:**
+- Investigate `icache.rs` instruction length handling
+- Check how traces are built and if `ilen` is preserved correctly
+- Verify RIP advancement in cached traces matches uncached execution
+- Add icache-specific logging to track instruction lengths
+
+## Solution Options
+
+### Option A: ✅ COMPLETED - ROM Mapping Fix
+Fixed 0xE0000-0xFFFFF mapping to allow access to rombios32 code.
+
+### Option B: Debug Register Corruption
+Continue investigating why registers are corrupted or instructions misaligned.
+
+### Option C: Recompile BIOS from Source
+Recompile with debug symbols to verify correct linking (may not help if emulator bug).
 
 ### Option D: Use Different BIOS
-Find or build a BIOS that has correct symbol addresses (SeaBIOS, coreboot, etc.).
+Try SeaBIOS or other BIOS to see if issue is BIOS-specific or emulator bug.
 
 ## Files Modified
 

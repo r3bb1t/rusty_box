@@ -1,0 +1,15 @@
+parallel = {
+  0 = {
+    data = 0xaa
+    slct = true
+    ack = true
+    busy = true
+    strobe = false
+    autofeed = false
+    init = true
+    slct_in = true
+    irq = false
+    input = false
+    initmode = false
+  }
+}

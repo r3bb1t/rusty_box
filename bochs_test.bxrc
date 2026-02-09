@@ -1,0 +1,27 @@
+# Test configuration matching dlxlinux/bochsrc.bxrc
+megs: 32
+
+# BIOS files
+romimage: file=cpp_orig/bochs/bios/BIOS-bochs-latest
+vgaromimage: file=cpp_orig/bochs/bios/VGABIOS-lgpl-latest.bin
+
+# Hard disk
+ata0: enabled=1, ioaddr1=0x1f0, ioaddr2=0x3f0, irq=14
+ata0-master: type=disk, path="dlxlinux/hd10meg.img", cylinders=306, heads=4, spt=17
+
+# Boot from disk
+boot: disk
+
+# Logging - capture detailed output
+log: bochs_test.log
+debugger_log: bochs_debug.log
+error: action=report
+info: action=report
+debug: action=report
+
+# Display
+display_library: nogui
+
+# Misc
+mouse: enabled=0
+cpu: ips=15000000

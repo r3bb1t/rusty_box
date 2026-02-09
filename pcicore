@@ -1,0 +1,3 @@
+pcicore = {
+  confAddr = 0x80000058
+}

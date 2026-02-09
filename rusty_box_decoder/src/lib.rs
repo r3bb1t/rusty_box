@@ -462,3 +462,5 @@ pub const BX_SUPPORT_EVEX: u8 = BxAvxVectorLength::Vl512 as _;
 pub const BX_XMM_REGISTERS: usize = 32;
 
 const BX_VECTOR_TMP_REGISTER: usize = BX_XMM_REGISTERS;
+
+mod test_call_decode;
