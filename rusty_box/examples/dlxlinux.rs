@@ -208,8 +208,8 @@ fn run_dlxlinux() -> Result<()> {
         guest_memory_size: 32 * 1024 * 1024, // 32 MB
         host_memory_size: 32 * 1024 * 1024,  // 32 MB
         memory_block_size: 128 * 1024,
-        ips: 15_000_000, // IPS from bochsrc.bxrc
-        pci_enabled: true,  // Enable PCI for shadow RAM support
+        ips: 15_000_000,   // IPS from bochsrc.bxrc
+        pci_enabled: true, // Enable PCI for shadow RAM support
         ..Default::default()
     };
 
@@ -257,8 +257,12 @@ fn run_dlxlinux() -> Result<()> {
     // 128KB BIOS: load at 0xFFFE0000 (0xFFFE0000 + 0x20000 = 0x100000000)
     let bios_size = bios_data.len() as u64;
     let bios_load_addr = 0x100000000u64 - bios_size;
-    tracing::info!("BIOS size: {} bytes ({} KB), calculated load address: {:#x}",
-        bios_size, bios_size / 1024, bios_load_addr);
+    tracing::info!(
+        "BIOS size: {} bytes ({} KB), calculated load address: {:#x}",
+        bios_size,
+        bios_size / 1024,
+        bios_load_addr
+    );
     emu.load_bios(&bios_data, bios_load_addr)?;
     tracing::info!("✓ Loaded system BIOS at {:#x}", bios_load_addr);
 

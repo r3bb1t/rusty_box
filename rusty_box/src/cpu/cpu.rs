@@ -1503,6 +1503,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     );
                 }
 
+                // Log every 10000 instructions to detect progress
+                if iteration % 10000 == 0 {
+                    tracing::error!(
+                        "📊 Progress: {} instructions executed, RIP={:#x}, opcode={:?}",
+                        iteration, current_rip, i.get_ia_opcode()
+                    );
+                }
+
                 // Matching C++ line 203: BX_CPU_CALL_METHOD(i->execute1, (i));
                 // might iterate repeat instruction
 
