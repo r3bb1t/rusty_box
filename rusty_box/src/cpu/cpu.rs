@@ -1799,6 +1799,40 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // 2. RIP cycles through same small set of addresses (loop with multiple instructions)
             let current_rip = self.rip();
 
+            // 🎯 SPECIFIC RIP TRACKING: Log problematic addresses if needed for debugging
+            // (Disabled after fixing MOV_GbEbM memory form handler)
+
+            // ⚠️ ZERO-MEMORY DETECTION: Check if we jumped to zero or low memory
+            if current_rip < 0x100 {
+                tracing::error!(
+                    "❌ JUMPED TO NEAR-ZERO MEMORY! RIP={:#x} after {} instructions",
+                    current_rip, iteration
+                );
+                tracing::error!("   This usually means we jumped to invalid/zeroed memory!");
+                tracing::error!("   EAX={:#x} EBX={:#x} ECX={:#x} EDX={:#x}",
+                    self.eax(), self.ebx(), self.ecx(), self.edx());
+                tracing::error!("   ESP={:#x} EBP={:#x} ESI={:#x} EDI={:#x}",
+                    self.esp(), self.ebp(), self.esi(), self.edi());
+                // Don't break - let it fail naturally so we see the error
+            }
+
+            // ⚠️ ZERO-MEMORY DETECTION: Check if instruction bytes at RIP are all zeros
+            let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+            let linear_addr = cs_base + current_rip;
+            let mut instr_bytes_check = [0u8; 15];
+            for idx in 0..15 {
+                instr_bytes_check[idx] = self.mem_read_byte(linear_addr + idx as u64);
+            }
+            let all_zeros = instr_bytes_check.iter().all(|&b| b == 0);
+            if all_zeros {
+                tracing::error!(
+                    "❌ EXECUTING ZEROED MEMORY! RIP={:#x} Linear={:#x} after {} instructions",
+                    current_rip, linear_addr, iteration
+                );
+                tracing::error!("   All instruction bytes are 0x00!");
+                tracing::error!("   This means we're executing from uninitialized/zeroed memory!");
+            }
+
             // Update RIP history (circular buffer)
             rip_history[history_idx] = current_rip;
             history_idx = (history_idx + 1) % rip_history.len();
@@ -1850,13 +1884,25 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 stuck_counter = 0; // Reset counter when RIP changes normally
             }
 
-            // Also log every 10 million instructions to show progress
-            if iteration > 0 && (iteration % 10_000_000) == 0 {
+            // Also log every 5 million instructions to show progress (reduced from 10M)
+            if iteration > 0 && (iteration % 5_000_000) == 0 {
                 // Log progress periodically
+                let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+                let linear_addr = cs_base + current_rip;
+
+                // Read first 8 bytes at RIP
+                let mut instr_preview = [0u8; 8];
+                for idx in 0..8 {
+                    instr_preview[idx] = self.mem_read_byte(linear_addr + idx as u64);
+                }
+
                 tracing::info!(
-                    "Executed {} instructions, current RIP={:#x}",
-                    iteration,
-                    current_rip
+                    "📊 {} instructions: RIP={:#x} Linear={:#x} Bytes={:02X?}",
+                    iteration, current_rip, linear_addr, &instr_preview
+                );
+                tracing::info!(
+                    "   CPU State: EAX={:#x} ESP={:#x} EBP={:#x}",
+                    self.eax(), self.esp(), self.ebp()
                 );
             }
 

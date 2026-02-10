@@ -64,6 +64,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let port = self.dx();
         let value = self.port_in(port, 1) as u8;
         self.set_al(value);
+
+        // Log I/O if we're near the problematic RIP or at common ports
+        let rip = self.rip();
+        if (rip >= 0x970 && rip <= 0x9a0) || self.icount % 1_000_000 == 0 {
+            tracing::warn!("🔌 IN AL, DX ({:#x}) -> {:#x} at RIP={:#x}", port, value, rip);
+        }
+
         tracing::trace!("IN AL, DX ({:#x}) -> {:#x}", port, value);
     }
 

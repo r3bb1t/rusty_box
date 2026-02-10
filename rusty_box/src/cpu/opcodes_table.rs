@@ -430,21 +430,33 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         crate::cpu::data_xfer::MOV_OdAX(cpu, instr)
     }
 
-    // Wrapper functions for method-based handlers
+    // Wrapper functions for 8-bit MOV instructions (following Bochs data_xfer8.cc)
+    fn mov_gb_eb_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        crate::cpu::data_xfer::MOV_GbEbM(cpu, instr)
+    }
+
     fn mov_gb_eb_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
-        cpu.mov_gb_eb_r(instr);
-        Ok(())
+        crate::cpu::data_xfer::MOV_GbEbR(cpu, instr)
+    }
+
+    fn mov_eb_gb_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        crate::cpu::data_xfer::MOV_EbGbM(cpu, instr)
     }
 
     fn mov_eb_gb_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
-        cpu.mov_eb_gb_r(instr);
-        Ok(())
+        crate::cpu::data_xfer::MOV_EbGbR(cpu, instr)
     }
 
     fn mov_rb_ib_wrapper<I: BxCpuIdTrait>(
@@ -1022,14 +1034,16 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         }),
 
         // Data transfer (MOV) instructions - 8-bit
+        // Opcode 0x8A: MOV r8, r/m8 - Load register from memory/register
         Opcode::MovGbEb => Some(BxOpcodeEntry {
-            execute1: mov_gb_eb_r_wrapper,
-            execute2: Some(mov_gb_eb_r_wrapper), // Register form
+            execute1: mov_gb_eb_m_wrapper,      // Memory form: MOV r8, [mem]
+            execute2: Some(mov_gb_eb_r_wrapper), // Register form: MOV r8, r8
             opflags: OpFlags::empty(),
         }),
+        // Opcode 0x88: MOV r/m8, r8 - Store register to memory/register
         Opcode::MovEbGb => Some(BxOpcodeEntry {
-            execute1: mov_eb_gb_r_wrapper,
-            execute2: Some(mov_eb_gb_r_wrapper), // Register form
+            execute1: mov_eb_gb_m_wrapper,      // Memory form: MOV [mem], r8
+            execute2: Some(mov_eb_gb_r_wrapper), // Register form: MOV r8, r8
             opflags: OpFlags::empty(),
         }),
         Opcode::MovEbIb => Some(BxOpcodeEntry {

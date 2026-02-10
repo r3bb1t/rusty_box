@@ -43,7 +43,8 @@
       "Bash(timeout:*)",
       "Bash(RUSTY_BOX_HEADLESS=1 timeout 5 ./target/release/examples/dlxlinux.exe:*)",
       "Bash(set:*)",
-      "Bash(export RUSTY_BOX_HEADLESS=1:*)"
+      "Bash(export RUSTY_BOX_HEADLESS=1:*)",
+      "Bash(RUST_LOG=rusty_box=debug RUSTY_BOX_HEADLESS=1 cargo run:*)"
     ]
   }
 }

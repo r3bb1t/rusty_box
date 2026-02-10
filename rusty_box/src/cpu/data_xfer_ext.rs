@@ -356,7 +356,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// Write byte to virtual address (matches write_virtual_byte)
-    fn write_virtual_byte(&mut self, seg: BxSegregs, eaddr: u32, val: u8) {
+    pub fn write_virtual_byte(&mut self, seg: BxSegregs, eaddr: u32, val: u8) {
         let laddr = self.get_laddr32_seg(seg, eaddr);
         self.mem_write_byte(laddr as u64, val);
     }
