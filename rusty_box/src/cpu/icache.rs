@@ -146,8 +146,9 @@ pub struct BxICacheEntry {
 
 pub struct BxICache {
     pub(crate) entry: [BxICacheEntry; BX_ICACHE_ENTRIES],
-    pub(crate) mpool: [BxInstructionGenerated; BX_ICACHE_MEM_POOL],
-    //        mpool: vec![0; BX_ICACHE_MEM_POOL],
+    /// Vec to avoid stack overflow - this is ~15 MB!
+    /// Using Vec instead of array moves allocation to heap
+    pub(crate) mpool: Vec<BxInstructionGenerated>,
     pub(crate) mpindex: usize,
     next_page_split_index: usize,
     page_split_index: [PageSplitEntry; BX_ICACHE_ENTRIES],
@@ -190,7 +191,9 @@ impl BxICache {
                 i: BxInstructionGenerated::default(),
                 mpool_start_idx: 0,
             }),
-            mpool: [BxInstructionGenerated::default(); BX_ICACHE_MEM_POOL],
+            // Allocate on heap to avoid 15 MB stack allocation
+            // vec![val; size] is efficient and heap-allocated
+            mpool: vec![BxInstructionGenerated::default(); BX_ICACHE_MEM_POOL],
             mpindex: 0,
             next_page_split_index: 0,
             page_split_index: core::array::from_fn(|_| PageSplitEntry::default()),

@@ -104,7 +104,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     ///
     /// This creates all components but does not initialize them.
     /// Call `initialize()` after creation to complete setup.
-    pub fn new(config: EmulatorConfig) -> Result<Self> {
+    ///
+    /// Returns Box<Emulator> to avoid stack overflow (Emulator is ~1.4 MB).
+    /// This matches original Bochs behavior which uses `new BX_CPU_C(i)`.
+    pub fn new(config: EmulatorConfig) -> Result<Box<Self>> {
         // Create PC system
         let pc_system = BxPcSystemC::new();
 
@@ -127,7 +130,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         let builder: BxCpuBuilder<I> = BxCpuBuilder::new();
         let cpu = builder.build()?;
 
-        Ok(Self {
+        // Box to allocate on heap (matches Bochs's `new BX_CPU_C(i)`)
+        Ok(Box::new(Self {
             cpu,
             memory,
             devices,
@@ -139,7 +143,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             gui: None,
             #[cfg(feature = "std")]
             bios_output_file: None,
-        })
+        }))
     }
 
     /// Initialize the emulator

@@ -205,10 +205,10 @@ fn run_dlxlinux() -> Result<()> {
     // Create and configure emulator
     // =========================================================================
     let config = EmulatorConfig {
-        // Start with 4 MB RAM to avoid stack overflow during initialization
-        // TODO: Investigate why 32 MB causes stack overflow
-        guest_memory_size: 4 * 1024 * 1024, // 4 MB (reduced from 32 MB)
-        host_memory_size: 4 * 1024 * 1024,  // 4 MB
+        // Match bochsrc.bxrc: 32 MB RAM
+        // Stack overflow fixed by Boxing icache.mpool and returning Box<Emulator>
+        guest_memory_size: 32 * 1024 * 1024, // 32 MB
+        host_memory_size: 32 * 1024 * 1024,  // 32 MB
         memory_block_size: 128 * 1024,
         ips: 15_000_000,   // IPS from bochsrc.bxrc
         pci_enabled: true, // Enable PCI for shadow RAM support
@@ -243,9 +243,9 @@ fn run_dlxlinux() -> Result<()> {
     tracing::info!("Initializing hardware...");
     emu.initialize()?;
 
-    // Configure CMOS for 4 MB memory
-    // Base: 640KB, Extended: 3.36 MB = 3456 KB
-    emu.configure_memory_in_cmos(640, 3456);
+    // Configure CMOS for 32 MB memory (matches bochsrc.bxrc)
+    // Base: 640KB, Extended: 31 MB = 31 * 1024 KB
+    emu.configure_memory_in_cmos(640, 31 * 1024);
 
     // Configure hard drive in CMOS (drive type 47 = user-defined)
     emu.configure_disk_in_cmos(0, 47);
@@ -332,8 +332,8 @@ fn run_dlxlinux() -> Result<()> {
         }
     );
     println!(
-        "║  Memory = {} MB                                            ║",
-        4
+        "║  Memory = {} MB                                           ║",
+        32
     );
     println!(
         "║  Disk   = {} cylinders × {} heads × {} spt               ║",
