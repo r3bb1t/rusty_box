@@ -267,9 +267,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV r/m16, r16 (register to register)
     /// For opcode 89: Ew (r/m) is destination, Gw (nnn) is source
     pub fn mov_ew_gw_r(&mut self, instr: &BxInstructionGenerated) {
-        // For MOV Ew, Gw: r/m (meta_data[1]) is destination, nnn (meta_data[0]) is source
-        let src = instr.meta_data[0] as usize;  // nnn = Gw = source
-        let dst = instr.meta_data[1] as usize;  // rm = Ew = destination
+        // After decoder fix: meta_data[0] = dst (rm), meta_data[1] = src (nnn) for Ed,Gd format
+        let dst = instr.meta_data[0] as usize;  // rm = Ew = destination
+        let src = instr.meta_data[1] as usize;  // nnn = Gw = source
         let val = self.get_gpr16(src);
         self.set_gpr16(dst, val);
         tracing::trace!("MOV16: reg{} = reg{} ({:#06x})", dst, src, val);
@@ -287,9 +287,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV r/m8, r8 (register to register)
     /// For opcode 88: Eb (r/m) is destination, Gb (nnn) is source
     pub fn mov_eb_gb_r(&mut self, instr: &BxInstructionGenerated) {
-        // For MOV Eb, Gb: r/m (meta_data[1]) is destination, nnn (meta_data[0]) is source
-        let src = instr.meta_data[0] as usize;  // nnn = Gb = source
-        let dst = instr.meta_data[1] as usize;  // rm = Eb = destination
+        // After decoder fix: meta_data[0] = dst (rm), meta_data[1] = src (nnn) for Ed,Gd format
+        let dst = instr.meta_data[0] as usize;  // rm = Eb = destination
+        let src = instr.meta_data[1] as usize;  // nnn = Gb = source
         let val = self.get_gpr8(src);
         self.set_gpr8(dst, val);
         tracing::trace!("MOV8: reg{} = reg{} ({:#04x})", dst, src, val);

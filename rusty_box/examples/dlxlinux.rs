@@ -114,20 +114,21 @@ fn run_dlxlinux() -> Result<()> {
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
     let bios_paths = [
-        // MUST use BIOS-bochs-latest (128KB) - contains 32-bit rombios32 code
-        // BIOS-bochs-legacy (64KB) is 16-bit only, missing _start function!
-        workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-latest"),
+        // MUST use BIOS-bochs-legacy (64KB) with 32 MB RAM
+        // BIOS-bochs-latest (128KB) uses ESP=0xFFFFFFF0 which doesn't work with <4GB RAM
+        // See MEMORY.md for detailed analysis
         workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-legacy"),
+        workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-latest"),
         workspace_root.join("cpp_orig/bochs/bios/bios.bin-1.13.0"),
         // Fallbacks (if user has BIOS copied elsewhere)
-        workspace_root.join("BIOS-bochs-latest"),
         workspace_root.join("BIOS-bochs-legacy"),
+        workspace_root.join("BIOS-bochs-latest"),
         workspace_root.join("bios.bin-1.13.0"),
-        workspace_root.join("../cpp_orig/bochs/bios/BIOS-bochs-latest"),
-        workspace_root.join("../BIOS-bochs-latest"),
-        std::path::PathBuf::from("BIOS-bochs-latest"),
-        std::path::PathBuf::from("../cpp_orig/bochs/bios/BIOS-bochs-latest"),
-        std::path::PathBuf::from("../BIOS-bochs-latest"),
+        workspace_root.join("../cpp_orig/bochs/bios/BIOS-bochs-legacy"),
+        workspace_root.join("../BIOS-bochs-legacy"),
+        std::path::PathBuf::from("BIOS-bochs-legacy"),
+        std::path::PathBuf::from("../cpp_orig/bochs/bios/BIOS-bochs-legacy"),
+        std::path::PathBuf::from("../BIOS-bochs-legacy"),
     ];
 
     let vga_bios_paths = [
@@ -162,7 +163,7 @@ fn run_dlxlinux() -> Result<()> {
             println!("  Trying BIOS: {}", path.display());
             std::fs::read(path).ok()
         })
-        .expect("Could not find BIOS file (BIOS-bochs-latest)");
+        .expect("Could not find BIOS file (BIOS-bochs-legacy or BIOS-bochs-latest)");
     println!("✓ BIOS loaded: {} bytes", bios_data.len());
 
     // Option ROMs (like VGABIOS) must be sized in 512-byte blocks (Bochs behavior).
@@ -204,9 +205,10 @@ fn run_dlxlinux() -> Result<()> {
     // Create and configure emulator
     // =========================================================================
     let config = EmulatorConfig {
-        // Match bochsrc.bxrc: 32 MB RAM
-        guest_memory_size: 32 * 1024 * 1024, // 32 MB
-        host_memory_size: 32 * 1024 * 1024,  // 32 MB
+        // Start with 4 MB RAM to avoid stack overflow during initialization
+        // TODO: Investigate why 32 MB causes stack overflow
+        guest_memory_size: 4 * 1024 * 1024, // 4 MB (reduced from 32 MB)
+        host_memory_size: 4 * 1024 * 1024,  // 4 MB
         memory_block_size: 128 * 1024,
         ips: 15_000_000,   // IPS from bochsrc.bxrc
         pci_enabled: true, // Enable PCI for shadow RAM support
@@ -241,9 +243,9 @@ fn run_dlxlinux() -> Result<()> {
     tracing::info!("Initializing hardware...");
     emu.initialize()?;
 
-    // Configure CMOS for 32 MB memory (matches bochsrc.bxrc)
-    // Base: 640KB, Extended: 31 MB = 31 * 1024 KB
-    emu.configure_memory_in_cmos(640, 31 * 1024);
+    // Configure CMOS for 4 MB memory
+    // Base: 640KB, Extended: 3.36 MB = 3456 KB
+    emu.configure_memory_in_cmos(640, 3456);
 
     // Configure hard drive in CMOS (drive type 47 = user-defined)
     emu.configure_disk_in_cmos(0, 47);
@@ -330,8 +332,8 @@ fn run_dlxlinux() -> Result<()> {
         }
     );
     println!(
-        "║  Memory = {} MB                                           ║",
-        32
+        "║  Memory = {} MB                                            ║",
+        4
     );
     println!(
         "║  Disk   = {} cylinders × {} heads × {} spt               ║",
@@ -398,10 +400,8 @@ fn run_dlxlinux() -> Result<()> {
     let start_time = Instant::now();
 
     // Run with instruction limit to allow debugging
-    // const MAX_INSTRUCTIONS: u64 = 10_000_000; // 10M instructions - reasonable limit for testing
-    const MAX_INSTRUCTIONS: u64 = 100_000_000; // 1M - enough to see if BIOS progresses past the stack issue
+    const MAX_INSTRUCTIONS: u64 = 50_000_000; // 50M instructions - BIOS needs time to initialize
                                                // BIOS + VGABIOS can take hundreds of millions of instructions to reach visible VGA output.
-                                               // const MAX_INSTRUCTIONS: u64 = 5_000_000;
 
     // Use interactive loop that handles GUI events
     let result = emu.run_interactive(MAX_INSTRUCTIONS);

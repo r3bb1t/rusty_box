@@ -1503,8 +1503,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     );
                 }
 
-                // Log every 10000 instructions to detect progress
-                if iteration % 10000 == 0 {
+                // Log every 1M instructions to detect progress
+                if iteration % 1_000_000 == 0 {
                     tracing::error!(
                         "📊 Progress: {} instructions executed, RIP={:#x}, opcode={:?}",
                         iteration, current_rip, i.get_ia_opcode()
