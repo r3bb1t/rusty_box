@@ -513,20 +513,23 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
                 pos += 3;
             }
             4 => {
-                instr.modrm_form.operand_data.id = read_u32_le(bytes, pos);
+                // Check if this is a far pointer (0x9A CALL FAR, 0xEA JMP FAR)
+                let is_far_pointer = matches!(b1, 0x9A | 0xEA);
+                if is_far_pointer {
+                    // Far pointer in 16-bit mode: Iw (offset) + Iw (segment)
+                    instr.modrm_form.operand_data.id = read_u16_le(bytes, pos) as u32;
+                    instr.modrm_form.displacement.data32 = read_u16_le(bytes, pos + 2) as u32;
+                } else {
+                    // Regular 4-byte immediate
+                    instr.modrm_form.operand_data.id = read_u32_le(bytes, pos);
+                }
                 pos += 4;
             }
             6 => {
-                // Far pointer: Id + Iw (or Iw + Iw in 16-bit)
-                if os_32 {
-                    instr.modrm_form.operand_data.id = read_u32_le(bytes, pos);
-                    instr.modrm_form.displacement.data32 = read_u16_le(bytes, pos + 4) as u32;
-                    pos += 6;
-                } else {
-                    instr.modrm_form.operand_data.id = read_u16_le(bytes, pos) as u32;
-                    instr.modrm_form.displacement.data32 = read_u16_le(bytes, pos + 2) as u32;
-                    pos += 4;
-                }
+                // Far pointer in 32-bit mode: Id (offset) + Iw (segment)
+                instr.modrm_form.operand_data.id = read_u32_le(bytes, pos);
+                instr.modrm_form.displacement.data32 = read_u16_le(bytes, pos + 4) as u32;
+                pos += 6;
             }
             _ => {}
         }
@@ -1089,8 +1092,16 @@ const fn get_immediate_size_32(b1: u32, map: u8, os_32: bool, as_32: bool, nnn: 
                 }
             }
 
-            // Far pointer (Ap)
-            0x9A | 0xEA => 6, // Handled specially in parsing
+            // Far pointer (Ap): offset + segment
+            // 16-bit: Iw + Iw = 4 bytes (2-byte offset + 2-byte segment)
+            // 32-bit: Id + Iw = 6 bytes (4-byte offset + 2-byte segment)
+            0x9A | 0xEA => {
+                if os_32 {
+                    6 // 32-bit mode: 4-byte offset + 2-byte segment
+                } else {
+                    4 // 16-bit mode: 2-byte offset + 2-byte segment
+                }
+            }
 
             _ => 0,
         }
