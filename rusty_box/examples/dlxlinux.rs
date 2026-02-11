@@ -238,29 +238,28 @@ fn run_dlxlinux() -> Result<()> {
     }
 
     // =========================================================================
-    // Initialize hardware
+    // Initialize hardware - Part 1: Memory and PC system
     // =========================================================================
+    // Following original Bochs sequence from main.cc:1312-1353:
+    // 1. Memory init (line 1312)
+    // 2. Load BIOS (line 1315)
+    // 3. CPU init (line 1337)
+    // 4. Device init (line 1353)
     tracing::info!("Initializing hardware...");
-    emu.initialize()?;
-
-    // Configure CMOS for 32 MB memory (matches bochsrc.bxrc)
-    // Base: 640KB, Extended: 31 MB = 31 * 1024 KB
-    emu.configure_memory_in_cmos(640, 31 * 1024);
-
-    // Configure hard drive in CMOS (drive type 47 = user-defined)
-    emu.configure_disk_in_cmos(0, 47);
+    emu.init_memory_and_pc_system()?;
 
     // =========================================================================
-    // Load BIOS ROMs
+    // Load BIOS ROMs (AFTER memory init, BEFORE CPU init)
     // =========================================================================
-    // Calculate correct BIOS load address based on size
-    // For x86, BIOS must end at 0x100000000 (4GB) so it's accessible at reset vector 0xFFFFFFF0
-    // 64KB BIOS:  load at 0xFFFF0000 (0xFFFF0000 + 0x10000 = 0x100000000)
-    // 128KB BIOS: load at 0xFFFE0000 (0xFFFE0000 + 0x20000 = 0x100000000)
+    // BIOS must be loaded at 0xF0000 (matching original Bochs)
+    // This makes it accessible in the F000 segment (0xF0000-0xFFFFF)
+    // The memory system maps 0xE0000-0xFFFFF to BIOS ROM via bios_map_last128k()
+    // At CPU reset, CS.base is specially set to 0xFFFF0000, allowing the first
+    // instruction fetch from 0xFFFFFFF0 to access the same ROM data
     let bios_size = bios_data.len() as u64;
-    let bios_load_addr = 0x100000000u64 - bios_size;
+    let bios_load_addr = 0xF0000u64;  // Load at 0xF0000, NOT at high memory!
     tracing::info!(
-        "BIOS size: {} bytes ({} KB), calculated load address: {:#x}",
+        "BIOS size: {} bytes ({} KB), load address: {:#x}",
         bios_size,
         bios_size / 1024,
         bios_load_addr
@@ -273,6 +272,21 @@ fn run_dlxlinux() -> Result<()> {
         emu.load_optional_rom(&vga_data, 0xC0000)?;
         tracing::info!("✓ Loaded VGA BIOS at 0xC0000");
     }
+
+    // =========================================================================
+    // Initialize hardware - Part 2: CPU and devices
+    // =========================================================================
+    emu.init_cpu_and_devices()?;
+
+    // =========================================================================
+    // Configure CMOS (AFTER device initialization)
+    // =========================================================================
+    // Configure CMOS for 32 MB memory (matches bochsrc.bxrc)
+    // Base: 640KB, Extended: 31 MB = 31 * 1024 KB
+    emu.configure_memory_in_cmos(640, 31 * 1024);
+
+    // Configure hard drive in CMOS (drive type 47 = user-defined)
+    emu.configure_disk_in_cmos(0, 47);
 
     // =========================================================================
     // Attach disk image

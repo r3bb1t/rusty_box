@@ -165,6 +165,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     /// 14. Start timers - line 1384 (done in reset())
     ///
     /// After this, call `load_bios()` to load a BIOS image, then `reset()` and `run()`.
+    ///
+    /// **IMPORTANT**: For correct BIOS initialization sequence matching original Bochs,
+    /// use `init_memory()` + `load_bios()` + `init_cpu_and_devices()` instead of this method.
+    /// See main.cc:1312-1353 for the correct sequence.
     pub fn initialize(&mut self) -> Result<()> {
         if self.initialized {
             tracing::warn!("Emulator already initialized");
@@ -189,8 +193,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.memory.set_a20_mask(self.pc_system.a20_mask());
         tracing::debug!("Memory initialized and A20 mask synced");
 
-        // Step 3-5: BIOS/ROM/RAM loading is done via separate methods (load_bios, load_optional_rom, load_ram)
-        // These should be called after initialize() but before reset()
+        // Step 3-5: BIOS/ROM/RAM loading should happen HERE (after memory init, before CPU init)
+        // But since this method doesn't have BIOS data, it's loaded separately after this call.
+        // For correct initialization, use init_memory() + load_bios() + init_cpu_and_devices()
 
         // Step 6: Initialize CPU (line 1337)
         self.cpu.initialize(self.config.cpu_params.clone())?;
@@ -216,6 +221,102 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.device_manager
             .init(&mut self.devices, &mut self.memory)?;
         tracing::debug!("Devices initialized");
+
+        // Note: SIM->opt_plugin_ctrl("*", 0) at line 1355 unloads unused optional plugins
+        // This is optional plugin management, not yet implemented in Rust version
+
+        // Step 10: PC system register state (line 1356)
+        self.pc_system.register_state();
+
+        // Step 11: Device register state (line 1357)
+        self.devices.register_state()?;
+        tracing::debug!("State registered");
+
+        // Note: bx_set_log_actions_by_device(1) at line 1359 sets up logging per device
+        // This is only called if not restoring state, and is optional logging setup
+
+        self.initialized = true;
+        tracing::info!("Emulator initialization complete");
+
+        // Note: Steps 12-14 (Reset, GUI signal handlers, Start timers) are done via:
+        // - reset() method (called after BIOS loading)
+        // - init_gui() method (calls init_signal_handlers)
+        // - reset() also calls start_timers()
+
+        Ok(())
+    }
+
+    /// Initialize memory and PC system (Step 1-2 of initialization)
+    ///
+    /// This is the first part of the initialization sequence from Bochs main.cc:
+    /// 1. PC system initialization (timers, IPS) - line 1201
+    /// 2. Memory initialization - line 1312
+    ///
+    /// After this, call `load_bios()` and `load_optional_rom()`, then `init_cpu_and_devices()`.
+    /// This matches the original Bochs sequence: Memory init → Load BIOS → CPU init → Device init.
+    pub fn init_memory_and_pc_system(&mut self) -> Result<()> {
+        if self.initialized {
+            tracing::warn!("Emulator already initialized");
+            return Ok(());
+        }
+
+        tracing::info!("Initializing hardware...");
+
+        // Step 1: Initialize PC system with IPS (line 1201)
+        self.pc_system.initialize(self.config.ips);
+        tracing::debug!("PC system initialized with {} IPS", self.config.ips);
+
+        // Step 2: Memory initialization (line 1312)
+        // In original: BX_MEM(0)->init_memory(memSize, hostMemSize, memBlockSize);
+        self.memory.init_memory(
+            self.config.guest_memory_size,
+            self.config.host_memory_size,
+            self.config.memory_block_size,
+        )?;
+
+        // Sync A20 mask from PC system (after memory init, matching original)
+        self.memory.set_a20_mask(self.pc_system.a20_mask());
+        tracing::debug!("Memory initialized and A20 mask synced");
+
+        Ok(())
+    }
+
+    /// Initialize CPU and devices (Step 6-11 of initialization)
+    ///
+    /// This is the second part of the initialization sequence from Bochs main.cc:
+    /// 6. CPU initialization - line 1337
+    /// 7. CPU sanity checks - line 1338
+    /// 8. CPU register state - line 1339
+    /// 9. Device initialization - line 1353
+    /// 10. PC system register state - line 1356
+    /// 11. Device register state - line 1357
+    ///
+    /// Call this AFTER `init_memory_and_pc_system()` and `load_bios()`.
+    pub fn init_cpu_and_devices(&mut self) -> Result<()> {
+        // Step 6: Initialize CPU (line 1337)
+        self.cpu.initialize(self.config.cpu_params.clone())?;
+        tracing::debug!("CPU initialized");
+
+        // Step 7: CPU sanity checks (line 1338) - separate call to match original
+        self.cpu.sanity_checks()?;
+        tracing::debug!("CPU sanity checks passed");
+
+        // Step 8: Register CPU state (line 1339)
+        self.cpu.register_state();
+        tracing::debug!("CPU state registered");
+
+        // Note: BX_INSTR_INITIALIZE(0) at line 1340 is instrumentation initialization
+        // This is optional and not yet implemented in Rust version
+
+        // Step 9: Initialize devices (line 1353)
+        // Pass pointer to system_control for Port 92h handling
+        let port92_ptr = &mut self.system_control as *mut SystemControlPort;
+        self.devices.init(&mut self.memory, Some(port92_ptr))?;
+
+        // Initialize device manager (actual hardware + I/O handler registration)
+        self.device_manager
+            .init(&mut self.devices, &mut self.memory)?;
+        tracing::info!("Device initialization complete");
 
         // Note: SIM->opt_plugin_ctrl("*", 0) at line 1355 unloads unused optional plugins
         // This is optional plugin management, not yet implemented in Rust version

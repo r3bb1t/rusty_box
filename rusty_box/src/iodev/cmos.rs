@@ -266,6 +266,19 @@ impl BxCmosC {
         self.ram[0x30] = (extended_kb & 0xFF) as u8;
         self.ram[0x31] = ((extended_kb >> 8) & 0xFF) as u8;
 
+        // Extended memory above 16MB (in 64KB blocks)
+        // Matching cpp_orig/bochs/iodev/devices.cc:332-337
+        let total_kb = base_kb as u32 + extended_kb as u32;
+        let extended_memory_in_64k = if total_kb > 16384 {
+            // Calculate (total - 16MB) / 64KB, limit to 3GB-16MB (0xBF00 blocks)
+            ((total_kb - 16384) / 64).min(0xbf00)
+        } else {
+            0
+        };
+
+        self.ram[0x34] = (extended_memory_in_64k & 0xFF) as u8;
+        self.ram[0x35] = ((extended_memory_in_64k >> 8) & 0xFF) as u8;
+
         self.update_checksum();
     }
 

@@ -1833,6 +1833,50 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 tracing::error!("   This means we're executing from uninitialized/zeroed memory!");
             }
 
+            // 🎯 CS.BASE TRACKING: Find where CS.base gets corrupted to 0
+            static mut LAST_CS_BASE: u64 = 0xFFFFFFFFFFFFFFFF;
+            let current_cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+            if current_cs_base != unsafe { LAST_CS_BASE } {
+                tracing::warn!(
+                    "⚠️ CS.BASE CHANGED: {:#010x} → {:#010x} at RIP={:#06x}, opcode={:?}",
+                    unsafe { LAST_CS_BASE }, current_cs_base, current_rip, i.get_ia_opcode()
+                );
+                unsafe { LAST_CS_BASE = current_cs_base; }
+
+                // Critical: Log when CS.base becomes 0
+                if current_cs_base == 0 {
+                    tracing::error!(
+                        "❌ CS.BASE CORRUPTED TO ZERO! RIP={:#x}, opcode={:?}, instruction #{}, CS.selector={:#x}",
+                        current_rip, i.get_ia_opcode(), iteration,
+                        self.sregs[BxSegregs::Cs as usize].selector.value
+                    );
+                }
+            }
+
+            // 🔍 COUNTDOWN LOOP DEBUGGING: Track loop at 0x2055-0x2074
+            static mut LOOP_2055_LOG_COUNTER: u64 = 0;
+            if current_rip >= 0x2055 && current_rip <= 0x2074 {
+                unsafe {
+                    LOOP_2055_LOG_COUNTER += 1;
+                    if LOOP_2055_LOG_COUNTER <= 5 {
+                        let bp = self.bp();
+                        let ss_base = self.sregs[BxSegregs::Ss as usize].cache.u.segment.base;
+                        let counter_addr = ss_base + (bp.wrapping_sub(271) & 0xFFFF) as u64;
+                        let value_addr = ss_base + (bp.wrapping_sub(547) & 0xFFFF) as u64;
+                        let counter_val = self.mem_read_byte(counter_addr);
+                        let value_val = self.mem_read_byte(value_addr);
+                        tracing::warn!(
+                            "🔍 Loop #{}: RIP={:#x}, BP={:#x}, [BP-271]@{:#x}={:#x}, [BP-547]@{:#x}={:#x}, AL={:#x}",
+                            LOOP_2055_LOG_COUNTER, current_rip, bp, counter_addr, counter_val,
+                            value_addr, value_val, self.al()
+                        );
+                    } else if LOOP_2055_LOG_COUNTER == 6 {
+                        let bp = self.bp();
+                        tracing::error!("❌ COUNTDOWN LOOP CONFIRMED INFINITE! BP={:#x} (should be ~0xFFFA)", bp);
+                    }
+                }
+            }
+
             // Update RIP history (circular buffer)
             rip_history[history_idx] = current_rip;
             history_idx = (history_idx + 1) % rip_history.len();
@@ -1904,6 +1948,27 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     "   CPU State: EAX={:#x} ESP={:#x} EBP={:#x}",
                     self.eax(), self.esp(), self.ebp()
                 );
+            }
+
+            // VGA BIOS execution detection (0xC0000-0xDFFFF)
+            if current_rip >= 0xC0000 && current_rip < 0xE0000 {
+                tracing::warn!(
+                    "🎨 VGA BIOS EXECUTION: RIP={:#x}, Bytes={:02X?}",
+                    current_rip, &instr_bytes_check[0..8]
+                );
+            }
+
+            // BIOS option ROM scan detection
+            static mut LAST_ROM_SCAN_LOG: u64 = 0;
+            if current_rip >= 0xF0000 && iteration.saturating_sub(unsafe { LAST_ROM_SCAN_LOG }) > 100_000 {
+                // Check if reading from option ROM range
+                if linear_addr >= 0xC0000 && linear_addr < 0xE0000 {
+                    tracing::info!(
+                        "🔍 BIOS accessing Option ROM range: RIP={:#x}, accessing address={:#x}",
+                        current_rip, linear_addr
+                    );
+                    unsafe { LAST_ROM_SCAN_LOG = iteration; }
+                }
             }
 
             // TODO: And syncing of time

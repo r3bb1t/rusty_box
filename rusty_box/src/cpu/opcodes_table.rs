@@ -503,7 +503,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
-        cpu.mov_sw_ew(instr);
+        cpu.mov_sw_ew(instr)?;
         Ok(())
     }
 
@@ -888,15 +888,31 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         let offset32 = instr.id();
         let offset16 = instr.iw() as u32;
 
+        // DEBUG: Log what we read from instruction
+        tracing::error!(
+            "🔴 JmpfAp HANDLER: ilen={}, iw()={:#x}, iw2()={:#x}, id()={:#x}, RIP={:#x}",
+            instr.ilen(), instr.iw(), segment, offset32, cpu.rip()
+        );
+
         // If instruction length suggests 32-bit (>= 6 bytes including opcode),
         // or if the 32-bit value is significantly different from 16-bit, use 32-bit
         if instr.ilen() >= 6 && offset32 != offset16 {
             // 32-bit far jump
-            tracing::info!("FAR JMP 32 to {:04x}:{:08x} (ilen={})", segment, offset32, instr.ilen());
+            tracing::info!(
+                "FAR JMP 32 to {:04x}:{:08x} (ilen={})",
+                segment,
+                offset32,
+                instr.ilen()
+            );
             cpu.jmp_far32(instr, segment, offset32)?;
         } else {
             // 16-bit far jump
-            tracing::info!("FAR JMP 16 to {:04x}:{:04x} (ilen={})", segment, offset16, instr.ilen());
+            tracing::info!(
+                "FAR JMP 16 to {:04x}:{:04x} (ilen={})",
+                segment,
+                offset16,
+                instr.ilen()
+            );
             cpu.jmp_far16(instr, segment, offset16 as u16)?;
         }
 
@@ -1036,13 +1052,13 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         // Data transfer (MOV) instructions - 8-bit
         // Opcode 0x8A: MOV r8, r/m8 - Load register from memory/register
         Opcode::MovGbEb => Some(BxOpcodeEntry {
-            execute1: mov_gb_eb_m_wrapper,      // Memory form: MOV r8, [mem]
+            execute1: mov_gb_eb_m_wrapper,       // Memory form: MOV r8, [mem]
             execute2: Some(mov_gb_eb_r_wrapper), // Register form: MOV r8, r8
             opflags: OpFlags::empty(),
         }),
         // Opcode 0x88: MOV r/m8, r8 - Store register to memory/register
         Opcode::MovEbGb => Some(BxOpcodeEntry {
-            execute1: mov_eb_gb_m_wrapper,      // Memory form: MOV [mem], r8
+            execute1: mov_eb_gb_m_wrapper,       // Memory form: MOV [mem], r8
             execute2: Some(mov_eb_gb_r_wrapper), // Register form: MOV r8, r8
             opflags: OpFlags::empty(),
         }),
