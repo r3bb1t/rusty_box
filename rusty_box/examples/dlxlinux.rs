@@ -257,11 +257,12 @@ fn run_dlxlinux() -> Result<()> {
     // At CPU reset, CS.base is specially set to 0xFFFF0000, allowing the first
     // instruction fetch from 0xFFFFFFF0 to access the same ROM data
     let bios_size = bios_data.len() as u64;
-    // Calculate BIOS load address: place BIOS at TOP of 4GB address space
-    // so that reset vector at 0xFFFFFFF0 is valid
-    // 64KB BIOS:  0x100000000 - 0x10000 = 0xFFFF0000
-    // 128KB BIOS: 0x100000000 - 0x20000 = 0xFFFE0000
-    let bios_load_addr = 0x100000000u64 - bios_size;
+    // Calculate BIOS load address following original Bochs logic:
+    // romaddress = ~(size - 1) for reset vector support (misc_mem.cc:363)
+    // 64KB BIOS:  ~0xFFFF = 0xFFFF0000 (ends at 4GB, wraps in u32)
+    // 128KB BIOS: ~0x1FFFF = 0xFFFE0000
+    // Validation: (romaddress + size) should wrap to 0 OR equal 0x100000
+    let bios_load_addr = !(bios_size - 1);
     tracing::info!(
         "BIOS size: {} bytes ({} KB), load address: {:#x}",
         bios_size,
