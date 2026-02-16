@@ -262,6 +262,30 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
+    // Unified wrappers (dispatch register vs memory form based on mod_c0)
+    // =========================================================================
+
+    /// MUL AX, r/m16 - Unified wrapper
+    pub fn mul_ax_ew(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        if instr.mod_c0() { self.mul_ax_ew_r(instr) } else { self.mul_ax_ew_m(instr) }
+    }
+
+    /// IMUL AX, r/m16 - Unified wrapper
+    pub fn imul_ax_ew(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        if instr.mod_c0() { self.imul_ax_ew_r(instr) } else { self.imul_ax_ew_m(instr) }
+    }
+
+    /// DIV AX, r/m16 - Unified wrapper
+    pub fn div_ax_ew(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        if instr.mod_c0() { self.div_ax_ew_r(instr) } else { self.div_ax_ew_m(instr) }
+    }
+
+    /// IDIV AX, r/m16 - Unified wrapper
+    pub fn idiv_ax_ew(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        if instr.mod_c0() { self.idiv_ax_ew_r(instr) } else { self.idiv_ax_ew_m(instr) }
+    }
+
+    // =========================================================================
     // Helper functions
     // =========================================================================
 

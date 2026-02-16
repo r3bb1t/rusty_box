@@ -174,6 +174,26 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("CMP r16, imm16: {:#06x} - {:#06x}", op1, op2);
     }
 
+    /// CMP_GwEw_M: CMP r16, r/m16 (memory form)
+    pub fn cmp_gw_ew_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let op1 = self.get_gpr16(instr.dst() as usize);
+        let op2 = self.read_virtual_word(seg, eaddr);
+        let result = op1.wrapping_sub(op2);
+        self.set_flags_oszapc_sub_16(op1, op2, result);
+    }
+
+    /// CMP_EwIw_M: CMP r/m16, imm16 (memory form)
+    pub fn cmp_ew_iw_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let op1 = self.read_virtual_word(seg, eaddr);
+        let op2 = instr.iw();
+        let result = op1.wrapping_sub(op2);
+        self.set_flags_oszapc_sub_16(op1, op2, result);
+    }
+
     // =========================================================================
     // TEST instructions
     // =========================================================================
@@ -601,5 +621,52 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op2_16,
             result
         );
+    }
+
+    // =========================================================================
+    // Unified handlers: dispatch R/M based on instr.mod_c0()
+    // =========================================================================
+
+    pub fn xor_ew_gw(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.xor_gw_ew_r(instr) } else { self.xor_ew_gw_m(instr) }
+    }
+    pub fn xor_gw_ew(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.xor_gw_ew_r(instr) } else { self.xor_gw_ew_m(instr) }
+    }
+    pub fn xor_ew_iw(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.xor_ew_iw_r(instr) } else { self.xor_ew_iw_m(instr) }
+    }
+    pub fn and_ew_gw(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.and_gw_ew_r(instr) } else { self.and_ew_gw_m(instr) }
+    }
+    pub fn and_gw_ew(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.and_gw_ew_r(instr) } else { self.and_gw_ew_m(instr) }
+    }
+    pub fn and_ew_iw(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.and_ew_iw_r(instr) } else { self.and_ew_iw_m(instr) }
+    }
+    pub fn or_ew_gw(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.or_gw_ew_r(instr) } else { self.or_ew_gw_m(instr) }
+    }
+    pub fn or_gw_ew(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.or_gw_ew_r(instr) } else { self.or_gw_ew_m(instr) }
+    }
+    pub fn or_ew_iw(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.or_ew_iw_r(instr) } else { self.or_ew_iw_m(instr) }
+    }
+    pub fn not_ew(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.not_ew_r(instr) } else { self.not_ew_m(instr) }
+    }
+    pub fn test_ew_gw(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.test_ew_gw_r(instr) } else { self.test_ew_gw_m(instr) }
+    }
+    pub fn test_ew_iw(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.test_ew_iw_r(instr) } else { self.test_ew_iw_m(instr) }
+    }
+    pub fn cmp_gw_ew(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.cmp_gw_ew_r(instr) } else { self.cmp_gw_ew_m(instr) }
+    }
+    pub fn cmp_ew_iw(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.cmp_ew_iw_r(instr) } else { self.cmp_ew_iw_m(instr) }
     }
 }

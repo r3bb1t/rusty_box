@@ -56,16 +56,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// XOR_EbIbR: XOR r/m8, imm8 (register form)
-    /// Opcode: 0x80/6 or 0x83/6 (8-bit)
+    /// Opcode: 0x80/6 (8-bit)
     /// Matches BX_CPU_C::XOR_EbIbR
-    /// This covers XOR AL, imm8 (XorAlib opcode)
     pub fn xor_eb_ib_r(&mut self, instr: &BxInstructionGenerated) {
-        // For XOR AL, imm8, we can use AL directly
-        let op1 = self.al();
+        let dst = instr.dst() as usize;
+        let extend8bit_l = instr.extend8bit_l();
+        let op1 = self.read_8bit_regx(dst, extend8bit_l);
         let op2 = instr.ib();
         let result = op1 ^ op2;
-        
-        self.set_al(result);
+
+        self.write_8bit_regx(dst, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
     }
 
@@ -186,6 +186,36 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("CMP AL, imm8: {:#04x} - {:#04x}", op1, op2);
     }
 
+    /// CMP_GbEb_M: CMP r8, r/m8 (memory form)
+    pub fn cmp_gb_eb_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let op1 = self.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
+        let op2 = self.read_virtual_byte(seg, eaddr);
+        let result = op1.wrapping_sub(op2);
+        self.set_flags_oszapc_sub_8(op1, op2, result);
+    }
+
+    /// CMP_EbGb_M: CMP r/m8, r8 (memory form)
+    pub fn cmp_eb_gb_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let op1 = self.read_virtual_byte(seg, eaddr);
+        let op2 = self.read_8bit_regx(instr.src() as usize, instr.extend8bit_l());
+        let result = op1.wrapping_sub(op2);
+        self.set_flags_oszapc_sub_8(op1, op2, result);
+    }
+
+    /// CMP_EbIb_M: CMP r/m8, imm8 (memory form)
+    pub fn cmp_eb_ib_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let op1 = self.read_virtual_byte(seg, eaddr);
+        let op2 = instr.ib();
+        let result = op1.wrapping_sub(op2);
+        self.set_flags_oszapc_sub_8(op1, op2, result);
+    }
+
     // =========================================================================
     // TEST instructions
     // =========================================================================
@@ -208,6 +238,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op1 & op2;
         self.set_flags_oszapc_logic_8(result);
         tracing::trace!("TEST AL, imm8: {:#04x} & {:#04x}", op1, op2);
+    }
+
+    /// TEST_EbIbR: TEST r8, imm8 (register form)
+    /// Matches BX_CPU_C::TEST_EbIbR
+    pub fn test_eb_ib_r(&mut self, instr: &BxInstructionGenerated) {
+        let dst = instr.dst() as usize;
+        let extend8bit_l = instr.extend8bit_l();
+        let op1 = self.read_8bit_regx(dst, extend8bit_l);
+        let op2 = instr.ib();
+        let result = op1 & op2;
+
+        self.set_flags_oszapc_logic_8(result);
     }
 
     // =========================================================================
@@ -235,6 +277,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_flags_oszapc_logic_8(result);
     }
 
+    /// AND_EbIbR: AND r8, imm8 (register form)
+    /// Matches BX_CPU_C::AND_EbIbR
+    pub fn and_eb_ib_r(&mut self, instr: &BxInstructionGenerated) {
+        let dst = instr.dst() as usize;
+        let extend8bit_l = instr.extend8bit_l();
+        let op1 = self.read_8bit_regx(dst, extend8bit_l);
+        let op2 = instr.ib();
+        let result = op1 & op2;
+
+        self.write_8bit_regx(dst, extend8bit_l, result);
+        self.set_flags_oszapc_logic_8(result);
+    }
+
     // =========================================================================
     // OR instructions
     // =========================================================================
@@ -256,6 +311,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = instr.ib();
         let result = op1 | op2;
         self.set_gpr8(0, result);
+        self.set_flags_oszapc_logic_8(result);
+    }
+
+    /// OR_EbIbR: OR r8, imm8 (register form)
+    /// Matches BX_CPU_C::OR_EbIbR
+    pub fn or_eb_ib_r(&mut self, instr: &BxInstructionGenerated) {
+        let dst = instr.dst() as usize;
+        let extend8bit_l = instr.extend8bit_l();
+        let op1 = self.read_8bit_regx(dst, extend8bit_l);
+        let op2 = instr.ib();
+        let result = op1 | op2;
+
+        self.write_8bit_regx(dst, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
     }
 
@@ -451,5 +519,77 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_flags_oszapc_logic_8(result);
         tracing::trace!("TEST8 mem: [{:?}:{:#x}] & {:#04x} = {:#04x} & {:#04x} = {:#04x}", seg, eaddr, op2, op1, op2, result);
+    }
+
+    // =========================================================================
+    // CMP register-form instructions (needed for unified dispatchers)
+    // =========================================================================
+
+    /// CMP_EbGbR: CMP r/m8, r8 (register form)
+    /// Matches BX_CPU_C::CMP_EbGbR
+    pub fn cmp_eb_gb_r(&mut self, instr: &BxInstructionGenerated) {
+        let op1 = self.get_gpr8(instr.dst() as usize);
+        let op2 = self.get_gpr8(instr.src() as usize);
+        let result = op1.wrapping_sub(op2);
+        self.set_flags_oszapc_sub_8(op1, op2, result);
+    }
+
+    /// CMP_EbIbR: CMP r/m8, imm8 (register form)
+    /// Matches BX_CPU_C::CMP_EbIbR
+    pub fn cmp_eb_ib_r(&mut self, instr: &BxInstructionGenerated) {
+        let op1 = self.get_gpr8(instr.dst() as usize);
+        let op2 = instr.ib();
+        let result = op1.wrapping_sub(op2);
+        self.set_flags_oszapc_sub_8(op1, op2, result);
+    }
+
+    // =========================================================================
+    // Unified handlers: dispatch R/M based on instr.mod_c0()
+    // =========================================================================
+
+    pub fn and_eb_gb(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.and_gb_eb_r(instr) } else { self.and_eb_gb_m(instr) }
+    }
+    pub fn and_gb_eb(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.and_gb_eb_r(instr) } else { self.and_gb_eb_m(instr) }
+    }
+    pub fn and_eb_ib(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.and_eb_ib_r(instr) } else { self.and_eb_ib_m(instr) }
+    }
+    pub fn or_eb_gb(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.or_gb_eb_r(instr) } else { self.or_eb_gb_m(instr) }
+    }
+    pub fn or_gb_eb(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.or_gb_eb_r(instr) } else { self.or_gb_eb_m(instr) }
+    }
+    pub fn or_eb_ib(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.or_eb_ib_r(instr) } else { self.or_eb_ib_m(instr) }
+    }
+    pub fn xor_eb_gb(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.xor_gb_eb_r(instr) } else { self.xor_eb_gb_m(instr) }
+    }
+    pub fn xor_gb_eb(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.xor_gb_eb_r(instr) } else { self.xor_gb_eb_m(instr) }
+    }
+    pub fn xor_eb_ib(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.xor_eb_ib_r(instr) } else { self.xor_eb_ib_m(instr) }
+    }
+    pub fn not_eb(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.not_eb_r(instr) } else { self.not_eb_m(instr) }
+    }
+    pub fn test_eb_gb(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.test_eb_gb_r(instr) } else { self.test_eb_gb_m(instr) }
+    }
+    pub fn test_eb_ib(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.test_eb_ib_r(instr) } else { self.test_eb_ib_m(instr) }
+    }
+    pub fn cmp_gb_eb(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.cmp_gb_eb_r(instr) } else { self.cmp_gb_eb_m(instr) }
+    }
+    pub fn cmp_eb_gb(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.cmp_eb_gb_r(instr) } else { self.cmp_eb_gb_m(instr) }
+    }
+    pub fn cmp_eb_ib(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.cmp_eb_ib_r(instr) } else { self.cmp_eb_ib_m(instr) }
     }
 }

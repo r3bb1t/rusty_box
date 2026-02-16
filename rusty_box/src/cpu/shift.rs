@@ -8,7 +8,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::BxInstructionGenerated,
+    decoder::{BxInstructionGenerated, BxSegregs},
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -16,15 +16,69 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // SHL - Shift Left (8-bit)
     // =========================================================================
     
+    // ---- 8-bit read/write helpers for shift instructions ----
+    fn shift_read8(&mut self, instr: &BxInstructionGenerated) -> (u8, Option<u32>) {
+        if instr.mod_c0() {
+            (self.get_gpr8(instr.dst() as usize), None)
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let seg = BxSegregs::from(instr.seg());
+            let (val, laddr) = self.read_rmw_virtual_byte(seg, eaddr);
+            (val, Some(laddr))
+        }
+    }
+    fn shift_write8(&mut self, instr: &BxInstructionGenerated, laddr: Option<u32>, result: u8) {
+        if let Some(la) = laddr {
+            self.write_rmw_linear_byte(la, result);
+        } else {
+            self.set_gpr8(instr.dst() as usize, result);
+        }
+    }
+    // ---- 16-bit read/write helpers for shift instructions ----
+    fn shift_read16(&mut self, instr: &BxInstructionGenerated) -> (u16, Option<u32>) {
+        if instr.mod_c0() {
+            (self.get_gpr16(instr.dst() as usize), None)
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let seg = BxSegregs::from(instr.seg());
+            let (val, laddr) = self.read_rmw_virtual_word(seg, eaddr);
+            (val, Some(laddr))
+        }
+    }
+    fn shift_write16(&mut self, instr: &BxInstructionGenerated, laddr: Option<u32>, result: u16) {
+        if let Some(la) = laddr {
+            self.write_rmw_linear_word(la, result);
+        } else {
+            self.set_gpr16(instr.dst() as usize, result);
+        }
+    }
+    // ---- 32-bit read/write helpers for shift instructions ----
+    fn shift_read32(&mut self, instr: &BxInstructionGenerated) -> (u32, Option<u32>) {
+        if instr.mod_c0() {
+            (self.get_gpr32(instr.dst() as usize), None)
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let seg = BxSegregs::from(instr.seg());
+            let (val, laddr) = self.read_rmw_virtual_dword(seg, eaddr);
+            (val, Some(laddr))
+        }
+    }
+    fn shift_write32(&mut self, instr: &BxInstructionGenerated, laddr: Option<u32>, result: u32) {
+        if let Some(la) = laddr {
+            self.write_rmw_linear_dword(la, result);
+        } else {
+            self.set_gpr32(instr.dst() as usize, result);
+        }
+    }
+
     /// SHL r/m8, 1
     pub fn shl_eb_1(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr8(dst);
+        let (op1, laddr) = self.shift_read8(instr);
         let result = op1 << 1;
-        self.set_gpr8(dst, result);
-        
+        self.shift_write8(instr, laddr, result);
+
         let cf = (op1 & 0x80) != 0;
-        let of = ((result ^ op1) & 0x80) != 0; // OF = CF XOR MSB of result
+        let of = ((result ^ op1) & 0x80) != 0;
         self.update_flags_shl8(result, cf, of);
     }
 
@@ -32,13 +86,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn shl_eb_cl(&mut self, instr: &BxInstructionGenerated) {
         let count = self.cl() & 0x1F;
         if count == 0 { return; }
-        
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr8(dst);
-        
+
+        let (op1, laddr) = self.shift_read8(instr);
         let result = if count >= 8 { 0 } else { op1 << count };
-        self.set_gpr8(dst, result);
-        
+        self.shift_write8(instr, laddr, result);
+
         let cf = if count >= 8 { false } else { ((op1 << (count - 1)) & 0x80) != 0 };
         let of = if count == 1 { ((result ^ op1) & 0x80) != 0 } else { false };
         self.update_flags_shl8(result, cf, of);
@@ -48,13 +100,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn shl_eb_ib(&mut self, instr: &BxInstructionGenerated) {
         let count = instr.ib() & 0x1F;
         if count == 0 { return; }
-        
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr8(dst);
-        
+
+        let (op1, laddr) = self.shift_read8(instr);
         let result = if count >= 8 { 0 } else { op1 << count };
-        self.set_gpr8(dst, result);
-        
+        self.shift_write8(instr, laddr, result);
+
         let cf = if count >= 8 { false } else { ((op1 << (count - 1)) & 0x80) != 0 };
         let of = if count == 1 { ((result ^ op1) & 0x80) != 0 } else { false };
         self.update_flags_shl8(result, cf, of);
@@ -65,26 +115,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     
     /// SAR r/m8, imm8
-    /// Opcode: 0xC0/7 or 0xD0/7 with imm8
-    /// Matches BX_CPU_C::SAR_EbR (for imm8 case)
     pub fn sar_eb_ib(&mut self, instr: &BxInstructionGenerated) {
         let count = instr.ib() & 0x1F;
-        
-        if count == 0 {
-            return;
-        }
-        
-        let dst = instr.meta_data[0] as usize;
-        let op1_8 = self.get_gpr8(dst);
+        if count == 0 { return; }
+
+        let (op1_8, laddr) = self.shift_read8(instr);
         let result_8 = ((op1_8 as i8) >> count) as u8;
-        
-        self.set_gpr8(dst, result_8);
-        
+        self.shift_write8(instr, laddr, result_8);
+
         let cf = (((op1_8 as i8) >> (count - 1)) & 0x1) != 0;
-        
-        // SET_FLAGS_OSZAPC_LOGIC_8(result_8) + set CF
         self.update_flags_logic8(result_8);
-        self.set_cf_of(cf, false);  // CF from shift, OF = 0 for SAR
+        self.set_cf_of(cf, false);
     }
 
     // =========================================================================
@@ -93,11 +134,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     
     /// SHL r/m16, 1
     pub fn shl_ew_1(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr16(dst);
+        let (op1, laddr) = self.shift_read16(instr);
         let result = op1 << 1;
-        self.set_gpr16(dst, result);
-        
+        self.shift_write16(instr, laddr, result);
+
         let cf = (op1 & 0x8000) != 0;
         let of = ((result ^ op1) & 0x8000) != 0;
         self.update_flags_shl16(result, cf, of);
@@ -107,13 +147,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn shl_ew_cl(&mut self, instr: &BxInstructionGenerated) {
         let count = self.cl() & 0x1F;
         if count == 0 { return; }
-        
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr16(dst);
-        
+
+        let (op1, laddr) = self.shift_read16(instr);
         let result = if count >= 16 { 0 } else { op1 << count };
-        self.set_gpr16(dst, result);
-        
+        self.shift_write16(instr, laddr, result);
+
         let cf = if count >= 16 { false } else { ((op1 << (count - 1)) & 0x8000) != 0 };
         let of = if count == 1 { ((result ^ op1) & 0x8000) != 0 } else { false };
         self.update_flags_shl16(result, cf, of);
@@ -124,11 +162,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let count = (instr.ib() & 0x1F) as u32;
         if count == 0 { return; }
 
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr16(dst);
-
+        let (op1, laddr) = self.shift_read16(instr);
         let result = if count >= 16 { 0 } else { op1 << count };
-        self.set_gpr16(dst, result);
+        self.shift_write16(instr, laddr, result);
 
         let cf = if count >= 16 { false } else { ((op1 << (count - 1)) & 0x8000) != 0 };
         let of = if count == 1 { ((result ^ op1) & 0x8000) != 0 } else { false };
@@ -141,11 +177,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     
     /// SHL r/m32, 1
     pub fn shl_ed_1(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr32(dst);
+        let (op1, laddr) = self.shift_read32(instr);
         let result = op1 << 1;
-        self.set_gpr32(dst, result);
-        
+        self.shift_write32(instr, laddr, result);
+
         let cf = (op1 & 0x80000000) != 0;
         let of = ((result ^ op1) & 0x80000000) != 0;
         self.update_flags_shl32(result, cf, of);
@@ -155,13 +190,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn shl_ed_cl(&mut self, instr: &BxInstructionGenerated) {
         let count = self.cl() & 0x1F;
         if count == 0 { return; }
-        
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr32(dst);
-        
+
+        let (op1, laddr) = self.shift_read32(instr);
         let result = op1 << count;
-        self.set_gpr32(dst, result);
-        
+        self.shift_write32(instr, laddr, result);
+
         let cf = ((op1 << (count - 1)) & 0x80000000) != 0;
         let of = if count == 1 { ((result ^ op1) & 0x80000000) != 0 } else { false };
         self.update_flags_shl32(result, cf, of);
@@ -172,11 +205,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let count = (instr.ib() & 0x1F) as u32;
         if count == 0 { return; }
 
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr32(dst);
-
+        let (op1, laddr) = self.shift_read32(instr);
         let result = op1 << count;
-        self.set_gpr32(dst, result);
+        self.shift_write32(instr, laddr, result);
 
         let cf = ((op1 << (count - 1)) & 0x80000000) != 0;
         let of = if count == 1 { ((result ^ op1) & 0x80000000) != 0 } else { false };
@@ -189,13 +220,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     
     /// SHR r/m8, 1
     pub fn shr_eb_1(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr8(dst);
+        let (op1, laddr) = self.shift_read8(instr);
         let result = op1 >> 1;
-        self.set_gpr8(dst, result);
-        
+        self.shift_write8(instr, laddr, result);
+
         let cf = (op1 & 0x01) != 0;
-        let of = (op1 & 0x80) != 0; // OF = MSB of original operand
+        let of = (op1 & 0x80) != 0;
         self.update_flags_shr8(result, cf, of);
     }
 
@@ -204,11 +234,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let count = self.cl() & 0x1F;
         if count == 0 { return; }
 
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr8(dst);
-
+        let (op1, laddr) = self.shift_read8(instr);
         let result = if count >= 8 { 0 } else { op1 >> count };
-        self.set_gpr8(dst, result);
+        self.shift_write8(instr, laddr, result);
 
         let cf = if count >= 8 { false } else { ((op1 >> (count - 1)) & 0x01) != 0 };
         let of = if count == 1 { (op1 & 0x80) != 0 } else { false };
@@ -220,11 +248,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let count = instr.ib() & 0x1F;
         if count == 0 { return; }
 
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr8(dst);
-
+        let (op1, laddr) = self.shift_read8(instr);
         let result = if count >= 8 { 0 } else { op1 >> count };
-        self.set_gpr8(dst, result);
+        self.shift_write8(instr, laddr, result);
 
         let cf = if count >= 8 { false } else { ((op1 >> (count - 1)) & 0x01) != 0 };
         let of = if count == 1 { (op1 & 0x80) != 0 } else { false };
@@ -237,11 +263,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     
     /// SHR r/m16, 1
     pub fn shr_ew_1(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr16(dst);
+        let (op1, laddr) = self.shift_read16(instr);
         let result = op1 >> 1;
-        self.set_gpr16(dst, result);
-        
+        self.shift_write16(instr, laddr, result);
+
         let cf = (op1 & 0x0001) != 0;
         let of = (op1 & 0x8000) != 0;
         self.update_flags_shr16(result, cf, of);
@@ -251,13 +276,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn shr_ew_cl(&mut self, instr: &BxInstructionGenerated) {
         let count = self.cl() & 0x1F;
         if count == 0 { return; }
-        
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr16(dst);
-        
+
+        let (op1, laddr) = self.shift_read16(instr);
         let result = if count >= 16 { 0 } else { op1 >> count };
-        self.set_gpr16(dst, result);
-        
+        self.shift_write16(instr, laddr, result);
+
         let cf = if count >= 16 { false } else { ((op1 >> (count - 1)) & 0x0001) != 0 };
         let of = if count == 1 { (op1 & 0x8000) != 0 } else { false };
         self.update_flags_shr16(result, cf, of);
@@ -267,13 +290,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn shr_ew_ib(&mut self, instr: &BxInstructionGenerated) {
         let count = (instr.ib() & 0x1F) as u32;
         if count == 0 { return; }
-        
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr16(dst);
-        
+
+        let (op1, laddr) = self.shift_read16(instr);
         let result = if count >= 16 { 0 } else { op1 >> count };
-        self.set_gpr16(dst, result);
-        
+        self.shift_write16(instr, laddr, result);
+
         let cf = if count >= 16 { false } else { ((op1 >> (count - 1)) & 0x0001) != 0 };
         let of = if count == 1 { (op1 & 0x8000) != 0 } else { false };
         self.update_flags_shr16(result, cf, of);
@@ -285,11 +306,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     
     /// SHR r/m32, 1
     pub fn shr_ed_1(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr32(dst);
+        let (op1, laddr) = self.shift_read32(instr);
         let result = op1 >> 1;
-        self.set_gpr32(dst, result);
-        
+        self.shift_write32(instr, laddr, result);
+
         let cf = (op1 & 0x00000001) != 0;
         let of = (op1 & 0x80000000) != 0;
         self.update_flags_shr32(result, cf, of);
@@ -299,13 +319,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn shr_ed_cl(&mut self, instr: &BxInstructionGenerated) {
         let count = self.cl() & 0x1F;
         if count == 0 { return; }
-        
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr32(dst);
-        
+
+        let (op1, laddr) = self.shift_read32(instr);
         let result = op1 >> count;
-        self.set_gpr32(dst, result);
-        
+        self.shift_write32(instr, laddr, result);
+
         let cf = ((op1 >> (count - 1)) & 0x00000001) != 0;
         let of = if count == 1 { (op1 & 0x80000000) != 0 } else { false };
         self.update_flags_shr32(result, cf, of);
@@ -316,11 +334,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let count = (instr.ib() & 0x1F) as u32;
         if count == 0 { return; }
 
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr32(dst);
-
+        let (op1, laddr) = self.shift_read32(instr);
         let result = op1 >> count;
-        self.set_gpr32(dst, result);
+        self.shift_write32(instr, laddr, result);
 
         let cf = ((op1 >> (count - 1)) & 0x00000001) != 0;
         let of = if count == 1 { (op1 & 0x80000000) != 0 } else { false };
@@ -333,11 +349,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     
     /// SAR r/m8, 1
     pub fn sar_eb_1(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr8(dst) as i8;
+        let (op1_u, laddr) = self.shift_read8(instr);
+        let op1 = op1_u as i8;
         let result = (op1 >> 1) as u8;
-        self.set_gpr8(dst, result);
-        
+        self.shift_write8(instr, laddr, result);
+
         let cf = (op1 & 0x01) != 0;
         self.update_flags_sar8(result, cf);
     }
@@ -346,28 +362,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn sar_eb_cl(&mut self, instr: &BxInstructionGenerated) {
         let count = self.cl() & 0x1F;
         if count == 0 { return; }
-        
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr8(dst) as i8;
-        
-        let result = if count >= 8 { 
+
+        let (op1_u, laddr) = self.shift_read8(instr);
+        let op1 = op1_u as i8;
+
+        let result = if count >= 8 {
             if op1 < 0 { 0xFF } else { 0 }
-        } else { 
+        } else {
             ((op1 >> count) as u8)
         };
-        self.set_gpr8(dst, result);
-        
+        self.shift_write8(instr, laddr, result);
+
         let cf = if count >= 8 { (op1 < 0) } else { ((op1 >> (count - 1)) & 0x01) != 0 };
         self.update_flags_sar8(result, cf);
     }
 
     /// SAR r/m16, 1
     pub fn sar_ew_1(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr16(dst) as i16;
+        let (op1_u, laddr) = self.shift_read16(instr);
+        let op1 = op1_u as i16;
         let result = (op1 >> 1) as u16;
-        self.set_gpr16(dst, result);
-        
+        self.shift_write16(instr, laddr, result);
+
         let cf = (op1 & 0x0001) != 0;
         self.update_flags_sar16(result, cf);
     }
@@ -376,28 +392,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn sar_ew_cl(&mut self, instr: &BxInstructionGenerated) {
         let count = self.cl() & 0x1F;
         if count == 0 { return; }
-        
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr16(dst) as i16;
-        
+
+        let (op1_u, laddr) = self.shift_read16(instr);
+        let op1 = op1_u as i16;
+
         let result = if count >= 16 {
             if op1 < 0 { 0xFFFF } else { 0 }
         } else {
             (op1 >> count) as u16
         };
-        self.set_gpr16(dst, result);
-        
+        self.shift_write16(instr, laddr, result);
+
         let cf = if count >= 16 { (op1 < 0) } else { ((op1 >> (count - 1)) & 0x0001) != 0 };
         self.update_flags_sar16(result, cf);
     }
 
     /// SAR r/m32, 1
     pub fn sar_ed_1(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr32(dst) as i32;
+        let (op1_u, laddr) = self.shift_read32(instr);
+        let op1 = op1_u as i32;
         let result = (op1 >> 1) as u32;
-        self.set_gpr32(dst, result);
-        
+        self.shift_write32(instr, laddr, result);
+
         let cf = (op1 & 0x00000001) != 0;
         self.update_flags_sar32(result, cf);
     }
@@ -406,13 +422,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn sar_ed_cl(&mut self, instr: &BxInstructionGenerated) {
         let count = self.cl() & 0x1F;
         if count == 0 { return; }
-        
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr32(dst) as i32;
-        
+
+        let (op1_u, laddr) = self.shift_read32(instr);
+        let op1 = op1_u as i32;
+
         let result = (op1 >> count) as u32;
-        self.set_gpr32(dst, result);
-        
+        self.shift_write32(instr, laddr, result);
+
         let cf = ((op1 >> (count - 1)) & 0x00000001) != 0;
         self.update_flags_sar32(result, cf);
     }
@@ -423,11 +439,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     
     /// ROL r/m8, 1
     pub fn rol_eb_1(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr8(dst);
+        let (op1, laddr) = self.shift_read8(instr);
         let result = op1.rotate_left(1);
-        self.set_gpr8(dst, result);
-        
+        self.shift_write8(instr, laddr, result);
+
         let cf = (result & 0x01) != 0;
         let of = ((result ^ op1) & 0x80) != 0;
         self.set_cf_of(cf, of);
@@ -437,12 +452,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn rol_eb_cl(&mut self, instr: &BxInstructionGenerated) {
         let count = self.cl() & 0x07; // Only low 3 bits for 8-bit rotate
         if count == 0 { return; }
-        
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr8(dst);
+
+        let (op1, laddr) = self.shift_read8(instr);
         let result = op1.rotate_left(count as u32);
-        self.set_gpr8(dst, result);
-        
+        self.shift_write8(instr, laddr, result);
+
         let cf = (result & 0x01) != 0;
         let of = ((result ^ op1) & 0x80) != 0;
         self.set_cf_of(cf, of);
@@ -450,11 +464,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// ROL r/m16, 1
     pub fn rol_ew_1(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr16(dst);
+        let (op1, laddr) = self.shift_read16(instr);
         let result = op1.rotate_left(1);
-        self.set_gpr16(dst, result);
-        
+        self.shift_write16(instr, laddr, result);
+
         let cf = (result & 0x0001) != 0;
         let of = ((result ^ op1) & 0x8000) != 0;
         self.set_cf_of(cf, of);
@@ -464,12 +477,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn rol_ew_cl(&mut self, instr: &BxInstructionGenerated) {
         let count = self.cl() & 0x0F; // Only low 4 bits for 16-bit rotate
         if count == 0 { return; }
-        
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr16(dst);
+
+        let (op1, laddr) = self.shift_read16(instr);
         let result = op1.rotate_left(count as u32);
-        self.set_gpr16(dst, result);
-        
+        self.shift_write16(instr, laddr, result);
+
         let cf = (result & 0x0001) != 0;
         let of = ((result ^ op1) & 0x8000) != 0;
         self.set_cf_of(cf, of);
@@ -481,11 +493,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     
     /// ROR r/m8, 1
     pub fn ror_eb_1(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr8(dst);
+        let (op1, laddr) = self.shift_read8(instr);
         let result = op1.rotate_right(1);
-        self.set_gpr8(dst, result);
-        
+        self.shift_write8(instr, laddr, result);
+
         let cf = (result & 0x80) != 0;
         let of = ((result ^ (result << 1)) & 0x80) != 0;
         self.set_cf_of(cf, of);
@@ -495,12 +506,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn ror_eb_cl(&mut self, instr: &BxInstructionGenerated) {
         let count = self.cl() & 0x07;
         if count == 0 { return; }
-        
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr8(dst);
+
+        let (op1, laddr) = self.shift_read8(instr);
         let result = op1.rotate_right(count as u32);
-        self.set_gpr8(dst, result);
-        
+        self.shift_write8(instr, laddr, result);
+
         let cf = (result & 0x80) != 0;
         let of = ((result ^ (result << 1)) & 0x80) != 0;
         self.set_cf_of(cf, of);
@@ -508,11 +518,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// ROR r/m16, 1
     pub fn ror_ew_1(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr16(dst);
+        let (op1, laddr) = self.shift_read16(instr);
         let result = op1.rotate_right(1);
-        self.set_gpr16(dst, result);
-        
+        self.shift_write16(instr, laddr, result);
+
         let cf = (result & 0x8000) != 0;
         let of = ((result ^ (result << 1)) & 0x8000) != 0;
         self.set_cf_of(cf, of);
@@ -522,12 +531,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn ror_ew_cl(&mut self, instr: &BxInstructionGenerated) {
         let count = self.cl() & 0x0F;
         if count == 0 { return; }
-        
-        let dst = instr.meta_data[0] as usize;
-        let op1 = self.get_gpr16(dst);
+
+        let (op1, laddr) = self.shift_read16(instr);
         let result = op1.rotate_right(count as u32);
-        self.set_gpr16(dst, result);
-        
+        self.shift_write16(instr, laddr, result);
+
         let cf = (result & 0x8000) != 0;
         let of = ((result ^ (result << 1)) & 0x8000) != 0;
         self.set_cf_of(cf, of);
@@ -598,73 +606,40 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Based on Bochs shift32.cc:30-93
     // =========================================================================
 
-    /// SHLD r/m32, r32, imm8 (register form)
+    /// SHLD r/m32, r32, imm8
     /// Opcode: 0x0F 0xA4
-    /// Original: bochs/cpu/shift32.cc:63-93 SHLD_EdGdR
-    /// Shift destination left by count, filling from source register
     pub fn shld_ed_gd_ib(&mut self, instr: &BxInstructionGenerated) {
-        let dst_idx = instr.meta_data[0] as usize;
-        let src_idx = instr.meta_data[1] as usize;
-        let count = (instr.ib() & 0x1F) as u32; // Use only 5 LSBs
+        let count = (instr.ib() & 0x1F) as u32;
+        if count == 0 { return; }
 
-        if count == 0 {
-            // If count is 0, do nothing (but still clear upper 32 bits in 64-bit mode)
-            // In 32-bit mode, this is a no-op
-            return;
-        }
+        let (op1_32, laddr) = self.shift_read32(instr);
+        let op2_32 = self.get_gpr32(instr.src() as usize);
 
-        let op1_32 = self.get_gpr32(dst_idx);
-        let op2_32 = self.get_gpr32(src_idx);
-
-        // Shift op1 left by count, fill low bits from high bits of op2
         let result_32 = (op1_32 << count) | (op2_32 >> (32 - count));
+        self.shift_write32(instr, laddr, result_32);
 
-        self.set_gpr32(dst_idx, result_32);
-
-        // Set flags: OSZAPC (based on logic flags + CF/OF special)
         self.update_flags_logic32(result_32);
-
-        // CF = bit shifted out of op1 (bit at position 32-count)
         let cf = ((op1_32 >> (32 - count)) & 0x1) != 0;
-
-        // OF = CF XOR MSB of result
         let of = cf ^ ((result_32 >> 31) != 0);
-
         self.set_cf_of(cf, of);
-
-        tracing::trace!("SHLD r{}, r{}, {}: {:#x} << {} | {:#x} >> {} = {:#x}",
-            dst_idx, src_idx, count, op1_32, count, op2_32, 32 - count, result_32);
     }
 
-    /// SHLD r/m32, r32, CL (register form)
+    /// SHLD r/m32, r32, CL
     /// Opcode: 0x0F 0xA5
-    /// Original: bochs/cpu/shift32.cc:63-93 SHLD_EdGdR
-    /// Shift destination left by CL, filling from source register
     pub fn shld_ed_gd_cl(&mut self, instr: &BxInstructionGenerated) {
-        let dst_idx = instr.meta_data[0] as usize;
-        let src_idx = instr.meta_data[1] as usize;
-        let count = (self.cl() & 0x1F) as u32; // Use only 5 LSBs
+        let count = (self.cl() & 0x1F) as u32;
+        if count == 0 { return; }
 
-        if count == 0 {
-            return;
-        }
-
-        let op1_32 = self.get_gpr32(dst_idx);
-        let op2_32 = self.get_gpr32(src_idx);
+        let (op1_32, laddr) = self.shift_read32(instr);
+        let op2_32 = self.get_gpr32(instr.src() as usize);
 
         let result_32 = (op1_32 << count) | (op2_32 >> (32 - count));
-
-        self.set_gpr32(dst_idx, result_32);
+        self.shift_write32(instr, laddr, result_32);
 
         self.update_flags_logic32(result_32);
-
         let cf = ((op1_32 >> (32 - count)) & 0x1) != 0;
         let of = cf ^ ((result_32 >> 31) != 0);
-
         self.set_cf_of(cf, of);
-
-        tracing::trace!("SHLD r{}, r{}, CL({}): {:#x} -> {:#x}",
-            dst_idx, src_idx, count, op1_32, result_32);
     }
 
     // =========================================================================
@@ -672,70 +647,40 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Based on Bochs shift32.cc:97-161
     // =========================================================================
 
-    /// SHRD r/m32, r32, imm8 (register form)
+    /// SHRD r/m32, r32, imm8
     /// Opcode: 0x0F 0xAC
-    /// Original: bochs/cpu/shift32.cc:130-161 SHRD_EdGdR
-    /// Shift destination right by count, filling from source register
     pub fn shrd_ed_gd_ib(&mut self, instr: &BxInstructionGenerated) {
-        let dst_idx = instr.meta_data[0] as usize;
-        let src_idx = instr.meta_data[1] as usize;
-        let count = (instr.ib() & 0x1F) as u32; // Use only 5 LSBs
+        let count = (instr.ib() & 0x1F) as u32;
+        if count == 0 { return; }
 
-        if count == 0 {
-            return;
-        }
+        let (op1_32, laddr) = self.shift_read32(instr);
+        let op2_32 = self.get_gpr32(instr.src() as usize);
 
-        let op1_32 = self.get_gpr32(dst_idx);
-        let op2_32 = self.get_gpr32(src_idx);
-
-        // Shift op1 right by count, fill high bits from low bits of op2
         let result_32 = (op2_32 << (32 - count)) | (op1_32 >> count);
-
-        self.set_gpr32(dst_idx, result_32);
+        self.shift_write32(instr, laddr, result_32);
 
         self.update_flags_logic32(result_32);
-
-        // CF = bit shifted out of op1 (bit at position count-1)
         let cf = ((op1_32 >> (count - 1)) & 0x1) != 0;
-
-        // OF = result_bit30 XOR result_bit31
         let of = (((result_32 << 1) ^ result_32) >> 31) != 0;
-
         self.set_cf_of(cf, of);
-
-        tracing::trace!("SHRD r{}, r{}, {}: {:#x} >> {} | {:#x} << {} = {:#x}",
-            dst_idx, src_idx, count, op1_32, count, op2_32, 32 - count, result_32);
     }
 
-    /// SHRD r/m32, r32, CL (register form)
+    /// SHRD r/m32, r32, CL
     /// Opcode: 0x0F 0xAD
-    /// Original: bochs/cpu/shift32.cc:130-161 SHRD_EdGdR
-    /// Shift destination right by CL, filling from source register
     pub fn shrd_ed_gd_cl(&mut self, instr: &BxInstructionGenerated) {
-        let dst_idx = instr.meta_data[0] as usize;
-        let src_idx = instr.meta_data[1] as usize;
         let count = (self.cl() & 0x1F) as u32;
+        if count == 0 { return; }
 
-        if count == 0 {
-            return;
-        }
-
-        let op1_32 = self.get_gpr32(dst_idx);
-        let op2_32 = self.get_gpr32(src_idx);
+        let (op1_32, laddr) = self.shift_read32(instr);
+        let op2_32 = self.get_gpr32(instr.src() as usize);
 
         let result_32 = (op2_32 << (32 - count)) | (op1_32 >> count);
-
-        self.set_gpr32(dst_idx, result_32);
+        self.shift_write32(instr, laddr, result_32);
 
         self.update_flags_logic32(result_32);
-
         let cf = ((op1_32 >> (count - 1)) & 0x1) != 0;
         let of = (((result_32 << 1) ^ result_32) >> 31) != 0;
-
         self.set_cf_of(cf, of);
-
-        tracing::trace!("SHRD r{}, r{}, CL({}): {:#x} -> {:#x}",
-            dst_idx, src_idx, count, op1_32, result_32);
     }
 }
 

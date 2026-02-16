@@ -1,7 +1,7 @@
 // 32-bit arithmetic operations: ADD, SUB, etc.
 // Mirrors Bochs cpp/cpu/arith32.cc
 
-use crate::cpu::decoder::BxInstructionGenerated;
+use crate::cpu::decoder::{BxInstructionGenerated, BxSegregs};
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 /// ADD_GdEd_R: ADD r32, r/m32 (register form)
@@ -57,17 +57,6 @@ pub fn ADD_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
     let op2 = instr.id(); // Sign-extended immediate
     let result = op1.wrapping_add(op2);
 
-    // CRITICAL DEBUG: Print to stdout to see all ADD operations
-    if op2 == 0x400 {
-        eprintln!("★★★ ADD_EdId_R: dst_reg={}, op1={:#x}, op2={:#x}, result={:#x}",
-                    dst_reg, op1, op2, result);
-    }
-
-    // Log ESP operations for debugging stack issues
-    if dst_reg == 4 {
-        eprintln!("★★★ ADD ESP, {:#x}: ESP {:#x} -> {:#x}", op2, op1, result);
-    }
-
     cpu.set_gpr32(dst_reg, result);
     cpu.update_flags_add32(op1, op2, result);
 }
@@ -120,17 +109,6 @@ pub fn SUB_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
     let op2 = instr.id(); // Sign-extended immediate
     let result = op1.wrapping_sub(op2);
 
-    // CRITICAL DEBUG: Print to stdout to see all SUB operations
-    if op2 == 0x400 {
-        eprintln!("★★★ SUB_EdId_R: dst_reg={}, op1={:#x}, op2={:#x}, result={:#x}",
-                    dst_reg, op1, op2, result);
-    }
-
-    // Log ESP operations for debugging stack issues
-    if dst_reg == 4 {
-        eprintln!("★★★ SUB ESP, {:#x}: ESP {:#x} -> {:#x}", op2, op1, result);
-    }
-
     cpu.set_gpr32(dst_reg, result);
     cpu.update_flags_sub32(op1, op2, result);
 }
@@ -148,12 +126,12 @@ pub fn CMP_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
     cpu.update_flags_sub32(op1, op2, result);
 }
 
-/// CMP_EdGd: CMP r/m32, r32 (register form)
+/// CMP_EdGd_R: CMP r/m32, r32 (register form)
 /// Original: Bochs cpu/arith32.cc:274-285 CMP_GdEdR (operands swapped in Bochs naming)
 /// Opcode: 0x39, ModRM: r/m32, r32 (both registers)
 /// meta_data[0] = destination (r/m32), meta_data[1] = source (r32)
 /// Performs op1 - op2 and sets flags without storing result
-pub fn CMP_EdGd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+fn CMP_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
     let dst_idx = instr.meta_data[0] as usize;
     let src_idx = instr.meta_data[1] as usize;
 
@@ -197,4 +175,193 @@ pub fn ADC_GdEd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 
     cpu.set_gpr32(dst_idx, sum_32);
     cpu.update_flags_add32(op1_32, op2_32, sum_32);
+}
+
+// =========================================================================
+// Memory-form handlers (mod != 11)
+// Mirrors Bochs arith32.cc *M functions
+// =========================================================================
+
+/// ADD_EdGd_M: ADD r/m32, r32 (memory form) - read-modify-write
+pub fn ADD_EdGd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let (op1, laddr) = cpu.read_rmw_virtual_dword(seg, eaddr);
+    let op2 = cpu.get_gpr32(instr.src() as usize);
+    let result = op1.wrapping_add(op2);
+    cpu.write_rmw_linear_dword(laddr, result);
+    cpu.update_flags_add32(op1, op2, result);
+}
+
+/// ADD_GdEd_M: ADD r32, r/m32 (memory form) - read memory, write register
+pub fn ADD_GdEd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1 = cpu.get_gpr32(instr.dst() as usize);
+    let op2 = cpu.read_virtual_dword(seg, eaddr);
+    let result = op1.wrapping_add(op2);
+    cpu.set_gpr32(instr.dst() as usize, result);
+    cpu.update_flags_add32(op1, op2, result);
+}
+
+/// ADD_EdId_M: ADD r/m32, imm32 (memory form)
+pub fn ADD_EdId_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let (op1, laddr) = cpu.read_rmw_virtual_dword(seg, eaddr);
+    let op2 = instr.id();
+    let result = op1.wrapping_add(op2);
+    cpu.write_rmw_linear_dword(laddr, result);
+    cpu.update_flags_add32(op1, op2, result);
+}
+
+/// SUB_EdGd_M: SUB r/m32, r32 (memory form)
+pub fn SUB_EdGd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let (op1, laddr) = cpu.read_rmw_virtual_dword(seg, eaddr);
+    let op2 = cpu.get_gpr32(instr.src() as usize);
+    let result = op1.wrapping_sub(op2);
+    cpu.write_rmw_linear_dword(laddr, result);
+    cpu.update_flags_sub32(op1, op2, result);
+}
+
+/// SUB_GdEd_M: SUB r32, r/m32 (memory form)
+pub fn SUB_GdEd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1 = cpu.get_gpr32(instr.dst() as usize);
+    let op2 = cpu.read_virtual_dword(seg, eaddr);
+    let result = op1.wrapping_sub(op2);
+    cpu.set_gpr32(instr.dst() as usize, result);
+    cpu.update_flags_sub32(op1, op2, result);
+}
+
+/// SUB_EdId_M: SUB r/m32, imm32 (memory form)
+pub fn SUB_EdId_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let (op1, laddr) = cpu.read_rmw_virtual_dword(seg, eaddr);
+    let op2 = instr.id();
+    let result = op1.wrapping_sub(op2);
+    cpu.write_rmw_linear_dword(laddr, result);
+    cpu.update_flags_sub32(op1, op2, result);
+}
+
+/// CMP_EdGd_M: CMP r/m32, r32 (memory form)
+pub fn CMP_EdGd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1 = cpu.read_virtual_dword(seg, eaddr);
+    let op2 = cpu.get_gpr32(instr.src() as usize);
+    let result = op1.wrapping_sub(op2);
+    cpu.update_flags_sub32(op1, op2, result);
+}
+
+/// CMP_GdEd_M: CMP r32, r/m32 (memory form)
+pub fn CMP_GdEd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1 = cpu.get_gpr32(instr.dst() as usize);
+    let op2 = cpu.read_virtual_dword(seg, eaddr);
+    let result = op1.wrapping_sub(op2);
+    cpu.update_flags_sub32(op1, op2, result);
+}
+
+/// CMP_EdId_M: CMP r/m32, imm32 (memory form)
+pub fn CMP_EdId_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1 = cpu.read_virtual_dword(seg, eaddr);
+    let op2 = instr.id();
+    let result = op1.wrapping_sub(op2);
+    cpu.update_flags_sub32(op1, op2, result);
+}
+
+/// ADC_EdGd_M: ADC r/m32, r32 (memory form)
+pub fn ADC_EdGd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let (op1, laddr) = cpu.read_rmw_virtual_dword(seg, eaddr);
+    let op2 = cpu.get_gpr32(instr.src() as usize);
+    let cf = cpu.get_cf() as u32;
+    let result = op1.wrapping_add(op2).wrapping_add(cf);
+    cpu.write_rmw_linear_dword(laddr, result);
+    cpu.update_flags_add32(op1, op2, result);
+}
+
+/// ADC_GdEd_M: ADC r32, r/m32 (memory form)
+pub fn ADC_GdEd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1 = cpu.get_gpr32(instr.dst() as usize);
+    let op2 = cpu.read_virtual_dword(seg, eaddr);
+    let cf = cpu.get_cf() as u32;
+    let result = op1.wrapping_add(op2).wrapping_add(cf);
+    cpu.set_gpr32(instr.dst() as usize, result);
+    cpu.update_flags_add32(op1, op2, result);
+}
+
+// =========================================================================
+// Unified handlers: dispatch R/M based on instr.mod_c0()
+//
+// Each unified handler checks mod_c0() internally, mirroring Bochs'
+// execute() pattern where the decoder pre-assigns R or M handlers.
+// Here we resolve at execution time with a single branch, keeping the
+// decoder crate independent of the CPU implementation.
+// =========================================================================
+
+/// ADD r/m32, r32 - unified (Bochs: ADD_EdGdR / ADD_EdGdM)
+pub fn ADD_EdGd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    if instr.mod_c0() { ADD_EdGd_R(cpu, instr) } else { ADD_EdGd_M(cpu, instr) }
+}
+
+/// ADD r32, r/m32 - unified (Bochs: ADD_GdEdR / ADD_GdEdM)
+pub fn ADD_GdEd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    if instr.mod_c0() { ADD_GdEd_R(cpu, instr) } else { ADD_GdEd_M(cpu, instr) }
+}
+
+/// ADD r/m32, imm32 - unified (Bochs: ADD_EdIdR / ADD_EdIdM)
+pub fn ADD_EdId<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    if instr.mod_c0() { ADD_EdId_R(cpu, instr) } else { ADD_EdId_M(cpu, instr) }
+}
+
+/// SUB r/m32, r32 - unified (Bochs: SUB_EdGdR / SUB_EdGdM)
+pub fn SUB_EdGd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    if instr.mod_c0() { SUB_EdGd_R(cpu, instr) } else { SUB_EdGd_M(cpu, instr) }
+}
+
+/// SUB r32, r/m32 - unified (Bochs: SUB_GdEdR / SUB_GdEdM)
+pub fn SUB_GdEd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    if instr.mod_c0() { SUB_GdEd_R(cpu, instr) } else { SUB_GdEd_M(cpu, instr) }
+}
+
+/// SUB r/m32, imm32 - unified (Bochs: SUB_EdIdR / SUB_EdIdM)
+pub fn SUB_EdId<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    if instr.mod_c0() { SUB_EdId_R(cpu, instr) } else { SUB_EdId_M(cpu, instr) }
+}
+
+/// CMP r/m32, r32 - unified (Bochs: CMP_EdGdR / CMP_EdGdM)
+pub fn CMP_EdGd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    if instr.mod_c0() { CMP_EdGd_R(cpu, instr) } else { CMP_EdGd_M(cpu, instr) }
+}
+
+/// CMP r32, r/m32 - unified (Bochs: CMP_GdEdR / CMP_GdEdM)
+pub fn CMP_GdEd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    if instr.mod_c0() { CMP_EdGd_R(cpu, instr) } else { CMP_GdEd_M(cpu, instr) }
+}
+
+/// CMP r/m32, imm32 - unified (Bochs: CMP_EdIdR / CMP_EdIdM)
+pub fn CMP_EdId<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    if instr.mod_c0() { CMP_EdId_R(cpu, instr) } else { CMP_EdId_M(cpu, instr) }
+}
+
+/// ADC r/m32, r32 - unified (Bochs: ADC_EdGdR / ADC_EdGdM)
+pub fn ADC_EdGd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    if instr.mod_c0() { ADC_EdGd_R(cpu, instr) } else { ADC_EdGd_M(cpu, instr) }
+}
+
+/// ADC r32, r/m32 - unified (Bochs: ADC_GdEdR / ADC_GdEdM)
+pub fn ADC_GdEd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    if instr.mod_c0() { ADC_GdEd_R(cpu, instr) } else { ADC_GdEd_M(cpu, instr) }
 }

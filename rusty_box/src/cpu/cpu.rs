@@ -2230,40 +2230,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // =========================================================================
             // Data transfer (MOV) instructions - 32-bit
             // =========================================================================
-            Opcode::MovOp32GdEd => {
-                data_xfer::MOV_GdEd_R(self, instr);
-                Ok(())
-            }
-            Opcode::MovOp32EdGd => {
-                data_xfer::MOV_EdGd_R(self, instr);
-                Ok(())
-            }
-            Opcode::MovEdId => {
-                data_xfer::MOV_EdId_R(self, instr);
-                Ok(())
-            }
+            Opcode::MovOp32GdEd => { data_xfer::MOV_GdEd(self, instr); Ok(()) }
+            Opcode::MovOp32EdGd => { data_xfer::MOV_EdGd(self, instr); Ok(()) }
+            Opcode::MovEdId => { data_xfer::MOV_EdId(self, instr); Ok(()) }
 
             // =========================================================================
             // Data transfer (MOV) instructions - 8-bit
             // =========================================================================
-            Opcode::MovGbEb => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.mov_gb_eb_r(instr);
-                } else {
-                    // Memory form
-                    self.mov_gb_eb_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::MovEbGb => {
-                self.mov_eb_gb_r(instr);
-                Ok(())
-            }
-            Opcode::MovEbIb => {
-                self.mov_rb_ib(instr);
-                Ok(())
-            }
+            Opcode::MovGbEb => { self.mov_gb_eb(instr); Ok(()) }
+            Opcode::MovEbGb => { self.mov_eb_gb(instr); Ok(()) }
+            Opcode::MovEbIb => { self.mov_eb_ib(instr); Ok(()) }
 
             // =========================================================================
             // 8-bit Arithmetic instructions (ADD, SUB, etc.)
@@ -2292,108 +2268,28 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 use crate::cpu::arith;
                 arith::SUB_GbEb(self, instr)
             }
-            Opcode::AndEbGb => {
-                // Memory form - register form is handled separately
-                self.and_eb_gb_m(instr);
-                Ok(())
-            }
-            Opcode::AndGbEb => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.and_gb_eb_r(instr);
-                } else {
-                    // Memory form
-                    self.and_gb_eb_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::AndEbIb => {
-                // Memory form
-                self.and_eb_ib_m(instr);
-                Ok(())
-            }
-            Opcode::OrEbGb => {
-                // Memory form
-                self.or_eb_gb_m(instr);
-                Ok(())
-            }
-            Opcode::OrGbEb => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.or_gb_eb_r(instr);
-                } else {
-                    // Memory form
-                    self.or_gb_eb_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::OrEbIb => {
-                // Memory form
-                self.or_eb_ib_m(instr);
-                Ok(())
-            }
-            Opcode::XorEbGb => {
-                // Memory form
-                self.xor_eb_gb_m(instr);
-                Ok(())
-            }
-            Opcode::XorGbEb => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.xor_gb_eb_r(instr);
-                } else {
-                    // Memory form
-                    self.xor_gb_eb_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::XorEbIb => {
-                // Memory form
-                self.xor_eb_ib_m(instr);
-                Ok(())
-            }
-            Opcode::NotEb => {
-                // Memory form
-                self.not_eb_m(instr);
-                Ok(())
-            }
-            Opcode::TestEbGb => {
-                // Memory form
-                self.test_eb_gb_m(instr);
-                Ok(())
-            }
-            Opcode::TestEbIb => {
-                // Memory form
-                self.test_eb_ib_m(instr);
-                Ok(())
-            }
+            Opcode::AndEbGb => { self.and_eb_gb(instr); Ok(()) }
+            Opcode::AndGbEb => { self.and_gb_eb(instr); Ok(()) }
+            Opcode::AndEbIb => { self.and_eb_ib(instr); Ok(()) }
+            Opcode::OrEbGb => { self.or_eb_gb(instr); Ok(()) }
+            Opcode::OrGbEb => { self.or_gb_eb(instr); Ok(()) }
+            Opcode::OrEbIb => { self.or_eb_ib(instr); Ok(()) }
+            Opcode::XorEbGb => { self.xor_eb_gb(instr); Ok(()) }
+            Opcode::XorGbEb => { self.xor_gb_eb(instr); Ok(()) }
+            Opcode::XorEbIb => { self.xor_eb_ib(instr); Ok(()) }
+            Opcode::NotEb => { self.not_eb(instr); Ok(()) }
+            Opcode::TestEbGb => { self.test_eb_gb(instr); Ok(()) }
+            Opcode::TestEbIb => { self.test_eb_ib(instr); Ok(()) }
 
             // =========================================================================
             // Data transfer (MOV) instructions - 16-bit
             // =========================================================================
             Opcode::MovGwEw => {
-                // Debug MOV DX, [BP+4] at 0x50B
-                if self.prev_rip >= 0x50b && self.prev_rip <= 0x50d {
-                    tracing::warn!("MOV DX,[BP+4] at {:#x}: mod_c0={}", self.prev_rip, instr.mod_c0());
-                }
-
-                if instr.mod_c0() {
-                    // Register form
-                    self.mov_gw_ew_r(instr);
-                } else {
-                    // Memory form
-                    self.mov_gw_ew_m(instr);
-                }
+                self.mov_gw_ew(instr);
                 Ok(())
             }
-            Opcode::MovEwGw => {
-                self.mov_ew_gw_r(instr);
-                Ok(())
-            }
-            Opcode::MovEwIw => {
-                self.mov_rw_iw(instr);
-                Ok(())
-            }
+            Opcode::MovEwGw => { self.mov_ew_gw(instr); Ok(()) }
+            Opcode::MovEwIw => { self.mov_ew_iw(instr); Ok(()) }
 
             // =========================================================================
             // Segment register MOV
@@ -2447,14 +2343,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             // Arithmetic (ADD) instructions
-            Opcode::AddGdEd => {
-                arith::ADD_GdEd_R(self, instr);
-                Ok(())
-            }
-            Opcode::AddEdGd => {
-                arith::ADD_EdGd_R(self, instr);
-                Ok(())
-            }
+            Opcode::AddGdEd => { arith::ADD_GdEd(self, instr); Ok(()) }
+            Opcode::AddEdGd => { arith::ADD_EdGd(self, instr); Ok(()) }
             Opcode::AddEaxid => {
                 arith::ADD_EAX_Id(self, instr);
                 Ok(())
@@ -2479,23 +2369,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 use crate::cpu::arith;
                 arith::ADD_EwGw(self, instr)
             }
-            Opcode::AddEdsIb => {
-                arith::ADD_EdId_R(self, instr);
-                Ok(())
-            }
-            Opcode::AddEdId => {
-                arith::ADD_EdId_R(self, instr);
-                Ok(())
-            }
+            Opcode::AddEdsIb | Opcode::AddEdId => { arith::ADD_EdId(self, instr); Ok(()) }
             // Arithmetic (SUB) instructions
-            Opcode::SubGdEd => {
-                arith::SUB_GdEd_R(self, instr);
-                Ok(())
-            }
-            Opcode::SubEdGd => {
-                arith::SUB_EdGd_R(self, instr);
-                Ok(())
-            }
+            Opcode::SubGdEd => { arith::SUB_GdEd(self, instr); Ok(()) }
+            Opcode::SubEdGd => { arith::SUB_EdGd(self, instr); Ok(()) }
             Opcode::SubEaxid => {
                 arith::SUB_EAX_Id(self, instr);
                 Ok(())
@@ -2504,62 +2381,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 use crate::cpu::arith;
                 arith::SUB_AL_Ib(self, instr)
             }
-            Opcode::SubEdsIb => {
-                eprintln!("★★★ DISPATCH SubEdsIb with ib={:#x}, meta_data[0]={}", instr.ib(), instr.meta_data[0]);
-                arith::SUB_EdId_R(self, instr);
-                Ok(())
-            }
-            Opcode::SubEdId => {
-                eprintln!("★★★ DISPATCH SubEdId with id={:#x}, meta_data[0]={}", instr.id(), instr.meta_data[0]);
-                arith::SUB_EdId_R(self, instr);
-                Ok(())
-            }
+            Opcode::SubEdsIb | Opcode::SubEdId => { arith::SUB_EdId(self, instr); Ok(()) }
             // XOR instructions
-            Opcode::XorEdGd => {
-                // Memory form
-                self.xor_ed_gd_m(instr);
-                Ok(())
-            }
+            Opcode::XorEdGd => { self.xor_ed_gd(instr); Ok(()) }
             Opcode::XorEdGdZeroIdiom | Opcode::XorGdEdZeroIdiom => {
                 self.zero_idiom_gd_r(instr);
                 Ok(())
             }
-            Opcode::XorGdEd => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.xor_gd_ed_r(instr);
-                } else {
-                    // Memory form
-                    self.xor_gd_ed_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::XorEbGb | Opcode::XorGbEb => {
-                // XOR r8, r/m8
-                let dst = instr.meta_data[0] as usize;
-                let src = instr.meta_data[1] as usize;
-                let val1 = self.get_gpr8(dst);
-                let val2 = self.get_gpr8(src);
-                let result = val1 ^ val2;
-                self.set_gpr8(dst, result);
-                self.update_flags_logic8(result);
-                Ok(())
-            }
-            Opcode::XorEwGw => {
-                // Memory form
-                self.xor_ew_gw_m(instr);
-                Ok(())
-            }
-            Opcode::XorGwEw => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.xor_gw_ew_r(instr);
-                } else {
-                    // Memory form
-                    self.xor_gw_ew_m(instr);
-                }
-                Ok(())
-            }
+            Opcode::XorGdEd => { self.xor_gd_ed(instr); Ok(()) }
+            Opcode::XorEwGw => { self.xor_ew_gw(instr); Ok(()) }
+            Opcode::XorGwEw => { self.xor_gw_ew(instr); Ok(()) }
             Opcode::XorEwGwZeroIdiom | Opcode::XorGwEwZeroIdiom => {
                 self.zero_idiom_gw_r(instr);
                 Ok(())
@@ -3062,18 +2893,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // =========================================================================
             // CMP instructions
             // =========================================================================
-            Opcode::CmpGbEb => {
-                self.cmp_gb_eb_r(instr);
-                Ok(())
-            }
-            Opcode::CmpGwEw => {
-                self.cmp_gw_ew_r(instr);
-                Ok(())
-            }
-            Opcode::CmpGdEd => {
-                self.cmp_gd_ed_r(instr);
-                Ok(())
-            }
+            Opcode::CmpGbEb => { self.cmp_gb_eb(instr); Ok(()) }
+            Opcode::CmpGwEw => { self.cmp_gw_ew(instr); Ok(()) }
+            Opcode::CmpGdEd => { arith::arith32::CMP_GdEd(self, instr); Ok(()) }
             Opcode::CmpEwGw => {
                 use crate::cpu::arith;
                 arith::CMP_EwGw(self, instr)
@@ -3082,25 +2904,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.cmp_al_ib(instr);
                 Ok(())
             }
-            Opcode::CmpEbIb => {
-                // CMP r/m8, imm8
-                let dst = instr.meta_data[0] as usize;
-                let op1 = self.get_gpr8(dst);
-                let op2 = instr.ib();
-                let result = op1.wrapping_sub(op2);
-                self.update_flags_sub8(op1, op2, result);
-                Ok(())
-            }
-            Opcode::CmpEbGb => {
-                // CMP r/m8, r8
-                let dst = instr.meta_data[0] as usize;
-                let src = instr.meta_data[1] as usize;
-                let op1 = self.get_gpr8(dst);
-                let op2 = self.get_gpr8(src);
-                let result = op1.wrapping_sub(op2);
-                self.update_flags_sub8(op1, op2, result);
-                Ok(())
-            }
+            Opcode::CmpEbIb => { self.cmp_eb_ib(instr); Ok(()) }
+            Opcode::CmpEbGb => { self.cmp_eb_gb(instr); Ok(()) }
             Opcode::CmpAxiw => {
                 self.cmp_ax_iw(instr);
                 Ok(())
@@ -3109,40 +2914,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.cmp_eax_id(instr);
                 Ok(())
             }
-            Opcode::CmpEwIw => {
-                self.cmp_ew_iw_r(instr);
-                Ok(())
-            }
-            Opcode::CmpEdId => {
-                self.cmp_ed_id_r(instr);
-                Ok(())
-            }
-            Opcode::CmpEdsIb => {
-                self.cmp_ed_id_r(instr);
-                Ok(())
-            }
-            Opcode::CmpEdGd => {
-                // CMP r/m32, r32 (register form) - Based on Bochs arith32.cc:274-285
-                arith::arith32::CMP_EdGd(self, instr);
-                Ok(())
-            }
+            Opcode::CmpEwIw => { self.cmp_ew_iw(instr); Ok(()) }
+            Opcode::CmpEdId | Opcode::CmpEdsIb => { arith::arith32::CMP_EdId(self, instr); Ok(()) }
+            Opcode::CmpEdGd => { arith::arith32::CMP_EdGd(self, instr); Ok(()) }
 
             // TEST instructions
-            Opcode::TestEbGb => {
-                // Memory form
-                self.test_eb_gb_m(instr);
-                Ok(())
-            }
-            Opcode::TestEwGw => {
-                // Memory form
-                self.test_ew_gw_m(instr);
-                Ok(())
-            }
-            Opcode::TestEdGd => {
-                // Memory form
-                self.test_ed_gd_m(instr);
-                Ok(())
-            }
+            Opcode::TestEwGw => { self.test_ew_gw(instr); Ok(()) }
+            Opcode::TestEdGd => { self.test_ed_gd(instr); Ok(()) }
             Opcode::TestAlib => {
                 self.test_al_ib(instr);
                 Ok(())
@@ -3155,60 +2933,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.test_eax_id(instr);
                 Ok(())
             }
-            Opcode::TestEwIw => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.test_ew_iw_r(instr);
-                } else {
-                    // Memory form
-                    self.test_ew_iw_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::TestEdId => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.test_ed_id_r(instr);
-                } else {
-                    // Memory form
-                    self.test_ed_id_m(instr);
-                }
-                Ok(())
-            }
+            Opcode::TestEwIw => { self.test_ew_iw(instr); Ok(()) }
+            Opcode::TestEdId => { self.test_ed_id(instr); Ok(()) }
 
             // =========================================================================
             // AND/OR/NOT instructions
             // =========================================================================
-            Opcode::AndGwEw => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.and_gw_ew_r(instr);
-                } else {
-                    // Memory form
-                    self.and_gw_ew_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::AndEwGw => {
-                // Memory form
-                self.and_ew_gw_m(instr);
-                Ok(())
-            }
-            Opcode::AndGdEd => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.and_gd_ed_r(instr);
-                } else {
-                    // Memory form
-                    self.and_gd_ed_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::AndEdGd => {
-                // Memory form
-                self.and_ed_gd_m(instr);
-                Ok(())
-            }
+            Opcode::AndGwEw => { self.and_gw_ew(instr); Ok(()) }
+            Opcode::AndEwGw => { self.and_ew_gw(instr); Ok(()) }
+            Opcode::AndGdEd => { self.and_gd_ed(instr); Ok(()) }
+            Opcode::AndEdGd => { self.and_ed_gd(instr); Ok(()) }
             Opcode::AndAlib => {
                 self.and_al_ib(instr);
                 Ok(())
@@ -3221,67 +2955,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.and_eax_id(instr);
                 Ok(())
             }
-            Opcode::AndEwIw => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.and_ew_iw_r(instr);
-                } else {
-                    // Memory form
-                    self.and_ew_iw_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::AndEdId => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.and_ed_id_r(instr);
-                } else {
-                    // Memory form
-                    self.and_ed_id_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::AndEdsIb => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.and_ed_id_r(instr);
-                } else {
-                    // Memory form
-                    self.and_ed_id_m(instr);
-                }
-                Ok(())
-            }
+            Opcode::AndEwIw => { self.and_ew_iw(instr); Ok(()) }
+            Opcode::AndEdId | Opcode::AndEdsIb => { self.and_ed_id(instr); Ok(()) }
 
-            Opcode::OrGwEw => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.or_gw_ew_r(instr);
-                } else {
-                    // Memory form
-                    self.or_gw_ew_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::OrEwGw => {
-                // Memory form
-                self.or_ew_gw_m(instr);
-                Ok(())
-            }
-            Opcode::OrGdEd => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.or_gd_ed_r(instr);
-                } else {
-                    // Memory form
-                    self.or_gd_ed_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::OrEdGd => {
-                // Memory form
-                self.or_ed_gd_m(instr);
-                Ok(())
-            }
+            Opcode::OrGwEw => { self.or_gw_ew(instr); Ok(()) }
+            Opcode::OrEwGw => { self.or_ew_gw(instr); Ok(()) }
+            Opcode::OrGdEd => { self.or_gd_ed(instr); Ok(()) }
+            Opcode::OrEdGd => { self.or_ed_gd(instr); Ok(()) }
             Opcode::OrAlib => {
                 self.or_al_ib(instr);
                 Ok(())
@@ -3294,194 +2974,32 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.or_eax_id(instr);
                 Ok(())
             }
-            Opcode::OrEwIw => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.or_ew_iw_r(instr);
-                } else {
-                    // Memory form
-                    self.or_ew_iw_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::OrEdId => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.or_ed_id_r(instr);
-                } else {
-                    // Memory form
-                    self.or_ed_id_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::XorEwIw => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.xor_ew_iw_r(instr);
-                } else {
-                    // Memory form
-                    self.xor_ew_iw_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::XorEdId => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.xor_ed_id_r(instr);
-                } else {
-                    // Memory form
-                    self.xor_ed_id_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::NotEw => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.not_ew_r(instr);
-                } else {
-                    // Memory form
-                    self.not_ew_m(instr);
-                }
-                Ok(())
-            }
-            Opcode::NotEd => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.not_ed_r(instr);
-                } else {
-                    // Memory form
-                    self.not_ed_m(instr);
-                }
-                Ok(())
-            }
+            Opcode::OrEwIw => { self.or_ew_iw(instr); Ok(()) }
+            Opcode::OrEdId => { self.or_ed_id(instr); Ok(()) }
+            Opcode::XorEwIw => { self.xor_ew_iw(instr); Ok(()) }
+            Opcode::XorEdId => { self.xor_ed_id(instr); Ok(()) }
+            Opcode::NotEw => { self.not_ew(instr); Ok(()) }
+            Opcode::NotEd => { self.not_ed(instr); Ok(()) }
 
             // =========================================================================
             // Multiplication and Division instructions
             // =========================================================================
-            Opcode::MulAleb => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.mul_al_eb_r(instr)?;
-                } else {
-                    // Memory form
-                    self.mul_al_eb_m(instr)?;
-                }
-                Ok(())
-            }
-            Opcode::ImulAleb => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.imul_al_eb_r(instr)?;
-                } else {
-                    // Memory form
-                    self.imul_al_eb_m(instr)?;
-                }
-                Ok(())
-            }
-            Opcode::DivAleb => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.div_al_eb_r(instr)?;
-                } else {
-                    // Memory form
-                    self.div_al_eb_m(instr)?;
-                }
-                Ok(())
-            }
-            Opcode::IdivAleb => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.idiv_al_eb_r(instr)?;
-                } else {
-                    // Memory form
-                    self.idiv_al_eb_m(instr)?;
-                }
-                Ok(())
-            }
-            Opcode::MulAxew => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.mul_ax_ew_r(instr)?;
-                } else {
-                    // Memory form
-                    self.mul_ax_ew_m(instr)?;
-                }
-                Ok(())
-            }
-            Opcode::ImulAxew => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.imul_ax_ew_r(instr)?;
-                } else {
-                    // Memory form
-                    self.imul_ax_ew_m(instr)?;
-                }
-                Ok(())
-            }
-            Opcode::DivAxew => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.div_ax_ew_r(instr)?;
-                } else {
-                    // Memory form
-                    self.div_ax_ew_m(instr)?;
-                }
-                Ok(())
-            }
-            Opcode::IdivAxew => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.idiv_ax_ew_r(instr)?;
-                } else {
-                    // Memory form
-                    self.idiv_ax_ew_m(instr)?;
-                }
-                Ok(())
-            }
-            Opcode::MulEaxed => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.mul_eax_ed_r(instr)?;
-                } else {
-                    // Memory form
-                    self.mul_eax_ed_m(instr)?;
-                }
-                Ok(())
-            }
-            Opcode::ImulEaxed => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.imul_eax_ed_r(instr)?;
-                } else {
-                    // Memory form
-                    self.imul_eax_ed_m(instr)?;
-                }
-                Ok(())
-            }
+            Opcode::MulAleb => self.mul_al_eb(instr),
+            Opcode::ImulAleb => self.imul_al_eb(instr),
+            Opcode::DivAleb => self.div_al_eb(instr),
+            Opcode::IdivAleb => self.idiv_al_eb(instr),
+            Opcode::MulAxew => self.mul_ax_ew(instr),
+            Opcode::ImulAxew => self.imul_ax_ew(instr),
+            Opcode::DivAxew => self.div_ax_ew(instr),
+            Opcode::IdivAxew => self.idiv_ax_ew(instr),
+            Opcode::MulEaxed => self.mul_eax_ed(instr),
+            Opcode::ImulEaxed => self.imul_eax_ed(instr),
             Opcode::ImulGdEdsIb => {
                 self.imul_gd_ed_ib(instr)?;
                 Ok(())
             }
-            Opcode::DivEaxed => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.div_eax_ed_r(instr)?;
-                } else {
-                    // Memory form
-                    self.div_eax_ed_m(instr)?;
-                }
-                Ok(())
-            }
-            Opcode::IdivEaxed => {
-                if instr.mod_c0() {
-                    // Register form
-                    self.idiv_eax_ed_r(instr)?;
-                } else {
-                    // Memory form
-                    self.idiv_eax_ed_m(instr)?;
-                }
-                Ok(())
-            }
+            Opcode::DivEaxed => self.div_eax_ed(instr),
+            Opcode::IdivEaxed => self.idiv_eax_ed(instr),
 
             // =========================================================================
             // INC/DEC instructions
@@ -3887,18 +3405,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.cbw(instr);
                 Ok(())
             }
-            Opcode::MovsxGdEb => {
-                self.movsx_gd_eb(instr);
-                Ok(())
-            }
-            Opcode::MovzxGdEb => {
-                data_xfer::MOVZX_GdEb(self, instr);
-                Ok(())
-            }
-            Opcode::MovzxGdEw => {
-                data_xfer::MOVZX_GdEw(self, instr);
-                Ok(())
-            }
+            Opcode::MovsxGdEb => { self.movsx_gd_eb(instr); Ok(()) }
+            Opcode::MovzxGdEb => { data_xfer::MOVZX_GdEb_unified(self, instr); Ok(()) }
+            Opcode::MovzxGdEw => { data_xfer::MOVZX_GdEw_unified(self, instr); Ok(()) }
             Opcode::Cwd => {
                 self.cwd(instr);
                 Ok(())

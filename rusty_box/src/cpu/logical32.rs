@@ -486,4 +486,129 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_flags_oszapc_logic_32(result);
         tracing::trace!("TEST32 mem: [{:?}:{:#x}] & {:#010x} = {:#010x} & {:#010x} = {:#010x}", seg, eaddr, op2_32, op1_32, op2_32, result);
     }
+
+    /// CMP_GdEdM: CMP r32, r/m32 (memory form)
+    /// Matches BX_CPU_C::CMP_GdEdM
+    pub fn cmp_gd_ed_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let op2_32 = self.read_virtual_dword(seg, eaddr);
+        let dst_reg = instr.dst() as usize;
+        let op1_32 = self.get_gpr32(dst_reg);
+        let result = op1_32.wrapping_sub(op2_32);
+        self.set_flags_oszapc_sub_32(op1_32, op2_32, result);
+    }
+
+    /// CMP_EdGdR: CMP r/m32, r32 (register form)
+    /// Matches BX_CPU_C::CMP_EdGdR
+    pub fn cmp_ed_gd_r(&mut self, instr: &BxInstructionGenerated) {
+        let dst = instr.dst() as usize;
+        let src = instr.src() as usize;
+        let op1 = self.get_gpr32(dst);
+        let op2 = self.get_gpr32(src);
+        let result = op1.wrapping_sub(op2);
+        self.set_flags_oszapc_sub_32(op1, op2, result);
+    }
+
+    /// CMP_EdGdM: CMP r/m32, r32 (memory form)
+    /// Matches BX_CPU_C::CMP_EdGdM
+    pub fn cmp_ed_gd_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let (op1_32, _laddr) = self.read_rmw_virtual_dword(seg, eaddr);
+        let src_reg = instr.src() as usize;
+        let op2_32 = self.get_gpr32(src_reg);
+        let result = op1_32.wrapping_sub(op2_32);
+        self.set_flags_oszapc_sub_32(op1_32, op2_32, result);
+    }
+
+    /// CMP_EdIdM: CMP r/m32, imm32 (memory form)
+    /// Matches BX_CPU_C::CMP_EdIdM
+    pub fn cmp_ed_id_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let op1_32 = self.read_virtual_dword(seg, eaddr);
+        let op2_32 = instr.id();
+        let result = op1_32.wrapping_sub(op2_32);
+        self.set_flags_oszapc_sub_32(op1_32, op2_32, result);
+    }
+
+    // =========================================================================
+    // Unified handlers: dispatch R/M based on instr.mod_c0()
+    // =========================================================================
+
+    /// XOR r/m32, r32 - unified (EdGd: memory is read-modify-write, register is commutative)
+    pub fn xor_ed_gd(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.xor_gd_ed_r(instr) } else { self.xor_ed_gd_m(instr) }
+    }
+
+    /// XOR r32, r/m32 - unified (GdEd: register dest, memory is read-only source)
+    pub fn xor_gd_ed(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.xor_gd_ed_r(instr) } else { self.xor_gd_ed_m(instr) }
+    }
+
+    /// XOR r/m32, imm32 - unified
+    pub fn xor_ed_id(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.xor_ed_id_r(instr) } else { self.xor_ed_id_m(instr) }
+    }
+
+    /// AND r/m32, r32 - unified (EdGd: memory is read-modify-write, register is commutative)
+    pub fn and_ed_gd(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.and_gd_ed_r(instr) } else { self.and_ed_gd_m(instr) }
+    }
+
+    /// AND r32, r/m32 - unified (GdEd: register dest, memory is read-only source)
+    pub fn and_gd_ed(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.and_gd_ed_r(instr) } else { self.and_gd_ed_m(instr) }
+    }
+
+    /// AND r/m32, imm32 - unified (handles both AndEdId and AndEdsIb opcodes)
+    pub fn and_ed_id(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.and_ed_id_r(instr) } else { self.and_ed_id_m(instr) }
+    }
+
+    /// OR r/m32, r32 - unified (EdGd: memory is read-modify-write, register is commutative)
+    pub fn or_ed_gd(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.or_gd_ed_r(instr) } else { self.or_ed_gd_m(instr) }
+    }
+
+    /// OR r32, r/m32 - unified (GdEd: register dest, memory is read-only source)
+    pub fn or_gd_ed(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.or_gd_ed_r(instr) } else { self.or_gd_ed_m(instr) }
+    }
+
+    /// OR r/m32, imm32 - unified
+    pub fn or_ed_id(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.or_ed_id_r(instr) } else { self.or_ed_id_m(instr) }
+    }
+
+    /// NOT r/m32 - unified
+    pub fn not_ed(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.not_ed_r(instr) } else { self.not_ed_m(instr) }
+    }
+
+    /// TEST r/m32, r32 - unified
+    pub fn test_ed_gd(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.test_ed_gd_r(instr) } else { self.test_ed_gd_m(instr) }
+    }
+
+    /// TEST r/m32, imm32 - unified
+    pub fn test_ed_id(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.test_ed_id_r(instr) } else { self.test_ed_id_m(instr) }
+    }
+
+    /// CMP r32, r/m32 - unified (GdEd: register dest compares with reg or memory)
+    pub fn cmp_gd_ed(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.cmp_gd_ed_r(instr) } else { self.cmp_gd_ed_m(instr) }
+    }
+
+    /// CMP r/m32, r32 - unified (EdGd: memory or register compared with register)
+    pub fn cmp_ed_gd(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.cmp_ed_gd_r(instr) } else { self.cmp_ed_gd_m(instr) }
+    }
+
+    /// CMP r/m32, imm32 - unified (handles both CmpEdId and CmpEdsIb opcodes)
+    pub fn cmp_ed_id(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.cmp_ed_id_r(instr) } else { self.cmp_ed_id_m(instr) }
+    }
 }
