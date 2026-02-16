@@ -1136,19 +1136,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.mem_ptr = Some(mem_vector);
         self.mem_len = mem_len;
 
-        // One-time boot breadcrumb: prove the 0xE9 output pipeline works and show
-        // the very first bytes the CPU sees at the current CS:IP.
-        if (self.boot_debug_flags & 0x80) == 0 {
-            self.boot_debug_flags |= 0x80;
-            // Removed hardcoded "[cpu_loop start]" message and reset vector dump per user request
-        }
-
         let mut iteration = 0u64;
-        let mut stuck_counter = 0u64;
-        let mut last_rip = self.rip();
-        let mut rip_history = [0u64; 16]; // Track last 16 RIP values
-        let mut history_idx = 0usize;
-        const STUCK_THRESHOLD: u64 = 100000; // Warn if RIP doesn't change for this many instructions
 
         tracing::info!("CPU loop starting at CS:IP = {:04X}:{:08X}",
             unsafe { self.sregs[BxSegregs::Cs as usize].selector.value },
@@ -1156,30 +1144,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         let result = 'cpu_loop: loop {
             iteration += 1;
-
-            // Periodic progress logging (every 100k instructions for first 5M)
-            if iteration % 100_000 == 0 && iteration <= 5_000_000 {
-                let current_rip = self.rip();
-                let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-                let linear_addr = cs_base + current_rip;
-                tracing::info!("Progress: {}k instructions, RIP={:#x}, Linear={:#x}", iteration / 1000, current_rip, linear_addr);
-            }
-
-            // Sample instruction execution every 250k instructions (first 5M only)
-            if iteration % 250_000 == 0 && iteration <= 5_000_000 {
-                let current_rip = self.rip();
-                let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-                let linear_addr = cs_base + current_rip;
-
-                // Read first few bytes of instruction
-                let bytes: Vec<u8> = (0..8).map(|i| self.mem_read_byte(linear_addr + i)).collect();
-                tracing::debug!(
-                    "Trace [{}k]: RIP={:#010x}, Linear={:#010x}, Bytes=[{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}]",
-                    iteration / 1000, current_rip, linear_addr,
-                    bytes[0], bytes[1], bytes[2], bytes[3],
-                    bytes[4], bytes[5], bytes[6], bytes[7]
-                );
-            }
 
             // Safety limit - pause when instruction limit is reached
             if iteration > max_instructions {
@@ -1202,55 +1166,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
             // SAFETY: We extend the lifetime of mem temporarily for this call only.
             // The borrow is released at the end of the expression.
-            let current_rip = self.rip();
-
-            // Check for execution in dangerous low memory (IVT region 0x0000-0x03FF)
-            // This typically indicates uninitialized interrupt vectors or stack corruption
-            let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-            let linear_addr = cs_base + current_rip;
-
-            if linear_addr < 0x400 && (self.boot_debug_flags & 0x40) == 0 {
-                self.boot_debug_flags |= 0x40;
-
-                let cs_sel = self.sregs[BxSegregs::Cs as usize].selector.value;
-                let ip = self.get_ip();
-
-                tracing::error!("╔════════════════════════════════════════════════════════════╗");
-                tracing::error!("║  EXECUTION IN IVT REGION (0x0000-0x03FF)                  ║");
-                tracing::error!("╠════════════════════════════════════════════════════════════╣");
-                tracing::error!("║  CS:IP = {:#06x}:{:#06x}, Linear = {:#010x}", cs_sel, ip, linear_addr);
-                tracing::error!("║  This indicates uninitialized interrupt vector or corruption!");
-                tracing::error!("║");
-                tracing::error!("║  Previous RIP values (most recent last):");
-                for (i, &rip) in rip_history.iter().enumerate() {
-                    if rip != 0 {
-                        tracing::error!("║    [{:2}] {:#018x}", i, rip);
-                    }
-                }
-                tracing::error!("╠════════════════════════════════════════════════════════════╣");
-                tracing::error!("║  STOPPING EXECUTION - This would infinite loop            ║");
-                tracing::error!("╚════════════════════════════════════════════════════════════╝");
-
-                self.debug_puts(b"[IVT->0000:0000]\n[RIP=");
-                self.debug_put_hex_u16(ip);
-                self.debug_puts(b" cs:ip=");
-                self.debug_put_hex_u16(cs_sel);
-                self.debug_putc(b':');
-                self.debug_put_hex_u16(ip);
-                self.debug_puts(b"] ");
-
-                // Dump 8 bytes from the current instruction stream
-                let paddr = cs_base.wrapping_add(ip as u64);
-                for i in 0..8u64 {
-                    let b = self.mem_read_byte(paddr.wrapping_add(i));
-                    self.debug_put_hex_u8(b);
-                    self.debug_putc(if i == 7 { b'\n' } else { b' ' });
-                }
-
-                // STOP execution instead of continuing - this prevents infinite loops
-                break Ok(iteration);
-            }
-
             let mut entry = unsafe {
                 let mem_extended: &'c mut BxMemC<'c> = &mut *mem_ptr;
                 match self.get_icache_entry(mem_extended, cpus) {
@@ -1265,7 +1180,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             };
             tracing::debug!(
                 "get_icache_entry: RIP={:#x}, entry.tlen={}",
-                current_rip,
+                self.rip(),
                 entry.tlen
             );
 
@@ -1305,7 +1220,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
             tracing::trace!(
                 "Initial trace: RIP={:#x}, trace_start_idx={}, tlen={}, mpool_start_idx={}",
-                current_rip,
+                self.rip(),
                 trace_start_idx,
                 entry.tlen,
                 entry.mpool_start_idx
@@ -1313,7 +1228,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
             // Loop through all instructions in the trace (matching C++ cpu.cc:196-222)
             let mut instr_idx = 0usize;
-            let mut prev_rip_in_loop = self.rip(); // Track previous RIP for loop detection
             let mut restart_decode = false;
             loop {
                 // Bounds check before accessing mpool
@@ -1336,78 +1250,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     break;
                 }
                 let mut i = self.i_cache.mpool[mpool_idx];
-                let current_rip_for_log = self.rip();
                 tracing::trace!("Fetching instruction: trace_start_idx={}, instr_idx={}, mpool_idx={}, opcode={:?}, RIP={:#x}",
-                    trace_start_idx, instr_idx, mpool_idx, i.get_ia_opcode(), current_rip_for_log);
-
-                // Debug: Log when entering the I/O function at 0x506
-                if current_rip_for_log == 0x506 {
-                    let sp = self.sp();
-                    let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-                    tracing::warn!(
-                        "Entering I/O function at F000:0506, SP={:#x}, CS.base={:#x}",
-                        sp, cs_base
-                    );
-
-                    // Dump memory at addresses we're about to execute
-                    use crate::config::BxPhyAddress;
-                    for check_addr in [0x4b2, 0x506, 0x508, 0x50a, 0x50c] {
-                        let mut buf = [0u8; 16];
-                        if let Ok(_) = mem.read_physical_page(
-                            &[self],
-                            check_addr as BxPhyAddress,
-                            buf.len(),
-                            &mut buf,
-                        ) {
-                            tracing::error!("📍 Memory at {:#x}: {:02x?}", check_addr, &buf);
-                        }
-                    }
-                }
-
-                // Log instructions in I/O function to see parameter reads
-                if current_rip_for_log >= 0x506 && current_rip_for_log <= 0x520 {
-                    let sp = self.sp();
-                    let bp = self.bp();
-                    let dx = self.dx();
-                    let al = self.al();
-                    if current_rip_for_log == 0x50b || current_rip_for_log == 0x50e {
-                        tracing::warn!(
-                            "I/O func param read: RIP={:#x}, opcode={:?}, BP={:#x}, SP={:#x}, DX={:#x}, AL={:#x}",
-                            current_rip_for_log, i.get_ia_opcode(), bp, sp, dx, al
-                        );
-                    }
-                }
-
-                // Log caller regions to see if parameters are pushed
-                if (current_rip_for_log >= 0xc64 && current_rip_for_log <= 0xc80) ||
-                   (current_rip_for_log >= 0xcbe && current_rip_for_log <= 0xcda) {
-                    let sp = self.sp();
-                    let ax = self.ax();
-                    let dx = self.dx();
-                    let bp = self.bp();
-                    tracing::warn!(
-                        "Caller: RIP={:#x}, opcode={:?}, SP={:#x}, AX={:#x}, DX={:#x}, BP={:#x}",
-                        current_rip_for_log, i.get_ia_opcode(), sp, ax, dx, bp
-                    );
-                }
-                // Also log the instruction that might jump TO 0xe1d59
-                if current_rip_for_log >= 0xe1c00 && current_rip_for_log <= 0xe2000 {
-                    tracing::warn!(
-                        "RIP in BIOS area: RIP={:#x}, opcode={:?}",
-                        current_rip_for_log,
-                        i.get_ia_opcode()
-                    );
-                }
-
-                // Track CS.base corruption - log instructions around 0xe0bf0-0xe0c00
-                if current_rip_for_log >= 0xe0bf0 && current_rip_for_log <= 0xe0c00 {
-                    let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-                    let cs_selector = self.sregs[BxSegregs::Cs as usize].selector.value;
-                    tracing::error!(
-                        "🔍 CS tracking: RIP={:#x}, opcode={:?}, CS.selector={:#x}, CS.base={:#x}",
-                        current_rip_for_log, i.get_ia_opcode(), cs_selector, cs_base
-                    );
-                }
+                    trace_start_idx, instr_idx, mpool_idx, i.get_ia_opcode(), self.rip());
 
                 // want to allow changing of the instruction inside instrumentation callback
                 // Matching C++ line 201: BX_INSTR_BEFORE_EXECUTION(BX_CPU_ID, i);
@@ -1470,46 +1314,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
                 self.set_rip(next_rip);
 
-                // Enhanced instruction tracing with CS:IP and instruction bytes
-                let cs_selector = self.sregs[BxSegregs::Cs as usize].selector.value;
-                let ip_16 = (current_rip & 0xFFFF) as u16;
-                let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-                let paddr = cs_base.wrapping_add(current_rip);
-
-                // Read instruction bytes from memory for display
-                let mut instr_bytes = [0u8; 15]; // Max x86 instruction length
-                for idx in 0..ilen.min(15) as usize {
-                    instr_bytes[idx] = self.mem_read_byte(paddr + idx as u64);
-                }
-
                 tracing::trace!(
-                    "Execute: {:04X}:{:04X} (phys={:#x})  {:02X?}  {:?}",
-                    cs_selector,
-                    ip_16,
-                    paddr,
-                    &instr_bytes[..ilen as usize],
-                    i.get_ia_opcode()
+                    "Executing {:?} at RIP={:#x}, ilen={}, next_rip={:#x}",
+                    i.get_ia_opcode(), current_rip, ilen, next_rip
                 );
-
-                tracing::trace!("{:#x} Executing opcode: {:?} at RIP={:#x}, ilen={}, next_rip={:#x}, trace_start_idx={}, instr_idx={}",
-                    self.rip(), i.get_ia_opcode(), current_rip, ilen, next_rip, trace_start_idx, instr_idx);
-
-                // Track _start function execution (0xE0000-0xE0030)
-                if current_rip >= 0xE0000 && current_rip <= 0xE0030 {
-                    tracing::error!(
-                        "🎯 _start: RIP={:#x} opcode={:?} ilen={} next_rip={:#x} | EAX={:#x} ECX={:#x} ESI={:#x} EDI={:#x}",
-                        current_rip, i.get_ia_opcode(), ilen, next_rip,
-                        self.eax(), self.ecx(), self.esi(), self.edi()
-                    );
-                }
-
-                // Log every 1M instructions to detect progress
-                if iteration % 1_000_000 == 0 {
-                    tracing::error!(
-                        "📊 Progress: {} instructions executed, RIP={:#x}, opcode={:?}",
-                        iteration, current_rip, i.get_ia_opcode()
-                    );
-                }
 
                 // Matching C++ line 203: BX_CPU_CALL_METHOD(i->execute1, (i));
                 // might iterate repeat instruction
@@ -1765,16 +1573,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         entry.mpool_start_idx
                     );
 
-                    // Debug: Log RIP transitions near the problematic address
-                    let rip = self.rip();
-                    if rip >= 0xe1d00 && rip <= 0xe1dff {
-                        tracing::warn!(
-                            "RIP in 0xe1d00 range: RIP={:#x}, prev_rip={:#x}",
-                            rip,
-                            last_rip
-                        );
-                    }
-
                     // Reset for new trace
                     instr_idx = 0;
                 }
@@ -1786,189 +1584,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // Only clear STOP_TRACE if activity_state is Active (normal execution).
             if matches!(self.activity_state, CpuActivityState::Active) {
                 self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
-            }
-
-            // Use the last executed instruction for loop detection
-            // If we broke early due to async_event, use the last instruction we executed
-            // Otherwise, use the last instruction in the trace
-            let last_instr_idx = if instr_idx > 0 { instr_idx - 1 } else { 0 };
-            let mut i = self.i_cache.mpool[trace_start_idx + last_instr_idx];
-
-            // Detect infinite loops - check multiple patterns:
-            // 1. RIP doesn't change (direct infinite loop)
-            // 2. RIP cycles through same small set of addresses (loop with multiple instructions)
-            let current_rip = self.rip();
-
-            // 🎯 SPECIFIC RIP TRACKING: Log problematic addresses if needed for debugging
-            // (Disabled after fixing MOV_GbEbM memory form handler)
-
-            // ⚠️ ZERO-MEMORY DETECTION: Check if we jumped to zero or low memory
-            if current_rip < 0x100 {
-                tracing::error!(
-                    "❌ JUMPED TO NEAR-ZERO MEMORY! RIP={:#x} after {} instructions",
-                    current_rip, iteration
-                );
-                tracing::error!("   This usually means we jumped to invalid/zeroed memory!");
-                tracing::error!("   EAX={:#x} EBX={:#x} ECX={:#x} EDX={:#x}",
-                    self.eax(), self.ebx(), self.ecx(), self.edx());
-                tracing::error!("   ESP={:#x} EBP={:#x} ESI={:#x} EDI={:#x}",
-                    self.esp(), self.ebp(), self.esi(), self.edi());
-                // Don't break - let it fail naturally so we see the error
-            }
-
-            // ⚠️ ZERO-MEMORY DETECTION: Check if instruction bytes at RIP are all zeros
-            let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-            let linear_addr = cs_base + current_rip;
-            let mut instr_bytes_check = [0u8; 15];
-            for idx in 0..15 {
-                instr_bytes_check[idx] = self.mem_read_byte(linear_addr + idx as u64);
-            }
-            let all_zeros = instr_bytes_check.iter().all(|&b| b == 0);
-            if all_zeros {
-                tracing::error!(
-                    "❌ EXECUTING ZEROED MEMORY! RIP={:#x} Linear={:#x} after {} instructions",
-                    current_rip, linear_addr, iteration
-                );
-                tracing::error!("   All instruction bytes are 0x00!");
-                tracing::error!("   This means we're executing from uninitialized/zeroed memory!");
-            }
-
-            // 🎯 CS.BASE TRACKING: Find where CS.base gets corrupted to 0
-            static mut LAST_CS_BASE: u64 = 0xFFFFFFFFFFFFFFFF;
-            let current_cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-            if current_cs_base != unsafe { LAST_CS_BASE } {
-                tracing::warn!(
-                    "⚠️ CS.BASE CHANGED: {:#010x} → {:#010x} at RIP={:#06x}, opcode={:?}",
-                    unsafe { LAST_CS_BASE }, current_cs_base, current_rip, i.get_ia_opcode()
-                );
-                unsafe { LAST_CS_BASE = current_cs_base; }
-
-                // Critical: Log when CS.base becomes 0
-                if current_cs_base == 0 {
-                    tracing::error!(
-                        "❌ CS.BASE CORRUPTED TO ZERO! RIP={:#x}, opcode={:?}, instruction #{}, CS.selector={:#x}",
-                        current_rip, i.get_ia_opcode(), iteration,
-                        self.sregs[BxSegregs::Cs as usize].selector.value
-                    );
-                }
-            }
-
-            // 🔍 COUNTDOWN LOOP DEBUGGING: Track loop at 0x2055-0x2074
-            static mut LOOP_2055_LOG_COUNTER: u64 = 0;
-            if current_rip >= 0x2055 && current_rip <= 0x2074 {
-                unsafe {
-                    LOOP_2055_LOG_COUNTER += 1;
-                    if LOOP_2055_LOG_COUNTER <= 5 {
-                        let bp = self.bp();
-                        let ss_base = self.sregs[BxSegregs::Ss as usize].cache.u.segment.base;
-                        let counter_addr = ss_base + (bp.wrapping_sub(271) & 0xFFFF) as u64;
-                        let value_addr = ss_base + (bp.wrapping_sub(547) & 0xFFFF) as u64;
-                        let counter_val = self.mem_read_byte(counter_addr);
-                        let value_val = self.mem_read_byte(value_addr);
-                        tracing::warn!(
-                            "🔍 Loop #{}: RIP={:#x}, BP={:#x}, [BP-271]@{:#x}={:#x}, [BP-547]@{:#x}={:#x}, AL={:#x}",
-                            LOOP_2055_LOG_COUNTER, current_rip, bp, counter_addr, counter_val,
-                            value_addr, value_val, self.al()
-                        );
-                    } else if LOOP_2055_LOG_COUNTER == 6 {
-                        let bp = self.bp();
-                        tracing::error!("❌ COUNTDOWN LOOP CONFIRMED INFINITE! BP={:#x} (should be ~0xFFFA)", bp);
-                    }
-                }
-            }
-
-            // Update RIP history (circular buffer)
-            rip_history[history_idx] = current_rip;
-            history_idx = (history_idx + 1) % rip_history.len();
-
-            // Check if we're stuck at same RIP (jumped back to same instruction)
-            if current_rip == prev_rip_in_loop {
-                stuck_counter += 1;
-                if stuck_counter == STUCK_THRESHOLD {
-                    tracing::warn!(
-                        "CPU appears stuck in infinite loop at RIP={:#x} (0x{:x}) after {} instructions. Last instruction: {:?}",
-                        current_rip, current_rip, stuck_counter, i.get_ia_opcode()
-                    );
-                } else if stuck_counter > STUCK_THRESHOLD && (stuck_counter % 100000) == 0 {
-                    tracing::warn!(
-                        "CPU still stuck at RIP={:#x} after {} instructions total",
-                        current_rip,
-                        stuck_counter
-                    );
-                }
-            }
-            // Check if RIP is cycling (pattern repeats in history)
-            else if iteration > rip_history.len() as u64 {
-                // Count unique RIPs without heap allocations (no_std-friendly).
-                let mut unique = [0u64; 16];
-                let mut unique_len = 0usize;
-                for &rip in rip_history.iter() {
-                    if !unique[..unique_len].iter().any(|&x| x == rip) {
-                        unique[unique_len] = rip;
-                        unique_len += 1;
-                        if unique_len > 4 {
-                            break;
-                        }
-                    }
-                }
-
-                if unique_len <= 4 && stuck_counter > 10000 {
-                    // Very few unique RIPs suggests a tight loop
-                    stuck_counter += 1;
-                    if stuck_counter == STUCK_THRESHOLD {
-                        tracing::warn!(
-                            "CPU appears stuck in tight loop (cycling through {} addresses) after {} instructions. Recent RIPs: {:?}",
-                            unique_len, stuck_counter, rip_history
-                        );
-                    }
-                } else {
-                    stuck_counter = 0; // Reset if pattern breaks
-                }
-            } else {
-                stuck_counter = 0; // Reset counter when RIP changes normally
-            }
-
-            // Also log every 5 million instructions to show progress (reduced from 10M)
-            if iteration > 0 && (iteration % 5_000_000) == 0 {
-                // Log progress periodically
-                let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-                let linear_addr = cs_base + current_rip;
-
-                // Read first 8 bytes at RIP
-                let mut instr_preview = [0u8; 8];
-                for idx in 0..8 {
-                    instr_preview[idx] = self.mem_read_byte(linear_addr + idx as u64);
-                }
-
-                tracing::info!(
-                    "📊 {} instructions: RIP={:#x} Linear={:#x} Bytes={:02X?}",
-                    iteration, current_rip, linear_addr, &instr_preview
-                );
-                tracing::info!(
-                    "   CPU State: EAX={:#x} ESP={:#x} EBP={:#x}",
-                    self.eax(), self.esp(), self.ebp()
-                );
-            }
-
-            // VGA BIOS execution detection (0xC0000-0xDFFFF)
-            if current_rip >= 0xC0000 && current_rip < 0xE0000 {
-                tracing::warn!(
-                    "🎨 VGA BIOS EXECUTION: RIP={:#x}, Bytes={:02X?}",
-                    current_rip, &instr_bytes_check[0..8]
-                );
-            }
-
-            // BIOS option ROM scan detection
-            static mut LAST_ROM_SCAN_LOG: u64 = 0;
-            if current_rip >= 0xF0000 && iteration.saturating_sub(unsafe { LAST_ROM_SCAN_LOG }) > 100_000 {
-                // Check if reading from option ROM range
-                if linear_addr >= 0xC0000 && linear_addr < 0xE0000 {
-                    tracing::info!(
-                        "🔍 BIOS accessing Option ROM range: RIP={:#x}, accessing address={:#x}",
-                        current_rip, linear_addr
-                    );
-                    unsafe { LAST_ROM_SCAN_LOG = iteration; }
-                }
             }
 
             // TODO: And syncing of time
@@ -2407,18 +2022,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // Segment selector is always Iw2 (16-bit)
                 let segment = instr.iw2();
 
-                tracing::error!("🚀 JmpfAp HANDLER: os32_l={}, ilen={}, Id={:#x}, Iw={:#x}, Iw2={:#x}, EIP={:#x}",
-                    instr.os32_l(), instr.ilen(), instr.id(), instr.iw(), instr.iw2(), self.eip());
-
                 if instr.os32_l() != 0 {
-                    // 32-bit operand size: offset is Id (32-bit)
                     let offset32 = instr.id();
-                    tracing::error!("🚀 FAR JMP 32-BIT to {:04x}:{:08x}", segment, offset32);
+                    tracing::debug!("FAR JMP 32-BIT to {:04x}:{:08x}", segment, offset32);
                     self.jmp_far32(instr, segment, offset32)?;
                 } else {
-                    // 16-bit operand size: offset is Iw (16-bit)
                     let offset16 = instr.iw();
-                    tracing::error!("🚀 FAR JMP 16-BIT to {:04x}:{:04x}", segment, offset16);
+                    tracing::debug!("FAR JMP 16-BIT to {:04x}:{:04x}", segment, offset16);
                     self.jmp_far16(instr, segment, offset16)?;
                 }
                 Ok(())
