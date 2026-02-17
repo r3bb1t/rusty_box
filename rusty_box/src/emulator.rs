@@ -765,9 +765,13 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         if stuck_count >= 10 && !stuck_reported {
                             stuck_reported = true;
                             tracing::warn!(
-                                "BIOS stuck at RIP={:#x} after {}k instructions",
+                                "BIOS stuck at RIP={:#x} after {}k instructions, last I/O read: port={:#06x} value={:#x}, CS={:#06x} mode={}",
                                 current_rip,
-                                instructions_executed / 1000
+                                instructions_executed / 1000,
+                                self.devices.last_io_read_port,
+                                self.devices.last_io_read_value,
+                                self.cpu.get_cs_selector(),
+                                self.cpu.get_cpu_mode(),
                             );
                         }
                     } else {

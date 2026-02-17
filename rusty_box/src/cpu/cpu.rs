@@ -1530,6 +1530,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     break;
                 }
 
+                // Check instruction limit inside inner loop to prevent infinite hangs
+                // when the BIOS runs tight loops within a single trace
+                if iteration > max_instructions {
+                    break 'cpu_loop Ok(iteration - 1);
+                }
+
                 // Matching C++ line 217: if (++i == last)
                 // Move to next instruction in trace (increment pointer/index)
                 instr_idx += 1;

@@ -112,10 +112,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Otherwise it falls back to conservative defaults (useful for unit tests
     /// that don't wire devices and never execute real firmware).
     fn port_in(&mut self, port: u16, len: u8) -> u32 {
-        if let Some(io_bus) = self.io_bus {
+        if let Some(mut io_bus) = self.io_bus {
             // SAFETY: `io_bus` is set by the emulator for the duration of execution
             // and cleared afterwards. Single-CPU execution avoids concurrent access.
-            let value = unsafe { io_bus.as_ref().inp(port, len) };
+            let value = unsafe { io_bus.as_mut().inp(port, len) };
             tracing::trace!("port_in: port={:#06x} len={} -> {:#x}", port, len, value);
             return value;
         }

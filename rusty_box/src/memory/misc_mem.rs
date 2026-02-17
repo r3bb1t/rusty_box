@@ -632,7 +632,7 @@ impl BxMemC<'_> {
             return Ok(());
         } else {
             // Access outside limits of physical memory, ignore (from memory.cc:172-174)
-            tracing::debug!("Write outside the limits of physical memory ({:#x}) (ignore)", a20_addr);
+            tracing::trace!("Write outside the limits of physical memory ({:#x}) (ignore)", a20_addr);
             return Ok(());
         }
     }

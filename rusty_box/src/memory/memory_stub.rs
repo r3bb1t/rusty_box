@@ -466,7 +466,7 @@ impl BxMemoryStubC {
                 page_write_stamp_table.dec_write_stamp(a20_addr);
             }
         } else {
-            tracing::debug!("Write outside the limits of physical memory ({a20_addr:#x}) (ignore)");
+            tracing::trace!("Write outside the limits of physical memory ({a20_addr:#x}) (ignore)");
         }
         Ok(())
     }

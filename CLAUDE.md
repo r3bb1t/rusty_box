@@ -36,17 +36,23 @@ The previous investigation concluded BIOS ROM had wrong symbol addresses. In rea
 - 10-100: Drops into low-address subroutines (F000:0Cxx area = keyboard/PCI init)
 - ~360k: Real-mode init completes, BIOS enters protected mode
 - At 362k: RIP=0xE08C0, CS=0x0010, mode=protected - rombios32 executing
-- At ~363k: **Stuck in infinite loop** - likely polling an I/O port that never responds
+- At ~363k+: Continues executing in protected mode (no longer hangs)
+
+**Log flooding bug found and fixed (2026-02-17):**
+The apparent "hang" at 363k instructions was caused by `tracing::debug!` in `misc_mem.rs` and `memory_stub.rs` logging every byte written beyond 32MB RAM. When the BIOS enters protected mode and probes memory, it writes to addresses above 0x2000000, generating millions of debug messages (118MB+ of log output). Changed to `tracing::trace!` to fix the performance cliff.
+
+**I/O port tracking added (2026-02-17):**
+`BxDevicesC::inp()` now tracks the last I/O read port/value (`last_io_read_port`, `last_io_read_value`). The stuck-loop detector in `emulator.rs` reports this info. Signature changed from `&self` to `&mut self`.
 
 **BIOS ROM shadow mapping bug found (partially fixed):**
 The `get_host_mem_addr` PCI path for addresses 0xE0000-0xFFFFF was using the expansion ROM formula (`a20_addr & EXROM_MASK + BIOSROMSZ`) instead of `bios_map_last128k()`. Fixed to correctly distinguish 0xE0000-0xFFFFF (BIOS shadow) from 0xC0000-0xDFFFF (expansion ROM).
 
-**Next step:** Add I/O port access logging around instruction 362k to identify which port the BIOS is polling in the infinite loop. Common culprits: PCI config space (0xCFC/0xCF8), CMOS (0x71 UIP flag), keyboard controller (0x64 status).
+**Next step:** Identify why there's still no BIOS output (ports 0xE9, 0x402, 0x403 silent; VGA memory untouched). Run with RUST_LOG=debug to see I/O port activity and determine what the BIOS is doing in protected mode.
 
 ## Known Issues & Next Steps
 
 ### Next Steps
-1. **Fix infinite loop at protected mode entry** - Add I/O port logging to identify the polling port, then implement proper device response
+1. **Investigate missing BIOS output** - Run with RUST_LOG=debug to trace I/O port activity in protected mode and determine why no output reaches debug ports or VGA memory
 2. **Implement remaining instructions** - As discovered by running the emulator further
 3. **Boot sector loading** - Once BIOS completes POST, load and execute boot sector
 
@@ -57,8 +63,10 @@ The `get_host_mem_addr` PCI path for addresses 0xE0000-0xFFFFF was using the exp
 - ✅ No unimplemented opcode errors (all needed opcodes implemented)
 - ✅ Extensive instruction set coverage (arithmetic, logical, shift, rotate, control flow, data transfer, string ops)
 - ✅ Debug instrumentation cleaned up (no more WARN/ERROR spam in hot paths)
-- ❌ BIOS enters infinite loop immediately after entering protected mode
-- ❌ No BIOS text output yet
+- ✅ Log flooding fix: out-of-bounds memory write messages downgraded to trace level
+- ✅ I/O port tracking: last read port/value reported in stuck-loop diagnostics
+- ✅ Inner loop instruction limit check prevents single-batch hangs
+- ❌ No BIOS text output yet (investigating)
 
 ## Build Commands
 
@@ -238,11 +246,11 @@ Uses `thiserror` with root `Error` enum in `src/error.rs` aggregating:
 
 ## Known Issues
 
-### Infinite Loop After Protected Mode Entry (2026-02-17)
+### No BIOS Output (2026-02-17)
 
 **Status:** Under investigation
 
-BIOS enters protected mode at ~362k instructions (CS=0x10, RIP=0xE08C0) but immediately enters an infinite loop at ~363k instructions. The loop is likely polling an I/O port. Need to add I/O port access logging to identify the port and implement proper device response.
+BIOS enters protected mode at ~362k instructions and continues executing (no longer hangs after log flooding fix), but produces no output to debug ports (0xE9, 0x402, 0x403) or VGA memory. Need to trace I/O port activity to understand what the BIOS is doing.
 
 ### BIOS ROM Shadow Mapping (2026-02-17)
 
@@ -264,8 +272,9 @@ Exception handling infrastructure exists (Exception enum, IVT delivery in real m
 
 ### Major Bug Fixes (Historical)
 
-1. **Segment default fix (2026-02-16)**: `[BP+disp]` was using DS instead of SS. Fixed with lookup tables in `fetchdecode32.rs`.
-2. **execute1/execute2 fix (2026-02-16)**: 18 opcodes had memory/register handler forms swapped in `opcodes_table.rs`.
-3. **Group 1 decoder fix (2026-02-02)**: ModRM `reg` field stored instead of `r/m` for opcodes 0x80/0x81/0x83.
-4. **BIOS load address fix (2026-02-07)**: Address calculated from BIOS size instead of hardcoded.
-5. **Memory allocation fix (2026-02-06)**: `vec![0; size]` instead of loop-based `push()` for large allocations.
+1. **Log flooding fix (2026-02-17)**: Out-of-bounds memory write messages (`misc_mem.rs`, `memory_stub.rs`) downgraded from `debug!` to `trace!`. BIOS memory probing in protected mode generated 118MB+ of log output, causing apparent hang.
+2. **Segment default fix (2026-02-16)**: `[BP+disp]` was using DS instead of SS. Fixed with lookup tables in `fetchdecode32.rs`.
+3. **execute1/execute2 fix (2026-02-16)**: 18 opcodes had memory/register handler forms swapped in `opcodes_table.rs`.
+4. **Group 1 decoder fix (2026-02-02)**: ModRM `reg` field stored instead of `r/m` for opcodes 0x80/0x81/0x83.
+5. **BIOS load address fix (2026-02-07)**: Address calculated from BIOS size instead of hardcoded.
+6. **Memory allocation fix (2026-02-06)**: `vec![0; size]` instead of loop-based `push()` for large allocations.

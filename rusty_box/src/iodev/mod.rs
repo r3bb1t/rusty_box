@@ -121,6 +121,10 @@ pub struct BxDevicesC {
     ///
     /// These are not ASCII; they are diagnostic progress codes used by many BIOSes.
     port80_output: VecDeque<u8>,
+
+    /// Last I/O read port and value (for stuck-loop diagnostics)
+    pub last_io_read_port: u16,
+    pub last_io_read_value: u32,
 }
 
 impl Default for BxDevicesC {
@@ -149,6 +153,8 @@ impl BxDevicesC {
             pci_conf_addr: 0,
             port_e9_output: VecDeque::new(),
             port80_output: VecDeque::new(),
+            last_io_read_port: 0,
+            last_io_read_value: 0,
         }
     }
 
@@ -215,22 +221,28 @@ impl BxDevicesC {
     /// 
     /// # Returns
     /// The value read from the port
-    pub fn inp(&self, port: u16, io_len: u8) -> u32 {
+    pub fn inp(&mut self, port: u16, io_len: u8) -> u32 {
         let entry = &self.read_handlers[port as usize];
 
-        if let Some(handler) = entry.handler {
+        let value = if let Some(handler) = entry.handler {
             // Check if the requested I/O length is supported
             let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
             if (entry.mask & len_mask) != 0 {
-                return handler(entry.this_ptr, port, io_len);
+                handler(entry.this_ptr, port, io_len)
+            } else {
+                // Handler exists but mask doesn't match - log this
+                tracing::debug!("I/O read port={:#06x}: handler '{}' exists but mask={:#x} doesn't support len={}",
+                    port, entry.name, entry.mask, io_len);
+                self.default_read_handler(port, io_len)
             }
-            // Handler exists but mask doesn't match - log this
-            tracing::debug!("I/O read port={:#06x}: handler '{}' exists but mask={:#x} doesn't support len={}",
-                port, entry.name, entry.mask, io_len);
-        }
+        } else {
+            // Default: return all 1s for unhandled reads
+            self.default_read_handler(port, io_len)
+        };
 
-        // Default: return all 1s for unhandled reads
-        self.default_read_handler(port, io_len)
+        self.last_io_read_port = port;
+        self.last_io_read_value = value;
+        value
     }
 
     /// Write to an I/O port
@@ -339,8 +351,8 @@ mod tests {
 
     #[test]
     fn test_default_handlers() {
-        let devices = BxDevicesC::new();
-        
+        let mut devices = BxDevicesC::new();
+
         // Reading unhandled port should return 0xFF/0xFFFF/0xFFFFFFFF
         assert_eq!(devices.inp(0x1234, 1), 0xFF);
         assert_eq!(devices.inp(0x1234, 2), 0xFFFF);
@@ -368,6 +380,7 @@ mod tests {
 
         // dev1 should return custom value, dev2 should return default
         assert_eq!(dev1.inp(0x100, 1), 0x200);
+        let mut dev2 = dev2;
         assert_eq!(dev2.inp(0x100, 1), 0xFF);
     }
 }
