@@ -44,7 +44,11 @@
       "Bash(RUSTY_BOX_HEADLESS=1 timeout 5 ./target/release/examples/dlxlinux.exe:*)",
       "Bash(set:*)",
       "Bash(export RUSTY_BOX_HEADLESS=1:*)",
-      "Bash(RUST_LOG=rusty_box=debug RUSTY_BOX_HEADLESS=1 cargo run:*)"
+      "Bash(RUST_LOG=rusty_box=debug RUSTY_BOX_HEADLESS=1 cargo run:*)",
+      "Bash(/tmp/find_unchecked.py << 'EOF'\nimport re\n\nwith open\\(r\"C:\\\\Users\\\\Aslan\\\\claude_rusty_box\\\\rusty_box\\\\src\\\\cpu\\\\cpu.rs\", 'r'\\) as f:\n    lines = f.readlines\\(\\)\n\n# Lines with _m\\( calls\ntarget_lines = [2255, 2299, 2309, 2317, 2325, 2335, 2343, 2351, 2361, 2369, 2377, 2385, 2393, 2412, 2549, 2563, 2571, 2581, 3157, 3165, 3187, 3197, 3211, 3219, 3229, 3237, 3259, 3269, 3279, 3290, 3298, 3308, 3316, 3338, 3348, 3358, 3368, 3378, 3388, 3402, 3412, 3422, 3432, 3442, 3452, 3462, 3472, 3482, 3492, 3506, 3516, 3906, 3910, 3970, 3974, 3978, 3982, 3986]\n\nresults = []\n\nfor line_num in target_lines:\n    line_idx = line_num - 1  # 0-based indexing\n    \n    # Look back up to 15 lines for mod_c0\n    has_mod_c0 = False\n    start_idx = max\\(0, line_idx - 15\\)\n    \n    for i in range\\(start_idx, line_idx\\):\n        if 'mod_c0' in lines[i]:\n            has_mod_c0 = True\n            break\n    \n    if not has_mod_c0:\n        # Get the handler name and opcode\n        line_content = lines[line_idx].strip\\(\\)\n        opcode_line = None\n        for i in range\\(line_idx - 1, max\\(0, line_idx - 5\\), -1\\):\n            if 'Opcode::' in lines[i]:\n                opcode_line = lines[i].strip\\(\\)\n                break\n        \n        results.append\\(\\(line_num, opcode_line, line_content\\)\\)\n\nfor line_num, opcode, handler in results:\n    print\\(f\"Line {line_num}: {opcode}\"\\)\n    print\\(f\"  Handler: {handler}\"\\)\n    print\\(\\)\n\nEOF)",
+      "Bash(python3:*)",
+      "Bash(/tmp/better_check.sh:*)",
+      "Bash(bash:*)"
     ]
   }
 }
