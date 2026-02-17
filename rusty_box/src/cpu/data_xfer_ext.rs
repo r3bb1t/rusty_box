@@ -274,16 +274,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn mov_rb_ib(&mut self, instr: &BxInstructionGenerated) {
         let dst = instr.meta_data[0] as usize;
         let imm = instr.ib();
-        // Debug: log MOV AL, 0x0F (instruction for CMOS address selection)
-        if self.icount < 20 || (dst == 0 && (imm == 0x0f || imm == 0xc0)) {
-            tracing::info!(
-                "MOV r8, imm8 [#{}]: reg{} = {:#04x}, AL before={:#04x}",
-                self.icount,
-                dst,
-                imm,
-                self.al()
-            );
-        }
         self.set_gpr8(dst, imm);
         tracing::trace!("MOV: reg{} = {:#04x}", dst, imm);
     }
@@ -511,6 +501,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         );
     }
 
+    /// MOV r16, r/m16 (memory form)
+    /// Matching C++ data_xfer16.cc:58-65 MOV_GwEwM
     /// MOV r16, r/m16 (memory form)
     /// Matching C++ data_xfer16.cc:58-65 MOV_GwEwM
     pub fn mov_gw_ew_m(&mut self, instr: &BxInstructionGenerated) {

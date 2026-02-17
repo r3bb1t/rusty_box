@@ -217,15 +217,18 @@ impl BxDevicesC {
     /// The value read from the port
     pub fn inp(&self, port: u16, io_len: u8) -> u32 {
         let entry = &self.read_handlers[port as usize];
-        
+
         if let Some(handler) = entry.handler {
             // Check if the requested I/O length is supported
             let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
             if (entry.mask & len_mask) != 0 {
                 return handler(entry.this_ptr, port, io_len);
             }
+            // Handler exists but mask doesn't match - log this
+            tracing::debug!("I/O read port={:#06x}: handler '{}' exists but mask={:#x} doesn't support len={}",
+                port, entry.name, entry.mask, io_len);
         }
-        
+
         // Default: return all 1s for unhandled reads
         self.default_read_handler(port, io_len)
     }
@@ -260,7 +263,7 @@ impl BxDevicesC {
         if address == 0x00E9 {
             retval = 0xE9;
         } else {
-            tracing::trace!("Unhandled I/O read: port={:#06x}, len={}", address, io_len);
+            tracing::debug!("Unhandled I/O read: port={:#06x}, len={} -> 0xFF..F", address, io_len);
         }
 
         match io_len {

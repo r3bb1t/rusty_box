@@ -2991,6 +2991,90 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.rol_ew_cl(instr);
                 Ok(())
             }
+            Opcode::RolEwIb => {
+                self.rol_ew_cl(instr);
+                Ok(())
+            }
+            Opcode::RolEdI1 => {
+                self.rol_ed_1(instr);
+                Ok(())
+            }
+            Opcode::RolEd => {
+                self.rol_ed_cl(instr);
+                Ok(())
+            }
+            Opcode::RolEdIb => {
+                self.rol_ed_ib(instr);
+                Ok(())
+            }
+            Opcode::RorEbI1 => {
+                self.ror_eb_1(instr);
+                Ok(())
+            }
+            Opcode::RorEb => {
+                self.ror_eb_cl(instr);
+                Ok(())
+            }
+            Opcode::RorEbIb => {
+                self.ror_eb_cl(instr);
+                Ok(())
+            }
+            Opcode::RorEwI1 => {
+                self.ror_ew_1(instr);
+                Ok(())
+            }
+            Opcode::RorEw => {
+                self.ror_ew_cl(instr);
+                Ok(())
+            }
+            Opcode::RorEwIb => {
+                self.ror_ew_cl(instr);
+                Ok(())
+            }
+            Opcode::RorEdI1 => {
+                self.ror_ed_1(instr);
+                Ok(())
+            }
+            Opcode::RorEd => {
+                self.ror_ed_cl(instr);
+                Ok(())
+            }
+            Opcode::RorEdIb => {
+                self.ror_ed_ib(instr);
+                Ok(())
+            }
+            Opcode::SarEbI1 => {
+                self.sar_eb_1(instr);
+                Ok(())
+            }
+            Opcode::SarEb => {
+                self.sar_eb_cl(instr);
+                Ok(())
+            }
+            Opcode::SarEwI1 => {
+                self.sar_ew_1(instr);
+                Ok(())
+            }
+            Opcode::SarEw => {
+                self.sar_ew_cl(instr);
+                Ok(())
+            }
+            Opcode::SarEwIb => {
+                self.sar_ew_cl(instr);
+                Ok(())
+            }
+            Opcode::SarEdI1 => {
+                self.sar_ed_1(instr);
+                Ok(())
+            }
+            Opcode::SarEd => {
+                self.sar_ed_cl(instr);
+                Ok(())
+            }
+            Opcode::SarEdIb => {
+                self.sar_ed_cl(instr);
+                Ok(())
+            }
 
             // =========================================================================
             // Data transfer extensions
@@ -3009,6 +3093,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::XchgEdGd => {
                 self.xchg_ed_gd(instr);
+                Ok(())
+            }
+            Opcode::XchgErxEax => {
+                self.xchg_eax_rd(instr);
+                Ok(())
+            }
+            Opcode::XchgRxax => {
+                self.xchg_ax_rw(instr);
                 Ok(())
             }
             Opcode::Cbw => {

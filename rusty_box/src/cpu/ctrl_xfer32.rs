@@ -129,12 +129,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let new_eip = self.get_gpr32(dst);
         let eip = self.eip();
 
-        // Track ALL CALL instructions to see what's happening
-        tracing::error!(
-            "🔥 CALL: eip={:#x}, target={:#x}, dst_reg={} | EAX={:#x}",
-            eip, new_eip, dst, self.eax()
-        );
-
         self.push_32(eip);
         self.branch_near32(new_eip)?;
         tracing::trace!("CALL r/m32: EIP = {:#010x}, ret = {:#010x}", new_eip, eip);
@@ -147,21 +141,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// RET near - Return from procedure (32-bit)
     pub fn ret_near32(&mut self, _instr: &BxInstructionGenerated) -> Result<()> {
-        let current_eip = self.eip();
-        let esp_before = self.esp();
-
-        // Read what's on stack before popping
-        let stack_val = self.stack_read_dword(esp_before);
-
         let return_eip = self.pop_32();
-
-        if return_eip == 0 || return_eip > 0xfffff {
-            tracing::error!("RET near32 SUSPICIOUS: current_eip={:#x}, return_eip={:#x}, ESP before={:#x}, stack_val={:#x}",
-                current_eip, return_eip, esp_before, stack_val);
-        }
-
         self.branch_near32(return_eip)?;
-        tracing::trace!("RET near32: EIP = {:#010x}", return_eip);
         Ok(())
     }
 
@@ -440,15 +421,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         parse_selector(selector, &mut self.sregs[seg as usize].selector);
         let new_base = (selector as u64) << 4;
 
-        // Track CS loads for debugging CS.base corruption
-        if matches!(seg, BxSegregs::Cs) {
-            let old_base = unsafe { self.sregs[seg as usize].cache.u.segment.base };
-            tracing::error!(
-                "🔴 CS LOAD (real mode): selector={:#x}, old_base={:#x}, new_base={:#x}, EIP={:#x}, real_mode={}",
-                selector, old_base, new_base, self.eip(), self.real_mode()
-            );
-        }
-
         self.set_segment_base(seg, new_base);
     }
 
@@ -465,14 +437,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         if !self.real_mode() {
             // Protected mode: use jump_protected
-            tracing::error!("🟢 jmp_far32 CALLED: cs={:#06x}, disp={:#010x}, real_mode={}, cpu_mode={:?}, EIP={:#x}",
-                          cs_raw, disp32, self.real_mode(), self.cpu_mode, self.eip());
-            tracing::error!("🟢 Calling jump_protected");
             self.jump_protected(cs_raw, disp32 as u64)?;
         } else {
             // Real mode
-            tracing::error!("🟢 jmp_far32 real mode path: cs={:#06x}, disp={:#010x}, EIP={:#x}",
-                          cs_raw, disp32, self.eip());
             let limit = self.get_segment_limit(BxSegregs::Cs);
             if disp32 > limit {
                 tracing::error!("jmp_far32: offset {:#010x} outside of CS limits {:#010x}", disp32, limit);

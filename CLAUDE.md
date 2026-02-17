@@ -8,153 +8,57 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 ## Current BIOS Execution Status
 
-### ✅ INVESTIGATION COMPLETE (2026-02-09): Real Root Cause Found!
+### ✅ MAJOR BREAKTHROUGH (2026-02-16): BIOS-bochs-latest Runs Successfully!
 
-**DISCOVERY**: Far jump implementation is CORRECT! The actual bug is **corrupted symbol addresses** baked into the BIOS ROM files.
+**DISCOVERY**: The "corrupted BIOS symbol addresses" bug was NOT in the BIOS ROM files - it was caused by two emulator bugs:
 
-**What Actually Happens (Correct Flow!):**
-1. ✅ Real mode BIOS executes
-2. ✅ Far jump to 0x0010:0x000F9E5F (rombios32_05) - **Works correctly!**
-3. ✅ rombios32_05 initializes segments (DS, ES, SS, FS, GS)
-4. ✅ rombios32_05 pushes parameters (0x4B0, 0x4B2)
-5. ✅ `call 0xE0000` - Calls _start **indirectly** (not a far jump!)
-6. ✅ _start DOES execute - we see BSS clearing
-7. ❌ **_start uses WRONG symbol addresses** from ROM:
-   - ESI = 0xFFFF0700 (should be 0x000E416F for `_end`)
-   - EDI ≈ 0x1 (should be 0x70C for `__data_start`)
-8. ❌ .data section copied to wrong address (0x1 instead of 0x70C)
-9. ❌ Execution jumps to garbage (0x20000) → decoder fails → crash
+1. **Segment default bug**: `[BP+disp]` addressing modes were defaulting to DS instead of SS. Fixed by adding proper segment override lookup tables (`SREG_MOD00_RM16`, `SREG_MOD01OR10_RM16`, `SREG_MOD0_BASE32`, `SREG_MOD1OR2_BASE32`) in `fetchdecode32.rs`.
 
-**Root Cause:**
-Both BIOS ROM files (`BIOS-bochs-latest` and `BIOS-bochs-legacy`) were compiled with incorrect linker symbol values that don't match `rombios32.ld`. The `__data_start`, `__data_end`, `__bss_start`, and `_end` symbols have wrong addresses baked into the machine code.
+2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Evidence:**
-- ✅ Far jump handler executes: `JmpfAp HANDLER: os32_l=4, Id=0xf9e5f` (CORRECT!)
-- ✅ jump_protected called with cs=0x10, disp=0x000F9E5F (CORRECT!)
-- ✅ Execution at 0xE0000 detected: writes to low memory from _start
-- ❌ Writes go to address 0x1, not 0x70C (WRONG destination!)
-- ❌ ESI register = 0xFFFF0700 at crash (WRONG source pointer!)
+**Current Status:**
+- ✅ BIOS-bochs-latest (128 KB) is now the primary BIOS
+- ✅ Real mode BIOS executes ~362k instructions (keyboard init, memory probe, etc.)
+- ✅ Transitions to protected mode via far jump (CS=0x10, flat memory model)
+- ✅ rombios32 enters protected mode, _start executes with correct symbol addresses
+- ✅ BSS clearing + .data copy complete correctly
+- ✅ No unimplemented opcode errors
+- ❌ **Stuck in infinite loop** at ~363k instructions (RIP=0xE08C0, protected mode)
+- ❌ No BIOS output (ports 0xE9, 0x402, 0x403 silent; VGA memory untouched)
 
-**Solution Required:**
-Recompile BIOS from source with correct linker script, or use a different BIOS (SeaBIOS, coreboot).
+**What Fixed the "Corrupted Symbols":**
+The previous investigation concluded BIOS ROM had wrong symbol addresses. In reality, the segment default bug caused stack reads via `[BP+offset]` to use DS (base=0) instead of SS, and the execute1/execute2 swap caused memory reads to return register values. Together, these made the BIOS load wrong values for `_end`, `__data_start`, etc. With both bugs fixed, the BIOS reads correct values from the stack and memory.
 
-See `docs/FAR_JUMP_BUG_INVESTIGATION.md` for complete analysis.
+### Current Investigation: Infinite Loop at Protected Mode Entry (2026-02-17)
 
-### Progress Status (2026-02-07)
+**Execution timeline (measured by instruction count):**
+- 0-10: Real mode BIOS at F000:E0xx (initial setup)
+- 10-100: Drops into low-address subroutines (F000:0Cxx area = keyboard/PCI init)
+- ~360k: Real-mode init completes, BIOS enters protected mode
+- At 362k: RIP=0xE08C0, CS=0x0010, mode=protected - rombios32 executing
+- At ~363k: **Stuck in infinite loop** - likely polling an I/O port that never responds
 
-**Instructions Implemented This Session:**
-- ✅ `LEAVE` (LeaveOp16) - High level procedure exit (MOV SP,BP; POP BP)
-- ✅ `PUSH imm16` (PushIw) - Push 16-bit immediate
-- ✅ `PUSH imm8` (PushSIb16) - Push sign-extended 8-bit immediate
-- ✅ `CMP r/m16, r16` (CmpEwGw) - 16-bit comparison
-- 🔄 `ADD AX, imm16` (AddAxiw) - Next to implement
+**BIOS ROM shadow mapping bug found (partially fixed):**
+The `get_host_mem_addr` PCI path for addresses 0xE0000-0xFFFFF was using the expansion ROM formula (`a20_addr & EXROM_MASK + BIOSROMSZ`) instead of `bios_map_last128k()`. Fixed to correctly distinguish 0xE0000-0xFFFFF (BIOS shadow) from 0xC0000-0xDFFFF (expansion ROM).
 
-**Core Systems Verified:**
-- ✅ Memory subsystem correct (4 MB ROM allocation, proper is_bios handling)
-- ✅ BIOS ROM mapping (address calculation based on size)
-- ✅ Reset vector access (0xFFFFFFF0)
-- ✅ Decoder (no illegal opcode errors)
-- ✅ Tracing infrastructure (using tracing crate)
-
-### Key Findings (2026-02-06)
-
-**BIOS Compatibility:**
-- **BIOS-bochs-legacy (64 KB)**: ✅ Works with 32 MB RAM
-- **BIOS-bochs-latest (128 KB)**: ❌ Fails (uses ESP=0xFFFFFFF0 in ROM range)
-- **Root Cause**: Modern BIOS expects 4GB+ RAM for high-address stack
-
-### Major Investigation (2026-02-03)
-
-**Memory System Verification:**
-- **Task:** Investigate apparent "stack corruption" where PUSH writes 0x0 but POP reads 0x6c6c0000
-- **Method:** Line-by-line comparison with original Bochs C++ source (cpp_orig/bochs/memory/misc_mem.cc)
-- **Finding:** All memory behavior is CORRECT and matches Bochs exactly
-- **Root Cause:** BIOS sets ESP=0xFFFFFFF0 which points to BIOS ROM (>= 0xFFFF0000), not RAM
-- **Behavior:** Writes to ROM are vetoed (correct), reads return ROM data (correct)
-- **Result:** Stack operations read/write ROM, causing garbage return addresses
-- **Documentation:** See docs/MEMORY_AND_STACK_INVESTIGATION.md for full analysis
-
-**Key Insight:** The emulator is working correctly. The issue is that the BIOS has not properly initialized its stack to point to valid RAM.
-
-### Major Fixes (2026-02-02)
-
-**Decoder Bug Fix:**
-- **Problem:** ModRM byte parsing incorrectly stored `reg` field instead of `r/m` field for Group 1 instructions (0x80, 0x81, 0x83)
-- **Impact:** `SUB ESP, 0x400` was modifying EBP instead of ESP, causing complete stack corruption
-- **Fix:** Added 0x80, 0x81, 0x83 to `is_group_opcode` list in both `fetchdecode32.rs` and `fetchdecode64.rs`
-- **Result:** Function calls/returns now work correctly, BIOS executes much further
-
-### Recently Implemented Instructions (2026-02-02)
-
-**Data Transfer:**
-- `MOVZX r32, r/m8` (MovzxGdEb) - Move byte to dword with zero extension
-- `MOVZX r32, r/m16` (MovzxGdEw) - Move word to dword with zero extension
-- `MOV EAX, moffs32` (MovEaxod) - Load EAX from memory at direct address
-- `MOV moffs32, EAX` (MovOdEax) - Store EAX to memory at direct address
-
-**Shift Instructions (Double Precision):**
-- `SHLD r32, r32, imm8` (ShldEdGdIb) - Shift left double precision with immediate
-- `SHLD r32, r32, CL` (ShldEdGd) - Shift left double precision with CL
-- `SHRD r32, r32, imm8` (ShrdEdGdIb) - Shift right double precision with immediate
-- `SHRD r32, r32, CL` (ShrdEdGd) - Shift right double precision with CL
-- `SHR r32, imm8` (ShrEdIb) - Logical shift right with immediate
-
-**Arithmetic (8-bit):**
-- `INC r/m8` (IncEb) - Increment 8-bit register/memory by 1
-- `DEC r/m8` (DecEb) - Decrement 8-bit register/memory by 1
-
-**CPU Identification:**
-- `CPUID` - Returns CPU vendor, family, and feature flags (basic implementation)
-
-### Previously Implemented Instructions (2026-02-01)
-
-**Stack Operations (32-bit):**
-- `PUSH imm32` (PushId) - Push 32-bit immediate value onto stack
-- `PUSH imm8` (PushSIb32) - Push sign-extended 8-bit immediate
-
-**Arithmetic (32-bit):**
-- `ADD r32, imm8` (AddEdsIb) - Add sign-extended 8-bit immediate to r32
-- `ADD r32, imm32` (AddEdId) - Add 32-bit immediate to r32
-- `SUB r32, imm8` (SubEdsIb) - Subtract sign-extended 8-bit immediate from r32
-- `SUB r32, imm32` (SubEdId) - Subtract 32-bit immediate from r32
-- `CMP r32, imm8` (CmpEdsIb) - Compare r32 with sign-extended 8-bit immediate
-
-**Logical (32-bit):**
-- `AND r32, imm8` (AndEdsIb) - Bitwise AND r32 with sign-extended 8-bit immediate
-
-**Control Flow:**
-- `JNZ rel8` (JnzJbd) - Jump if not zero (byte displacement)
-- `JZ rel8` (JzJbd) - Jump if zero (byte displacement)
-
-**Data Transfer:**
-- `MOVSX r32, r/m8` (MovsxGdEb) - Move byte to dword with sign extension
+**Next step:** Add I/O port access logging around instruction 362k to identify which port the BIOS is polling in the infinite loop. Common culprits: PCI config space (0xCFC/0xCF8), CMOS (0x71 UIP flag), keyboard controller (0x64 status).
 
 ## Known Issues & Next Steps
 
-### Current Limitation
-The BIOS executes successfully for an extended period but eventually hits an illegal opcode (FE /7) at RIP 0xe1d59. This appears to be either:
-1. A control flow issue causing execution of data as code
-2. Missing exception handling - real x86 would trigger #UD (Undefined Instruction) fault
-3. A rare BIOS code path that expects exception handling
-
-**BIOS Output Observed:**
-```
-[cpu_loop start] ea 5b e0 00 f0 30 35 2f
-```
-This is not an actual bios output! It's an output caused by hardocded code in emulator. Need to ivestigate why there's no bios output
-
 ### Next Steps
-1. **Implement Exception Handling** - Add #UD (Undefined Instruction) fault support
-2. **Add Execution Tracing** - Better logging to identify what causes jump to 0xe1d59
-3. **Implement Remaining Common Instructions** - As they're discovered
-4. **Boot Sector Loading** - Once BIOS completes POST, load and execute boot sector
+1. **Fix infinite loop at protected mode entry** - Add I/O port logging to identify the polling port, then implement proper device response
+2. **Implement remaining instructions** - As discovered by running the emulator further
+3. **Boot sector loading** - Once BIOS completes POST, load and execute boot sector
 
 ### Progress Metrics
-- ✅ Decoder bug fixed (Group 1 opcodes 0x80, 0x81, 0x83)
-- ✅ Stack operations working correctly
-- ✅ 10+ new instructions implemented in this session
-- ✅ BIOS produces output to debug ports
-- ✅ Executes continuously without crashes (until hitting illegal opcode)
+- ✅ All major decoder bugs fixed (Group 1 opcodes, segment defaults, execute1/execute2)
+- ✅ Protected mode transition works (far jump, GDT, segment loading)
+- ✅ rombios32 initialization executes with correct symbols
+- ✅ No unimplemented opcode errors (all needed opcodes implemented)
+- ✅ Extensive instruction set coverage (arithmetic, logical, shift, rotate, control flow, data transfer, string ops)
+- ✅ Debug instrumentation cleaned up (no more WARN/ERROR spam in hot paths)
+- ❌ BIOS enters infinite loop immediately after entering protected mode
+- ❌ No BIOS text output yet
 
 ## Build Commands
 
@@ -334,45 +238,34 @@ Uses `thiserror` with root `Error` enum in `src/error.rs` aggregating:
 
 ## Known Issues
 
+### Infinite Loop After Protected Mode Entry (2026-02-17)
+
+**Status:** Under investigation
+
+BIOS enters protected mode at ~362k instructions (CS=0x10, RIP=0xE08C0) but immediately enters an infinite loop at ~363k instructions. The loop is likely polling an I/O port. Need to add I/O port access logging to identify the port and implement proper device response.
+
+### BIOS ROM Shadow Mapping (2026-02-17)
+
+**Status:** Partially fixed
+
+Found that `get_host_mem_addr` PCI path for 0xE0000-0xFFFFF used wrong ROM offset formula. Fixed to use `bios_map_last128k()` which maps shadow addresses to the last 128KB of the 4MB ROM array. Three locations in `misc_mem.rs` were corrected. The real-mode BIOS execution was NOT affected (it took an earlier correct code path), but protected-mode code that accesses the BIOS shadow area now gets correct data.
+
 ### Decoder Bug: Group 3a/3b Immediate Size (2026-02-02)
 
-**Status:** Identified, not yet fixed
+**Status:** Identified, not yet fixed (may no longer be hit with current BIOS path)
 
-The decoder fails to account for immediate bytes in TEST instructions (opcodes 0xF6 and 0xF7 with ModRM.nnn=0 or 1):
-
-**Problem:** In `fetchdecode32.rs`, `get_immediate_size_32()` returns 0 for opcode 0xF6/0xF7, but TEST variants need a 1-byte immediate.
-
-**Impact:** Instruction length miscalculation causes RIP misalignment. BIOS execution fails with "illegal opcode" at 0xe1d59 after hitting misaligned TEST instruction at 0xe1d44.
-
-**Example:**
-```
-0xe1d44: f6 05 31 07 00 00 02  = TEST BYTE PTR [0x731], 0x02
-Correct length: 7 bytes (opcode + ModRM + disp32 + imm8)
-Decoder calculates: 6 bytes (missing immediate!)
-```
-
-**Fix:** Add 0xF6/0xF7 to immediate size handling, with conditional check for ModRM.nnn field (only /0 and /1 have immediates).
-
-**See:** `DECODER_BUG_F6_IMMEDIATE.md` for detailed analysis
+The decoder fails to account for immediate bytes in TEST instructions (opcodes 0xF6 and 0xF7 with ModRM.nnn=0 or 1). Impact: instruction length miscalculation causes RIP misalignment. This was the original cause of BIOS crashes at 0xe1d59 with the legacy BIOS, but may not be triggered by the current BIOS-bochs-latest execution path.
 
 ### Exception Handling (2026-02-02)
 
 **Status:** Partially implemented
 
-Exception handling infrastructure added:
-- `Exception` enum with all x86 exception vectors (cpu.rs:237)
-- `exception()` method to generate exceptions (exception.rs:243)
-- `#UD` (Undefined Instruction) exception detection in icache (icache.rs:630)
-- Real mode exception delivery via IVT works
-- Protected mode requires IDT to be initialized
+Exception handling infrastructure exists (Exception enum, IVT delivery in real mode). Protected mode IDT delivery needs work - currently fails with `BadVector` when IDT limit=0.
 
-**Current limitation:** When BIOS runs in protected mode with uninitialized IDT (limit=0), exception delivery fails with `BadVector` error. Need to either:
-1. Implement IDT fallback to real mode IVT
-2. Allow exceptions to proceed even with IDT.limit=0
-3. Fix the underlying decoder bug so exceptions aren't triggered
+### Major Bug Fixes (Historical)
 
-### BIOS Output
-
-**Current behavior:** BIOS executes 80,000+ instructions in protected mode before hitting decoder bug. No readable text output appears on VGA or debug ports (0xE9, 0x402, 0x403) - only hex bytes.
-
-**Reason:** BIOS crashes due to decoder bug before reaching output-generating code.
+1. **Segment default fix (2026-02-16)**: `[BP+disp]` was using DS instead of SS. Fixed with lookup tables in `fetchdecode32.rs`.
+2. **execute1/execute2 fix (2026-02-16)**: 18 opcodes had memory/register handler forms swapped in `opcodes_table.rs`.
+3. **Group 1 decoder fix (2026-02-02)**: ModRM `reg` field stored instead of `r/m` for opcodes 0x80/0x81/0x83.
+4. **BIOS load address fix (2026-02-07)**: Address calculated from BIOS size instead of hardcoded.
+5. **Memory allocation fix (2026-02-06)**: `vec![0; size]` instead of loop-based `push()` for large allocations.

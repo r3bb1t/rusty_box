@@ -739,32 +739,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn mem_read_dword(&self, addr: u64) -> u32 {
         let lo = self.mem_read_word(addr) as u32;
         let hi = self.mem_read_word(addr + 2) as u32;
-        let value = lo | (hi << 16);
-
-        // Debug logging for problematic address range
-        if (addr >= 0xfffffb80 && addr <= 0xfffffc00) ||
-           (addr >= 0xffffffe0 && addr <= 0xfffffff0) {
-            let bogus_offset = (addr & 0xfff) as usize;
-            tracing::error!("📖 MEM_READ_DWORD: addr={:#x}, bogus_offset={:#x}, value={:#x}, eip={:#x}",
-                addr, bogus_offset, value, self.eip());
-        }
-
-        value
+        lo | (hi << 16)
     }
 
     pub(super) fn mem_write_dword(&mut self, addr: u64, value: u32) {
-        // Log ALL writes to low RAM (first 4KB) to track data section copy
-        if addr < 0x1000 {
-            tracing::warn!("💾 MEM_WRITE_DWORD: addr={:#x}, value={:#x}", addr, value);
-        }
-
-        // Debug logging for problematic address range
-        if (addr >= 0xfffffb80 && addr <= 0xfffffc00) ||
-           (addr >= 0xffffffe0 && addr <= 0xfffffff0) {
-            let bogus_offset = (addr & 0xfff) as usize;
-            tracing::error!("💾 MEM_WRITE_DWORD: addr={:#x}, bogus_offset={:#x}, value={:#x}, eip={:#x}",
-                addr, bogus_offset, value, self.eip());
-        }
         self.mem_write_word(addr, value as u16);
         self.mem_write_word(addr + 2, (value >> 16) as u16);
     }

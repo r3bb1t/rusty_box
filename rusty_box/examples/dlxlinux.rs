@@ -114,21 +114,19 @@ fn run_dlxlinux() -> Result<()> {
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
     let bios_paths = [
-        // MUST use BIOS-bochs-legacy (64KB) with 32 MB RAM
-        // BIOS-bochs-latest (128KB) uses ESP=0xFFFFFFF0 which doesn't work with <4GB RAM
-        // See MEMORY.md for detailed analysis
-        workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-legacy"),
+        // Prefer BIOS-bochs-latest (128KB) - the modern BIOS
         workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-latest"),
+        workspace_root.join("cpp_orig/bochs/bios/BIOS-bochs-legacy"),
         workspace_root.join("cpp_orig/bochs/bios/bios.bin-1.13.0"),
         // Fallbacks (if user has BIOS copied elsewhere)
-        workspace_root.join("BIOS-bochs-legacy"),
         workspace_root.join("BIOS-bochs-latest"),
+        workspace_root.join("BIOS-bochs-legacy"),
         workspace_root.join("bios.bin-1.13.0"),
+        workspace_root.join("../cpp_orig/bochs/bios/BIOS-bochs-latest"),
         workspace_root.join("../cpp_orig/bochs/bios/BIOS-bochs-legacy"),
-        workspace_root.join("../BIOS-bochs-legacy"),
-        std::path::PathBuf::from("BIOS-bochs-legacy"),
-        std::path::PathBuf::from("../cpp_orig/bochs/bios/BIOS-bochs-legacy"),
-        std::path::PathBuf::from("../BIOS-bochs-legacy"),
+        workspace_root.join("../BIOS-bochs-latest"),
+        std::path::PathBuf::from("BIOS-bochs-latest"),
+        std::path::PathBuf::from("../cpp_orig/bochs/bios/BIOS-bochs-latest"),
     ];
 
     let vga_bios_paths = [
@@ -419,8 +417,10 @@ fn run_dlxlinux() -> Result<()> {
     let start_time = Instant::now();
 
     // Run with instruction limit to allow debugging
-    const MAX_INSTRUCTIONS: u64 = 50_000_000; // 50M instructions - BIOS needs time to initialize
-                                              // BIOS + VGABIOS can take hundreds of millions of instructions to reach visible VGA output.
+    let MAX_INSTRUCTIONS: u64 = std::env::var("MAX_INSTRUCTIONS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50_000_000); // 50M instructions default
 
     // Use interactive loop that handles GUI events
     let result = emu.run_interactive(MAX_INSTRUCTIONS);
@@ -466,8 +466,10 @@ fn run_dlxlinux() -> Result<()> {
 
     println!("╠════════════════════════════════════════════════════════════╣");
     println!(
-        "║  Final RIP:   {:#018x}                          ║",
-        emu.cpu.rip()
+        "║  Final RIP:   {:#018x}  CS={:04x} mode={}          ║",
+        emu.cpu.rip(),
+        emu.cpu.get_cs_selector(),
+        emu.cpu.get_cpu_mode()
     );
     println!(
         "║  EAX={:08x} EBX={:08x} ECX={:08x} EDX={:08x}  ║",

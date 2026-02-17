@@ -632,17 +632,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
-        let is_real_mode = self.real_mode();
-        tracing::error!("🔵 jmp_far16 CALLED: cs={:#06x}, disp={:#06x}, real_mode={}, cpu_mode={:?}, EIP={:#x}",
-                      cs_raw, disp16, is_real_mode, self.cpu_mode, self.eip());
-
-        if !is_real_mode {
+        if !self.real_mode() {
             // Protected mode - use jump_protected
-            tracing::error!("🔵 Calling jump_protected");
             self.jump_protected(cs_raw, disp16 as u64)?;
         } else {
             // Real mode
-            tracing::error!("🔵 jmp_far16 real mode path: cs={:#06x}, disp={:#06x}", cs_raw, disp16);
             let limit = self.get_segment_limit(BxSegregs::Cs);
             if (disp16 as u32) > limit {
                 tracing::error!("jmp_far16: offset {:#06x} outside of CS limits {:#010x}", disp16, limit);

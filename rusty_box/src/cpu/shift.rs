@@ -542,9 +542,91 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
+    // 32-bit ROL/ROR
+    // =========================================================================
+
+    /// ROL r/m32, 1
+    pub fn rol_ed_1(&mut self, instr: &BxInstructionGenerated) {
+        let (op1, laddr) = self.shift_read32(instr);
+        let result = op1.rotate_left(1);
+        self.shift_write32(instr, laddr, result);
+
+        let cf = result & 1 != 0;
+        let of = ((result ^ (result >> 31)) & 1) != 0;
+        self.set_cf_of(cf, of);
+    }
+
+    /// ROL r/m32, CL
+    pub fn rol_ed_cl(&mut self, instr: &BxInstructionGenerated) {
+        let count = self.cl() & 0x1F;
+        if count == 0 { return; }
+
+        let (op1, laddr) = self.shift_read32(instr);
+        let result = op1.rotate_left(count as u32);
+        self.shift_write32(instr, laddr, result);
+
+        let cf = result & 1 != 0;
+        let of = if count == 1 { ((result ^ (result >> 31)) & 1) != 0 } else { false };
+        self.set_cf_of(cf, of);
+    }
+
+    /// ROL r/m32, imm8
+    pub fn rol_ed_ib(&mut self, instr: &BxInstructionGenerated) {
+        let count = (instr.ib() & 0x1F) as u32;
+        if count == 0 { return; }
+
+        let (op1, laddr) = self.shift_read32(instr);
+        let result = op1.rotate_left(count);
+        self.shift_write32(instr, laddr, result);
+
+        let cf = result & 1 != 0;
+        let of = if count == 1 { ((result ^ (result >> 31)) & 1) != 0 } else { false };
+        self.set_cf_of(cf, of);
+    }
+
+    /// ROR r/m32, 1
+    pub fn ror_ed_1(&mut self, instr: &BxInstructionGenerated) {
+        let (op1, laddr) = self.shift_read32(instr);
+        let result = op1.rotate_right(1);
+        self.shift_write32(instr, laddr, result);
+
+        let cf = (result & 0x80000000) != 0;
+        let of = ((result ^ (result << 1)) & 0x80000000) != 0;
+        self.set_cf_of(cf, of);
+    }
+
+    /// ROR r/m32, CL
+    pub fn ror_ed_cl(&mut self, instr: &BxInstructionGenerated) {
+        let count = self.cl() & 0x1F;
+        if count == 0 { return; }
+
+        let (op1, laddr) = self.shift_read32(instr);
+        let result = op1.rotate_right(count as u32);
+        self.shift_write32(instr, laddr, result);
+
+        let cf = (result & 0x80000000) != 0;
+        let of = if count == 1 { ((result ^ (result << 1)) & 0x80000000) != 0 } else { false };
+        self.set_cf_of(cf, of);
+    }
+
+    /// ROR r/m32, imm8
+    pub fn ror_ed_ib(&mut self, instr: &BxInstructionGenerated) {
+        let count = (instr.ib() & 0x1F) as u32;
+        if count == 0 { return; }
+
+        let (op1, laddr) = self.shift_read32(instr);
+        let result = op1.rotate_right(count);
+        self.shift_write32(instr, laddr, result);
+
+        let cf = (result & 0x80000000) != 0;
+        let of = if count == 1 { ((result ^ (result << 1)) & 0x80000000) != 0 } else { false };
+        self.set_cf_of(cf, of);
+    }
+
+    // =========================================================================
     // Flag update helpers
     // =========================================================================
-    
+
     fn update_flags_shl8(&mut self, result: u8, cf: bool, of: bool) {
         self.update_flags_logic8(result);
         self.set_cf_of(cf, of);

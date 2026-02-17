@@ -49,13 +49,6 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         let dword1 = (qword & 0xFFFFFFFF) as u32;
         let dword2 = ((qword >> 32) & 0xFFFFFFFF) as u32;
 
-        // Debug: log descriptor fetch for CS (selector index 2 = selector 0x10)
-        if selector.index == 2 && selector.ti == 0 {
-            tracing::error!(
-                "🔍 GDT fetch: selector={:#x}, index={}, offset={:#x}, dword1={:#x}, dword2={:#x}",
-                selector.value, selector.index, offset, dword1, dword2
-            );
-        }
 
         Ok((dword1, dword2))
     }
@@ -95,13 +88,6 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             let mut base = ((dword1 >> 16) as u64) | (((dword2 & 0xFF) as u64) << 16);
             base |= ((dword2 & 0xFF000000) as u64) << 8;
 
-            // Debug: log descriptor parsing for code segments
-            if (r#type & 0x8) != 0 { // bit 3 = 1 means code segment
-                tracing::error!(
-                    "🔍 Descriptor parse: dword1={:#x}, dword2={:#x}, base={:#x}, limit={:#x}, type={:#x}, p={}, dpl={}",
-                    dword1, dword2, base, limit, r#type, p, dpl
-                );
-            }
 
             let g = (dword2 & 0x00800000) != 0;
             let d_b = (dword2 & 0x00400000) != 0;
@@ -457,15 +443,6 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         descriptor: &mut BxDescriptor,
         cpl: u8,
     ) -> Result<()> {
-        // Track CS loads for debugging
-        let desc_base = unsafe { descriptor.u.segment.base };
-        let old_cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-        tracing::error!(
-            "🔴 CS LOAD (protected): selector={:#x}, old_base={:#x}, new_base={:#x}, EIP={:#x}, p={}, dpl={}, type={:#x}",
-            selector.value, old_cs_base, desc_base, self.eip(),
-            descriptor.p, descriptor.dpl, descriptor.r#type
-        );
-
         // Add cpl to the selector value
         selector.value = (selector.value & 0xFFFC) | cpl as u16;
         selector.rpl = cpl;
@@ -522,8 +499,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         cs_raw: u16,
         disp: u64,
     ) -> Result<()> {
-        tracing::error!("⚡ jump_protected CALLED: cs={:#06x}, disp={:#010x}, EIP={:#x}", cs_raw, disp, self.eip());
-        tracing::info!("jump_protected: cs={:#06x}, disp={:#010x}", cs_raw, disp);
+        tracing::trace!("jump_protected: cs={:#06x}, disp={:#010x}", cs_raw, disp);
 
         // Selector must not be null
         if (cs_raw & 0xFFFC) == 0 {

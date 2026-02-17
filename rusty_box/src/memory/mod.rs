@@ -123,6 +123,20 @@ impl BxMemC<'_> {
         self.a20_mask = mask;
     }
 
+    /// Peek at raw RAM bytes (no A20 masking, no memory handlers).
+    /// Returns a slice of up to `len` bytes starting at `addr`, or empty if out of bounds.
+    pub fn peek_ram(&self, addr: usize, len: usize) -> &[u8] {
+        let stub = &self.inherited_memory_stub;
+        let real_addr = stub.vector_offset + addr;
+        let ram = &stub.actual_vector;
+        if real_addr < ram.len() {
+            let end = (real_addr + len).min(ram.len());
+            &ram[real_addr..end]
+        } else {
+            &[]
+        }
+    }
+
     /// Get the current A20 mask
     pub fn a20_mask(&self) -> BxPhyAddress {
         self.a20_mask

@@ -140,26 +140,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
     #[inline]
     pub fn set_sp(&mut self, val: u16) {
-        let old_sp = unsafe { self.gen_reg[4].word.rx };
-
-        // Track when SP changes from initial 0x7000
-        if old_sp == 0x7000 && val != 0x7000 {
-            tracing::warn!("SP changed from initial 0x7000 to {:#x} at RIP={:#x}",
-                val, self.rip());
-        }
-
-        // Track SP corruption: log significant changes
-        if old_sp > 0x1000 && val < 0x100 {
-            tracing::error!("SP CORRUPTION! {:#x} -> {:#x} at RIP={:#x}",
-                old_sp, val, self.rip());
-        }
-
-        // Debug: detect when SP becomes 0 (indicates stack corruption)
-        if val == 0 && old_sp != 0 {
-            tracing::warn!("SP set to 0! Previous SP was {:#x}, RIP={:#x}",
-                old_sp, self.rip());
-        }
-
         self.gen_reg[4].word.rx = val
     }
     #[inline]
@@ -247,14 +227,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
     #[inline]
     pub fn set_esp(&mut self, val: u32) {
-        let old_esp = unsafe { self.gen_reg[4].dword.erx };
-
-        // Track when ESP/SP changes from initial 0x7000
-        if (old_esp & 0xFFFF) == 0x7000 && (val & 0xFFFF) != 0x7000 {
-            tracing::warn!("ESP/SP changed from initial 0x7000 to {:#x} (SP={:#x}) at RIP={:#x}",
-                val, val & 0xFFFF, self.rip());
-        }
-
         self.gen_reg[4].dword.erx = val
     }
     #[inline]
@@ -284,15 +256,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // High bits are cleared later in prefetch() via BX_CLEAR_64BIT_HIGH(BX_64BIT_REG_RIP)
         // See cpp_orig/bochs/cpu/cpu.cc:648 and ctrl_xfer16.cc:38
 
-        // Debug: log when EIP is set to 0 (potential issue indicator)
-        if val == 0 && (self.boot_debug_flags & 0x20) == 0 {
-            self.boot_debug_flags |= 0x20;
-            let old_eip = unsafe { self.gen_reg[BX_32BIT_REG_EIP].dword.erx };
-            let ss = self.sregs[super::decoder::BxSegregs::Ss as usize].selector.value;
-            let sp = self.get_gpr16(4);
-            tracing::warn!("set_eip(0) called! old_eip={:#x}, SS:SP={:04x}:{:04x}", old_eip, ss, sp);
-        }
-
         self.gen_reg[BX_32BIT_REG_EIP].dword.erx = val;
         // Note: We do NOT clear high bits here to match C++ behavior
         // High bits will be cleared in prefetch() via bx_clear_64bit_high()
@@ -305,6 +268,20 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     #[inline]
     pub fn set_tmp_32(&mut self, val: u32) {
         self.gen_reg[BX_TMP_REGISTER].dword.erx = val
+    }
+
+    /// Get current CPU mode (for diagnostics)
+    /// 0=real, 1=v8086, 2=protected, 3=compat, 4=long64
+    #[inline]
+    pub fn get_cpu_mode(&self) -> u8 {
+        // CpuMode doesn't implement Copy, so read the discriminant directly
+        unsafe { *(&self.cpu_mode as *const _ as *const u8) }
+    }
+
+    /// Get CS selector value (for diagnostics)
+    #[inline]
+    pub fn get_cs_selector(&self) -> u16 {
+        self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value
     }
 
     // getters for 64 bit general registers

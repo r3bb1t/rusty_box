@@ -200,15 +200,15 @@ impl BxKeyboardC {
                 self.status &= !(KBD_STATUS_OBF | KBD_STATUS_AUXB);
                 self.irq1_pending = false;
                 self.irq12_pending = false;
-                
+
                 // Load next byte from keyboard/mouse buffer
                 self.update_output_buffer();
-                
-                tracing::trace!("Keyboard: Read data = {:#04x}", data);
+
+                tracing::debug!("Keyboard: Read data port 0x60 = {:#04x}, status now = {:#04x}", data, self.status);
                 data as u32
             }
             KBD_STATUS_PORT => {
-                tracing::trace!("Keyboard: Read status = {:#04x}", self.status);
+                tracing::trace!("Keyboard: Read status port 0x64 = {:#04x}", self.status);
                 self.status as u32
             }
             SYSTEM_CONTROL_B => {
@@ -233,7 +233,7 @@ impl BxKeyboardC {
                 self.write_data(value);
             }
             KBD_COMMAND_PORT => {
-                tracing::trace!("Keyboard: Write command = {:#04x}", value);
+                tracing::debug!("Keyboard: Write command port 0x64 = {:#04x}", value);
                 self.write_command(value);
             }
             SYSTEM_CONTROL_B => {

@@ -91,57 +91,32 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if self.is_stack_32bit() {
             let esp = self.esp();
             let new_esp = esp.wrapping_sub(4);
-            let ss_base = unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.base };
-            let laddr = self.get_laddr32(BxSegregs::Ss as usize, new_esp);
-
-            if (new_esp >= 0xffffffe0 && new_esp <= 0xfffffff0) ||
-               (new_esp >= 0xfffffb80 && new_esp <= 0xfffffc00) {
-                tracing::error!("🟢 PUSH32: value={:#x}, ESP {:#x}->{:#x}, ss_base={:#x}, laddr={:#x}, eip={:#x}",
-                    value, esp, new_esp, ss_base, laddr, self.eip());
-            }
-
             self.stack_write_dword(new_esp, value);
             self.set_esp(new_esp);
-            tracing::warn!("PUSH32: value {:#x}, ESP {:#x} -> {:#x}", value, esp, new_esp);
         } else {
             let sp = self.sp();
             let new_sp = sp.wrapping_sub(4);
             self.stack_write_dword(new_sp as u32, value);
             self.set_sp(new_sp);
-            tracing::warn!("PUSH32: value {:#x}, SP {:#x} -> {:#x}", value, sp, new_sp);
         }
-        tracing::trace!("PUSH32: value {:#x} written to stack", value);
     }
 
     /// Pop a 32-bit value from the stack
     /// Based on BX_CPU_C::pop_32 in stack.h:105
     pub fn pop_32(&mut self) -> u32 {
-        let value = if self.is_stack_32bit() {
+        if self.is_stack_32bit() {
             let esp = self.esp();
-            let ss_base = unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.base };
-            let laddr = self.get_laddr32(BxSegregs::Ss as usize, esp);
             let value = self.stack_read_dword(esp);
             let new_esp = esp.wrapping_add(4);
-
-            if (esp >= 0xffffffe0 && esp <= 0xfffffff0) ||
-               (esp >= 0xfffffb80 && esp <= 0xfffffc00) {
-                tracing::error!("🔵 POP32: value={:#x}, ESP {:#x}->{:#x}, ss_base={:#x}, laddr={:#x}, eip={:#x}",
-                    value, esp, new_esp, ss_base, laddr, self.eip());
-            }
-
             self.set_esp(new_esp);
-            tracing::warn!("POP32: value {:#x} from ESP {:#x} -> {:#x}", value, esp, new_esp);
             value
         } else {
             let sp = self.sp();
             let value = self.stack_read_dword(sp as u32);
             let new_sp = sp.wrapping_add(4);
             self.set_sp(new_sp);
-            tracing::warn!("POP32: value {:#x} from SP {:#x} -> {:#x}", value, sp, new_sp);
             value
-        };
-        tracing::trace!("POP32: value {:#x} read from stack", value);
-        value
+        }
     }
 
     // =========================================================================

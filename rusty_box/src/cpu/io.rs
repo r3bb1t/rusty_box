@@ -34,11 +34,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn out_ib_al(&mut self, instr: &BxInstructionGenerated) {
         let port = instr.ib() as u16;
         let value = self.al();
-        // Debug: log early BIOS I/O (first 20 instructions or important ports)
-        if self.icount < 20 || port == 0x70 || port == 0x71 || port == 0x0D || port == 0xDA || port == 0xD4 || port == 0xD6 {
-            tracing::info!("OUT {:#04x}, AL ({:#04x}) [instr #{}] EIP={:#x}",
-                port, value, self.icount, self.eip());
-        }
         self.port_out(port, value as u32, 1);
         tracing::trace!("OUT {:#x}, AL ({:#x})", port, value);
     }
@@ -64,13 +59,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let port = self.dx();
         let value = self.port_in(port, 1) as u8;
         self.set_al(value);
-
-        // Log I/O if we're near the problematic RIP or at common ports
-        let rip = self.rip();
-        if (rip >= 0x970 && rip <= 0x9a0) || self.icount % 1_000_000 == 0 {
-            tracing::warn!("🔌 IN AL, DX ({:#x}) -> {:#x} at RIP={:#x}", port, value, rip);
-        }
-
         tracing::trace!("IN AL, DX ({:#x}) -> {:#x}", port, value);
     }
 
@@ -94,18 +82,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn out_dx_al(&mut self, _instr: &BxInstructionGenerated) {
         let port = self.dx();
         let value = self.al();
-
-        // Log ALL port output during early boot for debugging
-        if self.icount < 1000000 {
-            if value >= 0x20 && value < 0x7F {
-                // Printable ASCII
-                tracing::info!("OUT DX: port {:#x}, char '{}' ({:#x})", port, value as char, value);
-            } else {
-                // Non-printable
-                tracing::info!("OUT DX: port {:#x}, byte {:#x}", port, value);
-            }
-        }
-
         self.port_out(port, value as u32, 1);
         tracing::trace!("OUT DX ({:#x}), AL ({:#x})", port, value);
     }
@@ -139,16 +115,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if let Some(io_bus) = self.io_bus {
             // SAFETY: `io_bus` is set by the emulator for the duration of execution
             // and cleared afterwards. Single-CPU execution avoids concurrent access.
-            return unsafe { io_bus.as_ref().inp(port, len) };
+            let value = unsafe { io_bus.as_ref().inp(port, len) };
+            tracing::trace!("port_in: port={:#06x} len={} -> {:#x}", port, len, value);
+            return value;
         }
 
         // Fallback (no bus wired)
-        match len {
+        let value = match len {
             1 => 0xFF,
             2 => 0xFFFF,
             4 => 0xFFFFFFFF,
             _ => 0xFF,
-        }
+        };
+        tracing::trace!("port_in (no bus): port={:#06x} len={} -> {:#x}", port, len, value);
+        value
     }
 
     /// Write to I/O port.

@@ -706,7 +706,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             "[Emulator] Starting execution... (instructions will be processed in batches)"
         );
 
-        use std::collections::HashSet;
+        // Progress tracking: detect stuck loops
+        let mut last_rip: u64 = u64::MAX;
+        let mut stuck_count: u32 = 0;
+        let mut stuck_reported = false;
         while instructions_executed < max_instructions {
             // 1. Handle GUI events (keyboard input) - do this first to avoid borrow conflicts
 
@@ -742,6 +745,35 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     if self.system_control.value != last_port92_value {
                         last_port92_value = self.system_control.value;
                         self.sync_a20_state();
+                    }
+
+                    // -- Progress tracking --
+                    let current_rip = self.cpu.rip();
+
+                    // Log progress every 10M instructions
+                    if instructions_executed % 10_000_000 < INSTRUCTION_BATCH_SIZE {
+                        tracing::info!(
+                            "Progress: {}M instructions, RIP={:#x}",
+                            instructions_executed / 1_000_000,
+                            current_rip
+                        );
+                    }
+
+                    // Detect stuck loop: RIP unchanged for many batches
+                    if current_rip == last_rip {
+                        stuck_count += 1;
+                        if stuck_count >= 10 && !stuck_reported {
+                            stuck_reported = true;
+                            tracing::warn!(
+                                "BIOS stuck at RIP={:#x} after {}k instructions",
+                                current_rip,
+                                instructions_executed / 1000
+                            );
+                        }
+                    } else {
+                        stuck_count = 0;
+                        stuck_reported = false;
+                        last_rip = current_rip;
                     }
 
                     // Drain Bochs-style port 0xE9 output (if any) and print it.

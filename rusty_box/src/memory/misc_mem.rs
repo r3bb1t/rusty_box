@@ -175,10 +175,15 @@ impl<'c> BxMemC<'c> {
                 }
                 if self.memory_type[area][0] == false {
                     // Read from ROM
-                    let to_return = &mut self.inherited_memory_stub.rom()[((a20_addr
-                        & EXROM_MASK as BxPhyAddress)
-                        + BIOSROMSZ as BxPhyAddress)
-                        .try_into()?..];
+                    let rom_offset = if (a20_addr & 0xfffe0000) == 0x000e0000 {
+                        // Last 128K of BIOS ROM mapped to 0xE0000-0xFFFFF
+                        bios_map_last128k(a20_addr.try_into()?)
+                    } else {
+                        // Expansion ROM (0xC0000-0xDFFFF)
+                        ((a20_addr & EXROM_MASK as BxPhyAddress) + BIOSROMSZ as BxPhyAddress)
+                            .try_into()?
+                    };
+                    let to_return = &mut self.inherited_memory_stub.rom()[rom_offset..];
                     Ok(Some(to_return))
                 } else {
                     // Read from ShadowRAM
@@ -214,10 +219,11 @@ impl<'c> BxMemC<'c> {
                     &mut self.inherited_memory_stub.bogus()[(a20_addr & 0xfff).try_into()?..],
                 ))
             } else if is_bios {
-                // BIOS ROM access
+                // BIOS ROM access - use bios_map_last128k to map 0xE0000-0xFFFFF
+                // to the last 128KB of the 4MB ROM array (matching Bochs misc_mem.cc:721)
+                let rom_offset = bios_map_last128k(a20_addr.try_into()?);
                 Ok(Some(
-                    &mut self.inherited_memory_stub.rom()
-                        [(a20_addr & BIOS_MASK as BxPhyAddress).try_into()?..],
+                    &mut self.inherited_memory_stub.rom()[rom_offset..],
                 ))
             } else {
                 // Out of bounds - return bogus memory (matches Bochs)
@@ -614,7 +620,7 @@ impl BxMemC<'_> {
         } else if self.bios_write_enabled && is_bios {
             // Volatile BIOS write support (from memory.cc:151-170)
             for i in 0..len {
-                let rom_offset = (a20_addr & BIOS_MASK as u64) as usize;
+                let rom_offset = bios_map_last128k(a20_addr as usize);
                 if rom_offset < BIOSROMSZ {
                     let rom = self.inherited_memory_stub.rom();
                     if let Some(byte) = rom.get_mut(rom_offset) {
@@ -806,7 +812,7 @@ impl BxMemC<'_> {
             if is_bios {
                 // Read from BIOS ROM
                 for i in 0..len {
-                    let rom_offset = (a20_addr & BIOS_MASK as u64) as usize;
+                    let rom_offset = bios_map_last128k(a20_addr as usize);
                     if rom_offset < BIOSROMSZ {
                         let rom = self.inherited_memory_stub.rom();
                         if let Some(byte) = rom.get(rom_offset) {

@@ -176,6 +176,14 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         Ok(())
     }
 
+    fn mov_gd_ed_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        crate::cpu::data_xfer::MOV_GdEd_M(cpu, instr);
+        Ok(())
+    }
+
     fn mov_ed_gd_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -184,11 +192,27 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         Ok(())
     }
 
+    fn mov_ed_gd_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        crate::cpu::data_xfer::MOV_EdGd_M(cpu, instr);
+        Ok(())
+    }
+
     fn mov_ed_id_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
         crate::cpu::data_xfer::MOV_EdId_R(cpu, instr);
+        Ok(())
+    }
+
+    fn mov_ed_id_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        crate::cpu::data_xfer::MOV_EdId_M(cpu, instr);
         Ok(())
     }
 
@@ -214,11 +238,27 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         Ok(())
     }
 
+    fn add_gd_ed_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        crate::cpu::arith::ADD_GdEd_M(cpu, instr);
+        Ok(())
+    }
+
     fn add_ed_gd_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
         crate::cpu::arith::ADD_EdGd_R(cpu, instr);
+        Ok(())
+    }
+
+    fn add_ed_gd_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        crate::cpu::arith::ADD_EdGd_M(cpu, instr);
         Ok(())
     }
 
@@ -244,6 +284,14 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         crate::cpu::arith::ADD_EwIbR(cpu, instr)
     }
 
+    fn add_ew_ib_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        crate::cpu::arith::ADD_EwIbM(cpu, instr);
+        Ok(())
+    }
+
     fn sub_gd_ed_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -252,11 +300,27 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         Ok(())
     }
 
+    fn sub_gd_ed_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        crate::cpu::arith::SUB_GdEd_M(cpu, instr);
+        Ok(())
+    }
+
     fn sub_ed_gd_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
         crate::cpu::arith::SUB_EdGd_R(cpu, instr);
+        Ok(())
+    }
+
+    fn sub_ed_gd_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        crate::cpu::arith::SUB_EdGd_M(cpu, instr);
         Ok(())
     }
 
@@ -277,6 +341,22 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         Ok(())
     }
 
+    fn cmp_gb_eb_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        cpu.cmp_gb_eb_m(instr);
+        Ok(())
+    }
+
+    fn cmp_eb_gb_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        cpu.cmp_eb_gb_m(instr);
+        Ok(())
+    }
+
     fn cmp_gw_ew_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -285,11 +365,27 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         Ok(())
     }
 
+    fn cmp_gw_ew_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        cpu.cmp_gw_ew_m(instr);
+        Ok(())
+    }
+
     fn cmp_gd_ed_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
         cpu.cmp_gd_ed_r(instr);
+        Ok(())
+    }
+
+    fn cmp_gd_ed_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        cpu.cmp_gd_ed_m(instr);
         Ok(())
     }
 
@@ -325,11 +421,27 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         Ok(())
     }
 
+    fn cmp_ew_iw_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        cpu.cmp_ew_iw_m(instr);
+        Ok(())
+    }
+
     fn cmp_ed_id_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
         cpu.cmp_ed_id_r(instr);
+        Ok(())
+    }
+
+    fn cmp_ed_id_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        cpu.cmp_ed_id_m(instr);
         Ok(())
     }
 
@@ -475,6 +587,14 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         Ok(())
     }
 
+    fn mov_gw_ew_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        cpu.mov_gw_ew_m(instr);
+        Ok(())
+    }
+
     fn mov_ew_gw_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -483,11 +603,27 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         Ok(())
     }
 
+    fn mov_ew_gw_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        cpu.mov_ew_gw_m(instr);
+        Ok(())
+    }
+
     fn mov_rw_iw_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
     ) -> Result<()> {
         cpu.mov_rw_iw(instr);
+        Ok(())
+    }
+
+    fn mov_ew_iw_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        cpu.mov_ew_iw_m(instr);
         Ok(())
     }
 
@@ -888,31 +1024,15 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         let offset32 = instr.id();
         let offset16 = instr.iw() as u32;
 
-        // DEBUG: Log what we read from instruction
-        tracing::error!(
-            "🔴 JmpfAp HANDLER: ilen={}, iw()={:#x}, iw2()={:#x}, id()={:#x}, RIP={:#x}",
-            instr.ilen(), instr.iw(), segment, offset32, cpu.rip()
-        );
-
         // If instruction length suggests 32-bit (>= 6 bytes including opcode),
         // or if the 32-bit value is significantly different from 16-bit, use 32-bit
         if instr.ilen() >= 6 && offset32 != offset16 {
             // 32-bit far jump
-            tracing::info!(
-                "FAR JMP 32 to {:04x}:{:08x} (ilen={})",
-                segment,
-                offset32,
-                instr.ilen()
-            );
+            tracing::trace!("FAR JMP 32 to {:04x}:{:08x}", segment, offset32);
             cpu.jmp_far32(instr, segment, offset32)?;
         } else {
             // 16-bit far jump
-            tracing::info!(
-                "FAR JMP 16 to {:04x}:{:04x} (ilen={})",
-                segment,
-                offset16,
-                instr.ilen()
-            );
+            tracing::trace!("FAR JMP 16 to {:04x}:{:04x}", segment, offset16);
             cpu.jmp_far16(instr, segment, offset16 as u16)?;
         }
 
@@ -924,18 +1044,18 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
     match opcode {
         // Data transfer instructions - 32-bit
         Opcode::MovOp32GdEd => Some(BxOpcodeEntry {
-            execute1: mov_gd_ed_r_wrapper,       // Memory form
-            execute2: Some(mov_gd_ed_r_wrapper), // Register form (same handler for now)
+            execute1: mov_gd_ed_m_wrapper,       // Memory form: MOV r32, [mem]
+            execute2: Some(mov_gd_ed_r_wrapper), // Register form: MOV r32, r32
             opflags: OpFlags::empty(),
         }),
         Opcode::MovOp32EdGd => Some(BxOpcodeEntry {
-            execute1: mov_ed_gd_r_wrapper,       // Memory form
-            execute2: Some(mov_ed_gd_r_wrapper), // Register form
+            execute1: mov_ed_gd_m_wrapper,       // Memory form: MOV [mem], r32
+            execute2: Some(mov_ed_gd_r_wrapper), // Register form: MOV r32, r32
             opflags: OpFlags::empty(),
         }),
         Opcode::MovEdId => Some(BxOpcodeEntry {
-            execute1: mov_ed_id_r_wrapper,       // Memory form
-            execute2: Some(mov_ed_id_r_wrapper), // Register form
+            execute1: mov_ed_id_m_wrapper,       // Memory form: MOV [mem], imm32
+            execute2: Some(mov_ed_id_r_wrapper), // Register form: MOV r32, imm32
             opflags: OpFlags::empty(),
         }),
 
@@ -953,14 +1073,14 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
 
         // Arithmetic instructions - 32-bit
         Opcode::AddGdEd => Some(BxOpcodeEntry {
-            execute1: add_gd_ed_r_wrapper,       // Memory form
-            execute2: Some(add_gd_ed_r_wrapper), // Register form
+            execute1: add_gd_ed_m_wrapper,       // Memory form: ADD r32, [mem]
+            execute2: Some(add_gd_ed_r_wrapper), // Register form: ADD r32, r32
             opflags: OpFlags::empty(),
         }),
         Opcode::AddEdGd => Some(BxOpcodeEntry {
-            execute1: add_ed_gd_r_wrapper,       // Memory form
-            execute2: Some(add_ed_gd_r_wrapper), // Register form
-            opflags: OpFlags::empty(),
+            execute1: add_ed_gd_m_wrapper,       // Memory form: ADD [mem], r32
+            execute2: Some(add_ed_gd_r_wrapper), // Register form: ADD r32, r32
+            opflags: OpFlags::LOCKABLE,
         }),
         Opcode::AddEaxid => Some(BxOpcodeEntry {
             execute1: add_eax_id_wrapper,
@@ -973,8 +1093,8 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             opflags: OpFlags::empty(),
         }),
         Opcode::AddEwsIb => Some(BxOpcodeEntry {
-            execute1: add_ew_ib_r_wrapper,
-            execute2: Some(add_ew_ib_r_wrapper),
+            execute1: add_ew_ib_m_wrapper,       // Memory form: ADD [mem], imm8
+            execute2: Some(add_ew_ib_r_wrapper), // Register form: ADD r16, imm8
             opflags: OpFlags::empty(),
         }),
         Opcode::AddEbIb => Some(BxOpcodeEntry {
@@ -985,14 +1105,14 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
 
         // Arithmetic (SUB) instructions - 32-bit
         Opcode::SubGdEd => Some(BxOpcodeEntry {
-            execute1: sub_gd_ed_r_wrapper,
-            execute2: Some(sub_gd_ed_r_wrapper),
+            execute1: sub_gd_ed_m_wrapper,       // Memory form: SUB r32, [mem]
+            execute2: Some(sub_gd_ed_r_wrapper), // Register form: SUB r32, r32
             opflags: OpFlags::empty(),
         }),
         Opcode::SubEdGd => Some(BxOpcodeEntry {
-            execute1: sub_ed_gd_r_wrapper,
-            execute2: Some(sub_ed_gd_r_wrapper),
-            opflags: OpFlags::empty(),
+            execute1: sub_ed_gd_m_wrapper,       // Memory form: SUB [mem], r32
+            execute2: Some(sub_ed_gd_r_wrapper), // Register form: SUB r32, r32
+            opflags: OpFlags::LOCKABLE,
         }),
         Opcode::SubEaxid => Some(BxOpcodeEntry {
             execute1: sub_eax_id_wrapper,
@@ -1070,18 +1190,18 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
 
         // Data transfer (MOV) instructions - 16-bit
         Opcode::MovGwEw => Some(BxOpcodeEntry {
-            execute1: mov_gw_ew_r_wrapper,
-            execute2: Some(mov_gw_ew_r_wrapper), // Register form
+            execute1: mov_gw_ew_m_wrapper,       // Memory form: MOV r16, [mem]
+            execute2: Some(mov_gw_ew_r_wrapper), // Register form: MOV r16, r16
             opflags: OpFlags::empty(),
         }),
         Opcode::MovEwGw => Some(BxOpcodeEntry {
-            execute1: mov_ew_gw_r_wrapper,
-            execute2: Some(mov_ew_gw_r_wrapper), // Register form
+            execute1: mov_ew_gw_m_wrapper,       // Memory form: MOV [mem], r16
+            execute2: Some(mov_ew_gw_r_wrapper), // Register form: MOV r16, r16
             opflags: OpFlags::empty(),
         }),
         Opcode::MovEwIw => Some(BxOpcodeEntry {
-            execute1: mov_rw_iw_wrapper,
-            execute2: Some(mov_rw_iw_wrapper), // Register form
+            execute1: mov_ew_iw_m_wrapper,       // Memory form: MOV [mem], imm16
+            execute2: Some(mov_rw_iw_wrapper),   // Register form: MOV r16, imm16
             opflags: OpFlags::empty(),
         }),
 
@@ -1206,23 +1326,23 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
 
         // CMP (Compare) instructions
         Opcode::CmpGbEb => Some(BxOpcodeEntry {
-            execute1: cmp_gb_eb_r_wrapper,       // Memory form
-            execute2: Some(cmp_gb_eb_r_wrapper), // Register form (same handler)
+            execute1: cmp_gb_eb_m_wrapper,       // Memory form: CMP r8, [mem]
+            execute2: Some(cmp_gb_eb_r_wrapper), // Register form: CMP r8, r8
             opflags: OpFlags::empty(),
         }),
         Opcode::CmpEbGb => Some(BxOpcodeEntry {
-            execute1: cmp_gb_eb_r_wrapper,       // Memory form (CMP r/m8, r8)
-            execute2: Some(cmp_gb_eb_r_wrapper), // Register form
+            execute1: cmp_eb_gb_m_wrapper,       // Memory form: CMP [mem], r8
+            execute2: Some(cmp_gb_eb_r_wrapper), // Register form: CMP r8, r8
             opflags: OpFlags::empty(),
         }),
         Opcode::CmpGwEw => Some(BxOpcodeEntry {
-            execute1: cmp_gw_ew_r_wrapper,       // Memory form
-            execute2: Some(cmp_gw_ew_r_wrapper), // Register form
+            execute1: cmp_gw_ew_m_wrapper,       // Memory form: CMP r16, [mem]
+            execute2: Some(cmp_gw_ew_r_wrapper), // Register form: CMP r16, r16
             opflags: OpFlags::empty(),
         }),
         Opcode::CmpGdEd => Some(BxOpcodeEntry {
-            execute1: cmp_gd_ed_r_wrapper,       // Memory form
-            execute2: Some(cmp_gd_ed_r_wrapper), // Register form
+            execute1: cmp_gd_ed_m_wrapper,       // Memory form: CMP r32, [mem]
+            execute2: Some(cmp_gd_ed_r_wrapper), // Register form: CMP r32, r32
             opflags: OpFlags::empty(),
         }),
         Opcode::CmpAlib => Some(BxOpcodeEntry {
@@ -1241,13 +1361,13 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             opflags: OpFlags::empty(),
         }),
         Opcode::CmpEwIw => Some(BxOpcodeEntry {
-            execute1: cmp_ew_iw_r_wrapper,       // Memory form
-            execute2: Some(cmp_ew_iw_r_wrapper), // Register form
+            execute1: cmp_ew_iw_m_wrapper,       // Memory form: CMP [mem], imm16
+            execute2: Some(cmp_ew_iw_r_wrapper), // Register form: CMP r16, imm16
             opflags: OpFlags::empty(),
         }),
         Opcode::CmpEdId => Some(BxOpcodeEntry {
-            execute1: cmp_ed_id_r_wrapper,       // Memory form
-            execute2: Some(cmp_ed_id_r_wrapper), // Register form
+            execute1: cmp_ed_id_m_wrapper,       // Memory form: CMP [mem], imm32
+            execute2: Some(cmp_ed_id_r_wrapper), // Register form: CMP r32, imm32
             opflags: OpFlags::empty(),
         }),
         Opcode::CmpEbIb => Some(BxOpcodeEntry {

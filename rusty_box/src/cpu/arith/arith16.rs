@@ -107,6 +107,19 @@ pub fn ADD_EwIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
     Ok(())
 }
 
+/// ADD_EwIbM: ADD r/m16, imm8 (sign-extended, memory form)
+/// Opcode: 0x83/0 with memory operand
+/// Matching C++ BX_CPU_C::ADD_EwIbM in arith16.cc
+pub fn ADD_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let (op1, laddr) = cpu.read_rmw_virtual_word(seg, eaddr);
+    let op2 = instr.ib() as i8 as i16 as u16; // Sign-extend imm8 to u16
+    let result = op1.wrapping_add(op2);
+    cpu.write_rmw_linear_word(laddr, result);
+    cpu.update_flags_add16(op1, op2, result);
+}
+
 /// ADD_EwIwR: ADD r16, imm16 (register form)
 /// Opcode: 0x81/0
 /// Based on BX_CPU_C::ADD_EwIwR in arith16.cc
