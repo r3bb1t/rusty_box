@@ -55,12 +55,12 @@ fn run_dlxlinux() -> Result<()> {
     let bios_output_file = std::env::var("BIOS_OUTPUT_FILE").ok();
     let bios_quiet_mode = std::env::var("BIOS_QUIET_MODE").is_ok();
 
-    // Initialize tracing (reduce verbosity in BIOS quiet mode)
-    let log_level = if bios_quiet_mode {
-        tracing::Level::WARN // Suppress INFO logs when viewing BIOS output
-    } else {
-        tracing::Level::DEBUG // Use DEBUG to capture execution traces
-    };
+    // Initialize tracing - respect RUST_LOG env var, with WARN as default
+    // (set RUST_LOG=debug or RUST_LOG=info to see more detail)
+    let log_level = std::env::var("RUST_LOG")
+        .ok()
+        .and_then(|s| s.parse::<tracing::Level>().ok())
+        .unwrap_or(tracing::Level::WARN);
 
     tracing_subscriber::fmt()
         .without_time()

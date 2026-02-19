@@ -212,8 +212,11 @@ impl BxKeyboardC {
                 self.status as u32
             }
             SYSTEM_CONTROL_B => {
-                // Include PIT timer 2 output and refresh status
-                let value = self.system_control_b | 0x10; // Refresh always on
+                // Toggle bit 4 (PIT channel 2 output) on each read to simulate timing.
+                // The BIOS delay_ms() polls this bit waiting for transitions; if it never
+                // changes, delay_ms() hangs forever. Real hardware toggles at ~18Hz.
+                self.system_control_b ^= 0x10;
+                let value = self.system_control_b;
                 tracing::trace!("Keyboard: Read system control B = {:#04x}", value);
                 value as u32
             }

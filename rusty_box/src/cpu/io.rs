@@ -136,6 +136,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// When the emulator wires an I/O bus, this dispatches to `BxDevicesC::outp`.
     /// Otherwise it is ignored (useful for unit tests without devices).
     fn port_out(&mut self, port: u16, value: u32, len: u8) {
+        // Log BIOS diagnostic ports at debug level so RUST_LOG=debug catches them
+        // even if something goes wrong before the device handler is reached.
+        if matches!(port, 0x80 | 0x84 | 0xE9 | 0x402 | 0x403 | 0x500) {
+            tracing::debug!(
+                "port_out: port={:#06x} value={:#x} len={} io_bus={}",
+                port, value, len, self.io_bus.is_some()
+            );
+        }
         if let Some(mut io_bus) = self.io_bus {
             // SAFETY: `io_bus` is set by the emulator for the duration of execution
             // and cleared afterwards. Single-CPU execution avoids concurrent access.

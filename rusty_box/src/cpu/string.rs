@@ -62,6 +62,29 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("MOVSB16: DS:{:04x} -> ES:{:04x}, byte={:#04x}", si, di, byte);
     }
 
+    /// MOVSB - Move byte from DS:ESI to ES:EDI (32-bit address mode)
+    /// Based on BX_CPU_C::MOVSB32_YbXb in string.cc
+    pub fn movsb32(&mut self, _instr: &BxInstructionGenerated) {
+        let esi = self.esi() as u64;
+        let edi = self.edi() as u64;
+
+        let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
+        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
+
+        let byte = self.mem_read_byte(ds_base.wrapping_add(esi));
+        self.mem_write_byte(es_base.wrapping_add(edi), byte);
+
+        let increment = if self.get_df() { -1i32 } else { 1i32 };
+        let new_esi = (esi as i64).wrapping_add(increment as i64) as u32;
+        let new_edi = (edi as i64).wrapping_add(increment as i64) as u32;
+
+        // Zero extension of RSI/RDI (matching original BX_CLEAR_64BIT_HIGH behavior)
+        self.set_rsi(new_esi as u64);
+        self.set_rdi(new_edi as u64);
+
+        tracing::trace!("MOVSB32: DS:{:#x} -> ES:{:#x}, byte={:#04x}", esi, edi, byte);
+    }
+
     /// MOVSW - Move word from DS:SI to ES:DI (16-bit address mode)
     pub fn movsw16(&mut self, _instr: &BxInstructionGenerated) {
         let si = self.si() as u64;
@@ -158,6 +181,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         
         tracing::trace!("STOSB16: AL={:#04x} -> ES:{:04x}", al, di);
+    }
+
+    /// STOSB - Store AL at ES:EDI (32-bit address mode)
+    /// Based on BX_CPU_C::STOSB32_YbAL in string.cc
+    pub fn stosb32(&mut self, _instr: &BxInstructionGenerated) {
+        let edi = self.edi() as u64;
+        let al = self.al();
+
+        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
+        let dst_addr = es_base.wrapping_add(edi);
+        self.mem_write_byte(dst_addr, al);
+
+        let increment = if self.get_df() { -1i32 } else { 1i32 };
+        let new_edi = (edi as i64).wrapping_add(increment as i64) as u32;
+
+        // Zero extension of RDI (matching original BX_CLEAR_64BIT_HIGH behavior)
+        self.set_rdi(new_edi as u64);
+
+        tracing::trace!("STOSB32: AL={:#04x} -> ES:{:#x}", al, edi);
     }
 
     /// STOSW - Store AX at ES:DI (16-bit address mode)
@@ -487,7 +529,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // REP prefix handling
     // =========================================================================
     
-    /// REP MOVSB - Repeat move string byte CX times
+    /// REP MOVSB - Repeat move string byte CX times (16-bit address mode)
     pub fn rep_movsb16(&mut self, instr: &BxInstructionGenerated) {
         let mut cx = self.cx();
         while cx != 0 {
@@ -495,6 +537,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
         }
+    }
+
+    /// REP MOVSB - Repeat move string byte ECX times (32-bit address mode)
+    /// Based on BX_CPU_C::REP_MOVSB_YbXb with as32L() branch in string.cc
+    pub fn rep_movsb32(&mut self, instr: &BxInstructionGenerated) {
+        let mut ecx = self.ecx();
+        while ecx != 0 {
+            self.movsb32(instr);
+            ecx = ecx.wrapping_sub(1);
+            self.set_ecx(ecx);
+        }
+        // Clear upper 32 bits of RCX/RSI/RDI (BX_CLEAR_64BIT_HIGH)
+        self.set_rcx(self.ecx() as u64);
+        // RSI/RDI are already zero-extended per-iteration inside movsb32
     }
 
     /// REP MOVSW - Repeat move string word CX times
@@ -507,7 +563,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
-    /// REP STOSB - Repeat store string byte CX times
+    /// REP STOSB - Repeat store string byte CX times (16-bit address mode)
     pub fn rep_stosb16(&mut self, instr: &BxInstructionGenerated) {
         let mut cx = self.cx();
         while cx != 0 {
@@ -515,6 +571,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
         }
+    }
+
+    /// REP STOSB - Repeat store string byte ECX times (32-bit address mode)
+    /// Based on BX_CPU_C::REP_STOSB_YbAL with as32L() branch in string.cc
+    pub fn rep_stosb32(&mut self, instr: &BxInstructionGenerated) {
+        let mut ecx = self.ecx();
+        while ecx != 0 {
+            self.stosb32(instr);
+            ecx = ecx.wrapping_sub(1);
+            self.set_ecx(ecx);
+        }
+        // Clear upper 32 bits of RCX (BX_CLEAR_64BIT_HIGH)
+        self.set_rcx(self.ecx() as u64);
     }
 
     /// REP STOSW - Repeat store string word CX times

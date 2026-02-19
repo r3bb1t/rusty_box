@@ -549,7 +549,7 @@ impl BxMemC<'_> {
                     } else {
                         format!("{:02x?}...", &data[0..8])
                     };
-                    tracing::warn!("💾 LOW_RAM_WRITE: addr={:#x}, len={}, data={}", a20_addr, len, data_preview);
+                    tracing::trace!("💾 LOW_RAM_WRITE: addr={:#x}, len={}, data={}", a20_addr, len, data_preview);
                 }
                 // Regular RAM - delegate to stub
                 return self.inherited_memory_stub.write_physical_page(

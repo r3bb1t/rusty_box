@@ -47,7 +47,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Debug: log first 100 push operations or when SP wraps
             if self.icount < 100 || (sp < 0x10 && new_sp > 0xFFF0) {
                 let ss = self.sregs[BxSegregs::Ss as usize].selector.value;
-                tracing::info!("PUSH16[{}]: SP {:04x}->{:04x}, val={:04x}, SS={:04x}",
+                tracing::debug!("PUSH16[{}]: SP {:04x}->{:04x}, val={:04x}, SS={:04x}",
                     self.icount, sp, new_sp, value, ss);
             }
             self.stack_write_word(new_sp as u32, value);

@@ -275,7 +275,7 @@ impl BxDevicesC {
         if address == 0x00E9 {
             retval = 0xE9;
         } else {
-            tracing::debug!("Unhandled I/O read: port={:#06x}, len={} -> 0xFF..F", address, io_len);
+            tracing::trace!("Unhandled I/O read: port={:#06x}, len={} -> 0xFF..F", address, io_len);
         }
 
         match io_len {
@@ -290,6 +290,7 @@ impl BxDevicesC {
     fn default_write_handler(&mut self, address: u16, value: u32, io_len: u8) {
         // Bochs-style BIOS POST code port (0x80). Some BIOSes also use 0x84.
         if io_len == 1 && matches!(address, 0x0080 | 0x0084) {
+            tracing::debug!("BIOS POST code port {:#06x}: {:#04x}", address, value as u8);
             const PORT80_CAPACITY: usize = 4096;
             if self.port80_output.len() >= PORT80_CAPACITY {
                 let _ = self.port80_output.pop_front();
@@ -306,6 +307,11 @@ impl BxDevicesC {
         if io_len == 1
             && matches!(address, 0x00E9 | 0x0402 | 0x0403 | 0x0500)
         {
+            tracing::debug!(
+                "BIOS output port {:#06x}: {:?}",
+                address,
+                value as u8 as char
+            );
             const PORT_E9_CAPACITY: usize = 4096;
             if self.port_e9_output.len() >= PORT_E9_CAPACITY {
                 let _ = self.port_e9_output.pop_front();

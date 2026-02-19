@@ -1178,43 +1178,24 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     Err(e) => break 'cpu_loop Err(e),
                 }
             };
-            tracing::debug!(
+            tracing::trace!(
                 "get_icache_entry: RIP={:#x}, entry.tlen={}",
                 self.rip(),
                 entry.tlen
             );
 
-            // Get trace start index from entry (stored when trace was created)
-            // In C++, entry->i is a pointer directly into mpool, so we can do pointer arithmetic
-            // In Rust, we store the mpool index explicitly
+            // Get trace start index from entry (stored when trace was created).
+            // In C++, entry->i is a pointer directly into mpool; in Rust we store the index.
+            // Note: index 0 is VALID for the first cached trace, so mpool_start_idx==0 is not an error.
             let mut trace_start_idx = entry.mpool_start_idx;
 
-            // If mpool_start_idx is 0 and this is NOT the first trace (mpindex > tlen),
-            // it might be an old entry created before we added this field.
-            // However, index 0 is valid for the very first trace, so we need to be careful.
-            // Only use fallback if mpindex suggests this is a cached entry (mpindex > tlen)
-            // and trace_start_idx is 0, which would be wrong for a cached entry.
-            if trace_start_idx == 0 && entry.tlen > 0 && self.i_cache.mpindex > entry.tlen {
-                // Fallback: calculate from current mpindex (this is what we used to do)
-                // This might be wrong for cached entries, but it's better than 0
-                let calculated = self.i_cache.mpindex.saturating_sub(entry.tlen);
-                if calculated != 0 {
-                    trace_start_idx = calculated;
-                    tracing::warn!(
-                        "mpool_start_idx was 0 for cached entry, calculated fallback: {}",
-                        trace_start_idx
-                    );
-                }
-            }
-
-            // Bounds check: ensure trace_start_idx is valid
+            // Bounds check: ensure trace_start_idx is within the pool
             if trace_start_idx >= BX_ICACHE_MEM_POOL {
-                tracing::warn!(
-                    "trace_start_idx ({}) >= BX_ICACHE_MEM_POOL ({})",
+                tracing::debug!(
+                    "trace_start_idx ({}) >= BX_ICACHE_MEM_POOL ({}), resetting",
                     trace_start_idx,
                     BX_ICACHE_MEM_POOL
                 );
-                // Reset to start of mpool as fallback
                 trace_start_idx = 0;
             }
 
@@ -1232,7 +1213,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             loop {
                 // Bounds check before accessing mpool
                 if trace_start_idx + instr_idx >= BX_ICACHE_MEM_POOL {
-                    tracing::warn!(
+                    tracing::debug!(
                         "trace_start_idx + instr_idx ({}) >= BX_ICACHE_MEM_POOL, breaking",
                         trace_start_idx + instr_idx
                     );
@@ -2040,6 +2021,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             // Flag manipulation instructions
+            Opcode::Clc => {
+                self.eflags &= !(1 << 0); // CF is bit 0
+                Ok(())
+            }
+            Opcode::Stc => {
+                self.eflags |= 1 << 0;
+                Ok(())
+            }
+            Opcode::Cmc => {
+                self.eflags ^= 1 << 0;
+                Ok(())
+            }
             Opcode::Cli => {
                 // Clear Interrupt Flag
                 self.eflags &= !(1 << 9); // IF is bit 9
@@ -2259,8 +2252,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::JmpJbd => {
-                // JMP rel8 in 32-bit mode - uses same implementation as JmpJd
-                // Decoder sign-extends byte displacement to dword in id()
+                // JMP rel8 in 32-bit mode - same as JmpJd; decoder sign-extends byte to i32
                 self.jmp_jd(instr)?;
                 Ok(())
             }
@@ -2351,82 +2343,84 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // =========================================================================
             // Conditional jumps with 32-bit displacement (Jd variants)
             // =========================================================================
-            Opcode::JoJd => {
+            Opcode::JoJd | Opcode::JoJbd => {
                 self.jo_jd(instr)?;
                 Ok(())
             }
-            Opcode::JnoJd => {
+            Opcode::JnoJd | Opcode::JnoJbd => {
                 self.jno_jd(instr)?;
                 Ok(())
             }
-            Opcode::JbJd => {
+            Opcode::JbJd | Opcode::JbJbd => {
                 self.jb_jd(instr)?;
                 Ok(())
             }
-            Opcode::JnbJd => {
+            Opcode::JnbJd | Opcode::JnbJbd => {
                 self.jnb_jd(instr)?;
                 Ok(())
             }
-            Opcode::JzJd => {
+            Opcode::JzJd | Opcode::JzJbd => {
                 self.jz_jd(instr)?;
                 Ok(())
             }
-            Opcode::JzJbd => {
-                self.jz_jd(instr)?;
-                Ok(())
-            }
-            Opcode::JnzJd => {
+            Opcode::JnzJd | Opcode::JnzJbd => {
                 self.jnz_jd(instr)?;
                 Ok(())
             }
-            Opcode::JnzJbd => {
-                self.jnz_jd(instr)?;
-                Ok(())
-            }
-            Opcode::JbeJd => {
+            Opcode::JbeJd | Opcode::JbeJbd => {
                 self.jbe_jd(instr)?;
                 Ok(())
             }
-            Opcode::JnbeJd => {
+            Opcode::JnbeJd | Opcode::JnbeJbd => {
                 self.jnbe_jd(instr)?;
                 Ok(())
             }
-            Opcode::JsJd => {
+            Opcode::JsJd | Opcode::JsJbd => {
                 self.js_jd(instr)?;
                 Ok(())
             }
-            Opcode::JnsJd => {
+            Opcode::JnsJd | Opcode::JnsJbd => {
                 self.jns_jd(instr)?;
                 Ok(())
             }
-            Opcode::JpJd => {
+            Opcode::JpJd | Opcode::JpJbd => {
                 self.jp_jd(instr)?;
                 Ok(())
             }
-            Opcode::JnpJd => {
+            Opcode::JnpJd | Opcode::JnpJbd => {
                 self.jnp_jd(instr)?;
                 Ok(())
             }
-            Opcode::JlJd => {
+            Opcode::JlJd | Opcode::JlJbd => {
                 self.jl_jd(instr)?;
                 Ok(())
             }
-            Opcode::JnlJd => {
+            Opcode::JnlJd | Opcode::JnlJbd => {
                 self.jnl_jd(instr)?;
                 Ok(())
             }
-            Opcode::JleJd => {
+            Opcode::JleJd | Opcode::JleJbd => {
                 self.jle_jd(instr)?;
                 Ok(())
             }
-            Opcode::JnleJd => {
+            Opcode::JnleJd | Opcode::JnleJbd => {
                 self.jnle_jd(instr)?;
                 Ok(())
             }
 
-            // Note: LOOP instructions in 32-bit mode use the same opcodes as 16-bit mode
-            // (LoopJbw, LoopeJbw, LoopneJbw) but behavior is determined by operand size
-            // The existing loop16_jb, loope16_jb, loopne16_jb functions already handle 32-bit mode
+            // LOOP instructions: 32-bit variants (ECX counter, sign-extended byte displacement)
+            Opcode::LoopJbd => {
+                self.loop32_jb(instr)?;
+                Ok(())
+            }
+            Opcode::LoopeJbd => {
+                self.loope32_jb(instr)?;
+                Ok(())
+            }
+            Opcode::LoopneJbd => {
+                self.loopne32_jb(instr)?;
+                Ok(())
+            }
 
             // =========================================================================
             // Far CALL instructions (16-bit)
@@ -2712,7 +2706,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // String instructions
             // =========================================================================
             Opcode::RepMovsbYbXb => {
-                self.rep_movsb16(instr);
+                // Based on BX_CPU_C::REP_MOVSB_YbXb in string.cc
+                if instr.as32_l() != 0 {
+                    self.rep_movsb32(instr);
+                } else {
+                    self.rep_movsb16(instr);
+                }
                 Ok(())
             }
             Opcode::RepMovsdYdXd => {
@@ -2728,7 +2727,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::RepStosbYbAl => {
-                self.rep_stosb16(instr);
+                // Based on BX_CPU_C::REP_STOSB_YbAL in string.cc
+                if instr.as32_l() != 0 {
+                    self.rep_stosb32(instr);
+                } else {
+                    self.rep_stosb16(instr);
+                }
                 Ok(())
             }
             Opcode::RepStoswYwAx => {
@@ -2876,6 +2880,22 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::Cpuid => {
                 self.cpuid(instr);
+                Ok(())
+            }
+            Opcode::Rdmsr => {
+                // Read Model Specific Register: EDX:EAX = MSR[ECX]
+                // Return 0 for all MSRs; BIOS checks these for optional features
+                let msr = self.ecx();
+                tracing::debug!("RDMSR: MSR={:#010x} -> returning 0", msr);
+                self.set_rax(0);
+                self.set_rdx(0);
+                Ok(())
+            }
+            Opcode::Wrmsr => {
+                // Write Model Specific Register: MSR[ECX] = EDX:EAX
+                let msr = self.ecx();
+                let val = ((self.edx() as u64) << 32) | (self.eax() as u64);
+                tracing::debug!("WRMSR: MSR={:#010x} = {:#018x} (ignored)", msr, val);
                 Ok(())
             }
 
@@ -3592,7 +3612,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
             laddr = BxAddress::from(self.get_laddr32(BxSegregs::Cs as _, eip));
             let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-            tracing::info!(
+            tracing::debug!(
                 "prefetch: CS.base={:#x}, EIP={:#x}, laddr={:#x}",
                 cs_base,
                 eip,
@@ -3686,7 +3706,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             ) {
                 Ok(p_addr) => {
                     self.p_addr_fetch_page = ppf_of(p_addr);
-                    tracing::info!(
+                    tracing::debug!(
                         "prefetch: translate_linear OK, p_addr={:#x}, p_addr_fetch_page={:#x}",
                         p_addr,
                         self.p_addr_fetch_page
@@ -3719,7 +3739,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 }
                 Err(_e) => {
                     // Log the error and treat as no direct access
-                    tracing::warn!("Failed to get host mem addr for fetch: {:?}", _e);
+                    tracing::debug!("Failed to get host mem addr for fetch: {:?}", _e);
                     self.eip_fetch_ptr = None;
                 }
             }

@@ -583,7 +583,17 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
 
         match imm_size {
             1 => {
-                instr.modrm_form.operand_data.id = bytes[pos] as u32;
+                let byte_val = bytes[pos];
+                // Sign-extend byte relative displacements for branch opcodes.
+                // These are stored as id() and used as `instr.id() as i32` in execution handlers.
+                // All other byte immediates (0x83, 0x6A, 0x6B, etc.) use `instr.ib() as i8`
+                // in their execution handlers, so they don't need sign-extension here.
+                let needs_sign_ext = opcode_map == 0 && matches!(b1 as u8, 0x70..=0x7F | 0xE0..=0xE3 | 0xEB);
+                instr.modrm_form.operand_data.id = if needs_sign_ext {
+                    byte_val as i8 as i32 as u32
+                } else {
+                    byte_val as u32
+                };
                 pos += 1;
             }
             2 => {
