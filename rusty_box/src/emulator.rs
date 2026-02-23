@@ -667,11 +667,33 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             .set_memory_size(base_kb, extended_kb);
     }
 
-    /// Configure CMOS hard drive
+    /// Configure CMOS hard drive (type byte only — legacy)
     pub fn configure_disk_in_cmos(&mut self, drive_num: u8, drive_type: u8) {
         self.device_manager
             .cmos
             .set_hard_drive(drive_num, drive_type);
+    }
+
+    /// Configure full CMOS hard drive geometry (matching Bochs harddrv.cc:448-474)
+    pub fn configure_disk_geometry_in_cmos(
+        &mut self,
+        drive: u8,
+        cylinders: u16,
+        heads: u8,
+        spt: u8,
+    ) {
+        self.device_manager
+            .cmos
+            .configure_disk_geometry(drive, cylinders, heads, spt);
+    }
+
+    /// Configure boot sequence in CMOS
+    ///
+    /// Boot device codes: 0=none, 1=floppy, 2=hard disk, 3=cdrom
+    pub fn configure_boot_sequence(&mut self, first: u8, second: u8, third: u8) {
+        self.device_manager
+            .cmos
+            .set_boot_sequence(first, second, third);
     }
 
     /// Run emulator interactively with GUI event handling
@@ -779,6 +801,52 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 self.cpu.get_cs_selector(),
                                 self.cpu.get_cpu_mode(),
                             );
+                            // Dump IPL table and stack for debugging
+                            {
+                                let mem = self.memory.ram_slice();
+                                let read_u16 = |addr: usize| -> u16 {
+                                    if addr + 1 < mem.len() {
+                                        u16::from_le_bytes([mem[addr], mem[addr + 1]])
+                                    } else { 0 }
+                                };
+                                let ipl_count = read_u16(0x9FF80);
+                                let ipl_seq = read_u16(0x9FF82);
+                                let ipl_bootfirst = read_u16(0x9FF84);
+                                let ipl0_type = read_u16(0x9FF00);
+                                let ipl1_type = read_u16(0x9FF10);
+                                tracing::warn!(
+                                    "IPL table: count={:#x} seq={:#x} bootfirst={:#x} entry0_type={:#x} entry1_type={:#x}",
+                                    ipl_count, ipl_seq, ipl_bootfirst, ipl0_type, ipl1_type,
+                                );
+                                // Dump stack to find caller of bios_printf/BX_PANIC
+                                let ss_sel = self.cpu.get_ss_selector();
+                                let ss_base = self.cpu.get_ss_base() as usize;
+                                let sp = self.cpu.sp() as usize;
+                                let stack_addr = ss_base + sp;
+                                let mut stack_words = [0u16; 16];
+                                for i in 0..16 {
+                                    stack_words[i] = read_u16(stack_addr + i * 2);
+                                }
+                                tracing::warn!(
+                                    "Stack dump SS:SP={:#06x}:{:#06x} (phys {:#x}): {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x}",
+                                    ss_sel, sp, stack_addr,
+                                    stack_words[0], stack_words[1], stack_words[2], stack_words[3],
+                                    stack_words[4], stack_words[5], stack_words[6], stack_words[7],
+                                    stack_words[8], stack_words[9], stack_words[10], stack_words[11],
+                                    stack_words[12], stack_words[13], stack_words[14], stack_words[15],
+                                );
+                                // Also dump BDA and IVT for diagnostics
+                                let ebda_seg = read_u16(0x040E);
+                                let int08_vec = read_u16(0x0020) as u32 | ((read_u16(0x0022) as u32) << 16);
+                                let int13_vec = read_u16(0x004C) as u32 | ((read_u16(0x004E) as u32) << 16);
+                                let int19_vec = read_u16(0x0064) as u32 | ((read_u16(0x0066) as u32) << 16);
+                                let bda_ticks = read_u16(0x046C) as u32 | ((read_u16(0x046E) as u32) << 16);
+                                let bda_kbd_head = read_u16(0x041A);
+                                tracing::warn!(
+                                    "IVT: INT08={:#010x} INT13={:#010x} INT19={:#010x} | BDA: EBDA={:#06x} ticks={} kbd_head={:#06x}",
+                                    int08_vec, int13_vec, int19_vec, ebda_seg, bda_ticks, bda_kbd_head,
+                                );
+                            }
                         }
                     } else {
                         stuck_count = 0;

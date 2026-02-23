@@ -315,7 +315,7 @@ impl DeviceManager {
     pub fn tick(&mut self, usec: u64) -> bool {
         // Tick PIT/RTC first to generate periodic interrupts (Bochs-like behavior).
         // PIT drives IRQ0, CMOS/RTC drives IRQ8 when enabled.
-        let pit_fired = self.pit.tick(usec);
+        let _pit_fired = self.pit.tick(usec);
         if self.pit.check_irq0() {
             tracing::warn!("PIT-IRQ0: fired! PIC int_pin={}, master.imr={:#04x}, master.irr={:#04x}",
                 self.pic.master.int_pin, self.pic.master.imr, self.pic.master.irr);
@@ -329,17 +329,16 @@ impl DeviceManager {
             self.pic.raise_irq(8);
         }
 
-        // Tick PIT and check for IRQ0
-        // Check keyboard IRQ1
-        if self.keyboard.check_irq1() {
+        // Keyboard periodic: transfer internal buffers → output buffer,
+        // collect IRQ requests. Returns bitmask: bit0=IRQ1, bit1=IRQ12.
+        let kbd_irq = self.keyboard.periodic(usec as u32);
+        if kbd_irq & 0x01 != 0 {
             self.pic.raise_irq(1);
         }
-        
-        // Check mouse IRQ12
-        if self.keyboard.check_irq12() {
+        if kbd_irq & 0x02 != 0 {
             self.pic.raise_irq(12);
         }
-        
+
         // Check hard drive IRQ14/15
         if self.harddrv.check_irq14() {
             self.pic.raise_irq(14);
@@ -347,7 +346,7 @@ impl DeviceManager {
         if self.harddrv.check_irq15() {
             self.pic.raise_irq(15);
         }
-        
+
         self.pic.has_interrupt()
     }
 

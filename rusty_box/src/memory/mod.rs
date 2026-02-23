@@ -233,6 +233,12 @@ impl<'m> BxMemC<'m> {
         self.inherited_memory_stub.len
     }
 
+    /// Direct read access to physical RAM for debug inspection (with vector_offset applied)
+    pub(crate) fn ram_slice(&self) -> &[u8] {
+        let stub = &self.inherited_memory_stub;
+        &stub.actual_vector[stub.vector_offset..]
+    }
+
     /// Get raw pointer to memory for direct CPU access
     /// SAFETY: Caller must ensure the pointer is only used while memory is valid
     pub fn get_raw_memory_ptr(&mut self) -> (*mut u8, usize) {

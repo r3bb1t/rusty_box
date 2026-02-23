@@ -199,7 +199,12 @@ impl BxCmosC {
                         }
                     }
                 };
-                tracing::trace!("CMOS: Read [{:#04x}] = {:#04x}", addr, value);
+                // Temporarily log reads of disk/boot-related registers at debug level
+                if matches!(addr as u8, 0x12 | 0x19 | 0x1A | 0x1B..=0x2D | 0x38 | 0x39 | 0x3D) {
+                    tracing::debug!("CMOS: Read [{:#04x}] = {:#04x}", addr, value);
+                } else {
+                    tracing::trace!("CMOS: Read [{:#04x}] = {:#04x}", addr, value);
+                }
                 value as u32
             }
             _ => {
@@ -283,22 +288,87 @@ impl BxCmosC {
         self.update_checksum();
     }
 
-    /// Configure hard drive in CMOS
+    /// Configure hard drive type byte only (legacy — prefer configure_disk_geometry)
     pub fn set_hard_drive(&mut self, drive_num: u8, drive_type: u8) {
         if drive_num == 0 {
-            // Drive 0 in high nibble
             self.ram[0x12] = (self.ram[0x12] & 0x0F) | (drive_type << 4);
         } else if drive_num == 1 {
-            // Drive 1 in low nibble
             self.ram[0x12] = (self.ram[0x12] & 0xF0) | (drive_type & 0x0F);
         }
         self.update_checksum();
     }
 
-    /// Configure boot device
-    pub fn set_boot_device(&mut self, first_boot: u8) {
-        // Boot sequence: 0=floppy, 1=hard disk, 2=CD-ROM
-        self.ram[0x2D] = first_boot;
+    /// Configure full hard drive geometry in CMOS (matching Bochs harddrv.cc:448-474)
+    ///
+    /// Sets drive type byte (0x12) plus extended geometry registers:
+    /// - Drive 0: registers 0x19, 0x1B-0x23
+    /// - Drive 1: registers 0x1A, 0x24-0x2C
+    pub fn configure_disk_geometry(
+        &mut self,
+        drive: u8,
+        cylinders: u16,
+        heads: u8,
+        spt: u8,
+    ) {
+        if drive == 0 {
+            // Flag drive type as 0xF (extended), upper nibble of 0x12
+            self.ram[0x12] = (self.ram[0x12] & 0x0F) | 0xF0;
+            // User-definable type
+            self.ram[0x19] = 47;
+            // Cylinders (low, high)
+            self.ram[0x1B] = (cylinders & 0xFF) as u8;
+            self.ram[0x1C] = (cylinders >> 8) as u8;
+            // Heads
+            self.ram[0x1D] = heads;
+            // Write precompensation cylinder (0xFFFF = -1 = none)
+            self.ram[0x1E] = 0xFF;
+            self.ram[0x1F] = 0xFF;
+            // Control byte: bit 7,6 always set; bit 3 = heads > 8
+            self.ram[0x20] =
+                0xC0 | if heads > 8 { 0x08 } else { 0 };
+            // Landing zone = cylinders
+            self.ram[0x21] = self.ram[0x1B];
+            self.ram[0x22] = self.ram[0x1C];
+            // Sectors per track
+            self.ram[0x23] = spt;
+        } else if drive == 1 {
+            // Flag drive type as 0xF (extended), lower nibble of 0x12
+            self.ram[0x12] = (self.ram[0x12] & 0xF0) | 0x0F;
+            self.ram[0x1A] = 47;
+            self.ram[0x24] = (cylinders & 0xFF) as u8;
+            self.ram[0x25] = (cylinders >> 8) as u8;
+            self.ram[0x26] = heads;
+            self.ram[0x27] = 0xFF;
+            self.ram[0x28] = 0xFF;
+            self.ram[0x29] =
+                0xC0 | if heads > 8 { 0x08 } else { 0 };
+            self.ram[0x2A] = self.ram[0x24];
+            self.ram[0x2B] = self.ram[0x25];
+            self.ram[0x2C] = spt;
+        }
+        self.update_checksum();
+    }
+
+    /// Configure boot sequence in CMOS
+    ///
+    /// Sets both the legacy (0x2D) and ELTORITO (0x3D, 0x38) boot sequence registers.
+    /// Boot device codes for ELTORITO: 0=none, 1=floppy, 2=hard disk, 3=cdrom
+    pub fn set_boot_sequence(&mut self, first: u8, second: u8, third: u8) {
+        // Legacy register 0x2D bit 5: 0=boot C: then A:, 1=boot A: then C:
+        if first == 1 {
+            // First boot is floppy → set bit 5
+            self.ram[0x2D] |= 0x20;
+        } else {
+            // First boot is hard disk or other → clear bit 5
+            self.ram[0x2D] &= !0x20;
+        }
+
+        // ELTORITO boot sequence registers (used by BIOS-bochs-latest)
+        // 0x3D: low nibble = 1st boot device, high nibble = 2nd boot device
+        self.ram[0x3D] = first | (second << 4);
+        // 0x38: high nibble = 3rd boot device, low nibble = signature check flag
+        self.ram[0x38] = (self.ram[0x38] & 0x0F) | (third << 4);
+
         self.update_checksum();
     }
 

@@ -284,6 +284,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value
     }
 
+    pub fn get_ss_selector(&self) -> u16 {
+        self.sregs[super::decoder::BxSegregs::Ss as usize].selector.value
+    }
+
+    pub fn get_ss_base(&self) -> u64 {
+        unsafe { self.sregs[super::decoder::BxSegregs::Ss as usize].cache.u.segment.base }
+    }
+
     // getters for 64 bit general registers
     #[inline]
     pub fn rax(&self) -> u64 {

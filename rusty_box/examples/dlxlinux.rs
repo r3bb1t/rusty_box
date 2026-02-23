@@ -288,8 +288,13 @@ fn run_dlxlinux() -> Result<()> {
     // Base: 640KB, Extended: 31 MB = 31 * 1024 KB
     emu.configure_memory_in_cmos(640, 31 * 1024);
 
-    // Configure hard drive in CMOS (drive type 47 = user-defined)
-    emu.configure_disk_in_cmos(0, 47);
+    // Configure hard drive geometry in CMOS (matching Bochs harddrv.cc:448-474)
+    // Sets type=0xF (extended) + registers 0x19, 0x1B-0x23 for drive 0
+    emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
+
+    // Configure boot sequence: boot from hard disk first (matching Bochs floppy.cc:332-337)
+    // ELTORITO boot device codes: 0=none, 1=floppy, 2=hard disk, 3=cdrom
+    emu.configure_boot_sequence(2, 0, 0);
 
     // =========================================================================
     // Attach disk image

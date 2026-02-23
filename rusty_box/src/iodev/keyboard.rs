@@ -1,150 +1,133 @@
 //! 8042 Keyboard Controller Emulation
 //!
-//! The 8042 PS/2 controller handles:
-//! - Keyboard input (IRQ1)
-//! - Mouse input (IRQ12)
-//! - A20 gate control
-//! - System reset
+//! Faithful port of Bochs keyboard.cc — full PS/2 controller with:
+//! - Individual boolean status bits (assembled on port 0x64 read)
+//! - Ring-buffered kbd_internal_buffer / mouse_internal_buffer
+//! - controller_Q overflow queue (5 entries)
+//! - timer_pending / periodic() for deferred buffer transfers
+//! - kbd_ctrl_to_kbd / kbd_ctrl_to_mouse command handlers
+//! - Keyboard BAT, scancode sets, LED/typematic sub-commands
+//! - Mouse PS/2 protocol (reset, sample rate, resolution, stream mode)
 //!
-//! I/O Ports:
-//! - 0x60: Data port (read/write)
-//! - 0x64: Status/command port (read=status, write=command)
+//! Reference: cpp_orig/bochs/iodev/keyboard.cc (1477 lines)
 
-use alloc::collections::VecDeque;
 use core::ffi::c_void;
 
-/// Keyboard controller I/O ports
+// I/O Ports
 pub const KBD_DATA_PORT: u16 = 0x0060;
 pub const KBD_STATUS_PORT: u16 = 0x0064;
 pub const KBD_COMMAND_PORT: u16 = 0x0064;
-
-/// Port 0x61 - System control port B
 pub const SYSTEM_CONTROL_B: u16 = 0x0061;
 
-/// Status register bits
-pub const KBD_STATUS_OBF: u8 = 0x01;      // Output buffer full
-pub const KBD_STATUS_IBF: u8 = 0x02;      // Input buffer full
-pub const KBD_STATUS_SYS: u8 = 0x04;      // System flag
-pub const KBD_STATUS_CMD: u8 = 0x08;      // Command/data (0=data, 1=command)
-pub const KBD_STATUS_KEYL: u8 = 0x10;     // Keyboard lock
-pub const KBD_STATUS_AUXB: u8 = 0x20;     // Aux output buffer full (mouse)
-pub const KBD_STATUS_TIMEOUT: u8 = 0x40;  // General timeout
-pub const KBD_STATUS_PARITY: u8 = 0x80;   // Parity error
+// Buffer sizes (matching Bochs)
+const BX_KBD_ELEMENTS: usize = 16;
+const BX_MOUSE_BUFF_SIZE: usize = 48;
+const BX_KBD_CONTROLLER_QSIZE: usize = 5;
 
-/// Controller commands
-pub const KBD_CMD_READ_CCB: u8 = 0x20;        // Read controller configuration byte
-pub const KBD_CMD_WRITE_CCB: u8 = 0x60;       // Write controller configuration byte
-pub const KBD_CMD_DISABLE_AUX: u8 = 0xA7;     // Disable aux interface
-pub const KBD_CMD_ENABLE_AUX: u8 = 0xA8;      // Enable aux interface
-pub const KBD_CMD_TEST_AUX: u8 = 0xA9;        // Test aux interface
-pub const KBD_CMD_SELF_TEST: u8 = 0xAA;       // Controller self-test
-pub const KBD_CMD_KBD_TEST: u8 = 0xAB;        // Keyboard interface test
-pub const KBD_CMD_DISABLE_KBD: u8 = 0xAD;     // Disable keyboard interface
-pub const KBD_CMD_ENABLE_KBD: u8 = 0xAE;      // Enable keyboard interface
-pub const KBD_CMD_READ_INPUT: u8 = 0xC0;      // Read input port
-pub const KBD_CMD_READ_OUTPUT: u8 = 0xD0;     // Read output port
-pub const KBD_CMD_WRITE_OUTPUT: u8 = 0xD1;    // Write output port
-pub const KBD_CMD_WRITE_KBD: u8 = 0xD2;       // Write to keyboard output buffer
-pub const KBD_CMD_WRITE_AUX: u8 = 0xD3;       // Write to aux output buffer
-pub const KBD_CMD_WRITE_AUX_INPUT: u8 = 0xD4; // Write to aux device
-pub const KBD_CMD_PULSE_OUTPUT: u8 = 0xF0;    // Pulse output port (0xFE = reset)
+// Keyboard types
+const BX_KBD_XT_TYPE: u8 = 0;
+const BX_KBD_MF_TYPE: u8 = 2;
 
-/// Keyboard commands
-pub const KBD_KB_CMD_RESET: u8 = 0xFF;
-pub const KBD_KB_CMD_RESEND: u8 = 0xFE;
-pub const KBD_KB_CMD_SET_DEFAULTS: u8 = 0xF6;
-pub const KBD_KB_CMD_DISABLE: u8 = 0xF5;
-pub const KBD_KB_CMD_ENABLE: u8 = 0xF4;
-pub const KBD_KB_CMD_SET_TYPEMATIC: u8 = 0xF3;
-pub const KBD_KB_CMD_ECHO: u8 = 0xEE;
-pub const KBD_KB_CMD_SET_LEDS: u8 = 0xED;
-pub const KBD_KB_CMD_SET_SCANCODE: u8 = 0xF0;
+// Mouse modes
+const MOUSE_MODE_RESET: u8 = 10;
+const MOUSE_MODE_STREAM: u8 = 11;
+const MOUSE_MODE_REMOTE: u8 = 12;
+const MOUSE_MODE_WRAP: u8 = 13;
 
-/// Controller configuration byte bits
-pub const CCB_INT_KBD: u8 = 0x01;    // Keyboard interrupt enable
-pub const CCB_INT_AUX: u8 = 0x02;    // Aux interrupt enable
-pub const CCB_SYS_FLAG: u8 = 0x04;   // System flag
-pub const CCB_DIS_KBD: u8 = 0x10;    // Disable keyboard clock
-pub const CCB_DIS_AUX: u8 = 0x20;    // Disable aux clock
-pub const CCB_XLAT: u8 = 0x40;       // Scancode translation
+// Mouse types
+const BX_MOUSE_TYPE_PS2: u8 = 2;
+const BX_MOUSE_TYPE_IMPS2: u8 = 3;
 
-/// Keyboard state
+/// 8042 Controller state — individual booleans matching Bochs kbd_controller struct
 #[derive(Debug, Clone)]
-pub struct KeyboardState {
-    /// Keyboard enabled
-    pub enabled: bool,
-    /// Keyboard output buffer
-    pub output_buffer: VecDeque<u8>,
-    /// Expecting parameter for command
-    pub expecting_param: bool,
-    /// Current command waiting for parameter
-    pub current_cmd: u8,
-    /// LED state
-    pub led_state: u8,
-    /// Typematic rate
-    pub typematic_rate: u8,
-    /// Scancode set (1, 2, or 3)
-    pub scancode_set: u8,
+pub struct KbdController {
+    // Status register bits (assembled on port 0x64 read)
+    pub pare: bool, // bit 7: parity error
+    pub tim: bool,  // bit 6: timeout (cleared on each status read!)
+    pub auxb: bool, // bit 5: mouse data in output buffer
+    pub keyl: bool, // bit 4: keyboard lock (init = true)
+    pub c_d: bool,  // bit 3: last write was command(1) / data(0)
+    pub sysf: bool, // bit 2: system flag (set after self-test)
+    pub inpb: bool, // bit 1: input buffer full
+    pub outb: bool, // bit 0: output buffer full
+
+    // Internal controller state
+    pub kbd_clock_enabled: bool,
+    pub aux_clock_enabled: bool,
+    pub allow_irq1: bool,
+    pub allow_irq12: bool,
+    pub kbd_output_buffer: u8,
+    pub aux_output_buffer: u8,
+    pub last_comm: u8,
+    pub expecting_port60h: u8,
+    pub expecting_mouse_parameter: u8,
+    pub last_mouse_command: u8,
+    pub timer_pending: u32,
+    pub irq1_requested: bool,
+    pub irq12_requested: bool,
+    pub scancodes_translate: bool,
+    pub expecting_scancodes_set: bool,
+    pub current_scancodes_set: u8,
+    pub bat_in_progress: bool,
+    pub kbd_type: u8,
 }
 
-impl Default for KeyboardState {
-    fn default() -> Self {
-        Self {
-            enabled: true,
-            output_buffer: VecDeque::new(),
-            expecting_param: false,
-            current_cmd: 0,
-            led_state: 0,
-            typematic_rate: 0,
-            scancode_set: 2, // Default to scancode set 2
-        }
-    }
+/// Keyboard internal ring buffer
+#[derive(Debug, Clone)]
+pub struct KbdInternalBuffer {
+    pub buffer: [u8; BX_KBD_ELEMENTS],
+    pub head: usize,
+    pub num_elements: usize,
+    pub expecting_typematic: bool,
+    pub expecting_led_write: bool,
+    pub delay: u8,
+    pub repeat_rate: u8,
+    pub led_status: u8,
+    pub scanning_enabled: bool,
 }
 
-/// Mouse state
-#[derive(Debug, Clone, Default)]
+/// Mouse internal ring buffer
+#[derive(Debug, Clone)]
+pub struct MouseInternalBuffer {
+    pub buffer: [u8; BX_MOUSE_BUFF_SIZE],
+    pub head: usize,
+    pub num_elements: usize,
+}
+
+/// Mouse device state
+#[derive(Debug, Clone)]
 pub struct MouseState {
-    /// Mouse enabled
-    pub enabled: bool,
-    /// Mouse output buffer
-    pub output_buffer: VecDeque<u8>,
-    /// Sample rate
+    pub mouse_type: u8,
     pub sample_rate: u8,
-    /// Resolution
-    pub resolution: u8,
-    /// Scaling (1:1 or 2:1)
-    pub scaling: bool,
+    pub resolution_cpmm: u8,
+    pub scaling: u8,
+    pub mode: u8,
+    pub saved_mode: u8,
+    pub enable: bool,
+    pub button_status: u8,
+    pub delayed_dx: i16,
+    pub delayed_dy: i16,
+    pub delayed_dz: i16,
+    pub im_request: u8,
+    pub im_mode: bool,
 }
 
-/// 8042 Keyboard Controller
+/// 8042 Keyboard Controller — full Bochs-compatible implementation
 #[derive(Debug)]
 pub struct BxKeyboardC {
-    /// Status register
-    pub status: u8,
-    /// Controller configuration byte
-    pub ccb: u8,
-    /// Output port (bits 0-1 control A20 and reset)
-    pub output_port: u8,
-    /// Input port
-    pub input_port: u8,
-    /// Controller output buffer
-    pub output_buffer: u8,
-    /// Is output from aux device?
-    pub output_aux: bool,
-    /// Command byte waiting for data
-    pub pending_command: Option<u8>,
-    /// Keyboard state
-    pub keyboard: KeyboardState,
-    /// Mouse state
+    pub kbd_controller: KbdController,
+    pub kbd_internal_buffer: KbdInternalBuffer,
+    pub mouse_internal_buffer: MouseInternalBuffer,
     pub mouse: MouseState,
-    /// System control port B state
+    pub controller_q: [u8; BX_KBD_CONTROLLER_QSIZE],
+    pub controller_q_size: usize,
+    pub controller_q_source: u8,
+    /// System Control Port B (port 0x61)
     pub system_control_b: u8,
-    /// A20 gate state
+    /// A20 gate state (managed via output port / D1 command)
     pub a20_enabled: bool,
-    /// IRQ1 pending (keyboard)
-    pub irq1_pending: bool,
-    /// IRQ12 pending (mouse)
-    pub irq12_pending: bool,
+    /// First self-test flag (Bochs static kbd_initialized)
+    kbd_initialized: bool,
 }
 
 impl Default for BxKeyboardC {
@@ -154,67 +137,117 @@ impl Default for BxKeyboardC {
 }
 
 impl BxKeyboardC {
-    /// Create a new keyboard controller
+    /// Create a new keyboard controller (matching Bochs keyboard.cc init())
     pub fn new() -> Self {
         Self {
-            status: KBD_STATUS_SYS, // System flag set after POST
-            ccb: CCB_INT_KBD | CCB_INT_AUX | CCB_SYS_FLAG | CCB_XLAT,
-            output_port: 0xCF, // A20 enabled, reset line high
-            input_port: 0x80,
-            output_buffer: 0,
-            output_aux: false,
-            pending_command: None,
-            keyboard: KeyboardState::default(),
-            mouse: MouseState::default(),
+            kbd_controller: KbdController {
+                pare: false,
+                tim: false,
+                auxb: false,
+                keyl: true,  // keyboard lock = locked initially
+                c_d: true,   // last write was command
+                sysf: false, // not set until self-test passes
+                inpb: false,
+                outb: false,
+                kbd_clock_enabled: true,
+                aux_clock_enabled: false,
+                allow_irq1: true,
+                allow_irq12: true,
+                kbd_output_buffer: 0,
+                aux_output_buffer: 0,
+                last_comm: 0,
+                expecting_port60h: 0,
+                expecting_mouse_parameter: 0,
+                last_mouse_command: 0,
+                timer_pending: 0,
+                irq1_requested: false,
+                irq12_requested: false,
+                scancodes_translate: true,
+                expecting_scancodes_set: false,
+                current_scancodes_set: 1, // mf2 (0-indexed: 0=set1, 1=set2, 2=set3)
+                bat_in_progress: false,
+                kbd_type: BX_KBD_MF_TYPE,
+            },
+            kbd_internal_buffer: KbdInternalBuffer {
+                buffer: [0; BX_KBD_ELEMENTS],
+                head: 0,
+                num_elements: 0,
+                expecting_typematic: false,
+                expecting_led_write: false,
+                delay: 1,          // 500 mS
+                repeat_rate: 0x0b, // 10.9 chars/sec
+                led_status: 0,
+                scanning_enabled: true,
+            },
+            mouse_internal_buffer: MouseInternalBuffer {
+                buffer: [0; BX_MOUSE_BUFF_SIZE],
+                head: 0,
+                num_elements: 0,
+            },
+            mouse: MouseState {
+                mouse_type: BX_MOUSE_TYPE_PS2,
+                sample_rate: 100,
+                resolution_cpmm: 4,
+                scaling: 1,
+                mode: MOUSE_MODE_RESET,
+                saved_mode: MOUSE_MODE_RESET,
+                enable: false,
+                button_status: 0,
+                delayed_dx: 0,
+                delayed_dy: 0,
+                delayed_dz: 0,
+                im_request: 0,
+                im_mode: false,
+            },
+            controller_q: [0; BX_KBD_CONTROLLER_QSIZE],
+            controller_q_size: 0,
+            controller_q_source: 0,
             system_control_b: 0,
             a20_enabled: true,
-            irq1_pending: false,
-            irq12_pending: false,
+            kbd_initialized: false,
         }
     }
 
     /// Initialize the keyboard controller
     pub fn init(&mut self) {
         tracing::info!("Keyboard: Initializing 8042 PS/2 Controller");
-        self.reset();
+        self.resetinternals(true);
     }
 
-    /// Reset the keyboard controller
+    /// Reset the keyboard controller (matches Bochs keyboard.cc reset())
     pub fn reset(&mut self) {
-        self.status = KBD_STATUS_SYS;
-        self.ccb = CCB_INT_KBD | CCB_INT_AUX | CCB_SYS_FLAG | CCB_XLAT;
-        self.output_port = 0xCF;
-        self.pending_command = None;
-        self.keyboard = KeyboardState::default();
-        self.mouse = MouseState::default();
-        self.a20_enabled = true;
-        self.irq1_pending = false;
-        self.irq12_pending = false;
+        self.kbd_internal_buffer.led_status = 0;
     }
 
-    /// Read from keyboard I/O port
+    /// Flush internal buffer and reset keyboard settings (keyboard.cc:87-105)
+    fn resetinternals(&mut self, powerup: bool) {
+        self.kbd_internal_buffer.num_elements = 0;
+        self.kbd_internal_buffer.buffer = [0; BX_KBD_ELEMENTS];
+        self.kbd_internal_buffer.head = 0;
+        self.kbd_internal_buffer.expecting_typematic = false;
+
+        // Default scancode set is mf2 (translation controlled by 8042)
+        self.kbd_controller.expecting_scancodes_set = false;
+        self.kbd_controller.current_scancodes_set = 1;
+
+        if powerup {
+            self.kbd_internal_buffer.expecting_led_write = false;
+            self.kbd_internal_buffer.delay = 1; // 500 mS
+            self.kbd_internal_buffer.repeat_rate = 0x0b; // 10.9 chars/sec
+        }
+    }
+
+    // =========================================================================
+    // Port read handler
+    // =========================================================================
+
     pub fn read(&mut self, port: u16, _io_len: u8) -> u32 {
         match port {
-            KBD_DATA_PORT => {
-                let data = self.output_buffer;
-                self.status &= !(KBD_STATUS_OBF | KBD_STATUS_AUXB);
-                self.irq1_pending = false;
-                self.irq12_pending = false;
-
-                // Load next byte from keyboard/mouse buffer
-                self.update_output_buffer();
-
-                tracing::debug!("Keyboard: Read data port 0x60 = {:#04x}, status now = {:#04x}", data, self.status);
-                data as u32
-            }
-            KBD_STATUS_PORT => {
-                tracing::trace!("Keyboard: Read status port 0x64 = {:#04x}", self.status);
-                self.status as u32
-            }
+            KBD_DATA_PORT => self.read_port_60(),
+            KBD_STATUS_PORT => self.read_port_64(),
             SYSTEM_CONTROL_B => {
-                // Toggle bit 4 (PIT channel 2 output) on each read to simulate timing.
-                // The BIOS delay_ms() polls this bit waiting for transitions; if it never
-                // changes, delay_ms() hangs forever. Real hardware toggles at ~18Hz.
+                // Toggle bit 4 (PIT channel 2 output) on each read.
+                // The BIOS delay_ms() polls this bit waiting for transitions.
                 self.system_control_b ^= 0x10;
                 let value = self.system_control_b;
                 tracing::trace!("Keyboard: Read system control B = {:#04x}", value);
@@ -227,329 +260,976 @@ impl BxKeyboardC {
         }
     }
 
-    /// Write to keyboard I/O port
+    /// Port 0x60 read — keyboard.cc:292-348
+    fn read_port_60(&mut self) -> u32 {
+        if self.kbd_controller.auxb {
+            // Mouse byte available
+            let val = self.kbd_controller.aux_output_buffer;
+            self.kbd_controller.aux_output_buffer = 0;
+            self.kbd_controller.outb = false;
+            self.kbd_controller.auxb = false;
+            self.kbd_controller.irq12_requested = false;
+
+            if self.controller_q_size > 0 {
+                self.kbd_controller.aux_output_buffer = self.controller_q[0];
+                self.kbd_controller.outb = true;
+                self.kbd_controller.auxb = true;
+                if self.kbd_controller.allow_irq12 {
+                    self.kbd_controller.irq12_requested = true;
+                }
+                for i in 0..self.controller_q_size - 1 {
+                    self.controller_q[i] = self.controller_q[i + 1];
+                }
+                self.controller_q_size -= 1;
+            }
+
+            self.activate_timer();
+            tracing::debug!(
+                "Keyboard: Read port 0x60 [mouse] = {:#04x}",
+                val
+            );
+            val as u32
+        } else if self.kbd_controller.outb {
+            // Keyboard byte available
+            let val = self.kbd_controller.kbd_output_buffer;
+            self.kbd_controller.outb = false;
+            self.kbd_controller.auxb = false;
+            self.kbd_controller.irq1_requested = false;
+            self.kbd_controller.bat_in_progress = false;
+
+            if self.controller_q_size > 0 {
+                // Drain controller_Q — matching Bochs line 325-338
+                self.kbd_controller.aux_output_buffer = self.controller_q[0];
+                self.kbd_controller.outb = true;
+                self.kbd_controller.auxb = true;
+                if self.kbd_controller.allow_irq1 {
+                    self.kbd_controller.irq1_requested = true;
+                }
+                for i in 0..self.controller_q_size - 1 {
+                    self.controller_q[i] = self.controller_q[i + 1];
+                }
+                self.controller_q_size -= 1;
+            }
+
+            self.activate_timer();
+            tracing::debug!("Keyboard: Read port 0x60 [kbd] = {:#04x}", val);
+            val as u32
+        } else {
+            // Nothing ready — return last value
+            tracing::debug!(
+                "Keyboard: Read port 0x60 (outb empty) = {:#04x}",
+                self.kbd_controller.kbd_output_buffer
+            );
+            self.kbd_controller.kbd_output_buffer as u32
+        }
+    }
+
+    /// Port 0x64 read — assemble status byte from individual booleans (keyboard.cc:349-360)
+    fn read_port_64(&mut self) -> u32 {
+        let val = ((self.kbd_controller.pare as u8) << 7)
+            | ((self.kbd_controller.tim as u8) << 6)
+            | ((self.kbd_controller.auxb as u8) << 5)
+            | ((self.kbd_controller.keyl as u8) << 4)
+            | ((self.kbd_controller.c_d as u8) << 3)
+            | ((self.kbd_controller.sysf as u8) << 2)
+            | ((self.kbd_controller.inpb as u8) << 1)
+            | (self.kbd_controller.outb as u8);
+        self.kbd_controller.tim = false; // cleared on each status read
+        tracing::trace!("Keyboard: Read status 0x64 = {:#04x}", val);
+        val as u32
+    }
+
+    // =========================================================================
+    // Port write handler
+    // =========================================================================
+
     pub fn write(&mut self, port: u16, value: u32, _io_len: u8) {
-        let value = value as u8;
+        let value_u8 = value as u8;
         match port {
-            KBD_DATA_PORT => {
-                tracing::trace!("Keyboard: Write data = {:#04x}", value);
-                self.write_data(value);
-            }
-            KBD_COMMAND_PORT => {
-                tracing::debug!("Keyboard: Write command port 0x64 = {:#04x}", value);
-                self.write_command(value);
-            }
+            KBD_DATA_PORT => self.write_port_60(value_u8),
+            KBD_COMMAND_PORT => self.write_port_64(value_u8),
             SYSTEM_CONTROL_B => {
-                tracing::trace!("Keyboard: Write system control B = {:#04x}", value);
-                self.system_control_b = value;
-                // Bit 0: PIT timer 2 gate
-                // Bit 1: Speaker enable
+                tracing::trace!("Keyboard: Write system control B = {:#04x}", value_u8);
+                self.system_control_b = value_u8;
             }
             _ => {
-                tracing::warn!("Keyboard: Unknown write port {:#06x} value={:#04x}", port, value);
+                tracing::warn!(
+                    "Keyboard: Unknown write port {:#06x} value={:#04x}",
+                    port,
+                    value_u8
+                );
             }
         }
     }
 
-    /// Write to data port
-    fn write_data(&mut self, value: u8) {
-        if let Some(cmd) = self.pending_command {
-            self.pending_command = None;
-            match cmd {
-                KBD_CMD_WRITE_CCB => {
-                    self.ccb = value;
-                    tracing::debug!("Keyboard: CCB set to {:#04x}", value);
+    /// Port 0x60 write — keyboard.cc:387-467
+    fn write_port_60(&mut self, value: u8) {
+        tracing::debug!("Keyboard: Write port 0x60 = {:#04x}", value);
+
+        if self.kbd_controller.expecting_port60h != 0 {
+            self.kbd_controller.expecting_port60h = 0;
+            // data byte written to port 60h
+            self.kbd_controller.c_d = false;
+
+            match self.kbd_controller.last_comm {
+                0x60 => {
+                    // Write command byte (CCB) — keyboard.cc:397-421
+                    let scan_convert = (value >> 6) & 0x01 != 0;
+                    let disable_aux = (value >> 5) & 0x01 != 0;
+                    let disable_keyboard = (value >> 4) & 0x01 != 0;
+                    self.kbd_controller.sysf = (value >> 2) & 0x01 != 0;
+                    self.kbd_controller.allow_irq1 = (value >> 0) & 0x01 != 0;
+                    self.kbd_controller.allow_irq12 = (value >> 1) & 0x01 != 0;
+                    self.set_kbd_clock_enable(!disable_keyboard);
+                    self.set_aux_clock_enable(!disable_aux);
+                    if self.kbd_controller.allow_irq12 && self.kbd_controller.auxb {
+                        self.kbd_controller.irq12_requested = true;
+                    } else if self.kbd_controller.allow_irq1 && self.kbd_controller.outb {
+                        self.kbd_controller.irq1_requested = true;
+                    }
+                    self.kbd_controller.scancodes_translate = scan_convert;
+                    tracing::debug!(
+                        "Keyboard: CCB written: irq1={}, irq12={}, xlat={}, sysf={}, kbd_clk={}, aux_clk={}",
+                        self.kbd_controller.allow_irq1,
+                        self.kbd_controller.allow_irq12,
+                        scan_convert,
+                        self.kbd_controller.sysf,
+                        self.kbd_controller.kbd_clock_enabled,
+                        self.kbd_controller.aux_clock_enabled
+                    );
                 }
-                KBD_CMD_WRITE_OUTPUT => {
-                    self.write_output_port(value);
+                0xCB => {
+                    // Write keyboard controller mode
+                    tracing::debug!(
+                        "Keyboard: Write controller mode {:#04x}",
+                        value
+                    );
                 }
-                KBD_CMD_WRITE_KBD => {
-                    self.queue_keyboard_byte(value);
+                0xD1 => {
+                    // Write output port — keyboard.cc:427-433
+                    tracing::debug!(
+                        "Keyboard: Write output port {:#04x}",
+                        value
+                    );
+                    let new_a20 = (value & 0x02) != 0;
+                    if self.a20_enabled != new_a20 {
+                        self.a20_enabled = new_a20;
+                        tracing::debug!(
+                            "Keyboard: A20 gate = {} via output port",
+                            new_a20
+                        );
+                    }
+                    if (value & 0x01) == 0 {
+                        tracing::warn!(
+                            "Keyboard: Processor reset requested via output port!"
+                        );
+                    }
                 }
-                KBD_CMD_WRITE_AUX => {
-                    self.queue_mouse_byte(value);
+                0xD4 => {
+                    // Write to mouse — keyboard.cc:435-439
+                    self.kbd_ctrl_to_mouse(value);
                 }
-                KBD_CMD_WRITE_AUX_INPUT => {
-                    // Send to mouse device
-                    self.handle_mouse_command(value);
+                0xD3 => {
+                    // Write mouse output buffer — keyboard.cc:442-445
+                    self.controller_enq(value, 1);
                 }
-                _ => {}
+                0xD2 => {
+                    // Write keyboard output buffer — keyboard.cc:447-449
+                    self.controller_enq(value, 0);
+                }
+                _ => {
+                    tracing::warn!(
+                        "Keyboard: Unsupported port 0x60 write (last_comm={:#04x}): {:#04x}",
+                        self.kbd_controller.last_comm,
+                        value
+                    );
+                }
             }
         } else {
-            // Data to keyboard
-            self.handle_keyboard_command(value);
+            // Data byte to keyboard — keyboard.cc:456-466
+            self.kbd_controller.c_d = false;
+            self.kbd_controller.expecting_port60h = 0;
+            if !self.kbd_controller.kbd_clock_enabled {
+                self.set_kbd_clock_enable(true);
+            }
+            self.kbd_ctrl_to_kbd(value);
         }
     }
 
-    /// Write to command port
-    fn write_command(&mut self, value: u8) {
+    /// Port 0x64 write — keyboard.cc:469-640
+    fn write_port_64(&mut self, value: u8) {
+        tracing::debug!("Keyboard: Write command 0x64 = {:#04x}", value);
+
+        // Command byte written to port 64h
+        self.kbd_controller.c_d = true;
+        self.kbd_controller.last_comm = value;
+        // Most commands do NOT expect port60h write next
+        self.kbd_controller.expecting_port60h = 0;
+
         match value {
-            KBD_CMD_READ_CCB => {
-                self.queue_controller_byte(self.ccb);
+            0x20 => {
+                // Get keyboard command byte (CCB) — keyboard.cc:477-493
+                if self.kbd_controller.outb {
+                    tracing::warn!("Keyboard: OUTB set for cmd 0x20");
+                    return;
+                }
+                let command_byte =
+                    ((self.kbd_controller.scancodes_translate as u8) << 6)
+                        | ((!self.kbd_controller.aux_clock_enabled as u8) << 5)
+                        | ((!self.kbd_controller.kbd_clock_enabled as u8) << 4)
+                        | (0 << 3)
+                        | ((self.kbd_controller.sysf as u8) << 2)
+                        | ((self.kbd_controller.allow_irq12 as u8) << 1)
+                        | (self.kbd_controller.allow_irq1 as u8);
+                self.controller_enq(command_byte, 0);
             }
-            KBD_CMD_WRITE_CCB => {
-                self.pending_command = Some(value);
+            0x60 => {
+                // Write command byte — next byte to port 60h
+                self.kbd_controller.expecting_port60h = 1;
             }
-            KBD_CMD_DISABLE_AUX => {
-                self.ccb |= CCB_DIS_AUX;
-                self.mouse.enabled = false;
+            0xA0 | 0xA1 => {
+                // BIOS name / version — not supported
+                tracing::trace!("Keyboard: BIOS name/version cmd {:#04x} (unsupported)", value);
             }
-            KBD_CMD_ENABLE_AUX => {
-                self.ccb &= !CCB_DIS_AUX;
-                self.mouse.enabled = true;
+            0xA7 => {
+                // Disable aux device — keyboard.cc:508-510
+                self.set_aux_clock_enable(false);
+                tracing::debug!("Keyboard: Aux device disabled");
             }
-            KBD_CMD_TEST_AUX => {
-                self.queue_controller_byte(0x00); // Test passed
+            0xA8 => {
+                // Enable aux device — keyboard.cc:512-514
+                self.set_aux_clock_enable(true);
+                tracing::debug!("Keyboard: Aux device enabled");
             }
-            KBD_CMD_SELF_TEST => {
-                self.status |= KBD_STATUS_SYS;
-                self.queue_controller_byte(0x55); // Self-test passed
+            0xA9 => {
+                // Test mouse port — keyboard.cc:516-523
+                if self.kbd_controller.outb {
+                    tracing::warn!("Keyboard: OUTB set for cmd 0xA9");
+                    return;
+                }
+                self.controller_enq(0x00, 0); // no errors
+            }
+            0xAA => {
+                // Motherboard controller self test — keyboard.cc:524-539
+                if !self.kbd_initialized {
+                    self.controller_q_size = 0;
+                    self.kbd_controller.outb = false;
+                    self.kbd_initialized = true;
+                }
+                if self.kbd_controller.outb {
+                    tracing::warn!("Keyboard: OUTB set for cmd 0xAA");
+                    return;
+                }
+                self.kbd_controller.sysf = true; // self test complete
+                self.controller_enq(0x55, 0); // controller OK
                 tracing::debug!("Keyboard: Self-test passed");
             }
-            KBD_CMD_KBD_TEST => {
-                self.queue_controller_byte(0x00); // Test passed
+            0xAB => {
+                // Interface test — keyboard.cc:540-547
+                if self.kbd_controller.outb {
+                    tracing::warn!("Keyboard: OUTB set for cmd 0xAB");
+                    return;
+                }
+                self.controller_enq(0x00, 0);
             }
-            KBD_CMD_DISABLE_KBD => {
-                self.ccb |= CCB_DIS_KBD;
-                self.keyboard.enabled = false;
+            0xAD => {
+                // Disable keyboard — keyboard.cc:548-550
+                self.set_kbd_clock_enable(false);
                 tracing::debug!("Keyboard: Keyboard disabled");
             }
-            KBD_CMD_ENABLE_KBD => {
-                self.ccb &= !CCB_DIS_KBD;
-                self.keyboard.enabled = true;
+            0xAE => {
+                // Enable keyboard — keyboard.cc:552-554
+                self.set_kbd_clock_enable(true);
                 tracing::debug!("Keyboard: Keyboard enabled");
             }
-            KBD_CMD_READ_INPUT => {
-                self.queue_controller_byte(self.input_port);
+            0xAF => {
+                // Get controller version — not supported
+                tracing::trace!("Keyboard: Get controller version (unsupported)");
             }
-            KBD_CMD_READ_OUTPUT => {
-                self.queue_controller_byte(self.output_port);
-            }
-            KBD_CMD_WRITE_OUTPUT | KBD_CMD_WRITE_KBD | 
-            KBD_CMD_WRITE_AUX | KBD_CMD_WRITE_AUX_INPUT => {
-                self.pending_command = Some(value);
-            }
-            0xF0..=0xFF => {
-                // Pulse output port lines
-                let pulse = !(value & 0x0F);
-                if (pulse & 0x01) != 0 {
-                    // Bit 0 low = system reset
-                    tracing::warn!("Keyboard: System reset requested via pulse");
+            0xC0 => {
+                // Read input port — keyboard.cc:559-567
+                if self.kbd_controller.outb {
+                    tracing::warn!("Keyboard: OUTB set for cmd 0xC0");
+                    return;
                 }
+                self.controller_enq(0x80, 0); // keyboard not inhibited
+            }
+            0xCA => {
+                // Read keyboard controller mode
+                self.controller_enq(0x01, 0); // PS/2 (MCA) interface
+            }
+            0xCB => {
+                // Write keyboard controller mode
+                self.kbd_controller.expecting_port60h = 1;
+            }
+            0xD0 => {
+                // Read output port — keyboard.cc:576-588
+                if self.kbd_controller.outb {
+                    tracing::warn!("Keyboard: OUTB set for cmd 0xD0");
+                    return;
+                }
+                let output_port_val =
+                    ((self.kbd_controller.irq12_requested as u8) << 5)
+                        | ((self.kbd_controller.irq1_requested as u8) << 4)
+                        | ((self.a20_enabled as u8) << 1)
+                        | 0x01;
+                self.controller_enq(output_port_val, 0);
+            }
+            0xD1 => {
+                // Write output port — next byte to port 60h
+                self.kbd_controller.expecting_port60h = 1;
+            }
+            0xD2 => {
+                // Write keyboard output buffer — keyboard.cc:609-611
+                self.kbd_controller.expecting_port60h = 1;
+            }
+            0xD3 => {
+                // Write mouse output buffer — keyboard.cc:596-601
+                self.kbd_controller.expecting_port60h = 1;
+            }
+            0xD4 => {
+                // Write to mouse — keyboard.cc:603-607
+                self.kbd_controller.expecting_port60h = 1;
+            }
+            0xDD => {
+                // Disable A20 Address Line — keyboard.cc:613-614
+                self.a20_enabled = false;
+                tracing::debug!("Keyboard: A20 disabled via 0xDD");
+            }
+            0xDF => {
+                // Enable A20 Address Line — keyboard.cc:616-617
+                self.a20_enabled = true;
+                tracing::debug!("Keyboard: A20 enabled via 0xDF");
+            }
+            0xFE => {
+                // System reset — keyboard.cc:625-627
+                tracing::warn!("Keyboard: System reset via 0xFE");
             }
             _ => {
-                if (0x20..0x40).contains(&value) {
-                    // Read internal RAM
-                    let offset = (value - 0x20) as usize;
-                    if offset == 0 {
-                        self.queue_controller_byte(self.ccb);
-                    } else {
-                        self.queue_controller_byte(0);
-                    }
-                } else if (0x60..0x80).contains(&value) {
-                    // Write internal RAM
-                    self.pending_command = Some(value);
+                if value == 0xFF || (value >= 0xF0 && value <= 0xFD) {
+                    // Useless pulse output bit commands
+                    tracing::trace!(
+                        "Keyboard: Pulse command {:#04x}",
+                        value
+                    );
                 } else {
-                    tracing::trace!("Keyboard: Unknown command {:#04x}", value);
+                    tracing::warn!(
+                        "Keyboard: Unknown command {:#04x}",
+                        value
+                    );
                 }
             }
         }
     }
 
-    /// Write to output port
-    fn write_output_port(&mut self, value: u8) {
-        self.output_port = value;
-        
-        // Bit 0: System reset (0 = reset)
-        if (value & 0x01) == 0 {
-            tracing::warn!("Keyboard: System reset via output port");
+    // =========================================================================
+    // Controller queue and buffer management
+    // =========================================================================
+
+    /// Queue data from controller to output buffer (keyboard.cc:752-784)
+    ///
+    /// If output buffer is already full, pushes to controller_Q overflow queue.
+    /// Otherwise, puts directly in kbd_output_buffer or aux_output_buffer.
+    fn controller_enq(&mut self, data: u8, source: u8) {
+        tracing::debug!(
+            "Keyboard: controller_enQ({:#04x}) source={}",
+            data,
+            source
+        );
+
+        if self.kbd_controller.outb {
+            // Output buffer full — queue for later
+            if self.controller_q_size >= BX_KBD_CONTROLLER_QSIZE {
+                tracing::error!("Keyboard: controller_Q full!");
+                return;
+            }
+            self.controller_q[self.controller_q_size] = data;
+            self.controller_q_size += 1;
+            self.controller_q_source = source;
+            return;
         }
-        
-        // Bit 1: A20 gate
-        let new_a20 = (value & 0x02) != 0;
-        if self.a20_enabled != new_a20 {
-            self.a20_enabled = new_a20;
-            tracing::debug!("Keyboard: A20 gate = {}", new_a20);
+
+        // Q is empty, put directly in output buffer
+        if source == 0 {
+            // Keyboard
+            self.kbd_controller.kbd_output_buffer = data;
+            self.kbd_controller.outb = true;
+            self.kbd_controller.auxb = false;
+            self.kbd_controller.inpb = false;
+            if self.kbd_controller.allow_irq1 {
+                self.kbd_controller.irq1_requested = true;
+            }
+        } else {
+            // Mouse
+            self.kbd_controller.aux_output_buffer = data;
+            self.kbd_controller.outb = true;
+            self.kbd_controller.auxb = true;
+            self.kbd_controller.inpb = false;
+            if self.kbd_controller.allow_irq12 {
+                self.kbd_controller.irq12_requested = true;
+            }
         }
     }
 
-    /// Handle keyboard command
-    fn handle_keyboard_command(&mut self, value: u8) {
-        if self.keyboard.expecting_param {
-            self.keyboard.expecting_param = false;
-            match self.keyboard.current_cmd {
-                KBD_KB_CMD_SET_LEDS => {
-                    self.keyboard.led_state = value;
-                    self.queue_keyboard_byte(0xFA); // ACK
+    /// Immediate enqueue to keyboard output buffer (keyboard.cc:786-797)
+    ///
+    /// Bypasses internal buffer — used for LED-write ACK (0xFA).
+    fn kbd_enq_imm(&mut self, val: u8) {
+        self.kbd_controller.kbd_output_buffer = val;
+        self.kbd_controller.outb = true;
+        if self.kbd_controller.allow_irq1 {
+            self.kbd_controller.irq1_requested = true;
+        }
+    }
+
+    /// Queue scancode in internal keyboard ring buffer (keyboard.cc:799-822)
+    ///
+    /// The byte is NOT immediately visible in the output buffer. It must be
+    /// transferred by `periodic()` (called from the device tick path).
+    fn kbd_enq(&mut self, scancode: u8) {
+        if self.kbd_internal_buffer.num_elements >= BX_KBD_ELEMENTS {
+            tracing::warn!(
+                "Keyboard: Internal buffer full, ignoring {:#04x}",
+                scancode
+            );
+            return;
+        }
+
+        let tail = (self.kbd_internal_buffer.head
+            + self.kbd_internal_buffer.num_elements)
+            % BX_KBD_ELEMENTS;
+        self.kbd_internal_buffer.buffer[tail] = scancode;
+        self.kbd_internal_buffer.num_elements += 1;
+
+        if !self.kbd_controller.outb && self.kbd_controller.kbd_clock_enabled {
+            self.activate_timer();
+        }
+    }
+
+    /// Queue byte in internal mouse ring buffer (keyboard.cc:841-863)
+    #[allow(dead_code)]
+    fn mouse_enq(&mut self, data: u8) {
+        if self.mouse_internal_buffer.num_elements >= BX_MOUSE_BUFF_SIZE {
+            tracing::warn!(
+                "Keyboard: Mouse buffer full, ignoring {:#04x}",
+                data
+            );
+            return;
+        }
+
+        let tail = (self.mouse_internal_buffer.head
+            + self.mouse_internal_buffer.num_elements)
+            % BX_MOUSE_BUFF_SIZE;
+        self.mouse_internal_buffer.buffer[tail] = data;
+        self.mouse_internal_buffer.num_elements += 1;
+
+        if !self.kbd_controller.outb && self.kbd_controller.aux_clock_enabled {
+            self.activate_timer();
+        }
+    }
+
+    /// Set timer_pending flag (keyboard.cc:1097-1102)
+    fn activate_timer(&mut self) {
+        if self.kbd_controller.timer_pending == 0 {
+            self.kbd_controller.timer_pending = 1;
+        }
+    }
+
+    // =========================================================================
+    // Keyboard command handler (keyboard.cc:865-1022)
+    // =========================================================================
+
+    fn kbd_ctrl_to_kbd(&mut self, value: u8) {
+        tracing::debug!("Keyboard: kbd_ctrl_to_kbd({:#04x})", value);
+
+        if self.kbd_internal_buffer.expecting_typematic {
+            self.kbd_internal_buffer.expecting_typematic = false;
+            self.kbd_internal_buffer.delay = (value >> 5) & 0x03;
+            self.kbd_internal_buffer.repeat_rate = value & 0x1f;
+            self.kbd_enq(0xFA); // ACK
+            return;
+        }
+
+        if self.kbd_internal_buffer.expecting_led_write {
+            self.kbd_internal_buffer.led_status = value;
+            self.kbd_internal_buffer.expecting_led_write = false;
+            self.kbd_enq(0xFA); // ACK
+            return;
+        }
+
+        if self.kbd_controller.expecting_scancodes_set {
+            self.kbd_controller.expecting_scancodes_set = false;
+            if value != 0 {
+                if value < 4 {
+                    self.kbd_controller.current_scancodes_set = value - 1;
+                    self.kbd_enq(0xFA);
+                } else {
+                    self.kbd_enq(0xFF); // ERROR
                 }
-                KBD_KB_CMD_SET_TYPEMATIC => {
-                    self.keyboard.typematic_rate = value;
-                    self.queue_keyboard_byte(0xFA); // ACK
-                }
-                KBD_KB_CMD_SET_SCANCODE => {
-                    if value == 0 {
-                        // Query current scancode set
-                        self.queue_keyboard_byte(0xFA); // ACK
-                        self.queue_keyboard_byte(self.keyboard.scancode_set);
-                    } else if value <= 3 {
-                        self.keyboard.scancode_set = value;
-                        self.queue_keyboard_byte(0xFA); // ACK
-                    }
-                }
-                _ => {}
+            } else {
+                // Query current set: send ACK then set number
+                self.kbd_enq(0xFA);
+                self.kbd_enq(1 + self.kbd_controller.current_scancodes_set);
             }
             return;
         }
 
         match value {
-            KBD_KB_CMD_RESET => {
-                self.queue_keyboard_byte(0xFA); // ACK
-                self.queue_keyboard_byte(0xAA); // BAT passed
-                tracing::debug!("Keyboard: Reset");
+            0x00 => {
+                self.kbd_enq(0xFA); // ACK
             }
-            KBD_KB_CMD_RESEND => {
-                // Resend last byte (not implemented)
-                self.queue_keyboard_byte(0xFE);
+            0x05 => {
+                // (mch) trying to get this to work...
+                self.kbd_controller.sysf = true;
+                self.kbd_enq_imm(0xFE);
             }
-            KBD_KB_CMD_SET_DEFAULTS => {
-                self.keyboard.typematic_rate = 0;
-                self.keyboard.led_state = 0;
-                self.queue_keyboard_byte(0xFA); // ACK
+            0xED => {
+                // LED Write
+                self.kbd_internal_buffer.expecting_led_write = true;
+                self.kbd_enq_imm(0xFA); // ACK (immediate)
             }
-            KBD_KB_CMD_DISABLE => {
-                self.keyboard.enabled = false;
-                self.queue_keyboard_byte(0xFA); // ACK
+            0xEE => {
+                // Echo
+                self.kbd_enq(0xEE);
             }
-            KBD_KB_CMD_ENABLE => {
-                self.keyboard.enabled = true;
-                self.queue_keyboard_byte(0xFA); // ACK
-            }
-            KBD_KB_CMD_SET_TYPEMATIC | KBD_KB_CMD_SET_LEDS | KBD_KB_CMD_SET_SCANCODE => {
-                self.keyboard.expecting_param = true;
-                self.keyboard.current_cmd = value;
-                self.queue_keyboard_byte(0xFA); // ACK
-            }
-            KBD_KB_CMD_ECHO => {
-                self.queue_keyboard_byte(0xEE); // Echo
+            0xF0 => {
+                // Select alternate scan code set
+                self.kbd_controller.expecting_scancodes_set = true;
+                self.kbd_enq(0xFA); // ACK
             }
             0xF2 => {
-                // Read keyboard ID
-                self.queue_keyboard_byte(0xFA); // ACK
-                self.queue_keyboard_byte(0xAB); // Keyboard ID byte 1
-                self.queue_keyboard_byte(0x83); // Keyboard ID byte 2
+                // Identify keyboard — keyboard.cc:950-967
+                if self.kbd_controller.kbd_type != BX_KBD_XT_TYPE {
+                    self.kbd_enq(0xFA); // ACK
+                    if self.kbd_controller.kbd_type == BX_KBD_MF_TYPE {
+                        self.kbd_enq(0xAB);
+                        if self.kbd_controller.scancodes_translate {
+                            self.kbd_enq(0x41);
+                        } else {
+                            self.kbd_enq(0x83);
+                        }
+                    }
+                }
+            }
+            0xF3 => {
+                // Set typematic rate
+                self.kbd_internal_buffer.expecting_typematic = true;
+                self.kbd_enq(0xFA); // ACK
+            }
+            0xF4 => {
+                // Enable scanning
+                self.kbd_internal_buffer.scanning_enabled = true;
+                self.kbd_enq(0xFA); // ACK
+            }
+            0xF5 => {
+                // Reset keyboard and disable scanning
+                self.resetinternals(true);
+                self.kbd_enq(0xFA); // ACK
+                self.kbd_internal_buffer.scanning_enabled = false;
+            }
+            0xF6 => {
+                // Reset keyboard and enable scanning
+                self.resetinternals(true);
+                self.kbd_enq(0xFA); // ACK
+                self.kbd_internal_buffer.scanning_enabled = true;
+            }
+            0xFE => {
+                // Resend — not supported
+                tracing::warn!("Keyboard: Resend command (0xFE) received");
+            }
+            0xFF => {
+                // Reset keyboard + BAT — keyboard.cc:998-1004
+                tracing::debug!("Keyboard: Reset command received");
+                self.resetinternals(true);
+                self.kbd_enq(0xFA); // ACK
+                self.kbd_controller.bat_in_progress = true;
+                self.kbd_enq(0xAA); // BAT passed
+            }
+            0xD3 => {
+                self.kbd_enq(0xFA); // ACK
+            }
+            0xF7..=0xFD => {
+                // PS/2 extensions — silently ignored with NACK
+                self.kbd_enq(0xFE);
             }
             _ => {
-                self.queue_keyboard_byte(0xFA); // ACK
+                tracing::warn!(
+                    "Keyboard: Unknown kbd command {:#04x}",
+                    value
+                );
+                self.kbd_enq(0xFE); // NACK
             }
         }
     }
 
-    /// Handle mouse command
-    fn handle_mouse_command(&mut self, value: u8) {
+    // =========================================================================
+    // Mouse command handler (keyboard.cc:1104-1339)
+    // =========================================================================
+
+    fn kbd_ctrl_to_mouse(&mut self, value: u8) {
+        let is_ps2 = self.mouse.mouse_type == BX_MOUSE_TYPE_PS2
+            || self.mouse.mouse_type == BX_MOUSE_TYPE_IMPS2;
+
+        tracing::debug!("Keyboard: kbd_ctrl_to_mouse({:#04x})", value);
+
+        if self.kbd_controller.expecting_mouse_parameter != 0 {
+            self.kbd_controller.expecting_mouse_parameter = 0;
+            match self.kbd_controller.last_mouse_command {
+                0xF3 => {
+                    // Set sample rate
+                    self.mouse.sample_rate = value;
+                    // Wheel mouse detection sequence
+                    match (value, self.mouse.im_request) {
+                        (200, 0) => self.mouse.im_request = 1,
+                        (100, 1) => self.mouse.im_request = 2,
+                        (80, 2) => {
+                            if self.mouse.mouse_type == BX_MOUSE_TYPE_IMPS2 {
+                                self.mouse.im_mode = true;
+                            }
+                            self.mouse.im_request = 0;
+                        }
+                        _ => self.mouse.im_request = 0,
+                    }
+                    self.controller_enq(0xFA, 1); // ACK
+                }
+                0xE8 => {
+                    // Set resolution
+                    self.mouse.resolution_cpmm = match value {
+                        0 => 1,
+                        1 => 2,
+                        2 => 4,
+                        3 => 8,
+                        _ => 4,
+                    };
+                    self.controller_enq(0xFA, 1); // ACK
+                }
+                _ => {
+                    tracing::warn!(
+                        "Keyboard: Unknown mouse param for cmd {:#04x}",
+                        self.kbd_controller.last_mouse_command
+                    );
+                }
+            }
+            return;
+        }
+
+        self.kbd_controller.expecting_mouse_parameter = 0;
+        self.kbd_controller.last_mouse_command = value;
+
+        // Wrap mode handling
+        if self.mouse.mode == MOUSE_MODE_WRAP {
+            if value != 0xFF && value != 0xEC {
+                self.controller_enq(value, 1);
+                return;
+            }
+        }
+
         match value {
-            0xFF => {
-                // Reset
-                self.queue_mouse_byte(0xFA); // ACK
-                self.queue_mouse_byte(0xAA); // BAT passed
-                self.queue_mouse_byte(0x00); // Device ID
+            0xE6 => {
+                // Scaling 1:1
+                self.controller_enq(0xFA, 1);
+                self.mouse.scaling = 1;
+            }
+            0xE7 => {
+                // Scaling 2:1
+                self.controller_enq(0xFA, 1);
+                self.mouse.scaling = 2;
+            }
+            0xE8 => {
+                // Set resolution (next byte)
+                self.controller_enq(0xFA, 1);
+                self.kbd_controller.expecting_mouse_parameter = 1;
+            }
+            0xE9 => {
+                // Get mouse information
+                self.controller_enq(0xFA, 1);
+                let status = self.get_mouse_status_byte();
+                self.controller_enq(status, 1);
+                let resolution = self.get_mouse_resolution_byte();
+                self.controller_enq(resolution, 1);
+                self.controller_enq(self.mouse.sample_rate, 1);
+            }
+            0xEA => {
+                // Set stream mode
+                self.mouse.mode = MOUSE_MODE_STREAM;
+                self.controller_enq(0xFA, 1);
+            }
+            0xEC => {
+                // Reset wrap mode
+                if self.mouse.mode == MOUSE_MODE_WRAP {
+                    self.mouse.mode = self.mouse.saved_mode;
+                    self.controller_enq(0xFA, 1);
+                }
+            }
+            0xEE => {
+                // Set wrap mode
+                self.mouse.saved_mode = self.mouse.mode;
+                self.mouse.mode = MOUSE_MODE_WRAP;
+                self.controller_enq(0xFA, 1);
+            }
+            0xF0 => {
+                // Set remote mode
+                self.mouse.mode = MOUSE_MODE_REMOTE;
+                self.controller_enq(0xFA, 1);
+            }
+            0xF2 => {
+                // Read device type
+                self.controller_enq(0xFA, 1);
+                if self.mouse.im_mode {
+                    self.controller_enq(0x03, 1); // Wheel mouse
+                } else {
+                    self.controller_enq(0x00, 1); // Standard
+                }
+            }
+            0xF3 => {
+                // Set sample rate (next byte)
+                self.controller_enq(0xFA, 1);
+                self.kbd_controller.expecting_mouse_parameter = 1;
             }
             0xF4 => {
-                // Enable
-                self.mouse.enabled = true;
-                self.queue_mouse_byte(0xFA); // ACK
+                // Enable (stream mode)
+                if is_ps2 {
+                    self.mouse.enable = true;
+                    self.controller_enq(0xFA, 1);
+                } else {
+                    self.controller_enq(0xFE, 1); // RESEND
+                    self.kbd_controller.tim = true;
+                }
             }
             0xF5 => {
                 // Disable
-                self.mouse.enabled = false;
-                self.queue_mouse_byte(0xFA); // ACK
+                self.mouse.enable = false;
+                self.controller_enq(0xFA, 1);
             }
-            0xF2 => {
-                // Read device ID
-                self.queue_mouse_byte(0xFA); // ACK
-                self.queue_mouse_byte(0x00); // Standard mouse
+            0xF6 => {
+                // Set defaults
+                self.mouse.sample_rate = 100;
+                self.mouse.resolution_cpmm = 4;
+                self.mouse.scaling = 1;
+                self.mouse.enable = false;
+                self.mouse.mode = MOUSE_MODE_STREAM;
+                self.controller_enq(0xFA, 1);
+            }
+            0xFF => {
+                // Reset mouse
+                if is_ps2 {
+                    self.mouse.sample_rate = 100;
+                    self.mouse.resolution_cpmm = 4;
+                    self.mouse.scaling = 1;
+                    self.mouse.mode = MOUSE_MODE_RESET;
+                    self.mouse.enable = false;
+                    self.mouse.im_mode = false;
+                    self.controller_enq(0xFA, 1); // ACK
+                    self.controller_enq(0xAA, 1); // Completion
+                    self.controller_enq(0x00, 1); // ID
+                } else {
+                    self.controller_enq(0xFE, 1); // RESEND
+                    self.kbd_controller.tim = true;
+                }
+            }
+            0xE1 => {
+                // Read secondary ID
+                self.controller_enq(0xFA, 1);
+                self.controller_enq(0x00, 1);
+            }
+            0xEB => {
+                // Read data (remote mode)
+                self.controller_enq(0xFA, 1);
+                // Send empty packet
+                self.controller_enq(
+                    0x08 | (self.mouse.button_status & 0x0F),
+                    1,
+                );
+                self.controller_enq(0x00, 1);
+                self.controller_enq(0x00, 1);
             }
             _ => {
-                self.queue_mouse_byte(0xFA); // ACK
-            }
-        }
-    }
-
-    /// Queue a byte from controller to output buffer
-    fn queue_controller_byte(&mut self, byte: u8) {
-        self.output_buffer = byte;
-        self.output_aux = false;
-        self.status |= KBD_STATUS_OBF;
-    }
-
-    /// Queue a byte from keyboard
-    fn queue_keyboard_byte(&mut self, byte: u8) {
-        self.keyboard.output_buffer.push_back(byte);
-        self.update_output_buffer();
-    }
-
-    /// Queue a byte from mouse
-    fn queue_mouse_byte(&mut self, byte: u8) {
-        self.mouse.output_buffer.push_back(byte);
-        self.update_output_buffer();
-    }
-
-    /// Update the output buffer from keyboard/mouse queues
-    fn update_output_buffer(&mut self) {
-        if (self.status & KBD_STATUS_OBF) == 0 {
-            // Try keyboard first, then mouse
-            if let Some(byte) = self.keyboard.output_buffer.pop_front() {
-                self.output_buffer = byte;
-                self.output_aux = false;
-                self.status |= KBD_STATUS_OBF;
-                if (self.ccb & CCB_INT_KBD) != 0 {
-                    self.irq1_pending = true;
-                }
-            } else if let Some(byte) = self.mouse.output_buffer.pop_front() {
-                self.output_buffer = byte;
-                self.output_aux = true;
-                self.status |= KBD_STATUS_OBF | KBD_STATUS_AUXB;
-                if (self.ccb & CCB_INT_AUX) != 0 {
-                    self.irq12_pending = true;
+                if is_ps2 {
+                    tracing::warn!(
+                        "Keyboard: Unknown mouse command {:#04x}",
+                        value
+                    );
+                    self.controller_enq(0xFE, 1); // NACK
                 }
             }
         }
     }
 
-    /// Send a scancode to the keyboard
+    fn get_mouse_status_byte(&self) -> u8 {
+        let mut ret: u8 =
+            if self.mouse.mode == MOUSE_MODE_REMOTE { 0x40 } else { 0 };
+        ret |= (self.mouse.enable as u8) << 5;
+        if self.mouse.scaling != 1 {
+            ret |= 1 << 4;
+        }
+        ret |= (self.mouse.button_status & 0x01) << 2;
+        ret |= self.mouse.button_status & 0x02;
+        ret
+    }
+
+    fn get_mouse_resolution_byte(&self) -> u8 {
+        match self.mouse.resolution_cpmm {
+            1 => 0,
+            2 => 1,
+            4 => 2,
+            8 => 3,
+            _ => 2,
+        }
+    }
+
+    // =========================================================================
+    // Clock enable (keyboard.cc:710-742)
+    // =========================================================================
+
+    fn set_kbd_clock_enable(&mut self, enable: bool) {
+        if !enable {
+            self.kbd_controller.kbd_clock_enabled = false;
+        } else {
+            let prev = self.kbd_controller.kbd_clock_enabled;
+            self.kbd_controller.kbd_clock_enabled = true;
+            if !prev && !self.kbd_controller.outb {
+                self.activate_timer();
+            }
+        }
+    }
+
+    fn set_aux_clock_enable(&mut self, enable: bool) {
+        if !enable {
+            self.kbd_controller.aux_clock_enabled = false;
+        } else {
+            let prev = self.kbd_controller.aux_clock_enabled;
+            self.kbd_controller.aux_clock_enabled = true;
+            if !prev && !self.kbd_controller.outb {
+                self.activate_timer();
+            }
+        }
+    }
+
+    // =========================================================================
+    // Periodic timer (keyboard.cc:1037-1095)
+    // =========================================================================
+
+    /// Timer-driven transfer from internal buffers to output buffer.
+    ///
+    /// Returns IRQ bitmask: bit 0 = IRQ1 (keyboard), bit 1 = IRQ12 (mouse).
+    /// Called from DeviceManager::tick().
+    pub fn periodic(&mut self, usec_delta: u32) -> u8 {
+        // Collect pending IRQ requests
+        let mut retval: u8 = 0;
+        if self.kbd_controller.irq1_requested {
+            retval |= 0x01;
+        }
+        if self.kbd_controller.irq12_requested {
+            retval |= 0x02;
+        }
+        self.kbd_controller.irq1_requested = false;
+        self.kbd_controller.irq12_requested = false;
+
+        if self.kbd_controller.timer_pending == 0 {
+            return retval;
+        }
+
+        if usec_delta >= self.kbd_controller.timer_pending {
+            self.kbd_controller.timer_pending = 0;
+        } else {
+            self.kbd_controller.timer_pending -= usec_delta;
+            return retval;
+        }
+
+        // Timer expired — try to transfer a byte to output buffer
+        if self.kbd_controller.outb {
+            return retval;
+        }
+
+        // Transfer from keyboard internal buffer
+        if self.kbd_internal_buffer.num_elements > 0
+            && (self.kbd_controller.kbd_clock_enabled
+                || self.kbd_controller.bat_in_progress)
+        {
+            self.kbd_controller.kbd_output_buffer =
+                self.kbd_internal_buffer.buffer[self.kbd_internal_buffer.head];
+            self.kbd_controller.outb = true;
+            self.kbd_internal_buffer.head =
+                (self.kbd_internal_buffer.head + 1) % BX_KBD_ELEMENTS;
+            self.kbd_internal_buffer.num_elements -= 1;
+            if self.kbd_controller.allow_irq1 {
+                self.kbd_controller.irq1_requested = true;
+                retval |= 0x01;
+            }
+        } else {
+            // Try mouse internal buffer
+            if self.kbd_controller.aux_clock_enabled
+                && self.mouse_internal_buffer.num_elements > 0
+            {
+                self.kbd_controller.aux_output_buffer = self
+                    .mouse_internal_buffer.buffer
+                    [self.mouse_internal_buffer.head];
+                self.kbd_controller.outb = true;
+                self.kbd_controller.auxb = true;
+                self.mouse_internal_buffer.head =
+                    (self.mouse_internal_buffer.head + 1)
+                        % BX_MOUSE_BUFF_SIZE;
+                self.mouse_internal_buffer.num_elements -= 1;
+                if self.kbd_controller.allow_irq12 {
+                    self.kbd_controller.irq12_requested = true;
+                    retval |= 0x02;
+                }
+            }
+        }
+
+        retval
+    }
+
+    // =========================================================================
+    // External API
+    // =========================================================================
+
+    /// Send a scancode from external input (GUI)
     pub fn send_scancode(&mut self, scancode: u8) {
-        if self.keyboard.enabled && (self.ccb & CCB_DIS_KBD) == 0 {
-            self.queue_keyboard_byte(scancode);
+        if self.kbd_controller.kbd_clock_enabled
+            && self.kbd_internal_buffer.scanning_enabled
+        {
+            self.kbd_enq(scancode);
         }
-    }
-
-    /// Check and clear IRQ1 pending
-    pub fn check_irq1(&mut self) -> bool {
-        let pending = self.irq1_pending;
-        self.irq1_pending = false;
-        pending
-    }
-
-    /// Check and clear IRQ12 pending
-    pub fn check_irq12(&mut self) -> bool {
-        let pending = self.irq12_pending;
-        self.irq12_pending = false;
-        pending
     }
 
     /// Get A20 gate state
     pub fn get_a20_enabled(&self) -> bool {
         self.a20_enabled
     }
+
+    /// Check and clear IRQ1 pending (compatibility — prefer periodic() return value)
+    pub fn check_irq1(&mut self) -> bool {
+        let pending = self.kbd_controller.irq1_requested;
+        self.kbd_controller.irq1_requested = false;
+        pending
+    }
+
+    /// Check and clear IRQ12 pending (compatibility — prefer periodic() return value)
+    pub fn check_irq12(&mut self) -> bool {
+        let pending = self.kbd_controller.irq12_requested;
+        self.kbd_controller.irq12_requested = false;
+        pending
+    }
 }
 
 /// Keyboard read handler for I/O port infrastructure
-pub fn keyboard_read_handler(this_ptr: *mut c_void, port: u16, io_len: u8) -> u32 {
+pub fn keyboard_read_handler(
+    this_ptr: *mut c_void,
+    port: u16,
+    io_len: u8,
+) -> u32 {
     let kbd = unsafe { &mut *(this_ptr as *mut BxKeyboardC) };
     kbd.read(port, io_len)
 }
 
 /// Keyboard write handler for I/O port infrastructure
-pub fn keyboard_write_handler(this_ptr: *mut c_void, port: u16, value: u32, io_len: u8) {
+pub fn keyboard_write_handler(
+    this_ptr: *mut c_void,
+    port: u16,
+    value: u32,
+    io_len: u8,
+) {
     let kbd = unsafe { &mut *(this_ptr as *mut BxKeyboardC) };
     kbd.write(port, value, io_len);
 }
@@ -562,21 +1242,128 @@ mod tests {
     fn test_keyboard_creation() {
         let kbd = BxKeyboardC::new();
         assert!(kbd.a20_enabled);
-        assert!((kbd.status & KBD_STATUS_SYS) != 0);
+        assert!(!kbd.kbd_controller.sysf); // Not set until self-test
+        assert!(kbd.kbd_controller.keyl);
+        assert!(kbd.kbd_controller.kbd_clock_enabled);
+        assert!(!kbd.kbd_controller.aux_clock_enabled);
     }
 
     #[test]
     fn test_keyboard_self_test() {
         let mut kbd = BxKeyboardC::new();
-        
-        // Send self-test command
-        kbd.write(KBD_COMMAND_PORT, KBD_CMD_SELF_TEST as u32, 1);
-        
-        // Should have response in output buffer
-        assert!((kbd.status & KBD_STATUS_OBF) != 0);
-        
+
+        // Send self-test command (0xAA to port 0x64)
+        kbd.write(KBD_COMMAND_PORT, 0xAA, 1);
+
+        // Should have 0x55 in output buffer immediately (via controller_enQ)
+        assert!(kbd.kbd_controller.outb);
+        assert!(kbd.kbd_controller.sysf);
+
         let response = kbd.read(KBD_DATA_PORT, 1);
-        assert_eq!(response, 0x55); // Self-test passed
+        assert_eq!(response, 0x55);
+    }
+
+    #[test]
+    fn test_keyboard_interface_test() {
+        let mut kbd = BxKeyboardC::new();
+
+        // Self test first
+        kbd.write(KBD_COMMAND_PORT, 0xAA, 1);
+        let _ = kbd.read(KBD_DATA_PORT, 1);
+
+        // Interface test
+        kbd.write(KBD_COMMAND_PORT, 0xAB, 1);
+        assert!(kbd.kbd_controller.outb);
+
+        let response = kbd.read(KBD_DATA_PORT, 1);
+        assert_eq!(response, 0x00); // Test passed
+    }
+
+    #[test]
+    fn test_keyboard_reset_bat() {
+        let mut kbd = BxKeyboardC::new();
+
+        // Self-test first
+        kbd.write(KBD_COMMAND_PORT, 0xAA, 1);
+        let _ = kbd.read(KBD_DATA_PORT, 1);
+
+        // Enable keyboard
+        kbd.write(KBD_COMMAND_PORT, 0xAE, 1);
+
+        // Send reset (0xFF to port 0x60)
+        kbd.write(KBD_DATA_PORT, 0xFF, 1);
+
+        // ACK and BAT are in internal buffer, need periodic() to transfer
+        assert_eq!(kbd.kbd_internal_buffer.num_elements, 2);
+        assert!(kbd.kbd_controller.bat_in_progress);
+
+        // Transfer ACK
+        let irq = kbd.periodic(10);
+        assert!(kbd.kbd_controller.outb);
+        let ack = kbd.read(KBD_DATA_PORT, 1);
+        assert_eq!(ack, 0xFA);
+
+        // Activate timer for next transfer
+        // (read_port_60 calls activate_timer internally)
+        let irq = kbd.periodic(10);
+        assert!(kbd.kbd_controller.outb);
+        let bat = kbd.read(KBD_DATA_PORT, 1);
+        assert_eq!(bat, 0xAA);
+        let _ = irq; // suppress unused warning
+    }
+
+    #[test]
+    fn test_keyboard_disable_enable() {
+        let mut kbd = BxKeyboardC::new();
+
+        // Disable keyboard
+        kbd.write(KBD_COMMAND_PORT, 0xAD, 1);
+        assert!(!kbd.kbd_controller.kbd_clock_enabled);
+
+        // Enable keyboard
+        kbd.write(KBD_COMMAND_PORT, 0xAE, 1);
+        assert!(kbd.kbd_controller.kbd_clock_enabled);
+    }
+
+    #[test]
+    fn test_status_register_assembly() {
+        let mut kbd = BxKeyboardC::new();
+
+        // After init: keyl=1, c_d=1, everything else 0
+        let status = kbd.read(KBD_STATUS_PORT, 1);
+        // keyl(bit4)=1, c_d(bit3)=1 => 0x18
+        assert_eq!(status, 0x18);
+
+        // After self-test: sysf=1, outb=1 (0x55 in buffer)
+        kbd.write(KBD_COMMAND_PORT, 0xAA, 1);
+        let status = kbd.read(KBD_STATUS_PORT, 1);
+        // keyl=1, c_d=1, sysf=1, outb=1 => 0x1D
+        assert_eq!(status, 0x1D);
+    }
+
+    #[test]
+    fn test_ccb_write_read() {
+        let mut kbd = BxKeyboardC::new();
+
+        // Self-test first
+        kbd.write(KBD_COMMAND_PORT, 0xAA, 1);
+        let _ = kbd.read(KBD_DATA_PORT, 1);
+
+        // Write CCB: translate=1, disable_aux=1, sysf=1, irq1=1
+        // = 0b01100101 = 0x65
+        kbd.write(KBD_COMMAND_PORT, 0x60, 1);
+        kbd.write(KBD_DATA_PORT, 0x65, 1);
+
+        assert!(kbd.kbd_controller.scancodes_translate);
+        assert!(!kbd.kbd_controller.aux_clock_enabled);
+        assert!(kbd.kbd_controller.kbd_clock_enabled);
+        assert!(kbd.kbd_controller.sysf);
+        assert!(kbd.kbd_controller.allow_irq1);
+        assert!(!kbd.kbd_controller.allow_irq12);
+
+        // Read CCB back
+        kbd.write(KBD_COMMAND_PORT, 0x20, 1);
+        let ccb = kbd.read(KBD_DATA_PORT, 1);
+        assert_eq!(ccb, 0x65);
     }
 }
-
