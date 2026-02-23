@@ -113,7 +113,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r/m16, Sreg - Move segment register to r/m16
     pub fn mov_ew_sw(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
         let src_seg = instr.meta_data[1] as usize;
 
         // Decoder should never give us invalid segment registers (6-7)
@@ -125,14 +124,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         );
 
         let seg_val = self.sregs[src_seg].selector.value;
-        self.set_gpr16(dst, seg_val);
-        tracing::trace!("MOV: reg{} = seg{} ({:#06x})", dst, src_seg, seg_val);
+
+        if instr.mod_c0() {
+            // Register form: MOV r16, sreg
+            let dst = instr.meta_data[0] as usize;
+            self.set_gpr16(dst, seg_val);
+            tracing::trace!("MOV: reg{} = seg{} ({:#06x})", dst, src_seg, seg_val);
+        } else {
+            // Memory form: MOV [mem], sreg
+            let eaddr = self.resolve_addr32(instr);
+            let seg = BxSegregs::from(instr.seg());
+            self.write_virtual_word(seg, eaddr, seg_val);
+            tracing::trace!("MOV: [{:#x}] = seg{} ({:#06x})", eaddr, src_seg, seg_val);
+        }
     }
 
     /// MOV Sreg, r/m16 - Move r/m16 to segment register
     pub fn mov_sw_ew(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let dst_seg = instr.meta_data[0] as usize;
-        let src = instr.meta_data[1] as usize;
 
         // Decoder should never give us invalid segment registers (6-7)
         // Valid segment registers: ES(0), CS(1), SS(2), DS(3), FS(4), GS(5)
@@ -142,7 +151,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             dst_seg
         );
 
-        let new_sel = self.get_gpr16(src);
+        let new_sel = if instr.mod_c0() {
+            // Register form: MOV sreg, r16
+            let src = instr.meta_data[1] as usize;
+            self.get_gpr16(src)
+        } else {
+            // Memory form: MOV sreg, [mem]
+            let eaddr = self.resolve_addr32(instr);
+            let seg = BxSegregs::from(instr.seg());
+            self.read_virtual_word(seg, eaddr)
+        };
 
         // Don't allow loading CS directly (would need special handling)
         if dst_seg == BxSegregs::Cs as usize {
