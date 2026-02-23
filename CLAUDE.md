@@ -16,25 +16,27 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-02-19):**
+**Current Status (2026-02-23):**
 - ✅ BIOS-bochs-latest (128 KB) is now the primary BIOS
 - ✅ Real mode BIOS executes ~362k instructions (keyboard init, memory probe, etc.)
 - ✅ Transitions to protected mode via far jump (CS=0x10, flat memory model)
 - ✅ rombios32 enters protected mode, _start executes with correct symbol addresses
 - ✅ BSS clearing + .data copy complete correctly
-- ✅ No unimplemented opcode errors
-- ✅ Port 0x61 bit 4 toggle fix — `delay_ms()` in `smp_probe()` no longer infinite loops
-- ✅ All hot-path logging fixed (no more debug!/info! on hot paths)
-- ✅ dlxlinux.rs reads RUST_LOG env var (default WARN); use `RUSTY_BOX_HEADLESS=1` for headless
-- ✅ Short jump sign-extension fix — byte displacements (0x70-0x7F, 0xEB, 0xE0-0xE3) now sign-extended
-- ✅ All 17 missing Jbd dispatch variants added (JoJbd-JnleJbd, LoopJbd/LoopeJbd/LoopneJbd)
-- ✅ CLC/STC/CMC flags implemented
-- ✅ RDMSR/WRMSR stubs (return 0 / ignore)
-- ✅ 1M instructions run cleanly at ~1.08 MIPS (final RIP=0xE1D81, CS=0x10, protected mode)
-- ✅ Port 0x402 IS written — confirmed at RIP=0xE0BEA (PM bios_printf output loop)
-- ✅ setup_mtrr() ran (RDMSR MSR=0xFE observed), smp_probe() entered, 74-byte AP trampoline copy confirmed
-- ❌ bios_printf output corrupted — only 0xB2 and 0xFF seen instead of ASCII "Starting rombios32\n"
-- ❌ CPUID reports Family 15 (Pentium 4) — needs Skylake-X values (Family 6, Model 0x55)
+- ✅ BIOS output working! "Starting rombios32", "Found 1 cpu(s)", MP/SMBIOS tables
+- ✅ JMP/CALL r/m memory forms fixed (vsnprintf jump table now works)
+- ✅ Store-direction register field fixes completed (logical16, data_xfer_ext)
+- ✅ LES/LDS (Load Far Pointer) implemented for 16/32-bit
+- ✅ Proper Skylake-X CPUID (Leaf 0 max=0x16, Leaf 1 Family 6 Model 0x55, extended leaves)
+- ✅ All missing 16-bit arithmetic (ADD/SUB/SBB/CMP GwEw/EwGw directions)
+- ✅ All missing 8-bit Group 1 immediate forms (ADD/SUB/ADC/SBB EbIb)
+- ✅ SBB 8-bit register/memory forms (SBB_EbGb, SBB_GbEb)
+- ✅ NEG r/m32 with register and memory forms
+- ✅ WBINVD (no-op), APIC MMIO scratch buffer, CPU shutdown detection
+- ✅ 50M instructions at ~0.81 MIPS without crashes
+- ✅ rombios32_init completes: ram_probe, cpu_probe, setup_mtrr, smp_probe, PCI init all done
+- ✅ Returns to real-mode BIOS for IVT setup and INT-based init
+- ✅ Real-mode PCI probing loop runs (port 0x0CFC/0x0CFD)
+- 🔄 Real-mode BIOS executing at CS:IP=0000:0AE8 after 50M instructions
 
 **What Fixed the "Corrupted Symbols":**
 The previous investigation concluded BIOS ROM had wrong symbol addresses. In reality, the segment default bug caused stack reads via `[BP+offset]` to use DS (base=0) instead of SS, and the execute1/execute2 swap caused memory reads to return register values. Together, these made the BIOS load wrong values for `_end`, `__data_start`, etc. With both bugs fixed, the BIOS reads correct values from the stack and memory.
@@ -173,10 +175,10 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ## Known Issues & Next Steps
 
 ### Next Steps
-1. **Fix CPUID to Skylake-X values** — Replace hardcoded stub in soft_int.rs with proper Leaf data from `BxCpuIdTrait::get_cpuid_leaf()`. Key: Leaf 0 max=0x16, Leaf 1 EAX=0x00050654 (Family 6, Model 0x55), extended leaves 0x80000000-0x80000008.
-2. **Diagnose bios_printf corruption** — After CPUID fix, re-run and check port 0x402 for ASCII. Trace vsnprintf register state if still corrupted.
-3. **Implement remaining instructions** — As discovered by running the emulator further
-4. **Boot sector loading** — Once BIOS completes POST, load and execute boot sector
+1. **Continue real-mode BIOS execution** — Currently at CS:IP=0000:0AE8 after 50M instructions. BIOS is in real-mode IVT/INT-based init phase. May need more unimplemented instructions.
+2. **Implement remaining instructions** — As discovered by running the emulator further
+3. **Boot sector loading** — Once BIOS completes POST, INT 19h loads and executes boot sector
+4. **VGA text output** — VGA text dump shows no mapped writes yet; VGA BIOS ROM (0xC000) needs INT 10h handlers
 
 ### Quick Debug Commands
 ```bash
@@ -196,22 +198,20 @@ RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=1000000 ./target/release/examples/dlxlinux
 ### Progress Metrics
 - ✅ All major decoder bugs fixed (Group 1 opcodes, segment defaults, execute1/execute2)
 - ✅ Protected mode transition works (far jump, GDT, segment loading)
-- ✅ rombios32 initialization executes with correct symbols
-- ✅ No unimplemented opcode errors (all needed opcodes implemented)
+- ✅ rombios32_init completes fully (ram_probe, cpu_probe, setup_mtrr, smp_probe, PCI init)
+- ✅ BIOS output working: "Starting rombios32", "Found 1 cpu(s)", MP/SMBIOS tables
+- ✅ JMP/CALL r/m memory forms (vsnprintf jump table fix — was THE cause of output corruption)
+- ✅ Store-direction register fixes complete (16-bit logical, 8-bit XCHG)
+- ✅ LES/LDS (Load Far Pointer) 16/32-bit forms
+- ✅ Complete 16-bit arithmetic: ADD/SUB/SBB/CMP in both GwEw and EwGw directions
+- ✅ Complete 8-bit Group 1 immediate: ADD/SUB/ADC/SBB EbIb with R/M forms
+- ✅ SBB 8-bit register/memory: SBB_EbGb, SBB_GbEb
+- ✅ NEG r/m32 with register and memory forms
 - ✅ Extensive instruction set coverage (arithmetic, logical, shift, rotate, control flow, data transfer, string ops)
-- ✅ Log flooding fix: all hot-path messages at correct trace!/debug! level
-- ✅ I/O port tracking: last read port/value reported in stuck-loop diagnostics
-- ✅ Inner loop instruction limit check prevents single-batch hangs
-- ✅ Port 0x61 bit 4 toggle fix: delay_ms() now terminates (keyboard.rs)
-- ✅ REP STOSB/MOVSB 32-bit dispatch fixed (string.rs)
-- ✅ dlxlinux.rs reads RUST_LOG env var; RUSTY_BOX_HEADLESS=1 for headless runs
-- ✅ Short jump sign-extension fix: byte branch displacements now sign-extended in decoder
-- ✅ All 17 missing Jbd dispatch variants added to cpu.rs
-- ✅ CLC/STC/CMC flag instructions implemented
-- ✅ RDMSR/WRMSR stubs implemented
-- ✅ Runs 1M instructions cleanly at ~1.08 MIPS (no crashes)
 - ✅ Proper Skylake-X CPUID implemented (Leaf 0 max=0x16, Leaf 1 Family 6 Model 0x55, extended leaves)
-- ❌ BIOS text output corrupted — port 0x402 written at RIP=0xE0BEA but only 0xB2/0xFF (not ASCII)
+- ✅ APIC MMIO scratch buffer, CPU shutdown detection, WBINVD
+- ✅ Runs 50M instructions at ~0.81 MIPS without crashes
+- ✅ Returns to real-mode BIOS for IVT setup and INT-based init
 
 ## Build Commands
 
@@ -433,12 +433,14 @@ Exception handling infrastructure exists (Exception enum, IVT delivery in real m
 
 ### Major Bug Fixes (Historical)
 
-1. **Port 0x61 delay_ms fix (2026-02-19)**: `keyboard.rs` port 0x61 bit 4 now toggles on each read. Previously always returned `0x10`, causing `delay_ms()` in `smp_probe()` to loop infinitely — BIOS never produced output.
-2. **Hot-path logging fix (2026-02-19)**: `cpu.rs` `get_icache_entry` (every instruction) changed from `debug!` to `trace!`. Two `prefetch` messages changed from `info!` to `debug!`. `stack.rs` PUSH16 from `info!` to `debug!`. `dlxlinux.rs` now reads `RUST_LOG` env var (default WARN) instead of hardcoding `Level::DEBUG`.
-3. **REP STOSB/MOVSB 32-bit fix (2026-02-19)**: `RepStosbYbAl` and `RepMovsbYbXb` now dispatch to 32-bit variants (`rep_stosb32`, `rep_movsb32`) when `instr.as32_l() != 0`, matching how STOSD/MOVSD already worked.
-4. **Log flooding fix (2026-02-17)**: Out-of-bounds memory write messages (`misc_mem.rs`, `memory_stub.rs`) downgraded from `debug!` to `trace!`.
-5. **Segment default fix (2026-02-16)**: `[BP+disp]` was using DS instead of SS. Fixed with lookup tables in `fetchdecode32.rs`.
-6. **execute1/execute2 fix (2026-02-16)**: 18 opcodes had memory/register handler forms swapped in `opcodes_table.rs`.
-7. **Group 1 decoder fix (2026-02-02)**: ModRM `reg` field stored instead of `r/m` for opcodes 0x80/0x81/0x83.
-8. **BIOS load address fix (2026-02-07)**: Address calculated from BIOS size instead of hardcoded.
-9. **Memory allocation fix (2026-02-06)**: `vec![0; size]` instead of loop-based `push()` for large allocations.
+1. **JMP/CALL r/m memory form fix (2026-02-23)**: `Opcode::JmpEd`/`CallEd` only dispatched to register-form handlers. Memory-form `jmp dword ptr [reg*4+disp]` (vsnprintf jump table) read register values instead of memory → complete output corruption. Fixed by adding `jmp_ed_m`/`call_ed_m` with `mod_c0()` dispatch.
+2. **Store-direction register fix (2026-02-23)**: 16-bit logical ops (XOR/OR/AND/TEST ew_gw_m) and 8-bit XCHG (xchg_eb_gb_m) used wrong register fields due to decoder's meta_data swap for store opcodes.
+3. **Port 0x61 delay_ms fix (2026-02-19)**: `keyboard.rs` port 0x61 bit 4 now toggles on each read. Previously always returned `0x10`, causing `delay_ms()` in `smp_probe()` to loop infinitely — BIOS never produced output.
+4. **Hot-path logging fix (2026-02-19)**: `cpu.rs` `get_icache_entry` (every instruction) changed from `debug!` to `trace!`. Two `prefetch` messages changed from `info!` to `debug!`. `stack.rs` PUSH16 from `info!` to `debug!`. `dlxlinux.rs` now reads `RUST_LOG` env var (default WARN) instead of hardcoding `Level::DEBUG`.
+5. **REP STOSB/MOVSB 32-bit fix (2026-02-19)**: `RepStosbYbAl` and `RepMovsbYbXb` now dispatch to 32-bit variants (`rep_stosb32`, `rep_movsb32`) when `instr.as32_l() != 0`, matching how STOSD/MOVSD already worked.
+6. **Log flooding fix (2026-02-17)**: Out-of-bounds memory write messages (`misc_mem.rs`, `memory_stub.rs`) downgraded from `debug!` to `trace!`.
+7. **Segment default fix (2026-02-16)**: `[BP+disp]` was using DS instead of SS. Fixed with lookup tables in `fetchdecode32.rs`.
+8. **execute1/execute2 fix (2026-02-16)**: 18 opcodes had memory/register handler forms swapped in `opcodes_table.rs`.
+9. **Group 1 decoder fix (2026-02-02)**: ModRM `reg` field stored instead of `r/m` for opcodes 0x80/0x81/0x83.
+10. **BIOS load address fix (2026-02-07)**: Address calculated from BIOS size instead of hardcoded.
+11. **Memory allocation fix (2026-02-06)**: `vec![0; size]` instead of loop-based `push()` for large allocations.

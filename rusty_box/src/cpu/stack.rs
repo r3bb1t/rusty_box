@@ -67,11 +67,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             let sp = self.sp();
             let value = self.stack_read_word(sp as u32);
-            // Debug: log when popping 0 (potential issue indicator)
+            // Debug: log when popping 0 (normal for IVT setup in real mode)
             if value == 0 && sp < 0x100 {
                 let ss = self.sregs[BxSegregs::Ss as usize].selector.value;
                 let laddr = self.get_laddr32(BxSegregs::Ss as usize, sp as u32);
-                tracing::warn!("POP16: popped 0 from SS:SP={:04x}:{:04x} (laddr={:#x})", ss, sp, laddr);
+                tracing::trace!("POP16: popped 0 from SS:SP={:04x}:{:04x} (laddr={:#x})", ss, sp, laddr);
             }
             self.set_sp(sp.wrapping_add(2));
             value
