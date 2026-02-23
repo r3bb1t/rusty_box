@@ -18,25 +18,29 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 **Current Status (2026-02-23):**
 - ✅ BIOS-bochs-latest (128 KB) is now the primary BIOS
-- ✅ Real mode BIOS executes ~362k instructions (keyboard init, memory probe, etc.)
+- ✅ Real mode BIOS executes ~312k instructions (keyboard init, memory probe, etc.)
 - ✅ Transitions to protected mode via far jump (CS=0x10, flat memory model)
 - ✅ rombios32 enters protected mode, _start executes with correct symbol addresses
 - ✅ BSS clearing + .data copy complete correctly
-- ✅ BIOS output working! "Starting rombios32", "Found 1 cpu(s)", MP/SMBIOS tables
+- ✅ BIOS output working! Full rombios32_init output to port 0x402:
+  - "Starting rombios32", "Shutdown flag 0", "ram_size=0x01fa0000"
+  - "Found 1 cpu(s)", MP table, SMBIOS table, PCI init all complete
+- ✅ MOV [mem], sreg / MOV sreg, [mem] memory forms fixed (was only register form)
+  - Root cause of IVT corruption: BDA SS:SP save/restore used MOV [mem], SS
 - ✅ JMP/CALL r/m memory forms fixed (vsnprintf jump table now works)
 - ✅ Store-direction register field fixes completed (logical16, data_xfer_ext)
 - ✅ LES/LDS (Load Far Pointer) implemented for 16/32-bit
 - ✅ Proper Skylake-X CPUID (Leaf 0 max=0x16, Leaf 1 Family 6 Model 0x55, extended leaves)
 - ✅ All missing 16-bit arithmetic (ADD/SUB/SBB/CMP GwEw/EwGw directions)
 - ✅ All missing 8-bit Group 1 immediate forms (ADD/SUB/ADC/SBB EbIb)
-- ✅ SBB 8-bit register/memory forms (SBB_EbGb, SBB_GbEb)
-- ✅ NEG r/m32 with register and memory forms
-- ✅ WBINVD (no-op), APIC MMIO scratch buffer, CPU shutdown detection
-- ✅ 50M instructions at ~0.81 MIPS without crashes
-- ✅ rombios32_init completes: ram_probe, cpu_probe, setup_mtrr, smp_probe, PCI init all done
-- ✅ Returns to real-mode BIOS for IVT setup and INT-based init
-- ✅ Real-mode PCI probing loop runs (port 0x0CFC/0x0CFD)
-- 🔄 Real-mode BIOS executing at CS:IP=0000:0AE8 after 50M instructions
+- ✅ NEG r/m32, WBINVD, APIC MMIO scratch buffer, CPU shutdown detection
+- ✅ 5M instructions at **6.94 MIPS** without crashes (up from 1.08 MIPS)
+- ✅ rombios32_init completes fully, returns to real mode with correct SS:SP
+- ✅ Real-mode BIOS IVT intact after PM return, rom_scan executes
+- ✅ IRQ delivery infrastructure: PIT→PIC→CPU interrupt injection complete
+- 🔄 Stuck at F000:086A — timer tick wait loop (BDA[0x046C] never incremented)
+  - PIT fires IRQ0, PIC raises interrupt, but IF=0 (interrupts disabled during POST)
+  - Need: BIOS STI or hack timer tick increment
 
 **What Fixed the "Corrupted Symbols":**
 The previous investigation concluded BIOS ROM had wrong symbol addresses. In reality, the segment default bug caused stack reads via `[BP+offset]` to use DS (base=0) instead of SS, and the execute1/execute2 swap caused memory reads to return register values. Together, these made the BIOS load wrong values for `_end`, `__data_start`, etc. With both bugs fixed, the BIOS reads correct values from the stack and memory.
@@ -175,10 +179,10 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ## Known Issues & Next Steps
 
 ### Next Steps
-1. **Continue real-mode BIOS execution** — Currently at CS:IP=0000:0AE8 after 50M instructions. BIOS is in real-mode IVT/INT-based init phase. May need more unimplemented instructions.
-2. **Implement remaining instructions** — As discovered by running the emulator further
+1. **Fix timer tick loop** — BIOS stuck at F000:086A waiting for BDA[0x046C] (PIT timer tick count) to increment. PIT→PIC→CPU interrupt delivery infrastructure exists but IF=0 during POST. Options: (a) check if BIOS enables interrupts (STI) before this point, (b) implement STI if missing, (c) increment tick count from emulator as hack.
+2. **VGA BIOS initialization** — After rom_scan calls C000:0003, VGA BIOS needs working INT 10h and VGA I/O ports
 3. **Boot sector loading** — Once BIOS completes POST, INT 19h loads and executes boot sector
-4. **VGA text output** — VGA text dump shows no mapped writes yet; VGA BIOS ROM (0xC000) needs INT 10h handlers
+4. **Implement remaining instructions** — As discovered by running the emulator further
 
 ### Quick Debug Commands
 ```bash
@@ -200,18 +204,19 @@ RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=1000000 ./target/release/examples/dlxlinux
 - ✅ Protected mode transition works (far jump, GDT, segment loading)
 - ✅ rombios32_init completes fully (ram_probe, cpu_probe, setup_mtrr, smp_probe, PCI init)
 - ✅ BIOS output working: "Starting rombios32", "Found 1 cpu(s)", MP/SMBIOS tables
+- ✅ MOV [mem], sreg / MOV sreg, [mem] memory forms (fixed IVT corruption after PM return)
 - ✅ JMP/CALL r/m memory forms (vsnprintf jump table fix — was THE cause of output corruption)
 - ✅ Store-direction register fixes complete (16-bit logical, 8-bit XCHG)
 - ✅ LES/LDS (Load Far Pointer) 16/32-bit forms
 - ✅ Complete 16-bit arithmetic: ADD/SUB/SBB/CMP in both GwEw and EwGw directions
 - ✅ Complete 8-bit Group 1 immediate: ADD/SUB/ADC/SBB EbIb with R/M forms
-- ✅ SBB 8-bit register/memory: SBB_EbGb, SBB_GbEb
-- ✅ NEG r/m32 with register and memory forms
 - ✅ Extensive instruction set coverage (arithmetic, logical, shift, rotate, control flow, data transfer, string ops)
 - ✅ Proper Skylake-X CPUID implemented (Leaf 0 max=0x16, Leaf 1 Family 6 Model 0x55, extended leaves)
 - ✅ APIC MMIO scratch buffer, CPU shutdown detection, WBINVD
-- ✅ Runs 50M instructions at ~0.81 MIPS without crashes
-- ✅ Returns to real-mode BIOS for IVT setup and INT-based init
+- ✅ PIT→PIC→CPU interrupt delivery infrastructure complete
+- ✅ **6.94 MIPS** at 5M instructions (up from 1.08 MIPS — fixed infinite loops)
+- ✅ Returns to real-mode BIOS with correct SS:SP, IVT intact after PM return
+- 🔄 Timer tick wait loop at F000:086A (needs PIT IRQ0 delivery with IF=1)
 
 ## Build Commands
 

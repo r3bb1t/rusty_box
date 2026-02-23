@@ -216,6 +216,7 @@ impl BxCmosC {
             CMOS_ADDR => {
                 self.nmi_mask = (value & 0x80) != 0;
                 self.address = value & 0x7F;
+                tracing::trace!("CMOS: Select register {:#04x} (NMI mask={})", self.address, self.nmi_mask);
             }
             CMOS_DATA => {
                 let addr = (self.address & 0x7F) as usize;
