@@ -18,13 +18,13 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 **Current Status (2026-02-23):**
 - ✅ BIOS-bochs-latest (128 KB) is now the primary BIOS
-- ✅ Real mode BIOS executes ~312k instructions (keyboard init, memory probe, etc.)
+- ✅ Real mode BIOS executes ~362k instructions (keyboard init, memory probe, etc.)
 - ✅ Transitions to protected mode via far jump (CS=0x10, flat memory model)
 - ✅ rombios32 enters protected mode, _start executes with correct symbol addresses
 - ✅ BSS clearing + .data copy complete correctly
 - ✅ BIOS output working! Full rombios32_init output to port 0x402:
   - "Starting rombios32", "Shutdown flag 0", "ram_size=0x01fa0000"
-  - "Found 1 cpu(s)", MP table, SMBIOS table, PCI init all complete
+  - "Found 1 cpu(s)", MP table, SMBIOS table, bios_table_addr all complete
 - ✅ MOV [mem], sreg / MOV sreg, [mem] memory forms fixed (was only register form)
   - Root cause of IVT corruption: BDA SS:SP save/restore used MOV [mem], SS
 - ✅ JMP/CALL r/m memory forms fixed (vsnprintf jump table now works)
@@ -38,9 +38,15 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 - ✅ rombios32_init completes fully, returns to real mode with correct SS:SP
 - ✅ Real-mode BIOS IVT intact after PM return, rom_scan executes
 - ✅ IRQ delivery infrastructure: PIT→PIC→CPU interrupt injection complete
-- 🔄 Stuck at F000:086A — timer tick wait loop (BDA[0x046C] never incremented)
-  - PIT fires IRQ0, PIC raises interrupt, but IF=0 (interrupts disabled during POST)
-  - Need: BIOS STI or hack timer tick increment
+- ✅ PIT RateGenerator mode fixed — output transition detection was broken
+- ✅ async_event clearing fixed (matching Bochs event.cc:428-433) — was causing executed=1 per batch
+- ✅ Minimum 10 usec tick quantum — PIT/RTC timers tick even during HLT
+- ✅ Timer tick BDA[0x046C] correctly incremented by INT 8 handler
+- ✅ Timer wait loops at F000:086A exit successfully (5 calls with ticks 0→11→22→33→44)
+- 🔄 Stuck at F000:0C48 — HLT with IF=0 (CLI;HLT fatal halt) at ~754k instructions
+  - BIOS function at F000:0C43 tests [BP+04] & 0x01, halts if non-zero (error flag)
+  - Last I/O: CMOS read (port 0x0071 value=0x0)
+  - Need: investigate which BIOS function returned error
 
 **What Fixed the "Corrupted Symbols":**
 The previous investigation concluded BIOS ROM had wrong symbol addresses. In reality, the segment default bug caused stack reads via `[BP+offset]` to use DS (base=0) instead of SS, and the execute1/execute2 swap caused memory reads to return register values. Together, these made the BIOS load wrong values for `_end`, `__data_start`, etc. With both bugs fixed, the BIOS reads correct values from the stack and memory.
@@ -179,7 +185,7 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ## Known Issues & Next Steps
 
 ### Next Steps
-1. **Fix timer tick loop** — BIOS stuck at F000:086A waiting for BDA[0x046C] (PIT timer tick count) to increment. PIT→PIC→CPU interrupt delivery infrastructure exists but IF=0 during POST. Options: (a) check if BIOS enables interrupts (STI) before this point, (b) implement STI if missing, (c) increment tick count from emulator as hack.
+1. **Investigate F000:0C48 HLT-with-IF=0** — BIOS fatal halt at ~754k instructions. Code at F000:0C43 tests `[BP+04] & 0x01` (error flag), halts if set. Last I/O was CMOS read (port 0x71). Likely a keyboard controller or CMOS init function returning error. Need to trace what function is at this address and what went wrong.
 2. **VGA BIOS initialization** — After rom_scan calls C000:0003, VGA BIOS needs working INT 10h and VGA I/O ports
 3. **Boot sector loading** — Once BIOS completes POST, INT 19h loads and executes boot sector
 4. **Implement remaining instructions** — As discovered by running the emulator further
@@ -214,9 +220,13 @@ RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=1000000 ./target/release/examples/dlxlinux
 - ✅ Proper Skylake-X CPUID implemented (Leaf 0 max=0x16, Leaf 1 Family 6 Model 0x55, extended leaves)
 - ✅ APIC MMIO scratch buffer, CPU shutdown detection, WBINVD
 - ✅ PIT→PIC→CPU interrupt delivery infrastructure complete
+- ✅ PIT RateGenerator mode fixed (output transition detection was broken)
+- ✅ async_event clearing matches Bochs (event.cc:428-433) — fixes executed=1 per batch
+- ✅ Timer tick BDA[0x046C] correctly incremented by INT 8 handler
+- ✅ Timer wait loops at F000:086A exit successfully (PIT→IRQ0→INT 8→BDA tick→wake from HLT)
 - ✅ **6.94 MIPS** at 5M instructions (up from 1.08 MIPS — fixed infinite loops)
 - ✅ Returns to real-mode BIOS with correct SS:SP, IVT intact after PM return
-- 🔄 Timer tick wait loop at F000:086A (needs PIT IRQ0 delivery with IF=1)
+- 🔄 Fatal halt at F000:0C48 — BIOS function returns error, triggers CLI;HLT
 
 ## Build Commands
 
@@ -396,27 +406,44 @@ Uses `thiserror` with root `Error` enum in `src/error.rs` aggregating:
 
 ## Known Issues
 
-### No BIOS Output — Root Cause Found and Fixed (2026-02-19)
+### BIOS Output — VERIFIED WORKING (2026-02-23)
 
-**Status:** Fix applied, pending verification
+**Status:** RESOLVED - full rombios32_init output confirmed
 
-**Root cause**: `rombios32_init()` calls `smp_probe()` before any `BX_INFO()` output. `smp_probe()` calls `delay_ms(10)`, which polls port 0x61 bit 4 (PIT channel 2 output) waiting for 66 edge transitions. Our emulator returned a fixed `0x10` from port 0x61 — bit 4 never toggled — so `delay_ms()` was an infinite loop. The BIOS was alive and executing, just stuck before any output code.
+**Full BIOS output from port 0x402:**
+```
+Starting rombios32
+Shutdown flag 0
+ram_size=0x01fa0000
+ram_end=33161216MB
+Found 1 cpu(s)
+bios_table_addr: 0x000fa1d8 end=0x000fcc00
+MP table addr=0x000000b0 MPC table addr=0x000000e0 size=0xc8
+SMBIOS table addr=0x000000c0
+bios_table_cur_addr: 0x000001a3
+```
 
-**Fix**: `keyboard.rs` SYSTEM_CONTROL_B (port 0x61) read handler now XORs bit 4 on each read: `self.system_control_b ^= 0x10;`
+**Three bugs fixed in this session to make timer-driven BIOS waits work:**
+1. **PIT RateGenerator mode** (pit.rs): Output pulsed LOW→HIGH in same clock() call, making transition check always see no change. Fixed by separating LOW pulse from HIGH recovery across clock cycles.
+2. **async_event not cleared** (event.rs): Bochs event.cc:428-433 clears `async_event=0` at end of `handleAsyncEvent()`. Our version never cleared it → `BX_ASYNC_EVENT_STOP_TRACE` stayed set → inner trace loop broke after every instruction (executed=1 per batch). Fixed to match Bochs.
+3. **Minimum usec for tick_devices** (emulator.rs): With executed=1 at IPS=15M, `usec = (1*1M)/15M = 0` → tick_devices never called → PIT starved. Fixed with `usec = usec_from_instr.max(10)`.
 
-**rombios32_init() call order** (from `cpp_orig/bochs/bios/rombios32.c:2574`):
-1. `BX_INFO("Starting rombios32\n")` — line 2576, first output to port 0x402
-2. `BX_INFO("Shutdown flag %x\n", ...)` — line 2577
-3. `ram_probe()` — detects memory size, outputs more BX_INFO
-4. `cpu_probe()` — detect CPU features
-5. `setup_mtrr()` — RDMSR/WRMSR (needs MSR support)
-6. `smp_probe()` — **HERE** was the delay_ms() infinite loop ← line 2589
-7. `find_bios_table_area()`
-8. `pci_bios_init()` — PCI enumeration
+**Result:** PIT fires IRQ0 → PIC raises interrupt → CPU injects INT 8 → handler increments BDA[0x046C] → timer wait loops exit → BIOS continues.
 
-**Output chain**: `BX_INFO` → `bios_printf` (rombios32.c:354) → `putch()` (line 109) → `outb(INFO_PORT=0x402, c)` → captured in `iodev/mod.rs:port_e9_output` → drained in `emulator.rs` run loop and in `dlxlinux.rs` at end-of-run.
+### Fatal Halt at F000:0C48 — Under Investigation (2026-02-23)
 
-Since BX_INFO is called before smp_probe(), "Starting rombios32\n" was being written to port 0x402 before the delay_ms() hang — it may have been buffered but not printed due to how the stuck-loop detection interacted with the drain. After the port 0x61 fix, the BIOS should proceed through smp_probe() to pci_bios_init() and beyond.
+**Status:** Active investigation
+
+After rombios32_init completes and BIOS returns to real mode, timer wait loops execute successfully (~5 calls). At ~754k instructions, BIOS hits a fatal halt (CLI;HLT;JMP.-3) at F000:0C48. Code pattern:
+```
+F000:0C3E  MOV AL, [BP+04]     ; load function arg (error flag)
+F000:0C41  AND AL, 01          ; test bit 0
+F000:0C43  TEST AL, AL
+F000:0C45  JZ +4               ; skip if no error
+F000:0C47  CLI                 ; error path: disable interrupts
+F000:0C48  HLT                 ; and halt forever
+```
+Last I/O: CMOS read (port 0x71 value=0x0). Likely a keyboard controller or CMOS init function returning an error code.
 
 ### BIOS ROM Shadow Mapping (2026-02-17)
 
@@ -438,9 +465,12 @@ Exception handling infrastructure exists (Exception enum, IVT delivery in real m
 
 ### Major Bug Fixes (Historical)
 
-1. **JMP/CALL r/m memory form fix (2026-02-23)**: `Opcode::JmpEd`/`CallEd` only dispatched to register-form handlers. Memory-form `jmp dword ptr [reg*4+disp]` (vsnprintf jump table) read register values instead of memory → complete output corruption. Fixed by adding `jmp_ed_m`/`call_ed_m` with `mod_c0()` dispatch.
-2. **Store-direction register fix (2026-02-23)**: 16-bit logical ops (XOR/OR/AND/TEST ew_gw_m) and 8-bit XCHG (xchg_eb_gb_m) used wrong register fields due to decoder's meta_data swap for store opcodes.
-3. **Port 0x61 delay_ms fix (2026-02-19)**: `keyboard.rs` port 0x61 bit 4 now toggles on each read. Previously always returned `0x10`, causing `delay_ms()` in `smp_probe()` to loop infinitely — BIOS never produced output.
+1. **PIT RateGenerator mode fix (2026-02-23)**: Mode 2 output pulsed LOW→HIGH in same clock() call. Transition check `old_output != self.output && self.output` always saw true→true (no change). Fixed by separating LOW pulse from HIGH recovery across clock cycles. Without this fix, IRQ0 never fired.
+2. **async_event clearing fix (2026-02-23)**: Bochs event.cc:428-433 clears `async_event=0` at end of `handleAsyncEvent()`. Our version never cleared it → `BX_ASYNC_EVENT_STOP_TRACE` stayed set → inner trace loop broke after every instruction (executed=1 per batch) → usec=0 → tick_devices never called → PIT starved.
+3. **Minimum tick quantum fix (2026-02-23)**: Changed `if usec != 0 { tick_devices(usec) }` to `usec = usec_from_instr.max(10)` — ensures PIT/RTC timers advance even when CPU is halted (executed=1 at high IPS gives usec=0).
+4. **JMP/CALL r/m memory form fix (2026-02-23)**: `Opcode::JmpEd`/`CallEd` only dispatched to register-form handlers. Memory-form `jmp dword ptr [reg*4+disp]` (vsnprintf jump table) read register values instead of memory → complete output corruption. Fixed by adding `jmp_ed_m`/`call_ed_m` with `mod_c0()` dispatch.
+5. **Store-direction register fix (2026-02-23)**: 16-bit logical ops (XOR/OR/AND/TEST ew_gw_m) and 8-bit XCHG (xchg_eb_gb_m) used wrong register fields due to decoder's meta_data swap for store opcodes.
+6. **Port 0x61 delay_ms fix (2026-02-19)**: `keyboard.rs` port 0x61 bit 4 now toggles on each read. Previously always returned `0x10`, causing `delay_ms()` in `smp_probe()` to loop infinitely — BIOS never produced output.
 4. **Hot-path logging fix (2026-02-19)**: `cpu.rs` `get_icache_entry` (every instruction) changed from `debug!` to `trace!`. Two `prefetch` messages changed from `info!` to `debug!`. `stack.rs` PUSH16 from `info!` to `debug!`. `dlxlinux.rs` now reads `RUST_LOG` env var (default WARN) instead of hardcoding `Level::DEBUG`.
 5. **REP STOSB/MOVSB 32-bit fix (2026-02-19)**: `RepStosbYbAl` and `RepMovsbYbXb` now dispatch to 32-bit variants (`rep_stosb32`, `rep_movsb32`) when `instr.as32_l() != 0`, matching how STOSD/MOVSD already worked.
 6. **Log flooding fix (2026-02-17)**: Out-of-bounds memory write messages (`misc_mem.rs`, `memory_stub.rs`) downgraded from `debug!` to `trace!`.

@@ -192,6 +192,11 @@ pub fn MOV_EAXOd<I: BxCpuIdTrait>(
     let value = cpu.mem_read_dword(addr);
     cpu.set_eax(value);
 
+    // Watchpoint: BDA timer tick counter
+    if addr == 0x046C || offset == 0x046C {
+        tracing::warn!("WP-READ32: MOV EAX,[{:#x}] (offset={:#x}, DS.base={:#x}) = {:#010x}, RIP={:#x}",
+            addr, offset, ds_base, value, cpu.rip());
+    }
     tracing::trace!("MOV EAX, [DS:{:#x}]: {:#x}", offset, value);
     Ok(())
 }
@@ -213,8 +218,14 @@ pub fn MOV_OdEAX<I: BxCpuIdTrait>(
             .base
     };
     let addr = ds_base.wrapping_add(offset);
-    cpu.mem_write_dword(addr, cpu.eax());
+    let eax_val = cpu.eax();
+    cpu.mem_write_dword(addr, eax_val);
 
+    // Watchpoint: BDA timer tick counter
+    if addr == 0x046C || offset == 0x046C {
+        tracing::warn!("WP-WRITE32: MOV [{:#x}],EAX (offset={:#x}, DS.base={:#x}) = {:#010x}, RIP={:#x}",
+            addr, offset, ds_base, eax_val, cpu.rip());
+    }
     tracing::trace!("MOV [DS:{:#x}], EAX: {:#x}", offset, cpu.eax());
     Ok(())
 }

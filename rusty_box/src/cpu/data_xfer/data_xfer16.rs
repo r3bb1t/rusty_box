@@ -14,6 +14,11 @@ pub fn MOV_AXOd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGener
     let addr = ds_base.wrapping_add(offset);
     let val = cpu.mem_read_word(addr);
     cpu.set_ax(val);
+    // Watchpoint: BDA timer tick counter
+    if addr == 0x046C || offset == 0x046C {
+        tracing::warn!("WP-READ16: MOV AX,[{:#x}] (offset={:#x}, DS.base={:#x}) = {:#06x}, RIP={:#x}",
+            addr, offset, ds_base, val, cpu.rip());
+    }
     Ok(())
 }
 
@@ -26,5 +31,10 @@ pub fn MOV_OdAX<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGener
     let ds_base = unsafe { cpu.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
     let addr = ds_base.wrapping_add(offset);
     cpu.mem_write_word(addr, cpu.ax());
+    // Watchpoint: BDA timer tick counter
+    if addr == 0x046C || offset == 0x046C {
+        tracing::warn!("WP-WRITE16: MOV [{:#x}],AX (offset={:#x}, DS.base={:#x}) = {:#06x}, RIP={:#x}",
+            addr, offset, ds_base, cpu.ax(), cpu.rip());
+    }
     Ok(())
 }

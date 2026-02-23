@@ -284,15 +284,24 @@ impl PitCounter {
                 }
             }
             PitMode::RateGenerator => {
+                // Mode 2: output is normally HIGH.  When count decrements to 1,
+                // output goes LOW for exactly one clock period, then reloads and
+                // goes back HIGH (generating the IRQ on the rising edge).
+                //
+                // We must NOT set output back to HIGH in the same clock() call as
+                // the LOW pulse, otherwise the transition check at the end will
+                // never see a change.  Instead, leave it LOW for one tick; on the
+                // *next* clock() call the "count > 1" path raises it back HIGH.
                 if self.count > 1 {
                     self.count -= 1;
+                    // Rising edge after the one-clock LOW pulse
+                    if !self.output {
+                        self.output = true;
+                    }
                 } else {
-                    // Reload and pulse output low
+                    // Terminal count: reload and pulse output LOW
                     self.count = if self.initial_count == 0 { 0xFFFF } else { self.initial_count };
                     self.output = false;
-                }
-                if !self.output {
-                    self.output = true;
                 }
             }
             PitMode::SquareWave => {

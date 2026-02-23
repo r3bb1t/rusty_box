@@ -1,7 +1,7 @@
 use super::{cpuid::BxCpuIdTrait, cpu::CpuActivityState, BxCpuC};
 
 impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
-    /// Handle async events - matches Bochs event.cc:handleAsyncEvent()
+    /// Handle async events - matches Bochs event.cc:205-436 handleAsyncEvent()
     /// Returns true if should return from cpu_loop
     pub(super) fn handle_async_event(&mut self) -> bool {
         // Check if CPU is in non-active state (HLT, MWAIT, etc.)
@@ -14,9 +14,20 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
         }
 
-        // For now, always return false (continue execution)
-        // TODO: Add other event handling (SMI, INIT, NMI, interrupts, etc.)
-        false
+        // TODO: Priority 2-5 event handling (SMI, INIT, NMI, external interrupts, etc.)
+        // For now, external interrupts are handled in the emulator's outer loop.
+
+        // Matches Bochs event.cc:428-433:
+        //   if (!(unmasked_events_pending || debug_trap || HRQ)) {
+        //       async_event = 0;
+        //   }
+        // Clear async_event when no events remain pending.
+        // Without this, BX_ASYNC_EVENT_STOP_TRACE stays set forever,
+        // causing the inner trace loop to break after every instruction
+        // (executed=1 per batch → usec=0 → tick_devices never called).
+        self.async_event = 0;
+
+        false // Continue execution
     }
 
     /// Handle wait for event - matches Bochs event.cc:handleWaitForEvent()

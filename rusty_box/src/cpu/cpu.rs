@@ -303,7 +303,7 @@ impl_eflag!(nt, 14);
 impl_eflag!(if, 9); // Interrupt Flag (bit 9)
 
 #[derive(Debug, Default)]
-pub(super) enum CpuActivityState {
+pub enum CpuActivityState {
     #[default]
     Active,
     Hlt,
@@ -527,7 +527,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
 
     // Todo: Maybe enum?
     // pub(super) activity_state: u32,
-    pub(super) activity_state: CpuActivityState,
+    pub activity_state: CpuActivityState,
 
     pub(super) pending_event: u32,
     pub(super) event_mask: u32,
@@ -1517,7 +1517,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
                 // Matching C++ line 215: if (BX_CPU_THIS_PTR async_event) break;
                 if self.async_event != 0 {
-                    tracing::trace!("Async event detected, breaking trace loop");
+                    if iteration < 20 || iteration % 100000 == 0 {
+                        tracing::warn!("TRACE-BREAK: async_event={:#x} at iter={}, RIP={:#x}, opcode={:?}",
+                            self.async_event, iteration, self.rip(), i.get_ia_opcode());
+                    }
                     break;
                 }
 

@@ -315,9 +315,13 @@ impl DeviceManager {
     pub fn tick(&mut self, usec: u64) -> bool {
         // Tick PIT/RTC first to generate periodic interrupts (Bochs-like behavior).
         // PIT drives IRQ0, CMOS/RTC drives IRQ8 when enabled.
-        let _ = self.pit.tick(usec);
+        let pit_fired = self.pit.tick(usec);
         if self.pit.check_irq0() {
+            tracing::warn!("PIT-IRQ0: fired! PIC int_pin={}, master.imr={:#04x}, master.irr={:#04x}",
+                self.pic.master.int_pin, self.pic.master.imr, self.pic.master.irr);
             self.pic.raise_irq(0);
+            tracing::warn!("PIT-IRQ0: after raise_irq(0): int_pin={}, irr={:#04x}",
+                self.pic.master.int_pin, self.pic.master.irr);
         }
 
         let _ = self.cmos.tick(usec);

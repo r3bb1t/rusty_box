@@ -813,26 +813,68 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     // Advance virtual time (Bochs-like ticking).
                     // Required so PIT can generate IRQ0 and BIOS can progress past HLT waits.
                     if self.config.ips != 0 {
-                        let usec = if executed != 0 {
-                            // executed instructions -> microseconds at configured IPS
-                            (executed.saturating_mul(1_000_000)) / (self.config.ips as u64)
-                        } else {
-                            // If the CPU executed 0 instructions (e.g., HLT/wait), still advance
-                            // a small time quantum to allow timer interrupts to occur.
-                            10
+                        let usec_from_instr = (executed.saturating_mul(1_000_000)) / (self.config.ips as u64);
+                        // Always advance at least 10 usec so PIT/RTC timers tick even when
+                        // the CPU is halted or executed very few instructions (e.g., executed=1
+                        // at IPS=15M gives usec=0, starving timers forever).
+                        let usec = usec_from_instr.max(10);
+                        self.tick_devices(usec);
+                    }
+
+                    // Log batch sizes and check if timer ticking works
+                    if instructions_executed < 5 * INSTRUCTION_BATCH_SIZE || instructions_executed % 100_000 < INSTRUCTION_BATCH_SIZE {
+                        let pit_c0_count = self.device_manager.pit.counters[0].count;
+                        // Read BDA timer tick counter at 0x046C (4 bytes) directly from RAM
+                        let bda_ticks = {
+                            let (ptr, len) = self.memory.get_raw_memory_ptr();
+                            if 0x046C + 4 <= len {
+                                unsafe {
+                                    let p = ptr.add(0x046C) as *const u32;
+                                    *p
+                                }
+                            } else { 0 }
                         };
-                        if usec != 0 {
-                            self.tick_devices(usec);
-                        }
+                        tracing::warn!("BATCH-DIAG: executed={}, total={}k, RIP={:#x}, PIT_count={}, activity={:?}, BDA_ticks={}",
+                            executed, instructions_executed / 1000, self.cpu.rip(), pit_c0_count,
+                            self.cpu.activity_state, bda_ticks);
+                    }
+
+                    // Periodic interrupt-chain diagnostic (every ~1M instructions)
+                    if instructions_executed % 1_000_000 < INSTRUCTION_BATCH_SIZE {
+                        let has_int = self.has_interrupt();
+                        let if_flag = self.cpu.get_b_if();
+                        let rip = self.cpu.rip();
+                        let pit_c0 = &self.device_manager.pit.counters[0];
+                        tracing::warn!(
+                            "IRQ-DIAG: {}M instr, RIP={:#x}, IF={}, has_int={}, PIC_imr={:#04x}, PIC_irr={:#04x}, PIT_c0: mode={:?} init={} count={} enabled={} counting={} output={}",
+                            instructions_executed / 1_000_000,
+                            rip,
+                            if_flag,
+                            has_int,
+                            self.device_manager.pic.master.imr,
+                            self.device_manager.pic.master.irr,
+                            self.device_manager.pit.counters[0].mode,
+                            pit_c0.initial_count,
+                            pit_c0.count,
+                            pit_c0.enabled,
+                            pit_c0.counting,
+                            pit_c0.output,
+                        );
                     }
 
                     // Deliver pending PIC interrupts to the CPU (Bochs-like).
-                    //
-                    // Bochs checks/delivers external interrupts at instruction boundaries,
-                    // not only when HLT. Restricting injection to “waiting” can stall BIOS
-                    // code that relies on periodic timer IRQs while still executing.
+                    {
+                        let has_int = self.has_interrupt();
+                        let if_flag = self.cpu.get_b_if();
+                        if has_int {
+                            tracing::warn!("INT-DELIVER: has_int={}, IF={}, activity={:?}, RIP={:#x}",
+                                has_int, if_flag, self.cpu.activity_state, self.cpu.rip());
+                        }
+                    }
                     if self.has_interrupt() && self.cpu.get_b_if() != 0 {
                         let vector = self.iac();
+                        tracing::warn!("INT-INJECT: vector={:#04x}, activity_before={:?}",
+                            vector, self.cpu.activity_state);
 
                         // Temporarily wire the memory bus so the interrupt path can
                         // read IVT/IDT and push stack frames correctly.
@@ -848,9 +890,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             r
                         };
 
-                        if let Err(e) = inject_result {
-                            tracing::error!("Interrupt injection error: {:?}", e);
-                            return Err(crate::Error::Cpu(e));
+                        match &inject_result {
+                            Ok(()) => {
+                                tracing::warn!("INT-INJECT: OK! activity_after={:?}, RIP={:#x}",
+                                    self.cpu.activity_state, self.cpu.rip());
+                            }
+                            Err(e) => {
+                                tracing::error!("INT-INJECT: FAILED: {:?}", e);
+                                return Err(crate::Error::Cpu(inject_result.unwrap_err()));
+                            }
                         }
                     }
 
