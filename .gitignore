@@ -3,8 +3,46 @@
 /binaries
 /dlxlinux
 /How the Bochs works under the hood 2nd edition.pdf
+
+# Debug/trace output files
 /log*
 /*trace*
 /*out*
 /*log
 /*.txt
+
+# Compiled debug tools
+/*.exe
+/*.pdb
+
+# Bochs savestate files
+/acpi
+/cmos
+/config
+/cpu0
+/dma
+/floppy
+/floppy.*
+/gameport
+/hard_drive
+/hard_drive.*
+/hpet
+/ioapic
+/keyboard
+/memory
+/memory.*
+/parallel
+/pc_system
+/pci*
+/pic
+/pit
+/serial
+/usb_*
+/vga
+/vga.*
+/virt_timer
+/logopts
+/*.bxrc
+
+# Temp files
+/tmpclaude-*
