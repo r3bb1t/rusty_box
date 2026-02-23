@@ -21,19 +21,14 @@ pub fn ADD_GdEd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 }
 
 /// ADD_EdGd_R: ADD r/m32, r32 (register form)
-/// Opcode: 0x01, ModRM: r/m32, r32 (register)
-/// meta_data[0] = destination register  
-/// meta_data[1] = source register
+/// Opcode: 0x01: decoder swaps for 16/32-bit store: [0]=rm=DEST, [1]=nnn=SOURCE
 pub fn ADD_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
-    let dst_idx = instr.meta_data[0] as usize;
-    let src_idx = instr.meta_data[1] as usize;
+    let op1 = cpu.get_gpr32(instr.meta_data[0] as usize);  // rm = destination/first operand
+    let op2 = cpu.get_gpr32(instr.meta_data[1] as usize);  // nnn = source/second operand
+    let result = op1.wrapping_add(op2);
 
-    let dst_val = cpu.get_gpr32(dst_idx);
-    let src_val = cpu.get_gpr32(src_idx);
-    let result = dst_val.wrapping_add(src_val);
-
-    cpu.set_gpr32(dst_idx, result);
-    cpu.update_flags_add32(dst_val, src_val, result);
+    cpu.set_gpr32(instr.meta_data[0] as usize, result);     // write to rm = destination
+    cpu.update_flags_add32(op1, op2, result);
 }
 
 /// ADD_EAX_Id: ADD EAX, imm32
@@ -76,17 +71,14 @@ pub fn SUB_GdEd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 }
 
 /// SUB_EdGd_R: SUB r/m32, r32 (register form)
-/// Opcode: 0x29, ModRM: r/m32, r32 (register)
+/// Opcode: 0x29: decoder swaps for 16/32-bit store: [0]=rm=DEST, [1]=nnn=SOURCE
 pub fn SUB_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
-    let dst_idx = instr.meta_data[0] as usize;
-    let src_idx = instr.meta_data[1] as usize;
+    let op1 = cpu.get_gpr32(instr.meta_data[0] as usize);  // rm = destination/first operand
+    let op2 = cpu.get_gpr32(instr.meta_data[1] as usize);  // nnn = source/second operand
+    let result = op1.wrapping_sub(op2);
 
-    let dst_val = cpu.get_gpr32(dst_idx);
-    let src_val = cpu.get_gpr32(src_idx);
-    let result = dst_val.wrapping_sub(src_val);
-
-    cpu.set_gpr32(dst_idx, result);
-    cpu.update_flags_sub32(dst_val, src_val, result);
+    cpu.set_gpr32(instr.meta_data[0] as usize, result);     // write to rm = destination
+    cpu.update_flags_sub32(op1, op2, result);
 }
 
 /// SUB_EAX_Id: SUB EAX, imm32
@@ -127,38 +119,29 @@ pub fn CMP_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 }
 
 /// CMP_EdGd_R: CMP r/m32, r32 (register form)
-/// Original: Bochs cpu/arith32.cc:274-285 CMP_GdEdR (operands swapped in Bochs naming)
-/// Opcode: 0x39, ModRM: r/m32, r32 (both registers)
-/// meta_data[0] = destination (r/m32), meta_data[1] = source (r32)
-/// Performs op1 - op2 and sets flags without storing result
+/// Opcode: 0x39: decoder swaps for 16/32-bit store: [0]=rm=first operand, [1]=nnn=second operand
+/// Performs rm - nnn and sets flags without storing result
 fn CMP_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
-    let dst_idx = instr.meta_data[0] as usize;
-    let src_idx = instr.meta_data[1] as usize;
-
-    let op1 = cpu.get_gpr32(dst_idx);
-    let op2 = cpu.get_gpr32(src_idx);
+    let op1 = cpu.get_gpr32(instr.meta_data[0] as usize);  // rm = first operand
+    let op2 = cpu.get_gpr32(instr.meta_data[1] as usize);  // nnn = second operand
     let diff = op1.wrapping_sub(op2);
 
     cpu.update_flags_sub32(op1, op2, diff);
 
     tracing::trace!("CMP r{}d, r{}d: {:#010x} - {:#010x}",
-        dst_idx, src_idx, op1, op2);
+        instr.meta_data[0], instr.meta_data[1], op1, op2);
 }
 
 /// ADC_EdGd_R: ADC r/m32, r32 (register form)
-/// Original: bochs/cpu/arith32.cc ADC_EdGd (register case)
-/// Opcode: 0x11, ModRM: r/m32, r32 (register)
+/// Opcode: 0x11: decoder swaps for 16/32-bit store: [0]=rm=DEST, [1]=nnn=SOURCE
 pub fn ADC_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
-    let dst_idx = instr.meta_data[0] as usize;
-    let src_idx = instr.meta_data[1] as usize;
-
-    let op1_32 = cpu.get_gpr32(dst_idx);
-    let op2_32 = cpu.get_gpr32(src_idx);
+    let op1 = cpu.get_gpr32(instr.meta_data[0] as usize);  // rm = destination/first operand
+    let op2 = cpu.get_gpr32(instr.meta_data[1] as usize);  // nnn = source/second operand
     let cf = cpu.get_cf() as u32;
-    let sum_32 = op1_32.wrapping_add(op2_32).wrapping_add(cf);
+    let result = op1.wrapping_add(op2).wrapping_add(cf);
 
-    cpu.set_gpr32(dst_idx, sum_32);
-    cpu.update_flags_add32(op1_32, op2_32, sum_32);
+    cpu.set_gpr32(instr.meta_data[0] as usize, result);     // write to rm = destination
+    cpu.update_flags_add32(op1, op2, result);
 }
 
 /// ADC_GdEd_R: ADC r32, r/m32 (register form)
@@ -183,6 +166,7 @@ pub fn ADC_GdEd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 // =========================================================================
 
 /// ADD_EdGd_M: ADD r/m32, r32 (memory form) - read-modify-write
+/// Decoder swaps: src() = meta_data[1] = nnn = SOURCE register
 pub fn ADD_EdGd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
@@ -216,6 +200,7 @@ pub fn ADD_EdId_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 }
 
 /// SUB_EdGd_M: SUB r/m32, r32 (memory form)
+/// Decoder swaps: src() = meta_data[1] = nnn = SOURCE register
 pub fn SUB_EdGd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
@@ -249,6 +234,7 @@ pub fn SUB_EdId_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 }
 
 /// CMP_EdGd_M: CMP r/m32, r32 (memory form)
+/// Decoder swaps: src() = meta_data[1] = nnn = SOURCE register
 pub fn CMP_EdGd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
@@ -279,6 +265,7 @@ pub fn CMP_EdId_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 }
 
 /// ADC_EdGd_M: ADC r/m32, r32 (memory form)
+/// Decoder swaps: src() = meta_data[1] = nnn = SOURCE register
 pub fn ADC_EdGd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
@@ -364,4 +351,33 @@ pub fn ADC_EdGd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGener
 /// ADC r32, r/m32 - unified (Bochs: ADC_GdEdR / ADC_GdEdM)
 pub fn ADC_GdEd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
     if instr.mod_c0() { ADC_GdEd_R(cpu, instr) } else { ADC_GdEd_M(cpu, instr) }
+}
+
+// =========================================================================
+// NEG - Two's Complement Negation (32-bit)
+// Matching Bochs arith32.cc NEG_EdR / NEG_EdM
+// =========================================================================
+
+/// NEG r32 - Negate register (register form)
+pub fn NEG_EdR<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let dst = instr.dst() as usize;
+    let op1 = cpu.get_gpr32(dst);
+    let result = 0u32.wrapping_sub(op1);
+    cpu.set_gpr32(dst, result);
+    cpu.update_flags_sub32(0, op1, result);
+}
+
+/// NEG m32 - Negate memory (memory form)
+pub fn NEG_EdM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let (op1, laddr) = cpu.read_rmw_virtual_dword(seg, eaddr);
+    let result = 0u32.wrapping_sub(op1);
+    cpu.write_rmw_linear_dword(laddr, result);
+    cpu.update_flags_sub32(0, op1, result);
+}
+
+/// NEG r/m32 - unified dispatch
+pub fn NEG_Ed<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    if instr.mod_c0() { NEG_EdR(cpu, instr) } else { NEG_EdM(cpu, instr) }
 }

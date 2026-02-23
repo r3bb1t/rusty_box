@@ -248,6 +248,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_flags_oszapc_logic_16(result);
     }
 
+    /// AND_EwGwR: AND r/m16, r16 (register form, store-direction)
+    /// Opcode 0x21: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
+    pub fn and_ew_gw_r(&mut self, instr: &BxInstructionGenerated) {
+        let op1 = self.get_gpr16(instr.meta_data[0] as usize);  // rm = destination
+        let op2 = self.get_gpr16(instr.meta_data[1] as usize);  // nnn = source
+        let result = op1 & op2;
+        self.set_gpr16(instr.meta_data[0] as usize, result);
+        self.set_flags_oszapc_logic_16(result);
+    }
+
     /// AND AX, imm16
     pub fn and_ax_iw(&mut self, instr: &BxInstructionGenerated) {
         let op1 = self.get_gpr16(0);
@@ -283,6 +293,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_flags_oszapc_logic_16(result);
     }
 
+    /// XOR_EwGwR: XOR r/m16, r16 (register form, store-direction)
+    /// Opcode 0x31: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
+    pub fn xor_ew_gw_r(&mut self, instr: &BxInstructionGenerated) {
+        let op1 = self.get_gpr16(instr.meta_data[0] as usize);  // rm = destination
+        let op2 = self.get_gpr16(instr.meta_data[1] as usize);  // nnn = source
+        let result = op1 ^ op2;
+        self.set_gpr16(instr.meta_data[0] as usize, result);
+        self.set_flags_oszapc_logic_16(result);
+    }
+
     /// XOR_EwIwR: XOR r/m16, imm16 (register form)
     /// Matches BX_CPU_C::XOR_EwIwR
     pub fn xor_ew_iw_r(&mut self, instr: &BxInstructionGenerated) {
@@ -306,6 +326,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.get_gpr16(src);
         let result = op1 | op2;
         self.set_gpr16(dst, result);
+        self.set_flags_oszapc_logic_16(result);
+    }
+
+    /// OR_EwGwR: OR r/m16, r16 (register form, store-direction)
+    /// Opcode 0x09: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
+    pub fn or_ew_gw_r(&mut self, instr: &BxInstructionGenerated) {
+        let op1 = self.get_gpr16(instr.meta_data[0] as usize);  // rm = destination
+        let op2 = self.get_gpr16(instr.meta_data[1] as usize);  // nnn = source
+        let result = op1 | op2;
+        self.set_gpr16(instr.meta_data[0] as usize, result);
         self.set_flags_oszapc_logic_16(result);
     }
 
@@ -376,7 +406,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr);
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.src() as usize; // src()=[1]=nnn=register for 16-bit store (decoder swaps)
         let op2_16 = self.get_gpr16(src_reg);
         let result = op1_16 ^ op2_16;
 
@@ -440,7 +470,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr);
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.src() as usize; // src()=[1]=nnn=register for 16-bit store (decoder swaps)
         let op2_16 = self.get_gpr16(src_reg);
         let result = op1_16 | op2_16;
 
@@ -504,7 +534,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr);
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.src() as usize; // src()=[1]=nnn=register for 16-bit store (decoder swaps)
         let op2_16 = self.get_gpr16(src_reg);
         let result = op1_16 & op2_16;
 
@@ -586,7 +616,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op1_16 = self.read_virtual_word(seg, eaddr);
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.src() as usize; // src()=[1]=nnn=register for 16-bit store (decoder swaps)
         let op2_16 = self.get_gpr16(src_reg);
         let result = op1_16 & op2_16;
 
@@ -628,7 +658,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     pub fn xor_ew_gw(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.xor_gw_ew_r(instr) } else { self.xor_ew_gw_m(instr) }
+        if instr.mod_c0() { self.xor_ew_gw_r(instr) } else { self.xor_ew_gw_m(instr) }
     }
     pub fn xor_gw_ew(&mut self, instr: &BxInstructionGenerated) {
         if instr.mod_c0() { self.xor_gw_ew_r(instr) } else { self.xor_gw_ew_m(instr) }
@@ -637,7 +667,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() { self.xor_ew_iw_r(instr) } else { self.xor_ew_iw_m(instr) }
     }
     pub fn and_ew_gw(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.and_gw_ew_r(instr) } else { self.and_ew_gw_m(instr) }
+        if instr.mod_c0() { self.and_ew_gw_r(instr) } else { self.and_ew_gw_m(instr) }
     }
     pub fn and_gw_ew(&mut self, instr: &BxInstructionGenerated) {
         if instr.mod_c0() { self.and_gw_ew_r(instr) } else { self.and_gw_ew_m(instr) }
@@ -646,7 +676,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() { self.and_ew_iw_r(instr) } else { self.and_ew_iw_m(instr) }
     }
     pub fn or_ew_gw(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.or_gw_ew_r(instr) } else { self.or_ew_gw_m(instr) }
+        if instr.mod_c0() { self.or_ew_gw_r(instr) } else { self.or_ew_gw_m(instr) }
     }
     pub fn or_gw_ew(&mut self, instr: &BxInstructionGenerated) {
         if instr.mod_c0() { self.or_gw_ew_r(instr) } else { self.or_gw_ew_m(instr) }

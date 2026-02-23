@@ -88,13 +88,34 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// JMP r/m32 - Indirect jump through register
+    /// JMP r32 - Indirect jump through register (register form)
+    /// Matching Bochs ctrl_xfer32.cc JMP_EdR
     pub fn jmp_ed_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let dst = instr.dst() as usize;
         let new_eip = self.get_gpr32(dst);
         self.branch_near32(new_eip)?;
-        tracing::trace!("JMP r/m32: EIP = {:#010x}", new_eip);
+        tracing::trace!("JMP r32: EIP = {:#010x}", new_eip);
         Ok(())
+    }
+
+    /// JMP m32 - Indirect jump through memory (memory form)
+    /// Matching Bochs ctrl_xfer32.cc JMP_EdM
+    pub fn jmp_ed_m(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let new_eip = self.read_virtual_dword(seg, eaddr);
+        self.branch_near32(new_eip)?;
+        tracing::trace!("JMP m32: [{:?}:{:#010x}] -> EIP = {:#010x}", seg, eaddr, new_eip);
+        Ok(())
+    }
+
+    /// JMP r/m32 - Unified dispatch (checks mod_c0)
+    pub fn jmp_ed(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        if instr.mod_c0() {
+            self.jmp_ed_r(instr)
+        } else {
+            self.jmp_ed_m(instr)
+        }
     }
 
     // =========================================================================
@@ -107,23 +128,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eip = self.eip();
 
         // Push return address
-        let esp_before = self.esp();
         self.push_32(eip);
-        let esp_after = self.esp();
 
         let new_eip = (eip as i32).wrapping_add(disp) as u32;
-
-        if eip == 0 {
-            tracing::error!("CALL rel32 SUSPICIOUS: pushing return_addr={:#x}, ESP {:#x}->{:#x}, target={:#x}",
-                eip, esp_before, esp_after, new_eip);
-        }
 
         self.branch_near32(new_eip)?;
         tracing::trace!("CALL rel32: EIP = {:#010x}, ret = {:#010x}", new_eip, eip);
         Ok(())
     }
 
-    /// CALL r/m32 - Indirect call through register
+    /// CALL r32 - Indirect call through register (register form)
+    /// Matching Bochs ctrl_xfer32.cc CALL_EdR
     pub fn call_ed_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let dst = instr.dst() as usize;
         let new_eip = self.get_gpr32(dst);
@@ -131,8 +146,31 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.push_32(eip);
         self.branch_near32(new_eip)?;
-        tracing::trace!("CALL r/m32: EIP = {:#010x}, ret = {:#010x}", new_eip, eip);
+        tracing::trace!("CALL r32: EIP = {:#010x}, ret = {:#010x}", new_eip, eip);
         Ok(())
+    }
+
+    /// CALL m32 - Indirect call through memory (memory form)
+    /// Matching Bochs ctrl_xfer32.cc CALL_EdM
+    pub fn call_ed_m(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let new_eip = self.read_virtual_dword(seg, eaddr);
+        let eip = self.eip();
+
+        self.push_32(eip);
+        self.branch_near32(new_eip)?;
+        tracing::trace!("CALL m32: [{:?}:{:#010x}] -> EIP = {:#010x}, ret = {:#010x}", seg, eaddr, new_eip, eip);
+        Ok(())
+    }
+
+    /// CALL r/m32 - Unified dispatch (checks mod_c0)
+    pub fn call_ed(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        if instr.mod_c0() {
+            self.call_ed_r(instr)
+        } else {
+            self.call_ed_m(instr)
+        }
     }
 
     // =========================================================================

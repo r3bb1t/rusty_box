@@ -24,6 +24,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("PUSH r16 (reg {}): {:#06x}", dst, value);
     }
 
+    /// PUSH m16 - Push 16-bit value from memory
+    /// Based on Bochs stack16.cc PUSH_EwM
+    pub fn push_ew_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let value = self.read_virtual_word(seg, eaddr);
+        self.push_16(value);
+        tracing::trace!("PUSH m16 [{:?}:{:#010x}]: {:#06x}", seg, eaddr, value);
+    }
+
     /// PUSH Sw - Push segment register
     /// Based on Bochs stack16.cc PUSH16_Sw
     pub fn push16_sw(&mut self, instr: &BxInstructionGenerated) {
@@ -63,6 +73,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let value = self.pop_16();
         self.set_gpr16(dst, value);
         tracing::trace!("POP r16 (reg {}): {:#06x}", dst, value);
+    }
+
+    /// POP m16 - Pop into 16-bit memory location
+    /// Based on Bochs stack16.cc POP_EwM
+    pub fn pop_ew_m(&mut self, instr: &BxInstructionGenerated) {
+        let value = self.pop_16();
+        let eaddr = self.resolve_addr32(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        self.write_virtual_word(seg, eaddr, value);
+        tracing::trace!("POP m16 [{:?}:{:#010x}]: {:#06x}", seg, eaddr, value);
     }
 
     /// POP Sw - Pop into segment register

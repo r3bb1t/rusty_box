@@ -18,14 +18,10 @@ pub fn MOV_GdEd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 
 /// MOV_EdGd_R: MOV r/m32, r32 (register form)
 /// Opcode: 0x89, ModRM: r/m32, r32 (register)
-/// meta_data[0] = destination register
-/// meta_data[1] = source register
+/// Decoder swaps for 16/32-bit store: meta_data[0] = rm (DESTINATION), meta_data[1] = nnn (SOURCE)
 pub fn MOV_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
-    let dst_idx = instr.meta_data[0] as usize;
-    let src_idx = instr.meta_data[1] as usize;
-
-    let val = cpu.get_gpr32(src_idx);
-    cpu.set_gpr32(dst_idx, val);
+    let val = cpu.get_gpr32(instr.meta_data[1] as usize);  // nnn = source
+    cpu.set_gpr32(instr.meta_data[0] as usize, val);       // rm = destination
 }
 
 /// MOV_EdId_R: MOV r/m32, imm32 (register form)
@@ -53,6 +49,7 @@ pub fn MOV_GdEd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 /// MOV_EdGd_M: MOV r/m32, r32 (memory form)
 /// Opcode: 0x89, ModRM: r/m32, r32 (memory)
 /// Bochs: MOV32_EdGdM
+/// Decoder swaps for 16/32-bit store: meta_data[1] (src()) = nnn = SOURCE register
 pub fn MOV_EdGd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());

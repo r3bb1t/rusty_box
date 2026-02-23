@@ -123,6 +123,7 @@ impl BxMemoryStubC {
             bogus_offset,
 
             used_blocks: Cell::new(used_blocks),
+            apic_scratch: [0u8; 4096],
             #[cfg(feature = "bx_large_ram_file")]
             next_swapout_idx: Cell::new(0),
             #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]

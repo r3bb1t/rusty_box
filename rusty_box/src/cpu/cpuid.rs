@@ -18,6 +18,12 @@ pub trait BxCpuIdTrait: core::fmt::Debug {
     fn sanity_checks(&self) -> Result<()>;
 
     fn new() -> Self;
+
+    /// Returns (EAX, EBX, ECX, EDX) for the given CPUID leaf and sub-leaf.
+    /// Default implementation returns zeros for all unimplemented leaves.
+    fn get_cpuid_leaf(&self, _eax: u32, _ecx: u32) -> (u32, u32, u32, u32) {
+        (0, 0, 0, 0)
+    }
 }
 
 bitflags! {

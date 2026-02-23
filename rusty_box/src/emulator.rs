@@ -740,6 +740,12 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 Ok(executed) => {
                     instructions_executed += executed;
 
+                    // If CPU triple-faulted into shutdown, stop emulation loop
+                    if self.cpu.is_in_shutdown() {
+                        tracing::error!("[Emulator] CPU triple-fault shutdown — stopping");
+                        break;
+                    }
+
                     // Port 92h (System Control) may have changed A20 during execution.
                     // Sync PC system + memory masks if any writes occurred.
                     if self.system_control.value != last_port92_value {

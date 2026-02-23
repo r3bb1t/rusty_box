@@ -729,7 +729,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let paddr: BxPhyAddress = addr as BxPhyAddress;
 
             if let Ok(Some(slice)) = mem.get_host_mem_addr(paddr, MemoryAccessType::Read, &[cpu_ref]) {
-                return slice.get(0).copied().unwrap_or(0);
+                let val = slice.get(0).copied().unwrap_or(0);
+                return val;
             }
 
             let mut data = [0u8; 1];
@@ -752,12 +753,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     pub(super) fn mem_write_byte(&mut self, addr: u64, value: u8) {
-        // Log ALL writes to low RAM (first 4KB) to track data section copy
-        // Disabled: creates too much output
-        // if addr < 0x1000 {
-        //     tracing::warn!("💾 MEM_WRITE_BYTE: addr={:#x}, value={:#x}", addr, value);
-        // }
-
         // Prefer Bochs-style host access through the memory system when available.
         if let Some(mem_bus) = self.mem_bus {
             // SAFETY: see mem_read_byte.

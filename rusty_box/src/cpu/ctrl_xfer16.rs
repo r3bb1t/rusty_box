@@ -67,12 +67,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("JMP rel16: IP = {:#06x}", new_ip);
     }
 
-    /// JMP r/m16 - Indirect jump through register
+    /// JMP r16 - Indirect jump through register (register form)
+    /// Matching Bochs ctrl_xfer16.cc JMP_EwR
     pub fn jmp_ew_r(&mut self, instr: &BxInstructionGenerated) {
         let dst = instr.dst() as usize;
         let new_ip = self.get_gpr16(dst);
         self.branch_near16(new_ip);
-        tracing::trace!("JMP r/m16: IP = {:#06x}", new_ip);
+        tracing::trace!("JMP r16: IP = {:#06x}", new_ip);
+    }
+
+    /// JMP m16 - Indirect jump through memory (memory form)
+    /// Matching Bochs ctrl_xfer16.cc JMP_EwM
+    pub fn jmp_ew_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let new_ip = self.read_virtual_word(seg, eaddr);
+        self.branch_near16(new_ip);
+        tracing::trace!("JMP m16: [{:?}:{:#x}] -> IP = {:#06x}", seg, eaddr, new_ip);
+    }
+
+    /// JMP r/m16 - Unified dispatch (checks mod_c0)
+    pub fn jmp_ew(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.jmp_ew_r(instr) } else { self.jmp_ew_m(instr) }
     }
 
     // =========================================================================
@@ -92,15 +108,34 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("CALL rel16: IP = {:#06x}, ret = {:#06x}", new_ip, ip);
     }
 
-    /// CALL r/m16 - Indirect call through register
+    /// CALL r16 - Indirect call through register (register form)
+    /// Matching Bochs ctrl_xfer16.cc CALL_EwR
     pub fn call_ew_r(&mut self, instr: &BxInstructionGenerated) {
         let dst = instr.dst() as usize;
         let new_ip = self.get_gpr16(dst);
         let ip = self.get_ip();
-        
+
         self.push_16(ip);
         self.branch_near16(new_ip);
-        tracing::trace!("CALL r/m16: IP = {:#06x}, ret = {:#06x}", new_ip, ip);
+        tracing::trace!("CALL r16: IP = {:#06x}, ret = {:#06x}", new_ip, ip);
+    }
+
+    /// CALL m16 - Indirect call through memory (memory form)
+    /// Matching Bochs ctrl_xfer16.cc CALL_EwM
+    pub fn call_ew_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let new_ip = self.read_virtual_word(seg, eaddr);
+        let ip = self.get_ip();
+
+        self.push_16(ip);
+        self.branch_near16(new_ip);
+        tracing::trace!("CALL m16: [{:?}:{:#x}] -> IP = {:#06x}, ret = {:#06x}", seg, eaddr, new_ip, ip);
+    }
+
+    /// CALL r/m16 - Unified dispatch (checks mod_c0)
+    pub fn call_ew(&mut self, instr: &BxInstructionGenerated) {
+        if instr.mod_c0() { self.call_ew_r(instr) } else { self.call_ew_m(instr) }
     }
 
     // =========================================================================

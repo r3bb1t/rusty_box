@@ -218,6 +218,10 @@ impl<'c> BxMemC<'c> {
                 Ok(Some(
                     &mut self.inherited_memory_stub.bogus()[(a20_addr & 0xfff).try_into()?..],
                 ))
+            } else if a20_addr >= 0xFEE00000 && a20_addr < 0xFEF00000 {
+                // APIC MMIO at 0xFEE00000-0xFEEFFFFF: return zeroed scratch (not 0xFF bogus)
+                let offset = ((a20_addr - 0xFEE00000) & 0xFFF) as usize;
+                Ok(Some(&mut self.inherited_memory_stub.apic_scratch()[offset..]))
             } else if is_bios {
                 // BIOS ROM access - use bios_map_last128k to map 0xE0000-0xFFFFF
                 // to the last 128KB of the 4MB ROM array (matching Bochs misc_mem.cc:721)
@@ -234,6 +238,11 @@ impl<'c> BxMemC<'c> {
             }
         } else {
             // op == {BX_WRITE, BX_RW}
+            if a20_addr >= 0xFEE00000 && a20_addr < 0xFEF00000 {
+                // APIC MMIO at 0xFEE00000-0xFEEFFFFF: accept writes into scratch buffer
+                let offset = ((a20_addr - 0xFEE00000) & 0xFFF) as usize;
+                return Ok(Some(&mut self.inherited_memory_stub.apic_scratch()[offset..]));
+            }
             if (a20_addr >= self.inherited_memory_stub.len.try_into()?) || is_bios {
                 // Error, requested addr is out of bounds or writing to BIOS ROM
                 // From cpp_orig/bochs/memory/misc_mem.cc:763-764

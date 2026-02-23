@@ -579,6 +579,14 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         Ok(())
     }
 
+    fn mov_eb_ib_m_wrapper<I: BxCpuIdTrait>(
+        cpu: &mut BxCpuC<'_, I>,
+        instr: &BxInstructionGenerated,
+    ) -> Result<()> {
+        cpu.mov_eb_ib_m(instr);
+        Ok(())
+    }
+
     fn mov_gw_ew_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &BxInstructionGenerated,
@@ -1097,11 +1105,8 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: Some(add_ew_ib_r_wrapper), // Register form: ADD r16, imm8
             opflags: OpFlags::empty(),
         }),
-        Opcode::AddEbIb => Some(BxOpcodeEntry {
-            execute1: add_eb_ib_wrapper,
-            execute2: Some(add_eb_ib_wrapper),
-            opflags: OpFlags::empty(),
-        }),
+        // AddEbIb: falls through to execute_instruction (unified dispatch)
+        // Both forms previously used register-only handler — bug fixed by removal
 
         // Arithmetic (SUB) instructions - 32-bit
         Opcode::SubGdEd => Some(BxOpcodeEntry {
@@ -1136,16 +1141,8 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: Some(adc_ew_gw_wrapper),
             opflags: OpFlags::empty(),
         }),
-        Opcode::AdcEdGd => Some(BxOpcodeEntry {
-            execute1: adc_ed_gd_wrapper,
-            execute2: Some(adc_ed_gd_wrapper),
-            opflags: OpFlags::empty(),
-        }),
-        Opcode::AdcGdEd => Some(BxOpcodeEntry {
-            execute1: adc_gd_ed_wrapper,
-            execute2: Some(adc_gd_ed_wrapper),
-            opflags: OpFlags::empty(),
-        }),
+        // AdcEdGd/AdcGdEd: falls through to execute_instruction (unified dispatch)
+        // Both forms previously used _R (register-only) handler — bug fixed by removal
 
         // Data transfer (MOV) instructions - direct memory
         Opcode::MovAlod => Some(BxOpcodeEntry {
@@ -1183,8 +1180,8 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             opflags: OpFlags::empty(),
         }),
         Opcode::MovEbIb => Some(BxOpcodeEntry {
-            execute1: mov_rb_ib_wrapper,
-            execute2: Some(mov_rb_ib_wrapper), // Register form
+            execute1: mov_eb_ib_m_wrapper,       // Memory form: MOV [mem], imm8
+            execute2: Some(mov_rb_ib_wrapper),   // Register form: MOV r8, imm8
             opflags: OpFlags::empty(),
         }),
 
@@ -1370,11 +1367,8 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             execute2: Some(cmp_ed_id_r_wrapper), // Register form: CMP r32, imm32
             opflags: OpFlags::empty(),
         }),
-        Opcode::CmpEbIb => Some(BxOpcodeEntry {
-            execute1: cmp_eb_ib_wrapper,       // Memory form
-            execute2: Some(cmp_eb_ib_wrapper), // Register form
-            opflags: OpFlags::empty(),
-        }),
+        // CmpEbIb: falls through to execute_instruction (unified dispatch)
+        // Wrapper was register-only (get_gpr8 instead of read_virtual_byte) — bug fixed by removal
 
         // Error handlers (matching C++ BX_IA_ERROR and BX_INSERTED_OPCODE)
         Opcode::IaError => Some(BxOpcodeEntry {

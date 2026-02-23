@@ -24,6 +24,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("PUSH r32 (reg {}): {:#010x}", dst, value);
     }
 
+    /// PUSH m32 - Push 32-bit value from memory
+    /// Based on Bochs stack32.cc PUSH_EdM
+    pub fn push_ed_m(&mut self, instr: &BxInstructionGenerated) {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let value = self.read_virtual_dword(seg, eaddr);
+        self.push_32(value);
+        tracing::trace!("PUSH m32 [{:?}:{:#010x}]: {:#010x}", seg, eaddr, value);
+    }
+
     /// PUSH imm32
     /// Based on Bochs stack32.cc PUSH_Id
     pub fn push_id(&mut self, instr: &BxInstructionGenerated) {
@@ -44,6 +54,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let value = self.pop_32();
         self.set_gpr32(dst, value);
         tracing::trace!("POP r32 (reg {}): {:#010x}", dst, value);
+    }
+
+    /// POP m32 - Pop into 32-bit memory location
+    /// Based on Bochs stack32.cc POP_EdM
+    pub fn pop_ed_m(&mut self, instr: &BxInstructionGenerated) {
+        let value = self.pop_32();
+        let eaddr = self.resolve_addr32(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        self.write_virtual_dword(seg, eaddr, value);
+        tracing::trace!("POP m32 [{:?}:{:#010x}]: {:#010x}", seg, eaddr, value);
     }
 
     /// POP segment register (32-bit mode)

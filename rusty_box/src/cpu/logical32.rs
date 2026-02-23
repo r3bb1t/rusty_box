@@ -131,7 +131,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // AND instructions
     // =========================================================================
 
-    /// AND r32, r32
+    /// AND_EdGdR: AND r/m32, r32 (register form, store-direction)
+    /// Opcode 0x21: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
+    pub fn and_ed_gd_r(&mut self, instr: &BxInstructionGenerated) {
+        let op1 = self.get_gpr32(instr.meta_data[0] as usize);  // rm = destination
+        let op2 = self.get_gpr32(instr.meta_data[1] as usize);  // nnn = source
+        let result = op1 & op2;
+        self.set_gpr32(instr.meta_data[0] as usize, result);
+        self.set_flags_oszapc_logic_32(result);
+    }
+
+    /// AND r32, r32 (load-direction, opcode 0x23)
     pub fn and_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
         let dst = instr.dst() as usize;
         let src = instr.src() as usize;
@@ -177,6 +187,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_flags_oszapc_logic_32(result);
     }
 
+    /// XOR_EdGdR: XOR r/m32, r32 (register form, store-direction)
+    /// Opcode 0x31: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
+    pub fn xor_ed_gd_r(&mut self, instr: &BxInstructionGenerated) {
+        let op1 = self.get_gpr32(instr.meta_data[0] as usize);  // rm = destination
+        let op2 = self.get_gpr32(instr.meta_data[1] as usize);  // nnn = source
+        let result = op1 ^ op2;
+        self.set_gpr32(instr.meta_data[0] as usize, result);
+        self.set_flags_oszapc_logic_32(result);
+    }
+
     /// XOR_EdIdR: XOR r/m32, imm32 (register form)
     /// Matches BX_CPU_C::XOR_EdIdR
     pub fn xor_ed_id_r(&mut self, instr: &BxInstructionGenerated) {
@@ -192,7 +212,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // OR instructions
     // =========================================================================
 
-    /// OR r32, r32
+    /// OR_EdGdR: OR r/m32, r32 (register form, store-direction)
+    /// Opcode 0x09: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
+    pub fn or_ed_gd_r(&mut self, instr: &BxInstructionGenerated) {
+        let op1 = self.get_gpr32(instr.meta_data[0] as usize);  // rm = destination
+        let op2 = self.get_gpr32(instr.meta_data[1] as usize);  // nnn = source
+        let result = op1 | op2;
+        self.set_gpr32(instr.meta_data[0] as usize, result);
+        self.set_flags_oszapc_logic_32(result);
+    }
+
+    /// OR r32, r32 (load-direction, opcode 0x0B)
     pub fn or_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
         let dst = instr.dst() as usize;
         let src = instr.src() as usize;
@@ -317,7 +347,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// XOR_EdGdM: XOR r/m32, r32 (memory form)
-    /// Matches BX_CPU_C::XOR_EdGdM
+    /// Decoder swaps: src() = [1] = nnn = SOURCE register
     pub fn xor_ed_gd_m(&mut self, instr: &BxInstructionGenerated) {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -361,7 +391,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// OR_EdGdM: OR r/m32, r32 (memory form)
-    /// Matches BX_CPU_C::OR_EdGdM
+    /// Decoder swaps: src() = [1] = nnn = SOURCE register
     pub fn or_ed_gd_m(&mut self, instr: &BxInstructionGenerated) {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -405,7 +435,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// AND_EdGdM: AND r/m32, r32 (memory form)
-    /// Matches BX_CPU_C::AND_EdGdM
+    /// Decoder swaps: src() = [1] = nnn = SOURCE register
     pub fn and_ed_gd_m(&mut self, instr: &BxInstructionGenerated) {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -461,7 +491,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// TEST_EdGdM: TEST r/m32, r32 (memory form)
-    /// Matches BX_CPU_C::TEST_EdGdM
+    /// Decoder swaps: src() = [1] = nnn = SOURCE register
     pub fn test_ed_gd_m(&mut self, instr: &BxInstructionGenerated) {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -539,7 +569,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XOR r/m32, r32 - unified (EdGd: memory is read-modify-write, register is commutative)
     pub fn xor_ed_gd(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.xor_gd_ed_r(instr) } else { self.xor_ed_gd_m(instr) }
+        if instr.mod_c0() { self.xor_ed_gd_r(instr) } else { self.xor_ed_gd_m(instr) }
     }
 
     /// XOR r32, r/m32 - unified (GdEd: register dest, memory is read-only source)
@@ -554,7 +584,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// AND r/m32, r32 - unified (EdGd: memory is read-modify-write, register is commutative)
     pub fn and_ed_gd(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.and_gd_ed_r(instr) } else { self.and_ed_gd_m(instr) }
+        if instr.mod_c0() { self.and_ed_gd_r(instr) } else { self.and_ed_gd_m(instr) }
     }
 
     /// AND r32, r/m32 - unified (GdEd: register dest, memory is read-only source)
@@ -569,7 +599,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// OR r/m32, r32 - unified (EdGd: memory is read-modify-write, register is commutative)
     pub fn or_ed_gd(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.or_gd_ed_r(instr) } else { self.or_ed_gd_m(instr) }
+        if instr.mod_c0() { self.or_ed_gd_r(instr) } else { self.or_ed_gd_m(instr) }
     }
 
     /// OR r32, r/m32 - unified (GdEd: register dest, memory is read-only source)

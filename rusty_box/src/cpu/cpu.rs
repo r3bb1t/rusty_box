@@ -1064,6 +1064,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         !matches!(self.activity_state, CpuActivityState::Active)
     }
 
+    /// True if the CPU has triple-faulted and entered shutdown state.
+    ///
+    /// The emulator run loop should stop when this is true to avoid spinning.
+    pub fn is_in_shutdown(&self) -> bool {
+        matches!(self.activity_state, CpuActivityState::Shutdown)
+    }
+
     /// Execute CPU loop with an attached I/O bus (port handlers).
     ///
     /// This sets the bus pointer for the duration of the call and clears it afterwards.
@@ -1299,6 +1306,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     "Executing {:?} at RIP={:#x}, ilen={}, next_rip={:#x}",
                     i.get_ia_opcode(), current_rip, ilen, next_rip
                 );
+
+
 
                 // Matching C++ line 203: BX_CPU_CALL_METHOD(i->execute1, (i));
                 // might iterate repeat instruction
@@ -1858,6 +1867,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 use crate::cpu::arith;
                 arith::ADC_EbGb(self, instr)
             }
+            Opcode::AdcGbEb => {
+                use crate::cpu::arith;
+                arith::ADC_GbEb(self, instr)
+            }
             Opcode::AdcGwEw => {
                 use crate::cpu::arith;
                 arith::ADC_GwEw(self, instr)
@@ -1955,15 +1968,35 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 use crate::cpu::arith;
                 arith::ADD_Axiw(self, instr)
             }
-            Opcode::AddAlib => {
+            Opcode::AddAlib | Opcode::AddEbIb => {
                 use crate::cpu::arith;
                 arith::ADD_EbIb(self, instr)
+            }
+            Opcode::SubEbIb => {
+                use crate::cpu::arith;
+                arith::SUB_EbIb(self, instr)
+            }
+            Opcode::AdcEbIb => {
+                use crate::cpu::arith;
+                arith::ADC_EbIb(self, instr)
+            }
+            Opcode::SbbEbIb => {
+                use crate::cpu::arith;
+                arith::SBB_EbIb(self, instr)
+            }
+            Opcode::SbbEbGb => {
+                use crate::cpu::arith;
+                arith::SBB_EbGb(self, instr)
+            }
+            Opcode::SbbGbEb => {
+                use crate::cpu::arith;
+                arith::SBB_GbEb(self, instr)
             }
             Opcode::AddEwsIb => {
                 use crate::cpu::arith;
                 arith::ADD_EwIbR(self, instr)
             }
-            Opcode::AddEwIw => {
+            Opcode::AddEwIw | Opcode::AddEwsIb => {
                 use crate::cpu::arith;
                 arith::ADD_EwIw(self, instr)
             }
@@ -1971,10 +2004,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 use crate::cpu::arith;
                 arith::ADD_EwGw(self, instr)
             }
+            Opcode::AddGwEw => {
+                use crate::cpu::arith;
+                arith::ADD_GwEw(self, instr)
+            }
             Opcode::AddEdsIb | Opcode::AddEdId => { arith::ADD_EdId(self, instr); Ok(()) }
             // Arithmetic (SUB) instructions
             Opcode::SubGdEd => { arith::SUB_GdEd(self, instr); Ok(()) }
             Opcode::SubEdGd => { arith::SUB_EdGd(self, instr); Ok(()) }
+            Opcode::SubGwEw => { arith::SUB_GwEw(self, instr) }
+            Opcode::SubEwGw => { arith::SUB_EwGw(self, instr) }
+            Opcode::SbbGwEw => { arith::SBB_GwEw(self, instr) }
+            Opcode::SbbEwGw => { arith::SBB_EwGw(self, instr) }
             Opcode::SubEaxid => {
                 arith::SUB_EAX_Id(self, instr);
                 Ok(())
@@ -2257,11 +2298,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::JmpEw => {
-                self.jmp_ew_r(instr);
+                self.jmp_ew(instr);
                 Ok(())
             }
             Opcode::JmpEd => {
-                self.jmp_ed_r(instr)?;
+                self.jmp_ed(instr)?;
                 Ok(())
             }
 
@@ -2275,11 +2316,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::CallEw => {
-                self.call_ew_r(instr);
+                self.call_ew(instr);
                 Ok(())
             }
             Opcode::CallEd => {
-                self.call_ed_r(instr)?;
+                self.call_ed(instr)?;
                 Ok(())
             }
 
@@ -2524,7 +2565,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.cmp_eax_id(instr);
                 Ok(())
             }
-            Opcode::CmpEwIw => { self.cmp_ew_iw(instr); Ok(()) }
+            Opcode::CmpEwIw | Opcode::CmpEwsIb => { self.cmp_ew_iw(instr); Ok(()) }
             Opcode::CmpEdId | Opcode::CmpEdsIb => { arith::arith32::CMP_EdId(self, instr); Ok(()) }
             Opcode::CmpEdGd => { arith::arith32::CMP_EdGd(self, instr); Ok(()) }
 
@@ -2565,7 +2606,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.and_eax_id(instr);
                 Ok(())
             }
-            Opcode::AndEwIw => { self.and_ew_iw(instr); Ok(()) }
+            Opcode::AndEwIw | Opcode::AndEwsIb => { self.and_ew_iw(instr); Ok(()) }
             Opcode::AndEdId | Opcode::AndEdsIb => { self.and_ed_id(instr); Ok(()) }
 
             Opcode::OrGwEw => { self.or_gw_ew(instr); Ok(()) }
@@ -2584,12 +2625,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.or_eax_id(instr);
                 Ok(())
             }
-            Opcode::OrEwIw => { self.or_ew_iw(instr); Ok(()) }
-            Opcode::OrEdId => { self.or_ed_id(instr); Ok(()) }
-            Opcode::XorEwIw => { self.xor_ew_iw(instr); Ok(()) }
+            Opcode::OrEwIw | Opcode::OrEwsIb => { self.or_ew_iw(instr); Ok(()) }
+            Opcode::OrEdId | Opcode::OrEdsIb => { self.or_ed_id(instr); Ok(()) }
+            Opcode::XorEwIw | Opcode::XorEwsIb => { self.xor_ew_iw(instr); Ok(()) }
             Opcode::XorEdId => { self.xor_ed_id(instr); Ok(()) }
             Opcode::NotEw => { self.not_ew(instr); Ok(()) }
             Opcode::NotEd => { self.not_ed(instr); Ok(()) }
+            Opcode::NegEd => { arith::NEG_Ed(self, instr); Ok(()) }
 
             // =========================================================================
             // Multiplication and Division instructions
@@ -2637,11 +2679,19 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // PUSH/POP instructions
             // =========================================================================
             Opcode::PushEw => {
-                self.push_ew_r(instr);
+                if instr.mod_c0() {
+                    self.push_ew_r(instr);
+                } else {
+                    self.push_ew_m(instr);
+                }
                 Ok(())
             }
             Opcode::PushEd => {
-                self.push_ed_r(instr);
+                if instr.mod_c0() {
+                    self.push_ed_r(instr);
+                } else {
+                    self.push_ed_m(instr);
+                }
                 Ok(())
             }
             Opcode::PushId => {
@@ -2653,11 +2703,19 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::PopEw => {
-                self.pop_ew_r(instr);
+                if instr.mod_c0() {
+                    self.pop_ew_r(instr);
+                } else {
+                    self.pop_ew_m(instr);
+                }
                 Ok(())
             }
             Opcode::PopEd => {
-                self.pop_ed_r(instr);
+                if instr.mod_c0() {
+                    self.pop_ed_r(instr);
+                } else {
+                    self.pop_ed_m(instr);
+                }
                 Ok(())
             }
             Opcode::PopOp32Sw => {
@@ -2765,6 +2823,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::INT3 => {
                 self.int3(instr);
+                Ok(())
+            }
+            Opcode::INT1 => {
+                // INT1 (ICEBP) - ICE breakpoint, generates #DB (vector 1)
+                // Matching Bochs soft_int.cc INT1: exception(BX_DB_EXCEPTION, 0)
+                tracing::warn!("INT1 (ICEBP) at RIP={:#x} CS={:#x}", self.rip(),
+                    self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize].selector.value);
+                // TODO: proper exception(BX_DB_EXCEPTION, 0) delivery
+                // For now, trigger exception which will triple-fault cleanly
+                self.interrupt_real_mode(1);
                 Ok(())
             }
             Opcode::IretOp16 => {
@@ -2878,17 +2946,38 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.hlt(instr);
                 Ok(())
             }
+            Opcode::Wbinvd => {
+                // WBINVD - Write Back and Invalidate Cache
+                // Matching Bochs misc_int.cc WBINVD: no-op (no cache to flush)
+                tracing::trace!("WBINVD: no-op (no cache)");
+                Ok(())
+            }
+
+            // LES/LDS - Load Far Pointer
+            Opcode::LesGwMp => { self.les_gw_mp(instr) }
+            Opcode::LesGdMp => { self.les_gd_mp(instr) }
+            Opcode::LdsGwMp => { self.lds_gw_mp(instr) }
+            Opcode::LdsGdMp => { self.lds_gd_mp(instr) }
             Opcode::Cpuid => {
                 self.cpuid(instr);
                 Ok(())
             }
             Opcode::Rdmsr => {
                 // Read Model Specific Register: EDX:EAX = MSR[ECX]
-                // Return 0 for all MSRs; BIOS checks these for optional features
                 let msr = self.ecx();
-                tracing::debug!("RDMSR: MSR={:#010x} -> returning 0", msr);
-                self.set_rax(0);
-                self.set_rdx(0);
+                let val: u64 = match msr {
+                    // MSR_IA32_APICBASE (0x1B): APIC base address + enable + BSP flags
+                    // Bit 11: APIC Global Enable, Bit 8: BSP flag
+                    // Base address in bits [35:12] = 0xFEE00 (default LAPIC at 0xFEE00000)
+                    0x1B => 0xFEE00900,
+                    // MSR_MTRRCAP (0xFE): 8 variable-range MTRRs, fix supported, WC supported
+                    0xFE => 0x0508,
+                    // All other MSRs return 0 (MTRR bases/masks, PAT, etc.)
+                    _ => 0,
+                };
+                tracing::debug!("RDMSR: MSR={:#010x} -> {:#018x}", msr, val);
+                self.set_rax((val & 0xFFFF_FFFF) as u64);
+                self.set_rdx((val >> 32) as u64);
                 Ok(())
             }
             Opcode::Wrmsr => {

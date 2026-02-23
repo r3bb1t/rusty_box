@@ -66,8 +66,10 @@ pub fn MOV_EbGbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGene
     // Get segment (with override support)
     let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
 
-    // Read from source register
-    let val = cpu.read_8bit_regx(instr.src() as usize, instr.extend8bit_l());
+    // Read from source register - use dst() because the decoder stores
+    // the ModRM reg field in meta_data[0] (dst), regardless of direction.
+    // For opcode 0x88 (MOV r/m8, r8), reg is the SOURCE register.
+    let val = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
 
     // Write byte to virtual memory
     cpu.write_virtual_byte(seg, eaddr, val);
@@ -75,10 +77,12 @@ pub fn MOV_EbGbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGene
     Ok(())
 }
 
-/// MOV_EbGbR: MOV r8, r8 - Register to register (opcode 0x88, register form)
+/// MOV_EbGbR: MOV r/m8, r8 - Register to register (opcode 0x88, register form)
 /// Mirrors Bochs cpp/cpu/data_xfer8.cc:69 MOV_EbGbR
+/// Note: decoder always stores reg→meta_data[0](dst), rm→meta_data[1](src).
+/// For opcode 0x88, reg=source and rm=destination, so we swap access.
 pub fn MOV_EbGbR<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
-    let op2 = cpu.read_8bit_regx(instr.src() as usize, instr.extend8bit_l());
-    cpu.write_8bit_regx(instr.dst() as usize, instr.extend8bit_l(), op2);
+    let op2 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
+    cpu.write_8bit_regx(instr.src() as usize, instr.extend8bit_l(), op2);
     Ok(())
 }

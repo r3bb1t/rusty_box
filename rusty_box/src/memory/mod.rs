@@ -49,6 +49,9 @@ pub struct BxMemoryStubC {
 
     used_blocks: Cell<usize>,
 
+    /// Zero-initialized 4KB scratch buffer for APIC MMIO (0xFEE00000-0xFEEFFFFF)
+    apic_scratch: [u8; 4096],
+
     #[cfg(feature = "bx_large_ram_file")]
     next_swapout_idx: Cell<usize>,
     #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
@@ -179,6 +182,10 @@ impl BxMemoryStubC {
     pub fn bogus(&mut self) -> &mut [u8] {
         //&mut (self.actual_vector()[self.bogus_offset..])
         &mut self.actual_vector[self.bogus_offset..]
+    }
+
+    pub fn apic_scratch(&mut self) -> &mut [u8] {
+        &mut self.apic_scratch
     }
 
     /// Get a mutable reference to a memory block by index

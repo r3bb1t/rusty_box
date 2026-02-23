@@ -31,7 +31,10 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 - ✅ CLC/STC/CMC flags implemented
 - ✅ RDMSR/WRMSR stubs (return 0 / ignore)
 - ✅ 1M instructions run cleanly at ~1.08 MIPS (final RIP=0xE1D81, CS=0x10, protected mode)
-- ❌ No BIOS output yet — port 0x402 silent, VGA writes = 0 (BX_INFO not reached in 1M instructions)
+- ✅ Port 0x402 IS written — confirmed at RIP=0xE0BEA (PM bios_printf output loop)
+- ✅ setup_mtrr() ran (RDMSR MSR=0xFE observed), smp_probe() entered, 74-byte AP trampoline copy confirmed
+- ❌ bios_printf output corrupted — only 0xB2 and 0xFF seen instead of ASCII "Starting rombios32\n"
+- ❌ CPUID reports Family 15 (Pentium 4) — needs Skylake-X values (Family 6, Model 0x55)
 
 **What Fixed the "Corrupted Symbols":**
 The previous investigation concluded BIOS ROM had wrong symbol addresses. In reality, the segment default bug caused stack reads via `[BP+offset]` to use DS (base=0) instead of SS, and the execute1/execute2 swap caused memory reads to return register values. Together, these made the BIOS load wrong values for `_end`, `__data_start`, etc. With both bugs fixed, the BIOS reads correct values from the stack and memory.
@@ -152,19 +155,26 @@ D=1 confirmed in bit 22 of dword2 (0x00CF... → bit 22 = 1). Decoder correctly 
 ```
 This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe sends INIT IPI + SIPI + delay_ms(10) + reports CPU count.
 
-**Outstanding: 0xB2 and 0xFF at port 0x402** (in 500K instruction debug run):
-- Only 2 writes seen (both non-ASCII) — suggests real-mode bios_printf before PM entry
-- OR emulator reaches rombios32_init but vsnprintf produces wrong output
-- Port 0x402 verified: only accessed from bios_printf at file 0x0BE9 (single OUT DX,AL loop)
-- rombios.c's 16-bit bios_printf: only writes to 0x402 if `action & BIOS_PRINTF_INFO` set
-- Possible source: `BX_INFO("BIOS BUILD DATE: %s\n", ...)` in real-mode at ~362K instructions
-- Need to run with RIP logging on port 0x402 writes to pinpoint source
+**2026-02-23 session findings:**
+- Port 0x402 writes confirmed at **RIP=0xE0BEA** (PM bios_printf output loop, file 0x0BE9) — NOT real-mode
+- Only 0xB2 and 0xFF observed — not ASCII "Starting rombios32\n" — vsnprintf corruption suspected
+- RDMSR MSR=0xFE observed → `setup_mtrr()` ran before `smp_probe()`
+- PM prefetch at 0xE1D38 → `smp_probe()` entered
+- smp_probe copy loop at 0xE1D74 confirmed: 74 iterations copying AP trampoline 0xE0028→0x9F000
+- APIC path taken in smp_probe (bit 9 of EDX=0x0783_fbff is set)
+- CPUID Leaf 1 currently reports Family 15 (Pentium 4) — wrong for Core i7 Skylake-X (should be Family 6, Model 0x55)
+- bios_printf/vsnprintf corruption hypothesis: wrong CPUID or register state causes vsnprintf to produce garbage
+
+**bios_printf corruption (possible causes):**
+- CPUID Leaf 0 max=1 causes `cpu_probe()` to skip extended leaves, wrong feature bits set
+- Stack state or calling convention mismatch in vsnprintf could produce wrong chars
+- Wrong Leaf 1 EAX (Family 15) doesn't affect format strings directly, but wrong feature flags might alter codepath
 
 ## Known Issues & Next Steps
 
 ### Next Steps
-1. **Diagnose 0xB2 and 0xFF at port 0x402** — Add RIP logging to port_out for 0x402, then find what instruction writes these non-ASCII values. Are they from real-mode bios_printf or PM vsnprintf?
-2. **Verify rombios32_init output reaches port 0x402** — Run 1M+ instructions with debug logging and check for ASCII chars at 0x402 (should see 'S'=0x53 from "Starting rombios32\n")
+1. **Fix CPUID to Skylake-X values** — Replace hardcoded stub in soft_int.rs with proper Leaf data from `BxCpuIdTrait::get_cpuid_leaf()`. Key: Leaf 0 max=0x16, Leaf 1 EAX=0x00050654 (Family 6, Model 0x55), extended leaves 0x80000000-0x80000008.
+2. **Diagnose bios_printf corruption** — After CPUID fix, re-run and check port 0x402 for ASCII. Trace vsnprintf register state if still corrupted.
 3. **Implement remaining instructions** — As discovered by running the emulator further
 4. **Boot sector loading** — Once BIOS completes POST, load and execute boot sector
 
@@ -200,7 +210,8 @@ RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=1000000 ./target/release/examples/dlxlinux
 - ✅ CLC/STC/CMC flag instructions implemented
 - ✅ RDMSR/WRMSR stubs implemented
 - ✅ Runs 1M instructions cleanly at ~1.08 MIPS (no crashes)
-- ❌ BIOS text output still pending — BX_INFO("Starting rombios32\n") not reached in 1M instructions
+- ✅ Proper Skylake-X CPUID implemented (Leaf 0 max=0x16, Leaf 1 Family 6 Model 0x55, extended leaves)
+- ❌ BIOS text output corrupted — port 0x402 written at RIP=0xE0BEA but only 0xB2/0xFF (not ASCII)
 
 ## Build Commands
 

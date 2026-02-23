@@ -83,6 +83,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_flags_oszapc_logic_8(result);
     }
 
+    /// XOR_EbGbR: XOR r/m8, r8 (register form, store-direction)
+    /// Opcode 0x30: reg (meta_data[0]) = SOURCE, rm (meta_data[1]) = DESTINATION
+    pub fn xor_eb_gb_r(&mut self, instr: &BxInstructionGenerated) {
+        let extend8bit_l = instr.extend8bit_l();
+        let op1 = self.read_8bit_regx(instr.meta_data[1] as usize, extend8bit_l);  // rm = destination
+        let op2 = self.read_8bit_regx(instr.meta_data[0] as usize, extend8bit_l);  // reg = source
+        let result = op1 ^ op2;
+        self.write_8bit_regx(instr.meta_data[1] as usize, extend8bit_l, result);
+        self.set_flags_oszapc_logic_8(result);
+    }
+
     // =========================================================================
     // Helper functions
     // =========================================================================
@@ -201,7 +212,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op1 = self.read_virtual_byte(seg, eaddr);
-        let op2 = self.read_8bit_regx(instr.src() as usize, instr.extend8bit_l());
+        let op2 = self.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l()); // reg field = source
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_8(op1, op2, result);
     }
@@ -268,6 +279,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("AND r8, r8: {:#04x} & {:#04x} = {:#04x}", op1, op2, result);
     }
 
+    /// AND_EbGbR: AND r/m8, r8 (register form, store-direction)
+    /// Opcode 0x20: reg (meta_data[0]) = SOURCE, rm (meta_data[1]) = DESTINATION
+    pub fn and_eb_gb_r(&mut self, instr: &BxInstructionGenerated) {
+        let extend8bit_l = instr.extend8bit_l();
+        let op1 = self.read_8bit_regx(instr.meta_data[1] as usize, extend8bit_l);  // rm = destination
+        let op2 = self.read_8bit_regx(instr.meta_data[0] as usize, extend8bit_l);  // reg = source
+        let result = op1 & op2;
+        self.write_8bit_regx(instr.meta_data[1] as usize, extend8bit_l, result);
+        self.set_flags_oszapc_logic_8(result);
+    }
+
     /// AND AL, imm8
     pub fn and_al_ib(&mut self, instr: &BxInstructionGenerated) {
         let op1 = self.get_gpr8(0);
@@ -294,7 +316,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // OR instructions
     // =========================================================================
 
-    /// OR r8, r8
+    /// OR_EbGbR: OR r/m8, r8 (register form, store-direction)
+    /// Opcode 0x08: reg (meta_data[0]) = SOURCE, rm (meta_data[1]) = DESTINATION
+    pub fn or_eb_gb_r(&mut self, instr: &BxInstructionGenerated) {
+        let extend8bit_l = instr.extend8bit_l();
+        let op1 = self.read_8bit_regx(instr.meta_data[1] as usize, extend8bit_l);  // rm = destination
+        let op2 = self.read_8bit_regx(instr.meta_data[0] as usize, extend8bit_l);  // reg = source
+        let result = op1 | op2;
+        self.write_8bit_regx(instr.meta_data[1] as usize, extend8bit_l, result);
+        self.set_flags_oszapc_logic_8(result);
+    }
+
+    /// OR r8, r8 (load-direction, opcode 0x0A)
     pub fn or_gb_eb_r(&mut self, instr: &BxInstructionGenerated) {
         let dst = instr.dst() as usize;
         let src = instr.src() as usize;
@@ -361,7 +394,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let (op1, laddr) = self.read_rmw_virtual_byte(seg, eaddr);
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize; // reg field = source for store-direction
         let extend8bit_l = instr.extend8bit_l();
         let op2 = self.read_8bit_regx(src_reg, extend8bit_l);
         let result = op1 ^ op2;
@@ -407,7 +440,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let (op1, laddr) = self.read_rmw_virtual_byte(seg, eaddr);
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize; // reg field = source for store-direction
         let extend8bit_l = instr.extend8bit_l();
         let op2 = self.read_8bit_regx(src_reg, extend8bit_l);
         let result = op1 | op2;
@@ -453,7 +486,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let (op1, laddr) = self.read_rmw_virtual_byte(seg, eaddr);
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize; // reg field = source for store-direction
         let extend8bit_l = instr.extend8bit_l();
         let op2 = self.read_8bit_regx(src_reg, extend8bit_l);
         let result = op1 & op2;
@@ -499,7 +532,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op1 = self.read_virtual_byte(seg, eaddr);
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize; // reg field = source for store-direction
         let extend8bit_l = instr.extend8bit_l();
         let op2 = self.read_8bit_regx(src_reg, extend8bit_l);
         let result = op1 & op2;
@@ -526,10 +559,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// CMP_EbGbR: CMP r/m8, r8 (register form)
-    /// Matches BX_CPU_C::CMP_EbGbR
+    /// Opcode 0x38: reg (dst()) = second operand, rm (src()) = first operand
     pub fn cmp_eb_gb_r(&mut self, instr: &BxInstructionGenerated) {
-        let op1 = self.get_gpr8(instr.dst() as usize);
-        let op2 = self.get_gpr8(instr.src() as usize);
+        let op1 = self.get_gpr8(instr.src() as usize);  // rm = first operand
+        let op2 = self.get_gpr8(instr.dst() as usize);  // reg = second operand
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_8(op1, op2, result);
     }
@@ -548,7 +581,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     pub fn and_eb_gb(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.and_gb_eb_r(instr) } else { self.and_eb_gb_m(instr) }
+        if instr.mod_c0() { self.and_eb_gb_r(instr) } else { self.and_eb_gb_m(instr) }
     }
     pub fn and_gb_eb(&mut self, instr: &BxInstructionGenerated) {
         if instr.mod_c0() { self.and_gb_eb_r(instr) } else { self.and_gb_eb_m(instr) }
@@ -557,7 +590,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() { self.and_eb_ib_r(instr) } else { self.and_eb_ib_m(instr) }
     }
     pub fn or_eb_gb(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.or_gb_eb_r(instr) } else { self.or_eb_gb_m(instr) }
+        if instr.mod_c0() { self.or_eb_gb_r(instr) } else { self.or_eb_gb_m(instr) }
     }
     pub fn or_gb_eb(&mut self, instr: &BxInstructionGenerated) {
         if instr.mod_c0() { self.or_gb_eb_r(instr) } else { self.or_gb_eb_m(instr) }
@@ -566,7 +599,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() { self.or_eb_ib_r(instr) } else { self.or_eb_ib_m(instr) }
     }
     pub fn xor_eb_gb(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.xor_gb_eb_r(instr) } else { self.xor_eb_gb_m(instr) }
+        if instr.mod_c0() { self.xor_eb_gb_r(instr) } else { self.xor_eb_gb_m(instr) }
     }
     pub fn xor_gb_eb(&mut self, instr: &BxInstructionGenerated) {
         if instr.mod_c0() { self.xor_gb_eb_r(instr) } else { self.xor_gb_eb_m(instr) }

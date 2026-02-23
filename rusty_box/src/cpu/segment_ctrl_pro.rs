@@ -84,7 +84,9 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
         if segment {
             // Data/code segment descriptor
-            let limit = (dword1 & 0xFFFF) | ((dword2 & 0x000F0000) << 16);
+            // limit[15:0] from dword1 bits[15:0]; limit[19:16] from dword2 bits[19:16]
+            // dword2 & 0x000F0000 already has limit[19:16] in the correct bit positions
+            let limit = (dword1 & 0xFFFF) | (dword2 & 0x000F0000);
             let mut base = ((dword1 >> 16) as u64) | (((dword2 & 0xFF) as u64) << 16);
             base |= ((dword2 & 0xFF000000) as u64) << 8;
 
@@ -146,7 +148,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 }
                 0x2 | 0x1 | 0x3 | 0x9 | 0xB => {
                     // LDT, TSS descriptors
-                    let limit = (dword1 & 0xFFFF) | ((dword2 & 0x000F0000) << 16);
+                    let limit = (dword1 & 0xFFFF) | (dword2 & 0x000F0000);
                     let mut base = ((dword1 >> 16) as u64) | (((dword2 & 0xFF) as u64) << 16);
                     base |= ((dword2 & 0xFF000000) as u64) << 8;
                     
