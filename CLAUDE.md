@@ -97,11 +97,74 @@ These bugs were causing an infinite loop at ~363k instructions and crashes in th
 - Some loop/spin consuming instructions before the BX_INFO point
 - Run with RUST_LOG=debug to see RDMSR/WRMSR calls and trace what's happening
 
+### BIOS Binary Analysis (2026-02-23)
+
+**Confirmed BIOS layout** (128KB = file 0x0000-0x1FFFF = physical 0xFFFE0000-0xFFFFFFFF):
+- File 0x0000 = phys 0xE0000: rombios32 _start (BSS clear, .data copy, JMP to rombios32_init)
+- File 0x2980 = phys 0xE2980: `rombios32_init()` — first function called in 32-bit PM
+- File 0x0B98 = phys 0xE0B98: `bios_printf()` — writes ALL formatted bytes to port 0x402
+- File 0x075C = phys 0xE075C: `vsnprintf()` — called by bios_printf to format strings
+- File 0x17F4 = phys 0xE17F4: `delay_ms()` — polls port 0x61 bit 4 (66 transitions/ms)
+- File 0x1D3A = phys 0xE1D3A: `smp_probe()` — APIC check + AP trampoline copy + IPI + delay_ms
+- File 0x1D74 = phys 0xE1D74: smp_probe copy loop (74 bytes, 0xE0028 → 0x9F000)
+- Real-mode code: file 0x8000-0x1FFFF (16-bit code segment)
+
+**True PM entry sequence** (not 0xE08C0 as previously thought):
+```
+Real-mode BIOS (~362K instr):
+  → F000:XXXX: LGDT [rombios32_gdt_48]; MOV CR0, EAX; FAR JMP 0x10:0xF9E5F
+  → phys 0xF9E5F (file 0x19E5F): PM setup (MOV DS/ES/SS=0x18, FS/GS=0; set stack)
+  → PUSH 0x4B0; PUSH 0x4B2; MOV EAX, 0xE0000; CALL EAX (_start)
+  → phys 0xE0000 (_start): XOR EAX; REP STOSB (BSS 88B); REP MOVSB (.data 12B)
+  → JMP 0xE2980 (rombios32_init)
+rombios32_init (0xE2980):
+  1. bios_printf(4, "Starting rombios32\n")    ← first ASCII to port 0x402
+  2. bios_printf(4, "Shutdown flag %x\n", ...)
+  3. ram_probe() — CMOS reads for memory size
+  4. cpu_probe() — CPUID
+  5. setup_mtrr() — RDMSR/WRMSR (wrmsr stubs in emulator)
+  6. smp_probe() — APIC check, 74-byte AP copy, INIT/SIPI IPI, delay_ms(10)
+     → bios_printf("Found %d cpu(s)\n", num_cpus)
+  7. find_bios_table_area()
+  8. pci_bios_init()
+```
+
+**GDT (rombios32_gdt at line 10698 of rombios.c)**:
+```c
+// selector 0x10: 32-bit flat code  (base=0, limit=4GB, D=1, G=1)
+dw 0xffff, 0, 0x9b00, 0x00cf
+// selector 0x18: 32-bit flat data  (base=0, limit=4GB, D=1, G=1)
+dw 0xffff, 0, 0x9300, 0x00cf
+```
+D=1 confirmed in bit 22 of dword2 (0x00CF... → bit 22 = 1). Decoder correctly reads CS.d_b.
+
+**bios_printf port 0x402 behavior**: Port 0x402 is ONLY written from a single loop at file 0x0BE9. bios_printf(rombios32.c) ALWAYS writes ALL formatted chars to port 0x402, regardless of the `flags` argument. No flag gate before the output loop.
+
+**smp_probe loop analysis** (ending at RIP=0xE1D81):
+```asm
+; EAX starts at 0x9F000, ECX = 0x9F04A (end), 74 iterations
+0xE1D74: LEA EDX, [EAX+1]
+0xE1D77: MOV BL, [EAX + 0x41028]    ; read from ROM (0xE0028..0xE0071)
+0xE1D7D: MOV [EAX], BL              ; write to RAM (0x9F000..0x9F049)
+0xE1D7F: MOV EAX, EDX
+0xE1D81: CMP EDX, ECX
+0xE1D83: JNZ → 0xE1D74
+```
+This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe sends INIT IPI + SIPI + delay_ms(10) + reports CPU count.
+
+**Outstanding: 0xB2 and 0xFF at port 0x402** (in 500K instruction debug run):
+- Only 2 writes seen (both non-ASCII) — suggests real-mode bios_printf before PM entry
+- OR emulator reaches rombios32_init but vsnprintf produces wrong output
+- Port 0x402 verified: only accessed from bios_printf at file 0x0BE9 (single OUT DX,AL loop)
+- rombios.c's 16-bit bios_printf: only writes to 0x402 if `action & BIOS_PRINTF_INFO` set
+- Possible source: `BX_INFO("BIOS BUILD DATE: %s\n", ...)` in real-mode at ~362K instructions
+- Need to run with RIP logging on port 0x402 writes to pinpoint source
+
 ## Known Issues & Next Steps
 
 ### Next Steps
-1. **Find why BX_INFO("Starting rombios32\n") not reached** — Run with `RUST_LOG=debug MAX_INSTRUCTIONS=2000000` and look for RDMSR/WRMSR messages to see where the BIOS spends its time
-2. **May need more instructions** — The real-mode BIOS takes ~362k; rombios32 may need many more than 638k to reach its first BX_INFO
+1. **Diagnose 0xB2 and 0xFF at port 0x402** — Add RIP logging to port_out for 0x402, then find what instruction writes these non-ASCII values. Are they from real-mode bios_printf or PM vsnprintf?
+2. **Verify rombios32_init output reaches port 0x402** — Run 1M+ instructions with debug logging and check for ASCII chars at 0x402 (should see 'S'=0x53 from "Starting rombios32\n")
 3. **Implement remaining instructions** — As discovered by running the emulator further
 4. **Boot sector loading** — Once BIOS completes POST, load and execute boot sector
 
@@ -113,8 +176,11 @@ cargo build --release --example dlxlinux --features std
 # Run headless (fast) with default WARN logging
 RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=2000000 ./target/release/examples/dlxlinux.exe
 
-# Run with debug logging to see port 0x402 writes
-RUST_LOG=debug RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=500000 ./target/release/examples/dlxlinux.exe 2>&1 | grep -E "BIOS|0x0402|POST|Starting"
+# Run with debug logging to see port 0x402 writes (and port 0x80 POST codes)
+RUST_LOG=debug RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=500000 ./target/release/examples/dlxlinux.exe 2>&1 | grep -E "0x0402|0x0080|port_out.*402|BIOS output"
+
+# Check BIOS output buffer drain in emulator summary
+RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=1000000 ./target/release/examples/dlxlinux.exe 2>&1
 ```
 
 ### Progress Metrics

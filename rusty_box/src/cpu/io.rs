@@ -138,10 +138,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn port_out(&mut self, port: u16, value: u32, len: u8) {
         // Log BIOS diagnostic ports at debug level so RUST_LOG=debug catches them
         // even if something goes wrong before the device handler is reached.
+        // Include RIP so we can trace which BIOS function is writing.
         if matches!(port, 0x80 | 0x84 | 0xE9 | 0x402 | 0x403 | 0x500) {
             tracing::debug!(
-                "port_out: port={:#06x} value={:#x} len={} io_bus={}",
-                port, value, len, self.io_bus.is_some()
+                "port_out: port={:#06x} value={:#04x} len={} RIP={:#010x}",
+                port, value as u8, len, self.rip()
             );
         }
         if let Some(mut io_bus) = self.io_bus {
