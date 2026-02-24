@@ -263,6 +263,56 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
+    /// IMUL Gd, Ed - Two-operand signed multiply (register form)
+    /// dst = dst * src, only lower 32 bits stored
+    /// Matching C++ mult32.cc:IMUL_GdEdR
+    pub fn imul_gd_ed_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        let dst_reg = instr.dst() as usize;
+        let src_reg = instr.src() as usize;
+
+        let op1 = self.get_gpr32(dst_reg) as i32;
+        let op2 = self.get_gpr32(src_reg) as i32;
+
+        let product_64 = (op1 as i64) * (op2 as i64);
+        let product_32 = (product_64 & 0xFFFFFFFF) as u32;
+
+        self.set_gpr32(dst_reg, product_32);
+
+        self.update_flags_logic32(product_32);
+        if product_64 != (product_64 as i32 as i64) {
+            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+        }
+
+        tracing::trace!("IMUL Gd,Ed: reg{} ({:#010x}) * reg{} ({:#010x}) = {:#010x}",
+            dst_reg, op1 as u32, src_reg, op2 as u32, product_32);
+        Ok(())
+    }
+
+    /// IMUL Gd, Ed - Two-operand signed multiply (memory form)
+    /// Matching C++ mult32.cc:IMUL_GdEdM
+    pub fn imul_gd_ed_m(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        let dst_reg = instr.dst() as usize;
+
+        let op1 = self.get_gpr32(dst_reg) as i32;
+        let eaddr = self.resolve_addr32(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let op2 = self.read_virtual_dword(seg, eaddr) as i32;
+
+        let product_64 = (op1 as i64) * (op2 as i64);
+        let product_32 = (product_64 & 0xFFFFFFFF) as u32;
+
+        self.set_gpr32(dst_reg, product_32);
+
+        self.update_flags_logic32(product_32);
+        if product_64 != (product_64 as i32 as i64) {
+            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+        }
+
+        tracing::trace!("IMUL Gd,Ed mem: reg{} ({:#010x}) * [{:?}:{:#x}] ({:#010x}) = {:#010x}",
+            dst_reg, op1 as u32, seg, eaddr, op2 as u32, product_32);
+        Ok(())
+    }
+
     /// IMUL Gd, Ed, Ib - Three-operand signed multiply with 8-bit immediate
     /// dst = src * sign_extend(imm8)
     /// Opcode: 6B /r ib

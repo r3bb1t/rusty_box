@@ -384,6 +384,15 @@ impl AtaDrive {
         buf[6] = self.geometry.heads;
         buf[7] = 0;
 
+        // Word 4: Unformatted bytes per track (sect_size * spt)
+        let bytes_per_track = SECTOR_SIZE as u16 * self.geometry.sectors_per_track as u16;
+        buf[8] = (bytes_per_track & 0xFF) as u8;
+        buf[9] = (bytes_per_track >> 8) as u8;
+
+        // Word 5: Unformatted bytes per sector (sect_size = 512) — used as blksize by BIOS
+        buf[10] = (SECTOR_SIZE & 0xFF) as u8;
+        buf[11] = ((SECTOR_SIZE >> 8) & 0xFF) as u8;
+
         // Word 6: Sectors per track
         buf[12] = self.geometry.sectors_per_track;
         buf[13] = 0;
@@ -439,6 +448,10 @@ impl AtaDrive {
         // Word 47: Maximum sectors per multiple command
         buf[94] = 16;
         buf[95] = 0x80;
+
+        // Word 48: PIO32 support (1 = 32-bit PIO supported)
+        buf[96] = 0x01;
+        buf[97] = 0x00;
 
         // Word 49: Capabilities
         buf[98] = 0x00;
@@ -634,21 +647,21 @@ impl BxHardDriveC {
         
         match offset {
             ATA_DATA => {
-                if io_len == 2 {
-                    // 16-bit read
-                    let idx = drive.controller.buffer_index;
-                    if idx + 1 < drive.controller.buffer_size {
-                        let value = (drive.controller.buffer[idx] as u32) |
-                                   ((drive.controller.buffer[idx + 1] as u32) << 8);
-                        drive.controller.buffer_index += 2;
-                        
-                        // Check if transfer complete
-                        if drive.controller.buffer_index >= drive.controller.buffer_size {
-                            drive.controller.status &= !ATA_STATUS_DRQ;
-                        }
-                        
-                        return value;
+                let idx = drive.controller.buffer_index;
+                let bytes = io_len as usize; // 1, 2, or 4
+                if idx + bytes <= drive.controller.buffer_size {
+                    let mut value: u32 = 0;
+                    for b in 0..bytes {
+                        value |= (drive.controller.buffer[idx + b] as u32) << (b * 8);
                     }
+                    drive.controller.buffer_index += bytes;
+
+                    // Check if transfer complete
+                    if drive.controller.buffer_index >= drive.controller.buffer_size {
+                        drive.controller.status &= !ATA_STATUS_DRQ;
+                    }
+
+                    return value;
                 }
                 0
             }
@@ -672,6 +685,7 @@ impl BxHardDriveC {
                         self.irq15_pending = false;
                     }
                 }
+                tracing::trace!("ATA: Status read = {:#04x} (port={:#06x})", drive.controller.status, port);
                 drive.controller.status as u32
             }
             _ => 0xFF,
@@ -699,31 +713,30 @@ impl BxHardDriveC {
                 if drive.device_type == DeviceType::None {
                     return;
                 }
-                
-                if io_len == 2 {
-                    // 16-bit write
-                    let idx = drive.controller.buffer_index;
-                    if idx + 1 < drive.controller.buffer.len() {
-                        drive.controller.buffer[idx] = (value & 0xFF) as u8;
-                        drive.controller.buffer[idx + 1] = ((value >> 8) & 0xFF) as u8;
-                        drive.controller.buffer_index += 2;
-                        
-                        // Check if transfer complete
-                        if drive.controller.buffer_index >= drive.controller.buffer_size {
-                            // Execute write command
-                            let lba = drive.get_lba();
-                            let count = if drive.controller.sector_count == 0 { 256u16 } else { drive.controller.sector_count as u16 };
-                            
-                            if let Err(e) = drive.write_sectors(lba, count as u8) {
-                                tracing::error!("ATA: Write failed: {}", e);
-                                drive.controller.error = ATA_ERROR_ABRT;
-                                drive.controller.status = ATA_STATUS_ERR | ATA_STATUS_DRDY;
-                            } else {
-                                drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC;
-                            }
-                            
-                            drive.controller.status &= !ATA_STATUS_DRQ;
+
+                let bytes = io_len as usize; // 1, 2, or 4
+                let idx = drive.controller.buffer_index;
+                if idx + bytes <= drive.controller.buffer.len() {
+                    for b in 0..bytes {
+                        drive.controller.buffer[idx + b] = ((value >> (b * 8)) & 0xFF) as u8;
+                    }
+                    drive.controller.buffer_index += bytes;
+
+                    // Check if transfer complete
+                    if drive.controller.buffer_index >= drive.controller.buffer_size {
+                        // Execute write command
+                        let lba = drive.get_lba();
+                        let count = if drive.controller.sector_count == 0 { 256u16 } else { drive.controller.sector_count as u16 };
+
+                        if let Err(e) = drive.write_sectors(lba, count as u8) {
+                            tracing::error!("ATA: Write failed: {}", e);
+                            drive.controller.error = ATA_ERROR_ABRT;
+                            drive.controller.status = ATA_STATUS_ERR | ATA_STATUS_DRDY;
+                        } else {
+                            drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC;
                         }
+
+                        drive.controller.status &= !ATA_STATUS_DRQ;
                     }
                 }
             }
@@ -795,18 +808,23 @@ impl BxHardDriveC {
     /// Execute an ATA command
     fn execute_command(&mut self, channel_num: usize, command: u8) {
         let channel = &mut self.channels[channel_num];
+        let ds = channel.drive_select;
         let drive = channel.selected_drive_mut();
-        
+
         if drive.device_type == DeviceType::None {
             return;
         }
-        
+
         drive.controller.current_command = command;
         drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC;
         drive.controller.error = 0;
-        
-        tracing::trace!("ATA: Command {:#04x}", command);
-        
+
+        tracing::debug!("ATA: Command {:#04x} drive={} scount={} sno={} cyl={} head={} lba_mode={}",
+            command, ds,
+            drive.controller.sector_count, drive.controller.sector_no,
+            drive.controller.cylinder_no, drive.controller.head_no,
+            drive.controller.lba_mode);
+
         match command {
             ATA_CMD_RECALIBRATE => {
                 drive.controller.cylinder_no = 0;
@@ -815,9 +833,9 @@ impl BxHardDriveC {
             ATA_CMD_READ_SECTORS | ATA_CMD_READ_SECTORS_EXT => {
                 let lba = drive.get_lba();
                 let count = if drive.controller.sector_count == 0 { 256u16 } else { drive.controller.sector_count as u16 };
-                
-                tracing::trace!("ATA: READ LBA={} count={}", lba, count);
-                
+
+                tracing::debug!("ATA: READ LBA={} count={}", lba, count);
+
                 if let Err(e) = drive.read_sectors(lba, count as u8) {
                     tracing::error!("ATA: Read failed: {}", e);
                     drive.controller.error = ATA_ERROR_ABRT;

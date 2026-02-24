@@ -340,6 +340,39 @@ pub fn ADC_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruct
     }
 }
 
+/// ADC_EwIbR: ADC r16, imm8 (sign-extended, register form)
+/// Opcode: 0x83/2
+pub fn ADC_EwIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    let dst = instr.meta_data[0] as usize;
+    let op1 = cpu.get_gpr16(dst);
+    let op2 = instr.ib() as i8 as i16 as u16;
+    let cf = cpu.get_cf() as u16;
+    let result = op1.wrapping_add(op2).wrapping_add(cf);
+
+    cpu.set_gpr16(dst, result);
+    cpu.update_flags_add16(op1, op2, result);
+
+    Ok(())
+}
+
+/// ADC_EwIbM: ADC m16, imm8 (sign-extended, memory form)
+/// Opcode: 0x83/2
+pub fn ADC_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let (op1, laddr) = cpu.read_rmw_virtual_word(seg, eaddr);
+    let op2 = instr.ib() as i8 as i16 as u16;
+    let cf = cpu.get_cf() as u16;
+    let result = op1.wrapping_add(op2).wrapping_add(cf);
+    cpu.write_rmw_linear_word(laddr, result);
+    cpu.update_flags_add16(op1, op2, result);
+}
+
+/// ADC_EwsIb: ADC r/m16, imm8 (sign-extended) - dispatcher
+pub fn ADC_EwsIb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() { ADC_EwIbR(cpu, instr) } else { ADC_EwIbM(cpu, instr); Ok(()) }
+}
+
 // =========================================================================
 // CMP - Compare (16-bit)
 // =========================================================================

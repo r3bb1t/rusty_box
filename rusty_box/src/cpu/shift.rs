@@ -407,6 +407,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.update_flags_sar16(result, cf);
     }
 
+    /// SAR r/m16, imm8
+    pub fn sar_ew_ib(&mut self, instr: &BxInstructionGenerated) {
+        let count = instr.ib() & 0x1F;
+        if count == 0 { return; }
+
+        let (op1_u, laddr) = self.shift_read16(instr);
+        let op1 = op1_u as i16;
+
+        let result = if count >= 16 {
+            if op1 < 0 { 0xFFFF } else { 0 }
+        } else {
+            (op1 >> count) as u16
+        };
+        self.shift_write16(instr, laddr, result);
+
+        let cf = if count >= 16 { (op1 < 0) } else { ((op1 >> (count - 1)) & 0x0001) != 0 };
+        self.update_flags_sar16(result, cf);
+    }
+
     /// SAR r/m32, 1
     pub fn sar_ed_1(&mut self, instr: &BxInstructionGenerated) {
         let (op1_u, laddr) = self.shift_read32(instr);
@@ -421,6 +440,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// SAR r/m32, CL
     pub fn sar_ed_cl(&mut self, instr: &BxInstructionGenerated) {
         let count = self.cl() & 0x1F;
+        if count == 0 { return; }
+
+        let (op1_u, laddr) = self.shift_read32(instr);
+        let op1 = op1_u as i32;
+
+        let result = (op1 >> count) as u32;
+        self.shift_write32(instr, laddr, result);
+
+        let cf = ((op1 >> (count - 1)) & 0x00000001) != 0;
+        self.update_flags_sar32(result, cf);
+    }
+
+    /// SAR r/m32, imm8
+    pub fn sar_ed_ib(&mut self, instr: &BxInstructionGenerated) {
+        let count = instr.ib() & 0x1F;
         if count == 0 { return; }
 
         let (op1_u, laddr) = self.shift_read32(instr);
@@ -487,6 +521,34 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_cf_of(cf, of);
     }
 
+    /// ROL r/m8, imm8
+    pub fn rol_eb_ib(&mut self, instr: &BxInstructionGenerated) {
+        let count = instr.ib() & 0x07; // Only low 3 bits for 8-bit rotate
+        if count == 0 { return; }
+
+        let (op1, laddr) = self.shift_read8(instr);
+        let result = op1.rotate_left(count as u32);
+        self.shift_write8(instr, laddr, result);
+
+        let cf = (result & 0x01) != 0;
+        let of = ((result ^ op1) & 0x80) != 0;
+        self.set_cf_of(cf, of);
+    }
+
+    /// ROL r/m16, imm8
+    pub fn rol_ew_ib(&mut self, instr: &BxInstructionGenerated) {
+        let count = instr.ib() & 0x0F; // Only low 4 bits for 16-bit rotate
+        if count == 0 { return; }
+
+        let (op1, laddr) = self.shift_read16(instr);
+        let result = op1.rotate_left(count as u32);
+        self.shift_write16(instr, laddr, result);
+
+        let cf = (result & 0x0001) != 0;
+        let of = ((result ^ op1) & 0x8000) != 0;
+        self.set_cf_of(cf, of);
+    }
+
     // =========================================================================
     // ROR - Rotate Right
     // =========================================================================
@@ -530,6 +592,34 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// ROR r/m16, CL
     pub fn ror_ew_cl(&mut self, instr: &BxInstructionGenerated) {
         let count = self.cl() & 0x0F;
+        if count == 0 { return; }
+
+        let (op1, laddr) = self.shift_read16(instr);
+        let result = op1.rotate_right(count as u32);
+        self.shift_write16(instr, laddr, result);
+
+        let cf = (result & 0x8000) != 0;
+        let of = ((result ^ (result << 1)) & 0x8000) != 0;
+        self.set_cf_of(cf, of);
+    }
+
+    /// ROR r/m8, imm8
+    pub fn ror_eb_ib(&mut self, instr: &BxInstructionGenerated) {
+        let count = instr.ib() & 0x07;
+        if count == 0 { return; }
+
+        let (op1, laddr) = self.shift_read8(instr);
+        let result = op1.rotate_right(count as u32);
+        self.shift_write8(instr, laddr, result);
+
+        let cf = (result & 0x80) != 0;
+        let of = ((result ^ (result << 1)) & 0x80) != 0;
+        self.set_cf_of(cf, of);
+    }
+
+    /// ROR r/m16, imm8
+    pub fn ror_ew_ib(&mut self, instr: &BxInstructionGenerated) {
+        let count = instr.ib() & 0x0F;
         if count == 0 { return; }
 
         let (op1, laddr) = self.shift_read16(instr);

@@ -1570,7 +1570,23 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let p_addr: BxPhyAddress = self.p_addr_fetch_page | (eip_biased as u64);
 
         // Find entry in cache
-        let entry_option = self.i_cache.find_entry(p_addr, self.fetch_mode_mask.into());
+        let mut entry_option = self.i_cache.find_entry(p_addr, self.fetch_mode_mask.into());
+
+        // Validate cached entry against current memory (SMC detection).
+        // Bochs uses per-page write stamps; we compare the first 8 bytes of the
+        // instruction stream stored during serve_icache_miss against current memory.
+        // Checking just 1 byte is insufficient: padding byte 0x00 before a loop entry
+        // can match even when subsequent code bytes have been overwritten.
+        if let Some(ref entry) = entry_option {
+            if let Some(fetch_slice) = self.eip_fetch_ptr {
+                let offset = eip_biased as usize;
+                let avail = fetch_slice.len().saturating_sub(offset).min(8);
+                if avail > 0 && fetch_slice[offset..offset + avail] != entry.first_bytes[..avail] {
+                    // Memory has changed since this entry was cached — force re-decode
+                    entry_option = None;
+                }
+            }
+        }
 
         // Check if cache miss or entry has invalid instruction (matching C++ line 299)
         if entry_option.is_none() || entry_option.as_ref().unwrap().i.meta_info.ilen == 0 {
@@ -1769,6 +1785,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 use crate::cpu::arith;
                 arith::ADC_GwEw(self, instr)
             }
+            Opcode::AdcEwsIb => { arith::ADC_EwsIb(self, instr) }
             Opcode::SubEbGb => {
                 use crate::cpu::arith;
                 arith::SUB_EbGb(self, instr)
@@ -1922,6 +1939,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             Opcode::SubEwIw => { arith::SUB_EwIw(self, instr) }
             Opcode::SubEwsIb => { arith::SUB_EwsIb(self, instr) }
             Opcode::SubEdsIb | Opcode::SubEdId => { arith::SUB_EdId(self, instr); Ok(()) }
+            // SUB zero idioms (SUB reg, reg where src==dst → result is always 0)
+            Opcode::SubEwGwZeroIdiom | Opcode::SubGwEwZeroIdiom => {
+                self.zero_idiom_gw_r(instr);
+                Ok(())
+            }
+            Opcode::SubEdGdZeroIdiom | Opcode::SubGdEdZeroIdiom => {
+                self.zero_idiom_gd_r(instr);
+                Ok(())
+            }
             // XOR instructions
             Opcode::XorEdGd => { self.xor_ed_gd(instr); Ok(()) }
             Opcode::XorEdGdZeroIdiom | Opcode::XorGdEdZeroIdiom => {
@@ -2029,6 +2055,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::MovCr4rd => {
                 self.mov_cr4_rd(instr)?;
+                Ok(())
+            }
+
+            Opcode::LmswEw => {
+                self.lmsw_ew(instr)?;
                 Ok(())
             }
 
@@ -2596,6 +2627,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.imul_gd_ed_ib(instr)?;
                 Ok(())
             }
+            Opcode::ImulGdEd => {
+                if instr.mod_c0() {
+                    self.imul_gd_ed_r(instr)?;
+                } else {
+                    self.imul_gd_ed_m(instr)?;
+                }
+                Ok(())
+            }
             Opcode::DivEaxed => self.div_eax_ed(instr),
             Opcode::IdivEaxed => self.idiv_eax_ed(instr),
 
@@ -2716,6 +2755,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 } else {
                     if instr.as32_l() != 0 { self.movsb32(instr); }
                     else { self.movsb16(instr); }
+                }
+                Ok(())
+            }
+            Opcode::RepMovswYwXw => {
+                if instr.lock_rep_used_value() != 0 {
+                    if instr.as32_l() != 0 { self.rep_movsw32(instr); }
+                    else { self.rep_movsw16(instr); }
+                } else {
+                    if instr.as32_l() != 0 { self.movsw32(instr); }
+                    else { self.movsw16(instr); }
                 }
                 Ok(())
             }
@@ -2989,6 +3038,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             Opcode::LesGdMp => { self.les_gd_mp(instr) }
             Opcode::LdsGwMp => { self.lds_gw_mp(instr) }
             Opcode::LdsGdMp => { self.lds_gd_mp(instr) }
+            Opcode::LssGwMp => { self.lss_gw_mp(instr) }
+            Opcode::LssGdMp => { self.lss_gd_mp(instr) }
+            Opcode::LfsGwMp => { self.lfs_gw_mp(instr) }
+            Opcode::LfsGdMp => { self.lfs_gd_mp(instr) }
+            Opcode::LgsGwMp => { self.lgs_gw_mp(instr) }
+            Opcode::LgsGdMp => { self.lgs_gd_mp(instr) }
             Opcode::Cpuid => {
                 self.cpuid(instr);
                 Ok(())
@@ -3126,7 +3181,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::RolEbIb => {
-                self.rol_eb_cl(instr);  // Uses same implementation
+                self.rol_eb_ib(instr);
                 Ok(())
             }
             Opcode::RolEwI1 => {
@@ -3138,7 +3193,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::RolEwIb => {
-                self.rol_ew_cl(instr);
+                self.rol_ew_ib(instr);
                 Ok(())
             }
             Opcode::RolEdI1 => {
@@ -3162,7 +3217,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::RorEbIb => {
-                self.ror_eb_cl(instr);
+                self.ror_eb_ib(instr);
                 Ok(())
             }
             Opcode::RorEwI1 => {
@@ -3174,7 +3229,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::RorEwIb => {
-                self.ror_ew_cl(instr);
+                self.ror_ew_ib(instr);
                 Ok(())
             }
             Opcode::RorEdI1 => {
@@ -3206,7 +3261,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::SarEwIb => {
-                self.sar_ew_cl(instr);
+                self.sar_ew_ib(instr);
                 Ok(())
             }
             Opcode::SarEdI1 => {
@@ -3218,7 +3273,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::SarEdIb => {
-                self.sar_ed_cl(instr);
+                self.sar_ed_ib(instr);
                 Ok(())
             }
 
@@ -3233,8 +3288,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.lea_gd_m(instr);
                 Ok(())
             }
+            Opcode::XchgEbGb => {
+                if instr.mod_c0() { self.xchg_eb_gb(instr); }
+                else { self.xchg_eb_gb_m(instr); }
+                Ok(())
+            }
             Opcode::XchgEwGw => {
-                self.xchg_ew_gw(instr);
+                if instr.mod_c0() { self.xchg_ew_gw(instr); }
+                else { self.xchg_ew_gw_m(instr); }
                 Ok(())
             }
             Opcode::XchgEdGd => {

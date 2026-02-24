@@ -45,9 +45,14 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 - ✅ SUB AX,imm16 / SUB r/m16,imm16 / SUB r/m16,imm8 / CMP r/m16,imm16
 - ✅ #DE exception delivery fixed — DIV/IDIV now call self.exception() instead of returning BadVector
 - ✅ BIOS reaches boot attempt stage at ~1.1M instructions
-- 🔄 INT 13h function 02 (Read Sectors) returns error 04 → "No bootable device." → fatal halt
-  - ATA disk geometry detected correctly (306/4/17)
-  - Sector read command fails — need to debug ATA PIO read path in harddrv.rs
+- ✅ INT 13h function 02 (Read Sectors) works — boot sector loaded from ATA
+- ✅ "Booting from 0000:7c00" — BIOS POST completes, boot sector executes!
+- ✅ LILO boot loader runs, loads compressed Linux kernel
+- ✅ Shift/rotate Ib dispatch bugs fixed (6 opcodes used CL instead of immediate byte)
+- ✅ Two-operand IMUL (0F AF) implemented for kernel decompressor
+- ✅ Icache SMC detection: first_bytes[8] check catches stale entries after code loading
+- 🔄 Stuck at RIP=0x3260 ~5M instructions — stale icache trace in kernel decompressor
+  - Need proper Bochs-style page write stamp table for complete SMC handling
 
 **What Fixed the "Corrupted Symbols":**
 The previous investigation concluded BIOS ROM had wrong symbol addresses. In reality, the segment default bug caused stack reads via `[BP+offset]` to use DS (base=0) instead of SS, and the execute1/execute2 swap caused memory reads to return register values. Together, these made the BIOS load wrong values for `_end`, `__data_start`, etc. With both bugs fixed, the BIOS reads correct values from the stack and memory.
@@ -186,8 +191,8 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ## Known Issues & Next Steps
 
 ### Next Steps
-1. **Fix INT 13h Read Sectors (function 02)** — Returns error 04 (sector not found). ATA disk geometry detected correctly (306/4/17), IDENTIFY works, but actual sector PIO read fails. Debug the ATA read command path in `harddrv.rs`.
-2. **Boot sector loading** — Once INT 13h reads work, BIOS loads boot sector from cylinder 0, head 0, sector 1 and jumps to 0x7C00
+1. **Implement Bochs pageWriteStampTable** — Stale icache traces cause kernel decompressor loop at RIP=0x3260. Need per-page write stamp tracking (Bochs `icache.h` lines 29-102): 1M-entry array, `markICache()` on trace creation, `decWriteStamp()` on memory writes, `handleSMC()` to invalidate. Reference: `cpp_orig/bochs/cpu/icache.h`.
+2. **Continue iterative boot fixes** — LILO loads kernel, decompressor runs. After SMC fix, kernel should decompress and start executing at 0x100000.
 3. **Implement remaining instructions** — As discovered by running the emulator further
 
 ### Quick Debug Commands
@@ -228,7 +233,12 @@ RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=1000000 ./target/release/examples/dlxlinux
 - ✅ ATA disk detected: "ata0-0: PCHS=306/4/17 translation=none LCHS=306/4/17"
 - ✅ BIOS completes full POST and reaches boot attempt stage (~1.1M instructions)
 - ✅ Returns to real-mode BIOS with correct SS:SP, IVT intact after PM return
-- 🔄 INT 13h Read Sectors returns error 04 → "No bootable device." → fatal halt
+- ✅ INT 13h Read Sectors works — "Booting from 0000:7c00"
+- ✅ LILO runs, loads compressed Linux kernel into memory
+- ✅ Shift/rotate Ib dispatch: 6 opcodes fixed (SarEdIb, RolEbIb, etc. were using CL not imm8)
+- ✅ Two-operand IMUL (0F AF) for kernel decompressor
+- ✅ Icache SMC detection: first_bytes[8] fingerprint on each trace entry
+- 🔄 Stale icache trace at RIP=0x3260 — need Bochs pageWriteStampTable
 
 ## Build Commands
 

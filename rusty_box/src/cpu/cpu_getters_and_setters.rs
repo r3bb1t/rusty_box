@@ -531,4 +531,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     pub fn get_ip(&self) -> u16 {
         unsafe { self.gen_reg[BX_16BIT_REG_IP].word.rx }
     }
+
+    /// Get CR0 value (for diagnostics)
+    #[inline]
+    pub fn get_cr0_val(&self) -> u32 {
+        self.cr0.get32()
+    }
+
+    /// Get CR3 value (for diagnostics)
+    #[inline]
+    pub fn get_cr3_val(&self) -> u64 {
+        self.cr3
+    }
 }

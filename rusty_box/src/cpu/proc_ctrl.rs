@@ -221,4 +221,44 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("MOV CR4, r32: {:#010x}", val_32);
         Ok(())
     }
+
+    /// LMSW - Load Machine Status Word
+    /// Original: Bochs cpu/crregs.cc:870-914 LMSW_Ew
+    /// Sets low 4 bits of CR0 (PE, MP, EM, TS). Cannot clear PE once set.
+    pub fn lmsw_ew(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
+        let msw = if instr.mod_c0() {
+            // Register form: r/m field (meta_data[0]) has the source register
+            self.get_gpr16(instr.meta_data[0] as usize)
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let seg = super::decoder::BxSegregs::from(instr.seg());
+            self.read_virtual_word(seg, eaddr)
+        };
+
+        // LMSW cannot clear PE
+        let mut msw = msw;
+        if self.cr0.pe() {
+            msw |= 1; // keep PE set
+        }
+
+        // LMSW only affects low 4 bits (PE, MP, EM, TS)
+        let msw = msw & 0xF;
+        let cr0_val = (self.cr0.get32() & 0xFFFFFFF0) | msw as u32;
+
+        self.cr0.set32(cr0_val);
+
+        // Update CPU mode based on CR0.PE
+        if self.cr0.pe() {
+            self.cpu_mode = super::cpu::CpuMode::Ia32Protected;
+        } else {
+            self.cpu_mode = super::cpu::CpuMode::Ia32Real;
+        }
+
+        // Invalidate prefetch
+        self.eip_fetch_ptr = None;
+        self.eip_page_window_size = 0;
+
+        tracing::debug!("LMSW: msw={:#06x}, CR0={:#010x} (PE={})", msw, cr0_val, self.cr0.pe());
+        Ok(())
+    }
 }

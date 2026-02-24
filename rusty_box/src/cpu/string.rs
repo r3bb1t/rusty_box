@@ -163,6 +163,31 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("MOVSD32: dword={:#010x}, ESI={:#x}, EDI={:#x}", dword, new_esi, new_edi);
     }
 
+    /// MOVSW - Move word from DS:ESI to ES:EDI (32-bit address mode)
+    /// Based on BX_CPU_C::MOVSW32_YwXw in string.cc
+    pub fn movsw32(&mut self, _instr: &BxInstructionGenerated) {
+        let esi = self.esi() as u64;
+        let edi = self.edi() as u64;
+
+        let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
+        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
+
+        let src_addr = ds_base.wrapping_add(esi);
+        let dst_addr = es_base.wrapping_add(edi);
+
+        let word = self.mem_read_word(src_addr);
+        self.mem_write_word(dst_addr, word);
+
+        let increment = if self.get_df() { -2i32 } else { 2i32 };
+        let new_esi = (esi as i64).wrapping_add(increment as i64) as u32;
+        let new_edi = (edi as i64).wrapping_add(increment as i64) as u32;
+
+        self.set_rsi(new_esi as u64);
+        self.set_rdi(new_edi as u64);
+
+        tracing::trace!("MOVSW32: word={:#06x}, ESI={:#x}, EDI={:#x}", word, new_esi, new_edi);
+    }
+
     // =========================================================================
     // STOSB - Store String Byte
     // =========================================================================
@@ -555,7 +580,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // RSI/RDI are already zero-extended per-iteration inside movsb32
     }
 
-    /// REP MOVSW - Repeat move string word CX times
+    /// REP MOVSW - Repeat move string word CX times (16-bit address mode)
     pub fn rep_movsw16(&mut self, instr: &BxInstructionGenerated) {
         let mut cx = self.cx();
         while cx != 0 {
@@ -563,6 +588,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
         }
+    }
+
+    /// REP MOVSW - Repeat move string word ECX times (32-bit address mode)
+    /// Based on BX_CPU_C::REP_MOVSW_YwXw in string.cc
+    pub fn rep_movsw32(&mut self, instr: &BxInstructionGenerated) {
+        let mut ecx = self.ecx();
+        while ecx != 0 {
+            self.movsw32(instr);
+            ecx = ecx.wrapping_sub(1);
+            self.set_ecx(ecx);
+        }
+        self.set_rcx(self.ecx() as u64);
     }
 
     /// REP STOSB - Repeat store string byte CX times (16-bit address mode)
@@ -867,6 +904,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 if let Some(b) = slice.get_mut(0) {
                     *b = value;
                 }
+                // Invalidate icache for this page (SMC detection)
+                self.i_cache.invalidate_page(addr & !0xFFF);
                 return;
             }
 
@@ -875,16 +914,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let mut stamp = BxPageWriteStampTable::new(&mut dummy_mapping);
             let mut data = [value];
             let _ = mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 1, &mut data);
+            // Invalidate icache for this page (SMC detection)
+            self.i_cache.invalidate_page(addr & !0xFFF);
             return;
         }
 
         // Fallback: raw pointer access (best-effort) when not running inside cpu_loop.
         if let Some(ptr) = self.mem_ptr {
-            let addr = addr as usize;
-            if addr < self.mem_len {
+            let addr_usize = addr as usize;
+            if addr_usize < self.mem_len {
                 unsafe {
-                    *ptr.add(addr) = value;
+                    *ptr.add(addr_usize) = value;
                 }
+                // Invalidate icache for this page (SMC detection)
+                self.i_cache.invalidate_page(addr & !0xFFF);
             }
         }
     }

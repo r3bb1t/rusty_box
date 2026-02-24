@@ -126,6 +126,8 @@ pub struct BxKeyboardC {
     pub system_control_b: u8,
     /// A20 gate state (managed via output port / D1 command)
     pub a20_enabled: bool,
+    /// Flag set when A20 state changes, cleared by emulator after propagation
+    pub a20_change_pending: bool,
     /// First self-test flag (Bochs static kbd_initialized)
     kbd_initialized: bool,
 }
@@ -204,6 +206,7 @@ impl BxKeyboardC {
             controller_q_source: 0,
             system_control_b: 0,
             a20_enabled: true,
+            a20_change_pending: false,
             kbd_initialized: false,
         }
     }
@@ -414,6 +417,7 @@ impl BxKeyboardC {
                     let new_a20 = (value & 0x02) != 0;
                     if self.a20_enabled != new_a20 {
                         self.a20_enabled = new_a20;
+                        self.a20_change_pending = true;
                         tracing::debug!(
                             "Keyboard: A20 gate = {} via output port",
                             new_a20
@@ -594,11 +598,13 @@ impl BxKeyboardC {
             0xDD => {
                 // Disable A20 Address Line — keyboard.cc:613-614
                 self.a20_enabled = false;
+                self.a20_change_pending = true;
                 tracing::debug!("Keyboard: A20 disabled via 0xDD");
             }
             0xDF => {
                 // Enable A20 Address Line — keyboard.cc:616-617
                 self.a20_enabled = true;
+                self.a20_change_pending = true;
                 tracing::debug!("Keyboard: A20 enabled via 0xDF");
             }
             0xFE => {

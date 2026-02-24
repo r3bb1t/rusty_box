@@ -1421,4 +1421,82 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("LDS32: reg{} = {:#010x}, DS = {:#06x}", dst, reg_32, segsel);
         Ok(())
     }
+
+    /// LSS r16, m16:16 - Load SS:r16 from memory far pointer
+    pub fn lss_gw_mp(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let reg_16 = self.read_virtual_word(seg, eaddr);
+        let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(2));
+        self.load_seg_reg(BxSegregs::Ss, segsel)?;
+        let dst = instr.dst() as usize;
+        self.set_gpr16(dst, reg_16);
+        tracing::trace!("LSS16: reg{} = {:#06x}, SS = {:#06x}", dst, reg_16, segsel);
+        Ok(())
+    }
+
+    /// LSS r32, m16:32 - Load SS:r32 from memory far pointer
+    pub fn lss_gd_mp(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let reg_32 = self.read_virtual_dword(seg, eaddr);
+        let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(4));
+        self.load_seg_reg(BxSegregs::Ss, segsel)?;
+        let dst = instr.dst() as usize;
+        self.set_gpr32(dst, reg_32);
+        tracing::trace!("LSS32: reg{} = {:#010x}, SS = {:#06x}", dst, reg_32, segsel);
+        Ok(())
+    }
+
+    /// LFS r16, m16:16 - Load FS:r16 from memory far pointer
+    pub fn lfs_gw_mp(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let reg_16 = self.read_virtual_word(seg, eaddr);
+        let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(2));
+        self.load_seg_reg(BxSegregs::Fs, segsel)?;
+        let dst = instr.dst() as usize;
+        self.set_gpr16(dst, reg_16);
+        tracing::trace!("LFS16: reg{} = {:#06x}, FS = {:#06x}", dst, reg_16, segsel);
+        Ok(())
+    }
+
+    /// LFS r32, m16:32 - Load FS:r32 from memory far pointer
+    pub fn lfs_gd_mp(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let reg_32 = self.read_virtual_dword(seg, eaddr);
+        let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(4));
+        self.load_seg_reg(BxSegregs::Fs, segsel)?;
+        let dst = instr.dst() as usize;
+        self.set_gpr32(dst, reg_32);
+        tracing::trace!("LFS32: reg{} = {:#010x}, FS = {:#06x}", dst, reg_32, segsel);
+        Ok(())
+    }
+
+    /// LGS r16, m16:16 - Load GS:r16 from memory far pointer
+    pub fn lgs_gw_mp(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let reg_16 = self.read_virtual_word(seg, eaddr);
+        let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(2));
+        self.load_seg_reg(BxSegregs::Gs, segsel)?;
+        let dst = instr.dst() as usize;
+        self.set_gpr16(dst, reg_16);
+        tracing::trace!("LGS16: reg{} = {:#06x}, GS = {:#06x}", dst, reg_16, segsel);
+        Ok(())
+    }
+
+    /// LGS r32, m16:32 - Load GS:r32 from memory far pointer
+    pub fn lgs_gd_mp(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let reg_32 = self.read_virtual_dword(seg, eaddr);
+        let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(4));
+        self.load_seg_reg(BxSegregs::Gs, segsel)?;
+        let dst = instr.dst() as usize;
+        self.set_gpr32(dst, reg_32);
+        tracing::trace!("LGS32: reg{} = {:#010x}, GS = {:#06x}", dst, reg_32, segsel);
+        Ok(())
+    }
 }

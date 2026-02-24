@@ -142,6 +142,11 @@ pub struct BxICacheEntry {
     // In C++, entry->i is a pointer, so we can do pointer arithmetic
     // In Rust, we need to store the index explicitly
     pub(super) mpool_start_idx: usize,
+    /// First 8 bytes of this trace's instruction stream (for SMC detection).
+    /// Compared against current memory on icache lookup to detect stale entries
+    /// when code memory has been overwritten (e.g., LILO loading kernel via REP INSW).
+    /// Bochs uses per-page write stamps; this is a simpler but effective alternative.
+    pub(super) first_bytes: [u8; 8],
 }
 
 pub struct BxICache {
@@ -170,6 +175,7 @@ impl Default for PageSplitEntry {
                 tlen: 0,
                 i: BxInstructionGenerated::default(),
                 mpool_start_idx: 0,
+                first_bytes: [0; 8],
             },
         }
     }
@@ -190,6 +196,7 @@ impl BxICache {
                 tlen: 0,
                 i: BxInstructionGenerated::default(),
                 mpool_start_idx: 0,
+                first_bytes: [0; 8],
             }),
             // Allocate on heap to avoid 15 MB stack allocation
             // vec![val; size] is efficient and heap-allocated
@@ -539,6 +546,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             entry.p_addr = IcacheAddress::Address(p_addr);
             entry.trace_mask = 0;
             entry.mpool_start_idx = trace_start_idx;
+            // Store first 8 bytes of instruction stream for SMC detection.
+            // Checking just the first byte is insufficient — if code is loaded
+            // at offset+1 (e.g., kernel fill loop at 0x3261 with padding 0x00 at 0x3260),
+            // the first byte matches but subsequent bytes are stale.
+            let copy_len = fetch_ptr.len().min(8);
+            entry.first_bytes[..copy_len].copy_from_slice(&fetch_ptr[..copy_len]);
+            if copy_len < 8 {
+                entry.first_bytes[copy_len..].fill(0);
+            }
         }
 
         let mut current_p_addr = p_addr;
@@ -995,6 +1011,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             tlen: cached_tlen,
             i: cached_first_instr,
             mpool_start_idx: 0, // Not used for search, just need valid struct
+            first_bytes: [0; 8],
         };
 
         if let Some(source_start_idx) = self

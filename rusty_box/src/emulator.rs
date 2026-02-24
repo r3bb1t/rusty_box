@@ -982,6 +982,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         self.tick_devices(usec);
                     }
 
+                    // Propagate A20 gate changes from keyboard controller to memory system
+                    // Matching Bochs BX_SET_ENABLE_A20() which immediately updates pc_system and memory
+                    if self.device_manager.keyboard.a20_change_pending {
+                        self.device_manager.keyboard.a20_change_pending = false;
+                        let a20 = self.device_manager.keyboard.a20_enabled;
+                        self.pc_system.set_enable_a20(a20);
+                        self.memory.set_a20_mask(self.pc_system.a20_mask());
+                    }
+
                     // Log batch sizes and check if timer ticking works
                     if instructions_executed < 5 * INSTRUCTION_BATCH_SIZE || instructions_executed % 100_000 < INSTRUCTION_BATCH_SIZE {
                         let pit_c0_count = self.device_manager.pit.counters[0].count;
