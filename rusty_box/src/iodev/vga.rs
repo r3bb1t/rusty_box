@@ -561,10 +561,17 @@ impl BxVgaC {
                 }
             }
             VGA_STATUS | VGA_STATUS_MONO => {
-                // Status register: bit 0 = display enable, bit 3 = vertical retrace
-                // Toggle bit 0 for display enable status
-                self.status_reg ^= 0x01;
-                (self.status_reg | 0x08) as u32 // Always set bit 3 (vertical retrace)
+                // Input Status Register 1 (0x3DA / 0x3BA)
+                // Matching Bochs vgacore.cc:501-530
+                // bit 0: Display Enable (1 = in blanking period)
+                // bit 3: Vertical Retrace (1 = in vertical retrace)
+                // Toggle both bits to simulate display cycling through
+                // active → hblank → vblank → vretrace phases.
+                // VGA BIOS waits for bit 3 transitions (0→1 and 1→0).
+                self.status_reg ^= 0x09; // toggle bits 0 and 3
+                // Reading this port resets the attribute flip-flop (Bochs line 529)
+                self.attr_flip_flop = false;
+                self.status_reg as u32
             }
             VGA_ATTRIB_ADDR | VGA_ATTRIB_DATA => {
                 // Attribute controller: reading toggles flip-flop

@@ -114,7 +114,7 @@ pub(super) const BX_ICACHE_MEM_POOL: usize = 576 * 1024;
 const BX_MAX_TRACE_LENGTH: usize = 32;
 
 #[derive(Debug, PartialEq, Clone, Default, Copy)]
-enum IcacheAddress {
+pub(crate) enum IcacheAddress {
     #[default]
     Invalid,
     Address(BxPhyAddress),
@@ -389,6 +389,81 @@ fn gen_dummy_icache_entry(i: &mut BxInstructionGenerated) {
     // In Rust, we check for Opcode::InsertedOpcode in cpu_loop_n and set async_event
 }
 
+/// Check if an opcode is a trace-ending instruction (control flow change).
+/// Matching Bochs BxTraceEnd flag: branches, jumps, calls, returns, loops,
+/// interrupts, IRET, HLT, and system call instructions all end the trace.
+fn is_trace_end_opcode(opcode: Opcode) -> bool {
+    matches!(
+        opcode,
+        // Jumps (near)
+        Opcode::JmpEd | Opcode::JmpEw | Opcode::JmpJw | Opcode::JmpJbw |
+        Opcode::JmpJd | Opcode::JmpJbd |
+        // Jumps (far)
+        Opcode::JmpfAp | Opcode::JmpfOp16Ep | Opcode::JmpfOp32Ep |
+        // Jumps (64-bit)
+        Opcode::JmpJq | Opcode::JmpJbq | Opcode::JmpEq | Opcode::JmpfOp64Ep |
+        // Calls (near)
+        Opcode::CallEd | Opcode::CallEw | Opcode::CallJd | Opcode::CallJw |
+        // Calls (far)
+        Opcode::CallfOp16Ap | Opcode::CallfOp32Ap |
+        Opcode::CallfOp16Ep | Opcode::CallfOp32Ep |
+        // Calls (64-bit)
+        Opcode::CallJq | Opcode::CallEq | Opcode::CallfOp64Ep |
+        // Returns (near)
+        Opcode::RetOp16 | Opcode::RetOp16Iw | Opcode::RetOp32 | Opcode::RetOp32Iw |
+        Opcode::RetOp64 | Opcode::RetOp64Iw |
+        // Returns (far)
+        Opcode::RetfOp16 | Opcode::RetfOp16Iw | Opcode::RetfOp32 | Opcode::RetfOp32Iw |
+        Opcode::RetfOp64 | Opcode::RetfOp64Iw |
+        // Conditional jumps (16-bit relative)
+        Opcode::JoJw | Opcode::JnoJw | Opcode::JbJw | Opcode::JnbJw |
+        Opcode::JzJw | Opcode::JnzJw | Opcode::JbeJw | Opcode::JnbeJw |
+        Opcode::JsJw | Opcode::JnsJw | Opcode::JpJw | Opcode::JnpJw |
+        Opcode::JlJw | Opcode::JnlJw | Opcode::JleJw | Opcode::JnleJw |
+        // Conditional jumps (8-bit, 16-bit mode)
+        Opcode::JoJbw | Opcode::JnoJbw | Opcode::JbJbw | Opcode::JnbJbw |
+        Opcode::JzJbw | Opcode::JnzJbw | Opcode::JbeJbw | Opcode::JnbeJbw |
+        Opcode::JsJbw | Opcode::JnsJbw | Opcode::JpJbw | Opcode::JnpJbw |
+        Opcode::JlJbw | Opcode::JnlJbw | Opcode::JleJbw | Opcode::JnleJbw |
+        // Conditional jumps (32-bit relative)
+        Opcode::JoJd | Opcode::JnoJd | Opcode::JbJd | Opcode::JnbJd |
+        Opcode::JzJd | Opcode::JnzJd | Opcode::JbeJd | Opcode::JnbeJd |
+        Opcode::JsJd | Opcode::JnsJd | Opcode::JpJd | Opcode::JnpJd |
+        Opcode::JlJd | Opcode::JnlJd | Opcode::JleJd | Opcode::JnleJd |
+        // Conditional jumps (8-bit, 32-bit mode)
+        Opcode::JoJbd | Opcode::JnoJbd | Opcode::JbJbd | Opcode::JnbJbd |
+        Opcode::JzJbd | Opcode::JnzJbd | Opcode::JbeJbd | Opcode::JnbeJbd |
+        Opcode::JsJbd | Opcode::JnsJbd | Opcode::JpJbd | Opcode::JnpJbd |
+        Opcode::JlJbd | Opcode::JnlJbd | Opcode::JleJbd | Opcode::JnleJbd |
+        // Conditional jumps (64-bit relative)
+        Opcode::JoJq | Opcode::JnoJq | Opcode::JbJq | Opcode::JnbJq |
+        Opcode::JzJq | Opcode::JnzJq | Opcode::JbeJq | Opcode::JnbeJq |
+        Opcode::JsJq | Opcode::JnsJq | Opcode::JpJq | Opcode::JnpJq |
+        Opcode::JlJq | Opcode::JnlJq | Opcode::JleJq | Opcode::JnleJq |
+        // Conditional jumps (8-bit, 64-bit mode)
+        Opcode::JoJbq | Opcode::JnoJbq | Opcode::JbJbq | Opcode::JnbJbq |
+        Opcode::JzJbq | Opcode::JnzJbq | Opcode::JbeJbq | Opcode::JnbeJbq |
+        Opcode::JsJbq | Opcode::JnsJbq | Opcode::JpJbq | Opcode::JnpJbq |
+        Opcode::JlJbq | Opcode::JnlJbq | Opcode::JleJbq | Opcode::JnleJbq |
+        // Loops
+        Opcode::LoopJbw | Opcode::LoopeJbw | Opcode::LoopneJbw |
+        Opcode::LoopJbd | Opcode::LoopeJbd | Opcode::LoopneJbd |
+        Opcode::LoopJbq | Opcode::LoopeJbq | Opcode::LoopneJbq |
+        // JCXZ/JECXZ/JRCXZ
+        Opcode::JcxzJbw | Opcode::JecxzJbd | Opcode::JrcxzJbq |
+        // Interrupts
+        Opcode::IntIb | Opcode::Int0 |
+        // Interrupt returns
+        Opcode::IretOp16 | Opcode::IretOp32 | Opcode::IretOp64 |
+        // Halt
+        Opcode::Hlt |
+        // System calls
+        Opcode::Syscall | Opcode::Sysret |
+        Opcode::SyscallLegacy | Opcode::SysretLegacy |
+        Opcode::Sysenter | Opcode::Sysexit
+    )
+}
+
 impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     fn bx_end_trace(&mut self) {
         self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
@@ -520,22 +595,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     // In Rust, we can't store function pointers in instruction structure (it's in decoder crate),
                     // so we call assign_handler again during execution to get the handler.
                     // But we still call it here to check if tracing should stop (matching original behavior).
-                    let fetch_mode_mask = self.fetch_mode_mask;
-                    let stop_trace_indication = {
-                        // Call assign_handler to check if trace should stop
-                        // We need to borrow self mutably, so we do this in a separate scope
-                        let instr_ref = &mut self.i_cache.mpool[current_mpindex];
-                        // Create a temporary mutable reference to self for assign_handler
-                        // This is safe because we're only reading from the instruction
-                        let should_stop = {
-                            // We can't call assign_handler here because it requires &mut self
-                            // Instead, we'll check the opcode and flags directly
-                            // For now, just continue tracing - the actual handler assignment
-                            // will happen during execution in cpu_loop
-                            false
-                        };
-                        should_stop
-                    };
+                    // Check if this instruction ends the trace (matching Bochs assignHandler
+                    // BxTraceEnd check). Control-flow instructions (branches, jumps, calls,
+                    // returns, loops, interrupts) must end the trace so that the next
+                    // get_icache_entry call looks up the branch TARGET address, not the
+                    // next sequential address.
+                    let stop_trace_indication = is_trace_end_opcode(
+                        self.i_cache.mpool[current_mpindex].get_ia_opcode()
+                    );
 
                     // TODO: Implement BX_INSTR_STORE_OPCODE_BYTES if needed (matching C++ line 175-177)
                     // TODO: Implement BX_INSTR_OPCODE if needed (matching C++ line 178-179)
@@ -587,9 +654,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         ) {
                             // Update entry and commit
                             {
+                                let first_instr = self.i_cache.mpool[trace_start_idx];
                                 let entry = &mut self.i_cache.entry[entry_idx];
                                 entry.tlen = tlen;
                                 entry.trace_mask |= trace_mask;
+                                entry.i = first_instr;
                             }
                             page_write_stamp_table.mark_icache_mask(current_p_addr, trace_mask);
                             self.i_cache.mpindex = current_mpindex;
@@ -693,6 +762,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         let entry = &mut self.i_cache.entry[entry_idx];
                         entry.p_addr = IcacheAddress::Address(p_addr); // Restore pAddr (~entry->pAddr in C++)
                         entry.trace_mask = 0x80000000; /* last line in page */
+                        entry.i = boundary_instr; // Set first instruction for ilen cache hit check
                         // Note: tlen is already set to 1 above, no need to set it again
                         // mpool_start_idx was already set above
                     }
@@ -741,10 +811,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
         }
 
-        // Update entry tlen and commit trace (matching C++ line 217)
+        // Update entry tlen and first instruction (matching C++ line 217)
+        // In C++, entry->i is a pointer to the first instruction in mpool.
+        // In Rust, we store a copy of the first instruction in entry.i so that
+        // find_entry can check i.meta_info.ilen != 0 for cache hit validation.
         {
+            let first_instr = self.i_cache.mpool[trace_start_idx];
             let entry = &mut self.i_cache.entry[entry_idx];
             entry.tlen = tlen;
+            entry.i = first_instr;
         }
         // Cap mpindex to prevent out-of-bounds access
         let capped_mpindex = current_mpindex.min(BX_ICACHE_MEM_POOL - 1);

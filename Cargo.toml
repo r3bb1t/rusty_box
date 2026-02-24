@@ -9,7 +9,7 @@ edition = "2021"
 license = "Apache-2.0"
 
 [workspace.dependencies]
-tracing = { version = "0.1", default-features = false }
+tracing = { version = "0.1", default-features = false, features = ["max_level_warn"] }
 thiserror = "2"
 byteorder = "1.5"
 spin = { version = "0.10", default-features = false, features = ["once"] }

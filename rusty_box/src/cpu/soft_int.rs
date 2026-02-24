@@ -194,7 +194,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.boot_debug_flags |= 0x02;
             self.debug_puts(b"[IVT->0000:0000]\n");
         }
-        
         // Load CS:IP from IVT
         let cs_index = BxSegregs::Cs as usize;
         parse_selector(new_cs, &mut self.sregs[cs_index].selector);

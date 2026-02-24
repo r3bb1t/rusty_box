@@ -522,14 +522,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let val16 = self.read_virtual_word(seg, eaddr);
         let dst_reg = instr.dst() as usize;
-
         self.set_gpr16(dst_reg, val16);
         tracing::trace!(
             "MOV16 mem: reg{} = [{:?}:{:#x}] ({:#06x})",
-            dst_reg,
-            seg,
-            eaddr,
-            val16
+            dst_reg, seg, eaddr, val16
         );
     }
 
@@ -1343,6 +1339,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r16, r/m16 - unified dispatch
     pub fn mov_gw_ew(&mut self, instr: &BxInstructionGenerated) {
+        // Removed debug trace
         if instr.mod_c0() { self.mov_gw_ew_r(instr) } else { self.mov_gw_ew_m(instr) }
     }
 
@@ -1374,6 +1371,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let reg_16 = self.read_virtual_word(seg, eaddr);
         let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(2));
+
         self.load_seg_reg(BxSegregs::Es, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr16(dst, reg_16);
@@ -1402,6 +1400,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let reg_16 = self.read_virtual_word(seg, eaddr);
         let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(2));
+
         self.load_seg_reg(BxSegregs::Ds, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr16(dst, reg_16);

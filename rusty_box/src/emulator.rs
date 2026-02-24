@@ -712,6 +712,26 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     {
         self.prepare_run();
 
+        // Verify VGA BIOS ROM is accessible
+        {
+            // Check through ROM area (not RAM)
+            let rom_bytes = self.memory.peek_ram(0xC0000, 4);
+            tracing::warn!(
+                "VGA ROM check via peek_ram(0xC0000): {:02X?} (expect [55, AA, ...])",
+                rom_bytes
+            );
+            // Also verify IPL table area is writable
+            let ipl_bytes = self.memory.peek_ram(0x9FF00, 4);
+            tracing::warn!(
+                "IPL table check at 0x9FF00: {:02X?} (expect zeros before POST)",
+                ipl_bytes
+            );
+            // Check total memory size
+            tracing::warn!(
+                "Memory len={:#x}", self.memory.get_memory_len()
+            );
+        }
+
         // Force initial GUI update to show initial state
         self.device_manager.vga.force_initial_update();
         self.update_gui(); // Force initial update
@@ -748,6 +768,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
             // 2. Execute CPU instructions in batches
             let batch_size = (max_instructions - instructions_executed).min(INSTRUCTION_BATCH_SIZE);
+            let batch_start_time = std::time::Instant::now();
             // Use unsafe to work around lifetime issues - the memory borrow is safe because
             // we control the lifetime and the CPU doesn't outlive the memory
             let result = unsafe {
@@ -761,6 +782,23 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             let should_update_gui = match result {
                 Ok(executed) => {
                     instructions_executed += executed;
+
+                    // Batch timing: log when a batch takes >50ms (indicating perf cliff)
+                    let batch_elapsed = batch_start_time.elapsed();
+                    if batch_elapsed.as_millis() > 50 {
+                        tracing::warn!(
+                            "SLOW-BATCH: {}ms for {} instr at {}k total, CS:RIP={:#06x}:{:#x}, icache_miss={}, prefetch={}",
+                            batch_elapsed.as_millis(),
+                            executed,
+                            instructions_executed / 1000,
+                            self.cpu.get_cs_selector(),
+                            self.cpu.rip(),
+                            self.cpu.perf_icache_miss,
+                            self.cpu.perf_prefetch,
+                        );
+                        self.cpu.perf_icache_miss = 0;
+                        self.cpu.perf_prefetch = 0;
+                    }
 
                     // If CPU triple-faulted into shutdown, stop emulation loop
                     if self.cpu.is_in_shutdown() {
@@ -787,19 +825,55 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         );
                     }
 
+                    // Detailed EIP trace to track POST progression
+                    // Log every batch in the critical PM→POST transition range
+                    if (440_000..480_000).contains(&instructions_executed) {
+                        let mem = self.memory.ram_slice();
+                        let ipl_count = if 0x9FF81 < mem.len() {
+                            u16::from_le_bytes([mem[0x9FF80], mem[0x9FF81]])
+                        } else { 0 };
+                        let ipl0_type = if 0x9FF01 < mem.len() {
+                            u16::from_le_bytes([mem[0x9FF00], mem[0x9FF01]])
+                        } else { 0 };
+                        tracing::warn!(
+                            "EIP trace: {} instr, CS:IP={:#06x}:{:#06x}, mode={}, IPL_count={}, IPL0_type={}",
+                            instructions_executed,
+                            self.cpu.get_cs_selector(),
+                            current_rip,
+                            self.cpu.get_cpu_mode(),
+                            ipl_count, ipl0_type,
+                        );
+                    }
+
                     // Detect stuck loop: RIP unchanged for many batches
                     if current_rip == last_rip {
                         stuck_count += 1;
                         if stuck_count >= 10 && !stuck_reported {
                             stuck_reported = true;
+                            let bp = self.cpu.bp() as usize;
+                            let ss_base = self.cpu.get_ss_base() as usize;
+                            let bp_phys = ss_base + bp;
+                            let ax = self.cpu.eax() as u16;
+                            // Read [BP+2] (return addr) and [BP+4] (action) from memory
+                            let mem_peek = self.memory.ram_slice();
+                            let bp2 = if bp_phys + 3 < mem_peek.len() {
+                                u16::from_le_bytes([mem_peek[bp_phys + 2], mem_peek[bp_phys + 3]])
+                            } else { 0 };
+                            let bp4 = if bp_phys + 5 < mem_peek.len() {
+                                u16::from_le_bytes([mem_peek[bp_phys + 4], mem_peek[bp_phys + 5]])
+                            } else { 0 };
+                            let bp6 = if bp_phys + 7 < mem_peek.len() {
+                                u16::from_le_bytes([mem_peek[bp_phys + 6], mem_peek[bp_phys + 7]])
+                            } else { 0 };
                             tracing::warn!(
-                                "BIOS stuck at RIP={:#x} after {}k instructions, last I/O read: port={:#06x} value={:#x}, CS={:#06x} mode={}",
+                                "BIOS stuck at RIP={:#x} after {}k instructions, last I/O read: port={:#06x} value={:#x}, CS={:#06x} mode={}, BP={:#06x} AX={:#06x} [BP+2]={:#06x} [BP+4]={:#06x} [BP+6]={:#06x}",
                                 current_rip,
                                 instructions_executed / 1000,
                                 self.devices.last_io_read_port,
                                 self.devices.last_io_read_value,
                                 self.cpu.get_cs_selector(),
                                 self.cpu.get_cpu_mode(),
+                                bp, ax, bp2, bp4, bp6,
                             );
                             // Dump IPL table and stack for debugging
                             {
@@ -814,9 +888,17 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 let ipl_bootfirst = read_u16(0x9FF84);
                                 let ipl0_type = read_u16(0x9FF00);
                                 let ipl1_type = read_u16(0x9FF10);
+                                // Also check the WRONG address (get_vector bug: addr % 128KB)
+                                let wrong_ipl_count = read_u16(0x1FF80);
+                                let wrong_ipl0_type = read_u16(0x1FF00);
+                                let wrong_ipl1_type = read_u16(0x1FF10);
                                 tracing::warn!(
-                                    "IPL table: count={:#x} seq={:#x} bootfirst={:#x} entry0_type={:#x} entry1_type={:#x}",
+                                    "IPL table @0x9FF00: count={:#x} seq={:#x} bootfirst={:#x} entry0_type={:#x} entry1_type={:#x}",
                                     ipl_count, ipl_seq, ipl_bootfirst, ipl0_type, ipl1_type,
+                                );
+                                tracing::warn!(
+                                    "IPL table @0x1FF00 (get_vector mapped): count={:#x} entry0_type={:#x} entry1_type={:#x}",
+                                    wrong_ipl_count, wrong_ipl0_type, wrong_ipl1_type,
                                 );
                                 // Dump stack to find caller of bios_printf/BX_PANIC
                                 let ss_sel = self.cpu.get_ss_selector();
@@ -827,6 +909,17 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 for i in 0..16 {
                                     stack_words[i] = read_u16(stack_addr + i * 2);
                                 }
+                                // Also dump the full stack from SP to 0xFFFE
+                                let full_stack_start = stack_addr;
+                                let full_stack_end = (ss_base + 0xFFFE).min(mem.len());
+                                let full_words: Vec<u16> = (full_stack_start..full_stack_end).step_by(2)
+                                    .map(|a| read_u16(a))
+                                    .collect();
+                                let full_hex: Vec<String> = full_words.iter().map(|w| format!("{:04x}", w)).collect();
+                                tracing::warn!(
+                                    "Full stack SS:SP={:#06x}:{:#06x} ({} words): {}",
+                                    ss_sel, sp, full_words.len(), full_hex.join(" "),
+                                );
                                 tracing::warn!(
                                     "Stack dump SS:SP={:#06x}:{:#06x} (phys {:#x}): {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x}",
                                     ss_sel, sp, stack_addr,

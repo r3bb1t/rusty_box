@@ -135,29 +135,26 @@ impl BxMemoryStubC {
     pub(super) fn get_vector<'a, I: BxCpuIdTrait>(
         &'a mut self,
         addr: BxPhyAddress,
-        cpus: &[&BxCpuC<I>],
+        _cpus: &[&BxCpuC<I>],
     ) -> Result<&'a mut [u8]> {
-        let block: usize = (addr / self.block_size as u64) as _;
-        let blocks = self.blocks_offsets();
-
-        if cfg!(feature = "bx_large_ram_file") {
-            // TODO: Continue here and check if swapped out if always null
-            if let Block::SwappedOut = blocks[block] {
-                self.allocate_block(block, cpus)?;
-            }
+        // Memory is contiguous in actual_vector[vector_offset..].
+        // Use the full physical address as the index into the flat memory view.
+        //
+        // BUG FIX: The old code used `addr & (block_size - 1)` (within-block offset)
+        // which mapped ALL addresses to block 0's range. For example, a write to
+        // physical 0x9FF00 with block_size=128KB would go to offset 0x1FF00 instead
+        // of the correct 0x9FF00. This caused the BIOS IPL table (at 0x9FF00) to be
+        // written to the wrong address, and any data above 128KB to be misplaced.
+        let addr_usize = addr as usize;
+        let vo = self.vector_offset;
+        let start = vo + addr_usize;
+        if start < self.actual_vector.len() {
+            Ok(&mut self.actual_vector[start..])
         } else {
-            self.allocate_block(block, cpus)?;
+            // Out of bounds — return bogus memory scratch area
+            let bo = self.bogus_offset;
+            Ok(&mut self.actual_vector[bo..])
         }
-
-        let offset = (addr & (self.block_size - 1) as u64) as u32;
-        //Ok(self.block_by_index(block).unwrap().as_ptr() as )
-        //Ok(&mut self.vector()[offset as usize..(self.block_size as usize)])
-        let block_size = self.block_size as usize;
-        Ok(&mut self.vector()[offset as usize..block_size])
-
-        //let offset = (self.block_by_index(block).unwrap().as_ptr() as usize + *addr as usize)
-        //    & (self.block_size - 1);
-        //Ok(&mut self.vector()[offset..(self.block_size as usize)])
     }
 
     #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]

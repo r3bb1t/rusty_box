@@ -108,6 +108,8 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             cpu_state_use_ok: Default::default(),
             last_exception_type: Default::default(),
             cpuloop_stack_anchor: Default::default(),
+            perf_icache_miss: 0,
+            perf_prefetch: 0,
             eip_page_bias: Default::default(),
             eip_page_window_size: Default::default(),
             eip_fetch_ptr: Default::default(),

@@ -548,6 +548,10 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     #[cfg(feature = "bx_support_handlers_chaining_speedups")]
     pub(super) cpuloop_stack_anchor: Option<&'c [u8]>,
 
+    // Perf counters (temporary, for diagnosing slowdowns)
+    pub(crate) perf_icache_miss: u64,
+    pub(crate) perf_prefetch: u64,
+
     // Boundaries of current code page, based on EIP
     pub(super) eip_page_bias: BxAddress,
     pub(super) eip_page_window_size: u32,
@@ -1144,6 +1148,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.mem_len = mem_len;
 
         let mut iteration = 0u64;
+        let mut trace_break_count = 0u64;
+        let mut get_icache_count = 0u64;
+        let mut icache_miss_count = 0u64;
+        let mut prefetch_count = 0u64;
+        #[cfg(feature = "profiling")]
+        let mut prof_assign_ns = 0u64;
+        #[cfg(feature = "profiling")]
+        let mut prof_exec_ns = 0u64;
+        #[cfg(feature = "profiling")]
+        let mut prof_icache_ns = 0u64;
 
         tracing::info!("CPU loop starting at CS:IP = {:04X}:{:08X}",
             unsafe { self.sregs[BxSegregs::Cs as usize].selector.value },
@@ -1151,9 +1165,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         let result = 'cpu_loop: loop {
             iteration += 1;
+            get_icache_count += 1;
 
             // Safety limit - pause when instruction limit is reached
             if iteration > max_instructions {
+                #[cfg(feature = "profiling")]
+                tracing::warn!("CPU-LOOP-STATS: {} instr, icache={}ms assign={}ms exec={}ms",
+                    iteration - 1, prof_icache_ns / 1_000_000,
+                    prof_assign_ns / 1_000_000, prof_exec_ns / 1_000_000);
+                #[cfg(feature = "profiling")]
+                { prof_icache_ns = 0; prof_assign_ns = 0; prof_exec_ns = 0; }
+                self.perf_icache_miss = 0;
+                self.perf_prefetch = 0;
                 break Ok(iteration - 1);
             }
 
@@ -1173,6 +1196,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
             // SAFETY: We extend the lifetime of mem temporarily for this call only.
             // The borrow is released at the end of the expression.
+            #[cfg(feature = "profiling")]
+            let _t0 = std::time::Instant::now();
             let mut entry = unsafe {
                 let mem_extended: &'c mut BxMemC<'c> = &mut *mem_ptr;
                 match self.get_icache_entry(mem_extended, cpus) {
@@ -1185,6 +1210,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     Err(e) => break 'cpu_loop Err(e),
                 }
             };
+            #[cfg(feature = "profiling")]
+            { prof_icache_ns += _t0.elapsed().as_nanos() as u64; }
             tracing::trace!(
                 "get_icache_entry: RIP={:#x}, entry.tlen={}",
                 self.rip(),
@@ -1307,187 +1334,38 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     i.get_ia_opcode(), current_rip, ilen, next_rip
                 );
 
-
-
-
                 // Matching C++ line 203: BX_CPU_CALL_METHOD(i->execute1, (i));
-                // might iterate repeat instruction
-
-                // Assign handler for this instruction (matching original assignHandler logic)
-                // This checks feature flags, assigns handler, and determines if trace should end
-                let fetch_mode_mask = self.fetch_mode_mask;
-                match self.assign_handler(&mut i, fetch_mode_mask) {
-                    Ok((should_stop_trace, handler_opt)) => {
-                        if should_stop_trace {
-                            tracing::debug!("assign_handler returned true, stopping trace");
+                // Execute instruction directly
+                {
+                    match self.execute_instruction(&mut i) {
+                        Ok(()) => {}
+                        Err(crate::cpu::CpuError::CpuNotInitialized) => {
                             break;
                         }
-
-                        // Execute the instruction using assigned handler if available
-                        if let Some(handler) = handler_opt {
-                            // Call handler function pointer directly (matching C++ i->execute1(i))
-                            match handler(self, &i) {
-                                Ok(()) => {
-                                    // Instruction executed successfully
-                                }
-                                Err(crate::cpu::CpuError::CpuNotInitialized) => {
-                                    // Prefetch queue invalidated - need to break and get new trace
-                                    tracing::debug!(
-                                        "handler returned CpuNotInitialized, breaking trace"
-                                    );
-                                    break;
-                                }
-                                Err(e) => {
-                                    tracing::warn!("handler execution returned error: {:?}", e);
-                                    // Continue but instruction may not have executed correctly
-                                }
-                            }
-                        } else {
-                            // Handler not in table yet - use execute_instruction match statement
-                            match self.execute_instruction(&mut i) {
-                                Ok(()) => {
-                                    // Instruction executed successfully
-                                }
-                                Err(crate::cpu::CpuError::CpuNotInitialized) => {
-                                    // Prefetch queue invalidated - need to break and get new trace
-                                    tracing::debug!("execute_instruction returned CpuNotInitialized, breaking trace");
-                                    break;
-                                }
-                                Err(crate::cpu::CpuError::UnimplementedOpcode { opcode }) => {
-                                    // Panic on unimplemented opcode with detailed information
-                                    let rip = current_rip;
-                                    let cs_base = unsafe {
-                                        self.sregs[BxSegregs::Cs as usize].cache.u.segment.base
-                                    };
-                                    let laddr = cs_base + rip;
-                                    let cs_value = unsafe {
-                                        self.sregs[BxSegregs::Cs as usize].selector.value
-                                    };
-
-                                    // Try to get instruction bytes for debugging
-                                    let instr_bytes = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
-                                        let page_base = cs_base + (self.eip_page_bias as u64);
-                                        let offset = (rip.wrapping_sub(page_base)) as usize;
-                                        if offset < fetch_ptr.len()
-                                            && offset + ilen as usize <= fetch_ptr.len()
-                                        {
-                                            fetch_ptr[offset..offset + ilen as usize].to_vec()
-                                        } else {
-                                            vec![]
-                                        }
-                                    } else {
-                                        vec![]
-                                    };
-
-                                    panic!(
-                                        "\n\
-                                ╔════════════════════════════════════════════════════════════╗\n\
-                                ║          UNIMPLEMENTED OPCODE DETECTED                      ║\n\
-                                ╠════════════════════════════════════════════════════════════╣\n\
-                                ║  Opcode:      {}                                    ║\n\
-                                ║  RIP:         {:#018x}                          ║\n\
-                                ║  CS:IP:       {:#04x}:{:#04x}                              ║\n\
-                                ║  Linear Addr: {:#018x}                          ║\n\
-                                ║  Length:      {} bytes                                    ║\n\
-                                ║  Bytes:       {:02x?}                                      ║\n\
-                                ╠════════════════════════════════════════════════════════════╣\n\
-                                ║  Please implement this instruction in:                    ║\n\
-                                ║    rusty_box/src/cpu/cpu.rs::execute_instruction()       ║\n\
-                                ║                                                             ║\n\
-                                ║  Check original C++ implementation in:                     ║\n\
-                                ║    cpp_orig/bochs/cpu/decoder/ia_opcodes.def              ║\n\
-                                ╚════════════════════════════════════════════════════════════╝\n",
-                                        opcode, rip, cs_value, rip, laddr, ilen, instr_bytes
-                                    );
-                                }
-                                Err(crate::cpu::CpuError::CpuLoopRestart) => {
-                                    // Bochs longjmp: restart decode/trace immediately, do not
-                                    // commit RIP or increment instruction counters for this instruction.
-                                    restart_decode = true;
-                                    break;
-                                }
-                                Err(e) => {
-                                    // Unlike the old placeholder logic, do NOT continue on CPU errors.
-                                    // This corrupts guest execution and quickly leads to bogus RIP=0.
-                                    break 'cpu_loop Err(e);
-                                }
-                            }
+                        Err(crate::cpu::CpuError::CpuLoopRestart) => {
+                            restart_decode = true;
+                            break;
                         }
-                    }
-                    Err(crate::cpu::CpuError::CpuLoopRestart) => {
-                        restart_decode = true;
-                        break;
-                    }
-                    Err(e) => {
-                        tracing::warn!("assign_handler returned error: {:?}", e);
-                        // Fall back to execute_instruction match statement
-                        match self.execute_instruction(&mut i) {
-                            Ok(()) => {
-                                // Instruction executed successfully
-                            }
-                            Err(crate::cpu::CpuError::CpuNotInitialized) => {
-                                tracing::debug!("execute_instruction returned CpuNotInitialized, breaking trace");
-                                break;
-                            }
-                            Err(crate::cpu::CpuError::UnimplementedOpcode { opcode }) => {
-                                // Panic on unimplemented opcode with detailed information
-                                let rip = current_rip;
-                                let cs_base = unsafe {
-                                    self.sregs[BxSegregs::Cs as usize].cache.u.segment.base
-                                };
-                                let laddr = cs_base + rip;
-                                let cs_value =
-                                    unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
-
-                                // Try to get instruction bytes for debugging
-                                let instr_bytes = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
-                                    let page_base = cs_base + (self.eip_page_bias as u64);
-                                    let offset = (rip.wrapping_sub(page_base)) as usize;
-                                    if offset < fetch_ptr.len()
-                                        && offset + ilen as usize <= fetch_ptr.len()
-                                    {
-                                        fetch_ptr[offset..offset + ilen as usize].to_vec()
-                                    } else {
-                                        vec![]
-                                    }
-                                } else {
-                                    vec![]
-                                };
-
-                                panic!(
-                                    "\n\
-                                    ╔════════════════════════════════════════════════════════════╗\n\
-                                    ║          UNIMPLEMENTED OPCODE DETECTED                      ║\n\
-                                    ╠════════════════════════════════════════════════════════════╣\n\
-                                    ║  Opcode:      {}                                    ║\n\
-                                    ║  RIP:         {:#018x}                          ║\n\
-                                    ║  CS:IP:       {:#04x}:{:#04x}                              ║\n\
-                                    ║  Linear Addr: {:#018x}                          ║\n\
-                                    ║  Length:      {} bytes                                    ║\n\
-                                    ║  Bytes:       {:02x?}                                      ║\n\
-                                    ╠════════════════════════════════════════════════════════════╣\n\
-                                    ║  Please implement this instruction in:                    ║\n\
-                                    ║    rusty_box/src/cpu/cpu.rs::execute_instruction()       ║\n\
-                                    ║                                                             ║\n\
-                                    ║  Check original C++ implementation in:                     ║\n\
-                                    ║    cpp_orig/bochs/cpu/decoder/ia_opcodes.def              ║\n\
-                                    ╚════════════════════════════════════════════════════════════╝\n",
-                                    opcode,
-                                    rip,
-                                    cs_value,
-                                    rip,
-                                    laddr,
-                                    ilen,
-                                    instr_bytes
-                                );
-                            }
-                            Err(crate::cpu::CpuError::CpuLoopRestart) => {
-                                restart_decode = true;
-                                break;
-                            }
-                            Err(e) => {
-                                break 'cpu_loop Err(e);
-                            }
+                        Err(crate::cpu::CpuError::UnimplementedOpcode { opcode }) => {
+                            let rip = current_rip;
+                            let cs_base = unsafe {
+                                self.sregs[BxSegregs::Cs as usize].cache.u.segment.base
+                            };
+                            let laddr = cs_base + rip;
+                            let cs_value =
+                                unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
+                            let instr_bytes = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
+                                let page_base = cs_base + (self.eip_page_bias as u64);
+                                let offset = (rip.wrapping_sub(page_base)) as usize;
+                                if offset < fetch_ptr.len() && offset + ilen as usize <= fetch_ptr.len() {
+                                    fetch_ptr[offset..offset + ilen as usize].to_vec()
+                                } else { vec![] }
+                            } else { vec![] };
+                            panic!("UNIMPLEMENTED OPCODE: {} at RIP={:#x} CS:IP={:#x}:{:#x} laddr={:#x} bytes={:02x?}",
+                                opcode, rip, cs_value, rip, laddr, instr_bytes);
+                        }
+                        Err(e) => {
+                            break 'cpu_loop Err(e);
                         }
                     }
                 }
@@ -1517,10 +1395,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
                 // Matching C++ line 215: if (BX_CPU_THIS_PTR async_event) break;
                 if self.async_event != 0 {
-                    if iteration < 20 || iteration % 100000 == 0 {
-                        tracing::warn!("TRACE-BREAK: async_event={:#x} at iter={}, RIP={:#x}, opcode={:?}",
-                            self.async_event, iteration, self.rip(), i.get_ia_opcode());
-                    }
+                    trace_break_count += 1;
+                    tracing::trace!("TRACE-BREAK: async_event={:#x} at iter={}, RIP={:#x}, opcode={:?}",
+                        self.async_event, iteration, self.rip(), i.get_ia_opcode());
                     break;
                 }
 
@@ -1635,6 +1512,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let mut eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
 
         if needs_prefetch {
+            self.perf_prefetch += 1;
             // Matching C++ cpu.cc:289-291 - call prefetch() and recalculate eip_biased after
             // Retry loop: if prefetch raises an exception, the handler invalidates the queue
             // and we need to retry prefetch with the new CPU state
@@ -1696,6 +1574,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Check if cache miss or entry has invalid instruction (matching C++ line 299)
         if entry_option.is_none() || entry_option.as_ref().unwrap().i.meta_info.ilen == 0 {
+            self.perf_icache_miss += 1;
+            // Log first few misses at VGA ROM addresses for debugging
+            if p_addr >= 0xC0000 && p_addr < 0xD0000 && self.perf_icache_miss <= 5 {
+                let hash_idx = BxICache::hash(p_addr, self.fetch_mode_mask.into());
+                let existing = &self.i_cache.entry[hash_idx as usize];
+                let existing_paddr_val = match existing.p_addr {
+                    crate::cpu::icache::IcacheAddress::Address(a) => a as i64,
+                    _ => -1i64,
+                };
+                tracing::warn!("ICACHE-MISS: p_addr={:#x}, hash={}, existing_paddr={}, ilen={}",
+                    p_addr, hash_idx, existing_paddr_val, existing.i.meta_info.ilen);
+            }
             // iCache miss. Call serve_icache_miss
             // Create a dummy page_write_stamp_table for now (matches prefetch approach)
             let mut dummy_mapping: [u32; 0] = [];
@@ -2028,6 +1918,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 use crate::cpu::arith;
                 arith::SUB_AL_Ib(self, instr)
             }
+            Opcode::SubAxiw => { arith::SUB_AX_Iw(self, instr) }
+            Opcode::SubEwIw => { arith::SUB_EwIw(self, instr) }
+            Opcode::SubEwsIb => { arith::SUB_EwsIb(self, instr) }
             Opcode::SubEdsIb | Opcode::SubEdId => { arith::SUB_EdId(self, instr); Ok(()) }
             // XOR instructions
             Opcode::XorEdGd => { self.xor_ed_gd(instr); Ok(()) }
@@ -2202,6 +2095,55 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::OutDxEax => {
                 self.out_dx_eax(instr);
+                Ok(())
+            }
+            // INS/OUTS string I/O
+            Opcode::RepInsbYbDx => {
+                if instr.lock_rep_used_value() != 0 {
+                    self.rep_insb16(instr);
+                } else {
+                    self.insb16(instr);
+                }
+                Ok(())
+            }
+            Opcode::RepInswYwDx => {
+                if instr.lock_rep_used_value() != 0 {
+                    self.rep_insw16(instr);
+                } else {
+                    self.insw16(instr);
+                }
+                Ok(())
+            }
+            Opcode::RepInsdYdDx => {
+                if instr.lock_rep_used_value() != 0 {
+                    self.rep_insd16(instr);
+                } else {
+                    self.insd16(instr);
+                }
+                Ok(())
+            }
+            Opcode::RepOutsbDxxb => {
+                if instr.lock_rep_used_value() != 0 {
+                    self.rep_outsb16(instr);
+                } else {
+                    self.outsb16(instr);
+                }
+                Ok(())
+            }
+            Opcode::RepOutswDxxw => {
+                if instr.lock_rep_used_value() != 0 {
+                    self.rep_outsw16(instr);
+                } else {
+                    self.outsw16(instr);
+                }
+                Ok(())
+            }
+            Opcode::RepOutsdDxxd => {
+                if instr.lock_rep_used_value() != 0 {
+                    self.rep_outsd16(instr);
+                } else {
+                    self.outsd16(instr);
+                }
                 Ok(())
             }
 
@@ -2768,53 +2710,138 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // String instructions
             // =========================================================================
             Opcode::RepMovsbYbXb => {
-                // Based on BX_CPU_C::REP_MOVSB_YbXb in string.cc
-                if instr.as32_l() != 0 {
-                    self.rep_movsb32(instr);
+                if instr.lock_rep_used_value() != 0 {
+                    if instr.as32_l() != 0 { self.rep_movsb32(instr); }
+                    else { self.rep_movsb16(instr); }
                 } else {
-                    self.rep_movsb16(instr);
+                    if instr.as32_l() != 0 { self.movsb32(instr); }
+                    else { self.movsb16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepMovsdYdXd => {
-                // REP MOVSD - Move dword from DS:SI/ESI to ES:DI/EDI with repeat
-                // Based on BX_CPU_C::REP_MOVSD_YdXd in string.cc:71-88
-                if instr.as32_l() != 0 {
-                    // 32-bit address mode
-                    self.rep_movsd32(instr);
+                if instr.lock_rep_used_value() != 0 {
+                    if instr.as32_l() != 0 { self.rep_movsd32(instr); }
+                    else { self.rep_movsd16(instr); }
                 } else {
-                    // 16-bit address mode
-                    self.rep_movsd16(instr);
+                    if instr.as32_l() != 0 { self.movsd32(instr); }
+                    else { self.movsd16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepStosbYbAl => {
-                // Based on BX_CPU_C::REP_STOSB_YbAL in string.cc
-                if instr.as32_l() != 0 {
-                    self.rep_stosb32(instr);
+                if instr.lock_rep_used_value() != 0 {
+                    if instr.as32_l() != 0 { self.rep_stosb32(instr); }
+                    else { self.rep_stosb16(instr); }
                 } else {
-                    self.rep_stosb16(instr);
+                    if instr.as32_l() != 0 { self.stosb32(instr); }
+                    else { self.stosb16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepStoswYwAx => {
-                self.rep_stosw16(instr);
+                if instr.lock_rep_used_value() != 0 {
+                    self.rep_stosw16(instr);
+                } else {
+                    self.stosw16(instr);
+                }
                 Ok(())
             }
             Opcode::RepStosdYdEax => {
-                // REP STOSD - Store EAX at ES:DI/EDI with repeat
-                // Based on BX_CPU_C::REP_STOSD_YdEAX in string.cc
-                if instr.as32_l() != 0 {
-                    // 32-bit address mode
-                    self.rep_stosd32(instr);
+                if instr.lock_rep_used_value() != 0 {
+                    if instr.as32_l() != 0 { self.rep_stosd32(instr); }
+                    else { self.rep_stosd16(instr); }
                 } else {
-                    // 16-bit address mode
-                    self.rep_stosd16(instr);
+                    if instr.as32_l() != 0 { self.stosd32(instr); }
+                    else { self.stosd16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepLodsbAlxb => {
-                self.rep_lodsb16(instr);
+                if instr.lock_rep_used_value() != 0 {
+                    self.rep_lodsb16(instr);
+                } else {
+                    self.lodsb16(instr);
+                }
+                Ok(())
+            }
+            Opcode::RepLodswAxxw => {
+                if instr.lock_rep_used_value() != 0 {
+                    self.rep_lodsw16(instr);
+                } else {
+                    self.lodsw16(instr);
+                }
+                Ok(())
+            }
+            Opcode::RepScasbAlyb => {
+                let rep = instr.lock_rep_used_value();
+                if rep == 3 {
+                    // F3 = REPE SCASB
+                    self.repe_scasb16(instr);
+                } else if rep == 2 {
+                    // F2 = REPNE SCASB
+                    self.repne_scasb16(instr);
+                } else {
+                    // No REP prefix — single SCASB
+                    self.scasb16(instr);
+                }
+                Ok(())
+            }
+            Opcode::RepScaswAxyw => {
+                let rep = instr.lock_rep_used_value();
+                if rep == 3 {
+                    self.repe_scasw16(instr);
+                } else if rep == 2 {
+                    self.repne_scasw16(instr);
+                } else {
+                    self.scasw16(instr);
+                }
+                Ok(())
+            }
+            Opcode::RepScasdEaxyd => {
+                let rep = instr.lock_rep_used_value();
+                if rep == 3 {
+                    self.repe_scasd16(instr);
+                } else if rep == 2 {
+                    self.repne_scasd16(instr);
+                } else {
+                    self.scasd16(instr);
+                }
+                Ok(())
+            }
+            Opcode::RepCmpsbXbYb => {
+                let rep = instr.lock_rep_used_value();
+                if rep == 3 {
+                    // F3 = REPE CMPSB
+                    self.repe_cmpsb16(instr);
+                } else if rep == 2 {
+                    // F2 = REPNE CMPSB
+                    self.repne_cmpsb16(instr);
+                } else {
+                    self.cmpsb16(instr);
+                }
+                Ok(())
+            }
+            Opcode::RepCmpswXwYw => {
+                let rep = instr.lock_rep_used_value();
+                if rep == 3 {
+                    self.repe_cmpsw16(instr);
+                } else if rep == 2 {
+                    self.repne_cmpsw16(instr);
+                } else {
+                    self.cmpsw16(instr);
+                }
+                Ok(())
+            }
+            Opcode::RepCmpsdXdYd => {
+                let rep = instr.lock_rep_used_value();
+                if rep == 3 {
+                    self.repe_cmpsd16(instr);
+                } else if rep == 2 {
+                    self.repne_cmpsd16(instr);
+                } else {
+                    self.cmpsd16(instr);
+                }
                 Ok(())
             }
 

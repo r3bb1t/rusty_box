@@ -16,7 +16,7 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-02-23):**
+**Current Status (2026-02-24):**
 - ✅ BIOS-bochs-latest (128 KB) is now the primary BIOS
 - ✅ Real mode BIOS executes ~362k instructions (keyboard init, memory probe, etc.)
 - ✅ Transitions to protected mode via far jump (CS=0x10, flat memory model)
@@ -26,7 +26,6 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
   - "Starting rombios32", "Shutdown flag 0", "ram_size=0x01fa0000"
   - "Found 1 cpu(s)", MP table, SMBIOS table, bios_table_addr all complete
 - ✅ MOV [mem], sreg / MOV sreg, [mem] memory forms fixed (was only register form)
-  - Root cause of IVT corruption: BDA SS:SP save/restore used MOV [mem], SS
 - ✅ JMP/CALL r/m memory forms fixed (vsnprintf jump table now works)
 - ✅ Store-direction register field fixes completed (logical16, data_xfer_ext)
 - ✅ LES/LDS (Load Far Pointer) implemented for 16/32-bit
@@ -34,19 +33,21 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 - ✅ All missing 16-bit arithmetic (ADD/SUB/SBB/CMP GwEw/EwGw directions)
 - ✅ All missing 8-bit Group 1 immediate forms (ADD/SUB/ADC/SBB EbIb)
 - ✅ NEG r/m32, WBINVD, APIC MMIO scratch buffer, CPU shutdown detection
-- ✅ 5M instructions at **6.94 MIPS** without crashes (up from 1.08 MIPS)
 - ✅ rombios32_init completes fully, returns to real mode with correct SS:SP
 - ✅ Real-mode BIOS IVT intact after PM return, rom_scan executes
 - ✅ IRQ delivery infrastructure: PIT→PIC→CPU interrupt injection complete
 - ✅ PIT RateGenerator mode fixed — output transition detection was broken
-- ✅ async_event clearing fixed (matching Bochs event.cc:428-433) — was causing executed=1 per batch
-- ✅ Minimum 10 usec tick quantum — PIT/RTC timers tick even during HLT
-- ✅ Timer tick BDA[0x046C] correctly incremented by INT 8 handler
-- ✅ Timer wait loops at F000:086A exit successfully (5 calls with ticks 0→11→22→33→44)
-- 🔄 Stuck at F000:0C48 — HLT with IF=0 (CLI;HLT fatal halt) at ~754k instructions
-  - BIOS function at F000:0C43 tests [BP+04] & 0x01, halts if non-zero (error flag)
-  - Last I/O: CMOS read (port 0x0071 value=0x0)
-  - Need: investigate which BIOS function returned error
+- ✅ VGA BIOS initializes: "VGABios ID: vgabios.c 2025-01-08", "VBE Bios ID: vbe.c 2025-01-08"
+- ✅ ATA disk detected correctly: "ata0-0: PCHS=306/4/17 translation=none LCHS=306/4/17"
+- ✅ REP string instructions fixed — check REP prefix before looping (was ~1000x slowdown)
+- ✅ SCAS/CMPS with REPE/REPNE prefix handling (ZF-based termination)
+- ✅ INS/OUTS string I/O (INSB/INSW/INSD/OUTSB/OUTSW/OUTSD + REP variants)
+- ✅ SUB AX,imm16 / SUB r/m16,imm16 / SUB r/m16,imm8 / CMP r/m16,imm16
+- ✅ #DE exception delivery fixed — DIV/IDIV now call self.exception() instead of returning BadVector
+- ✅ BIOS reaches boot attempt stage at ~1.1M instructions
+- 🔄 INT 13h function 02 (Read Sectors) returns error 04 → "No bootable device." → fatal halt
+  - ATA disk geometry detected correctly (306/4/17)
+  - Sector read command fails — need to debug ATA PIO read path in harddrv.rs
 
 **What Fixed the "Corrupted Symbols":**
 The previous investigation concluded BIOS ROM had wrong symbol addresses. In reality, the segment default bug caused stack reads via `[BP+offset]` to use DS (base=0) instead of SS, and the execute1/execute2 swap caused memory reads to return register values. Together, these made the BIOS load wrong values for `_end`, `__data_start`, etc. With both bugs fixed, the BIOS reads correct values from the stack and memory.
@@ -185,10 +186,9 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ## Known Issues & Next Steps
 
 ### Next Steps
-1. **Investigate F000:0C48 HLT-with-IF=0** — BIOS fatal halt at ~754k instructions. Code at F000:0C43 tests `[BP+04] & 0x01` (error flag), halts if set. Last I/O was CMOS read (port 0x71). Likely a keyboard controller or CMOS init function returning error. Need to trace what function is at this address and what went wrong.
-2. **VGA BIOS initialization** — After rom_scan calls C000:0003, VGA BIOS needs working INT 10h and VGA I/O ports
-3. **Boot sector loading** — Once BIOS completes POST, INT 19h loads and executes boot sector
-4. **Implement remaining instructions** — As discovered by running the emulator further
+1. **Fix INT 13h Read Sectors (function 02)** — Returns error 04 (sector not found). ATA disk geometry detected correctly (306/4/17), IDENTIFY works, but actual sector PIO read fails. Debug the ATA read command path in `harddrv.rs`.
+2. **Boot sector loading** — Once INT 13h reads work, BIOS loads boot sector from cylinder 0, head 0, sector 1 and jumps to 0x7C00
+3. **Implement remaining instructions** — As discovered by running the emulator further
 
 ### Quick Debug Commands
 ```bash
@@ -217,16 +217,18 @@ RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=1000000 ./target/release/examples/dlxlinux
 - ✅ Complete 16-bit arithmetic: ADD/SUB/SBB/CMP in both GwEw and EwGw directions
 - ✅ Complete 8-bit Group 1 immediate: ADD/SUB/ADC/SBB EbIb with R/M forms
 - ✅ Extensive instruction set coverage (arithmetic, logical, shift, rotate, control flow, data transfer, string ops)
+- ✅ REP string instructions fixed (check prefix before looping — was ~1000x slowdown)
+- ✅ SCAS/CMPS with REPE/REPNE (ZF-based termination), INS/OUTS string I/O
+- ✅ #DE exception delivery via IVT (DIV/IDIV handlers call self.exception())
 - ✅ Proper Skylake-X CPUID implemented (Leaf 0 max=0x16, Leaf 1 Family 6 Model 0x55, extended leaves)
 - ✅ APIC MMIO scratch buffer, CPU shutdown detection, WBINVD
 - ✅ PIT→PIC→CPU interrupt delivery infrastructure complete
 - ✅ PIT RateGenerator mode fixed (output transition detection was broken)
-- ✅ async_event clearing matches Bochs (event.cc:428-433) — fixes executed=1 per batch
-- ✅ Timer tick BDA[0x046C] correctly incremented by INT 8 handler
-- ✅ Timer wait loops at F000:086A exit successfully (PIT→IRQ0→INT 8→BDA tick→wake from HLT)
-- ✅ **6.94 MIPS** at 5M instructions (up from 1.08 MIPS — fixed infinite loops)
+- ✅ VGA BIOS initializes and runs (vgabios.c + vbe.c)
+- ✅ ATA disk detected: "ata0-0: PCHS=306/4/17 translation=none LCHS=306/4/17"
+- ✅ BIOS completes full POST and reaches boot attempt stage (~1.1M instructions)
 - ✅ Returns to real-mode BIOS with correct SS:SP, IVT intact after PM return
-- 🔄 Fatal halt at F000:0C48 — BIOS function returns error, triggers CLI;HLT
+- 🔄 INT 13h Read Sectors returns error 04 → "No bootable device." → fatal halt
 
 ## Build Commands
 
@@ -430,20 +432,20 @@ bios_table_cur_addr: 0x000001a3
 
 **Result:** PIT fires IRQ0 → PIC raises interrupt → CPU injects INT 8 → handler increments BDA[0x046C] → timer wait loops exit → BIOS continues.
 
-### Fatal Halt at F000:0C48 — Under Investigation (2026-02-23)
+### INT 13h Read Sectors Error — Under Investigation (2026-02-24)
 
 **Status:** Active investigation
 
-After rombios32_init completes and BIOS returns to real mode, timer wait loops execute successfully (~5 calls). At ~754k instructions, BIOS hits a fatal halt (CLI;HLT;JMP.-3) at F000:0C48. Code pattern:
+BIOS completes full POST (rombios32_init, VGA BIOS, ATA detection), then attempts to boot:
 ```
-F000:0C3E  MOV AL, [BP+04]     ; load function arg (error flag)
-F000:0C41  AND AL, 01          ; test bit 0
-F000:0C43  TEST AL, AL
-F000:0C45  JZ +4               ; skip if no error
-F000:0C47  CLI                 ; error path: disable interrupts
+ata0-0: PCHS=306/4/17 translation=none LCHS=306/4/17
+int13_harddisk: function 02, error 04 !
+No bootable device.
 F000:0C48  HLT                 ; and halt forever
 ```
-Last I/O: CMOS read (port 0x71 value=0x0). Likely a keyboard controller or CMOS init function returning an error code.
+INT 13h function 02 = Read Sectors. Error 04 = sector not found. ATA IDENTIFY works (geometry detected correctly), but PIO sector read fails. The ATA read command path in `harddrv.rs` needs debugging — likely the command dispatch or data transfer phase is wrong.
+
+Fatal halt at F000:0C49 (CLI;HLT) at ~1.17M instructions after "No bootable device."
 
 ### BIOS ROM Shadow Mapping (2026-02-17)
 
@@ -465,14 +467,17 @@ Exception handling infrastructure exists (Exception enum, IVT delivery in real m
 
 ### Major Bug Fixes (Historical)
 
-1. **PIT RateGenerator mode fix (2026-02-23)**: Mode 2 output pulsed LOW→HIGH in same clock() call. Transition check `old_output != self.output && self.output` always saw true→true (no change). Fixed by separating LOW pulse from HIGH recovery across clock cycles. Without this fix, IRQ0 never fired.
-2. **async_event clearing fix (2026-02-23)**: Bochs event.cc:428-433 clears `async_event=0` at end of `handleAsyncEvent()`. Our version never cleared it → `BX_ASYNC_EVENT_STOP_TRACE` stayed set → inner trace loop broke after every instruction (executed=1 per batch) → usec=0 → tick_devices never called → PIT starved.
-3. **Minimum tick quantum fix (2026-02-23)**: Changed `if usec != 0 { tick_devices(usec) }` to `usec = usec_from_instr.max(10)` — ensures PIT/RTC timers advance even when CPU is halted (executed=1 at high IPS gives usec=0).
-4. **JMP/CALL r/m memory form fix (2026-02-23)**: `Opcode::JmpEd`/`CallEd` only dispatched to register-form handlers. Memory-form `jmp dword ptr [reg*4+disp]` (vsnprintf jump table) read register values instead of memory → complete output corruption. Fixed by adding `jmp_ed_m`/`call_ed_m` with `mod_c0()` dispatch.
-5. **Store-direction register fix (2026-02-23)**: 16-bit logical ops (XOR/OR/AND/TEST ew_gw_m) and 8-bit XCHG (xchg_eb_gb_m) used wrong register fields due to decoder's meta_data swap for store opcodes.
-6. **Port 0x61 delay_ms fix (2026-02-19)**: `keyboard.rs` port 0x61 bit 4 now toggles on each read. Previously always returned `0x10`, causing `delay_ms()` in `smp_probe()` to loop infinitely — BIOS never produced output.
-4. **Hot-path logging fix (2026-02-19)**: `cpu.rs` `get_icache_entry` (every instruction) changed from `debug!` to `trace!`. Two `prefetch` messages changed from `info!` to `debug!`. `stack.rs` PUSH16 from `info!` to `debug!`. `dlxlinux.rs` now reads `RUST_LOG` env var (default WARN) instead of hardcoding `Level::DEBUG`.
-5. **REP STOSB/MOVSB 32-bit fix (2026-02-19)**: `RepStosbYbAl` and `RepMovsbYbXb` now dispatch to 32-bit variants (`rep_stosb32`, `rep_movsb32`) when `instr.as32_l() != 0`, matching how STOSD/MOVSD already worked.
+1. **REP string prefix fix (2026-02-24)**: REP LODSB/STOSB/MOVSB/etc. always looped CX times even without REP prefix. Non-REP forms should execute once. Caused ~1000x slowdown when VGA BIOS executed single-iteration string ops.
+2. **#DE exception delivery fix (2026-02-24)**: DIV/IDIV handlers in mult8/16/32.rs returned `Err(BadVector)` which terminated the CPU loop. Changed to `self.exception(Exception::De, 0)` for proper IVT delivery.
+3. **SCAS/CMPS REPE/REPNE semantics (2026-02-24)**: Added ZF-based loop termination for REPE (break if ZF=0) and REPNE (break if ZF=1) string compare/scan ops.
+4. **INS/OUTS string I/O (2026-02-24)**: Implemented INSB/INSW/INSD and OUTSB/OUTSW/OUTSD with REP variants for ATA PIO disk access.
+5. **PIT RateGenerator mode fix (2026-02-23)**: Mode 2 output pulsed LOW→HIGH in same clock() call. Fixed by separating LOW pulse from HIGH recovery across clock cycles.
+6. **async_event clearing fix (2026-02-23)**: Matched Bochs event.cc:428-433 — clears `async_event=0` at end of `handleAsyncEvent()`.
+7. **JMP/CALL r/m memory form fix (2026-02-23)**: Added memory-form handlers with `mod_c0()` dispatch for vsnprintf jump table.
+8. **Store-direction register fix (2026-02-23)**: 16-bit logical ops and 8-bit XCHG used wrong register fields due to decoder's meta_data swap.
+9. **Port 0x61 delay_ms fix (2026-02-19)**: `keyboard.rs` port 0x61 bit 4 now toggles on each read.
+10. **Hot-path logging fix (2026-02-19)**: Changed `get_icache_entry` from `debug!` to `trace!`, `prefetch` from `info!` to `debug!`.
+11. **REP STOSB/MOVSB 32-bit fix (2026-02-19)**: Dispatch to 32-bit variants when `instr.as32_l() != 0`.
 6. **Log flooding fix (2026-02-17)**: Out-of-bounds memory write messages (`misc_mem.rs`, `memory_stub.rs`) downgraded from `debug!` to `trace!`.
 7. **Segment default fix (2026-02-16)**: `[BP+disp]` was using DS instead of SS. Fixed with lookup tables in `fetchdecode32.rs`.
 8. **execute1/execute2 fix (2026-02-16)**: 18 opcodes had memory/register handler forms swapped in `opcodes_table.rs`.

@@ -101,53 +101,53 @@ const RESOLVE16_INDEX_REG: [u8; 8] = [
 // Default segment for 16-bit addressing, mod=00
 // Matching Bochs sreg_mod00_rm16 in fetchdecode32.cc:669-678
 const SREG_MOD00_RM16: [u8; 8] = [
-    0, // DS (BX+SI)
-    0, // DS (BX+DI)
+    3, // DS (BX+SI)
+    3, // DS (BX+DI)
     2, // SS (BP+SI)
     2, // SS (BP+DI)
-    0, // DS (SI)
-    0, // DS (DI)
-    0, // DS (disp16)
-    0, // DS (BX)
+    3, // DS (SI)
+    3, // DS (DI)
+    3, // DS (disp16)
+    3, // DS (BX)
 ];
 
 // Default segment for 16-bit addressing, mod=01 or mod=10
 // Matching Bochs sreg_mod01or10_rm16 in fetchdecode32.cc:680-689
 const SREG_MOD01OR10_RM16: [u8; 8] = [
-    0, // DS (BX+SI+disp)
-    0, // DS (BX+DI+disp)
+    3, // DS (BX+SI+disp)
+    3, // DS (BX+DI+disp)
     2, // SS (BP+SI+disp)
     2, // SS (BP+DI+disp)
-    0, // DS (SI+disp)
-    0, // DS (DI+disp)
+    3, // DS (SI+disp)
+    3, // DS (DI+disp)
     2, // SS (BP+disp)
-    0, // DS (BX+disp)
+    3, // DS (BX+disp)
 ];
 
 // Default segment for 32-bit addressing, mod=00
 // Matching Bochs sreg_mod0_base32 in fetchdecode32.cc:692-701
 const SREG_MOD0_BASE32: [u8; 8] = [
-    0, // DS (EAX)
-    0, // DS (ECX)
-    0, // DS (EDX)
-    0, // DS (EBX)
+    3, // DS (EAX)
+    3, // DS (ECX)
+    3, // DS (EDX)
+    3, // DS (EBX)
     2, // SS (ESP via SIB)
-    0, // DS (disp32)
-    0, // DS (ESI)
-    0, // DS (EDI)
+    3, // DS (disp32)
+    3, // DS (ESI)
+    3, // DS (EDI)
 ];
 
 // Default segment for 32-bit addressing, mod=01 or mod=10
 // Matching Bochs sreg_mod1or2_base32 in fetchdecode32.cc:703-712
 const SREG_MOD1OR2_BASE32: [u8; 8] = [
-    0, // DS (EAX+disp)
-    0, // DS (ECX+disp)
-    0, // DS (EDX+disp)
-    0, // DS (EBX+disp)
+    3, // DS (EAX+disp)
+    3, // DS (ECX+disp)
+    3, // DS (EDX+disp)
+    3, // DS (EBX+disp)
     2, // SS (ESP+disp)
     2, // SS (EBP+disp)
-    0, // DS (ESI+disp)
-    0, // DS (EDI+disp)
+    3, // DS (ESI+disp)
+    3, // DS (EDI+disp)
 ];
 
 /// Const-compatible 32-bit/16-bit instruction decoder

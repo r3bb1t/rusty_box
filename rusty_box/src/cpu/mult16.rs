@@ -19,7 +19,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ mult16.cc:MUL_AXEwR
     pub fn mul_ax_ew_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let op1 = self.get_gpr16(0); // AX
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize;
         let op2 = self.get_gpr16(src_reg);
 
         let product_32 = (op1 as u32) * (op2 as u32);
@@ -72,7 +72,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ mult16.cc:IMUL_AXEwR
     pub fn imul_ax_ew_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let op1 = self.get_gpr16(0) as i16; // AX
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize;
         let op2 = self.get_gpr16(src_reg) as i16;
 
         let product_32 = (op1 as i32) * (op2 as i32);
@@ -128,11 +128,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// DIV r/m16 - Unsigned divide DX:AX by r/m16, quotient in AX, remainder in DX
     /// Matching C++ mult16.cc:DIV_AXEwR
     pub fn div_ax_ew_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize;
         let op2 = self.get_gpr16(src_reg);
 
         if op2 == 0 {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         let dx = self.get_gpr16(2); // DX
@@ -144,7 +144,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let quotient_16l = (quotient_32 & 0xFFFF) as u16;
 
         if quotient_32 != (quotient_16l as u32) {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         // Write quotient to AX, remainder to DX
@@ -163,7 +163,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.read_virtual_word(seg, eaddr);
 
         if op2 == 0 {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         let dx = self.get_gpr16(2); // DX
@@ -175,7 +175,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let quotient_16l = (quotient_32 & 0xFFFF) as u16;
 
         if quotient_32 != (quotient_16l as u32) {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         // Write quotient to AX, remainder to DX
@@ -197,14 +197,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Check MIN_INT case
         if op1 == 0x80000000u32 as i32 {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize;
         let op2 = self.get_gpr16(src_reg) as i16;
 
         if op2 == 0 {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         let quotient_32 = op1 / (op2 as i32);
@@ -212,7 +212,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let quotient_16l = (quotient_32 & 0xFFFF) as i16;
 
         if quotient_32 != (quotient_16l as i32) {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         // Write quotient to AX, remainder to DX
@@ -234,7 +234,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Check MIN_INT case
         if op1 == 0x80000000u32 as i32 {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         let eaddr = self.resolve_addr32(instr);
@@ -242,7 +242,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.read_virtual_word(seg, eaddr) as i16;
 
         if op2 == 0 {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         let quotient_32 = op1 / (op2 as i32);
@@ -250,7 +250,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let quotient_16l = (quotient_32 & 0xFFFF) as i16;
 
         if quotient_32 != (quotient_16l as i32) {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         // Write quotient to AX, remainder to DX

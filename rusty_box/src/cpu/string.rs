@@ -49,7 +49,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Read and write using raw memory access
         let byte = self.mem_read_byte(src_addr);
         self.mem_write_byte(dst_addr, byte);
-        
+
         // Update SI and DI based on DF
         if self.get_df() {
             self.set_si(self.si().wrapping_sub(1));
@@ -58,7 +58,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_si(self.si().wrapping_add(1));
             self.set_di(self.di().wrapping_add(1));
         }
-        
+
         tracing::trace!("MOVSB16: DS:{:04x} -> ES:{:04x}, byte={:#04x}", si, di, byte);
     }
 
@@ -71,8 +71,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
         let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
 
-        let byte = self.mem_read_byte(ds_base.wrapping_add(esi));
-        self.mem_write_byte(es_base.wrapping_add(edi), byte);
+        let src_addr = ds_base.wrapping_add(esi);
+        let dst_addr = es_base.wrapping_add(edi);
+        let byte = self.mem_read_byte(src_addr);
+        self.mem_write_byte(dst_addr, byte);
 
         let increment = if self.get_df() { -1i32 } else { 1i32 };
         let new_esi = (esi as i64).wrapping_add(increment as i64) as u32;
@@ -707,6 +709,104 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if self.get_zf() {
                 break;
             }
+        }
+    }
+
+    /// REPE SCASW - Repeat scan string word while equal
+    pub fn repe_scasw16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.scasw16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+            if !self.get_zf() { break; }
+        }
+    }
+
+    /// REPNE SCASW - Repeat scan string word while not equal
+    pub fn repne_scasw16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.scasw16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+            if self.get_zf() { break; }
+        }
+    }
+
+    /// REPE SCASD - Repeat scan string dword while equal
+    pub fn repe_scasd16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.scasd16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+            if !self.get_zf() { break; }
+        }
+    }
+
+    /// REPNE SCASD - Repeat scan string dword while not equal
+    pub fn repne_scasd16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.scasd16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+            if self.get_zf() { break; }
+        }
+    }
+
+    /// REP LODSW - Repeat load string word CX times
+    pub fn rep_lodsw16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.lodsw16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+        }
+    }
+
+    /// REPE CMPSW - Repeat compare string word while equal
+    pub fn repe_cmpsw16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.cmpsw16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+            if !self.get_zf() { break; }
+        }
+    }
+
+    /// REPNE CMPSW - Repeat compare string word while not equal
+    pub fn repne_cmpsw16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.cmpsw16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+            if self.get_zf() { break; }
+        }
+    }
+
+    /// REPE CMPSD - Repeat compare string dword while equal
+    pub fn repe_cmpsd16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.cmpsd16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+            if !self.get_zf() { break; }
+        }
+    }
+
+    /// REPNE CMPSD - Repeat compare string dword while not equal
+    pub fn repne_cmpsd16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.cmpsd16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+            if self.get_zf() { break; }
         }
     }
 

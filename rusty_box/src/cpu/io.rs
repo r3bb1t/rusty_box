@@ -103,6 +103,172 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // ========================================================================
+    // INS/OUTS - String I/O instructions
+    // ========================================================================
+
+    /// INSB - Input byte from port DX to ES:DI (16-bit address mode)
+    pub fn insb16(&mut self, _instr: &BxInstructionGenerated) {
+        let port = self.dx();
+        let di = self.di() as u64;
+        let es_base = unsafe { self.sregs[super::decoder::BxSegregs::Es as usize].cache.u.segment.base };
+        let dst_addr = es_base.wrapping_add(di);
+
+        let value = self.port_in(port, 1) as u8;
+        self.mem_write_byte(dst_addr, value);
+
+        if self.get_df() {
+            self.set_di(self.di().wrapping_sub(1));
+        } else {
+            self.set_di(self.di().wrapping_add(1));
+        }
+    }
+
+    /// INSW - Input word from port DX to ES:DI (16-bit address mode)
+    pub fn insw16(&mut self, _instr: &BxInstructionGenerated) {
+        let port = self.dx();
+        let di = self.di() as u64;
+        let es_base = unsafe { self.sregs[super::decoder::BxSegregs::Es as usize].cache.u.segment.base };
+        let dst_addr = es_base.wrapping_add(di);
+
+        let value = self.port_in(port, 2) as u16;
+        self.mem_write_word(dst_addr, value);
+
+        if self.get_df() {
+            self.set_di(self.di().wrapping_sub(2));
+        } else {
+            self.set_di(self.di().wrapping_add(2));
+        }
+    }
+
+    /// INSD - Input dword from port DX to ES:DI (16-bit address mode)
+    pub fn insd16(&mut self, _instr: &BxInstructionGenerated) {
+        let port = self.dx();
+        let di = self.di() as u64;
+        let es_base = unsafe { self.sregs[super::decoder::BxSegregs::Es as usize].cache.u.segment.base };
+        let dst_addr = es_base.wrapping_add(di);
+
+        let value = self.port_in(port, 4);
+        self.mem_write_dword(dst_addr, value);
+
+        if self.get_df() {
+            self.set_di(self.di().wrapping_sub(4));
+        } else {
+            self.set_di(self.di().wrapping_add(4));
+        }
+    }
+
+    /// OUTSB - Output byte from DS:SI to port DX (16-bit address mode)
+    pub fn outsb16(&mut self, _instr: &BxInstructionGenerated) {
+        let port = self.dx();
+        let si = self.si() as u64;
+        let ds_base = unsafe { self.sregs[super::decoder::BxSegregs::Ds as usize].cache.u.segment.base };
+        let src_addr = ds_base.wrapping_add(si);
+
+        let value = self.mem_read_byte(src_addr);
+        self.port_out(port, value as u32, 1);
+
+        if self.get_df() {
+            self.set_si(self.si().wrapping_sub(1));
+        } else {
+            self.set_si(self.si().wrapping_add(1));
+        }
+    }
+
+    /// OUTSW - Output word from DS:SI to port DX (16-bit address mode)
+    pub fn outsw16(&mut self, _instr: &BxInstructionGenerated) {
+        let port = self.dx();
+        let si = self.si() as u64;
+        let ds_base = unsafe { self.sregs[super::decoder::BxSegregs::Ds as usize].cache.u.segment.base };
+        let src_addr = ds_base.wrapping_add(si);
+
+        let value = self.mem_read_word(src_addr);
+        self.port_out(port, value as u32, 2);
+
+        if self.get_df() {
+            self.set_si(self.si().wrapping_sub(2));
+        } else {
+            self.set_si(self.si().wrapping_add(2));
+        }
+    }
+
+    /// OUTSD - Output dword from DS:SI to port DX (16-bit address mode)
+    pub fn outsd16(&mut self, _instr: &BxInstructionGenerated) {
+        let port = self.dx();
+        let si = self.si() as u64;
+        let ds_base = unsafe { self.sregs[super::decoder::BxSegregs::Ds as usize].cache.u.segment.base };
+        let src_addr = ds_base.wrapping_add(si);
+
+        let value = self.mem_read_dword(src_addr);
+        self.port_out(port, value, 4);
+
+        if self.get_df() {
+            self.set_si(self.si().wrapping_sub(4));
+        } else {
+            self.set_si(self.si().wrapping_add(4));
+        }
+    }
+
+    /// REP INSB - Repeat input byte from port DX CX times
+    pub fn rep_insb16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.insb16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+        }
+    }
+
+    /// REP INSW - Repeat input word from port DX CX times
+    pub fn rep_insw16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.insw16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+        }
+    }
+
+    /// REP INSD - Repeat input dword from port DX CX times
+    pub fn rep_insd16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.insd16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+        }
+    }
+
+    /// REP OUTSB - Repeat output byte to port DX CX times
+    pub fn rep_outsb16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.outsb16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+        }
+    }
+
+    /// REP OUTSW - Repeat output word to port DX CX times
+    pub fn rep_outsw16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.outsw16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+        }
+    }
+
+    /// REP OUTSD - Repeat output dword to port DX CX times
+    pub fn rep_outsd16(&mut self, instr: &BxInstructionGenerated) {
+        let mut cx = self.cx();
+        while cx != 0 {
+            self.outsd16(instr);
+            cx = cx.wrapping_sub(1);
+            self.set_cx(cx);
+        }
+    }
+
+    // ========================================================================
     // Port I/O helpers
     // ========================================================================
 

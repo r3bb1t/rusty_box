@@ -19,7 +19,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ mult8.cc:27-48 MUL_ALEbR
     pub fn mul_al_eb_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let op1 = self.get_gpr8(0); // AL
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize;
         let extend8bit_l = instr.extend8bit_l();
         let op2 = self.read_8bit_regx(src_reg, extend8bit_l);
 
@@ -71,7 +71,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ mult8.cc:50-73 IMUL_ALEbR
     pub fn imul_al_eb_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let op1 = self.get_gpr8(0) as i8; // AL
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize;
         let extend8bit_l = instr.extend8bit_l();
         let op2 = self.read_8bit_regx(src_reg, extend8bit_l) as i8;
 
@@ -124,12 +124,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// DIV r/m8 - Unsigned divide AX by r/m8, quotient in AL, remainder in AH
     /// Matching C++ mult8.cc:75-98 DIV_ALEbR
     pub fn div_al_eb_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize;
         let extend8bit_l = instr.extend8bit_l();
         let op2 = self.read_8bit_regx(src_reg, extend8bit_l);
 
         if op2 == 0 {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         let op1 = self.get_gpr16(0); // AX
@@ -138,7 +138,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let quotient_8l = (quotient_16 & 0xFF) as u8;
 
         if quotient_16 != (quotient_8l as u16) {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         // Write quotient to AL, remainder to AH
@@ -157,7 +157,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.read_virtual_byte(seg, eaddr);
 
         if op2 == 0 {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         let op1 = self.get_gpr16(0); // AX
@@ -166,7 +166,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let quotient_8l = (quotient_16 & 0xFF) as u8;
 
         if quotient_16 != (quotient_8l as u16) {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         // Write quotient to AL, remainder to AH
@@ -184,15 +184,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Check MIN_INT case
         if op1 == 0x8000u16 as i16 {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize;
         let extend8bit_l = instr.extend8bit_l();
         let op2 = self.read_8bit_regx(src_reg, extend8bit_l) as i8;
 
         if op2 == 0 {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         let quotient_16 = op1 / (op2 as i16);
@@ -200,7 +200,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let quotient_8l = (quotient_16 & 0xFF) as i8;
 
         if quotient_16 != (quotient_8l as i16) {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         // Write quotient to AL, remainder to AH
@@ -218,7 +218,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Check MIN_INT case
         if op1 == 0x8000u16 as i16 {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         let eaddr = self.resolve_addr32(instr);
@@ -226,7 +226,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.read_virtual_byte(seg, eaddr) as i8;
 
         if op2 == 0 {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         let quotient_16 = op1 / (op2 as i16);
@@ -234,7 +234,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let quotient_8l = (quotient_16 & 0xFF) as i8;
 
         if quotient_16 != (quotient_8l as i16) {
-            return Err(CpuError::BadVector { vector: Exception::De });
+            return self.exception(Exception::De, 0);
         }
 
         // Write quotient to AL, remainder to AH
