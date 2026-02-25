@@ -322,212 +322,82 @@ impl BxVgaC {
         // Register I/O port handlers
         let vga_ptr = self as *mut BxVgaC as *mut c_void;
 
+        // All VGA write handlers use mask 0x3 (byte+word) matching Bochs vgacore.cc:208-235.
+        // Word writes are split into two byte writes in write_port().
+
         // CRTC registers (mono) (0x3B4-0x3B5)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_CRTC_INDEX_MONO,
-            "VGA CRTC Index (mono)",
-            0x1,
-        );
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_CRTC_DATA_MONO,
-            "VGA CRTC Data (mono)",
-            0x1,
-        );
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            VGA_CRTC_INDEX_MONO, "VGA CRTC Index (mono)", 0x3);
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            VGA_CRTC_DATA_MONO, "VGA CRTC Data (mono)", 0x3);
 
         // CRTC registers (0x3D4-0x3D5)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_CRTC_INDEX,
-            "VGA CRTC Index",
-            0x1,
-        );
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_CRTC_DATA,
-            "VGA CRTC Data",
-            0x1,
-        );
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            VGA_CRTC_INDEX, "VGA CRTC Index", 0x3);
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            VGA_CRTC_DATA, "VGA CRTC Data", 0x3);
 
         // Status register (0x3DA)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_STATUS,
-            "VGA Status",
-            0x1,
-        );
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            VGA_STATUS, "VGA Status", 0x3);
 
         // Status register (mono) (0x3BA)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_STATUS_MONO,
-            "VGA Status (mono)",
-            0x1,
-        );
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            VGA_STATUS_MONO, "VGA Status (mono)", 0x3);
 
         // Attribute controller (0x3C0-0x3C1)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_ATTRIB_ADDR,
-            "VGA Attribute Address",
-            0x1,
-        );
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_ATTRIB_DATA,
-            "VGA Attribute Data",
-            0x1,
-        );
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            VGA_ATTRIB_ADDR, "VGA Attribute Address", 0x3);
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            VGA_ATTRIB_DATA, "VGA Attribute Data", 0x3);
 
         // Sequencer (0x3C4-0x3C5)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_SEQ_INDEX,
-            "VGA Sequencer Index",
-            0x1,
-        );
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_SEQ_DATA,
-            "VGA Sequencer Data",
-            0x1,
-        );
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            VGA_SEQ_INDEX, "VGA Sequencer Index", 0x3);
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            VGA_SEQ_DATA, "VGA Sequencer Data", 0x3);
 
         // Graphics controller (0x3CE-0x3CF)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_GRAPHICS_INDEX,
-            "VGA Graphics Index",
-            0x1,
-        );
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_GRAPHICS_DATA,
-            "VGA Graphics Data",
-            0x1,
-        );
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            VGA_GRAPHICS_INDEX, "VGA Graphics Index", 0x3);
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            VGA_GRAPHICS_DATA, "VGA Graphics Data", 0x3);
 
         // Misc output READ (0x3CC) - reads the misc output register
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_MISC_OUTPUT,
-            "VGA Misc Output Read",
-            0x1,
-        );
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            VGA_MISC_OUTPUT, "VGA Misc Output Read", 0x3);
 
         // Misc output WRITE (0x3C2) - CRITICAL for BIOS to set color mode
-        // Note: VGA has asymmetric ports - write to 0x3C2, read from 0x3CC
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            0x3C2,
-            "VGA Misc Output Write",
-            0x1,
-        );
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            0x3C2, "VGA Misc Output Write", 0x3);
 
-        // VGA Enable (0x3C3) - bit 0 enables VGA display
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            0x3C3,
-            "VGA Enable",
-            0x1,
-        );
+        // VGA Enable (0x3C3)
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            0x3C3, "VGA Enable", 0x3);
 
         // PEL Mask (0x3C6)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            0x3C6,
-            "VGA PEL Mask",
-            0x1,
-        );
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            0x3C6, "VGA PEL Mask", 0x3);
 
         // DAC State Read / PEL Address Read Mode Write (0x3C7)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            0x3C7,
-            "VGA DAC State",
-            0x1,
-        );
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            0x3C7, "VGA DAC State", 0x3);
 
         // PEL Address Write Mode (0x3C8)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            0x3C8,
-            "VGA PEL Address Write",
-            0x1,
-        );
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            0x3C8, "VGA PEL Address Write", 0x3);
 
         // PEL Data Register (0x3C9)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            0x3C9,
-            "VGA PEL Data",
-            0x1,
-        );
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            0x3C9, "VGA PEL Data", 0x3);
 
-        // EGA compatibility ports (0x3CA, 0x3CB, 0x3CD) - stub handlers
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            0x3CA,
-            "VGA EGA Compat",
-            0x1,
-        );
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            0x3CB,
-            "VGA EGA Compat",
-            0x1,
-        );
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            0x3CD,
-            "VGA EGA Compat",
-            0x1,
-        );
+        // EGA compatibility ports (0x3CA, 0x3CB, 0x3CD)
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            0x3CA, "VGA EGA Compat", 0x3);
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            0x3CB, "VGA EGA Compat", 0x3);
+        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
+            0x3CD, "VGA EGA Compat", 0x3);
 
         // Register memory handlers for VGA memory range (0xA0000-0xBFFFF)
         // This matches DEV_register_memory_handlers in vgacore.cc line 177
@@ -649,7 +519,13 @@ impl BxVgaC {
     }
 
     /// Write to I/O port
-    pub(crate) fn write_port(&mut self, port: u16, value: u32, _io_len: u8) {
+    pub(crate) fn write_port(&mut self, port: u16, value: u32, io_len: u8) {
+        // Word writes: split into two byte writes (Bochs vgacore.cc:806-809)
+        if io_len == 2 {
+            self.write_port(port, value & 0xFF, 1);
+            self.write_port(port + 1, (value >> 8) & 0xFF, 1);
+            return;
+        }
         let value = value as u8;
         match port {
             VGA_CRTC_INDEX | VGA_CRTC_INDEX_MONO => {
@@ -822,29 +698,32 @@ impl BxVgaC {
     pub(crate) fn get_text_screen(&self) -> String {
         let mut result = String::new();
 
-        // Mirror Bochs text rendering: use CRTC start address and line offset.
-        // See `cpp_orig/bochs/iodev/display/vgacore.cc` text_update_common().
+        // Our text_memory is flat: [char0, attr0, char1, attr1, ...] at offsets
+        // (physical_addr & 0x7FFF). For 80x25 mode, each row is 160 bytes.
+        // CRTC start address (regs 12-13) is in character cells (words).
         let start_addr_words =
             ((self.crtc_regs[12] as u16) << 8) | (self.crtc_regs[13] as u16);
-        let start_address = (start_addr_words as usize) << 1; // words -> bytes
+        let start_address = (start_addr_words as usize) * BYTES_PER_CHAR;
 
-        // Line offset: CRTC reg[19] is in words. Convert to bytes.
-        let mut line_offset = (self.crtc_regs[19] as usize) * 2;
-        if line_offset == 0 {
-            line_offset = BYTES_PER_ROW;
-        }
-
-        // Bochs uses different snapshot sizes based on mapping; our backing store is 0x8000.
-        // Wrap accesses inside this aperture.
         let mem_mask = VGA_TEXT_MEM_SIZE - 1; // 0x7fff
 
         for row in 0..TEXT_ROWS {
-            let row_base = start_address + row * line_offset;
+            let row_base = start_address + row * BYTES_PER_ROW;
             for col in 0..TEXT_COLS {
                 let off = (row_base + col * BYTES_PER_CHAR) & mem_mask;
                 let ch = self.text_memory.get(off).copied().unwrap_or(0);
-                result.push(ch as char);
+                if ch >= 0x20 && ch < 0x7F {
+                    result.push(ch as char);
+                } else if ch == 0 {
+                    result.push(' ');
+                } else {
+                    result.push('?');
+                }
             }
+            // Trim trailing spaces
+            let trimmed = result.trim_end_matches(' ');
+            let trim_len = trimmed.len();
+            result.truncate(trim_len);
             result.push('\n');
         }
         result
@@ -1058,7 +937,13 @@ pub(super) fn vga_mem_read_handler(
         };
 
         let val = if mapped {
-            let offset = (current_addr as usize) & (VGA_TEXT_MEM_SIZE - 1);
+            let window_base: u64 = match memory_mapping {
+                2 => 0xB0000,
+                3 => 0xB8000,
+                1 => 0xA0000,
+                _ => 0xA0000,
+            };
+            let offset = (current_addr - window_base) as usize;
             vga.text_memory.get(offset).copied().unwrap_or(0xff)
         } else {
             0xff
@@ -1092,6 +977,11 @@ pub(super) fn vga_mem_write_handler(
     // Match Bochs window gating (vgacore.cc:1826..1842):
     // only the selected window maps to VGA memory; writes outside the window are ignored.
     let memory_mapping = (vga.graphics_regs[6] >> 2) & 0x03;
+    // Sequencer map mask (reg 2): bits 0-3 select which planes to write.
+    // In text mode: plane 0 = characters, plane 1 = attributes, plane 2 = fonts.
+    // Only update text_memory when planes 0/1 are being written (mask & 0x03).
+    let map_mask = vga.seq_regs[2] & 0x0F;
+    let is_text_plane_write = (map_mask & 0x03) != 0;
 
     let mut current_addr = addr;
     let mut data_ptr = data as *const u8;
@@ -1104,8 +994,15 @@ pub(super) fn vga_mem_write_handler(
             _ => current_addr >= 0xA0000 && current_addr <= 0xBFFFF,
         };
 
-        if mapped {
-            let offset = (current_addr as usize) & (VGA_TEXT_MEM_SIZE - 1);
+        if mapped && is_text_plane_write {
+            // Calculate offset relative to the window base.
+            let window_base: u64 = match memory_mapping {
+                2 => 0xB0000,
+                3 => 0xB8000,
+                1 => 0xA0000,
+                _ => 0xA0000,
+            };
+            let offset = (current_addr - window_base) as usize;
             if offset < vga.text_memory.len() {
                 unsafe {
                     let new_val = *data_ptr;
@@ -1125,12 +1022,14 @@ pub(super) fn vga_mem_write_handler(
                 unsafe { data_ptr = data_ptr.add(1) };
             }
         } else {
-            // Ignore write (Bochs returns early for unmapped address)
+            // Font plane write or unmapped — consume data byte but don't update text buffer
             unsafe {
-                let new_val = *data_ptr;
-                vga.probe_unmapped_writes = vga.probe_unmapped_writes.wrapping_add(1);
-                if vga.probe_first_unmapped.is_none() {
-                    vga.probe_first_unmapped = Some((current_addr, new_val, memory_mapping));
+                if !mapped {
+                    let new_val = *data_ptr;
+                    vga.probe_unmapped_writes = vga.probe_unmapped_writes.wrapping_add(1);
+                    if vga.probe_first_unmapped.is_none() {
+                        vga.probe_first_unmapped = Some((current_addr, new_val, memory_mapping));
+                    }
                 }
                 data_ptr = data_ptr.add(1);
             };

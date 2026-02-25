@@ -16,43 +16,35 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-02-24):**
+**Current Status (2026-02-25):**
 - ✅ BIOS-bochs-latest (128 KB) is now the primary BIOS
-- ✅ Real mode BIOS executes ~362k instructions (keyboard init, memory probe, etc.)
-- ✅ Transitions to protected mode via far jump (CS=0x10, flat memory model)
-- ✅ rombios32 enters protected mode, _start executes with correct symbol addresses
-- ✅ BSS clearing + .data copy complete correctly
-- ✅ BIOS output working! Full rombios32_init output to port 0x402:
-  - "Starting rombios32", "Shutdown flag 0", "ram_size=0x01fa0000"
-  - "Found 1 cpu(s)", MP table, SMBIOS table, bios_table_addr all complete
-- ✅ MOV [mem], sreg / MOV sreg, [mem] memory forms fixed (was only register form)
-- ✅ JMP/CALL r/m memory forms fixed (vsnprintf jump table now works)
-- ✅ Store-direction register field fixes completed (logical16, data_xfer_ext)
-- ✅ LES/LDS (Load Far Pointer) implemented for 16/32-bit
-- ✅ Proper Skylake-X CPUID (Leaf 0 max=0x16, Leaf 1 Family 6 Model 0x55, extended leaves)
-- ✅ All missing 16-bit arithmetic (ADD/SUB/SBB/CMP GwEw/EwGw directions)
-- ✅ All missing 8-bit Group 1 immediate forms (ADD/SUB/ADC/SBB EbIb)
-- ✅ NEG r/m32, WBINVD, APIC MMIO scratch buffer, CPU shutdown detection
-- ✅ rombios32_init completes fully, returns to real mode with correct SS:SP
-- ✅ Real-mode BIOS IVT intact after PM return, rom_scan executes
-- ✅ IRQ delivery infrastructure: PIT→PIC→CPU interrupt injection complete
-- ✅ PIT RateGenerator mode fixed — output transition detection was broken
-- ✅ VGA BIOS initializes: "VGABios ID: vgabios.c 2025-01-08", "VBE Bios ID: vbe.c 2025-01-08"
-- ✅ ATA disk detected correctly: "ata0-0: PCHS=306/4/17 translation=none LCHS=306/4/17"
-- ✅ REP string instructions fixed — check REP prefix before looping (was ~1000x slowdown)
-- ✅ SCAS/CMPS with REPE/REPNE prefix handling (ZF-based termination)
-- ✅ INS/OUTS string I/O (INSB/INSW/INSD/OUTSB/OUTSW/OUTSD + REP variants)
-- ✅ SUB AX,imm16 / SUB r/m16,imm16 / SUB r/m16,imm8 / CMP r/m16,imm16
-- ✅ #DE exception delivery fixed — DIV/IDIV now call self.exception() instead of returning BadVector
-- ✅ BIOS reaches boot attempt stage at ~1.1M instructions
-- ✅ INT 13h function 02 (Read Sectors) works — boot sector loaded from ATA
-- ✅ "Booting from 0000:7c00" — BIOS POST completes, boot sector executes!
+- ✅ Full BIOS POST completes: rombios32_init, VGA BIOS, ATA detection, boot
+- ✅ VGA text output working! Clean headless text dump matches Bochs reference:
+  ```
+  Bochs VGABios (PCI) 0.9c 08 Jan 2025
+  This VGA/VBE Bios is released under the GNU LGPL
+  Bochs 3.0.devel BIOS - build: 05/15/25
+  Options: apmbios pcibios pnpbios eltorito rombios32
+  Press F12 for boot menu.
+  Booting from Hard Disk...
+  LILO boot:
+  Loading linux......
+  ```
 - ✅ LILO boot loader runs, loads compressed Linux kernel
-- ✅ Shift/rotate Ib dispatch bugs fixed (6 opcodes used CL instead of immediate byte)
-- ✅ Two-operand IMUL (0F AF) implemented for kernel decompressor
-- ✅ Icache SMC detection: first_bytes[8] check catches stale entries after code loading
-- 🔄 Stuck at RIP=0x3260 ~5M instructions — stale icache trace in kernel decompressor
-  - Need proper Bochs-style page write stamp table for complete SMC handling
+- ✅ Kernel decompresses and starts executing (paging enabled, CR0=0x80000013)
+- ✅ Kernel reaches idle HLT loop with timer interrupts at ~100M instructions
+- ✅ Paging translation: all 32-bit string ops use read/write_virtual_byte/word/dword
+- ✅ Segment limit checks in virtual memory access functions
+- ✅ Protected mode: segment loading, descriptor parsing, privilege checks
+- ✅ BT/BTS/BTR/BTC r/m32 (all 8 variants: imm8 and register forms)
+- ✅ MOVSX GdEw unified dispatch (memory + register forms)
+- ✅ LEAVE instruction decoder fix (0xC9 added to no-ModRM list)
+- ✅ TLB flush on CR0/CR3/CR4 writes, INVLPG handler
+- ✅ VGA word-wide I/O: port mask 0x3 (byte+word) matching Bochs vgacore.cc
+- ✅ VGA memory plane filtering: map mask check prevents font data corrupting text buffer
+- ✅ x87 FPU stubs inlined (FNINIT, FNSTSW, FNSTCW, etc.)
+- 🔄 VGA text dump shows kernel boot messages but no Linux console output yet
+  - Kernel console likely uses different VGA mode or direct framebuffer writes
 
 **What Fixed the "Corrupted Symbols":**
 The previous investigation concluded BIOS ROM had wrong symbol addresses. In reality, the segment default bug caused stack reads via `[BP+offset]` to use DS (base=0) instead of SS, and the execute1/execute2 swap caused memory reads to return register values. Together, these made the BIOS load wrong values for `_end`, `__data_start`, etc. With both bugs fixed, the BIOS reads correct values from the stack and memory.
@@ -191,9 +183,9 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ## Known Issues & Next Steps
 
 ### Next Steps
-1. **Implement Bochs pageWriteStampTable** — Stale icache traces cause kernel decompressor loop at RIP=0x3260. Need per-page write stamp tracking (Bochs `icache.h` lines 29-102): 1M-entry array, `markICache()` on trace creation, `decWriteStamp()` on memory writes, `handleSMC()` to invalidate. Reference: `cpp_orig/bochs/cpu/icache.h`.
-2. **Continue iterative boot fixes** — LILO loads kernel, decompressor runs. After SMC fix, kernel should decompress and start executing at 0x100000.
-3. **Implement remaining instructions** — As discovered by running the emulator further
+1. **Get Linux console output visible** — Kernel boots to idle HLT loop but no console text on VGA. May need to handle Linux's direct VGA framebuffer writes or console initialization sequence.
+2. **Implement remaining instructions** — As discovered by running the emulator further
+3. **Reach DLX Linux login prompt** — Continue iterative bug fixing until the full boot completes
 
 ### Quick Debug Commands
 ```bash
@@ -238,7 +230,10 @@ RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=1000000 ./target/release/examples/dlxlinux
 - ✅ Shift/rotate Ib dispatch: 6 opcodes fixed (SarEdIb, RolEbIb, etc. were using CL not imm8)
 - ✅ Two-operand IMUL (0F AF) for kernel decompressor
 - ✅ Icache SMC detection: first_bytes[8] fingerprint on each trace entry
-- 🔄 Stale icache trace at RIP=0x3260 — need Bochs pageWriteStampTable
+- ✅ Kernel decompresses, enables paging, reaches idle HLT loop (~100M instructions)
+- ✅ BT/BTS/BTR/BTC all 8 variants, MOVSX GdEw, LEAVE decoder fix
+- ✅ VGA text output: word-wide I/O (mask 0x3), map mask plane filtering, window-base offsets
+- 🔄 Linux kernel console output not visible yet — may need different VGA handling
 
 ## Build Commands
 
