@@ -110,14 +110,15 @@ pub fn ADD_EwIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 /// ADD_EwIbM: ADD r/m16, imm8 (sign-extended, memory form)
 /// Opcode: 0x83/0 with memory operand
 /// Matching C++ BX_CPU_C::ADD_EwIbM in arith16.cc
-pub fn ADD_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+pub fn ADD_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
-    let (op1, laddr) = cpu.read_rmw_virtual_word(seg, eaddr);
+    let (op1, laddr) = cpu.read_rmw_virtual_word(seg, eaddr)?;
     let op2 = instr.ib() as i8 as i16 as u16; // Sign-extend imm8 to u16
     let result = op1.wrapping_add(op2);
     cpu.write_rmw_linear_word(laddr, result);
     cpu.update_flags_add16(op1, op2, result);
+    Ok(())
 }
 
 /// ADD_EwIwR: ADD r16, imm16 (register form)
@@ -357,15 +358,16 @@ pub fn ADC_EwIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// ADC_EwIbM: ADC m16, imm8 (sign-extended, memory form)
 /// Opcode: 0x83/2
-pub fn ADC_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+pub fn ADC_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
-    let (op1, laddr) = cpu.read_rmw_virtual_word(seg, eaddr);
+    let (op1, laddr) = cpu.read_rmw_virtual_word(seg, eaddr)?;
     let op2 = instr.ib() as i8 as i16 as u16;
     let cf = cpu.get_cf() as u16;
     let result = op1.wrapping_add(op2).wrapping_add(cf);
     cpu.write_rmw_linear_word(laddr, result);
     cpu.update_flags_add16(op1, op2, result);
+    Ok(())
 }
 
 /// ADC_EwsIb: ADC r/m16, imm8 (sign-extended) - dispatcher
@@ -674,14 +676,15 @@ pub fn SUB_EwIwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// SUB_EwIwM: SUB m16, imm16 (memory form)
 /// Opcode: 0x81/5
-pub fn SUB_EwIwM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+pub fn SUB_EwIwM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
-    let (op1, laddr) = cpu.read_rmw_virtual_word(seg, eaddr);
+    let (op1, laddr) = cpu.read_rmw_virtual_word(seg, eaddr)?;
     let op2 = instr.iw();
     let result = op1.wrapping_sub(op2);
     cpu.write_rmw_linear_word(laddr, result);
     cpu.update_flags_sub16(op1, op2, result);
+    Ok(())
 }
 
 /// SUB_EwIw: SUB r/m16, imm16 - dispatcher
@@ -705,14 +708,15 @@ pub fn SUB_EwIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// SUB_EwIbM: SUB m16, imm8 (sign-extended, memory form)
 /// Opcode: 0x83/5
-pub fn SUB_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+pub fn SUB_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
-    let (op1, laddr) = cpu.read_rmw_virtual_word(seg, eaddr);
+    let (op1, laddr) = cpu.read_rmw_virtual_word(seg, eaddr)?;
     let op2 = instr.ib() as i8 as i16 as u16;
     let result = op1.wrapping_sub(op2);
     cpu.write_rmw_linear_word(laddr, result);
     cpu.update_flags_sub16(op1, op2, result);
+    Ok(())
 }
 
 /// SUB_EwsIb: SUB r/m16, imm8 (sign-extended) - dispatcher

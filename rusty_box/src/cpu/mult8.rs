@@ -47,7 +47,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.get_gpr8(0); // AL
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_byte(seg, eaddr);
+        let op2 = self.read_virtual_byte(seg, eaddr)?;
 
         let product_16 = (op1 as u16) * (op2 as u16);
         let product_8l = (product_16 & 0xFF) as u8;
@@ -100,7 +100,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.get_gpr8(0) as i8; // AL
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_byte(seg, eaddr) as i8;
+        let op2 = self.read_virtual_byte(seg, eaddr)? as i8;
 
         let product_16 = (op1 as i16) * (op2 as i16);
         let product_8 = (product_16 & 0xFF) as u8;
@@ -154,7 +154,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn div_al_eb_m(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_byte(seg, eaddr);
+        let op2 = self.read_virtual_byte(seg, eaddr)?;
 
         if op2 == 0 {
             return self.exception(Exception::De, 0);
@@ -223,7 +223,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_byte(seg, eaddr) as i8;
+        let op2 = self.read_virtual_byte(seg, eaddr)? as i8;
 
         if op2 == 0 {
             return self.exception(Exception::De, 0);

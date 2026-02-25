@@ -298,13 +298,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.get_gpr32(dst);
         let result = op1.wrapping_sub(1);
         self.set_gpr32(dst, result);
-        
+
         let zf = result == 0;
         let sf = (result & 0x80000000) != 0;
         let of = op1 == 0x80000000;
         let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
         let pf = (result as u8).count_ones() % 2 == 0;
-        
+
         const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
         self.eflags &= !MASK;
         if pf { self.eflags |= 1 << 2; }
@@ -312,8 +312,68 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if zf { self.eflags |= 1 << 6; }
         if sf { self.eflags |= 1 << 7; }
         if of { self.eflags |= 1 << 11; }
-        
+
         tracing::trace!("DEC r32: {:#010x} - 1 = {:#010x}", op1, result);
+    }
+
+    /// INC r/m32 (memory form) — matches Bochs INC_EdM
+    pub fn inc_ed_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let (op1, laddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
+        let result = op1.wrapping_add(1);
+        self.write_rmw_linear_dword(laddr, result);
+
+        let zf = result == 0;
+        let sf = (result & 0x80000000) != 0;
+        let of = result == 0x80000000;
+        let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
+        let pf = (result as u8).count_ones() % 2 == 0;
+
+        const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
+        self.eflags &= !MASK;
+        if pf { self.eflags |= 1 << 2; }
+        if af { self.eflags |= 1 << 4; }
+        if zf { self.eflags |= 1 << 6; }
+        if sf { self.eflags |= 1 << 7; }
+        if of { self.eflags |= 1 << 11; }
+
+        Ok(())
+    }
+
+    /// DEC r/m32 (memory form) — matches Bochs DEC_EdM
+    pub fn dec_ed_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let (op1, laddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
+        let result = op1.wrapping_sub(1);
+        self.write_rmw_linear_dword(laddr, result);
+
+        let zf = result == 0;
+        let sf = (result & 0x80000000) != 0;
+        let of = op1 == 0x80000000;
+        let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
+        let pf = (result as u8).count_ones() % 2 == 0;
+
+        const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
+        self.eflags &= !MASK;
+        if pf { self.eflags |= 1 << 2; }
+        if af { self.eflags |= 1 << 4; }
+        if zf { self.eflags |= 1 << 6; }
+        if sf { self.eflags |= 1 << 7; }
+        if of { self.eflags |= 1 << 11; }
+
+        Ok(())
+    }
+
+    /// INC r/m32 — unified dispatch
+    pub fn inc_ed(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.inc_ed_r(instr); Ok(()) } else { self.inc_ed_m(instr) }
+    }
+
+    /// DEC r/m32 — unified dispatch
+    pub fn dec_ed(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.dec_ed_r(instr); Ok(()) } else { self.dec_ed_m(instr) }
     }
 
     // =========================================================================
@@ -324,22 +384,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // get_laddr32_seg is defined in logical8.rs to avoid duplicate definitions
 
-    /// Read dword from virtual address
-    pub fn read_virtual_dword(&self, seg: BxSegregs, eaddr: u32) -> u32 {
-        let laddr = self.get_laddr32_seg(seg, eaddr);
-        self.mem_read_dword(laddr as u64)
+    /// Read dword from virtual address (translates through page tables when paging is enabled).
+    pub fn read_virtual_dword(&mut self, seg: BxSegregs, eaddr: u32) -> super::Result<u32> {
+        let laddr = self.get_laddr32_seg_checked(seg, eaddr, 4)? as u64;
+        let paddr = self.translate_data_read(laddr)?;
+        Ok(self.mem_read_dword(paddr))
     }
 
-    /// Read-Modify-Write: Read dword, return it and linear address for write back
-    pub fn read_rmw_virtual_dword(&mut self, seg: BxSegregs, eaddr: u32) -> (u32, u32) {
-        let laddr = self.get_laddr32_seg(seg, eaddr);
-        let val = self.mem_read_dword(laddr as u64);
-        (val, laddr)
+    /// Read-Modify-Write: Read dword, return value and physical address for write back.
+    pub fn read_rmw_virtual_dword(&mut self, seg: BxSegregs, eaddr: u32) -> super::Result<(u32, u64)> {
+        let laddr = self.get_laddr32_seg_checked(seg, eaddr, 4)? as u64;
+        let paddr = self.translate_data_write(laddr)?;
+        let val = self.mem_read_dword(paddr);
+        Ok((val, paddr))
     }
 
-    /// Write dword to linear address (for RMW operations)
-    pub fn write_rmw_linear_dword(&mut self, laddr: u32, val: u32) {
-        self.mem_write_dword(laddr as u64, val);
+    /// Write dword to a previously-translated physical address (RMW write-back).
+    pub fn write_rmw_linear_dword(&mut self, paddr: u64, val: u32) {
+        self.mem_write_dword(paddr, val);
     }
 
     // =========================================================================
@@ -348,10 +410,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XOR_EdGdM: XOR r/m32, r32 (memory form)
     /// Decoder swaps: src() = [1] = nnn = SOURCE register
-    pub fn xor_ed_gd_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn xor_ed_gd_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_32, laddr) = self.read_rmw_virtual_dword(seg, eaddr);
+        let (op1_32, laddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
         let src_reg = instr.src() as usize;
         let op2_32 = self.get_gpr32(src_reg);
         let result = op1_32 ^ op2_32;
@@ -359,14 +421,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.write_rmw_linear_dword(laddr, result);
         self.set_flags_oszapc_logic_32(result);
         tracing::trace!("XOR32 mem: [{:?}:{:#x}] = {:#010x} ^ {:#010x} = {:#010x}", seg, eaddr, op1_32, op2_32, result);
+        Ok(())
     }
 
     /// XOR_GdEdM: XOR r32, r/m32 (memory form)
     /// Matches BX_CPU_C::XOR_GdEdM
-    pub fn xor_gd_ed_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn xor_gd_ed_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op2_32 = self.read_virtual_dword(seg, eaddr);
+        let op2_32 = self.read_virtual_dword(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let op1_32 = self.get_gpr32(dst_reg);
         let result = op1_32 ^ op2_32;
@@ -374,28 +437,30 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr32(dst_reg, result);
         self.set_flags_oszapc_logic_32(result);
         tracing::trace!("XOR32 mem: reg{} = {:#010x} ^ {:#010x} = {:#010x}", dst_reg, op1_32, op2_32, result);
+        Ok(())
     }
 
     /// XOR_EdIdM: XOR r/m32, imm32 (memory form)
     /// Matches BX_CPU_C::XOR_EdIdM
-    pub fn xor_ed_id_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn xor_ed_id_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_32, laddr) = self.read_rmw_virtual_dword(seg, eaddr);
+        let (op1_32, laddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
         let op2_32 = instr.id();
         let result = op1_32 ^ op2_32;
 
         self.write_rmw_linear_dword(laddr, result);
         self.set_flags_oszapc_logic_32(result);
         tracing::trace!("XOR32 mem: [{:?}:{:#x}] = {:#010x} ^ {:#010x} = {:#010x}", seg, eaddr, op1_32, op2_32, result);
+        Ok(())
     }
 
     /// OR_EdGdM: OR r/m32, r32 (memory form)
     /// Decoder swaps: src() = [1] = nnn = SOURCE register
-    pub fn or_ed_gd_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn or_ed_gd_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_32, laddr) = self.read_rmw_virtual_dword(seg, eaddr);
+        let (op1_32, laddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
         let src_reg = instr.src() as usize;
         let op2_32 = self.get_gpr32(src_reg);
         let result = op1_32 | op2_32;
@@ -403,14 +468,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.write_rmw_linear_dword(laddr, result);
         self.set_flags_oszapc_logic_32(result);
         tracing::trace!("OR32 mem: [{:?}:{:#x}] = {:#010x} | {:#010x} = {:#010x}", seg, eaddr, op1_32, op2_32, result);
+        Ok(())
     }
 
     /// OR_GdEdM: OR r32, r/m32 (memory form)
     /// Matches BX_CPU_C::OR_GdEdM
-    pub fn or_gd_ed_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn or_gd_ed_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op2_32 = self.read_virtual_dword(seg, eaddr);
+        let op2_32 = self.read_virtual_dword(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let op1_32 = self.get_gpr32(dst_reg);
         let result = op1_32 | op2_32;
@@ -418,28 +484,30 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr32(dst_reg, result);
         self.set_flags_oszapc_logic_32(result);
         tracing::trace!("OR32 mem: reg{} = {:#010x} | {:#010x} = {:#010x}", dst_reg, op1_32, op2_32, result);
+        Ok(())
     }
 
     /// OR_EdIdM: OR r/m32, imm32 (memory form)
     /// Matches BX_CPU_C::OR_EdIdM
-    pub fn or_ed_id_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn or_ed_id_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_32, laddr) = self.read_rmw_virtual_dword(seg, eaddr);
+        let (op1_32, laddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
         let op2_32 = instr.id();
         let result = op1_32 | op2_32;
 
         self.write_rmw_linear_dword(laddr, result);
         self.set_flags_oszapc_logic_32(result);
         tracing::trace!("OR32 mem: [{:?}:{:#x}] = {:#010x} | {:#010x} = {:#010x}", seg, eaddr, op1_32, op2_32, result);
+        Ok(())
     }
 
     /// AND_EdGdM: AND r/m32, r32 (memory form)
     /// Decoder swaps: src() = [1] = nnn = SOURCE register
-    pub fn and_ed_gd_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn and_ed_gd_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_32, laddr) = self.read_rmw_virtual_dword(seg, eaddr);
+        let (op1_32, laddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
         let src_reg = instr.src() as usize;
         let op2_32 = self.get_gpr32(src_reg);
         let result = op1_32 & op2_32;
@@ -447,14 +515,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.write_rmw_linear_dword(laddr, result);
         self.set_flags_oszapc_logic_32(result);
         tracing::trace!("AND32 mem: [{:?}:{:#x}] = {:#010x} & {:#010x} = {:#010x}", seg, eaddr, op1_32, op2_32, result);
+        Ok(())
     }
 
     /// AND_GdEdM: AND r32, r/m32 (memory form)
     /// Matches BX_CPU_C::AND_GdEdM
-    pub fn and_gd_ed_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn and_gd_ed_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op2_32 = self.read_virtual_dword(seg, eaddr);
+        let op2_32 = self.read_virtual_dword(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let op1_32 = self.get_gpr32(dst_reg);
         let result = op1_32 & op2_32;
@@ -462,71 +531,77 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr32(dst_reg, result);
         self.set_flags_oszapc_logic_32(result);
         tracing::trace!("AND32 mem: reg{} = {:#010x} & {:#010x} = {:#010x}", dst_reg, op1_32, op2_32, result);
+        Ok(())
     }
 
     /// AND_EdIdM: AND r/m32, imm32 (memory form)
     /// Matches BX_CPU_C::AND_EdIdM
-    pub fn and_ed_id_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn and_ed_id_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_32, laddr) = self.read_rmw_virtual_dword(seg, eaddr);
+        let (op1_32, laddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
         let op2_32 = instr.id();
         let result = op1_32 & op2_32;
 
         self.write_rmw_linear_dword(laddr, result);
         self.set_flags_oszapc_logic_32(result);
         tracing::trace!("AND32 mem: [{:?}:{:#x}] = {:#010x} & {:#010x} = {:#010x}", seg, eaddr, op1_32, op2_32, result);
+        Ok(())
     }
 
     /// NOT_EdM: NOT r/m32 (memory form)
     /// Matches BX_CPU_C::NOT_EdM
-    pub fn not_ed_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn not_ed_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_32, laddr) = self.read_rmw_virtual_dword(seg, eaddr);
+        let (op1_32, laddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
         let result = !op1_32;
 
         self.write_rmw_linear_dword(laddr, result);
         tracing::trace!("NOT32 mem: [{:?}:{:#x}] = !{:#010x} = {:#010x}", seg, eaddr, op1_32, result);
+        Ok(())
     }
 
     /// TEST_EdGdM: TEST r/m32, r32 (memory form)
-    /// Decoder swaps: src() = [1] = nnn = SOURCE register
-    pub fn test_ed_gd_m(&mut self, instr: &BxInstructionGenerated) {
+    /// Opcode 0x85 is NOT store-direction, so dst() = nnn = register operand
+    pub fn test_ed_gd_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1_32 = self.read_virtual_dword(seg, eaddr);
-        let src_reg = instr.src() as usize;
+        let op1_32 = self.read_virtual_dword(seg, eaddr)?;
+        let src_reg = instr.dst() as usize;
         let op2_32 = self.get_gpr32(src_reg);
         let result = op1_32 & op2_32;
 
         self.set_flags_oszapc_logic_32(result);
         tracing::trace!("TEST32 mem: [{:?}:{:#x}] & reg{} = {:#010x} & {:#010x} = {:#010x}", seg, eaddr, src_reg, op1_32, op2_32, result);
+        Ok(())
     }
 
     /// TEST_EdIdM: TEST r/m32, imm32 (memory form)
     /// Matches BX_CPU_C::TEST_EdIdM
-    pub fn test_ed_id_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn test_ed_id_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1_32 = self.read_virtual_dword(seg, eaddr);
+        let op1_32 = self.read_virtual_dword(seg, eaddr)?;
         let op2_32 = instr.id();
         let result = op1_32 & op2_32;
 
         self.set_flags_oszapc_logic_32(result);
         tracing::trace!("TEST32 mem: [{:?}:{:#x}] & {:#010x} = {:#010x} & {:#010x} = {:#010x}", seg, eaddr, op2_32, op1_32, op2_32, result);
+        Ok(())
     }
 
     /// CMP_GdEdM: CMP r32, r/m32 (memory form)
     /// Matches BX_CPU_C::CMP_GdEdM
-    pub fn cmp_gd_ed_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmp_gd_ed_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op2_32 = self.read_virtual_dword(seg, eaddr);
+        let op2_32 = self.read_virtual_dword(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let op1_32 = self.get_gpr32(dst_reg);
         let result = op1_32.wrapping_sub(op2_32);
         self.set_flags_oszapc_sub_32(op1_32, op2_32, result);
+        Ok(())
     }
 
     /// CMP_EdGdR: CMP r/m32, r32 (register form)
@@ -542,25 +617,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// CMP_EdGdM: CMP r/m32, r32 (memory form)
     /// Matches BX_CPU_C::CMP_EdGdM
-    pub fn cmp_ed_gd_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmp_ed_gd_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_32, _laddr) = self.read_rmw_virtual_dword(seg, eaddr);
+        let (op1_32, _laddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
         let src_reg = instr.src() as usize;
         let op2_32 = self.get_gpr32(src_reg);
         let result = op1_32.wrapping_sub(op2_32);
         self.set_flags_oszapc_sub_32(op1_32, op2_32, result);
+        Ok(())
     }
 
     /// CMP_EdIdM: CMP r/m32, imm32 (memory form)
     /// Matches BX_CPU_C::CMP_EdIdM
-    pub fn cmp_ed_id_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmp_ed_id_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1_32 = self.read_virtual_dword(seg, eaddr);
+        let op1_32 = self.read_virtual_dword(seg, eaddr)?;
         let op2_32 = instr.id();
         let result = op1_32.wrapping_sub(op2_32);
         self.set_flags_oszapc_sub_32(op1_32, op2_32, result);
+        Ok(())
     }
 
     // =========================================================================
@@ -568,77 +645,245 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// XOR r/m32, r32 - unified (EdGd: memory is read-modify-write, register is commutative)
-    pub fn xor_ed_gd(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.xor_ed_gd_r(instr) } else { self.xor_ed_gd_m(instr) }
+    pub fn xor_ed_gd(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.xor_ed_gd_r(instr); Ok(()) } else { self.xor_ed_gd_m(instr) }
     }
 
     /// XOR r32, r/m32 - unified (GdEd: register dest, memory is read-only source)
-    pub fn xor_gd_ed(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.xor_gd_ed_r(instr) } else { self.xor_gd_ed_m(instr) }
+    pub fn xor_gd_ed(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.xor_gd_ed_r(instr); Ok(()) } else { self.xor_gd_ed_m(instr) }
     }
 
     /// XOR r/m32, imm32 - unified
-    pub fn xor_ed_id(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.xor_ed_id_r(instr) } else { self.xor_ed_id_m(instr) }
+    pub fn xor_ed_id(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.xor_ed_id_r(instr); Ok(()) } else { self.xor_ed_id_m(instr) }
     }
 
     /// AND r/m32, r32 - unified (EdGd: memory is read-modify-write, register is commutative)
-    pub fn and_ed_gd(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.and_ed_gd_r(instr) } else { self.and_ed_gd_m(instr) }
+    pub fn and_ed_gd(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.and_ed_gd_r(instr); Ok(()) } else { self.and_ed_gd_m(instr) }
     }
 
     /// AND r32, r/m32 - unified (GdEd: register dest, memory is read-only source)
-    pub fn and_gd_ed(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.and_gd_ed_r(instr) } else { self.and_gd_ed_m(instr) }
+    pub fn and_gd_ed(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.and_gd_ed_r(instr); Ok(()) } else { self.and_gd_ed_m(instr) }
     }
 
     /// AND r/m32, imm32 - unified (handles both AndEdId and AndEdsIb opcodes)
-    pub fn and_ed_id(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.and_ed_id_r(instr) } else { self.and_ed_id_m(instr) }
+    pub fn and_ed_id(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.and_ed_id_r(instr); Ok(()) } else { self.and_ed_id_m(instr) }
     }
 
     /// OR r/m32, r32 - unified (EdGd: memory is read-modify-write, register is commutative)
-    pub fn or_ed_gd(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.or_ed_gd_r(instr) } else { self.or_ed_gd_m(instr) }
+    pub fn or_ed_gd(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.or_ed_gd_r(instr); Ok(()) } else { self.or_ed_gd_m(instr) }
     }
 
     /// OR r32, r/m32 - unified (GdEd: register dest, memory is read-only source)
-    pub fn or_gd_ed(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.or_gd_ed_r(instr) } else { self.or_gd_ed_m(instr) }
+    pub fn or_gd_ed(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.or_gd_ed_r(instr); Ok(()) } else { self.or_gd_ed_m(instr) }
     }
 
     /// OR r/m32, imm32 - unified
-    pub fn or_ed_id(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.or_ed_id_r(instr) } else { self.or_ed_id_m(instr) }
+    pub fn or_ed_id(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.or_ed_id_r(instr); Ok(()) } else { self.or_ed_id_m(instr) }
     }
 
     /// NOT r/m32 - unified
-    pub fn not_ed(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.not_ed_r(instr) } else { self.not_ed_m(instr) }
+    pub fn not_ed(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.not_ed_r(instr); Ok(()) } else { self.not_ed_m(instr) }
     }
 
     /// TEST r/m32, r32 - unified
-    pub fn test_ed_gd(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.test_ed_gd_r(instr) } else { self.test_ed_gd_m(instr) }
+    pub fn test_ed_gd(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.test_ed_gd_r(instr); Ok(()) } else { self.test_ed_gd_m(instr) }
     }
 
     /// TEST r/m32, imm32 - unified
-    pub fn test_ed_id(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.test_ed_id_r(instr) } else { self.test_ed_id_m(instr) }
+    pub fn test_ed_id(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.test_ed_id_r(instr); Ok(()) } else { self.test_ed_id_m(instr) }
     }
 
     /// CMP r32, r/m32 - unified (GdEd: register dest compares with reg or memory)
-    pub fn cmp_gd_ed(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.cmp_gd_ed_r(instr) } else { self.cmp_gd_ed_m(instr) }
+    pub fn cmp_gd_ed(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.cmp_gd_ed_r(instr); Ok(()) } else { self.cmp_gd_ed_m(instr) }
     }
 
     /// CMP r/m32, r32 - unified (EdGd: memory or register compared with register)
-    pub fn cmp_ed_gd(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.cmp_ed_gd_r(instr) } else { self.cmp_ed_gd_m(instr) }
+    pub fn cmp_ed_gd(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.cmp_ed_gd_r(instr); Ok(()) } else { self.cmp_ed_gd_m(instr) }
     }
 
     /// CMP r/m32, imm32 - unified (handles both CmpEdId and CmpEdsIb opcodes)
-    pub fn cmp_ed_id(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.cmp_ed_id_r(instr) } else { self.cmp_ed_id_m(instr) }
+    pub fn cmp_ed_id(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.cmp_ed_id_r(instr); Ok(()) } else { self.cmp_ed_id_m(instr) }
+    }
+
+    // =========================================================================
+    // Bit Test instructions (BT, BTS, BTR, BTC) — 32-bit
+    // Based on Bochs cpu/bit.cc
+    // =========================================================================
+
+    /// BT r/m32, imm8 — Bit Test (0F BA /4 ib)
+    /// Tests bit `imm8 % 32` of r/m32, sets CF to that bit.
+    pub fn bt_ed_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        let op1 = if instr.mod_c0() {
+            self.get_gpr32(instr.dst() as usize)
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let seg = BxSegregs::from(instr.seg());
+            self.read_virtual_dword(seg, eaddr)?
+        };
+        let bit = (instr.ib() & 0x1F) as u32;
+        let cf = (op1 >> bit) & 1;
+        if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; }
+        Ok(())
+    }
+
+    /// BTS r/m32, imm8 — Bit Test and Set (0F BA /5 ib)
+    /// Tests bit, sets CF, then sets the bit to 1.
+    pub fn bts_ed_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        let bit = (instr.ib() & 0x1F) as u32;
+        if instr.mod_c0() {
+            let dst = instr.dst() as usize;
+            let op1 = self.get_gpr32(dst);
+            let cf = (op1 >> bit) & 1;
+            if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; }
+            self.set_gpr32(dst, op1 | (1 << bit));
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let seg = BxSegregs::from(instr.seg());
+            let (op1, paddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
+            let cf = (op1 >> bit) & 1;
+            if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; }
+            self.write_rmw_linear_dword(paddr, op1 | (1 << bit));
+        }
+        Ok(())
+    }
+
+    /// BTR r/m32, imm8 — Bit Test and Reset (0F BA /6 ib)
+    /// Tests bit, sets CF, then clears the bit to 0.
+    pub fn btr_ed_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        let bit = (instr.ib() & 0x1F) as u32;
+        if instr.mod_c0() {
+            let dst = instr.dst() as usize;
+            let op1 = self.get_gpr32(dst);
+            let cf = (op1 >> bit) & 1;
+            if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; }
+            self.set_gpr32(dst, op1 & !(1 << bit));
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let seg = BxSegregs::from(instr.seg());
+            let (op1, paddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
+            let cf = (op1 >> bit) & 1;
+            if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; }
+            self.write_rmw_linear_dword(paddr, op1 & !(1 << bit));
+        }
+        Ok(())
+    }
+
+    /// BTC r/m32, imm8 — Bit Test and Complement (0F BA /7 ib)
+    /// Tests bit, sets CF, then complements (toggles) the bit.
+    pub fn btc_ed_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        let bit = (instr.ib() & 0x1F) as u32;
+        if instr.mod_c0() {
+            let dst = instr.dst() as usize;
+            let op1 = self.get_gpr32(dst);
+            let cf = (op1 >> bit) & 1;
+            if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; }
+            self.set_gpr32(dst, op1 ^ (1 << bit));
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let seg = BxSegregs::from(instr.seg());
+            let (op1, paddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
+            let cf = (op1 >> bit) & 1;
+            if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; }
+            self.write_rmw_linear_dword(paddr, op1 ^ (1 << bit));
+        }
+        Ok(())
+    }
+
+    /// BT r/m32, r32 — Bit Test (0F A3)
+    /// Tests bit specified by r32 in r/m32, sets CF.
+    pub fn bt_ed_gd(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        let op2 = self.get_gpr32(instr.src() as usize);
+        let op1 = if instr.mod_c0() {
+            self.get_gpr32(instr.dst() as usize)
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            // For memory form, bit offset is full op2 (not masked to 31).
+            // Bochs: displacement = ((s32)op2 >> 5) << 2
+            let displacement = ((op2 as i32) >> 5) << 2;
+            let addr = (eaddr as i32).wrapping_add(displacement) as u32;
+            let seg = BxSegregs::from(instr.seg());
+            self.read_virtual_dword(seg, addr)?
+        };
+        let bit = op2 & 0x1F;
+        let cf = (op1 >> bit) & 1;
+        if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; }
+        Ok(())
+    }
+
+    /// BTS r/m32, r32 — Bit Test and Set (0F AB)
+    pub fn bts_ed_gd(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        let op2 = self.get_gpr32(instr.src() as usize);
+        let bit = op2 & 0x1F;
+        if instr.mod_c0() {
+            let dst = instr.dst() as usize;
+            let op1 = self.get_gpr32(dst);
+            { let cf = (op1 >> bit) & 1; if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; } }
+            self.set_gpr32(dst, op1 | (1 << bit));
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let displacement = ((op2 as i32) >> 5) << 2;
+            let addr = (eaddr as i32).wrapping_add(displacement) as u32;
+            let seg = BxSegregs::from(instr.seg());
+            let (op1, paddr) = self.read_rmw_virtual_dword(seg, addr)?;
+            { let cf = (op1 >> bit) & 1; if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; } }
+            self.write_rmw_linear_dword(paddr, op1 | (1 << bit));
+        }
+        Ok(())
+    }
+
+    /// BTR r/m32, r32 — Bit Test and Reset (0F B3)
+    pub fn btr_ed_gd(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        let op2 = self.get_gpr32(instr.src() as usize);
+        let bit = op2 & 0x1F;
+        if instr.mod_c0() {
+            let dst = instr.dst() as usize;
+            let op1 = self.get_gpr32(dst);
+            { let cf = (op1 >> bit) & 1; if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; } }
+            self.set_gpr32(dst, op1 & !(1 << bit));
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let displacement = ((op2 as i32) >> 5) << 2;
+            let addr = (eaddr as i32).wrapping_add(displacement) as u32;
+            let seg = BxSegregs::from(instr.seg());
+            let (op1, paddr) = self.read_rmw_virtual_dword(seg, addr)?;
+            { let cf = (op1 >> bit) & 1; if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; } }
+            self.write_rmw_linear_dword(paddr, op1 & !(1 << bit));
+        }
+        Ok(())
+    }
+
+    /// BTC r/m32, r32 — Bit Test and Complement (0F BB)
+    pub fn btc_ed_gd(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        let op2 = self.get_gpr32(instr.src() as usize);
+        let bit = op2 & 0x1F;
+        if instr.mod_c0() {
+            let dst = instr.dst() as usize;
+            let op1 = self.get_gpr32(dst);
+            { let cf = (op1 >> bit) & 1; if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; } }
+            self.set_gpr32(dst, op1 ^ (1 << bit));
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let displacement = ((op2 as i32) >> 5) << 2;
+            let addr = (eaddr as i32).wrapping_add(displacement) as u32;
+            let seg = BxSegregs::from(instr.seg());
+            let (op1, paddr) = self.read_rmw_virtual_dword(seg, addr)?;
+            { let cf = (op1 >> bit) & 1; if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; } }
+            self.write_rmw_linear_dword(paddr, op1 ^ (1 << bit));
+        }
+        Ok(())
     }
 }

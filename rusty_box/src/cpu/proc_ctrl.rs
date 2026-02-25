@@ -52,8 +52,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         use super::decoder::BxSegregs;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr32(instr);
-        let limit = self.read_virtual_word(seg, eaddr);
-        let base = self.read_virtual_dword(seg, eaddr.wrapping_add(2)) as u64;
+        let limit = self.read_virtual_word(seg, eaddr)?;
+        let base = self.read_virtual_dword(seg, eaddr.wrapping_add(2))? as u64;
         self.idtr.base = base;
         self.idtr.limit = limit;
         tracing::trace!("LIDT: base={:#010x}, limit={:#06x}", base, limit);
@@ -66,8 +66,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         use super::decoder::BxSegregs;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr32(instr);
-        let limit = self.read_virtual_word(seg, eaddr);
-        let base = self.read_virtual_dword(seg, eaddr.wrapping_add(2)) as u64;
+        let limit = self.read_virtual_word(seg, eaddr)?;
+        let base = self.read_virtual_dword(seg, eaddr.wrapping_add(2))? as u64;
         self.gdtr.base = base;
         self.gdtr.limit = limit;
         tracing::trace!("LGDT: base={:#010x}, limit={:#06x}", base, limit);
@@ -79,66 +79,39 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// MOV r32, CR0 - Read CR0 into register
+    /// Note: decoder puts nnn (CR#) in meta_data[0]=dst, rm (GPR) in meta_data[1]=src
     pub fn mov_rd_cr0(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
-        // TODO: Add CPL check (CPL must be 0)
-        // For now, BIOS is always in ring 0 so this is safe
-
-        // Read CR0 value
         let val_32 = self.cr0.get32();
-
-        // Write to destination register
-        let dst = instr.dst() as usize;
-        self.set_gpr32(dst, val_32);
-
-        tracing::trace!("MOV r32, CR0: {:#010x}", val_32);
+        let gpr = instr.src() as usize; // rm field = GPR
+        self.set_gpr32(gpr, val_32);
+        tracing::trace!("MOV r32, CR0: {:#010x} -> reg{}", val_32, gpr);
         Ok(())
     }
 
     /// MOV r32, CR2 - Read CR2 into register (page fault linear address)
     pub fn mov_rd_cr2(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
-        // TODO: Add CPL check (CPL must be 0)
-        // For now, BIOS is always in ring 0 so this is safe
-
-        // Read CR2 value
         let val_32 = self.cr2 as u32;
-
-        // Write to destination register
-        let dst = instr.dst() as usize;
-        self.set_gpr32(dst, val_32);
-
-        tracing::trace!("MOV r32, CR2: {:#010x}", val_32);
+        let gpr = instr.src() as usize; // rm field = GPR
+        self.set_gpr32(gpr, val_32);
+        tracing::trace!("MOV r32, CR2: {:#010x} -> reg{}", val_32, gpr);
         Ok(())
     }
 
     /// MOV r32, CR3 - Read CR3 into register (page directory base)
     pub fn mov_rd_cr3(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
-        // TODO: Add CPL check (CPL must be 0)
-        // For now, BIOS is always in ring 0 so this is safe
-
-        // Read CR3 value
         let val_32 = self.cr3 as u32;
-
-        // Write to destination register
-        let dst = instr.dst() as usize;
-        self.set_gpr32(dst, val_32);
-
-        tracing::trace!("MOV r32, CR3: {:#010x}", val_32);
+        let gpr = instr.src() as usize; // rm field = GPR
+        self.set_gpr32(gpr, val_32);
+        tracing::trace!("MOV r32, CR3: {:#010x} -> reg{}", val_32, gpr);
         Ok(())
     }
 
     /// MOV r32, CR4 - Read CR4 into register
     pub fn mov_rd_cr4(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
-        // TODO: Add CPL check (CPL must be 0)
-        // For now, BIOS is always in ring 0 so this is safe
-
-        // Read CR4 value
         let val_32 = self.cr4.get32();
-
-        // Write to destination register
-        let dst = instr.dst() as usize;
-        self.set_gpr32(dst, val_32);
-
-        tracing::trace!("MOV r32, CR4: {:#010x}", val_32);
+        let gpr = instr.src() as usize; // rm field = GPR
+        self.set_gpr32(gpr, val_32);
+        tracing::trace!("MOV r32, CR4: {:#010x} -> reg{}", val_32, gpr);
         Ok(())
     }
 
@@ -147,18 +120,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// MOV CR0, r32 - Write to CR0
+    /// Matching Bochs crregs.cc SetCR0(): flushes TLB when PG/PE/WP change (mask 0x80010001)
     pub fn mov_cr0_rd(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
-        // TODO: Add CPL check (CPL must be 0)
-        // For now, BIOS is always in ring 0 so this is safe
-
-        // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
-        self.eip_page_window_size = 0;
-
         let src = instr.src1() as usize;
         let val_32 = self.get_gpr32(src);
+        let old_cr0 = self.cr0.get32();
 
-        // Set CR0 (bit 4 is hardwired to 1)
+        // Set CR0
         self.cr0.set32(val_32);
 
         // Update CPU mode based on CR0.PE
@@ -168,7 +136,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cpu_mode = super::cpu::CpuMode::Ia32Real;
         }
 
-        tracing::trace!("MOV CR0, r32: {:#010x} (PE={})", val_32, self.cr0.pe());
+        // Bochs crregs.cc:1158-1163: Modification of PG, PE, or WP flushes TLB
+        if (old_cr0 & 0x80010001) != (val_32 & 0x80010001) {
+            self.tlb_flush();
+        } else {
+            // Even without PG/PE/WP change, invalidate prefetch queue
+            self.invalidate_prefetch_q();
+        }
+
+        tracing::trace!("MOV CR0, r32: {:#010x} -> {:#010x} (PE={}, PG={})",
+            old_cr0, val_32, self.cr0.pe(), (val_32 >> 31) & 1);
         Ok(())
     }
 
@@ -186,37 +163,38 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV CR3, r32 - Write to CR3 (page directory base)
+    /// Matching Bochs crregs.cc SetCR3(): always flushes TLB (non-global if PGE set)
     pub fn mov_cr3_rd(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
-        // TODO: Add CPL check (CPL must be 0)
-        // For now, BIOS is always in ring 0 so this is safe
-
-        // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
-        self.eip_page_window_size = 0;
-
         let src = instr.src1() as usize;
         let val_32 = self.get_gpr32(src);
         self.cr3 = val_32 as u64;
 
-        // Invalidate TLB
-        // TODO: Implement TLB invalidation
+        // Bochs crregs.cc:1423-1445: flush TLB even if value does not change
+        if self.cr4.pge() {
+            self.tlb_flush_non_global();
+        } else {
+            self.tlb_flush();
+        }
 
         tracing::trace!("MOV CR3, r32: {:#010x}", val_32);
         Ok(())
     }
 
     /// MOV CR4, r32 - Write to CR4
+    /// Matching Bochs crregs.cc SetCR4(): flushes TLB when paging-related bits change
     pub fn mov_cr4_rd(&mut self, instr: &super::decoder::BxInstructionGenerated) -> crate::cpu::Result<()> {
-        // TODO: Add CPL check (CPL must be 0)
-        // For now, BIOS is always in ring 0 so this is safe
-
-        // Invalidate prefetch queue
-        self.eip_fetch_ptr = None;
-        self.eip_page_window_size = 0;
-
         let src = instr.src1() as usize;
         let val_32 = self.get_gpr32(src);
+        let old_cr4 = self.cr4.get32();
         self.cr4.set32(val_32);
+
+        // Bochs crregs.cc: SetCR4 flushes TLB when PAE, PGE, SMEP, SMAP, PKE, CET change
+        // Simplified: flush TLB on any CR4 change that affects paging
+        if old_cr4 != val_32 {
+            self.tlb_flush();
+        } else {
+            self.invalidate_prefetch_q();
+        }
 
         tracing::trace!("MOV CR4, r32: {:#010x}", val_32);
         Ok(())
@@ -232,7 +210,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             let eaddr = self.resolve_addr32(instr);
             let seg = super::decoder::BxSegregs::from(instr.seg());
-            self.read_virtual_word(seg, eaddr)
+            self.read_virtual_word(seg, eaddr)?
         };
 
         // LMSW cannot clear PE

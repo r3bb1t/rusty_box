@@ -17,7 +17,17 @@ use super::BxSegregs;
 use super::fetchdecode_opmap::*;
 use super::fetchdecode_opmap_0f38::BxOpcodeTable0F38;
 use super::fetchdecode_opmap_0f3a::BxOpcodeTable0F3A;
-use super::fetchdecode_x87::BX3_DNOW_OPCODE;
+use super::fetchdecode_x87::{
+    BX3_DNOW_OPCODE,
+    BX_OPCODE_INFO_FLOATING_POINT_D8,
+    BX_OPCODE_INFO_FLOATING_POINT_D9,
+    BX_OPCODE_INFO_FLOATING_POINT_DA,
+    BX_OPCODE_INFO_FLOATING_POINT_DB,
+    BX_OPCODE_INFO_FLOATING_POINT_DC,
+    BX_OPCODE_INFO_FLOATING_POINT_DD,
+    BX_OPCODE_INFO_FLOATING_POINT_DE,
+    BX_OPCODE_INFO_FLOATING_POINT_DF,
+};
 
 // Decoding mask bit offsets (from fetchdecode_generated.rs)
 const OS32_OFFSET: u32 = 22;
@@ -336,6 +346,7 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
 
     let mut nnn: u32 = (b1 >> 3) & 0x7;
     let mut rm: u32 = b1 & 0x7;
+    let mut modrm_byte: u8 = 0; // full modrm byte, used for x87 FPU escape
 
     if needs_modrm {
         if pos >= max_len {
@@ -343,6 +354,7 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
         }
 
         let modrm = bytes[pos];
+        modrm_byte = modrm;
         pos += 1;
 
         let mod_field = (modrm >> 6) & 0x3;
@@ -584,11 +596,11 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
         match imm_size {
             1 => {
                 let byte_val = bytes[pos];
-                // Sign-extend byte relative displacements for branch opcodes.
-                // These are stored as id() and used as `instr.id() as i32` in execution handlers.
-                // All other byte immediates (0x83, 0x6A, 0x6B, etc.) use `instr.ib() as i8`
-                // in their execution handlers, so they don't need sign-extension here.
-                let needs_sign_ext = opcode_map == 0 && matches!(b1 as u8, 0x70..=0x7F | 0xE0..=0xE3 | 0xEB);
+                // Sign-extend byte immediates that are used as 32-bit values via id():
+                // - Branch opcodes (0x70-0x7F, 0xE0-0xE3, 0xEB): relative displacements
+                // - 0x83 (Group 1 EdsIb): sign-extended imm8 to operand-size per Intel spec;
+                //   dispatchers route *EdsIb opcodes to *EdId handlers that read id()
+                let needs_sign_ext = opcode_map == 0 && matches!(b1 as u8, 0x70..=0x7F | 0xE0..=0xE3 | 0xEB | 0x83);
                 instr.modrm_form.operand_data.id = if needs_sign_ext {
                     byte_val as i8 as i32 as u32
                 } else {
@@ -661,7 +673,32 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
         };
 
     // Look up opcode from tables
-    if opcode_map == 4 {
+    if opcode_map == 0 && (b1 >= 0xD8 && b1 <= 0xDF) {
+        // x87 FPU escape opcodes — use dedicated FPU opcode tables
+        // Matching Bochs decoder32_fp_escape() in fetchdecode32.cc
+        let fpu_table = match b1 {
+            0xD8 => &BX_OPCODE_INFO_FLOATING_POINT_D8,
+            0xD9 => &BX_OPCODE_INFO_FLOATING_POINT_D9,
+            0xDA => &BX_OPCODE_INFO_FLOATING_POINT_DA,
+            0xDB => &BX_OPCODE_INFO_FLOATING_POINT_DB,
+            0xDC => &BX_OPCODE_INFO_FLOATING_POINT_DC,
+            0xDD => &BX_OPCODE_INFO_FLOATING_POINT_DD,
+            0xDE => &BX_OPCODE_INFO_FLOATING_POINT_DE,
+            _ => &BX_OPCODE_INFO_FLOATING_POINT_DF, // 0xDF
+        };
+        let fpu_index = if mod_c0 {
+            // Register form: index = (modrm & 0x3F) + 8
+            ((modrm_byte & 0x3F) as usize) + 8
+        } else {
+            // Memory form: index = nnn (0-7)
+            nnn as usize
+        };
+        instr.meta_info.ia_opcode = fpu_table[fpu_index];
+        // Store foo: (modrm | (escape_byte << 8)) & 0x7FF — for x87 FPU handler context
+        // Can't call set_foo() in const fn, so set id directly (foo is in lower 16 bits of id)
+        let foo_val = ((modrm_byte as u16) | ((b1 as u16) << 8)) & 0x7FF;
+        instr.modrm_form.operand_data.id = foo_val as u32;
+    } else if opcode_map == 4 {
         // 3DNow! instruction: use suffix to look up opcode directly
         instr.meta_info.ia_opcode = BX3_DNOW_OPCODE[dnow_suffix as usize];
     } else {
@@ -1067,7 +1104,7 @@ const fn opcode_needs_modrm_32(b1: u32, map: u8) -> bool {
             0x90..=0x9F |
             0xA0..=0xAF |
             0xB0..=0xBF |
-            0xC2 | 0xC3 | 0xC8 | 0xCA | 0xCB | 0xCC..=0xCF |
+            0xC2 | 0xC3 | 0xC8 | 0xC9 | 0xCA | 0xCB | 0xCC..=0xCF |
             0xD4..=0xD7 |
             0xE0..=0xEF |
             0xF1 | 0xF4 | 0xF5 | 0xF8..=0xFD
@@ -1454,5 +1491,27 @@ mod tests {
                 result
             );
         }
+    }
+
+    /// Test that 0x83 (Group 1 EdsIb) sign-extends the immediate byte
+    #[test]
+    fn test_0x83_sign_extension() {
+        // 83 C3 FD = ADD EBX, -3 (sign-extended 0xFD to 0xFFFFFFFD)
+        let bytes = vec![0x83, 0xC3, 0xFD];
+        let instr = fetch_decode32(&bytes, true).unwrap();
+        assert_eq!(instr.id(), 0xFFFFFFFD,
+            "0x83 imm8 0xFD should be sign-extended to 0xFFFFFFFD, got {:#x}", instr.id());
+
+        // 83 C3 08 = ADD EBX, 8 (positive stays same)
+        let bytes = vec![0x83, 0xC3, 0x08];
+        let instr = fetch_decode32(&bytes, true).unwrap();
+        assert_eq!(instr.id(), 0x00000008,
+            "0x83 imm8 0x08 should stay 0x00000008, got {:#x}", instr.id());
+
+        // 83 FB FF = CMP EBX, -1 (sign-extended)
+        let bytes = vec![0x83, 0xFB, 0xFF];
+        let instr = fetch_decode32(&bytes, true).unwrap();
+        assert_eq!(instr.id(), 0xFFFFFFFF,
+            "0x83 imm8 0xFF should be sign-extended to 0xFFFFFFFF, got {:#x}", instr.id());
     }
 }

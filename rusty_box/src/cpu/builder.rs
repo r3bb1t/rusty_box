@@ -105,6 +105,7 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             cpu_mode: Default::default(),
             user_pl: Default::default(),
             ignore_bad_msrs: Default::default(),
+            a20_mask: 0xFFFF_FFFF_FFFF_FFFF,
             cpu_state_use_ok: Default::default(),
             last_exception_type: Default::default(),
             cpuloop_stack_anchor: Default::default(),

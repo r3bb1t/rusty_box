@@ -175,23 +175,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMP_GwEw_M: CMP r16, r/m16 (memory form)
-    pub fn cmp_gw_ew_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmp_gw_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op1 = self.get_gpr16(instr.dst() as usize);
-        let op2 = self.read_virtual_word(seg, eaddr);
+        let op2 = self.read_virtual_word(seg, eaddr)?;
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_16(op1, op2, result);
+        Ok(())
     }
 
     /// CMP_EwIw_M: CMP r/m16, imm16 (memory form)
-    pub fn cmp_ew_iw_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmp_ew_iw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1 = self.read_virtual_word(seg, eaddr);
+        let op1 = self.read_virtual_word(seg, eaddr)?;
         let op2 = instr.iw();
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_16(op1, op2, result);
+        Ok(())
     }
 
     // =========================================================================
@@ -378,22 +380,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // get_laddr32_seg is defined in logical8.rs to avoid duplicate definitions
 
-    /// Read word from virtual address
-    pub fn read_virtual_word(&self, seg: BxSegregs, eaddr: u32) -> u16 {
-        let laddr = self.get_laddr32_seg(seg, eaddr);
-        self.mem_read_word(laddr as u64)
+    /// Read word from virtual address (translates through page tables when paging is enabled).
+    pub fn read_virtual_word(&mut self, seg: BxSegregs, eaddr: u32) -> super::Result<u16> {
+        let laddr = self.get_laddr32_seg_checked(seg, eaddr, 2)? as u64;
+        let paddr = self.translate_data_read(laddr)?;
+        Ok(self.mem_read_word(paddr))
     }
 
-    /// Read-Modify-Write: Read word, return it and linear address for write back
-    pub fn read_rmw_virtual_word(&mut self, seg: BxSegregs, eaddr: u32) -> (u16, u32) {
-        let laddr = self.get_laddr32_seg(seg, eaddr);
-        let val = self.mem_read_word(laddr as u64);
-        (val, laddr)
+    /// Read-Modify-Write: Read word, return value and physical address for write back.
+    pub fn read_rmw_virtual_word(&mut self, seg: BxSegregs, eaddr: u32) -> super::Result<(u16, u64)> {
+        let laddr = self.get_laddr32_seg_checked(seg, eaddr, 2)? as u64;
+        let paddr = self.translate_data_write(laddr)?;
+        let val = self.mem_read_word(paddr);
+        Ok((val, paddr))
     }
 
-    /// Write word to linear address (for RMW operations)
-    pub fn write_rmw_linear_word(&mut self, laddr: u32, val: u16) {
-        self.mem_write_word(laddr as u64, val);
+    /// Write word to a previously-translated physical address (RMW write-back).
+    pub fn write_rmw_linear_word(&mut self, paddr: u64, val: u16) {
+        self.mem_write_word(paddr, val);
     }
 
     // =========================================================================
@@ -402,10 +406,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XOR_EwGwM: XOR r/m16, r16 (memory form)
     /// Matches BX_CPU_C::XOR_EwGwM
-    pub fn xor_ew_gw_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn xor_ew_gw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr);
+        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
         let src_reg = instr.src() as usize; // src()=[1]=nnn=register for 16-bit store (decoder swaps)
         let op2_16 = self.get_gpr16(src_reg);
         let result = op1_16 ^ op2_16;
@@ -420,14 +424,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op2_16,
             result
         );
+        Ok(())
     }
 
     /// XOR_GwEwM: XOR r16, r/m16 (memory form)
     /// Matches BX_CPU_C::XOR_GwEwM
-    pub fn xor_gw_ew_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn xor_gw_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op2_16 = self.read_virtual_word(seg, eaddr);
+        let op2_16 = self.read_virtual_word(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let op1_16 = self.get_gpr16(dst_reg);
         let result = op1_16 ^ op2_16;
@@ -441,14 +446,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op2_16,
             result
         );
+        Ok(())
     }
 
     /// XOR_EwIwM: XOR r/m16, imm16 (memory form)
     /// Matches BX_CPU_C::XOR_EwIwM
-    pub fn xor_ew_iw_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn xor_ew_iw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr);
+        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
         let op2_16 = instr.iw();
         let result = op1_16 ^ op2_16;
 
@@ -462,14 +468,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op2_16,
             result
         );
+        Ok(())
     }
 
     /// OR_EwGwM: OR r/m16, r16 (memory form)
     /// Matches BX_CPU_C::OR_EwGwM
-    pub fn or_ew_gw_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn or_ew_gw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr);
+        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
         let src_reg = instr.src() as usize; // src()=[1]=nnn=register for 16-bit store (decoder swaps)
         let op2_16 = self.get_gpr16(src_reg);
         let result = op1_16 | op2_16;
@@ -484,14 +491,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op2_16,
             result
         );
+        Ok(())
     }
 
     /// OR_GwEwM: OR r16, r/m16 (memory form)
     /// Matches BX_CPU_C::OR_GwEwM
-    pub fn or_gw_ew_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn or_gw_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op2_16 = self.read_virtual_word(seg, eaddr);
+        let op2_16 = self.read_virtual_word(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let op1_16 = self.get_gpr16(dst_reg);
         let result = op1_16 | op2_16;
@@ -505,14 +513,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op2_16,
             result
         );
+        Ok(())
     }
 
     /// OR_EwIwM: OR r/m16, imm16 (memory form)
     /// Matches BX_CPU_C::OR_EwIwM
-    pub fn or_ew_iw_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn or_ew_iw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr);
+        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
         let op2_16 = instr.iw();
         let result = op1_16 | op2_16;
 
@@ -526,14 +535,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op2_16,
             result
         );
+        Ok(())
     }
 
     /// AND_EwGwM: AND r/m16, r16 (memory form)
     /// Matches BX_CPU_C::AND_EwGwM
-    pub fn and_ew_gw_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn and_ew_gw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr);
+        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
         let src_reg = instr.src() as usize; // src()=[1]=nnn=register for 16-bit store (decoder swaps)
         let op2_16 = self.get_gpr16(src_reg);
         let result = op1_16 & op2_16;
@@ -548,14 +558,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op2_16,
             result
         );
+        Ok(())
     }
 
     /// AND_GwEwM: AND r16, r/m16 (memory form)
     /// Matches BX_CPU_C::AND_GwEwM
-    pub fn and_gw_ew_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn and_gw_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op2_16 = self.read_virtual_word(seg, eaddr);
+        let op2_16 = self.read_virtual_word(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let op1_16 = self.get_gpr16(dst_reg);
         let result = op1_16 & op2_16;
@@ -569,14 +580,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op2_16,
             result
         );
+        Ok(())
     }
 
     /// AND_EwIwM: AND r/m16, imm16 (memory form)
     /// Matches BX_CPU_C::AND_EwIwM
-    pub fn and_ew_iw_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn and_ew_iw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr);
+        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
         let op2_16 = instr.iw();
         let result = op1_16 & op2_16;
 
@@ -590,14 +602,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op2_16,
             result
         );
+        Ok(())
     }
 
     /// NOT_EwM: NOT r/m16 (memory form)
     /// Matches BX_CPU_C::NOT_EwM
-    pub fn not_ew_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn not_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr);
+        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
         let result = !op1_16;
 
         self.write_rmw_linear_word(laddr, result);
@@ -608,15 +621,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op1_16,
             result
         );
+        Ok(())
     }
 
     /// TEST_EwGwM: TEST r/m16, r16 (memory form)
-    /// Matches BX_CPU_C::TEST_EwGwM
-    pub fn test_ew_gw_m(&mut self, instr: &BxInstructionGenerated) {
+    /// Opcode 0x85 is NOT store-direction, so dst() = nnn = register operand
+    pub fn test_ew_gw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1_16 = self.read_virtual_word(seg, eaddr);
-        let src_reg = instr.src() as usize; // src()=[1]=nnn=register for 16-bit store (decoder swaps)
+        let op1_16 = self.read_virtual_word(seg, eaddr)?;
+        let src_reg = instr.dst() as usize; // Opcode 0x85 is NOT store-direction: dst()=nnn=register
         let op2_16 = self.get_gpr16(src_reg);
         let result = op1_16 & op2_16;
 
@@ -630,14 +644,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op2_16,
             result
         );
+        Ok(())
     }
 
     /// TEST_EwIwM: TEST r/m16, imm16 (memory form)
     /// Matches BX_CPU_C::TEST_EwIwM
-    pub fn test_ew_iw_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn test_ew_iw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1_16 = self.read_virtual_word(seg, eaddr);
+        let op1_16 = self.read_virtual_word(seg, eaddr)?;
         let op2_16 = instr.iw();
         let result = op1_16 & op2_16;
 
@@ -651,52 +666,53 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op2_16,
             result
         );
+        Ok(())
     }
 
     // =========================================================================
     // Unified handlers: dispatch R/M based on instr.mod_c0()
     // =========================================================================
 
-    pub fn xor_ew_gw(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.xor_ew_gw_r(instr) } else { self.xor_ew_gw_m(instr) }
+    pub fn xor_ew_gw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.xor_ew_gw_r(instr); Ok(()) } else { self.xor_ew_gw_m(instr) }
     }
-    pub fn xor_gw_ew(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.xor_gw_ew_r(instr) } else { self.xor_gw_ew_m(instr) }
+    pub fn xor_gw_ew(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.xor_gw_ew_r(instr); Ok(()) } else { self.xor_gw_ew_m(instr) }
     }
-    pub fn xor_ew_iw(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.xor_ew_iw_r(instr) } else { self.xor_ew_iw_m(instr) }
+    pub fn xor_ew_iw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.xor_ew_iw_r(instr); Ok(()) } else { self.xor_ew_iw_m(instr) }
     }
-    pub fn and_ew_gw(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.and_ew_gw_r(instr) } else { self.and_ew_gw_m(instr) }
+    pub fn and_ew_gw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.and_ew_gw_r(instr); Ok(()) } else { self.and_ew_gw_m(instr) }
     }
-    pub fn and_gw_ew(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.and_gw_ew_r(instr) } else { self.and_gw_ew_m(instr) }
+    pub fn and_gw_ew(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.and_gw_ew_r(instr); Ok(()) } else { self.and_gw_ew_m(instr) }
     }
-    pub fn and_ew_iw(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.and_ew_iw_r(instr) } else { self.and_ew_iw_m(instr) }
+    pub fn and_ew_iw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.and_ew_iw_r(instr); Ok(()) } else { self.and_ew_iw_m(instr) }
     }
-    pub fn or_ew_gw(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.or_ew_gw_r(instr) } else { self.or_ew_gw_m(instr) }
+    pub fn or_ew_gw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.or_ew_gw_r(instr); Ok(()) } else { self.or_ew_gw_m(instr) }
     }
-    pub fn or_gw_ew(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.or_gw_ew_r(instr) } else { self.or_gw_ew_m(instr) }
+    pub fn or_gw_ew(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.or_gw_ew_r(instr); Ok(()) } else { self.or_gw_ew_m(instr) }
     }
-    pub fn or_ew_iw(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.or_ew_iw_r(instr) } else { self.or_ew_iw_m(instr) }
+    pub fn or_ew_iw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.or_ew_iw_r(instr); Ok(()) } else { self.or_ew_iw_m(instr) }
     }
-    pub fn not_ew(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.not_ew_r(instr) } else { self.not_ew_m(instr) }
+    pub fn not_ew(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.not_ew_r(instr); Ok(()) } else { self.not_ew_m(instr) }
     }
-    pub fn test_ew_gw(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.test_ew_gw_r(instr) } else { self.test_ew_gw_m(instr) }
+    pub fn test_ew_gw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.test_ew_gw_r(instr); Ok(()) } else { self.test_ew_gw_m(instr) }
     }
-    pub fn test_ew_iw(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.test_ew_iw_r(instr) } else { self.test_ew_iw_m(instr) }
+    pub fn test_ew_iw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.test_ew_iw_r(instr); Ok(()) } else { self.test_ew_iw_m(instr) }
     }
-    pub fn cmp_gw_ew(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.cmp_gw_ew_r(instr) } else { self.cmp_gw_ew_m(instr) }
+    pub fn cmp_gw_ew(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.cmp_gw_ew_r(instr); Ok(()) } else { self.cmp_gw_ew_m(instr) }
     }
-    pub fn cmp_ew_iw(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.cmp_ew_iw_r(instr) } else { self.cmp_ew_iw_m(instr) }
+    pub fn cmp_ew_iw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.cmp_ew_iw_r(instr); Ok(()) } else { self.cmp_ew_iw_m(instr) }
     }
 }

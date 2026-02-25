@@ -985,7 +985,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
     ) -> Result<()> {
         let seg = instr.meta_data[0] as usize;
         let val = cpu.sregs[seg].selector.value;
-        cpu.push_16(val);
+        cpu.push_16(val)?;
         Ok(())
     }
 
@@ -996,7 +996,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         use crate::cpu::decoder::BxSegregs;
         use crate::cpu::segment_ctrl_pro::parse_selector;
         let seg = instr.meta_data[0] as usize;
-        let val = cpu.pop_16();
+        let val = cpu.pop_16()?;
         // Don't allow loading CS
         if seg != BxSegregs::Cs as usize {
             parse_selector(val, &mut cpu.sregs[seg].selector);

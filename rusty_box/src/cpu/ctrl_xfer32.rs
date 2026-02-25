@@ -103,7 +103,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn jmp_ed_m(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let new_eip = self.read_virtual_dword(seg, eaddr);
+        let new_eip = self.read_virtual_dword(seg, eaddr)?;
         self.branch_near32(new_eip)?;
         tracing::trace!("JMP m32: [{:?}:{:#010x}] -> EIP = {:#010x}", seg, eaddr, new_eip);
         Ok(())
@@ -128,7 +128,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eip = self.eip();
 
         // Push return address
-        self.push_32(eip);
+        self.push_32(eip)?;
 
         let new_eip = (eip as i32).wrapping_add(disp) as u32;
 
@@ -144,7 +144,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let new_eip = self.get_gpr32(dst);
         let eip = self.eip();
 
-        self.push_32(eip);
+        self.push_32(eip)?;
         self.branch_near32(new_eip)?;
         tracing::trace!("CALL r32: EIP = {:#010x}, ret = {:#010x}", new_eip, eip);
         Ok(())
@@ -155,10 +155,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn call_ed_m(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let new_eip = self.read_virtual_dword(seg, eaddr);
+        let new_eip = self.read_virtual_dword(seg, eaddr)?;
         let eip = self.eip();
 
-        self.push_32(eip);
+        self.push_32(eip)?;
         self.branch_near32(new_eip)?;
         tracing::trace!("CALL m32: [{:?}:{:#010x}] -> EIP = {:#010x}, ret = {:#010x}", seg, eaddr, new_eip, eip);
         Ok(())
@@ -179,14 +179,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// RET near - Return from procedure (32-bit)
     pub fn ret_near32(&mut self, _instr: &BxInstructionGenerated) -> Result<()> {
-        let return_eip = self.pop_32();
+        let return_eip = self.pop_32()?;
         self.branch_near32(return_eip)?;
         Ok(())
     }
 
     /// RET near imm16 - Return and pop imm16 bytes (32-bit)
     pub fn ret_near32_iw(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
-        let return_eip = self.pop_32();
+        let return_eip = self.pop_32()?;
         let imm16 = instr.iw();
 
         self.branch_near32(return_eip)?;
@@ -516,8 +516,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Push return address (CS:EIP)
             let cs_value = self.sregs[BxSegregs::Cs as usize].selector.value;
             let eip = self.eip();
-            self.push_32(cs_value as u32);
-            self.push_32(eip);
+            self.push_32(cs_value as u32)?;
+            self.push_32(eip)?;
 
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
             self.set_eip(disp32);
@@ -548,8 +548,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         
         // Read offset and segment from memory
         let seg = BxSegregs::from(instr.seg());
-        let op1_32 = self.read_virtual_dword(seg, eaddr);
-        let cs_raw = self.read_virtual_word(seg, (eaddr.wrapping_add(4)) & (if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF }));
+        let op1_32 = self.read_virtual_dword(seg, eaddr)?;
+        let cs_raw = self.read_virtual_word(seg, (eaddr.wrapping_add(4)) & (if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF }))?;
         
         self.call_far32(instr, cs_raw, op1_32)
     }
@@ -574,8 +574,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         
         // Read offset and segment from memory
         let seg = BxSegregs::from(instr.seg());
-        let op1_32 = self.read_virtual_dword(seg, eaddr);
-        let cs_raw = self.read_virtual_word(seg, (eaddr.wrapping_add(4)) & (if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF }));
+        let op1_32 = self.read_virtual_dword(seg, eaddr)?;
+        let cs_raw = self.read_virtual_word(seg, (eaddr.wrapping_add(4)) & (if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF }))?;
         
         self.jmp_far32(instr, cs_raw, op1_32)
     }
@@ -598,8 +598,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             });
         } else {
             // Real mode - pop EIP and CS (32-bit pop, MSW discarded for CS)
-            let eip = self.pop_32();
-            let cs_raw = self.pop_32() as u16; // 32-bit pop, MSW discarded
+            let eip = self.pop_32()?;
+            let cs_raw = self.pop_32()? as u16; // 32-bit pop, MSW discarded
 
             // Check CS limit
             let limit = self.get_segment_limit(BxSegregs::Cs);
@@ -633,8 +633,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             });
         } else {
             // Real mode - pop EIP and CS (32-bit pop, MSW discarded for CS)
-            let eip = self.pop_32();
-            let cs_raw = self.pop_32() as u16; // 32-bit pop, MSW discarded
+            let eip = self.pop_32()?;
+            let cs_raw = self.pop_32()? as u16; // 32-bit pop, MSW discarded
 
             // Check CS limit
             let limit = self.get_segment_limit(BxSegregs::Cs);

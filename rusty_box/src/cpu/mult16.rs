@@ -47,7 +47,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.get_gpr16(0); // AX
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_word(seg, eaddr);
+        let op2 = self.read_virtual_word(seg, eaddr)?;
 
         let product_32 = (op1 as u32) * (op2 as u32);
         let product_16l = (product_32 & 0xFFFF) as u16;
@@ -102,7 +102,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.get_gpr16(0) as i16; // AX
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_word(seg, eaddr) as i16;
+        let op2 = self.read_virtual_word(seg, eaddr)? as i16;
 
         let product_32 = (op1 as i32) * (op2 as i32);
         let product_16l = (product_32 & 0xFFFF) as u16;
@@ -160,7 +160,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn div_ax_ew_m(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_word(seg, eaddr);
+        let op2 = self.read_virtual_word(seg, eaddr)?;
 
         if op2 == 0 {
             return self.exception(Exception::De, 0);
@@ -239,7 +239,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_word(seg, eaddr) as i16;
+        let op2 = self.read_virtual_word(seg, eaddr)? as i16;
 
         if op2 == 0 {
             return self.exception(Exception::De, 0);

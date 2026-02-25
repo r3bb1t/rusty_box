@@ -218,18 +218,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let is_386_gate = gate_descriptor.r#type >= 14;
 
             if is_386_gate {
-                self.push_32(self.eflags);
-                self.push_32(self.sregs[BxSegregs::Cs as usize].selector.value as u32);
-                self.push_32(self.eip());
+                self.push_32(self.eflags)?;
+                self.push_32(self.sregs[BxSegregs::Cs as usize].selector.value as u32)?;
+                self.push_32(self.eip())?;
                 if push_error {
-                    self.push_32(error_code as u32);
+                    self.push_32(error_code as u32)?;
                 }
             } else {
-                self.push_16((self.eflags & 0xFFFF) as u16);
-                self.push_16(self.sregs[BxSegregs::Cs as usize].selector.value);
-                self.push_16(self.eip() as u16);
+                self.push_16((self.eflags & 0xFFFF) as u16)?;
+                self.push_16(self.sregs[BxSegregs::Cs as usize].selector.value)?;
+                self.push_16(self.eip() as u16)?;
                 if push_error {
-                    self.push_16(error_code);
+                    self.push_16(error_code)?;
                 }
             }
 

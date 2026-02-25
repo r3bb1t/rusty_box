@@ -40,7 +40,7 @@ pub fn MOV_GbEbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGene
     let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
 
     // Read byte from virtual memory (matching read_virtual_byte)
-    let val = cpu.read_virtual_byte(seg, eaddr);
+    let val = cpu.read_virtual_byte(seg, eaddr)?;
 
     // Write to destination register (matching BX_WRITE_8BIT_REGx)
     cpu.write_8bit_regx(instr.dst() as usize, instr.extend8bit_l(), val);
@@ -72,7 +72,7 @@ pub fn MOV_EbGbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGene
     let val = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
 
     // Write byte to virtual memory
-    cpu.write_virtual_byte(seg, eaddr, val);
+    cpu.write_virtual_byte(seg, eaddr, val)?;
 
     Ok(())
 }

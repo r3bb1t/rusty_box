@@ -875,6 +875,210 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 self.cpu.get_cpu_mode(),
                                 bp, ax, bp2, bp4, bp6,
                             );
+                            // Dump code bytes at stuck RIP for disassembly
+                            {
+                                let mem = self.memory.ram_slice();
+                                let rip_usize = current_rip as usize;
+                                if rip_usize + 32 < mem.len() {
+                                    let bytes: Vec<String> = mem[rip_usize..rip_usize + 32]
+                                        .iter()
+                                        .map(|b| format!("{:02x}", b))
+                                        .collect();
+                                    tracing::warn!(
+                                        "Code at RIP={:#x}: {}",
+                                        current_rip,
+                                        bytes.join(" ")
+                                    );
+                                }
+                                // Dump 256 bytes BEFORE stuck point to see the comparison code
+                                let pre_start = rip_usize.saturating_sub(256);
+                                if pre_start < mem.len() && rip_usize < mem.len() {
+                                    // Dump in 32-byte lines
+                                    for offset in (pre_start..rip_usize).step_by(32) {
+                                        let end = (offset + 32).min(rip_usize);
+                                        let bytes: Vec<String> = mem[offset..end]
+                                            .iter()
+                                            .map(|b| format!("{:02x}", b))
+                                            .collect();
+                                        tracing::warn!(
+                                            "Code@{:#06x}: {}",
+                                            offset,
+                                            bytes.join(" ")
+                                        );
+                                    }
+                                }
+                                // Also dump all general registers + CR0
+                                tracing::warn!(
+                                    "Regs: EAX={:#010x} EBX={:#010x} ECX={:#010x} EDX={:#010x} ESI={:#010x} EDI={:#010x} ESP={:#010x} EBP={:#010x} CR0={:#010x}",
+                                    self.cpu.eax(), self.cpu.ebx(), self.cpu.ecx(), self.cpu.edx(),
+                                    self.cpu.esi(), self.cpu.edi(), self.cpu.esp(), self.cpu.ebp(),
+                                    self.cpu.get_cr0_val(),
+                                );
+                                // For PM stuck points: dump 32-bit stack frame (saved EBP, return addr, args)
+                                let ebp = self.cpu.ebp() as usize;
+                                if ebp + 16 < mem.len() {
+                                    let saved_ebp = u32::from_le_bytes([mem[ebp], mem[ebp+1], mem[ebp+2], mem[ebp+3]]);
+                                    let ret_addr = u32::from_le_bytes([mem[ebp+4], mem[ebp+5], mem[ebp+6], mem[ebp+7]]);
+                                    let arg1 = u32::from_le_bytes([mem[ebp+8], mem[ebp+9], mem[ebp+10], mem[ebp+11]]);
+                                    let arg2 = u32::from_le_bytes([mem[ebp+12], mem[ebp+13], mem[ebp+14], mem[ebp+15]]);
+                                    tracing::warn!(
+                                        "Stack frame: saved_EBP={:#010x} ret_addr={:#010x} arg1={:#010x} arg2={:#010x}",
+                                        saved_ebp, ret_addr, arg1, arg2,
+                                    );
+                                    // Follow up: dump code around the return address (128 bytes before)
+                                    let ra = ret_addr as usize;
+                                    if ra > 128 && ra + 32 < mem.len() {
+                                        for off in (ra.saturating_sub(128)..ra).step_by(32) {
+                                            let end = (off + 32).min(ra);
+                                            let bytes: Vec<String> = mem[off..end].iter().map(|b| format!("{:02x}", b)).collect();
+                                            tracing::warn!("Caller@{:#06x}: {}", off, bytes.join(" "));
+                                        }
+                                        let after: Vec<String> = mem[ra..ra+32].iter().map(|b| format!("{:02x}", b)).collect();
+                                        tracing::warn!("Caller code at ret_addr: {}", after.join(" "));
+                                    }
+                                    // Dump the error message string (EBX = msg ptr in error())
+                                    let ebx = self.cpu.ebx() as usize;
+                                    if ebx + 64 < mem.len() {
+                                        let msg_bytes = &mem[ebx..ebx+64];
+                                        let msg_end = msg_bytes.iter().position(|&b| b == 0).unwrap_or(64);
+                                        let msg_str = String::from_utf8_lossy(&msg_bytes[..msg_end]);
+                                        tracing::warn!("Error msg at EBX={:#x}: {:?}", ebx, msg_str);
+                                    }
+                                    // Also dump string at arg1
+                                    let a1 = arg1 as usize;
+                                    if a1 + 64 < mem.len() && a1 != ebx {
+                                        let msg_bytes = &mem[a1..a1+64];
+                                        let msg_end = msg_bytes.iter().position(|&b| b == 0).unwrap_or(64);
+                                        let msg_str = String::from_utf8_lossy(&msg_bytes[..msg_end]);
+                                        tracing::warn!("Error msg at arg1={:#x}: {:?}", a1, msg_str);
+                                    }
+                                    // Walk one more frame up
+                                    let parent_ebp = saved_ebp as usize;
+                                    if parent_ebp + 16 < mem.len() {
+                                        let p_saved = u32::from_le_bytes([mem[parent_ebp], mem[parent_ebp+1], mem[parent_ebp+2], mem[parent_ebp+3]]);
+                                        let p_ret = u32::from_le_bytes([mem[parent_ebp+4], mem[parent_ebp+5], mem[parent_ebp+6], mem[parent_ebp+7]]);
+                                        tracing::warn!("Parent frame: saved_EBP={:#010x} ret_addr={:#010x}", p_saved, p_ret);
+                                    }
+                                }
+                                // Search memory for gzip magic (1f 8b 08) to find where compressed kernel data is
+                                {
+                                    let search_end = mem.len().min(0x200000); // search first 2MB
+                                    let mut found_count = 0;
+                                    for i in 0..search_end.saturating_sub(3) {
+                                        if mem[i] == 0x1f && mem[i+1] == 0x8b && mem[i+2] == 0x08 {
+                                            let context: Vec<String> = mem[i..i.min(search_end).wrapping_add(32).min(search_end)]
+                                                .iter().map(|b| format!("{:02x}", b)).collect();
+                                            tracing::warn!("GZIP magic found at {:#x}: {}", i, context.join(" "));
+                                            found_count += 1;
+                                            if found_count >= 10 { break; }
+                                        }
+                                    }
+                                    if found_count == 0 {
+                                        tracing::warn!("NO gzip magic (1f 8b 08) found in first 2MB of memory!");
+                                    }
+                                    // Dump expected locations for compressed kernel data:
+                                    // After head.S relocates: system code at 0x1000, compressed data at offset ~0x2000-0x4000
+                                    for addr in [0x1000usize, 0x2000, 0x3000, 0x4000, 0x5000, 0x10000, 0x11000, 0x52E00, 0x53E00, 0x62E00, 0x63E00] {
+                                        if addr + 16 < mem.len() {
+                                            let bytes: Vec<String> = mem[addr..addr+16].iter().map(|b| format!("{:02x}", b)).collect();
+                                            tracing::warn!("Mem@{:#07x}: {}", addr, bytes.join(" "));
+                                        }
+                                    }
+                                    // Dump the decompressor's input_data pointer
+                                    let esi = self.cpu.esi() as usize;
+                                    if esi + 32 < mem.len() {
+                                        let bytes: Vec<String> = mem[esi..esi+32].iter().map(|b| format!("{:02x}", b)).collect();
+                                        tracing::warn!("Data at ESI={:#x}: {}", esi, bytes.join(" "));
+                                    }
+                                    // Search for the address 0x41d8 (little-endian) in code region 0x1000-0x4200
+                                    // This should appear in instructions that reference input_data
+                                    let search_val = [0xd8u8, 0x41, 0x00, 0x00];
+                                    for i in 0x1000..0x4200usize {
+                                        if i + 4 <= mem.len() && mem[i..i+4] == search_val {
+                                            let ctx_start = i.saturating_sub(4);
+                                            let ctx_end = (i + 8).min(mem.len());
+                                            let ctx: Vec<String> = mem[ctx_start..ctx_end].iter().map(|b| format!("{:02x}", b)).collect();
+                                            tracing::warn!("Found 0x41d8 ref at {:#06x}: {}", i, ctx.join(" "));
+                                        }
+                                    }
+                                    // Dump memory right around the gzip data to check alignment
+                                    for addr in [0x41d0usize, 0x41d8, 0x41e0, 0x41e8, 0x41f0] {
+                                        if addr + 16 < mem.len() {
+                                            let bytes: Vec<String> = mem[addr..addr+16].iter().map(|b| format!("{:02x}", b)).collect();
+                                            tracing::warn!("Mem@{:#07x}: {}", addr, bytes.join(" "));
+                                        }
+                                    }
+                                    // Dump decompressor key variables (found from code analysis):
+                                    // inbuf pointer at 0x510B0, input_len at 0x510AC
+                                    // Also dump surrounding BSS to find inptr/insize
+                                    for addr in (0x51080..0x51100).step_by(16) {
+                                        if addr + 16 < mem.len() {
+                                            let v0 = u32::from_le_bytes([mem[addr], mem[addr+1], mem[addr+2], mem[addr+3]]);
+                                            let v1 = u32::from_le_bytes([mem[addr+4], mem[addr+5], mem[addr+6], mem[addr+7]]);
+                                            let v2 = u32::from_le_bytes([mem[addr+8], mem[addr+9], mem[addr+10], mem[addr+11]]);
+                                            let v3 = u32::from_le_bytes([mem[addr+12], mem[addr+13], mem[addr+14], mem[addr+15]]);
+                                            tracing::warn!("BSS@{:#07x}: {:08x} {:08x} {:08x} {:08x}", addr, v0, v1, v2, v3);
+                                        }
+                                    }
+                                    // Also dump inbuf pointer specifically
+                                    if 0x510B4 < mem.len() {
+                                        let inbuf_ptr = u32::from_le_bytes([mem[0x510B0], mem[0x510B1], mem[0x510B2], mem[0x510B3]]);
+                                        let insize = u32::from_le_bytes([mem[0x510AC], mem[0x510AD], mem[0x510AE], mem[0x510AF]]);
+                                        tracing::warn!("Decompressor: inbuf={:#010x} (should be 0x41d8), val_at_0x510AC={:#010x}", inbuf_ptr, insize);
+                                        // DIRECT CHECK: Read via peek_ram (which applies vector_offset)
+                                        let peek = self.memory.peek_ram(0x510B0, 4);
+                                        let peek_val = if peek.len() >= 4 {
+                                            u32::from_le_bytes([peek[0], peek[1], peek[2], peek[3]])
+                                        } else { 0xDEAD };
+                                        tracing::warn!(
+                                            "  DIRECT CHECK: peek_ram(0x510B0)={:#010x} ram_slice[0x510B0]={:#010x}",
+                                            peek_val, inbuf_ptr,
+                                        );
+                                        // Also try reading via CPU's public read_physical_byte path
+                                        // (mem_read_dword is private, so use peek_ram from a different offset)
+                                        let peek2 = self.memory.peek_ram(0x510A0, 32);
+                                        if peek2.len() >= 32 {
+                                            let bytes: Vec<String> = peek2.iter().map(|b| format!("{:02x}", b)).collect();
+                                            tracing::warn!("  peek_ram(0x510A0..0x510C0): {}", bytes.join(" "));
+                                        }
+                                        // If inbuf is valid, dump what inbuf points to
+                                        let ibp = inbuf_ptr as usize;
+                                        if ibp + 16 < mem.len() {
+                                            let bytes: Vec<String> = mem[ibp..ibp+16].iter().map(|b| format!("{:02x}", b)).collect();
+                                            tracing::warn!("  *inbuf = {}", bytes.join(" "));
+                                        }
+                                    }
+                                    // Also dump wider BSS around 0x50000-0x51200 to find all decompressor globals
+                                    for addr in (0x50F80..0x51200).step_by(32) {
+                                        if addr + 32 < mem.len() {
+                                            let bytes: Vec<String> = mem[addr..addr+32].iter().map(|b| format!("{:02x}", b)).collect();
+                                            tracing::warn!("WiderBSS@{:#07x}: {}", addr, bytes.join(" "));
+                                        }
+                                    }
+                                }
+                                // Dump Linux boot parameters (memory detection)
+                                if mem.len() > 0x90100 {
+                                    let ext_mem_k = u16::from_le_bytes([mem[0x90002], mem[0x90003]]);
+                                    let alt_mem_k = u32::from_le_bytes([mem[0x901e0], mem[0x901e1], mem[0x901e2], mem[0x901e3]]);
+                                    // Also check BDA memory size at 0x413
+                                    let bda_mem = u16::from_le_bytes([mem[0x413], mem[0x414]]);
+                                    // Check CMOS values directly (what the BIOS should have read)
+                                    let cmos_ext_lo = mem.get(0x90030).copied().unwrap_or(0);
+                                    let cmos_ext_hi = mem.get(0x90031).copied().unwrap_or(0);
+                                    tracing::warn!(
+                                        "Boot params: ext_mem_k(0x90002)={} KB, alt_mem_k(0x901e0)={} KB, BDA_mem(0x413)={} KB",
+                                        ext_mem_k, alt_mem_k, bda_mem,
+                                    );
+                                    // Dump first 16 bytes of boot params header at 0x90000
+                                    let hdr: Vec<String> = mem[0x90000..0x90010].iter()
+                                        .map(|b| format!("{:02x}", b)).collect();
+                                    tracing::warn!("Boot params @0x90000: {}", hdr.join(" "));
+                                    // Dump setup header at 0x901F1+ (boot protocol version)
+                                    let setup_hdr: Vec<String> = mem[0x901F0..0x90200].iter()
+                                        .map(|b| format!("{:02x}", b)).collect();
+                                    tracing::warn!("Setup header @0x901F0: {}", setup_hdr.join(" "));
+                                }
+                            }
                             // Dump IPL table and stack for debugging
                             {
                                 let mem = self.memory.ram_slice();
@@ -975,10 +1179,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     // Required so PIT can generate IRQ0 and BIOS can progress past HLT waits.
                     if self.config.ips != 0 {
                         let usec_from_instr = (executed.saturating_mul(1_000_000)) / (self.config.ips as u64);
-                        // Always advance at least 10 usec so PIT/RTC timers tick even when
-                        // the CPU is halted or executed very few instructions (e.g., executed=1
-                        // at IPS=15M gives usec=0, starving timers forever).
-                        let usec = usec_from_instr.max(10);
+                        // When CPU is halted, advance time aggressively (5ms per batch) so PIT
+                        // fires IRQ0 quickly (~11 batches per 54.9ms PIT cycle). When active,
+                        // use min 10 usec to prevent timer starvation at low instruction counts.
+                        let min_usec = if matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::Hlt) {
+                            5000
+                        } else {
+                            10
+                        };
+                        let usec = usec_from_instr.max(min_usec);
                         self.tick_devices(usec);
                     }
 
@@ -1030,6 +1239,199 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             pit_c0.counting,
                             pit_c0.output,
                         );
+                    }
+
+                    // Decompressor progress check (every 1M instructions)
+                    if instructions_executed % 1_000_000 < INSTRUCTION_BATCH_SIZE {
+                        let rip = self.cpu.rip();
+                        // Check if we're in the decompressor (RIP in 0x1000-0x6000 range)
+                        if rip >= 0x1000 && rip < 0x6000 {
+                            let peek_inptr = self.memory.peek_ram(0x4004, 4);
+                            let inptr_val = u32::from_le_bytes([peek_inptr[0], peek_inptr[1], peek_inptr[2], peek_inptr[3]]);
+                            // Dump code at the inflate loop addresses
+                            let mem = self.memory.ram_slice();
+                            let code_23e0: Vec<String> = mem[0x23E0..0x2420].iter().map(|b| format!("{:02x}", b)).collect();
+                            // Decompressor global vars
+                            let peek = |addr: usize| -> u32 {
+                                let p = self.memory.peek_ram(addr, 4);
+                                u32::from_le_bytes([p[0], p[1], p[2], p[3]])
+                            };
+                            let outcnt = peek(0x4008);
+                            let bytes_out = peek(0x400C);
+                            let wp = peek(0x4010);  // window position / output_ptr
+                            // Check output at 0x100000 and 0x108000
+                            let peek_out = self.memory.peek_ram(0x100000, 8);
+                            let out_hex: Vec<String> = peek_out.iter().map(|b| format!("{:02x}", b)).collect();
+                            let peek_out2 = self.memory.peek_ram(0x108000, 8);
+                            let out2_hex: Vec<String> = peek_out2.iter().map(|b| format!("{:02x}", b)).collect();
+                            // Check the window buffer area (0x51100-0x59100 based on BSS layout)
+                            let peek_win = self.memory.peek_ram(0x51100, 8);
+                            let win_hex: Vec<String> = peek_win.iter().map(|b| format!("{:02x}", b)).collect();
+                            // Also check window buffer contents (wider sample)
+                            let peek_win16 = self.memory.peek_ram(0x510b8, 32);
+                            let win16_hex: Vec<String> = peek_win16.iter().map(|b| format!("{:02x}", b)).collect();
+                            // Check Huffman table area — tl/td pointers stored somewhere
+                            // Dump the key inflate globals (bb, bk might be on stack)
+                            let esp_val = self.cpu.esp() as usize;
+                            let stack_peek = if esp_val > 0 && esp_val < 0x100000 {
+                                let s = self.memory.peek_ram(esp_val, 32);
+                                let h: Vec<String> = s.iter().map(|b| format!("{:02x}", b)).collect();
+                                h.join(" ")
+                            } else { "N/A".to_string() };
+                            tracing::warn!(
+                                "DECOMP-PROGRESS: {}M instr, inptr={}/{} outcnt={} bytes_out={:#x} RIP={:#x} out@100000:{} win@510b8:{} stack@ESP:{}",
+                                instructions_executed / 1_000_000,
+                                inptr_val, 0x4CED4u32,
+                                outcnt, bytes_out,
+                                rip, out_hex.join(" "), win16_hex.join(" "), stack_peek,
+                            );
+                            if instructions_executed / 1_000_000 >= 1 && instructions_executed / 1_000_000 <= 3 {
+                                // inflate_codes EBP is 0x5CF1C (from trace), not the current EBP (which may be memcpy's)
+                                let ic_ebp = 0x5CF1Cu32 as usize;
+                                if ic_ebp + 0x30 < mem.len() {
+                                    let rd = |off: usize| -> u32 {
+                                        u32::from_le_bytes([mem[ic_ebp+off], mem[ic_ebp+off+1], mem[ic_ebp+off+2], mem[ic_ebp+off+3]])
+                                    };
+                                    let saved_ebp = rd(0);
+                                    let ret_addr = rd(4);
+                                    let arg1 = rd(8);    // tl
+                                    let arg2 = rd(0xC);  // td
+                                    let arg3 = rd(0x10); // bl
+                                    let arg4 = rd(0x14); // bd
+                                    tracing::warn!("INFLATE-CODES @EBP=0x5CF1C: saved_EBP={:#x} ret={:#x} tl={:#x} td={:#x} bl={} bd={}",
+                                        saved_ebp, ret_addr, arg1, arg2, arg3, arg4);
+                                    // Also dump the inflate_codes local variables
+                                    let locals = self.memory.peek_ram(ic_ebp - 0x30, 0x60);
+                                    let locals_hex: Vec<String> = locals.iter().map(|b| format!("{:02x}", b)).collect();
+                                    tracing::warn!("inflate_codes frame [EBP-0x30..EBP+0x30]: {}", locals_hex.join(" "));
+                                    // Check heap pointer
+                                    let free_mem_ptr = u32::from_le_bytes([mem[0x4014], mem[0x4015], mem[0x4016], mem[0x4017]]);
+                                    tracing::warn!("free_mem_ptr@0x4014={:#x}", free_mem_ptr);
+                                    // Dump compressed data (gzip+deflate) at 0x41D8
+                                    let cdata = self.memory.peek_ram(0x41D8, 64);
+                                    let cdata_hex: Vec<String> = cdata.iter().map(|b| format!("{:02x}", b)).collect();
+                                    tracing::warn!("Compressed data @0x41D8: {}", cdata_hex.join(" "));
+                                    // Check who called inflate_codes (return address 0x253D)
+                                    // Dump code around 0x2530 to see the CALL instruction
+                                    let call_area = self.memory.peek_ram(0x2520, 64);
+                                    let call_hex: Vec<String> = call_area.iter().map(|b| format!("{:02x}", b)).collect();
+                                    tracing::warn!("Code around inflate_codes CALL @0x2520: {}", call_hex.join(" "));
+                                    // Dump the full inflate_dynamic loop body (0x21A0-0x2430)
+                                    let loop_code1 = self.memory.peek_ram(0x21A0, 96);
+                                    let lc1_hex: Vec<String> = loop_code1.iter().map(|b| format!("{:02x}", b)).collect();
+                                    tracing::warn!("Code @0x21A0-0x21FF: {}", lc1_hex.join(" "));
+                                    let loop_code2 = self.memory.peek_ram(0x2200, 32);
+                                    let lc2_hex: Vec<String> = loop_code2.iter().map(|b| format!("{:02x}", b)).collect();
+                                    tracing::warn!("Code @0x2200-0x221F: {}", lc2_hex.join(" "));
+                                    let loop_code3 = self.memory.peek_ram(0x2410, 32);
+                                    let lc3_hex: Vec<String> = loop_code3.iter().map(|b| format!("{:02x}", b)).collect();
+                                    tracing::warn!("Code @0x2410-0x242F: {}", lc3_hex.join(" "));
+                                    // Dump code before the second loop to find the first loop
+                                    let code_2100 = self.memory.peek_ram(0x2100, 96);
+                                    let c2100_hex: Vec<String> = code_2100.iter().map(|b| format!("{:02x}", b)).collect();
+                                    tracing::warn!("Code @0x2100-0x215F: {}", c2100_hex.join(" "));
+                                    let code_2160 = self.memory.peek_ram(0x2160, 64);
+                                    let c2160_hex: Vec<String> = code_2160.iter().map(|b| format!("{:02x}", b)).collect();
+                                    tracing::warn!("Code @0x2160-0x219F: {}", c2160_hex.join(" "));
+                                    // Dump huft_build function (starts at 0x108C)
+                                    for chunk_start in (0x108Cu32..0x1700u32).step_by(64) {
+                                        let cs = chunk_start as usize;
+                                        let code = self.memory.peek_ram(cs, 64);
+                                        let hex: Vec<String> = code.iter().map(|b| format!("{:02x}", b)).collect();
+                                        tracing::warn!("Code @{:#06x}: {}", chunk_start, hex.join(" "));
+                                    }
+                                    // Also check the caller's (inflate_fixed/dynamic) stack frame
+                                    // Dump code-length Huffman table at tl=0x5d4e0
+                                    // Each entry is 8 bytes: [exop:1][bits:1][pad:2][base:4]
+                                    // Bochs inflate huft: { e:u8, b:u8, v:{n:u16 or t:ptr} }
+                                    let tl_addr = 0x5d4e0usize;
+                                    if tl_addr + 128*8 < mem.len() {
+                                        // Dump ALL non-zero entries in first 128
+                                        let mut nonzero_count = 0;
+                                        for idx in 0..128 {
+                                            let off = tl_addr + idx * 8;
+                                            let e = mem[off];
+                                            let b = mem[off + 1];
+                                            let vn = u16::from_le_bytes([mem[off+4], mem[off+5]]);
+                                            if e != 0 || b != 0 || vn != 0 {
+                                                nonzero_count += 1;
+                                                if nonzero_count <= 40 {
+                                                    tracing::warn!("HUFT[{}] @{:#x}: e={} b={} v.n={}", idx, off, e, b, vn);
+                                                }
+                                            }
+                                        }
+                                        tracing::warn!("HUFT table: {} non-zero entries out of 128", nonzero_count);
+                                        // Also dump entry 39
+                                        let idx = 39;
+                                        let off = tl_addr + idx * 8;
+                                        tracing::warn!("HUFT[39] raw: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                                            mem[off], mem[off+1], mem[off+2], mem[off+3], mem[off+4], mem[off+5], mem[off+6], mem[off+7]);
+                                    }
+                                    // Dump ll[] array (inflate_dynamic local at [EBP-0x4F0])
+                                    // inflate_dynamic EBP = 0x5D45C
+                                    let id_ebp = 0x5D45Cusize;
+                                    let ll_base = id_ebp - 0x4F0; // 0x5CF6C
+                                    // ll[] has 19 entries for code-length codes (border[0..18])
+                                    // Actually ll[] is 286+30=316 entries of unsigned int
+                                    // First dump the 19 code-length code lengths
+                                    let mut ll_vals = Vec::new();
+                                    for idx in 0..19 {
+                                        let off = ll_base + idx * 4;
+                                        if off + 4 <= mem.len() {
+                                            let v = u32::from_le_bytes([mem[off], mem[off+1], mem[off+2], mem[off+3]]);
+                                            ll_vals.push(format!("{}:{}", idx, v));
+                                        }
+                                    }
+                                    tracing::warn!("ll[0..19] (code-length code lengths): {}", ll_vals.join(" "));
+                                    // Also check bl and nb values
+                                    let bl_val = u32::from_le_bytes([mem[id_ebp-0x4F8], mem[id_ebp-0x4F7], mem[id_ebp-0x4F6], mem[id_ebp-0x4F5]]);
+                                    tracing::warn!("inflate_dynamic: bl=[EBP-0x4F8]={}, tl=[EBP-0x4F4]={:#x}",
+                                        bl_val,
+                                        u32::from_le_bytes([mem[id_ebp-0x4F4], mem[id_ebp-0x4F3], mem[id_ebp-0x4F2], mem[id_ebp-0x4F1]]));
+                                    // Dump border[] array at 0x4024 (19 entries of 4 bytes)
+                                    let border_addr = 0x4024usize;
+                                    if border_addr + 19*4 <= mem.len() {
+                                        let mut bvals = Vec::new();
+                                        for idx in 0..19 {
+                                            let off = border_addr + idx * 4;
+                                            let v = u32::from_le_bytes([mem[off], mem[off+1], mem[off+2], mem[off+3]]);
+                                            bvals.push(format!("{}", v));
+                                        }
+                                        tracing::warn!("border[] @0x4024: {}", bvals.join(" "));
+                                    }
+                                    // Dump mask_bits[] array (used for lookup mask)
+                                    // mask_bits is at 0x4064 based on code patterns (17 entries of 2 bytes: ush)
+                                    // Actually, let's find it. mask_bits[bl] was loaded as [EBP-0x508].
+                                    // The code at 0x2160 references 0x4164:
+                                    //   0f b7 04 45 64 41 00 00 = MOVZX EAX, word [EAX*2+0x4164]
+                                    // So mask_bits is at 0x4164
+                                    let mask_addr = 0x4164usize;
+                                    if mask_addr + 17*2 <= mem.len() {
+                                        let mut mvals = Vec::new();
+                                        for idx in 0..17 {
+                                            let off = mask_addr + idx * 2;
+                                            let v = u16::from_le_bytes([mem[off], mem[off+1]]);
+                                            mvals.push(format!("{}", v));
+                                        }
+                                        tracing::warn!("mask_bits[] @0x4164: {}", mvals.join(" "));
+                                    }
+                                    // saved_EBP from inflate_codes points to caller
+                                    if saved_ebp > 0 && (saved_ebp as usize) + 0x30 < mem.len() {
+                                        let caller_ebp = saved_ebp as usize;
+                                        let caller_ret = u32::from_le_bytes([mem[caller_ebp+4], mem[caller_ebp+5], mem[caller_ebp+6], mem[caller_ebp+7]]);
+                                        tracing::warn!("Caller frame @EBP={:#x}: ret={:#x}", saved_ebp, caller_ret);
+                                        // Dump caller's local variables
+                                        let caller_locals = self.memory.peek_ram(caller_ebp - 0x10, 0x30);
+                                        let cl_hex: Vec<String> = caller_locals.iter().map(|b| format!("{:02x}", b)).collect();
+                                        tracing::warn!("Caller locals [EBP-0x10..EBP+0x20]: {}", cl_hex.join(" "));
+                                    }
+                                }
+                                // Also dump registers
+                                tracing::warn!("REGS: EAX={:#x} ECX={:#x} EDX={:#x} EBX={:#x} ESP={:#x} EBP={:#x} ESI={:#x} EDI={:#x}",
+                                    self.cpu.eax(), self.cpu.ecx(), self.cpu.edx(), self.cpu.ebx(),
+                                    self.cpu.esp(), self.cpu.ebp(), self.cpu.esi(), self.cpu.edi());
+                            }
+                        }
                     }
 
                     // Deliver pending PIC interrupts to the CPU (Bochs-like).

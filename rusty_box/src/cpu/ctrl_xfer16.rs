@@ -78,17 +78,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// JMP m16 - Indirect jump through memory (memory form)
     /// Matching Bochs ctrl_xfer16.cc JMP_EwM
-    pub fn jmp_ew_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jmp_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let new_ip = self.read_virtual_word(seg, eaddr);
+        let new_ip = self.read_virtual_word(seg, eaddr)?;
         self.branch_near16(new_ip);
         tracing::trace!("JMP m16: [{:?}:{:#x}] -> IP = {:#06x}", seg, eaddr, new_ip);
+        Ok(())
     }
 
     /// JMP r/m16 - Unified dispatch (checks mod_c0)
-    pub fn jmp_ew(&mut self, instr: &BxInstructionGenerated) {
-        if instr.mod_c0() { self.jmp_ew_r(instr) } else { self.jmp_ew_m(instr) }
+    pub fn jmp_ew(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        if instr.mod_c0() { self.jmp_ew_r(instr); Ok(()) } else { self.jmp_ew_m(instr) }
     }
 
     // =========================================================================
@@ -96,45 +97,48 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// CALL rel16 - Near call with 16-bit displacement
-    pub fn call_jw(&mut self, instr: &BxInstructionGenerated) {
+    pub fn call_jw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let disp = instr.iw() as i16;
         let ip = self.get_ip();
         
         // Push return address
-        self.push_16(ip);
+        self.push_16(ip)?;
         
         let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
         self.branch_near16(new_ip);
         tracing::trace!("CALL rel16: IP = {:#06x}, ret = {:#06x}", new_ip, ip);
+        Ok(())
     }
 
     /// CALL r16 - Indirect call through register (register form)
     /// Matching Bochs ctrl_xfer16.cc CALL_EwR
-    pub fn call_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn call_ew_r(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let dst = instr.dst() as usize;
         let new_ip = self.get_gpr16(dst);
         let ip = self.get_ip();
 
-        self.push_16(ip);
+        self.push_16(ip)?;
         self.branch_near16(new_ip);
         tracing::trace!("CALL r16: IP = {:#06x}, ret = {:#06x}", new_ip, ip);
+        Ok(())
     }
 
     /// CALL m16 - Indirect call through memory (memory form)
     /// Matching Bochs ctrl_xfer16.cc CALL_EwM
-    pub fn call_ew_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn call_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let new_ip = self.read_virtual_word(seg, eaddr);
+        let new_ip = self.read_virtual_word(seg, eaddr)?;
         let ip = self.get_ip();
 
-        self.push_16(ip);
+        self.push_16(ip)?;
         self.branch_near16(new_ip);
         tracing::trace!("CALL m16: [{:?}:{:#x}] -> IP = {:#06x}, ret = {:#06x}", seg, eaddr, new_ip, ip);
+        Ok(())
     }
 
     /// CALL r/m16 - Unified dispatch (checks mod_c0)
-    pub fn call_ew(&mut self, instr: &BxInstructionGenerated) {
+    pub fn call_ew(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         if instr.mod_c0() { self.call_ew_r(instr) } else { self.call_ew_m(instr) }
     }
 
@@ -143,15 +147,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// RET near - Return from procedure (16-bit)
-    pub fn ret_near16(&mut self, _instr: &BxInstructionGenerated) {
-        let return_ip = self.pop_16();
+    pub fn ret_near16(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+        let return_ip = self.pop_16()?;
         self.branch_near16(return_ip);
         tracing::trace!("RET near16: IP = {:#06x}", return_ip);
+        Ok(())
     }
 
     /// RET near imm16 - Return and pop imm16 bytes (16-bit)
-    pub fn ret_near16_iw(&mut self, instr: &BxInstructionGenerated) {
-        let return_ip = self.pop_16();
+    pub fn ret_near16_iw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+        let return_ip = self.pop_16()?;
         let imm16 = instr.iw();
         
         self.branch_near16(return_ip);
@@ -166,6 +171,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_gpr16(4, sp.wrapping_add(imm16));
         }
         tracing::trace!("RET near16 imm16: IP = {:#06x}, pop = {}", return_ip, imm16);
+        Ok(())
     }
 
     // =========================================================================
@@ -710,8 +716,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Push return address (CS:IP)
             let cs_value = self.sregs[BxSegregs::Cs as usize].selector.value;
             let ip = self.get_ip();
-            self.push_16(cs_value);
-            self.push_16(ip);
+            self.push_16(cs_value)?;
+            self.push_16(ip)?;
 
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
             self.set_eip(disp16 as u32);
@@ -742,9 +748,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         
         // Read offset and segment from memory
         let seg = BxSegregs::from(instr.seg());
-        let op1_16 = self.read_virtual_word(seg, eaddr);
+        let op1_16 = self.read_virtual_word(seg, eaddr)?;
         let asize_mask = if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF };
-        let cs_raw = self.read_virtual_word(seg, (eaddr.wrapping_add(2)) & asize_mask);
+        let cs_raw = self.read_virtual_word(seg, (eaddr.wrapping_add(2)) & asize_mask)?;
         
         self.call_far16(instr, cs_raw, op1_16)
     }
@@ -769,9 +775,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         
         // Read offset and segment from memory
         let seg = BxSegregs::from(instr.seg());
-        let op1_16 = self.read_virtual_word(seg, eaddr);
+        let op1_16 = self.read_virtual_word(seg, eaddr)?;
         let asize_mask = if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF };
-        let cs_raw = self.read_virtual_word(seg, (eaddr.wrapping_add(2)) & asize_mask);
+        let cs_raw = self.read_virtual_word(seg, (eaddr.wrapping_add(2)) & asize_mask)?;
         
         self.jmp_far16(instr, cs_raw, op1_16)
     }
@@ -794,8 +800,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             });
         } else {
             // Real mode
-            let ip = self.pop_16();
-            let cs_raw = self.pop_16();
+            let ip = self.pop_16()?;
+            let cs_raw = self.pop_16()?;
 
             // Check CS limit
             let limit = self.get_segment_limit(BxSegregs::Cs);
@@ -829,8 +835,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             });
         } else {
             // Real mode
-            let ip = self.pop_16();
-            let cs_raw = self.pop_16();
+            let ip = self.pop_16()?;
+            let cs_raw = self.pop_16()?;
 
             // Check CS limit
             let limit = self.get_segment_limit(BxSegregs::Cs);

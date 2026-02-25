@@ -38,53 +38,58 @@ pub fn MOV_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 /// MOV_GdEd_M: MOV r32, r/m32 (memory form)
 /// Opcode: 0x8B, ModRM: r32, r/m32 (memory)
 /// Bochs: MOV32_GdEdM
-pub fn MOV_GdEd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+pub fn MOV_GdEd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
-    let val = cpu.read_virtual_dword(seg, eaddr);
+    let val = cpu.read_virtual_dword(seg, eaddr)?;
     let dst_idx = instr.dst() as usize;
     cpu.set_gpr32(dst_idx, val);
+    Ok(())
 }
 
 /// MOV_EdGd_M: MOV r/m32, r32 (memory form)
 /// Opcode: 0x89, ModRM: r/m32, r32 (memory)
 /// Bochs: MOV32_EdGdM
 /// Decoder swaps for 16/32-bit store: meta_data[1] (src()) = nnn = SOURCE register
-pub fn MOV_EdGd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+pub fn MOV_EdGd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
     let val = cpu.get_gpr32(instr.src() as usize);
-    cpu.write_virtual_dword(seg, eaddr, val);
+    cpu.write_virtual_dword(seg, eaddr, val)?;
+    Ok(())
 }
 
 /// MOV_EdId_M: MOV r/m32, imm32 (memory form)
 /// Opcode: 0xC7, ModRM: r/m32, imm32 (memory)
 /// Bochs: MOV_EdIdM
-pub fn MOV_EdId_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+pub fn MOV_EdId_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
     let imm = instr.modrm_form.operand_data.id();
-    cpu.write_virtual_dword(seg, eaddr, imm);
+    cpu.write_virtual_dword(seg, eaddr, imm)?;
+    Ok(())
 }
 
 /// MOVZX_GdEb_M: MOVZX r32, r/m8 (memory form)
 /// Bochs: MOVZX_GdEbM
-pub fn MOVZX_GdEb_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+pub fn MOVZX_GdEb_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
-    let val = cpu.read_virtual_byte(seg, eaddr);
+    let val = cpu.read_virtual_byte(seg, eaddr)?;
     let dst_reg = instr.dst() as usize;
     cpu.set_gpr32(dst_reg, val as u32);
+    Ok(())
 }
 
 /// MOVZX_GdEw_M: MOVZX r32, r/m16 (memory form)
 /// Bochs: MOVZX_GdEwM
-pub fn MOVZX_GdEw_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+pub fn MOVZX_GdEw_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
-    let val = cpu.read_virtual_word(seg, eaddr);
+    let val = cpu.read_virtual_word(seg, eaddr)?;
     let dst_reg = instr.dst() as usize;
     cpu.set_gpr32(dst_reg, val as u32);
+    Ok(())
 }
 
 // =========================================================================
@@ -92,28 +97,28 @@ pub fn MOVZX_GdEw_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionG
 // =========================================================================
 
 /// MOV r32, r/m32 - unified (Bochs: MOV_GdEdR / MOV_GdEdM)
-pub fn MOV_GdEd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
-    if instr.mod_c0() { MOV_GdEd_R(cpu, instr) } else { MOV_GdEd_M(cpu, instr) }
+pub fn MOV_GdEd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() { MOV_GdEd_R(cpu, instr); Ok(()) } else { MOV_GdEd_M(cpu, instr) }
 }
 
 /// MOV r/m32, r32 - unified (Bochs: MOV_EdGdR / MOV_EdGdM)
-pub fn MOV_EdGd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
-    if instr.mod_c0() { MOV_EdGd_R(cpu, instr) } else { MOV_EdGd_M(cpu, instr) }
+pub fn MOV_EdGd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() { MOV_EdGd_R(cpu, instr); Ok(()) } else { MOV_EdGd_M(cpu, instr) }
 }
 
 /// MOV r/m32, imm32 - unified (Bochs: MOV_EdIdR / MOV_EdIdM)
-pub fn MOV_EdId<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
-    if instr.mod_c0() { MOV_EdId_R(cpu, instr) } else { MOV_EdId_M(cpu, instr) }
+pub fn MOV_EdId<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() { MOV_EdId_R(cpu, instr); Ok(()) } else { MOV_EdId_M(cpu, instr) }
 }
 
 /// MOVZX r32, r/m8 - unified (Bochs: MOVZX_GdEbR / MOVZX_GdEbM)
-pub fn MOVZX_GdEb_unified<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
-    if instr.mod_c0() { MOVZX_GdEb(cpu, instr) } else { MOVZX_GdEb_M(cpu, instr) }
+pub fn MOVZX_GdEb_unified<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() { MOVZX_GdEb(cpu, instr); Ok(()) } else { MOVZX_GdEb_M(cpu, instr) }
 }
 
 /// MOVZX r32, r/m16 - unified (Bochs: MOVZX_GdEwR / MOVZX_GdEwM)
-pub fn MOVZX_GdEw_unified<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
-    if instr.mod_c0() { MOVZX_GdEw(cpu, instr) } else { MOVZX_GdEw_M(cpu, instr) }
+pub fn MOVZX_GdEw_unified<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() { MOVZX_GdEw(cpu, instr); Ok(()) } else { MOVZX_GdEw_M(cpu, instr) }
 }
 
 /// MOV_EAX_Id: MOV EAX, imm32 (register direct)

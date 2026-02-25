@@ -1,7 +1,8 @@
 use super::{
-    cpu::Exception,
+    cpu::{CpuMode, Exception},
     decoder::BxSegregs,
-    descriptor::{BxDescriptor, BxSelector, DescriptorGate, DescriptorSegment, DescriptorTaskGate},
+    descriptor::{BxDescriptor, BxSelector, DescriptorGate, DescriptorSegment, DescriptorTaskGate,
+                 SystemAndGateDescriptorEnum, SEG_VALID_CACHE},
     Result,
 };
 use crate::config::BxAddress;
@@ -88,19 +89,18 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             // dword2 & 0x000F0000 already has limit[19:16] in the correct bit positions
             let limit = (dword1 & 0xFFFF) | (dword2 & 0x000F0000);
             let mut base = ((dword1 >> 16) as u64) | (((dword2 & 0xFF) as u64) << 16);
-            base |= ((dword2 & 0xFF000000) as u64) << 8;
-
+            base |= (dword2 & 0xFF000000) as u64;
 
             let g = (dword2 & 0x00800000) != 0;
             let d_b = (dword2 & 0x00400000) != 0;
             let avl = (dword2 & 0x00100000) != 0;
-            
+
             let limit_scaled = if g {
                 (limit << 12) | 0xFFF
             } else {
                 limit
             };
-            
+
             descriptor.u.segment = DescriptorSegment {
                 base,
                 limit_scaled,
@@ -150,7 +150,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     // LDT, TSS descriptors
                     let limit = (dword1 & 0xFFFF) | (dword2 & 0x000F0000);
                     let mut base = ((dword1 >> 16) as u64) | (((dword2 & 0xFF) as u64) << 16);
-                    base |= ((dword2 & 0xFF000000) as u64) << 8;
+                    base |= (dword2 & 0xFF000000) as u64;
                     
                     let g = (dword2 & 0x00800000) != 0;
                     let d_b = (dword2 & 0x00400000) != 0;
@@ -182,28 +182,29 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         Ok(descriptor)
     }
 
-    /// Read qword from system address space (bypasses some checks)
+    /// Read qword from system address space.
     /// Based on BX_CPU_C::system_read_qword in access.cc:617
+    /// Translates linear address through paging when CR0.PG is set.
     pub(super) fn system_read_qword(&self, laddr: BxAddress) -> Result<u64> {
-        // For now, use simple memory read - in full implementation this would
-        // go through TLB and address translation
-        let lo = self.mem_read_dword(laddr) as u64;
-        let hi = self.mem_read_dword(laddr + 4) as u64;
+        let paddr_lo = self.translate_linear_system_read(laddr)?;
+        let paddr_hi = self.translate_linear_system_read(laddr + 4)?;
+        let lo = self.mem_read_dword(paddr_lo) as u64;
+        let hi = self.mem_read_dword(paddr_hi) as u64;
         Ok(lo | (hi << 32))
     }
 
-    /// Read word from system address space (bypasses some checks)
+    /// Read word from system address space.
     /// Based on BX_CPU_C::system_read_word in access.cc:585
     pub(super) fn system_read_word(&self, laddr: BxAddress) -> Result<u16> {
-        // For now, use simple memory read
-        Ok(self.mem_read_word(laddr))
+        let paddr = self.translate_linear_system_read(laddr)?;
+        Ok(self.mem_read_word(paddr))
     }
 
-    /// Read dword from system address space (bypasses some checks)
+    /// Read dword from system address space.
     /// Based on BX_CPU_C::system_read_dword in access.cc:600
     pub(super) fn system_read_dword(&self, laddr: BxAddress) -> Result<u32> {
-        // For now, use simple memory read
-        Ok(self.mem_read_dword(laddr))
+        let paddr = self.translate_linear_system_read(laddr)?;
+        Ok(self.mem_read_dword(paddr))
     }
 
     /// Get SS and ESP from TSS for given privilege level
@@ -705,5 +706,174 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         tracing::debug!("load_null_selector({:?}): selector {:#06x}, cleared all cache fields", seg, value);
+    }
+
+    /// LLDT - Load Local Descriptor Table Register
+    /// Based on Bochs protect_ctrl.cc:374-476
+    pub(super) fn lldt_ew(&mut self, instr: &super::decoder::BxInstructionGenerated) -> Result<()> {
+        // Must be in protected mode
+        if self.real_mode() {
+            tracing::error!("LLDT: not recognized in real mode");
+            self.exception(Exception::Ud, 0)?;
+            return Ok(());
+        }
+
+        // CPL must be 0
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        if cpl != 0 {
+            tracing::error!("LLDT: CPL != 0");
+            self.exception(Exception::Gp, 0)?;
+            return Ok(());
+        }
+
+        // Read selector from register or memory
+        let raw_selector = if instr.mod_c0() {
+            let src = instr.src() as usize;
+            self.get_gpr16(src)
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr32(instr);
+            self.read_virtual_word(seg, eaddr)?
+        };
+
+        // If selector is NULL, invalidate and done
+        if (raw_selector & 0xfffc) == 0 {
+            self.ldtr.selector.value = raw_selector;
+            self.ldtr.cache.valid = 0;
+            tracing::trace!("LLDT: NULL selector, invalidated");
+            return Ok(());
+        }
+
+        // Parse selector
+        let mut selector = BxSelector::default();
+        parse_selector(raw_selector, &mut selector);
+
+        // Selector must point into GDT (TI must be 0)
+        if selector.ti != 0 {
+            tracing::error!("LLDT: selector.ti != 0");
+            self.exception(Exception::Gp, raw_selector & 0xfffc)?;
+            return Ok(());
+        }
+
+        // Fetch descriptor from GDT
+        let (dword1, dword2) = self.fetch_raw_descriptor(&selector)?;
+
+        // Parse descriptor
+        let descriptor = self.parse_descriptor(dword1, dword2)?;
+
+        // Check if it's an LDT descriptor
+        if descriptor.valid == 0 || descriptor.segment
+            || descriptor.r#type != SystemAndGateDescriptorEnum::BxSysSegmentLdt as u8
+        {
+            tracing::error!("LLDT: doesn't point to an LDT descriptor!");
+            self.exception(Exception::Gp, raw_selector & 0xfffc)?;
+            return Ok(());
+        }
+
+        // Check if present
+        if !descriptor.p {
+            tracing::error!("LLDT: LDT descriptor not present!");
+            self.exception(Exception::Np, raw_selector & 0xfffc)?;
+            return Ok(());
+        }
+
+        // Load LDTR
+        self.ldtr.selector = selector;
+        self.ldtr.cache = descriptor;
+        self.ldtr.cache.valid = SEG_VALID_CACHE;
+
+        tracing::trace!("LLDT: loaded selector={:#06x}", raw_selector);
+        Ok(())
+    }
+
+    /// LTR - Load Task Register
+    /// Based on Bochs protect_ctrl.cc:478-564
+    pub(super) fn ltr_ew(&mut self, instr: &super::decoder::BxInstructionGenerated) -> Result<()> {
+        // Must be in protected mode
+        if self.real_mode() {
+            tracing::error!("LTR: not recognized in real mode");
+            self.exception(Exception::Ud, 0)?;
+            return Ok(());
+        }
+
+        // CPL must be 0
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        if cpl != 0 {
+            tracing::error!("LTR: CPL != 0");
+            self.exception(Exception::Gp, 0)?;
+            return Ok(());
+        }
+
+        // Read selector from register or memory
+        let raw_selector = if instr.mod_c0() {
+            let src = instr.src() as usize;
+            self.get_gpr16(src)
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr32(instr);
+            self.read_virtual_word(seg, eaddr)?
+        };
+
+        // NULL selector not allowed for LTR
+        if (raw_selector & 0xfffc) == 0 {
+            tracing::error!("LTR: loading with NULL selector!");
+            self.exception(Exception::Gp, 0)?;
+            return Ok(());
+        }
+
+        // Parse selector
+        let mut selector = BxSelector::default();
+        parse_selector(raw_selector, &mut selector);
+
+        // Selector must point into GDT (TI must be 0)
+        if selector.ti != 0 {
+            tracing::error!("LTR: selector.ti != 0");
+            self.exception(Exception::Gp, raw_selector & 0xfffc)?;
+            return Ok(());
+        }
+
+        // Fetch descriptor from GDT
+        let (dword1, dword2) = self.fetch_raw_descriptor(&selector)?;
+
+        // Parse descriptor
+        let mut descriptor = self.parse_descriptor(dword1, dword2)?;
+
+        // Check if it's an available TSS descriptor (type 1=16-bit avail, 9=32-bit avail)
+        let tss_type = descriptor.r#type;
+        if descriptor.valid == 0 || descriptor.segment
+            || (tss_type != SystemAndGateDescriptorEnum::BxSysSegmentAvail286Tss as u8
+                && tss_type != SystemAndGateDescriptorEnum::BxSysSegmentAvail386Tss as u8)
+        {
+            tracing::error!("LTR: doesn't point to an available TSS descriptor! type={}", tss_type);
+            self.exception(Exception::Gp, raw_selector & 0xfffc)?;
+            return Ok(());
+        }
+
+        // Check if present
+        if !descriptor.p {
+            tracing::error!("LTR: TSS descriptor not present!");
+            self.exception(Exception::Np, raw_selector & 0xfffc)?;
+            return Ok(());
+        }
+
+        // Mark TSS as busy in the descriptor
+        descriptor.r#type |= 0x02; // Set busy bit
+
+        // Save selector index before move
+        let selector_index = selector.index;
+
+        // Load TR
+        self.tr.selector = selector;
+        self.tr.cache = descriptor;
+        self.tr.cache.valid = SEG_VALID_CACHE;
+
+        // Also mark as busy in GDT (write back dword2 with busy bit)
+        let gdt_offset = self.gdtr.base + (selector_index as u64 * 8) + 4;
+        let new_dword2 = dword2 | 0x0200; // Set busy bit in access byte
+        let phys_addr = self.translate_linear_system_read(gdt_offset)?;
+        self.mem_write_dword(phys_addr, new_dword2);
+
+        tracing::trace!("LTR: loaded selector={:#06x}, marked busy", raw_selector);
+        Ok(())
     }
 }

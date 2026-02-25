@@ -442,8 +442,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // Minimal platform housekeeping helpers used during reset/context changes.
+
+    /// Flush all TLB entries (both DTLB and ITLB) and invalidate prefetch/stack caches.
+    /// Matching Bochs paging.cc TLB_flush(): flushes DTLB, ITLB, prefetch queue,
+    /// stack cache, and breaks icache trace links.
     pub(super) fn tlb_flush(&mut self) {
-        // Placeholder: concrete TLB invalidation will be implemented elsewhere.
+        self.invalidate_prefetch_q();
+        self.invalidate_stack_cache();
+        self.dtlb.flush();
+        self.itlb.flush();
+    }
+
+    /// Flush non-global TLB entries only (preserves entries with G bit set).
+    /// Used by CR3 writes when CR4.PGE is enabled.
+    /// Matching Bochs paging.cc TLB_flushNonGlobal().
+    pub(super) fn tlb_flush_non_global(&mut self) {
+        self.invalidate_prefetch_q();
+        self.invalidate_stack_cache();
+        self.dtlb.flush_non_global();
+        self.itlb.flush_non_global();
     }
 
     pub(super) fn invalidate_prefetch_q(&mut self) {

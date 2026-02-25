@@ -341,6 +341,171 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 }
 
+impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    /// Lightweight page table walk for system reads (CPL=0, read-only).
+    /// Uses mem_read_dword (reads from physical memory via mem_ptr).
+    /// Does NOT update accessed/dirty bits or go through TLB.
+    /// Matching Bochs translate_linear_legacy but read-only, no side effects.
+    pub(super) fn translate_linear_system_read(&self, laddr: BxAddress) -> Result<BxPhyAddress> {
+        let laddr = laddr & 0xFFFFFFFF; // Mask to 32 bits
+
+        // If paging disabled, linear = physical
+        if !self.cr0.pg() {
+            return Ok(laddr & self.a20_mask);
+        }
+
+        // Legacy 32-bit paging: two-level page table walk
+        let cr3 = self.cr3;
+        let ppf = (cr3 & BX_CR3_PAGING_MASK) as u32;
+
+        // Read PDE
+        let pde_index = ((laddr >> 22) & 0x3FF) as u32;
+        let pde_addr = ppf as u64 + (pde_index * 4) as u64;
+        let pde = self.mem_read_dword(pde_addr);
+
+        if (pde & 0x1) == 0 {
+            tracing::debug!("system_read page walk: PDE not present at {:#x}, laddr={:#x}", pde_addr, laddr);
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageNotPresent,
+            ));
+        }
+
+        // Check for 4MB page (PSE)
+        if (pde & 0x80) != 0 && self.cr4.pse() {
+            let ppf_4m = (pde & 0xFFC00000) as u64;
+            let offset = laddr & 0x3FFFFF;
+            return Ok((ppf_4m | offset) & self.a20_mask);
+        }
+
+        // Read PTE
+        let pt_base = (pde & 0xFFFFF000) as u64;
+        let pte_index = ((laddr >> 12) & 0x3FF) as u32;
+        let pte_addr = pt_base + (pte_index * 4) as u64;
+        let pte = self.mem_read_dword(pte_addr);
+
+        if (pte & 0x1) == 0 {
+            tracing::debug!("system_read page walk: PTE not present at {:#x}, laddr={:#x}", pte_addr, laddr);
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageNotPresent,
+            ));
+        }
+
+        let page_base = (pte & 0xFFFFF000) as u64;
+        let offset = laddr & 0xFFF;
+        Ok((page_base | offset) & self.a20_mask)
+    }
+
+    /// Apply the A20 mask to a physical address.
+    #[inline]
+    fn apply_a20(&self, paddr: u64) -> u64 {
+        paddr & self.a20_mask
+    }
+
+    /// Deliver a #PF exception.
+    fn page_fault(
+        &mut self,
+        fault: u32,
+        laddr: u64,
+        user: bool,
+        is_write: bool,
+    ) -> Result<()> {
+        self.cr2 = laddr;
+        let error_code = fault
+            | ((user as u32) << 2)
+            | ((is_write as u32) << 1);
+        self.exception(super::cpu::Exception::Pf, error_code as u16)
+    }
+
+    /// Translate a linear address to physical for a data read.
+    ///
+    /// When paging is disabled (CR0.PG=0) this just applies the A20 mask.
+    /// Otherwise it performs a two-level page-table walk using the physical
+    /// memory bus (`mem_read_dword` / `mem_write_dword`), exactly matching
+    /// Bochs `translate_linear` for legacy 32-bit paging.
+    pub(super) fn translate_data_read(&mut self, laddr: u64) -> Result<u64> {
+        self.translate_data_access(laddr, false)
+    }
+
+    /// Translate a linear address to physical for a data write.
+    pub(super) fn translate_data_write(&mut self, laddr: u64) -> Result<u64> {
+        self.translate_data_access(laddr, true)
+    }
+
+    fn translate_data_access(&mut self, laddr: u64, is_write: bool) -> Result<u64> {
+        let laddr = laddr & 0xFFFF_FFFF;
+
+        // Paging disabled → linear == physical (modulo A20).
+        if !self.cr0.pg() {
+            return Ok(self.apply_a20(laddr));
+        }
+
+        let user = self.user_pl;
+
+        // ---- PDE ----
+        let pde_addr = (self.cr3 & BX_CR3_PAGING_MASK)
+            | (((laddr >> 22) & 0x3FF) << 2);
+        let pde = self.mem_read_dword(pde_addr);
+
+        if pde & 0x1 == 0 {
+            self.page_fault(ERROR_NOT_PRESENT, laddr, user, is_write)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+
+        // ---- 4 MB page (PSE) ----
+        if pde & 0x80 != 0 && self.cr4.pse() {
+            let combined = pde & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+            let priv_index = ((self.cr0.wp() as u32) << 4)
+                | ((user as u32) << 3)
+                | combined
+                | (is_write as u32);
+            if PRIV_CHECK[priv_index as usize] == 0 {
+                self.page_fault(ERROR_PROTECTION, laddr, user, is_write)?;
+                return Err(super::CpuError::CpuLoopRestart);
+            }
+            // Set A/D bits on the PDE.
+            let needed = 0x20 | if is_write { 0x40 } else { 0 };
+            if pde & needed != needed {
+                self.mem_write_dword(pde_addr, pde | needed);
+            }
+            let ppf = (pde as u64 & 0xFFC0_0000) | (laddr & 0x003F_FFFF);
+            return Ok(self.apply_a20(ppf));
+        }
+
+        // ---- PTE ----
+        let pte_addr = (pde as u64 & 0xFFFF_F000)
+            | (((laddr >> 12) & 0x3FF) << 2);
+        let pte = self.mem_read_dword(pte_addr);
+
+        if pte & 0x1 == 0 {
+            self.page_fault(ERROR_NOT_PRESENT, laddr, user, is_write)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+
+        let combined = (pde & pte) & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+        let priv_index = ((self.cr0.wp() as u32) << 4)
+            | ((user as u32) << 3)
+            | combined
+            | (is_write as u32);
+        if PRIV_CHECK[priv_index as usize] == 0 {
+            self.page_fault(ERROR_PROTECTION, laddr, user, is_write)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+
+        // Set A bit on PDE if needed.
+        if pde & 0x20 == 0 {
+            self.mem_write_dword(pde_addr, pde | 0x20);
+        }
+        // Set A/D bits on PTE.
+        let pte_needed = 0x20 | if is_write { 0x40 } else { 0 };
+        if pte & pte_needed != pte_needed {
+            self.mem_write_dword(pte_addr, pte | pte_needed);
+        }
+
+        let paddr = (pte as u64 & 0xFFFF_F000) | (laddr & 0xFFF);
+        Ok(self.apply_a20(paddr))
+    }
+}
+
 impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     fn is_virtual_apic_page(&self, _p_addr: &BxPhyAddress) -> bool {
         // TODO: Implement virtual APIC page check

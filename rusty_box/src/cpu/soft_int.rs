@@ -49,7 +49,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     ///
     /// Compares the signed value in r16 against the signed lower and upper bounds
     /// at memory location. If the index is out of bounds, generates #BR exception.
-    pub fn bound_gw_ma(&mut self, instr: &BxInstructionGenerated) {
+    pub fn bound_gw_ma(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         // Get the 16-bit register value (signed)
         let op1_16 = self.get_gpr16(instr.dst() as usize) as i16;
 
@@ -58,8 +58,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr32(instr);
 
         // Read lower and upper bounds from memory (2 words)
-        let bound_min = self.read_virtual_word(seg, eaddr) as i16;
-        let bound_max = self.read_virtual_word(seg, eaddr.wrapping_add(2)) as i16;
+        let bound_min = self.read_virtual_word(seg, eaddr)? as i16;
+        let bound_max = self.read_virtual_word(seg, eaddr.wrapping_add(2))? as i16;
 
         tracing::trace!(
             "BOUND r16: value={}, min={}, max={}",
@@ -73,13 +73,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Generate #BR exception (Bound Range Exceeded, vector 5)
             self.interrupt_real_mode(5);
         }
+        Ok(())
     }
 
     /// BOUND r32, m32&32 - Check 32-bit register against bounds in memory
     ///
     /// Compares the signed value in r32 against the signed lower and upper bounds
     /// at memory location. If the index is out of bounds, generates #BR exception.
-    pub fn bound_gd_ma(&mut self, instr: &BxInstructionGenerated) {
+    pub fn bound_gd_ma(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
         // Get the 32-bit register value (signed)
         let op1_32 = self.get_gpr32(instr.dst() as usize) as i32;
 
@@ -88,8 +89,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr32(instr);
 
         // Read lower and upper bounds from memory (2 dwords)
-        let bound_min = self.read_virtual_dword(seg, eaddr) as i32;
-        let bound_max = self.read_virtual_dword(seg, eaddr.wrapping_add(4)) as i32;
+        let bound_min = self.read_virtual_dword(seg, eaddr)? as i32;
+        let bound_max = self.read_virtual_dword(seg, eaddr.wrapping_add(4))? as i32;
 
         tracing::trace!(
             "BOUND r32: value={}, min={}, max={}",
@@ -103,6 +104,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Generate #BR exception (Bound Range Exceeded, vector 5)
             self.interrupt_real_mode(5);
         }
+        Ok(())
     }
 
     // =========================================================================
@@ -110,11 +112,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     
     /// IRET - Return from interrupt (16-bit operand size)
-    pub fn iret16(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn iret16(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
         // Pop IP, CS, FLAGS from stack
-        let new_ip = self.pop_16();
-        let new_cs = self.pop_16();
-        let new_flags = self.pop_16();
+        let new_ip = self.pop_16()?;
+        let new_cs = self.pop_16()?;
+        let new_flags = self.pop_16()?;
         
         // Load CS with new selector (real mode)
         let cs_index = BxSegregs::Cs as usize;
@@ -134,14 +136,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.eip_page_window_size = 0;
         
         tracing::debug!("IRET16: returning to {:04x}:{:04x}, flags={:04x}", new_cs, new_ip, new_flags);
+        Ok(())
     }
 
     /// IRET - Return from interrupt (32-bit operand size)
-    pub fn iret32(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn iret32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
         // Pop EIP, CS, EFLAGS from stack
-        let new_eip = self.pop_32();
-        let new_cs = self.pop_32() as u16;
-        let new_eflags = self.pop_32();
+        let new_eip = self.pop_32()?;
+        let new_cs = self.pop_32()? as u16;
+        let new_eflags = self.pop_32()?;
         
         // Load CS with new selector (real mode)
         let cs_index = BxSegregs::Cs as usize;
@@ -161,6 +164,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.eip_page_window_size = 0;
         
         tracing::debug!("IRET32: returning to {:04x}:{:08x}, eflags={:08x}", new_cs, new_eip, new_eflags);
+        Ok(())
     }
 
     // =========================================================================
@@ -168,16 +172,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     
     /// Handle interrupt in real mode using IVT
-    pub(super) fn interrupt_real_mode(&mut self, vector: u8) {
+    pub(super) fn interrupt_real_mode(&mut self, vector: u8) -> super::Result<()> {
         // Save current FLAGS, CS, IP on stack
         let flags = (self.eflags & 0xFFFF) as u16;
         let cs = self.sregs[BxSegregs::Cs as usize].selector.value;
         let ip = self.get_ip();
         
         // Push FLAGS, CS, IP
-        self.push_16(flags);
-        self.push_16(cs);
-        self.push_16(ip);
+        self.push_16(flags)?;
+        self.push_16(cs)?;
+        self.push_16(ip)?;
         
         // Clear IF and TF
         self.eflags &= !((1 << 9) | (1 << 8)); // Clear IF (bit 9) and TF (bit 8)
@@ -210,6 +214,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if vector != 0x0d && vector != 0x0e && vector != 0x08 && vector < 0x20 {
             tracing::debug!("INT {:#04x}: vector at {:04x}:{:04x}", vector, new_cs, new_ip);
         }
+        // Log INT 15h calls (memory detection) — AH=88h returns extended memory in AX
+        if vector == 0x15 {
+            tracing::warn!(
+                "INT 15h: AH={:#04x} AX={:#06x} → handler at {:04x}:{:04x}, caller was {:04x}:{:04x}",
+                self.ah(), self.ax(), new_cs, new_ip, cs, ip
+            );
+        }
+        Ok(())
     }
 
     // =========================================================================

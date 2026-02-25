@@ -540,6 +540,9 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
 
     pub(super) ignore_bad_msrs: bool,
 
+    /// Cached A20 address mask (set at the top of cpu_loop from BxMemC).
+    pub(super) a20_mask: u64,
+
     pub(super) cpu_state_use_ok: u32, // format of BX_FETCH_MODE_*
 
     // FIXME: skipped   static jmp_buf jmp_buf_env;
@@ -1139,6 +1142,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Wire the memory system pointer for the duration of this execution call.
         // This enables Bochs-style "host-pointer-or-fallback" access in mem_read/mem_write.
         // Reborrow `mem` so we don't move the `&mut` binding.
+        self.a20_mask = mem.a20_mask() as u64;
         self.set_mem_bus_ptr(NonNull::from(&mut *mem));
 
         // Set memory pointer for instruction execution
@@ -1334,7 +1338,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     i.get_ia_opcode(), current_rip, ilen, next_rip
                 );
 
-                // Matching C++ line 203: BX_CPU_CALL_METHOD(i->execute1, (i));
                 // Execute instruction directly
                 {
                     match self.execute_instruction(&mut i) {
@@ -1365,6 +1368,25 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                                 opcode, rip, cs_value, rip, laddr, instr_bytes);
                         }
                         Err(e) => {
+                            let rip = current_rip;
+                            let cs_value = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
+                            let opcode = i.get_ia_opcode();
+                            eprintln!("CPU ERROR at icount={} (iter={}) RIP={:#x} CS={:#x} opcode={:?}: {}",
+                                self.icount, iteration, rip, cs_value, opcode, e);
+                            eprintln!("  EAX={:#x} ECX={:#x} EDX={:#x} EBX={:#x}",
+                                self.get_gpr32(0), self.get_gpr32(1), self.get_gpr32(2), self.get_gpr32(3));
+                            eprintln!("  ESP={:#x} EBP={:#x} ESI={:#x} EDI={:#x}",
+                                self.get_gpr32(4), self.get_gpr32(5), self.get_gpr32(6), self.get_gpr32(7));
+                            eprintln!("  CR0={:#x} EFLAGS={:#x} CPL={} GDTR.base={:#x} GDTR.limit={:#x} IDTR.base={:#x} IDTR.limit={:#x}",
+                                self.cr0.get32(), self.eflags, cs_value & 3,
+                                self.gdtr.base, self.gdtr.limit, self.idtr.base, self.idtr.limit);
+                            // Show segment registers
+                            for (idx, name) in [(0,"ES"),(1,"CS"),(2,"SS"),(3,"DS"),(4,"FS"),(5,"GS")] {
+                                let sel = unsafe { self.sregs[idx].selector.value };
+                                let base = unsafe { self.sregs[idx].cache.u.segment.base };
+                                let limit = unsafe { self.sregs[idx].cache.u.segment.limit_scaled };
+                                eprintln!("  {}={:#06x} base={:#x} limit={:#x}", name, sel, base, limit);
+                            }
                             break 'cpu_loop Err(e);
                         }
                     }
@@ -1845,12 +1867,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             Opcode::PushOp16Sw => {
                 let seg = instr.meta_data[0] as usize;
                 let val = self.sregs[seg].selector.value;
-                self.push_16(val);
+                self.push_16(val)?;
                 Ok(())
             }
             Opcode::PopOp16Sw => {
                 let seg = instr.meta_data[0] as usize;
-                let val = self.pop_16();
+                let val = self.pop_16()?;
                 // Don't allow loading CS
                 if seg != BxSegregs::Cs as usize {
                     parse_selector(val, &mut self.sregs[seg].selector);
@@ -1927,6 +1949,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             Opcode::SubEwGw => { arith::SUB_EwGw(self, instr) }
             Opcode::SbbGwEw => { arith::SBB_GwEw(self, instr) }
             Opcode::SbbEwGw => { arith::SBB_EwGw(self, instr) }
+            Opcode::SbbEdGd => { arith::SBB_EdGd(self, instr) }
+            Opcode::SbbGdEd => { arith::SBB_GdEd(self, instr) }
+            Opcode::SbbEaxid => { arith::SBB_EAX_Id(self, instr); Ok(()) }
+            Opcode::SbbEdId => { arith::SBB_EdId_R(self, instr); Ok(()) }
+            Opcode::SbbEdsIb => { arith::SBB_EdIb_R(self, instr); Ok(()) }
             Opcode::SubEaxid => {
                 arith::SUB_EAX_Id(self, instr);
                 Ok(())
@@ -1966,6 +1993,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.xor_eb_ib_r(instr);
                 Ok(())
             }
+            Opcode::XorAxiw => {
+                // XOR AX, imm16 — Bochs maps to XOR_EwIwR
+                self.xor_ew_iw_r(instr);
+                Ok(())
+            }
+            Opcode::XorEaxid => {
+                // XOR EAX, imm32 — Bochs maps to XOR_EdIdR
+                self.xor_ed_id_r(instr);
+                Ok(())
+            }
             // FAR JMP - Jump to absolute address with segment change
             Opcode::JmpfAp => {
                 // For JMP FAR Ap, offset size depends on operand size (os32)
@@ -1975,11 +2012,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
                 if instr.os32_l() != 0 {
                     let offset32 = instr.id();
-                    tracing::debug!("FAR JMP 32-BIT to {:04x}:{:08x}", segment, offset32);
+                    eprintln!("JmpfAp: FAR JMP 32-BIT to {:04x}:{:08x} from RIP={:#x} CR0={:#x} icount={}",
+                        segment, offset32, self.rip(), self.cr0.get32(), self.icount);
                     self.jmp_far32(instr, segment, offset32)?;
                 } else {
                     let offset16 = instr.iw();
-                    tracing::debug!("FAR JMP 16-BIT to {:04x}:{:04x}", segment, offset16);
+                    eprintln!("JmpfAp: FAR JMP 16-BIT to {:04x}:{:04x} from RIP={:#x} CR0={:#x} icount={}",
+                        segment, offset16, self.rip(), self.cr0.get32(), self.icount);
                     self.jmp_far16(instr, segment, offset16)?;
                 }
                 Ok(())
@@ -2015,6 +2054,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::LgdtMs => {
                 self.lgdt_ms(instr)?;
+                Ok(())
+            }
+            Opcode::LldtEw => {
+                self.lldt_ew(instr)?;
+                Ok(())
+            }
+            Opcode::LtrEw => {
+                self.ltr_ew(instr)?;
                 Ok(())
             }
 
@@ -2128,52 +2175,65 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.out_dx_eax(instr);
                 Ok(())
             }
-            // INS/OUTS string I/O
+            // INS/OUTS string I/O — dispatch based on address size (as32_l)
+            // Bochs io.cc: each handler checks i->as32L() to use EDI/ECX vs DI/CX
             Opcode::RepInsbYbDx => {
-                if instr.lock_rep_used_value() != 0 {
-                    self.rep_insb16(instr);
+                if instr.as32_l() != 0 {
+                    if instr.lock_rep_used_value() != 0 { self.rep_insb32(instr); }
+                    else { self.insb32(instr); }
                 } else {
-                    self.insb16(instr);
+                    if instr.lock_rep_used_value() != 0 { self.rep_insb16(instr); }
+                    else { self.insb16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepInswYwDx => {
-                if instr.lock_rep_used_value() != 0 {
-                    self.rep_insw16(instr);
+                if instr.as32_l() != 0 {
+                    if instr.lock_rep_used_value() != 0 { self.rep_insw32(instr); }
+                    else { self.insw32(instr); }
                 } else {
-                    self.insw16(instr);
+                    if instr.lock_rep_used_value() != 0 { self.rep_insw16(instr); }
+                    else { self.insw16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepInsdYdDx => {
-                if instr.lock_rep_used_value() != 0 {
-                    self.rep_insd16(instr);
+                if instr.as32_l() != 0 {
+                    if instr.lock_rep_used_value() != 0 { self.rep_insd32(instr); }
+                    else { self.insd32(instr); }
                 } else {
-                    self.insd16(instr);
+                    if instr.lock_rep_used_value() != 0 { self.rep_insd16(instr); }
+                    else { self.insd16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepOutsbDxxb => {
-                if instr.lock_rep_used_value() != 0 {
-                    self.rep_outsb16(instr);
+                if instr.as32_l() != 0 {
+                    if instr.lock_rep_used_value() != 0 { self.rep_outsb32(instr); }
+                    else { self.outsb32(instr); }
                 } else {
-                    self.outsb16(instr);
+                    if instr.lock_rep_used_value() != 0 { self.rep_outsb16(instr); }
+                    else { self.outsb16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepOutswDxxw => {
-                if instr.lock_rep_used_value() != 0 {
-                    self.rep_outsw16(instr);
+                if instr.as32_l() != 0 {
+                    if instr.lock_rep_used_value() != 0 { self.rep_outsw32(instr); }
+                    else { self.outsw32(instr); }
                 } else {
-                    self.outsw16(instr);
+                    if instr.lock_rep_used_value() != 0 { self.rep_outsw16(instr); }
+                    else { self.outsw16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepOutsdDxxd => {
-                if instr.lock_rep_used_value() != 0 {
-                    self.rep_outsd16(instr);
+                if instr.as32_l() != 0 {
+                    if instr.lock_rep_used_value() != 0 { self.rep_outsd32(instr); }
+                    else { self.outsd32(instr); }
                 } else {
-                    self.outsd16(instr);
+                    if instr.lock_rep_used_value() != 0 { self.rep_outsd16(instr); }
+                    else { self.outsd16(instr); }
                 }
                 Ok(())
             }
@@ -2611,6 +2671,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             Opcode::NegEd => { arith::NEG_Ed(self, instr); Ok(()) }
 
             // =========================================================================
+            // Bit Test instructions (BT, BTS, BTR, BTC)
+            // =========================================================================
+            Opcode::BtEdIb => { self.bt_ed_ib(instr)?; Ok(()) }
+            Opcode::BtsEdIb => { self.bts_ed_ib(instr)?; Ok(()) }
+            Opcode::BtrEdIb => { self.btr_ed_ib(instr)?; Ok(()) }
+            Opcode::BtcEdIb => { self.btc_ed_ib(instr)?; Ok(()) }
+            Opcode::BtEdGd => { self.bt_ed_gd(instr)?; Ok(()) }
+            Opcode::BtsEdGd => { self.bts_ed_gd(instr)?; Ok(()) }
+            Opcode::BtrEdGd => { self.btr_ed_gd(instr)?; Ok(()) }
+            Opcode::BtcEdGd => { self.btc_ed_gd(instr)?; Ok(()) }
+
+            // =========================================================================
             // Multiplication and Division instructions
             // =========================================================================
             Opcode::MulAleb => self.mul_al_eb(instr),
@@ -2641,24 +2713,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // =========================================================================
             // INC/DEC instructions
             // =========================================================================
-            Opcode::IncEb => arith::INC_Eb(self, instr),
-            Opcode::DecEb => arith::DEC_Eb(self, instr),
-            Opcode::IncEw => {
-                self.inc_ew_r(instr);
-                Ok(())
+            Opcode::IncEb => {
+                if instr.mod_c0() { arith::INC_Eb(self, instr) }
+                else { arith::INC_EbM(self, instr) }
             }
-            Opcode::IncEd => {
-                self.inc_ed_r(instr);
-                Ok(())
+            Opcode::DecEb => {
+                if instr.mod_c0() { arith::DEC_Eb(self, instr) }
+                else { arith::DEC_EbM(self, instr) }
             }
-            Opcode::DecEw => {
-                self.dec_ew_r(instr);
-                Ok(())
-            }
-            Opcode::DecEd => {
-                self.dec_ed_r(instr);
-                Ok(())
-            }
+            Opcode::IncEw => self.inc_ew(instr),
+            Opcode::IncEd => self.inc_ed(instr),
+            Opcode::DecEw => self.dec_ew(instr),
+            Opcode::DecEd => self.dec_ed(instr),
 
             // =========================================================================
             // PUSH/POP instructions
@@ -2708,6 +2774,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.pop32_sw(instr)?;
                 Ok(())
             }
+            Opcode::LeaveOp32 => {
+                self.leave_op32(instr)?;
+                Ok(())
+            }
+            Opcode::PushOp32Sw => {
+                self.push_op32_sw(instr)?;
+                Ok(())
+            }
             Opcode::PushaOp16 => {
                 self.pusha16(instr);
                 Ok(())
@@ -2749,147 +2823,170 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // String instructions
             // =========================================================================
             Opcode::RepMovsbYbXb => {
-                if instr.lock_rep_used_value() != 0 {
-                    if instr.as32_l() != 0 { self.rep_movsb32(instr); }
-                    else { self.rep_movsb16(instr); }
+                if instr.as32_l() != 0 {
+                    if instr.lock_rep_used_value() != 0 { self.rep_movsb32(instr)?; }
+                    else { self.movsb32(instr)?; }
                 } else {
-                    if instr.as32_l() != 0 { self.movsb32(instr); }
+                    if instr.lock_rep_used_value() != 0 { self.rep_movsb16(instr); }
                     else { self.movsb16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepMovswYwXw => {
-                if instr.lock_rep_used_value() != 0 {
-                    if instr.as32_l() != 0 { self.rep_movsw32(instr); }
-                    else { self.rep_movsw16(instr); }
+                if instr.as32_l() != 0 {
+                    if instr.lock_rep_used_value() != 0 { self.rep_movsw32(instr)?; }
+                    else { self.movsw32(instr)?; }
                 } else {
-                    if instr.as32_l() != 0 { self.movsw32(instr); }
+                    if instr.lock_rep_used_value() != 0 { self.rep_movsw16(instr); }
                     else { self.movsw16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepMovsdYdXd => {
-                if instr.lock_rep_used_value() != 0 {
-                    if instr.as32_l() != 0 { self.rep_movsd32(instr); }
-                    else { self.rep_movsd16(instr); }
+                if instr.as32_l() != 0 {
+                    if instr.lock_rep_used_value() != 0 { self.rep_movsd32(instr)?; }
+                    else { self.movsd32(instr)?; }
                 } else {
-                    if instr.as32_l() != 0 { self.movsd32(instr); }
+                    if instr.lock_rep_used_value() != 0 { self.rep_movsd16(instr); }
                     else { self.movsd16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepStosbYbAl => {
-                if instr.lock_rep_used_value() != 0 {
-                    if instr.as32_l() != 0 { self.rep_stosb32(instr); }
-                    else { self.rep_stosb16(instr); }
+                if instr.as32_l() != 0 {
+                    if instr.lock_rep_used_value() != 0 { self.rep_stosb32(instr)?; }
+                    else { self.stosb32(instr)?; }
                 } else {
-                    if instr.as32_l() != 0 { self.stosb32(instr); }
+                    if instr.lock_rep_used_value() != 0 { self.rep_stosb16(instr); }
                     else { self.stosb16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepStoswYwAx => {
-                if instr.lock_rep_used_value() != 0 {
-                    self.rep_stosw16(instr);
+                if instr.as32_l() != 0 {
+                    if instr.lock_rep_used_value() != 0 { self.rep_stosw32(instr)?; }
+                    else { self.stosw32(instr)?; }
                 } else {
-                    self.stosw16(instr);
+                    if instr.lock_rep_used_value() != 0 { self.rep_stosw16(instr); }
+                    else { self.stosw16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepStosdYdEax => {
-                if instr.lock_rep_used_value() != 0 {
-                    if instr.as32_l() != 0 { self.rep_stosd32(instr); }
-                    else { self.rep_stosd16(instr); }
+                if instr.as32_l() != 0 {
+                    if instr.lock_rep_used_value() != 0 { self.rep_stosd32(instr)?; }
+                    else { self.stosd32(instr)?; }
                 } else {
-                    if instr.as32_l() != 0 { self.stosd32(instr); }
+                    if instr.lock_rep_used_value() != 0 { self.rep_stosd16(instr); }
                     else { self.stosd16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepLodsbAlxb => {
-                if instr.lock_rep_used_value() != 0 {
-                    self.rep_lodsb16(instr);
+                if instr.as32_l() != 0 {
+                    if instr.lock_rep_used_value() != 0 { self.rep_lodsb32(instr)?; }
+                    else { self.lodsb32(instr)?; }
                 } else {
-                    self.lodsb16(instr);
+                    if instr.lock_rep_used_value() != 0 { self.rep_lodsb16(instr); }
+                    else { self.lodsb16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepLodswAxxw => {
-                if instr.lock_rep_used_value() != 0 {
-                    self.rep_lodsw16(instr);
+                if instr.as32_l() != 0 {
+                    if instr.lock_rep_used_value() != 0 { self.rep_lodsw32(instr)?; }
+                    else { self.lodsw32(instr)?; }
                 } else {
-                    self.lodsw16(instr);
+                    if instr.lock_rep_used_value() != 0 { self.rep_lodsw16(instr); }
+                    else { self.lodsw16(instr); }
+                }
+                Ok(())
+            }
+            Opcode::RepLodsdEaxxd => {
+                if instr.as32_l() != 0 {
+                    if instr.lock_rep_used_value() != 0 { self.rep_lodsd32(instr)?; }
+                    else { self.lodsd32(instr)?; }
+                } else {
+                    if instr.lock_rep_used_value() != 0 { self.rep_lodsd16(instr); }
+                    else { self.lodsd16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepScasbAlyb => {
                 let rep = instr.lock_rep_used_value();
-                if rep == 3 {
-                    // F3 = REPE SCASB
-                    self.repe_scasb16(instr);
-                } else if rep == 2 {
-                    // F2 = REPNE SCASB
-                    self.repne_scasb16(instr);
+                if instr.as32_l() != 0 {
+                    if rep == 3 { self.repe_scasb32(instr)?; }
+                    else if rep == 2 { self.repne_scasb32(instr)?; }
+                    else { self.scasb32(instr)?; }
                 } else {
-                    // No REP prefix — single SCASB
-                    self.scasb16(instr);
+                    if rep == 3 { self.repe_scasb16(instr); }
+                    else if rep == 2 { self.repne_scasb16(instr); }
+                    else { self.scasb16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepScaswAxyw => {
                 let rep = instr.lock_rep_used_value();
-                if rep == 3 {
-                    self.repe_scasw16(instr);
-                } else if rep == 2 {
-                    self.repne_scasw16(instr);
+                if instr.as32_l() != 0 {
+                    if rep == 3 { self.repe_scasw32(instr)?; }
+                    else if rep == 2 { self.repne_scasw32(instr)?; }
+                    else { self.scasw32(instr)?; }
                 } else {
-                    self.scasw16(instr);
+                    if rep == 3 { self.repe_scasw16(instr); }
+                    else if rep == 2 { self.repne_scasw16(instr); }
+                    else { self.scasw16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepScasdEaxyd => {
                 let rep = instr.lock_rep_used_value();
-                if rep == 3 {
-                    self.repe_scasd16(instr);
-                } else if rep == 2 {
-                    self.repne_scasd16(instr);
+                if instr.as32_l() != 0 {
+                    if rep == 3 { self.repe_scasd32(instr)?; }
+                    else if rep == 2 { self.repne_scasd32(instr)?; }
+                    else { self.scasd32(instr)?; }
                 } else {
-                    self.scasd16(instr);
+                    if rep == 3 { self.repe_scasd16(instr); }
+                    else if rep == 2 { self.repne_scasd16(instr); }
+                    else { self.scasd16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepCmpsbXbYb => {
                 let rep = instr.lock_rep_used_value();
-                if rep == 3 {
-                    // F3 = REPE CMPSB
-                    self.repe_cmpsb16(instr);
-                } else if rep == 2 {
-                    // F2 = REPNE CMPSB
-                    self.repne_cmpsb16(instr);
+                if instr.as32_l() != 0 {
+                    if rep == 3 { self.repe_cmpsb32(instr)?; }
+                    else if rep == 2 { self.repne_cmpsb32(instr)?; }
+                    else { self.cmpsb32(instr)?; }
                 } else {
-                    self.cmpsb16(instr);
+                    if rep == 3 { self.repe_cmpsb16(instr); }
+                    else if rep == 2 { self.repne_cmpsb16(instr); }
+                    else { self.cmpsb16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepCmpswXwYw => {
                 let rep = instr.lock_rep_used_value();
-                if rep == 3 {
-                    self.repe_cmpsw16(instr);
-                } else if rep == 2 {
-                    self.repne_cmpsw16(instr);
+                if instr.as32_l() != 0 {
+                    if rep == 3 { self.repe_cmpsw32(instr)?; }
+                    else if rep == 2 { self.repne_cmpsw32(instr)?; }
+                    else { self.cmpsw32(instr)?; }
                 } else {
-                    self.cmpsw16(instr);
+                    if rep == 3 { self.repe_cmpsw16(instr); }
+                    else if rep == 2 { self.repne_cmpsw16(instr); }
+                    else { self.cmpsw16(instr); }
                 }
                 Ok(())
             }
             Opcode::RepCmpsdXdYd => {
                 let rep = instr.lock_rep_used_value();
-                if rep == 3 {
-                    self.repe_cmpsd16(instr);
-                } else if rep == 2 {
-                    self.repne_cmpsd16(instr);
+                if instr.as32_l() != 0 {
+                    if rep == 3 { self.repe_cmpsd32(instr)?; }
+                    else if rep == 2 { self.repne_cmpsd32(instr)?; }
+                    else { self.cmpsd32(instr)?; }
                 } else {
-                    self.cmpsd16(instr);
+                    if rep == 3 { self.repe_cmpsd16(instr); }
+                    else if rep == 2 { self.repne_cmpsd16(instr); }
+                    else { self.cmpsd16(instr); }
                 }
                 Ok(())
             }
@@ -3030,6 +3127,26 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // WBINVD - Write Back and Invalidate Cache
                 // Matching Bochs misc_int.cc WBINVD: no-op (no cache to flush)
                 tracing::trace!("WBINVD: no-op (no cache)");
+                Ok(())
+            }
+            Opcode::Invlpg => {
+                // INVLPG - Invalidate TLB Entry
+                // Matching Bochs paging.cc: invalidate TLB entry for specified address
+                let seg = super::decoder::BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr32(instr);
+                let laddr = self.get_laddr32(seg as usize, eaddr);
+                self.dtlb.invlpg(laddr.into());
+                self.itlb.invlpg(laddr.into());
+                self.invalidate_prefetch_q();
+                tracing::trace!("INVLPG: laddr={:#x}", laddr);
+                Ok(())
+            }
+            Opcode::Clts => {
+                // CLTS - Clear Task-Switched flag in CR0
+                // Matching Bochs crregs.cc:1566-1593
+                // TODO: CPL check (CPL must be 0, else #GP(0))
+                let cr0_val = self.cr0.get32();
+                self.cr0.set32(cr0_val & !(1u32 << 3)); // Clear TS (bit 3)
                 Ok(())
             }
 
@@ -3315,6 +3432,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::MovsxGdEb => { self.movsx_gd_eb(instr); Ok(()) }
+            Opcode::MovsxGdEw => { self.movsx_gd_ew(instr)?; Ok(()) }
             Opcode::MovzxGdEb => { data_xfer::MOVZX_GdEb_unified(self, instr); Ok(()) }
             Opcode::MovzxGdEw => { data_xfer::MOVZX_GdEw_unified(self, instr); Ok(()) }
             Opcode::Cwd => {
@@ -3498,6 +3616,81 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // BCD (Binary Coded Decimal) instructions
             // =========================================================================
             Opcode::Das => crate::cpu::bcd::DAS(self, instr),
+
+            // =========================================================================
+            // x87 FPU instructions — Matching Bochs cpu/fpu/ handlers
+            // =========================================================================
+            // x87 FPU stubs — minimal implementations for BIOS/kernel boot
+            Opcode::Fninit => { /* FNINIT: reset FPU state */ Ok(()) }
+            Opcode::Fnclex => { /* FNCLEX: clear exceptions */ Ok(()) }
+            Opcode::FnstswAx => { self.set_rax((self.rax() & !0xFFFF) | 0); Ok(()) }
+            Opcode::Fnstsw => {
+                if instr.mod_c0() { Ok(()) }
+                else {
+                    let eaddr = self.resolve_addr32(instr);
+                    let seg = crate::cpu::decoder::BxSegregs::from(instr.seg());
+                    self.write_virtual_word(seg, eaddr, 0)?;
+                    Ok(())
+                }
+            }
+            Opcode::Fnstcw => {
+                if instr.mod_c0() { Ok(()) }
+                else {
+                    let eaddr = self.resolve_addr32(instr);
+                    let seg = crate::cpu::decoder::BxSegregs::from(instr.seg());
+                    self.write_virtual_word(seg, eaddr, 0x037F)?; // default CW
+                    Ok(())
+                }
+            }
+            Opcode::Fldcw | Opcode::Fldenv | Opcode::Fnstenv | Opcode::Frstor | Opcode::Fnsave => {
+                // consume memory operand but ignore
+                if !instr.mod_c0() { let _ = self.resolve_addr32(instr); }
+                Ok(())
+            }
+            Opcode::Fnop | Opcode::Fplegacy | Opcode::Fpuesc => Ok(()),
+            // All other FPU opcodes → NOP stub
+            Opcode::FldSti | Opcode::FldSingleReal | Opcode::FldDoubleReal | Opcode::FldExtendedReal |
+            Opcode::FildWordInteger | Opcode::FildDwordInteger | Opcode::FildQwordInteger |
+            Opcode::FbldPackedBcd |
+            Opcode::FstSti | Opcode::FstpSti | Opcode::FstpSpecialSti |
+            Opcode::FstSingleReal | Opcode::FstpSingleReal | Opcode::FstDoubleReal | Opcode::FstpDoubleReal |
+            Opcode::FstpExtendedReal |
+            Opcode::FistWordInteger | Opcode::FistpWordInteger | Opcode::FistDwordInteger | Opcode::FistpDwordInteger |
+            Opcode::FistpQwordInteger | Opcode::FbstpPackedBcd |
+            Opcode::FisttpMw | Opcode::FisttpMd | Opcode::FisttpMq |
+            Opcode::FaddSt0Stj | Opcode::FaddStiSt0 | Opcode::FaddpStiSt0 |
+            Opcode::FaddSingleReal | Opcode::FaddDoubleReal |
+            Opcode::FiaddWordInteger | Opcode::FiaddDwordInteger |
+            Opcode::FmulSt0Stj | Opcode::FmulStiSt0 | Opcode::FmulpStiSt0 |
+            Opcode::FmulSingleReal | Opcode::FmulDoubleReal |
+            Opcode::FimulWordInteger | Opcode::FimulDwordInteger |
+            Opcode::FsubSt0Stj | Opcode::FsubrSt0Stj | Opcode::FsubStiSt0 | Opcode::FsubpStiSt0 |
+            Opcode::FsubrStiSt0 | Opcode::FsubrpStiSt0 |
+            Opcode::FsubSingleReal | Opcode::FsubrSingleReal | Opcode::FsubDoubleReal | Opcode::FsubrDoubleReal |
+            Opcode::FisubWordInteger | Opcode::FisubrWordInteger | Opcode::FisubDwordInteger | Opcode::FisubrDwordInteger |
+            Opcode::FdivSt0Stj | Opcode::FdivrSt0Stj | Opcode::FdivStiSt0 | Opcode::FdivpStiSt0 |
+            Opcode::FdivrStiSt0 | Opcode::FdivrpStiSt0 |
+            Opcode::FdivSingleReal | Opcode::FdivrSingleReal | Opcode::FdivDoubleReal | Opcode::FdivrDoubleReal |
+            Opcode::FidivWordInteger | Opcode::FidivrWordInteger | Opcode::FidivDwordInteger | Opcode::FidivrDwordInteger |
+            Opcode::FcomSti | Opcode::FcompSti | Opcode::FucomSti | Opcode::FucompSti |
+            Opcode::FcomiSt0Stj | Opcode::FcomipSt0Stj | Opcode::FucomiSt0Stj | Opcode::FucomipSt0Stj |
+            Opcode::FcomSingleReal | Opcode::FcompSingleReal | Opcode::FcomDoubleReal | Opcode::FcompDoubleReal |
+            Opcode::FicomWordInteger | Opcode::FicompWordInteger | Opcode::FicomDwordInteger | Opcode::FicompDwordInteger |
+            Opcode::FcmovbSt0Stj | Opcode::FcmoveSt0Stj | Opcode::FcmovbeSt0Stj | Opcode::FcmovuSt0Stj |
+            Opcode::FcmovnbSt0Stj | Opcode::FcmovneSt0Stj | Opcode::FcmovnbeSt0Stj | Opcode::FcmovnuSt0Stj |
+            Opcode::Fcompp | Opcode::Fucompp |
+            Opcode::FxchSti |
+            Opcode::Fchs | Opcode::Fabs | Opcode::Ftst | Opcode::Fxam |
+            Opcode::FLD1 | Opcode::Fldl2t | Opcode::Fldl2e | Opcode::Fldpi | Opcode::Fldlg2 | Opcode::Fldln2 | Opcode::Fldz |
+            Opcode::Fdecstp | Opcode::Fincstp |
+            Opcode::FfreeSti | Opcode::FfreepSti |
+            Opcode::F2XM1 | Opcode::FYL2X | Opcode::Fptan | Opcode::Fpatan |
+            Opcode::Fxtract | Opcode::FPREM1 | Opcode::Fprem | Opcode::FYL2XP1 |
+            Opcode::Fsqrt | Opcode::Fsincos | Opcode::Frndint | Opcode::Fscale | Opcode::Fsin | Opcode::Fcos => {
+                // FPU data/arithmetic stubs — consume memory operand if present
+                if !instr.mod_c0() { let _ = self.resolve_addr32(instr); }
+                Ok(())
+            }
 
             _ => {
                 tracing::error!("Unimplemented opcode: {:?}", instr.get_ia_opcode());

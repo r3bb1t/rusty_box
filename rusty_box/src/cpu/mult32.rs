@@ -47,7 +47,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.get_gpr32(0); // EAX
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_dword(seg, eaddr);
+        let op2 = self.read_virtual_dword(seg, eaddr)?;
 
         let product_64 = (op1 as u64) * (op2 as u64);
         let product_32l = (product_64 & 0xFFFFFFFF) as u32;
@@ -102,7 +102,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.get_gpr32(0) as i32; // EAX
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_dword(seg, eaddr) as i32;
+        let op2 = self.read_virtual_dword(seg, eaddr)? as i32;
 
         let product_64 = (op1 as i64) * (op2 as i64);
         let product_32l = (product_64 & 0xFFFFFFFF) as u32;
@@ -160,7 +160,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn div_eax_ed_m(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_dword(seg, eaddr);
+        let op2 = self.read_virtual_dword(seg, eaddr)?;
 
         if op2 == 0 {
             return self.exception(Exception::De, 0);
@@ -241,7 +241,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_dword(seg, eaddr) as i32;
+        let op2 = self.read_virtual_dword(seg, eaddr)? as i32;
 
         if op2 == 0 {
             return self.exception(Exception::De, 0);
@@ -296,7 +296,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.get_gpr32(dst_reg) as i32;
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_dword(seg, eaddr) as i32;
+        let op2 = self.read_virtual_dword(seg, eaddr)? as i32;
 
         let product_64 = (op1 as i64) * (op2 as i64);
         let product_32 = (product_64 & 0xFFFFFFFF) as u32;
