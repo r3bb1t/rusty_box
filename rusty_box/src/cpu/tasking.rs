@@ -175,10 +175,17 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
         // Step 11: Load the new task (dynamic) state from new TSS (matches lines 486-503)
         self.set_eip(new_eip);
-        // TODO: Implement proper register setters
-        // For now, just set EIP and EFLAGS - register loading would need proper access methods
         self.eflags = final_eflags;
-        tracing::debug!("task_switch(): Loaded new EIP={:#x}, EFLAGS={:#x}", new_eip, final_eflags);
+        // Load all GPRs from new TSS
+        self.set_gpr32(0, new_eax); // EAX
+        self.set_gpr32(1, new_ecx); // ECX
+        self.set_gpr32(2, new_edx); // EDX
+        self.set_gpr32(3, new_ebx); // EBX
+        self.set_gpr32(4, new_esp); // ESP
+        self.set_gpr32(5, new_ebp); // EBP
+        self.set_gpr32(6, new_esi); // ESI
+        self.set_gpr32(7, new_edi); // EDI
+        tracing::debug!("task_switch(): Loaded new EIP={:#x}, EFLAGS={:#x}, EAX={:#x}, ECX={:#x}", new_eip, final_eflags, new_eax, new_ecx);
 
         // Fill in selectors for all segment registers (matches lines 508-523)
         let mut cs_selector = BxSelector::default();

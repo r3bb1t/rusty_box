@@ -21,7 +21,7 @@ use super::{
     cpustats::BxCpuStatistics,
     crregs::{BxCr0, BxCr4, BxDr6, BxDr7, Xcr0, MSR},
     decoder::{
-        BxInstructionGenerated, BX_GENERAL_REGISTERS, BX_ISA_EXTENSIONS_ARRAY_SIZE,
+        Instruction, BX_GENERAL_REGISTERS, BX_ISA_EXTENSIONS_ARRAY_SIZE,
         BX_XMM_REGISTERS,
     },
     descriptor::{BxGlobalSegmentReg, BxSegmentReg},
@@ -981,7 +981,7 @@ pub(super) struct BxGuardFound {
 }
 
 /// Type alias for instruction handler function pointer
-type InstructionHandler<I> = fn(&mut BxCpuC<'_, I>, &BxInstructionGenerated) -> Result<()>;
+type InstructionHandler<I> = fn(&mut BxCpuC<'_, I>, &Instruction) -> Result<()>;
 
 impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     #[inline]
@@ -1054,7 +1054,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         if self.real_mode() {
             // Real-mode external interrupts use the IVT at 0000:0000.
-            self.interrupt_real_mode(vector);
+            self.interrupt_real_mode(vector)?;
             Ok(())
         } else {
             // Protected-mode external interrupts go through the IDT gate.
@@ -1503,7 +1503,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         &mut self,
         mem: &'c mut BxMemC<'c>,
         cpus: &[&Self],
-    ) -> Result<BxInstructionGenerated> {
+    ) -> Result<Instruction> {
         // Get raw pointer to work around borrow checker if needed
         let mem_ptr: *mut BxMemC<'c> = mem;
         let entry = unsafe {
@@ -1764,7 +1764,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
     }
 
-    fn execute_instruction(&mut self, instr: &mut BxInstructionGenerated) -> Result<()> {
+    fn execute_instruction(&mut self, instr: &mut Instruction) -> Result<()> {
         use crate::cpu::arith;
         use crate::cpu::data_xfer;
         use crate::cpu::decoder::Opcode;
@@ -1773,16 +1773,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // =========================================================================
             // Data transfer (MOV) instructions - 32-bit
             // =========================================================================
-            Opcode::MovOp32GdEd => { data_xfer::MOV_GdEd(self, instr); Ok(()) }
-            Opcode::MovOp32EdGd => { data_xfer::MOV_EdGd(self, instr); Ok(()) }
-            Opcode::MovEdId => { data_xfer::MOV_EdId(self, instr); Ok(()) }
+            Opcode::MovOp32GdEd => { data_xfer::MOV_GdEd(self, instr)?; Ok(()) }
+            Opcode::MovOp32EdGd => { data_xfer::MOV_EdGd(self, instr)?; Ok(()) }
+            Opcode::MovEdId => { data_xfer::MOV_EdId(self, instr)?; Ok(()) }
 
             // =========================================================================
             // Data transfer (MOV) instructions - 8-bit
             // =========================================================================
-            Opcode::MovGbEb => { self.mov_gb_eb(instr); Ok(()) }
-            Opcode::MovEbGb => { self.mov_eb_gb(instr); Ok(()) }
-            Opcode::MovEbIb => { self.mov_eb_ib(instr); Ok(()) }
+            Opcode::MovGbEb => { self.mov_gb_eb(instr)?; Ok(()) }
+            Opcode::MovEbGb => { self.mov_eb_gb(instr)?; Ok(()) }
+            Opcode::MovEbIb => { self.mov_eb_ib(instr)?; Ok(()) }
 
             // =========================================================================
             // 8-bit Arithmetic instructions (ADD, SUB, etc.)
@@ -1816,34 +1816,34 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 use crate::cpu::arith;
                 arith::SUB_GbEb(self, instr)
             }
-            Opcode::AndEbGb => { self.and_eb_gb(instr); Ok(()) }
-            Opcode::AndGbEb => { self.and_gb_eb(instr); Ok(()) }
-            Opcode::AndEbIb => { self.and_eb_ib(instr); Ok(()) }
-            Opcode::OrEbGb => { self.or_eb_gb(instr); Ok(()) }
-            Opcode::OrGbEb => { self.or_gb_eb(instr); Ok(()) }
-            Opcode::OrEbIb => { self.or_eb_ib(instr); Ok(()) }
-            Opcode::XorEbGb => { self.xor_eb_gb(instr); Ok(()) }
-            Opcode::XorGbEb => { self.xor_gb_eb(instr); Ok(()) }
-            Opcode::XorEbIb => { self.xor_eb_ib(instr); Ok(()) }
-            Opcode::NotEb => { self.not_eb(instr); Ok(()) }
-            Opcode::TestEbGb => { self.test_eb_gb(instr); Ok(()) }
-            Opcode::TestEbIb => { self.test_eb_ib(instr); Ok(()) }
+            Opcode::AndEbGb => { self.and_eb_gb(instr)?; Ok(()) }
+            Opcode::AndGbEb => { self.and_gb_eb(instr)?; Ok(()) }
+            Opcode::AndEbIb => { self.and_eb_ib(instr)?; Ok(()) }
+            Opcode::OrEbGb => { self.or_eb_gb(instr)?; Ok(()) }
+            Opcode::OrGbEb => { self.or_gb_eb(instr)?; Ok(()) }
+            Opcode::OrEbIb => { self.or_eb_ib(instr)?; Ok(()) }
+            Opcode::XorEbGb => { self.xor_eb_gb(instr)?; Ok(()) }
+            Opcode::XorGbEb => { self.xor_gb_eb(instr)?; Ok(()) }
+            Opcode::XorEbIb => { self.xor_eb_ib(instr)?; Ok(()) }
+            Opcode::NotEb => { self.not_eb(instr)?; Ok(()) }
+            Opcode::TestEbGb => { self.test_eb_gb(instr)?; Ok(()) }
+            Opcode::TestEbIb => { self.test_eb_ib(instr)?; Ok(()) }
 
             // =========================================================================
             // Data transfer (MOV) instructions - 16-bit
             // =========================================================================
             Opcode::MovGwEw => {
-                self.mov_gw_ew(instr);
+                self.mov_gw_ew(instr)?;
                 Ok(())
             }
-            Opcode::MovEwGw => { self.mov_ew_gw(instr); Ok(()) }
-            Opcode::MovEwIw => { self.mov_ew_iw(instr); Ok(()) }
+            Opcode::MovEwGw => { self.mov_ew_gw(instr)?; Ok(()) }
+            Opcode::MovEwIw => { self.mov_ew_iw(instr)?; Ok(()) }
 
             // =========================================================================
             // Segment register MOV
             // =========================================================================
             Opcode::MovEwSw => {
-                self.mov_ew_sw(instr);
+                self.mov_ew_sw(instr)?;
                 Ok(())
             }
             Opcode::MovSwEw => {
@@ -1883,16 +1883,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::PushIw => {
-                self.push_iw(instr);
+                self.push_iw(instr)?;
                 Ok(())
             }
             Opcode::PushSIb16 => {
-                self.push_sib16(instr);
+                self.push_sib16(instr)?;
                 Ok(())
             }
             // Arithmetic (ADD) instructions
-            Opcode::AddGdEd => { arith::ADD_GdEd(self, instr); Ok(()) }
-            Opcode::AddEdGd => { arith::ADD_EdGd(self, instr); Ok(()) }
+            Opcode::AddGdEd => { arith::ADD_GdEd(self, instr)?; Ok(()) }
+            Opcode::AddEdGd => { arith::ADD_EdGd(self, instr)?; Ok(()) }
             Opcode::AddEaxid => {
                 arith::ADD_EAX_Id(self, instr);
                 Ok(())
@@ -1929,7 +1929,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 use crate::cpu::arith;
                 arith::ADD_EwIbR(self, instr)
             }
-            Opcode::AddEwIw | Opcode::AddEwsIb => {
+            Opcode::AddEwIw => {
                 use crate::cpu::arith;
                 arith::ADD_EwIw(self, instr)
             }
@@ -1941,10 +1941,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 use crate::cpu::arith;
                 arith::ADD_GwEw(self, instr)
             }
-            Opcode::AddEdsIb | Opcode::AddEdId => { arith::ADD_EdId(self, instr); Ok(()) }
+            Opcode::AddEdsIb | Opcode::AddEdId => { arith::ADD_EdId(self, instr)?; Ok(()) }
             // Arithmetic (SUB) instructions
-            Opcode::SubGdEd => { arith::SUB_GdEd(self, instr); Ok(()) }
-            Opcode::SubEdGd => { arith::SUB_EdGd(self, instr); Ok(()) }
+            Opcode::SubGdEd => { arith::SUB_GdEd(self, instr)?; Ok(()) }
+            Opcode::SubEdGd => { arith::SUB_EdGd(self, instr)?; Ok(()) }
             Opcode::SubGwEw => { arith::SUB_GwEw(self, instr) }
             Opcode::SubEwGw => { arith::SUB_EwGw(self, instr) }
             Opcode::SbbGwEw => { arith::SBB_GwEw(self, instr) }
@@ -1965,7 +1965,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             Opcode::SubAxiw => { arith::SUB_AX_Iw(self, instr) }
             Opcode::SubEwIw => { arith::SUB_EwIw(self, instr) }
             Opcode::SubEwsIb => { arith::SUB_EwsIb(self, instr) }
-            Opcode::SubEdsIb | Opcode::SubEdId => { arith::SUB_EdId(self, instr); Ok(()) }
+            Opcode::SubEdsIb | Opcode::SubEdId => { arith::SUB_EdId(self, instr)?; Ok(()) }
             // SUB zero idioms (SUB reg, reg where src==dst → result is always 0)
             Opcode::SubEwGwZeroIdiom | Opcode::SubGwEwZeroIdiom => {
                 self.zero_idiom_gw_r(instr);
@@ -1976,14 +1976,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             // XOR instructions
-            Opcode::XorEdGd => { self.xor_ed_gd(instr); Ok(()) }
+            Opcode::XorEdGd => { self.xor_ed_gd(instr)?; Ok(()) }
             Opcode::XorEdGdZeroIdiom | Opcode::XorGdEdZeroIdiom => {
                 self.zero_idiom_gd_r(instr);
                 Ok(())
             }
-            Opcode::XorGdEd => { self.xor_gd_ed(instr); Ok(()) }
-            Opcode::XorEwGw => { self.xor_ew_gw(instr); Ok(()) }
-            Opcode::XorGwEw => { self.xor_gw_ew(instr); Ok(()) }
+            Opcode::XorGdEd => { self.xor_gd_ed(instr)?; Ok(()) }
+            Opcode::XorEwGw => { self.xor_ew_gw(instr)?; Ok(()) }
+            Opcode::XorGwEw => { self.xor_gw_ew(instr)?; Ok(()) }
             Opcode::XorEwGwZeroIdiom | Opcode::XorGwEwZeroIdiom => {
                 self.zero_idiom_gw_r(instr);
                 Ok(())
@@ -2104,6 +2104,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.mov_cr4_rd(instr)?;
                 Ok(())
             }
+
+            // Debug Register Operations (0F 21 / 0F 23)
+            Opcode::MovRdDd => self.mov_rd_dd(instr),
+            Opcode::MovDdRd => self.mov_dd_rd(instr),
 
             Opcode::LmswEw => {
                 self.lmsw_ew(instr)?;
@@ -2335,7 +2339,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::JmpEw => {
-                self.jmp_ew(instr);
+                self.jmp_ew(instr)?;
                 Ok(())
             }
             Opcode::JmpEd => {
@@ -2345,7 +2349,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
             // CALL instructions
             Opcode::CallJw => {
-                self.call_jw(instr);
+                self.call_jw(instr)?;
                 Ok(())
             }
             Opcode::CallJd => {
@@ -2353,7 +2357,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::CallEw => {
-                self.call_ew(instr);
+                self.call_ew(instr)?;
                 Ok(())
             }
             Opcode::CallEd => {
@@ -2363,11 +2367,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
             // RET instructions
             Opcode::RetOp16 => {
-                self.ret_near16(instr);
+                self.ret_near16(instr)?;
                 Ok(())
             }
             Opcode::RetOp16Iw => {
-                self.ret_near16_iw(instr);
+                self.ret_near16_iw(instr)?;
                 Ok(())
             }
             Opcode::RetOp32 => {
@@ -2581,9 +2585,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // =========================================================================
             // CMP instructions
             // =========================================================================
-            Opcode::CmpGbEb => { self.cmp_gb_eb(instr); Ok(()) }
-            Opcode::CmpGwEw => { self.cmp_gw_ew(instr); Ok(()) }
-            Opcode::CmpGdEd => { arith::arith32::CMP_GdEd(self, instr); Ok(()) }
+            Opcode::CmpGbEb => { self.cmp_gb_eb(instr)?; Ok(()) }
+            Opcode::CmpGwEw => { self.cmp_gw_ew(instr)?; Ok(()) }
+            Opcode::CmpGdEd => { arith::arith32::CMP_GdEd(self, instr)?; Ok(()) }
             Opcode::CmpEwGw => {
                 use crate::cpu::arith;
                 arith::CMP_EwGw(self, instr)
@@ -2592,8 +2596,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.cmp_al_ib(instr);
                 Ok(())
             }
-            Opcode::CmpEbIb => { self.cmp_eb_ib(instr); Ok(()) }
-            Opcode::CmpEbGb => { self.cmp_eb_gb(instr); Ok(()) }
+            Opcode::CmpEbIb => { self.cmp_eb_ib(instr)?; Ok(()) }
+            Opcode::CmpEbGb => { self.cmp_eb_gb(instr)?; Ok(()) }
             Opcode::CmpAxiw => {
                 self.cmp_ax_iw(instr);
                 Ok(())
@@ -2602,13 +2606,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.cmp_eax_id(instr);
                 Ok(())
             }
-            Opcode::CmpEwIw | Opcode::CmpEwsIb => { self.cmp_ew_iw(instr); Ok(()) }
-            Opcode::CmpEdId | Opcode::CmpEdsIb => { arith::arith32::CMP_EdId(self, instr); Ok(()) }
-            Opcode::CmpEdGd => { arith::arith32::CMP_EdGd(self, instr); Ok(()) }
+            Opcode::CmpEwIw | Opcode::CmpEwsIb => { self.cmp_ew_iw(instr)?; Ok(()) }
+            Opcode::CmpEdId | Opcode::CmpEdsIb => { arith::arith32::CMP_EdId(self, instr)?; Ok(()) }
+            Opcode::CmpEdGd => { arith::arith32::CMP_EdGd(self, instr)?; Ok(()) }
 
             // TEST instructions
-            Opcode::TestEwGw => { self.test_ew_gw(instr); Ok(()) }
-            Opcode::TestEdGd => { self.test_ed_gd(instr); Ok(()) }
+            Opcode::TestEwGw => { self.test_ew_gw(instr)?; Ok(()) }
+            Opcode::TestEdGd => { self.test_ed_gd(instr)?; Ok(()) }
             Opcode::TestAlib => {
                 self.test_al_ib(instr);
                 Ok(())
@@ -2621,16 +2625,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.test_eax_id(instr);
                 Ok(())
             }
-            Opcode::TestEwIw => { self.test_ew_iw(instr); Ok(()) }
-            Opcode::TestEdId => { self.test_ed_id(instr); Ok(()) }
+            Opcode::TestEwIw => { self.test_ew_iw(instr)?; Ok(()) }
+            Opcode::TestEdId => { self.test_ed_id(instr)?; Ok(()) }
 
             // =========================================================================
             // AND/OR/NOT instructions
             // =========================================================================
-            Opcode::AndGwEw => { self.and_gw_ew(instr); Ok(()) }
-            Opcode::AndEwGw => { self.and_ew_gw(instr); Ok(()) }
-            Opcode::AndGdEd => { self.and_gd_ed(instr); Ok(()) }
-            Opcode::AndEdGd => { self.and_ed_gd(instr); Ok(()) }
+            Opcode::AndGwEw => { self.and_gw_ew(instr)?; Ok(()) }
+            Opcode::AndEwGw => { self.and_ew_gw(instr)?; Ok(()) }
+            Opcode::AndGdEd => { self.and_gd_ed(instr)?; Ok(()) }
+            Opcode::AndEdGd => { self.and_ed_gd(instr)?; Ok(()) }
             Opcode::AndAlib => {
                 self.and_al_ib(instr);
                 Ok(())
@@ -2643,13 +2647,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.and_eax_id(instr);
                 Ok(())
             }
-            Opcode::AndEwIw | Opcode::AndEwsIb => { self.and_ew_iw(instr); Ok(()) }
-            Opcode::AndEdId | Opcode::AndEdsIb => { self.and_ed_id(instr); Ok(()) }
+            Opcode::AndEwIw | Opcode::AndEwsIb => { self.and_ew_iw(instr)?; Ok(()) }
+            Opcode::AndEdId | Opcode::AndEdsIb => { self.and_ed_id(instr)?; Ok(()) }
 
-            Opcode::OrGwEw => { self.or_gw_ew(instr); Ok(()) }
-            Opcode::OrEwGw => { self.or_ew_gw(instr); Ok(()) }
-            Opcode::OrGdEd => { self.or_gd_ed(instr); Ok(()) }
-            Opcode::OrEdGd => { self.or_ed_gd(instr); Ok(()) }
+            Opcode::OrGwEw => { self.or_gw_ew(instr)?; Ok(()) }
+            Opcode::OrEwGw => { self.or_ew_gw(instr)?; Ok(()) }
+            Opcode::OrGdEd => { self.or_gd_ed(instr)?; Ok(()) }
+            Opcode::OrEdGd => { self.or_ed_gd(instr)?; Ok(()) }
             Opcode::OrAlib => {
                 self.or_al_ib(instr);
                 Ok(())
@@ -2662,13 +2666,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.or_eax_id(instr);
                 Ok(())
             }
-            Opcode::OrEwIw | Opcode::OrEwsIb => { self.or_ew_iw(instr); Ok(()) }
-            Opcode::OrEdId | Opcode::OrEdsIb => { self.or_ed_id(instr); Ok(()) }
-            Opcode::XorEwIw | Opcode::XorEwsIb => { self.xor_ew_iw(instr); Ok(()) }
-            Opcode::XorEdId => { self.xor_ed_id(instr); Ok(()) }
-            Opcode::NotEw => { self.not_ew(instr); Ok(()) }
-            Opcode::NotEd => { self.not_ed(instr); Ok(()) }
-            Opcode::NegEd => { arith::NEG_Ed(self, instr); Ok(()) }
+            Opcode::OrEwIw | Opcode::OrEwsIb => { self.or_ew_iw(instr)?; Ok(()) }
+            Opcode::OrEdId | Opcode::OrEdsIb => { self.or_ed_id(instr)?; Ok(()) }
+            Opcode::XorEwIw | Opcode::XorEwsIb => { self.xor_ew_iw(instr)?; Ok(()) }
+            Opcode::XorEdId => { self.xor_ed_id(instr)?; Ok(()) }
+            Opcode::NotEw => { self.not_ew(instr)?; Ok(()) }
+            Opcode::NotEd => { self.not_ed(instr)?; Ok(()) }
+            Opcode::NegEd => { arith::NEG_Ed(self, instr)?; Ok(()) }
 
             // =========================================================================
             // Bit Test instructions (BT, BTS, BTR, BTC)
@@ -2681,6 +2685,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             Opcode::BtsEdGd => { self.bts_ed_gd(instr)?; Ok(()) }
             Opcode::BtrEdGd => { self.btr_ed_gd(instr)?; Ok(()) }
             Opcode::BtcEdGd => { self.btc_ed_gd(instr)?; Ok(()) }
+
+            // =========================================================================
+            // Bit Scan instructions (BSF, BSR)
+            // =========================================================================
+            Opcode::BsfGdEd => self.bsf_gd_ed(instr),
+            Opcode::BsrGdEd => self.bsr_gd_ed(instr),
+            Opcode::BsfGwEw => self.bsf_gw_ew(instr),
+            Opcode::BsrGwEw => self.bsr_gw_ew(instr),
 
             // =========================================================================
             // Multiplication and Division instructions
@@ -2699,12 +2711,28 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.imul_gd_ed_ib(instr)?;
                 Ok(())
             }
+            Opcode::ImulGdEdId => {
+                if instr.mod_c0() { self.imul_gd_ed_id_r(instr)?; } else { self.imul_gd_ed_id_m(instr)?; }
+                Ok(())
+            }
             Opcode::ImulGdEd => {
                 if instr.mod_c0() {
                     self.imul_gd_ed_r(instr)?;
                 } else {
                     self.imul_gd_ed_m(instr)?;
                 }
+                Ok(())
+            }
+            Opcode::ImulGwEw => {
+                if instr.mod_c0() { self.imul_gw_ew_r(instr)?; } else { self.imul_gw_ew_m(instr)?; }
+                Ok(())
+            }
+            Opcode::ImulGwEwIw => {
+                if instr.mod_c0() { self.imul_gw_ew_iw_r(instr)?; } else { self.imul_gw_ew_iw_m(instr)?; }
+                Ok(())
+            }
+            Opcode::ImulGwEwsIb => {
+                if instr.mod_c0() { self.imul_gw_ew_sib_r(instr)?; } else { self.imul_gw_ew_sib_m(instr)?; }
                 Ok(())
             }
             Opcode::DivEaxed => self.div_eax_ed(instr),
@@ -2731,41 +2759,41 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // =========================================================================
             Opcode::PushEw => {
                 if instr.mod_c0() {
-                    self.push_ew_r(instr);
+                    self.push_ew_r(instr)?;
                 } else {
-                    self.push_ew_m(instr);
+                    self.push_ew_m(instr)?;
                 }
                 Ok(())
             }
             Opcode::PushEd => {
                 if instr.mod_c0() {
-                    self.push_ed_r(instr);
+                    self.push_ed_r(instr)?;
                 } else {
-                    self.push_ed_m(instr);
+                    self.push_ed_m(instr)?;
                 }
                 Ok(())
             }
             Opcode::PushId => {
-                self.push_id(instr);
+                self.push_id(instr)?;
                 Ok(())
             }
             Opcode::PushSIb32 => {
-                self.push_id(instr);
+                self.push_id(instr)?;
                 Ok(())
             }
             Opcode::PopEw => {
                 if instr.mod_c0() {
-                    self.pop_ew_r(instr);
+                    self.pop_ew_r(instr)?;
                 } else {
-                    self.pop_ew_m(instr);
+                    self.pop_ew_m(instr)?;
                 }
                 Ok(())
             }
             Opcode::PopEd => {
                 if instr.mod_c0() {
-                    self.pop_ed_r(instr);
+                    self.pop_ed_r(instr)?;
                 } else {
-                    self.pop_ed_m(instr);
+                    self.pop_ed_m(instr)?;
                 }
                 Ok(())
             }
@@ -2783,39 +2811,39 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(())
             }
             Opcode::PushaOp16 => {
-                self.pusha16(instr);
+                self.pusha16(instr)?;
                 Ok(())
             }
             Opcode::PushaOp32 => {
-                self.pusha32(instr);
+                self.pusha32(instr)?;
                 Ok(())
             }
             Opcode::PopaOp16 => {
-                self.popa16(instr);
+                self.popa16(instr)?;
                 Ok(())
             }
             Opcode::PopaOp32 => {
-                self.popa32(instr);
+                self.popa32(instr)?;
                 Ok(())
             }
             Opcode::PushfFw => {
-                self.pushf_fw(instr);
+                self.pushf_fw(instr)?;
                 Ok(())
             }
             Opcode::PopfFw => {
-                self.popf_fw(instr);
+                self.popf_fw(instr)?;
                 Ok(())
             }
             Opcode::PushfFd => {
-                self.pushf_fd(instr);
+                self.pushf_fd(instr)?;
                 Ok(())
             }
             Opcode::PopfFd => {
-                self.popf_fd(instr);
+                self.popf_fd(instr)?;
                 Ok(())
             }
             Opcode::LeaveOp16 => {
-                self.leave16(instr);
+                self.leave16(instr)?;
                 Ok(())
             }
 
@@ -3009,15 +3037,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize].selector.value);
                 // TODO: proper exception(BX_DB_EXCEPTION, 0) delivery
                 // For now, trigger exception which will triple-fault cleanly
-                self.interrupt_real_mode(1);
+                self.interrupt_real_mode(1)?;
                 Ok(())
             }
             Opcode::IretOp16 => {
-                self.iret16(instr);
+                self.iret16(instr)?;
                 Ok(())
             }
             Opcode::IretOp32 => {
-                self.iret32(instr);
+                self.iret32(instr)?;
                 Ok(())
             }
 
@@ -3025,11 +3053,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // BOUND - Check Array Index Against Bounds
             // =========================================================================
             Opcode::BoundGwMa => {
-                self.bound_gw_ma(instr);
+                self.bound_gw_ma(instr)?;
                 Ok(())
             }
             Opcode::BoundGdMa => {
-                self.bound_gd_ma(instr);
+                self.bound_gd_ma(instr)?;
                 Ok(())
             }
 
@@ -3195,202 +3223,202 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // Shift/Rotate instructions
             // =========================================================================
             Opcode::ShlEbI1 => {
-                self.shl_eb_1(instr);
+                self.shl_eb_1(instr)?;
                 Ok(())
             }
             Opcode::ShlEb => {
-                self.shl_eb_cl(instr);
+                self.shl_eb_cl(instr)?;
                 Ok(())
             }
             Opcode::ShlEbIb => {
-                self.shl_eb_ib(instr);
+                self.shl_eb_ib(instr)?;
                 Ok(())
             }
             Opcode::ShlEwI1 => {
-                self.shl_ew_1(instr);
+                self.shl_ew_1(instr)?;
                 Ok(())
             }
             Opcode::ShlEw => {
-                self.shl_ew_cl(instr);
+                self.shl_ew_cl(instr)?;
                 Ok(())
             }
             Opcode::ShlEwIb => {
-                self.shl_ew_ib(instr);
+                self.shl_ew_ib(instr)?;
                 Ok(())
             }
             Opcode::ShlEdI1 => {
-                self.shl_ed_1(instr);
+                self.shl_ed_1(instr)?;
                 Ok(())
             }
             Opcode::ShlEd => {
-                self.shl_ed_cl(instr);
+                self.shl_ed_cl(instr)?;
                 Ok(())
             }
             Opcode::ShlEdIb => {
-                self.shl_ed_ib(instr);
+                self.shl_ed_ib(instr)?;
                 Ok(())
             }
             Opcode::ShldEdGdIb => {
-                self.shld_ed_gd_ib(instr);
+                self.shld_ed_gd_ib(instr)?;
                 Ok(())
             }
             Opcode::ShldEdGd => {
-                self.shld_ed_gd_cl(instr);
+                self.shld_ed_gd_cl(instr)?;
                 Ok(())
             }
             Opcode::ShrdEdGdIb => {
-                self.shrd_ed_gd_ib(instr);
+                self.shrd_ed_gd_ib(instr)?;
                 Ok(())
             }
             Opcode::ShrdEdGd => {
-                self.shrd_ed_gd_cl(instr);
+                self.shrd_ed_gd_cl(instr)?;
                 Ok(())
             }
             Opcode::SarEbIb => {
-                self.sar_eb_ib(instr);
+                self.sar_eb_ib(instr)?;
                 Ok(())
             }
 
             Opcode::ShrEbI1 => {
-                self.shr_eb_1(instr);
+                self.shr_eb_1(instr)?;
                 Ok(())
             }
             Opcode::ShrEb => {
-                self.shr_eb_cl(instr);
+                self.shr_eb_cl(instr)?;
                 Ok(())
             }
             Opcode::ShrEbIb => {
-                self.shr_eb_ib(instr);
+                self.shr_eb_ib(instr)?;
                 Ok(())
             }
             Opcode::ShrEwI1 => {
-                self.shr_ew_1(instr);
+                self.shr_ew_1(instr)?;
                 Ok(())
             }
             Opcode::ShrEw => {
-                self.shr_ew_cl(instr);
+                self.shr_ew_cl(instr)?;
                 Ok(())
             }
             Opcode::ShrEwIb => {
-                self.shr_ew_ib(instr);
+                self.shr_ew_ib(instr)?;
                 Ok(())
             }
             Opcode::ShrEdI1 => {
-                self.shr_ed_1(instr);
+                self.shr_ed_1(instr)?;
                 Ok(())
             }
             Opcode::ShrEd => {
-                self.shr_ed_cl(instr);
+                self.shr_ed_cl(instr)?;
                 Ok(())
             }
             Opcode::ShrEdIb => {
-                self.shr_ed_ib(instr);
+                self.shr_ed_ib(instr)?;
                 Ok(())
             }
 
             // ROL - Rotate Left
             Opcode::RolEbI1 => {
-                self.rol_eb_1(instr);
+                self.rol_eb_1(instr)?;
                 Ok(())
             }
             Opcode::RolEb => {
-                self.rol_eb_cl(instr);
+                self.rol_eb_cl(instr)?;
                 Ok(())
             }
             Opcode::RolEbIb => {
-                self.rol_eb_ib(instr);
+                self.rol_eb_ib(instr)?;
                 Ok(())
             }
             Opcode::RolEwI1 => {
-                self.rol_ew_1(instr);
+                self.rol_ew_1(instr)?;
                 Ok(())
             }
             Opcode::RolEw => {
-                self.rol_ew_cl(instr);
+                self.rol_ew_cl(instr)?;
                 Ok(())
             }
             Opcode::RolEwIb => {
-                self.rol_ew_ib(instr);
+                self.rol_ew_ib(instr)?;
                 Ok(())
             }
             Opcode::RolEdI1 => {
-                self.rol_ed_1(instr);
+                self.rol_ed_1(instr)?;
                 Ok(())
             }
             Opcode::RolEd => {
-                self.rol_ed_cl(instr);
+                self.rol_ed_cl(instr)?;
                 Ok(())
             }
             Opcode::RolEdIb => {
-                self.rol_ed_ib(instr);
+                self.rol_ed_ib(instr)?;
                 Ok(())
             }
             Opcode::RorEbI1 => {
-                self.ror_eb_1(instr);
+                self.ror_eb_1(instr)?;
                 Ok(())
             }
             Opcode::RorEb => {
-                self.ror_eb_cl(instr);
+                self.ror_eb_cl(instr)?;
                 Ok(())
             }
             Opcode::RorEbIb => {
-                self.ror_eb_ib(instr);
+                self.ror_eb_ib(instr)?;
                 Ok(())
             }
             Opcode::RorEwI1 => {
-                self.ror_ew_1(instr);
+                self.ror_ew_1(instr)?;
                 Ok(())
             }
             Opcode::RorEw => {
-                self.ror_ew_cl(instr);
+                self.ror_ew_cl(instr)?;
                 Ok(())
             }
             Opcode::RorEwIb => {
-                self.ror_ew_ib(instr);
+                self.ror_ew_ib(instr)?;
                 Ok(())
             }
             Opcode::RorEdI1 => {
-                self.ror_ed_1(instr);
+                self.ror_ed_1(instr)?;
                 Ok(())
             }
             Opcode::RorEd => {
-                self.ror_ed_cl(instr);
+                self.ror_ed_cl(instr)?;
                 Ok(())
             }
             Opcode::RorEdIb => {
-                self.ror_ed_ib(instr);
+                self.ror_ed_ib(instr)?;
                 Ok(())
             }
             Opcode::SarEbI1 => {
-                self.sar_eb_1(instr);
+                self.sar_eb_1(instr)?;
                 Ok(())
             }
             Opcode::SarEb => {
-                self.sar_eb_cl(instr);
+                self.sar_eb_cl(instr)?;
                 Ok(())
             }
             Opcode::SarEwI1 => {
-                self.sar_ew_1(instr);
+                self.sar_ew_1(instr)?;
                 Ok(())
             }
             Opcode::SarEw => {
-                self.sar_ew_cl(instr);
+                self.sar_ew_cl(instr)?;
                 Ok(())
             }
             Opcode::SarEwIb => {
-                self.sar_ew_ib(instr);
+                self.sar_ew_ib(instr)?;
                 Ok(())
             }
             Opcode::SarEdI1 => {
-                self.sar_ed_1(instr);
+                self.sar_ed_1(instr)?;
                 Ok(())
             }
             Opcode::SarEd => {
-                self.sar_ed_cl(instr);
+                self.sar_ed_cl(instr)?;
                 Ok(())
             }
             Opcode::SarEdIb => {
-                self.sar_ed_ib(instr);
+                self.sar_ed_ib(instr)?;
                 Ok(())
             }
 
@@ -3407,12 +3435,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             Opcode::XchgEbGb => {
                 if instr.mod_c0() { self.xchg_eb_gb(instr); }
-                else { self.xchg_eb_gb_m(instr); }
+                else { self.xchg_eb_gb_m(instr)?; }
                 Ok(())
             }
             Opcode::XchgEwGw => {
                 if instr.mod_c0() { self.xchg_ew_gw(instr); }
-                else { self.xchg_ew_gw_m(instr); }
+                else { self.xchg_ew_gw_m(instr)?; }
                 Ok(())
             }
             Opcode::XchgEdGd => {
@@ -3427,14 +3455,37 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.xchg_ax_rw(instr);
                 Ok(())
             }
+            // =========================================================================
+            // SETcc Eb — Set byte on condition
+            // Encoder: group opcode with no nnn extension; DST=rm (byte reg or mem)
+            // =========================================================================
+            Opcode::SetoEb   => self.seto_eb(instr),
+            Opcode::SetnoEb  => self.setno_eb(instr),
+            Opcode::SetbEb   => self.setb_eb(instr),
+            Opcode::SetnbEb  => self.setnb_eb(instr),
+            Opcode::SetzEb   => self.setz_eb(instr),
+            Opcode::SetnzEb  => self.setnz_eb(instr),
+            Opcode::SetbeEb  => self.setbe_eb(instr),
+            Opcode::SetnbeEb => self.setnbe_eb(instr),
+            Opcode::SetsEb   => self.sets_eb(instr),
+            Opcode::SetnsEb  => self.setns_eb(instr),
+            Opcode::SetpEb   => self.setp_eb(instr),
+            Opcode::SetnpEb  => self.setnp_eb(instr),
+            Opcode::SetlEb   => self.setl_eb(instr),
+            Opcode::SetnlEb  => self.setnl_eb(instr),
+            Opcode::SetleEb  => self.setle_eb(instr),
+            Opcode::SetnleEb => self.setnle_eb(instr),
+
             Opcode::Cbw => {
                 self.cbw(instr);
                 Ok(())
             }
-            Opcode::MovsxGdEb => { self.movsx_gd_eb(instr); Ok(()) }
+            Opcode::MovsxGdEb => { self.movsx_gd_eb(instr)?; Ok(()) }
             Opcode::MovsxGdEw => { self.movsx_gd_ew(instr)?; Ok(()) }
-            Opcode::MovzxGdEb => { data_xfer::MOVZX_GdEb_unified(self, instr); Ok(()) }
-            Opcode::MovzxGdEw => { data_xfer::MOVZX_GdEw_unified(self, instr); Ok(()) }
+            Opcode::MovzxGdEb => { data_xfer::MOVZX_GdEb_unified(self, instr)?; Ok(()) }
+            Opcode::MovzxGdEw => { data_xfer::MOVZX_GdEw_unified(self, instr)?; Ok(()) }
+            Opcode::MovzxGwEb => self.movzx_gw_eb(instr),
+            Opcode::MovsxGwEb => self.movsx_gw_eb(instr),
             Opcode::Cwd => {
                 self.cwd(instr);
                 Ok(())
@@ -3647,7 +3698,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 if !instr.mod_c0() { let _ = self.resolve_addr32(instr); }
                 Ok(())
             }
-            Opcode::Fnop | Opcode::Fplegacy | Opcode::Fpuesc => Ok(()),
+            Opcode::Fnop | Opcode::Fplegacy | Opcode::Fpuesc | Opcode::Fwait => Ok(()),
             // All other FPU opcodes → NOP stub
             Opcode::FldSti | Opcode::FldSingleReal | Opcode::FldDoubleReal | Opcode::FldExtendedReal |
             Opcode::FildWordInteger | Opcode::FildDwordInteger | Opcode::FildQwordInteger |
@@ -4055,6 +4106,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             (hit, tlb_entry.ppf, tlb_entry.host_page_addr)
         };
 
+        // Track whether translate_linear succeeded so we can populate the iTLB afterward.
+        let mut itlb_should_update = false;
+
         let fetch_ptr_option = if tlb_hit {
             self.p_addr_fetch_page = tlb_ppf;
             Some(tlb_host_addr)
@@ -4080,6 +4134,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             ) {
                 Ok(p_addr) => {
                     self.p_addr_fetch_page = ppf_of(p_addr);
+                    itlb_should_update = true;
                     tracing::debug!(
                         "prefetch: translate_linear OK, p_addr={:#x}, p_addr_fetch_page={:#x}",
                         p_addr,
@@ -4117,6 +4172,22 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     self.eip_fetch_ptr = None;
                 }
             }
+            // Populate iTLB after a successful translate_linear so the next prefetch to this
+            // page hits the TLB instead of re-walking the page tables (avoids 200x slowdown).
+            if itlb_should_update {
+                if let Some(fp) = self.eip_fetch_ptr {
+                    let host_page_ptr = fp.as_ptr() as super::tlb::BxHostpageaddr;
+                    let ppf = self.p_addr_fetch_page;
+                    // access_bits bit 0 = supervisor, bit 1 = user (matches the TLB hit check).
+                    let access_bits = 1u32 << (self.user_pl as u32);
+                    let tlb_entry = self.itlb.get_entry_of(lpf, 0);
+                    tlb_entry.lpf = lpf;
+                    tlb_entry.ppf = ppf;
+                    tlb_entry.access_bits = access_bits;
+                    tlb_entry.lpf_mask = 0xFFF;
+                    tlb_entry.host_page_addr = host_page_ptr;
+                }
+            }
             // self.eip_fetch_ptr = eip_fetch_ptr.as_deref();
             let p_addr: BxPhyAddress = self.p_addr_fetch_page + u64::from(page_offset);
             if self.eip_fetch_ptr.is_none() && p_addr >= mem_len.try_into()? {
@@ -4144,7 +4215,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// BxError - Invalid instruction handler
     /// Matches BX_CPU_C::BxError from proc_ctrl.cc:40
     /// Raises #UD (Undefined Instruction) exception
-    pub(super) fn bx_error(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub(super) fn bx_error(&mut self, instr: &Instruction) -> Result<()> {
         let opcode = instr.get_ia_opcode();
 
         if opcode == crate::cpu::decoder::Opcode::IaError {
@@ -4167,7 +4238,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// BxNoFPU - FPU not available handler
     /// Matches BX_CPU_C::BxNoFPU from proc_ctrl.cc:463
     /// Raises #NM (Device Not Available) if CR0.EM or CR0.TS is set
-    pub(super) fn bx_no_fpu(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub(super) fn bx_no_fpu(&mut self, instr: &Instruction) -> Result<()> {
         let cr0 = self.cr0.get32();
         let cr0_em = (cr0 & (1 << 2)) != 0; // CR0.EM bit 2
         let cr0_ts = (cr0 & (1 << 3)) != 0; // CR0.TS bit 3
@@ -4184,7 +4255,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// BxNoMMX - MMX not available handler
     /// Matches BX_CPU_C::BxNoMMX from proc_ctrl.cc:473
     /// Raises #UD if CR0.EM is set, #NM if CR0.TS is set
-    pub(super) fn bx_no_mmx(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub(super) fn bx_no_mmx(&mut self, instr: &Instruction) -> Result<()> {
         let cr0 = self.cr0.get32();
         let cr0_em = (cr0 & (1 << 2)) != 0; // CR0.EM bit 2
         let cr0_ts = (cr0 & (1 << 3)) != 0; // CR0.TS bit 3
@@ -4207,7 +4278,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Only available if CPU_LEVEL >= 6
     /// Raises #UD if CR0.EM is set or CR4.OSFXSR is clear, #NM if CR0.TS is set
     #[cfg(feature = "bx_support_sse")]
-    pub(super) fn bx_no_sse(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub(super) fn bx_no_sse(&mut self, instr: &Instruction) -> Result<()> {
         let cr0 = self.cr0.get32();
         let cr4 = self.cr4.get32();
         let cr0_em = (cr0 & (1 << 2)) != 0; // CR0.EM bit 2
@@ -4233,7 +4304,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Raises #UD if not in protected mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
     /// Raises #NM if CR0.TS is set
     #[cfg(feature = "bx_support_avx")]
-    pub(super) fn bx_no_avx(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub(super) fn bx_no_avx(&mut self, instr: &Instruction) -> Result<()> {
         // Check if in protected mode (CR0.PE = 1)
         let cr0 = self.cr0.get32();
         let cr0_pe = (cr0 & (1 << 0)) != 0; // CR0.PE bit 0
@@ -4275,7 +4346,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Raises #UD if not in protected mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
     /// Raises #NM if CR0.TS is set
     #[cfg(feature = "bx_support_evex")]
-    pub(super) fn bx_no_opmask(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub(super) fn bx_no_opmask(&mut self, instr: &Instruction) -> Result<()> {
         // Check if in protected mode (CR0.PE = 1)
         let cr0 = self.cr0.get32();
         let cr0_pe = (cr0 & (1 << 0)) != 0; // CR0.PE bit 0
@@ -4320,7 +4391,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Raises #UD if not in protected mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
     /// Raises #NM if CR0.TS is set
     #[cfg(feature = "bx_support_evex")]
-    pub(super) fn bx_no_evex(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub(super) fn bx_no_evex(&mut self, instr: &Instruction) -> Result<()> {
         // Check if in protected mode (CR0.PE = 1)
         let cr0 = self.cr0.get32();
         let cr0_pe = (cr0 & (1 << 0)) != 0; // CR0.PE bit 0
@@ -4375,7 +4446,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Only available if BX_SUPPORT_AMX
     /// Raises #UD if not in long64 mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
     #[cfg(feature = "bx_support_amx")]
-    pub(super) fn bx_no_amx(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub(super) fn bx_no_amx(&mut self, instr: &Instruction) -> Result<()> {
         if !self.long64_mode() {
             self.exception(Exception::Ud, 0)?;
             return Ok(());
@@ -4435,7 +4506,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// - EVEX instructions with invalid broadcast/SAE get BxError handler
     pub(crate) fn assign_handler(
         &mut self,
-        instr: &mut BxInstructionGenerated,
+        instr: &mut Instruction,
         fetch_mode_mask: u32,
     ) -> Result<(bool, Option<InstructionHandler<I>>)> {
         use super::opcodes_table::{get_opcode_entry, FetchModeMask, OpFlags};

@@ -16,23 +16,21 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-02-25):**
+**Current Status (2026-02-26):**
 - ✅ BIOS-bochs-latest (128 KB) is now the primary BIOS
 - ✅ Full BIOS POST completes: rombios32_init, VGA BIOS, ATA detection, boot
-- ✅ VGA text output working! Clean headless text dump matches Bochs reference:
+- ✅ VGA text output working! Clean headless text dump:
   ```
   Bochs VGABios (PCI) 0.9c 08 Jan 2025
-  This VGA/VBE Bios is released under the GNU LGPL
+  ...
   Bochs 3.0.devel BIOS - build: 05/15/25
-  Options: apmbios pcibios pnpbios eltorito rombios32
-  Press F12 for boot menu.
-  Booting from Hard Disk...
   LILO boot:
   Loading linux......
+  Linux version 1.3.89 (root@merlin) (gcc version 2.7.2)
   ```
 - ✅ LILO boot loader runs, loads compressed Linux kernel
 - ✅ Kernel decompresses and starts executing (paging enabled, CR0=0x80000013)
-- ✅ Kernel reaches idle HLT loop with timer interrupts at ~100M instructions
+- ✅ Kernel runs ~190M instructions (timer interrupts, task switching, module loading)
 - ✅ Paging translation: all 32-bit string ops use read/write_virtual_byte/word/dword
 - ✅ Segment limit checks in virtual memory access functions
 - ✅ Protected mode: segment loading, descriptor parsing, privilege checks
@@ -43,8 +41,12 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 - ✅ VGA word-wide I/O: port mask 0x3 (byte+word) matching Bochs vgacore.cc
 - ✅ VGA memory plane filtering: map mask check prevents font data corrupting text buffer
 - ✅ x87 FPU stubs inlined (FNINIT, FNSTSW, FNSTCW, etc.)
-- 🔄 VGA text dump shows kernel boot messages but no Linux console output yet
-  - Kernel console likely uses different VGA mode or direct framebuffer writes
+- ✅ Exception delivery: protected_mode_int BadVector → recursive exception() for double/triple fault
+- ✅ task_switch: TSS GPR load now writes EAX-EDI to CPU registers
+- 🔄 Triple fault at icount=190880499: GDT[2] reads as wrong descriptor (not code segment)
+  - raw=0x62aa6010_0x6008ffff at GDTR.base=0xC0106870+16, need to find why/when overwritten
+- 🔄 vsprintf broken: Linux kernel shows "Memory: %uk/%uk available" (raw format specifiers)
+- 🔄 "Trying to free nonexistent swap-page" repeated — kernel swap init loop
 
 **What Fixed the "Corrupted Symbols":**
 The previous investigation concluded BIOS ROM had wrong symbol addresses. In reality, the segment default bug caused stack reads via `[BP+offset]` to use DS (base=0) instead of SS, and the execute1/execute2 swap caused memory reads to return register values. Together, these made the BIOS load wrong values for `_end`, `__data_start`, etc. With both bugs fixed, the BIOS reads correct values from the stack and memory.
@@ -183,9 +185,10 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ## Known Issues & Next Steps
 
 ### Next Steps
-1. **Get Linux console output visible** — Kernel boots to idle HLT loop but no console text on VGA. May need to handle Linux's direct VGA framebuffer writes or console initialization sequence.
-2. **Implement remaining instructions** — As discovered by running the emulator further
-3. **Reach DLX Linux login prompt** — Continue iterative bug fixing until the full boot completes
+1. **Fix GDT[2] triple fault** — At icount=190M, CS=0x10 from IDT gate reads as system descriptor instead of code segment. Need to trace physical address of GDTR.base+16 and determine if GDT got overwritten.
+2. **Fix vsprintf** — Linux kernel "Memory: %uk/%uk" shows raw format specifiers. vsprintf internals broken.
+3. **Fix swap init loop** — "Trying to free nonexistent swap-page" repeated hundreds of times.
+4. **Reach DLX Linux login prompt** — Continue iterative bug fixing until the full boot completes
 
 ### Quick Debug Commands
 ```bash
@@ -233,7 +236,12 @@ RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=1000000 ./target/release/examples/dlxlinux
 - ✅ Kernel decompresses, enables paging, reaches idle HLT loop (~100M instructions)
 - ✅ BT/BTS/BTR/BTC all 8 variants, MOVSX GdEw, LEAVE decoder fix
 - ✅ VGA text output: word-wide I/O (mask 0x3), map mask plane filtering, window-base offsets
-- 🔄 Linux kernel console output not visible yet — may need different VGA handling
+- ✅ Linux "Linux version 1.3.89" visible in VGA output — kernel console IS working
+- ✅ Exception delivery: protected_mode_int BadVector → recursive exception() (double/triple fault chain)
+- ✅ task_switch: TSS GPR load now writes EAX-EDI to CPU (compiler warning revealed dead assignment)
+- 🔄 Triple fault at icount=190M: GDT[2] (CS=0x10) reads as wrong descriptor — need root cause
+- 🔄 vsprintf broken: "Memory: %uk/%uk" shows raw format specs — vsprintf internals issue
+- 🔄 "Trying to free nonexistent swap-page" — kernel swap pool init loop
 
 ## Build Commands
 

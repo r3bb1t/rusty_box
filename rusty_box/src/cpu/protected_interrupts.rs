@@ -24,6 +24,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         push_error: bool,
         error_code: u16,
     ) -> Result<()> {
+        // Only log for exceptions (vectors 0-31), not hardware IRQs (32+)
+        if vector < 32 {
+            tracing::debug!("PM_INT: vec={:#04x} IDTR.base={:#010x} IDTR.limit={:#06x} CPL={} RIP={:#010x} icount={}",
+                vector, self.idtr.base, self.idtr.limit,
+                self.sregs[BxSegregs::Cs as usize].selector.rpl,
+                self.rip(), self.icount);
+        }
         // interrupt vector must be within IDT table limits, else #GP(vector*8 + 2 + EXT)
         if (vector as u64 * 8 + 7) > self.idtr.limit as u64 {
             tracing::error!(
@@ -33,9 +40,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
         }
 
-        let raw_descriptor = self.system_read_qword(self.idtr.base + vector as u64 * 8)?;
+        let gate_addr = self.idtr.base + vector as u64 * 8;
+        let raw_descriptor = self.system_read_qword(gate_addr)?;
         let dword1 = raw_descriptor as u32;
         let dword2 = (raw_descriptor >> 32) as u32;
+        if vector < 32 {
+            tracing::debug!("PM_INT: IDT[{:#04x}] @ {:#010x}: dword1={:#010x} dword2={:#010x}",
+                vector, gate_addr, dword1, dword2);
+        }
 
         let mut gate_descriptor = self.parse_descriptor(dword1, dword2)?;
 
@@ -178,9 +190,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             || super::descriptor::is_data_segment(cs_descriptor.r#type)
             || cs_descriptor.dpl > cpl
         {
-            tracing::error!(
-                "handle_interrupt_trap_gate(): not accessible or not code segment cs={:#04x}",
-                cs_selector.value
+            tracing::warn!(
+                "handle_interrupt_trap_gate(): not accessible or not code segment cs={:#04x} \
+                 raw={:#010x}_{:#010x} valid={} segment={} type={:#x} dpl={} cpl={} \
+                 GDTR.base={:#010x} GDTR.limit={:#06x} icount={}",
+                cs_selector.value, cs_dword2, cs_dword1,
+                cs_descriptor.valid, cs_descriptor.segment,
+                cs_descriptor.r#type, cs_descriptor.dpl, cpl,
+                self.gdtr.base, self.gdtr.limit, self.icount
             );
             return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
         }
@@ -238,11 +255,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let mut new_cs_selector = cs_selector;
             new_cs_selector.rpl = cpl;
             new_cs_selector.value = (new_cs_selector.value & !0x03) | cpl as u16;
-            
+
+            if tracing::enabled!(tracing::Level::DEBUG) {
+                let base = unsafe { cs_descriptor.u.segment.base };
+                let linear = base + gate_dest_offset as u64;
+                let bytes: Vec<u8> = (0..48u64).map(|i| {
+                    if let Ok(pa) = self.translate_linear_system_read(linear + i) {
+                        self.mem_read_byte(pa)
+                    } else { 0xFF }
+                }).collect();
+                tracing::debug!("PM_INT: loading CS sel={:#06x} base={:#010x} limit={:#010x} d_b={} -> EIP={:#010x} (linear={:#010x})",
+                    new_cs_selector.value, base,
+                    unsafe { cs_descriptor.u.segment.limit_scaled },
+                    unsafe { cs_descriptor.u.segment.d_b },
+                    gate_dest_offset, linear);
+                tracing::debug!("PM_INT: handler bytes @ {:#010x}: {:02x?}", linear, bytes);
+            }
+
             self.sregs[BxSegregs::Cs as usize].selector = new_cs_selector;
             self.sregs[BxSegregs::Cs as usize].cache = cs_descriptor;
             self.sregs[BxSegregs::Cs as usize].cache.valid = SEG_VALID_CACHE;
-            
+
             // Invalidate prefetch queue when CS changes
             self.eip_fetch_ptr = None;
             self.eip_page_window_size = 0;

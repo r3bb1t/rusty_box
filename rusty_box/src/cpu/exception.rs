@@ -240,7 +240,13 @@ const EXCEPTIONS_INFO: [BxExceptionInfo; BX_CPU_HANDLED_EXCEPTIONS as _] = [
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // vector:     0..255: vector in IDT
     // error_code: if exception generates and error, push this error code
+    #[track_caller]
     pub(super) fn exception(&mut self, vector: Exception, mut error_code: u16) -> Result<()> {
+        // Log the caller site for #GP to identify spurious exceptions during debugging
+        if vector == Exception::Gp && !self.real_mode() {
+            let caller = core::panic::Location::caller();
+            tracing::debug!("GP_CALLER: {}:{} icount={} RIP={:#x}", caller.file(), caller.line(), self.icount, self.prev_rip);
+        }
         let mut push_error = if (vector as usize) < BX_CPU_HANDLED_EXCEPTIONS {
             self.exception_push_error(vector as usize)
         } else {
@@ -342,10 +348,37 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         if self.real_mode() {
             // Real mode interrupt handling (already implemented in soft_int.rs)
-            self.interrupt_real_mode(vector_u8);
+            self.interrupt_real_mode(vector_u8)?;
         } else {
             // Protected mode interrupt handling
-            self.protected_mode_int(vector_u8, false, push_error, error_code)?;
+            {
+                // For #PF, include CR2 (the faulting linear address).
+                if vector == Exception::Pf {
+                    tracing::debug!("EXCEPTION: vec={:?}({:#x}) error_code={:#x} CR2={:#010x} RIP={:#x} ESP={:#x} icount={}",
+                        vector, vector as u8, error_code, self.cr2,
+                        self.rip(), self.esp(), self.icount);
+                } else {
+                    tracing::debug!("EXCEPTION: vec={:?}({:#x}) error_code={:#x} push_error={} RIP={:#x} icount={}",
+                        vector, vector as u8, error_code, push_error,
+                        self.rip(), self.icount);
+                }
+            }
+            // If protected_mode_int returns a BadVector error, it means delivery caused
+            // another exception (like IDT entry invalid → #GP). Handle it like Bochs does:
+            // call exception() recursively so double-fault detection runs normally.
+            match self.protected_mode_int(vector_u8, false, push_error, error_code) {
+                Ok(()) => {}
+                Err(super::error::CpuError::BadVector { vector: new_vector }) => {
+                    // Delivery failed — raise the indicated exception.
+                    // Double-fault / triple-fault detection is in the recursive call.
+                    tracing::warn!(
+                        "protected_mode_int({:?}) failed, raising {:?}; icount={}",
+                        vector, new_vector, self.icount
+                    );
+                    return self.exception(new_vector, 0);
+                }
+                Err(e) => return Err(e),
+            }
         }
 
         // error resolved
