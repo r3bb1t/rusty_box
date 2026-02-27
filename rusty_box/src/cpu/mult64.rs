@@ -4,10 +4,8 @@
 //! Copyright (C) 2001-2018 The Bochs Project
 
 use super::{
-    cpu::{BxCpuC, Exception},
+    cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::BxInstructionGenerated,
-    error::{CpuError, Result},
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {

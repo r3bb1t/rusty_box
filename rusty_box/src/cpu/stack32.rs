@@ -6,7 +6,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::BxInstructionGenerated,
+    decoder::Instruction,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -17,7 +17,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// PUSH r32 - Push 32-bit register
     /// Based on Bochs stack32.cc PUSH_EdR
-    pub fn push_ed_r(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn push_ed_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let dst = instr.dst() as usize;
         let value = self.get_gpr32(dst);
         self.push_32(value)?;
@@ -27,7 +27,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// PUSH m32 - Push 32-bit value from memory
     /// Based on Bochs stack32.cc PUSH_EdM
-    pub fn push_ed_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn push_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let value = self.read_virtual_dword(seg, eaddr)?;
@@ -38,7 +38,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// PUSH imm32
     /// Based on Bochs stack32.cc PUSH_Id
-    pub fn push_id(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn push_id(&mut self, instr: &Instruction) -> super::Result<()> {
         let value = instr.id();
         self.push_32(value)?;
         tracing::trace!("PUSH imm32: {:#010x}", value);
@@ -52,7 +52,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// POP r32 - Pop into 32-bit register
     /// Based on Bochs stack32.cc POP_EdR
-    pub fn pop_ed_r(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn pop_ed_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let dst = instr.dst() as usize;
         let value = self.pop_32()?;
         self.set_gpr32(dst, value);
@@ -62,7 +62,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// POP m32 - Pop into 32-bit memory location
     /// Based on Bochs stack32.cc POP_EdM
-    pub fn pop_ed_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn pop_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let value = self.pop_32()?;
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
@@ -74,7 +74,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// POP segment register (32-bit mode)
     /// Based on Bochs stack32.cc:87-111 POP32_Sw
     /// Pops a 16-bit selector from stack (advancing ESP by 4) and loads it into segment register
-    pub fn pop32_sw(&mut self, instr: &BxInstructionGenerated) -> Result<(), super::error::CpuError> {
+    pub fn pop32_sw(&mut self, instr: &Instruction) -> Result<(), super::error::CpuError> {
         use crate::cpu::decoder::BxSegregs;
         use crate::cpu::segment_ctrl_pro::parse_selector;
 
@@ -123,10 +123,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     let laddr = ss_base + self.esp() as u64;
                     // Try to translate and show what's at the stack
                     let paddr = self.translate_data_read(laddr).unwrap_or(0xDEAD);
-                    eprintln!("POP32_Sw: fetch_raw_descriptor FAILED for selector={:#06x} (index={}, TI={}), seg_idx={}, icount={}",
+                    tracing::warn!("POP32_Sw: fetch_raw_descriptor FAILED for selector={:#06x} (index={}, TI={}), seg_idx={}, icount={}",
                         selector_value, selector.index, selector.ti, seg_idx, self.icount);
-                    eprintln!("  ESP={:#x} SS.base={:#x} laddr={:#x} paddr={:#x}", self.esp(), ss_base, laddr, paddr);
-                    eprintln!("  GDTR.base={:#x} GDTR.limit={:#x} CR3={:#x}", self.gdtr.base, self.gdtr.limit, self.cr3);
+                    tracing::warn!("  ESP={:#x} SS.base={:#x} laddr={:#x} paddr={:#x}", self.esp(), ss_base, laddr, paddr);
+                    tracing::warn!("  GDTR.base={:#x} GDTR.limit={:#x} CR3={:#x}", self.gdtr.base, self.gdtr.limit, self.cr3);
                     // Dump stack dwords around ESP
                     let esp = self.esp();
                     for i in 0..8u32 {
@@ -134,7 +134,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         let la = ss_base + offset as u64;
                         if let Ok(pa) = self.translate_data_read(la) {
                             let val = self.mem_read_dword(pa);
-                            eprintln!("  Stack[ESP+{:#x}] = {:#010x}  (laddr={:#x} paddr={:#x})", i*4, val, la, pa);
+                            tracing::warn!("  Stack[ESP+{:#x}] = {:#010x}  (laddr={:#x} paddr={:#x})", i*4, val, la, pa);
                         }
                     }
                     // Also show previous ESP entries (what was popped before)
@@ -143,7 +143,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         let la = ss_base + offset as u64;
                         if let Ok(pa) = self.translate_data_read(la) {
                             let val = self.mem_read_dword(pa);
-                            eprintln!("  Stack[ESP-{:#x}] = {:#010x}  (laddr={:#x} paddr={:#x})", i*4, val, la, pa);
+                            tracing::warn!("  Stack[ESP-{:#x}] = {:#010x}  (laddr={:#x} paddr={:#x})", i*4, val, la, pa);
                         }
                     }
                     // Dump code bytes near the failing instruction
@@ -159,8 +159,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                             code_bytes.push(0xCC);
                         }
                     }
-                    eprintln!("  Code at CS:EIP-32 to CS:EIP+16 (EIP={:#x}, CS.base={:#x}):", self.eip(), cs_base);
-                    eprintln!("  {:02x?}", &code_bytes);
+                    tracing::warn!("  Code at CS:EIP-32 to CS:EIP+16 (EIP={:#x}, CS.base={:#x}):", self.eip(), cs_base);
+                    tracing::warn!("  {:02x?}", &code_bytes);
                 }
                 let (dword1, dword2) = fetch_result?;
                 let mut descriptor = self.parse_descriptor(dword1, dword2)?;
@@ -196,6 +196,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
+    // Unified PUSH/POP Ed dispatch (register vs memory)
+    // =========================================================================
+
+    /// PUSH r/m32 - Unified dispatch based on mod_c0()
+    pub fn push_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() { self.push_ed_r(instr) } else { self.push_ed_m(instr) }
+    }
+
+    /// POP r/m32 - Unified dispatch based on mod_c0()
+    pub fn pop_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() { self.pop_ed_r(instr) } else { self.pop_ed_m(instr) }
+    }
+
+    // =========================================================================
     // PUSHAD/POPAD instructions
     // Based on Bochs stack32.cc:120-193
     // =========================================================================
@@ -203,7 +217,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// PUSHAD - Push all 32-bit general registers
     /// Push order: EAX, ECX, EDX, EBX, ESP (original), EBP, ESI, EDI
     /// Based on Bochs stack32.cc:120-151
-    pub fn pusha32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn pusha32(&mut self, _instr: &Instruction) -> super::Result<()> {
         // Get register values before any pushes
         let eax = self.eax();
         let ecx = self.ecx();
@@ -252,7 +266,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// POPAD - Pop all 32-bit general registers
     /// Pop order: EDI, ESI, EBP, (skip ESP), EBX, EDX, ECX, EAX
     /// Based on Bochs stack32.cc:153-193
-    pub fn popa32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn popa32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let (edi, esi, ebp, ebx, edx, ecx, eax) = if self.is_stack_32bit() {
             let temp_esp = self.esp();
 
@@ -307,7 +321,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// PUSHFD - Push flags (32-bit)
-    pub fn pushf_fd(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn pushf_fd(&mut self, _instr: &Instruction) -> super::Result<()> {
         // VM & RF flags cleared in image stored on the stack
         let flags = self.eflags & 0x00FCFFFF;
         self.push_32(flags)?;
@@ -316,7 +330,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// POPFD - Pop flags (32-bit)
-    pub fn popf_fd(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn popf_fd(&mut self, _instr: &Instruction) -> super::Result<()> {
         let flags = self.pop_32()?;
 
         // RF is always zero after POPF
@@ -331,7 +345,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// PUSH segment register (32-bit mode)
     /// Based on Bochs stack32.cc:70-85 PUSH32_Sw
     /// Pushes 4 bytes (only lower 16 bits are meaningful)
-    pub fn push_op32_sw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn push_op32_sw(&mut self, instr: &Instruction) -> super::Result<()> {
         let seg_idx = instr.dst() as usize; // nnn field = segment register index
         let val_16 = self.sregs[seg_idx].selector.value;
         // Bochs writes only a word at ESP-4, not a full dword
@@ -350,7 +364,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LEAVE (32-bit operand size)
     /// Based on Bochs stack32.cc:258-273
-    pub fn leave_op32(&mut self, _instr: &super::decoder::BxInstructionGenerated) -> super::Result<()> {
+    pub fn leave_op32(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
         let ss_d_b = unsafe { self.sregs[super::decoder::BxSegregs::Ss as usize].cache.u.segment.d_b };
         let value32 = if ss_d_b {
             // 32-bit stack

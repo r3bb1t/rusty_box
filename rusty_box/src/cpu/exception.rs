@@ -299,7 +299,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             // Triple fault: 3rd exception with no resolution after #DF.
             if self.last_exception_type == ExceptionType::DoubleFault as u32 {
-                eprintln!("TRIPLE FAULT at RIP={:#x} CS={:#x} vector={:?} error_code={:#x} icount={} CR0={:#x} CR3={:#x} IDTR.base={:#x} IDTR.limit={:#x}",
+                tracing::error!("TRIPLE FAULT at RIP={:#x} CS={:#x} vector={:?} error_code={:#x} icount={} CR0={:#x} CR3={:#x} IDTR.base={:#x} IDTR.limit={:#x}",
                     self.rip(), self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value,
                     vector, error_code, self.icount,
                     self.cr0.get32(), self.cr3, self.idtr.base, self.idtr.limit);
@@ -318,7 +318,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let last = self.last_exception_type as usize;
             let newt = exception_type as usize;
             if last < 3 && newt < 3 && !IS_EXCEPTION_OK[last][newt] {
-                eprintln!("DOUBLE FAULT: 1st exception type={} 2nd={:?}(type={}) at RIP={:#x} error_code={:#x} icount={}",
+                tracing::error!("DOUBLE FAULT: 1st exception type={} 2nd={:?}(type={}) at RIP={:#x} error_code={:#x} icount={}",
                     last, vector, newt, self.rip(), error_code, self.icount);
                 return self.exception(Exception::Df, 0);
             }

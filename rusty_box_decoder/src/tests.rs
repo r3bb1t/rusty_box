@@ -3,7 +3,7 @@ extern crate std;
 
 use crate::{
     fetchdecode32::fetch_decode32, fetchdecode64::fetch_decode64, ia_opcodes::Opcode,
-    instr_generated::InstructionGenerated,
+    instr_generated::Instruction,
 };
 
 /// Initialize tracing for tests (similar to examples/init_and_run.rs)
@@ -17,7 +17,7 @@ fn init_tracing() {
 }
 
 /// Format an instruction for display (similar to Zydis output)
-fn format_instruction(address: u64, instr: &InstructionGenerated) -> std::string::String {
+fn format_instruction(address: u64, instr: &Instruction) -> std::string::String {
     let opcode_name = std::format!("{:?}", instr.get_ia_opcode());
     let length = instr.meta_info.ilen;
 
@@ -32,7 +32,7 @@ fn disassemble_sequence(
     data: &[u8],
     runtime_address: u64,
     is_32: bool,
-) -> std::vec::Vec<(u64, InstructionGenerated)> {
+) -> std::vec::Vec<(u64, Instruction)> {
     let mut offset = 0;
     let mut current_address = runtime_address;
     let mut instructions = std::vec::Vec::new();
@@ -280,7 +280,7 @@ fn disassemble_sequence_64bit(
     data: &[u8],
     runtime_address: u64,
     _is_32: bool,
-) -> std::vec::Vec<(u64, InstructionGenerated)> {
+) -> std::vec::Vec<(u64, Instruction)> {
     let mut offset = 0;
     let mut current_address = runtime_address;
     let mut instructions = std::vec::Vec::new();

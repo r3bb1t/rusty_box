@@ -1,14 +1,14 @@
 // 32-bit data transfer operations: MOV, etc.
 // Mirrors Bochs cpp/cpu/data_xfer32.cc
 
-use crate::cpu::decoder::{BxInstructionGenerated, BxSegregs};
+use crate::cpu::decoder::{Instruction, BxSegregs};
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 /// MOV_GdEd_R: MOV r32, r/m32 (register form)
 /// Opcode: 0x8B, ModRM: r32, r/m32 (register)
 /// meta_data[0] = destination register
 /// meta_data[1] = source register
-pub fn MOV_GdEd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+pub fn MOV_GdEd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
     let dst_idx = instr.meta_data[0] as usize;
     let src_idx = instr.meta_data[1] as usize;
 
@@ -19,7 +19,7 @@ pub fn MOV_GdEd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 /// MOV_EdGd_R: MOV r/m32, r32 (register form)
 /// Opcode: 0x89, ModRM: r/m32, r32 (register)
 /// Decoder swaps for 16/32-bit store: meta_data[0] = rm (DESTINATION), meta_data[1] = nnn (SOURCE)
-pub fn MOV_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+pub fn MOV_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
     let val = cpu.get_gpr32(instr.meta_data[1] as usize);  // nnn = source
     cpu.set_gpr32(instr.meta_data[0] as usize, val);       // rm = destination
 }
@@ -28,7 +28,7 @@ pub fn MOV_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 /// Opcode: 0xC7, ModRM: r/m32, imm32 (register)
 /// meta_data[0] = destination register
 /// Immediate value stored in operand_data.Id
-pub fn MOV_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+pub fn MOV_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
     let dst_idx = instr.meta_data[0] as usize;
     let imm: u32 = instr.modrm_form.operand_data.id();
 
@@ -38,7 +38,7 @@ pub fn MOV_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 /// MOV_GdEd_M: MOV r32, r/m32 (memory form)
 /// Opcode: 0x8B, ModRM: r32, r/m32 (memory)
 /// Bochs: MOV32_GdEdM
-pub fn MOV_GdEd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn MOV_GdEd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
     let val = cpu.read_virtual_dword(seg, eaddr)?;
@@ -51,7 +51,7 @@ pub fn MOV_GdEd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 /// Opcode: 0x89, ModRM: r/m32, r32 (memory)
 /// Bochs: MOV32_EdGdM
 /// Decoder swaps for 16/32-bit store: meta_data[1] (src()) = nnn = SOURCE register
-pub fn MOV_EdGd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn MOV_EdGd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
     let val = cpu.get_gpr32(instr.src() as usize);
@@ -62,7 +62,7 @@ pub fn MOV_EdGd_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 /// MOV_EdId_M: MOV r/m32, imm32 (memory form)
 /// Opcode: 0xC7, ModRM: r/m32, imm32 (memory)
 /// Bochs: MOV_EdIdM
-pub fn MOV_EdId_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn MOV_EdId_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
     let imm = instr.modrm_form.operand_data.id();
@@ -72,7 +72,7 @@ pub fn MOV_EdId_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 
 /// MOVZX_GdEb_M: MOVZX r32, r/m8 (memory form)
 /// Bochs: MOVZX_GdEbM
-pub fn MOVZX_GdEb_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn MOVZX_GdEb_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
     let val = cpu.read_virtual_byte(seg, eaddr)?;
@@ -83,7 +83,7 @@ pub fn MOVZX_GdEb_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionG
 
 /// MOVZX_GdEw_M: MOVZX r32, r/m16 (memory form)
 /// Bochs: MOVZX_GdEwM
-pub fn MOVZX_GdEw_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn MOVZX_GdEw_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
     let val = cpu.read_virtual_word(seg, eaddr)?;
@@ -97,34 +97,34 @@ pub fn MOVZX_GdEw_M<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionG
 // =========================================================================
 
 /// MOV r32, r/m32 - unified (Bochs: MOV_GdEdR / MOV_GdEdM)
-pub fn MOV_GdEd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn MOV_GdEd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() { MOV_GdEd_R(cpu, instr); Ok(()) } else { MOV_GdEd_M(cpu, instr) }
 }
 
 /// MOV r/m32, r32 - unified (Bochs: MOV_EdGdR / MOV_EdGdM)
-pub fn MOV_EdGd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn MOV_EdGd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() { MOV_EdGd_R(cpu, instr); Ok(()) } else { MOV_EdGd_M(cpu, instr) }
 }
 
 /// MOV r/m32, imm32 - unified (Bochs: MOV_EdIdR / MOV_EdIdM)
-pub fn MOV_EdId<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn MOV_EdId<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() { MOV_EdId_R(cpu, instr); Ok(()) } else { MOV_EdId_M(cpu, instr) }
 }
 
 /// MOVZX r32, r/m8 - unified (Bochs: MOVZX_GdEbR / MOVZX_GdEbM)
-pub fn MOVZX_GdEb_unified<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn MOVZX_GdEb_unified<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() { MOVZX_GdEb(cpu, instr); Ok(()) } else { MOVZX_GdEb_M(cpu, instr) }
 }
 
 /// MOVZX r32, r/m16 - unified (Bochs: MOVZX_GdEwR / MOVZX_GdEwM)
-pub fn MOVZX_GdEw_unified<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn MOVZX_GdEw_unified<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() { MOVZX_GdEw(cpu, instr); Ok(()) } else { MOVZX_GdEw_M(cpu, instr) }
 }
 
 /// MOV_EAX_Id: MOV EAX, imm32 (register direct)
 /// Opcodes: 0xB8-0xBF (0xB8 + register index)
 /// meta_data[0] = register index
-pub fn MOV_EAX_Id<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+pub fn MOV_EAX_Id<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
     let dst_idx = instr.meta_data[0] as usize;
     let imm: u32 = instr.modrm_form.operand_data.id();
 
@@ -135,7 +135,7 @@ pub fn MOV_EAX_Id<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 /// Opcode: 0x0F 0xB6, ModRM: r32, r/m8
 /// Original: bochs/cpu/data_xfer32.cc:110-130 MOVZX_GdEbM/MOVZX_GdEbR
 /// Zero extend byte operand into dword destination
-pub fn MOVZX_GdEb<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+pub fn MOVZX_GdEb<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
     let dst_reg = instr.meta_data[0] as usize;
     let src_reg = instr.meta_data[1] as usize;
 
@@ -158,7 +158,7 @@ pub fn MOVZX_GdEb<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 /// Opcode: 0x0F 0xB7, ModRM: r32, r/m16
 /// Original: bochs/cpu/data_xfer32.cc:132-152 MOVZX_GdEwM/MOVZX_GdEwR
 /// Zero extend word operand into dword destination
-pub fn MOVZX_GdEw<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+pub fn MOVZX_GdEw<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
     let dst_reg = instr.meta_data[0] as usize;
     let src_reg = instr.meta_data[1] as usize;
 
@@ -183,26 +183,13 @@ pub fn MOVZX_GdEw<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGen
 /// Load EAX from memory at direct address (seg:offset)
 pub fn MOV_EAXOd<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
-    instr: &BxInstructionGenerated,
+    instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let offset = instr.id() as u64;
-    let ds_base = unsafe {
-        cpu.sregs[crate::cpu::decoder::BxSegregs::Ds as usize]
-            .cache
-            .u
-            .segment
-            .base
-    };
-    let addr = ds_base.wrapping_add(offset);
-    let value = cpu.mem_read_dword(addr);
+    let seg = unsafe { core::mem::transmute::<u8, crate::cpu::decoder::BxSegregs>(instr.seg()) };
+    let offset = instr.id();
+    let value = cpu.read_virtual_dword(seg, offset)?;
     cpu.set_eax(value);
-
-    // Watchpoint: BDA timer tick counter
-    if addr == 0x046C || offset == 0x046C {
-        tracing::warn!("WP-READ32: MOV EAX,[{:#x}] (offset={:#x}, DS.base={:#x}) = {:#010x}, RIP={:#x}",
-            addr, offset, ds_base, value, cpu.rip());
-    }
-    tracing::trace!("MOV EAX, [DS:{:#x}]: {:#x}", offset, value);
+    tracing::trace!("MOV EAX, [{:#x}]: {:#x}", offset, value);
     Ok(())
 }
 
@@ -212,25 +199,12 @@ pub fn MOV_EAXOd<I: BxCpuIdTrait>(
 /// Store EAX to memory at direct address (seg:offset)
 pub fn MOV_OdEAX<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
-    instr: &BxInstructionGenerated,
+    instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let offset = instr.id() as u64;
-    let ds_base = unsafe {
-        cpu.sregs[crate::cpu::decoder::BxSegregs::Ds as usize]
-            .cache
-            .u
-            .segment
-            .base
-    };
-    let addr = ds_base.wrapping_add(offset);
+    let seg = unsafe { core::mem::transmute::<u8, crate::cpu::decoder::BxSegregs>(instr.seg()) };
+    let offset = instr.id();
     let eax_val = cpu.eax();
-    cpu.mem_write_dword(addr, eax_val);
-
-    // Watchpoint: BDA timer tick counter
-    if addr == 0x046C || offset == 0x046C {
-        tracing::warn!("WP-WRITE32: MOV [{:#x}],EAX (offset={:#x}, DS.base={:#x}) = {:#010x}, RIP={:#x}",
-            addr, offset, ds_base, eax_val, cpu.rip());
-    }
-    tracing::trace!("MOV [DS:{:#x}], EAX: {:#x}", offset, cpu.eax());
+    cpu.write_virtual_dword(seg, offset, eax_val)?;
+    tracing::trace!("MOV [{:#x}], EAX: {:#x}", offset, eax_val);
     Ok(())
 }

@@ -12,7 +12,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{BxInstructionGenerated, BxSegregs},
+    decoder::{Instruction, BxSegregs},
 };
 
 use crate::{
@@ -36,7 +36,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// MOVSB - Move byte from DS:SI to ES:DI (16-bit address mode)
-    pub fn movsb16(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn movsb16(&mut self, _instr: &Instruction) {
         let si = self.si() as u64;
         let di = self.di() as u64;
 
@@ -62,7 +62,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOVSB - Move byte from DS:ESI to ES:EDI (32-bit address mode)
     /// Uses virtual memory access for proper segment limits + paging translation.
-    pub fn movsb32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn movsb32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
         let edi = self.edi();
 
@@ -78,7 +78,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSW - Move word from DS:SI to ES:DI (16-bit address mode)
-    pub fn movsw16(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn movsw16(&mut self, _instr: &Instruction) {
         let si = self.si() as u64;
         let di = self.di() as u64;
 
@@ -103,7 +103,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSW - Move word from DS:ESI to ES:EDI (32-bit address mode)
-    pub fn movsw32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn movsw32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
         let edi = self.edi();
 
@@ -119,7 +119,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSD - Move dword from DS:SI to ES:DI (16-bit address mode)
-    pub fn movsd16(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn movsd16(&mut self, _instr: &Instruction) {
         let si = self.si() as u64;
         let di = self.di() as u64;
 
@@ -144,7 +144,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSD - Move dword from DS:ESI to ES:EDI (32-bit address mode)
-    pub fn movsd32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn movsd32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
         let edi = self.edi();
 
@@ -164,7 +164,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// STOSB - Store AL at ES:DI (16-bit address mode)
-    pub fn stosb16(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn stosb16(&mut self, _instr: &Instruction) {
         let di = self.di() as u64;
         let al = self.al();
 
@@ -182,7 +182,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// STOSB - Store AL at ES:EDI (32-bit address mode)
-    pub fn stosb32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn stosb32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let edi = self.edi();
         let al = self.al();
 
@@ -196,7 +196,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// STOSW - Store AX at ES:DI (16-bit address mode)
-    pub fn stosw16(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn stosw16(&mut self, _instr: &Instruction) {
         let di = self.di() as u64;
         let ax = self.ax();
 
@@ -214,7 +214,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// STOSW - Store AX at ES:EDI (32-bit address mode)
-    pub fn stosw32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn stosw32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let edi = self.edi();
         let ax = self.ax();
 
@@ -228,7 +228,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// STOSD - Store EAX at ES:DI (16-bit address mode)
-    pub fn stosd16(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn stosd16(&mut self, _instr: &Instruction) {
         let di = self.di() as u64;
         let eax = self.eax();
 
@@ -246,7 +246,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// STOSD - Store EAX at ES:EDI (32-bit address mode)
-    pub fn stosd32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn stosd32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let edi = self.edi();
         let eax = self.eax();
 
@@ -264,7 +264,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// LODSB - Load byte from DS:SI into AL (16-bit address mode)
-    pub fn lodsb16(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn lodsb16(&mut self, _instr: &Instruction) {
         let si = self.si() as u64;
 
         let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
@@ -283,7 +283,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LODSB - Load byte from DS:ESI into AL (32-bit address mode)
-    pub fn lodsb32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn lodsb32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
 
         let byte = self.read_virtual_byte(BxSegregs::Ds, esi)?;
@@ -297,7 +297,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LODSW - Load word from DS:SI into AX (16-bit address mode)
-    pub fn lodsw16(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn lodsw16(&mut self, _instr: &Instruction) {
         let si = self.si() as u64;
 
         let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
@@ -316,7 +316,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LODSW - Load word from DS:ESI into AX (32-bit address mode)
-    pub fn lodsw32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn lodsw32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
 
         let word = self.read_virtual_word(BxSegregs::Ds, esi)?;
@@ -330,7 +330,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LODSD - Load dword from DS:SI into EAX (16-bit address mode)
-    pub fn lodsd16(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn lodsd16(&mut self, _instr: &Instruction) {
         let si = self.si() as u64;
 
         let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
@@ -349,7 +349,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LODSD - Load dword from DS:ESI into EAX (32-bit address mode)
-    pub fn lodsd32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn lodsd32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
 
         let dword = self.read_virtual_dword(BxSegregs::Ds, esi)?;
@@ -367,7 +367,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// CMPSB - Compare bytes at DS:SI and ES:DI (16-bit address mode)
-    pub fn cmpsb16(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn cmpsb16(&mut self, _instr: &Instruction) {
         let si = self.si() as u64;
         let di = self.di() as u64;
 
@@ -395,7 +395,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMPSB - Compare bytes at DS:ESI and ES:EDI (32-bit address mode)
-    pub fn cmpsb32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn cmpsb32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
         let edi = self.edi();
 
@@ -414,7 +414,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMPSW - Compare words at DS:SI and ES:DI (16-bit address mode)
-    pub fn cmpsw16(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn cmpsw16(&mut self, _instr: &Instruction) {
         let si = self.si() as u64;
         let di = self.di() as u64;
 
@@ -442,7 +442,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMPSW - Compare words at DS:ESI and ES:EDI (32-bit address mode)
-    pub fn cmpsw32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn cmpsw32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
         let edi = self.edi();
 
@@ -461,7 +461,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMPSD - Compare dwords at DS:SI and ES:DI (16-bit address mode)
-    pub fn cmpsd16(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn cmpsd16(&mut self, _instr: &Instruction) {
         let si = self.si() as u64;
         let di = self.di() as u64;
 
@@ -489,7 +489,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMPSD - Compare dwords at DS:ESI and ES:EDI (32-bit address mode)
-    pub fn cmpsd32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn cmpsd32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
         let edi = self.edi();
 
@@ -512,7 +512,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// SCASB - Compare AL with byte at ES:DI (16-bit address mode)
-    pub fn scasb16(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn scasb16(&mut self, _instr: &Instruction) {
         let di = self.di() as u64;
         let al = self.al();
 
@@ -533,7 +533,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SCASB - Compare AL with byte at ES:EDI (32-bit address mode)
-    pub fn scasb32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn scasb32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let edi = self.edi();
         let al = self.al();
 
@@ -550,7 +550,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SCASW - Compare AX with word at ES:DI (16-bit address mode)
-    pub fn scasw16(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn scasw16(&mut self, _instr: &Instruction) {
         let di = self.di() as u64;
         let ax = self.ax();
 
@@ -571,7 +571,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SCASW - Compare AX with word at ES:EDI (32-bit address mode)
-    pub fn scasw32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn scasw32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let edi = self.edi();
         let ax = self.ax();
 
@@ -588,7 +588,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SCASD - Compare EAX with dword at ES:DI (16-bit address mode)
-    pub fn scasd16(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn scasd16(&mut self, _instr: &Instruction) {
         let di = self.di() as u64;
         let eax = self.eax();
 
@@ -609,7 +609,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SCASD - Compare EAX with dword at ES:EDI (32-bit address mode)
-    pub fn scasd32(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn scasd32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let edi = self.edi();
         let eax = self.eax();
 
@@ -630,7 +630,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// REP MOVSB CX times (16-bit)
-    pub fn rep_movsb16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn rep_movsb16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.movsb16(instr);
@@ -640,7 +640,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP MOVSW CX times (16-bit)
-    pub fn rep_movsw16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn rep_movsw16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.movsw16(instr);
@@ -650,7 +650,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP MOVSD CX times (16-bit)
-    pub fn rep_movsd16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn rep_movsd16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.movsd16(instr);
@@ -660,7 +660,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP STOSB CX times (16-bit)
-    pub fn rep_stosb16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn rep_stosb16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.stosb16(instr);
@@ -670,7 +670,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP STOSW CX times (16-bit)
-    pub fn rep_stosw16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn rep_stosw16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.stosw16(instr);
@@ -680,7 +680,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP STOSD CX times (16-bit)
-    pub fn rep_stosd16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn rep_stosd16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.stosd16(instr);
@@ -690,7 +690,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP LODSB CX times (16-bit)
-    pub fn rep_lodsb16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn rep_lodsb16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.lodsb16(instr);
@@ -700,7 +700,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP LODSW CX times (16-bit)
-    pub fn rep_lodsw16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn rep_lodsw16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.lodsw16(instr);
@@ -710,7 +710,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP LODSD CX times (16-bit)
-    pub fn rep_lodsd16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn rep_lodsd16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.lodsd16(instr);
@@ -720,7 +720,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPE CMPSB CX (16-bit)
-    pub fn repe_cmpsb16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn repe_cmpsb16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.cmpsb16(instr);
@@ -731,7 +731,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPNE CMPSB CX (16-bit)
-    pub fn repne_cmpsb16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn repne_cmpsb16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.cmpsb16(instr);
@@ -742,7 +742,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPE CMPSW CX (16-bit)
-    pub fn repe_cmpsw16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn repe_cmpsw16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.cmpsw16(instr);
@@ -753,7 +753,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPNE CMPSW CX (16-bit)
-    pub fn repne_cmpsw16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn repne_cmpsw16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.cmpsw16(instr);
@@ -764,7 +764,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPE CMPSD CX (16-bit)
-    pub fn repe_cmpsd16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn repe_cmpsd16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.cmpsd16(instr);
@@ -775,7 +775,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPNE CMPSD CX (16-bit)
-    pub fn repne_cmpsd16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn repne_cmpsd16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.cmpsd16(instr);
@@ -786,7 +786,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPE SCASB CX (16-bit)
-    pub fn repe_scasb16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn repe_scasb16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.scasb16(instr);
@@ -797,7 +797,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPNE SCASB CX (16-bit)
-    pub fn repne_scasb16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn repne_scasb16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.scasb16(instr);
@@ -808,7 +808,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPE SCASW CX (16-bit)
-    pub fn repe_scasw16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn repe_scasw16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.scasw16(instr);
@@ -819,7 +819,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPNE SCASW CX (16-bit)
-    pub fn repne_scasw16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn repne_scasw16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.scasw16(instr);
@@ -830,7 +830,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPE SCASD CX (16-bit)
-    pub fn repe_scasd16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn repe_scasd16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.scasd16(instr);
@@ -841,7 +841,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPNE SCASD CX (16-bit)
-    pub fn repne_scasd16(&mut self, instr: &BxInstructionGenerated) {
+    pub fn repne_scasd16(&mut self, instr: &Instruction) {
         let mut cx = self.cx();
         while cx != 0 {
             self.scasd16(instr);
@@ -856,7 +856,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// REP MOVSB ECX times (32-bit)
-    pub fn rep_movsb32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rep_movsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.movsb32(instr)?;
@@ -868,7 +868,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP MOVSW ECX times (32-bit)
-    pub fn rep_movsw32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rep_movsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.movsw32(instr)?;
@@ -880,7 +880,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP MOVSD ECX times (32-bit)
-    pub fn rep_movsd32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rep_movsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.movsd32(instr)?;
@@ -892,7 +892,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP STOSB ECX times (32-bit)
-    pub fn rep_stosb32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rep_stosb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.stosb32(instr)?;
@@ -904,7 +904,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP STOSW ECX times (32-bit)
-    pub fn rep_stosw32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rep_stosw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.stosw32(instr)?;
@@ -916,7 +916,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP STOSD ECX times (32-bit)
-    pub fn rep_stosd32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rep_stosd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.stosd32(instr)?;
@@ -928,7 +928,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP LODSB ECX times (32-bit)
-    pub fn rep_lodsb32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rep_lodsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.lodsb32(instr)?;
@@ -940,7 +940,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP LODSW ECX times (32-bit)
-    pub fn rep_lodsw32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rep_lodsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.lodsw32(instr)?;
@@ -952,7 +952,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP LODSD ECX times (32-bit)
-    pub fn rep_lodsd32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rep_lodsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.lodsd32(instr)?;
@@ -964,7 +964,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPE CMPSB ECX (32-bit)
-    pub fn repe_cmpsb32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn repe_cmpsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.cmpsb32(instr)?;
@@ -977,7 +977,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPNE CMPSB ECX (32-bit)
-    pub fn repne_cmpsb32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn repne_cmpsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.cmpsb32(instr)?;
@@ -990,7 +990,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPE CMPSW ECX (32-bit)
-    pub fn repe_cmpsw32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn repe_cmpsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.cmpsw32(instr)?;
@@ -1003,7 +1003,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPNE CMPSW ECX (32-bit)
-    pub fn repne_cmpsw32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn repne_cmpsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.cmpsw32(instr)?;
@@ -1016,7 +1016,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPE CMPSD ECX (32-bit)
-    pub fn repe_cmpsd32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn repe_cmpsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.cmpsd32(instr)?;
@@ -1029,7 +1029,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPNE CMPSD ECX (32-bit)
-    pub fn repne_cmpsd32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn repne_cmpsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.cmpsd32(instr)?;
@@ -1042,7 +1042,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPE SCASB ECX (32-bit)
-    pub fn repe_scasb32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn repe_scasb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.scasb32(instr)?;
@@ -1055,7 +1055,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPNE SCASB ECX (32-bit)
-    pub fn repne_scasb32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn repne_scasb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.scasb32(instr)?;
@@ -1068,7 +1068,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPE SCASW ECX (32-bit)
-    pub fn repe_scasw32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn repe_scasw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.scasw32(instr)?;
@@ -1081,7 +1081,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPNE SCASW ECX (32-bit)
-    pub fn repne_scasw32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn repne_scasw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.scasw32(instr)?;
@@ -1094,7 +1094,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPE SCASD ECX (32-bit)
-    pub fn repe_scasd32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn repe_scasd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.scasd32(instr)?;
@@ -1107,7 +1107,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REPNE SCASD ECX (32-bit)
-    pub fn repne_scasd32(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn repne_scasd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
             self.scasd32(instr)?;
@@ -1162,6 +1162,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     pub(super) fn mem_write_byte(&mut self, addr: u64, value: u8) {
+        // Trace VGA text buffer writes of '%' character to debug vsprintf
+        if value == 0x25 && addr >= 0xA0000 && addr < 0xC0000 {
+            tracing::warn!("VGA write 0x25 paddr={:#x} RIP={:#x} CS={:#x} icount={} odd={}",
+                addr, self.rip(), self.sregs[BxSegregs::Cs as usize].selector.value, self.icount, addr & 1);
+        }
         // Prefer Bochs-style host access through the memory system when available.
         if let Some(mem_bus) = self.mem_bus {
             // SAFETY: see mem_read_byte.
@@ -1224,5 +1229,221 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn mem_write_dword(&mut self, addr: u64, value: u32) {
         self.mem_write_word(addr, value as u16);
         self.mem_write_word(addr + 2, (value >> 16) as u16);
+    }
+
+    // =========================================================================
+    // Unified dispatch methods — called from dispatcher.rs
+    //
+    // Each method handles the 4-way (or 6-way for SCAS/CMPS) branching on
+    // address size (as32_l) and REP prefix (lock_rep_used_value) so the
+    // dispatcher can be a single method call per opcode.
+    // =========================================================================
+
+    // ---- MOVS ----
+
+    /// Dispatch MOVSB: 16/32-bit address, with or without REP prefix.
+    pub fn movsb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.as32_l() != 0 {
+            if instr.lock_rep_used_value() != 0 { self.rep_movsb32(instr)?; }
+            else { self.movsb32(instr)?; }
+        } else {
+            if instr.lock_rep_used_value() != 0 { self.rep_movsb16(instr); }
+            else { self.movsb16(instr); }
+        }
+        Ok(())
+    }
+
+    /// Dispatch MOVSW: 16/32-bit address, with or without REP prefix.
+    pub fn movsw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.as32_l() != 0 {
+            if instr.lock_rep_used_value() != 0 { self.rep_movsw32(instr)?; }
+            else { self.movsw32(instr)?; }
+        } else {
+            if instr.lock_rep_used_value() != 0 { self.rep_movsw16(instr); }
+            else { self.movsw16(instr); }
+        }
+        Ok(())
+    }
+
+    /// Dispatch MOVSD: 16/32-bit address, with or without REP prefix.
+    pub fn movsd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.as32_l() != 0 {
+            if instr.lock_rep_used_value() != 0 { self.rep_movsd32(instr)?; }
+            else { self.movsd32(instr)?; }
+        } else {
+            if instr.lock_rep_used_value() != 0 { self.rep_movsd16(instr); }
+            else { self.movsd16(instr); }
+        }
+        Ok(())
+    }
+
+    // ---- STOS ----
+
+    /// Dispatch STOSB: 16/32-bit address, with or without REP prefix.
+    pub fn stosb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.as32_l() != 0 {
+            if instr.lock_rep_used_value() != 0 { self.rep_stosb32(instr)?; }
+            else { self.stosb32(instr)?; }
+        } else {
+            if instr.lock_rep_used_value() != 0 { self.rep_stosb16(instr); }
+            else { self.stosb16(instr); }
+        }
+        Ok(())
+    }
+
+    /// Dispatch STOSW: 16/32-bit address, with or without REP prefix.
+    pub fn stosw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.as32_l() != 0 {
+            if instr.lock_rep_used_value() != 0 { self.rep_stosw32(instr)?; }
+            else { self.stosw32(instr)?; }
+        } else {
+            if instr.lock_rep_used_value() != 0 { self.rep_stosw16(instr); }
+            else { self.stosw16(instr); }
+        }
+        Ok(())
+    }
+
+    /// Dispatch STOSD: 16/32-bit address, with or without REP prefix.
+    pub fn stosd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.as32_l() != 0 {
+            if instr.lock_rep_used_value() != 0 { self.rep_stosd32(instr)?; }
+            else { self.stosd32(instr)?; }
+        } else {
+            if instr.lock_rep_used_value() != 0 { self.rep_stosd16(instr); }
+            else { self.stosd16(instr); }
+        }
+        Ok(())
+    }
+
+    // ---- LODS ----
+
+    /// Dispatch LODSB: 16/32-bit address, with or without REP prefix.
+    pub fn lodsb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.as32_l() != 0 {
+            if instr.lock_rep_used_value() != 0 { self.rep_lodsb32(instr)?; }
+            else { self.lodsb32(instr)?; }
+        } else {
+            if instr.lock_rep_used_value() != 0 { self.rep_lodsb16(instr); }
+            else { self.lodsb16(instr); }
+        }
+        Ok(())
+    }
+
+    /// Dispatch LODSW: 16/32-bit address, with or without REP prefix.
+    pub fn lodsw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.as32_l() != 0 {
+            if instr.lock_rep_used_value() != 0 { self.rep_lodsw32(instr)?; }
+            else { self.lodsw32(instr)?; }
+        } else {
+            if instr.lock_rep_used_value() != 0 { self.rep_lodsw16(instr); }
+            else { self.lodsw16(instr); }
+        }
+        Ok(())
+    }
+
+    /// Dispatch LODSD: 16/32-bit address, with or without REP prefix.
+    pub fn lodsd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.as32_l() != 0 {
+            if instr.lock_rep_used_value() != 0 { self.rep_lodsd32(instr)?; }
+            else { self.lodsd32(instr)?; }
+        } else {
+            if instr.lock_rep_used_value() != 0 { self.rep_lodsd16(instr); }
+            else { self.lodsd16(instr); }
+        }
+        Ok(())
+    }
+
+    // ---- SCAS (6-way: REPE=3, REPNE=2, none) ----
+
+    /// Dispatch SCASB: 16/32-bit address, with REPE/REPNE/no-REP prefix.
+    pub fn scasb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        let rep = instr.lock_rep_used_value();
+        if instr.as32_l() != 0 {
+            if rep == 3 { self.repe_scasb32(instr)?; }
+            else if rep == 2 { self.repne_scasb32(instr)?; }
+            else { self.scasb32(instr)?; }
+        } else {
+            if rep == 3 { self.repe_scasb16(instr); }
+            else if rep == 2 { self.repne_scasb16(instr); }
+            else { self.scasb16(instr); }
+        }
+        Ok(())
+    }
+
+    /// Dispatch SCASW: 16/32-bit address, with REPE/REPNE/no-REP prefix.
+    pub fn scasw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        let rep = instr.lock_rep_used_value();
+        if instr.as32_l() != 0 {
+            if rep == 3 { self.repe_scasw32(instr)?; }
+            else if rep == 2 { self.repne_scasw32(instr)?; }
+            else { self.scasw32(instr)?; }
+        } else {
+            if rep == 3 { self.repe_scasw16(instr); }
+            else if rep == 2 { self.repne_scasw16(instr); }
+            else { self.scasw16(instr); }
+        }
+        Ok(())
+    }
+
+    /// Dispatch SCASD: 16/32-bit address, with REPE/REPNE/no-REP prefix.
+    pub fn scasd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        let rep = instr.lock_rep_used_value();
+        if instr.as32_l() != 0 {
+            if rep == 3 { self.repe_scasd32(instr)?; }
+            else if rep == 2 { self.repne_scasd32(instr)?; }
+            else { self.scasd32(instr)?; }
+        } else {
+            if rep == 3 { self.repe_scasd16(instr); }
+            else if rep == 2 { self.repne_scasd16(instr); }
+            else { self.scasd16(instr); }
+        }
+        Ok(())
+    }
+
+    // ---- CMPS (6-way: REPE=3, REPNE=2, none) ----
+
+    /// Dispatch CMPSB: 16/32-bit address, with REPE/REPNE/no-REP prefix.
+    pub fn cmpsb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        let rep = instr.lock_rep_used_value();
+        if instr.as32_l() != 0 {
+            if rep == 3 { self.repe_cmpsb32(instr)?; }
+            else if rep == 2 { self.repne_cmpsb32(instr)?; }
+            else { self.cmpsb32(instr)?; }
+        } else {
+            if rep == 3 { self.repe_cmpsb16(instr); }
+            else if rep == 2 { self.repne_cmpsb16(instr); }
+            else { self.cmpsb16(instr); }
+        }
+        Ok(())
+    }
+
+    /// Dispatch CMPSW: 16/32-bit address, with REPE/REPNE/no-REP prefix.
+    pub fn cmpsw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        let rep = instr.lock_rep_used_value();
+        if instr.as32_l() != 0 {
+            if rep == 3 { self.repe_cmpsw32(instr)?; }
+            else if rep == 2 { self.repne_cmpsw32(instr)?; }
+            else { self.cmpsw32(instr)?; }
+        } else {
+            if rep == 3 { self.repe_cmpsw16(instr); }
+            else if rep == 2 { self.repne_cmpsw16(instr); }
+            else { self.cmpsw16(instr); }
+        }
+        Ok(())
+    }
+
+    /// Dispatch CMPSD: 16/32-bit address, with REPE/REPNE/no-REP prefix.
+    pub fn cmpsd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        let rep = instr.lock_rep_used_value();
+        if instr.as32_l() != 0 {
+            if rep == 3 { self.repe_cmpsd32(instr)?; }
+            else if rep == 2 { self.repne_cmpsd32(instr)?; }
+            else { self.cmpsd32(instr)?; }
+        } else {
+            if rep == 3 { self.repe_cmpsd16(instr); }
+            else if rep == 2 { self.repne_cmpsd16(instr); }
+            else { self.cmpsd16(instr); }
+        }
+        Ok(())
     }
 }

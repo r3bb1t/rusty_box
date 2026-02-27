@@ -8,7 +8,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{BxInstructionGenerated, BxSegregs},
+    decoder::{Instruction, BxSegregs},
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -17,7 +17,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     
     // ---- 8-bit read/write helpers for shift instructions ----
-    fn shift_read8(&mut self, instr: &BxInstructionGenerated) -> super::Result<(u8, Option<u64>)> {
+    fn shift_read8(&mut self, instr: &Instruction) -> super::Result<(u8, Option<u64>)> {
         if instr.mod_c0() {
             Ok((self.get_gpr8(instr.dst() as usize), None))
         } else {
@@ -27,7 +27,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Ok((val, Some(paddr)))
         }
     }
-    fn shift_write8(&mut self, instr: &BxInstructionGenerated, paddr: Option<u64>, result: u8) {
+    fn shift_write8(&mut self, instr: &Instruction, paddr: Option<u64>, result: u8) {
         if let Some(pa) = paddr {
             self.write_rmw_linear_byte(pa, result);
         } else {
@@ -35,7 +35,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
     // ---- 16-bit read/write helpers for shift instructions ----
-    fn shift_read16(&mut self, instr: &BxInstructionGenerated) -> super::Result<(u16, Option<u64>)> {
+    fn shift_read16(&mut self, instr: &Instruction) -> super::Result<(u16, Option<u64>)> {
         if instr.mod_c0() {
             Ok((self.get_gpr16(instr.dst() as usize), None))
         } else {
@@ -45,7 +45,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Ok((val, Some(paddr)))
         }
     }
-    fn shift_write16(&mut self, instr: &BxInstructionGenerated, paddr: Option<u64>, result: u16) {
+    fn shift_write16(&mut self, instr: &Instruction, paddr: Option<u64>, result: u16) {
         if let Some(pa) = paddr {
             self.write_rmw_linear_word(pa, result);
         } else {
@@ -53,7 +53,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
     // ---- 32-bit read/write helpers for shift instructions ----
-    fn shift_read32(&mut self, instr: &BxInstructionGenerated) -> super::Result<(u32, Option<u64>)> {
+    fn shift_read32(&mut self, instr: &Instruction) -> super::Result<(u32, Option<u64>)> {
         if instr.mod_c0() {
             Ok((self.get_gpr32(instr.dst() as usize), None))
         } else {
@@ -63,7 +63,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Ok((val, Some(paddr)))
         }
     }
-    fn shift_write32(&mut self, instr: &BxInstructionGenerated, paddr: Option<u64>, result: u32) {
+    fn shift_write32(&mut self, instr: &Instruction, paddr: Option<u64>, result: u32) {
         if let Some(pa) = paddr {
             self.write_rmw_linear_dword(pa, result);
         } else {
@@ -72,7 +72,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SHL r/m8, 1
-    pub fn shl_eb_1(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shl_eb_1(&mut self, instr: &Instruction) -> super::Result<()> {
         let (op1, laddr) = self.shift_read8(instr)?;
         let result = op1 << 1;
         self.shift_write8(instr, laddr, result);
@@ -84,7 +84,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SHL r/m8, CL
-    pub fn shl_eb_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shl_eb_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x1F;
         if count == 0 { return Ok(()); }
 
@@ -99,7 +99,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SHL r/m8, imm8
-    pub fn shl_eb_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shl_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = instr.ib() & 0x1F;
         if count == 0 { return Ok(()); }
 
@@ -118,7 +118,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     
     /// SAR r/m8, imm8
-    pub fn sar_eb_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn sar_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = instr.ib() & 0x1F;
         if count == 0 { return Ok(()); }
 
@@ -137,7 +137,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     
     /// SHL r/m16, 1
-    pub fn shl_ew_1(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shl_ew_1(&mut self, instr: &Instruction) -> super::Result<()> {
         let (op1, laddr) = self.shift_read16(instr)?;
         let result = op1 << 1;
         self.shift_write16(instr, laddr, result);
@@ -149,7 +149,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SHL r/m16, CL
-    pub fn shl_ew_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shl_ew_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x1F;
         if count == 0 { return Ok(()); }
 
@@ -164,7 +164,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SHL r/m16, imm8
-    pub fn shl_ew_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shl_ew_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (instr.ib() & 0x1F) as u32;
         if count == 0 { return Ok(()); }
 
@@ -183,7 +183,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     
     /// SHL r/m32, 1
-    pub fn shl_ed_1(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shl_ed_1(&mut self, instr: &Instruction) -> super::Result<()> {
         let (op1, laddr) = self.shift_read32(instr)?;
         let result = op1 << 1;
         self.shift_write32(instr, laddr, result);
@@ -195,7 +195,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SHL r/m32, CL
-    pub fn shl_ed_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shl_ed_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x1F;
         if count == 0 { return Ok(()); }
 
@@ -210,7 +210,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SHL r/m32, imm8
-    pub fn shl_ed_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shl_ed_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (instr.ib() & 0x1F) as u32;
         if count == 0 { return Ok(()); }
 
@@ -229,7 +229,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     
     /// SHR r/m8, 1
-    pub fn shr_eb_1(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shr_eb_1(&mut self, instr: &Instruction) -> super::Result<()> {
         let (op1, laddr) = self.shift_read8(instr)?;
         let result = op1 >> 1;
         self.shift_write8(instr, laddr, result);
@@ -241,7 +241,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SHR r/m8, CL
-    pub fn shr_eb_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shr_eb_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x1F;
         if count == 0 { return Ok(()); }
 
@@ -256,7 +256,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SHR r/m8, imm8
-    pub fn shr_eb_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shr_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = instr.ib() & 0x1F;
         if count == 0 { return Ok(()); }
 
@@ -275,7 +275,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     
     /// SHR r/m16, 1
-    pub fn shr_ew_1(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shr_ew_1(&mut self, instr: &Instruction) -> super::Result<()> {
         let (op1, laddr) = self.shift_read16(instr)?;
         let result = op1 >> 1;
         self.shift_write16(instr, laddr, result);
@@ -287,7 +287,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SHR r/m16, CL
-    pub fn shr_ew_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shr_ew_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x1F;
         if count == 0 { return Ok(()); }
 
@@ -302,7 +302,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SHR r/m16, imm8
-    pub fn shr_ew_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shr_ew_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (instr.ib() & 0x1F) as u32;
         if count == 0 { return Ok(()); }
 
@@ -321,7 +321,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     
     /// SHR r/m32, 1
-    pub fn shr_ed_1(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shr_ed_1(&mut self, instr: &Instruction) -> super::Result<()> {
         let (op1, laddr) = self.shift_read32(instr)?;
         let result = op1 >> 1;
         self.shift_write32(instr, laddr, result);
@@ -333,7 +333,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SHR r/m32, CL
-    pub fn shr_ed_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shr_ed_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x1F;
         if count == 0 { return Ok(()); }
 
@@ -348,7 +348,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SHR r/m32, imm8
-    pub fn shr_ed_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shr_ed_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (instr.ib() & 0x1F) as u32;
         if count == 0 { return Ok(()); }
 
@@ -367,7 +367,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     
     /// SAR r/m8, 1
-    pub fn sar_eb_1(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn sar_eb_1(&mut self, instr: &Instruction) -> super::Result<()> {
         let (op1_u, laddr) = self.shift_read8(instr)?;
         let op1 = op1_u as i8;
         let result = (op1 >> 1) as u8;
@@ -379,7 +379,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SAR r/m8, CL
-    pub fn sar_eb_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn sar_eb_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x1F;
         if count == 0 { return Ok(()); }
 
@@ -399,7 +399,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SAR r/m16, 1
-    pub fn sar_ew_1(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn sar_ew_1(&mut self, instr: &Instruction) -> super::Result<()> {
         let (op1_u, laddr) = self.shift_read16(instr)?;
         let op1 = op1_u as i16;
         let result = (op1 >> 1) as u16;
@@ -411,7 +411,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SAR r/m16, CL
-    pub fn sar_ew_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn sar_ew_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x1F;
         if count == 0 { return Ok(()); }
 
@@ -431,7 +431,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SAR r/m16, imm8
-    pub fn sar_ew_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn sar_ew_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = instr.ib() & 0x1F;
         if count == 0 { return Ok(()); }
 
@@ -451,7 +451,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SAR r/m32, 1
-    pub fn sar_ed_1(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn sar_ed_1(&mut self, instr: &Instruction) -> super::Result<()> {
         let (op1_u, laddr) = self.shift_read32(instr)?;
         let op1 = op1_u as i32;
         let result = (op1 >> 1) as u32;
@@ -463,7 +463,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SAR r/m32, CL
-    pub fn sar_ed_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn sar_ed_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x1F;
         if count == 0 { return Ok(()); }
 
@@ -479,7 +479,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SAR r/m32, imm8
-    pub fn sar_ed_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn sar_ed_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = instr.ib() & 0x1F;
         if count == 0 { return Ok(()); }
 
@@ -499,7 +499,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     
     /// ROL r/m8, 1
-    pub fn rol_eb_1(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rol_eb_1(&mut self, instr: &Instruction) -> super::Result<()> {
         let (op1, laddr) = self.shift_read8(instr)?;
         let result = op1.rotate_left(1);
         self.shift_write8(instr, laddr, result);
@@ -511,7 +511,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ROL r/m8, CL
-    pub fn rol_eb_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rol_eb_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x07; // Only low 3 bits for 8-bit rotate
         if count == 0 { return Ok(()); }
 
@@ -526,7 +526,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ROL r/m16, 1
-    pub fn rol_ew_1(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rol_ew_1(&mut self, instr: &Instruction) -> super::Result<()> {
         let (op1, laddr) = self.shift_read16(instr)?;
         let result = op1.rotate_left(1);
         self.shift_write16(instr, laddr, result);
@@ -538,7 +538,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ROL r/m16, CL
-    pub fn rol_ew_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rol_ew_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x0F; // Only low 4 bits for 16-bit rotate
         if count == 0 { return Ok(()); }
 
@@ -553,7 +553,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ROL r/m8, imm8
-    pub fn rol_eb_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rol_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = instr.ib() & 0x07; // Only low 3 bits for 8-bit rotate
         if count == 0 { return Ok(()); }
 
@@ -568,7 +568,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ROL r/m16, imm8
-    pub fn rol_ew_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rol_ew_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = instr.ib() & 0x0F; // Only low 4 bits for 16-bit rotate
         if count == 0 { return Ok(()); }
 
@@ -587,7 +587,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     
     /// ROR r/m8, 1
-    pub fn ror_eb_1(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn ror_eb_1(&mut self, instr: &Instruction) -> super::Result<()> {
         let (op1, laddr) = self.shift_read8(instr)?;
         let result = op1.rotate_right(1);
         self.shift_write8(instr, laddr, result);
@@ -599,7 +599,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ROR r/m8, CL
-    pub fn ror_eb_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn ror_eb_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x07;
         if count == 0 { return Ok(()); }
 
@@ -614,7 +614,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ROR r/m16, 1
-    pub fn ror_ew_1(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn ror_ew_1(&mut self, instr: &Instruction) -> super::Result<()> {
         let (op1, laddr) = self.shift_read16(instr)?;
         let result = op1.rotate_right(1);
         self.shift_write16(instr, laddr, result);
@@ -626,7 +626,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ROR r/m16, CL
-    pub fn ror_ew_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn ror_ew_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x0F;
         if count == 0 { return Ok(()); }
 
@@ -641,7 +641,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ROR r/m8, imm8
-    pub fn ror_eb_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn ror_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = instr.ib() & 0x07;
         if count == 0 { return Ok(()); }
 
@@ -656,7 +656,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ROR r/m16, imm8
-    pub fn ror_ew_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn ror_ew_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = instr.ib() & 0x0F;
         if count == 0 { return Ok(()); }
 
@@ -675,7 +675,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// ROL r/m32, 1
-    pub fn rol_ed_1(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rol_ed_1(&mut self, instr: &Instruction) -> super::Result<()> {
         let (op1, laddr) = self.shift_read32(instr)?;
         let result = op1.rotate_left(1);
         self.shift_write32(instr, laddr, result);
@@ -687,7 +687,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ROL r/m32, CL
-    pub fn rol_ed_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rol_ed_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x1F;
         if count == 0 { return Ok(()); }
 
@@ -702,7 +702,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ROL r/m32, imm8
-    pub fn rol_ed_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn rol_ed_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (instr.ib() & 0x1F) as u32;
         if count == 0 { return Ok(()); }
 
@@ -717,7 +717,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ROR r/m32, 1
-    pub fn ror_ed_1(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn ror_ed_1(&mut self, instr: &Instruction) -> super::Result<()> {
         let (op1, laddr) = self.shift_read32(instr)?;
         let result = op1.rotate_right(1);
         self.shift_write32(instr, laddr, result);
@@ -729,7 +729,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ROR r/m32, CL
-    pub fn ror_ed_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn ror_ed_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x1F;
         if count == 0 { return Ok(()); }
 
@@ -744,7 +744,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ROR r/m32, imm8
-    pub fn ror_ed_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn ror_ed_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (instr.ib() & 0x1F) as u32;
         if count == 0 { return Ok(()); }
 
@@ -825,7 +825,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// SHLD r/m32, r32, imm8
     /// Opcode: 0x0F 0xA4
-    pub fn shld_ed_gd_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shld_ed_gd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (instr.ib() & 0x1F) as u32;
         if count == 0 { return Ok(()); }
 
@@ -844,7 +844,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// SHLD r/m32, r32, CL
     /// Opcode: 0x0F 0xA5
-    pub fn shld_ed_gd_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shld_ed_gd_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (self.cl() & 0x1F) as u32;
         if count == 0 { return Ok(()); }
 
@@ -868,7 +868,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// SHRD r/m32, r32, imm8
     /// Opcode: 0x0F 0xAC
-    pub fn shrd_ed_gd_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shrd_ed_gd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (instr.ib() & 0x1F) as u32;
         if count == 0 { return Ok(()); }
 
@@ -887,7 +887,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// SHRD r/m32, r32, CL
     /// Opcode: 0x0F 0xAD
-    pub fn shrd_ed_gd_cl(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn shrd_ed_gd_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (self.cl() & 0x1F) as u32;
         if count == 0 { return Ok(()); }
 

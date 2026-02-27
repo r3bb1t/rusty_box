@@ -1213,7 +1213,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 }
                             } else { 0 }
                         };
-                        tracing::warn!("BATCH-DIAG: executed={}, total={}k, RIP={:#x}, PIT_count={}, activity={:?}, BDA_ticks={}",
+                        tracing::debug!("BATCH-DIAG: executed={}, total={}k, RIP={:#x}, PIT_count={}, activity={:?}, BDA_ticks={}",
                             executed, instructions_executed / 1000, self.cpu.rip(), pit_c0_count,
                             self.cpu.activity_state, bda_ticks);
                     }
@@ -1224,7 +1224,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         let if_flag = self.cpu.get_b_if();
                         let rip = self.cpu.rip();
                         let pit_c0 = &self.device_manager.pit.counters[0];
-                        tracing::warn!(
+                        tracing::debug!(
                             "IRQ-DIAG: {}M instr, RIP={:#x}, IF={}, has_int={}, PIC_imr={:#04x}, PIC_irr={:#04x}, PIT_c0: mode={:?} init={} count={} enabled={} counting={} output={}",
                             instructions_executed / 1_000_000,
                             rip,
@@ -1241,8 +1241,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         );
                     }
 
-                    // Decompressor progress check (every 1M instructions)
-                    if instructions_executed % 1_000_000 < INSTRUCTION_BATCH_SIZE {
+                    // Decompressor progress check (every 1M instructions) — DISABLED (decompressor works)
+                    if false && instructions_executed % 1_000_000 < INSTRUCTION_BATCH_SIZE {
                         let rip = self.cpu.rip();
                         // Check if we're in the decompressor (RIP in 0x1000-0x6000 range)
                         if rip >= 0x1000 && rip < 0x6000 {
@@ -1439,13 +1439,13 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         let has_int = self.has_interrupt();
                         let if_flag = self.cpu.get_b_if();
                         if has_int {
-                            tracing::warn!("INT-DELIVER: has_int={}, IF={}, activity={:?}, RIP={:#x}",
+                            tracing::trace!("INT-DELIVER: has_int={}, IF={}, activity={:?}, RIP={:#x}",
                                 has_int, if_flag, self.cpu.activity_state, self.cpu.rip());
                         }
                     }
                     if self.has_interrupt() && self.cpu.get_b_if() != 0 {
                         let vector = self.iac();
-                        tracing::warn!("INT-INJECT: vector={:#04x}, activity_before={:?}",
+                        tracing::trace!("INT-INJECT: vector={:#04x}, activity_before={:?}",
                             vector, self.cpu.activity_state);
 
                         // Temporarily wire the memory bus so the interrupt path can

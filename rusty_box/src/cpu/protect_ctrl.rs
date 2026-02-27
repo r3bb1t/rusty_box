@@ -8,7 +8,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::BxInstructionGenerated,
+    decoder::Instruction,
     descriptor::{BxDescriptor, SystemAndGateDescriptorEnum},
     exception::Exception,
     segment_ctrl_pro::parse_selector,
@@ -18,7 +18,7 @@ use super::{
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// LGDT - Load Global Descriptor Table Register
     /// Loads the GDTR register from memory
-    pub fn lgdt_ms(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn lgdt_ms(&mut self, instr: &Instruction) -> Result<()> {
         // CPL must be 0
         if self.get_cpl() != 0 {
             tracing::error!("LGDT: CPL != 0 causes #GP");
@@ -53,7 +53,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LIDT - Load Interrupt Descriptor Table Register
     /// Loads the IDTR register from memory
-    pub fn lidt_ms(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn lidt_ms(&mut self, instr: &Instruction) -> Result<()> {
         // CPL must be 0
         if self.get_cpl() != 0 {
             tracing::error!("LIDT: CPL != 0 causes #GP");
@@ -87,7 +87,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LLDT - Load Local Descriptor Table Register
     /// Loads the LDTR register from a selector
-    pub fn lldt_ew(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn lldt_ew(&mut self, instr: &Instruction) -> Result<()> {
         // Must be in protected mode
         if !self.protected_mode() {
             tracing::error!("LLDT: not recognized in real or virtual-8086 mode");
@@ -160,7 +160,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LTR - Load Task Register
     /// Loads the TR register from a selector
-    pub fn ltr_ew(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn ltr_ew(&mut self, instr: &Instruction) -> Result<()> {
         // Must be in protected mode
         if !self.protected_mode() {
             tracing::error!("LTR: not recognized in real or virtual-8086 mode");
@@ -245,7 +245,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// MOV CR0, r32 - Write to CR0
-    pub fn mov_cr0_rd(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn mov_cr0_rd(&mut self, instr: &Instruction) -> Result<()> {
         // CPL must be 0
         if self.get_cpl() != 0 {
             tracing::error!("MOV CR0: CPL != 0");
@@ -274,7 +274,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV CR2, r32 - Write to CR2 (page fault linear address)
-    pub fn mov_cr2_rd(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn mov_cr2_rd(&mut self, instr: &Instruction) -> Result<()> {
         // CPL must be 0
         if self.get_cpl() != 0 {
             tracing::error!("MOV CR2: CPL != 0");
@@ -290,7 +290,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV CR3, r32 - Write to CR3 (page directory base)
-    pub fn mov_cr3_rd(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn mov_cr3_rd(&mut self, instr: &Instruction) -> Result<()> {
         // CPL must be 0
         if self.get_cpl() != 0 {
             tracing::error!("MOV CR3: CPL != 0");
@@ -313,7 +313,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV CR4, r32 - Write to CR4
-    pub fn mov_cr4_rd(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn mov_cr4_rd(&mut self, instr: &Instruction) -> Result<()> {
         // CPL must be 0
         if self.get_cpl() != 0 {
             tracing::error!("MOV CR4: CPL != 0");
@@ -337,7 +337,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// MOV r32, CR0 - Read CR0 into register
-    pub fn mov_rd_cr0(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn mov_rd_cr0(&mut self, instr: &Instruction) -> Result<()> {
         // CPL must be 0
         if self.get_cpl() != 0 {
             tracing::error!("MOV r32, CR0: CPL != 0");
@@ -356,7 +356,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r32, CR2 - Read CR2 into register (page fault linear address)
-    pub fn mov_rd_cr2(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn mov_rd_cr2(&mut self, instr: &Instruction) -> Result<()> {
         // CPL must be 0
         if self.get_cpl() != 0 {
             tracing::error!("MOV r32, CR2: CPL != 0");
@@ -375,7 +375,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r32, CR3 - Read CR3 into register (page directory base)
-    pub fn mov_rd_cr3(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn mov_rd_cr3(&mut self, instr: &Instruction) -> Result<()> {
         // CPL must be 0
         if self.get_cpl() != 0 {
             tracing::error!("MOV r32, CR3: CPL != 0");
@@ -394,7 +394,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r32, CR4 - Read CR4 into register
-    pub fn mov_rd_cr4(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn mov_rd_cr4(&mut self, instr: &Instruction) -> Result<()> {
         // CPL must be 0
         if self.get_cpl() != 0 {
             tracing::error!("MOV r32, CR4: CPL != 0");

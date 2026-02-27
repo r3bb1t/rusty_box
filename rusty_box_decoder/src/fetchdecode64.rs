@@ -1,10 +1,10 @@
 //! Const-compatible 64-bit instruction decoder
 //!
 //! This module provides a `const fn` instruction decoder for x86-64 mode
-//! that returns `BxInstructionGenerated` - the same structure used by
+//! that returns `BxInstruction` - the same structure used by
 //! the non-const decoder.
 
-use crate::instr_generated::InstructionGenerated;
+use crate::instr_generated::Instruction;
 
 use super::error::{DecodeError, DecodeResult};
 use super::fetchdecode_generated::BxDecodeError;
@@ -78,10 +78,10 @@ const fn find_opcode_in_table(table: &[u64], decmask: u32) -> Opcode {
 /// Const-compatible 64-bit instruction decoder
 ///
 /// Decodes an x86-64 instruction and returns a `Result` containing either
-/// a `BxInstructionGenerated` struct on success, or a `DecodeError` on failure.
+/// a `BxInstruction` struct on success, or a `DecodeError` on failure.
 /// This is the const fn equivalent of `fetch_decode64`.
-pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<InstructionGenerated> {
-    let mut instr = InstructionGenerated {
+pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
+    let mut instr = Instruction {
         meta_info: BxInstructionMetaInfo {
             ia_opcode: Opcode::IaError,
             ilen: 0,
@@ -1243,7 +1243,7 @@ mod tests {
     fn const_disassemble_sequence_64bit(
         data: &[u8],
         runtime_address: u64,
-    ) -> std::vec::Vec<(u64, InstructionGenerated)> {
+    ) -> std::vec::Vec<(u64, Instruction)> {
         let mut offset = 0;
         let mut current_address = runtime_address;
         let mut instructions = std::vec::Vec::new();

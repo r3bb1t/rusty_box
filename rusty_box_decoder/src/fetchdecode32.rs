@@ -1,10 +1,10 @@
 //! Const-compatible 32-bit/16-bit instruction decoder
 //!
 //! This module provides a `const fn` instruction decoder for x86 protected/real mode
-//! that returns `BxInstructionGenerated` - the same structure used by
+//! that returns `BxInstruction` - the same structure used by
 //! the non-const decoder.
 
-use crate::instr_generated::InstructionGenerated;
+use crate::instr_generated::Instruction;
 
 use super::error::{DecodeError, DecodeResult};
 use super::fetchdecode_generated::BxDecodeError;
@@ -163,14 +163,14 @@ const SREG_MOD1OR2_BASE32: [u8; 8] = [
 /// Const-compatible 32-bit/16-bit instruction decoder
 ///
 /// Decodes an x86 protected/real mode instruction and returns a `Result` containing either
-/// a `BxInstructionGenerated` struct on success, or a `DecodeError` on failure.
+/// a `BxInstruction` struct on success, or a `DecodeError` on failure.
 /// This is the const fn equivalent of `fetch_decode32_chatgpt_generated_instr`.
 ///
 /// # Arguments
 /// * `bytes` - The instruction bytes to decode
 /// * `is_32` - true for 32-bit mode, false for 16-bit mode
-pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<InstructionGenerated> {
-    let mut instr = InstructionGenerated {
+pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instruction> {
+    let mut instr = Instruction {
         meta_info: BxInstructionMetaInfo {
             ia_opcode: Opcode::IaError,
             ilen: 0,

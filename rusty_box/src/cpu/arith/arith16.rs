@@ -1,7 +1,7 @@
 // 16-bit arithmetic operations: ADD, ADC, SUB, etc.
 // Mirrors Bochs cpp/cpu/arith16.cc
 
-use crate::cpu::decoder::{BxInstructionGenerated, BxSegregs};
+use crate::cpu::decoder::{Instruction, BxSegregs};
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 use crate::config::BxAddress;
 
@@ -22,7 +22,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 /// ADC_GwEwR: ADC r16, r16 (register form)
 /// Opcode: 0x13, ModRM: r16, r/m16 (register)
 /// Matches BX_CPU_C::ADC_GwEwR
-pub fn ADC_GwEwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADC_GwEwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
     let op2_16 = cpu.get_gpr16(instr.src1() as usize);
     let cf = cpu.get_cf() as u16;
@@ -37,7 +37,7 @@ pub fn ADC_GwEwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 /// ADC_GwEwM: ADC r16, r/m16 (memory form)
 /// Opcode: 0x13, ModRM: r16, r/m16 (memory)
 /// Matches BX_CPU_C::ADC_GwEwM
-pub fn ADC_GwEwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADC_GwEwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     // Resolve address manually (same logic as resolve_addr32 in arith8)
     let base_reg = instr.sib_base() as usize;
     let mut eaddr = if base_reg < 16 {
@@ -82,7 +82,7 @@ pub fn ADC_GwEwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// ADC_GwEw: ADC r16, r/m16
 /// Dispatches to memory or register form based on ModRM
-pub fn ADC_GwEw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADC_GwEw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
         // Register form
         ADC_GwEwR(cpu, instr)
@@ -95,7 +95,7 @@ pub fn ADC_GwEw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruct
 /// ADD_EwIbR: ADD r/m16, imm8 (sign-extended, register form)
 /// Opcode: 0x83/0
 /// Matches pattern for ADD r16, imm8 (sign-extended)
-pub fn ADD_EwIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADD_EwIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.meta_data[0] as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = (instr.ib() as i8 as i16 as u16); // Sign-extend imm8 to u16
@@ -110,7 +110,7 @@ pub fn ADD_EwIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 /// ADD_EwIbM: ADD r/m16, imm8 (sign-extended, memory form)
 /// Opcode: 0x83/0 with memory operand
 /// Matching C++ BX_CPU_C::ADD_EwIbM in arith16.cc
-pub fn ADD_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADD_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
     let (op1, laddr) = cpu.read_rmw_virtual_word(seg, eaddr)?;
@@ -124,7 +124,7 @@ pub fn ADD_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGene
 /// ADD_EwIwR: ADD r16, imm16 (register form)
 /// Opcode: 0x81/0
 /// Based on BX_CPU_C::ADD_EwIwR in arith16.cc
-pub fn ADD_EwIwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADD_EwIwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.dst() as usize;
     let op1_16 = cpu.get_gpr16(dst);
     let op2_16 = instr.iw();  // Read 16-bit immediate
@@ -139,7 +139,7 @@ pub fn ADD_EwIwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 /// ADD_EwIwM: ADD m16, imm16 (memory form)
 /// Opcode: 0x81/0
 /// Based on BX_CPU_C::ADD_EwIwM in arith16.cc
-pub fn ADD_EwIwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADD_EwIwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     // Resolve address manually (same logic as ADC_GwEwM)
     let base_reg = instr.sib_base() as usize;
     let mut eaddr = if base_reg < 16 {
@@ -184,7 +184,7 @@ pub fn ADD_EwIwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// ADD_EwIw: ADD r/m16, imm16
 /// Dispatches to memory or register form based on ModRM
-pub fn ADD_EwIw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADD_EwIw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
         // Register form
         ADD_EwIwR(cpu, instr)
@@ -198,7 +198,7 @@ pub fn ADD_EwIw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruct
 /// Original: bochs/cpu/arith16.cc lines 43-56
 /// Opcode: 0x01, ModRM: r/m16, r16 (memory)
 /// Matches BX_CPU_C::ADD_EwGwM
-pub fn ADD_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADD_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     // Resolve address manually (same logic as other memory operations)
     let base_reg = instr.sib_base() as usize;
     let mut eaddr = if base_reg < 16 {
@@ -243,7 +243,7 @@ pub fn ADD_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// ADD_EwGwR: ADD r/m16, r16 (register form)
 /// Opcode 0x01: decoder swaps for 16/32-bit store: [0]=rm=DEST, [1]=nnn=SOURCE
-pub fn ADD_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADD_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);  // dst=[0]=rm = destination/first operand
     let op2_16 = cpu.get_gpr16(instr.src() as usize);  // src=[1]=nnn = source/second operand
     let sum_16 = op1_16.wrapping_add(op2_16);
@@ -256,7 +256,7 @@ pub fn ADD_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// ADD_EwGw: ADD r/m16, r16
 /// Dispatches to memory or register form based on ModRM
-pub fn ADD_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADD_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
         // Register form: both operands are registers
         ADD_EwGwR(cpu, instr)
@@ -269,7 +269,7 @@ pub fn ADD_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruct
 /// ADC_EwGwM: ADC r/m16, r16 (memory form)
 /// Original: bochs/cpu/arith16.cc lines 86-99
 /// Opcode: 0x11, ModRM: r/m16, r16 (memory)
-pub fn ADC_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADC_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     // Resolve address manually (same logic as other memory operations)
     let base_reg = instr.sib_base() as usize;
     let mut eaddr = if base_reg < 16 {
@@ -317,7 +317,7 @@ pub fn ADC_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// ADC_EwGwR: ADC r/m16, r16 (register form)
 /// Opcode 0x11: decoder swaps for 16/32-bit store: [0]=rm=DEST, [1]=nnn=SOURCE
-pub fn ADC_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADC_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);  // dst=[0]=rm = destination/first operand
     let op2_16 = cpu.get_gpr16(instr.src() as usize);  // src=[1]=nnn = source/second operand
     let cf = cpu.get_cf() as u16;
@@ -331,7 +331,7 @@ pub fn ADC_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// ADC_EwGw: ADC r/m16, r16
 /// Dispatches to memory or register form based on ModRM
-pub fn ADC_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADC_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
         // Register form
         ADC_EwGwR(cpu, instr)
@@ -343,7 +343,7 @@ pub fn ADC_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruct
 
 /// ADC_EwIbR: ADC r16, imm8 (sign-extended, register form)
 /// Opcode: 0x83/2
-pub fn ADC_EwIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADC_EwIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.meta_data[0] as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = instr.ib() as i8 as i16 as u16;
@@ -358,7 +358,7 @@ pub fn ADC_EwIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// ADC_EwIbM: ADC m16, imm8 (sign-extended, memory form)
 /// Opcode: 0x83/2
-pub fn ADC_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADC_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
     let (op1, laddr) = cpu.read_rmw_virtual_word(seg, eaddr)?;
@@ -371,8 +371,8 @@ pub fn ADC_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGene
 }
 
 /// ADC_EwsIb: ADC r/m16, imm8 (sign-extended) - dispatcher
-pub fn ADC_EwsIb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
-    if instr.mod_c0() { ADC_EwIbR(cpu, instr) } else { ADC_EwIbM(cpu, instr); Ok(()) }
+pub fn ADC_EwsIb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() { ADC_EwIbR(cpu, instr) } else { ADC_EwIbM(cpu, instr)?; Ok(()) }
 }
 
 // =========================================================================
@@ -381,7 +381,7 @@ pub fn ADC_EwsIb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// CMP_EwGwR: CMP r/m16, r16 (register form)
 /// Opcode 0x39: decoder swaps: [0]=rm=first operand, [1]=nnn=second operand
-pub fn CMP_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn CMP_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);  // dst=[0]=rm = first operand
     let op2_16 = cpu.get_gpr16(instr.src() as usize);  // src=[1]=nnn = second operand
     let result = op1_16.wrapping_sub(op2_16);
@@ -393,7 +393,7 @@ pub fn CMP_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// CMP_EwGwM: CMP r/m16, r16 (memory form)
 /// Decoder swaps: src() = [1] = nnn = register operand (second operand)
-pub fn CMP_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn CMP_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
 
@@ -407,7 +407,7 @@ pub fn CMP_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 }
 
 /// CMP_EwGw: CMP r/m16, r16 - Dispatcher
-pub fn CMP_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn CMP_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() {
         CMP_EwGwR(cpu, instr)
     } else {
@@ -421,7 +421,7 @@ pub fn CMP_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruct
 
 /// ADD_GwEwR: ADD r16, r16 (register form)
 /// Opcode: 0x03
-pub fn ADD_GwEwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADD_GwEwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
     let op2_16 = cpu.get_gpr16(instr.src1() as usize);
     let sum_16 = op1_16.wrapping_add(op2_16);
@@ -434,7 +434,7 @@ pub fn ADD_GwEwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// ADD_GwEwM: ADD r16, r/m16 (memory form)
 /// Opcode: 0x03
-pub fn ADD_GwEwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADD_GwEwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
@@ -448,7 +448,7 @@ pub fn ADD_GwEwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 }
 
 /// ADD_GwEw: ADD r16, r/m16 - unified dispatch
-pub fn ADD_GwEw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADD_GwEw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() { ADD_GwEwR(cpu, instr) } else { ADD_GwEwM(cpu, instr) }
 }
 
@@ -458,7 +458,7 @@ pub fn ADD_GwEw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruct
 
 /// SUB_EwGwM: SUB r/m16, r16 (memory form)
 /// Opcode: 0x29
-pub fn SUB_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SUB_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
     let laddr = cpu.get_laddr32_seg_arith16(seg, eaddr);
@@ -474,7 +474,7 @@ pub fn SUB_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// SUB_EwGwR: SUB r/m16, r16 (register form)
 /// Opcode 0x29: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
-pub fn SUB_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SUB_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);  // dst=[0]=rm=destination
     let op2_16 = cpu.get_gpr16(instr.src() as usize);  // src=[1]=nnn=source
     let diff_16 = op1_16.wrapping_sub(op2_16);
@@ -486,13 +486,13 @@ pub fn SUB_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 }
 
 /// SUB_EwGw: SUB r/m16, r16 - unified dispatch
-pub fn SUB_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SUB_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() { SUB_EwGwR(cpu, instr) } else { SUB_EwGwM(cpu, instr) }
 }
 
 /// SUB_GwEwR: SUB r16, r16 (register form)
 /// Opcode: 0x2B
-pub fn SUB_GwEwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SUB_GwEwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
     let op2_16 = cpu.get_gpr16(instr.src1() as usize);
     let diff_16 = op1_16.wrapping_sub(op2_16);
@@ -505,7 +505,7 @@ pub fn SUB_GwEwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// SUB_GwEwM: SUB r16, r/m16 (memory form)
 /// Opcode: 0x2B
-pub fn SUB_GwEwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SUB_GwEwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
@@ -519,7 +519,7 @@ pub fn SUB_GwEwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 }
 
 /// SUB_GwEw: SUB r16, r/m16 - unified dispatch
-pub fn SUB_GwEw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SUB_GwEw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() { SUB_GwEwR(cpu, instr) } else { SUB_GwEwM(cpu, instr) }
 }
 
@@ -529,7 +529,7 @@ pub fn SUB_GwEw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruct
 
 /// SBB_EwGwM: SBB r/m16, r16 (memory form)
 /// Opcode: 0x19
-pub fn SBB_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SBB_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
     let laddr = cpu.get_laddr32_seg_arith16(seg, eaddr);
@@ -545,7 +545,7 @@ pub fn SBB_EwGwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 }
 
 /// SBB_EwGwR: SBB r/m16, r16 (register form)
-pub fn SBB_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SBB_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
     let op2_16 = cpu.get_gpr16(instr.src() as usize);
     let cf = cpu.get_cf() as u16;
@@ -558,12 +558,12 @@ pub fn SBB_EwGwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 }
 
 /// SBB_EwGw: SBB r/m16, r16 - unified dispatch
-pub fn SBB_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SBB_EwGw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() { SBB_EwGwR(cpu, instr) } else { SBB_EwGwM(cpu, instr) }
 }
 
 /// SBB_GwEwR: SBB r16, r16 (register form)
-pub fn SBB_GwEwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SBB_GwEwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
     let op2_16 = cpu.get_gpr16(instr.src1() as usize);
     let cf = cpu.get_cf() as u16;
@@ -576,7 +576,7 @@ pub fn SBB_GwEwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 }
 
 /// SBB_GwEwM: SBB r16, r/m16 (memory form)
-pub fn SBB_GwEwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SBB_GwEwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
@@ -591,7 +591,7 @@ pub fn SBB_GwEwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 }
 
 /// SBB_GwEw: SBB r16, r/m16 - unified dispatch
-pub fn SBB_GwEw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SBB_GwEw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() { SBB_GwEwR(cpu, instr) } else { SBB_GwEwM(cpu, instr) }
 }
 
@@ -600,7 +600,7 @@ pub fn SBB_GwEw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruct
 // =========================================================================
 
 /// CMP_GwEwR: CMP r16, r16 (register form)
-pub fn CMP_GwEwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn CMP_GwEwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
     let op2_16 = cpu.get_gpr16(instr.src1() as usize);
     let diff_16 = op1_16.wrapping_sub(op2_16);
@@ -611,7 +611,7 @@ pub fn CMP_GwEwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 }
 
 /// CMP_GwEwM: CMP r16, r/m16 (memory form)
-pub fn CMP_GwEwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn CMP_GwEwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
@@ -624,7 +624,7 @@ pub fn CMP_GwEwM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 }
 
 /// CMP_GwEw: CMP r16, r/m16 - unified dispatch
-pub fn CMP_GwEw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn CMP_GwEw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() { CMP_GwEwR(cpu, instr) } else { CMP_GwEwM(cpu, instr) }
 }
 
@@ -635,7 +635,7 @@ pub fn CMP_GwEw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruct
 /// ADD_Axiw: ADD AX, imm16
 /// Optimized form for accumulator
 /// Opcode: 0x05
-pub fn ADD_Axiw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn ADD_Axiw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let ax = cpu.ax();
     let imm16 = instr.iw();
     let result = ax.wrapping_add(imm16);
@@ -649,7 +649,7 @@ pub fn ADD_Axiw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruct
 /// SUB_AX_Iw: SUB AX, imm16
 /// Optimized form for accumulator
 /// Opcode: 0x2D
-pub fn SUB_AX_Iw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SUB_AX_Iw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let ax = cpu.ax();
     let imm16 = instr.iw();
     let result = ax.wrapping_sub(imm16);
@@ -662,7 +662,7 @@ pub fn SUB_AX_Iw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// SUB_EwIwR: SUB r16, imm16 (register form)
 /// Opcode: 0x81/5
-pub fn SUB_EwIwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SUB_EwIwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.dst() as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = instr.iw();
@@ -676,7 +676,7 @@ pub fn SUB_EwIwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// SUB_EwIwM: SUB m16, imm16 (memory form)
 /// Opcode: 0x81/5
-pub fn SUB_EwIwM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SUB_EwIwM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
     let (op1, laddr) = cpu.read_rmw_virtual_word(seg, eaddr)?;
@@ -688,13 +688,13 @@ pub fn SUB_EwIwM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGene
 }
 
 /// SUB_EwIw: SUB r/m16, imm16 - dispatcher
-pub fn SUB_EwIw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
-    if instr.mod_c0() { SUB_EwIwR(cpu, instr) } else { SUB_EwIwM(cpu, instr); Ok(()) }
+pub fn SUB_EwIw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() { SUB_EwIwR(cpu, instr) } else { SUB_EwIwM(cpu, instr)?; Ok(()) }
 }
 
 /// SUB_EwIbR: SUB r16, imm8 (sign-extended, register form)
 /// Opcode: 0x83/5
-pub fn SUB_EwIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SUB_EwIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.meta_data[0] as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = instr.ib() as i8 as i16 as u16;
@@ -708,7 +708,7 @@ pub fn SUB_EwIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// SUB_EwIbM: SUB m16, imm8 (sign-extended, memory form)
 /// Opcode: 0x83/5
-pub fn SUB_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn SUB_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
     let (op1, laddr) = cpu.read_rmw_virtual_word(seg, eaddr)?;
@@ -720,13 +720,13 @@ pub fn SUB_EwIbM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGene
 }
 
 /// SUB_EwsIb: SUB r/m16, imm8 (sign-extended) - dispatcher
-pub fn SUB_EwsIb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
-    if instr.mod_c0() { SUB_EwIbR(cpu, instr) } else { SUB_EwIbM(cpu, instr); Ok(()) }
+pub fn SUB_EwsIb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() { SUB_EwIbR(cpu, instr) } else { SUB_EwIbM(cpu, instr)?; Ok(()) }
 }
 
 /// CMP_EwIwR: CMP r16, imm16 (register form)
 /// Opcode: 0x81/7
-pub fn CMP_EwIwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn CMP_EwIwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let dst = instr.dst() as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = instr.iw();
@@ -737,7 +737,7 @@ pub fn CMP_EwIwR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstruc
 
 /// CMP_EwIwM: CMP m16, imm16 (memory form)
 /// Opcode: 0x81/7
-pub fn CMP_EwIwM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGenerated) {
+pub fn CMP_EwIwM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
     let eaddr = cpu.resolve_addr32(instr);
     let seg = BxSegregs::from(instr.seg());
     let op1 = cpu.read_virtual_word_arith16(seg, eaddr);
@@ -747,6 +747,6 @@ pub fn CMP_EwIwM<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &BxInstructionGene
 }
 
 /// CMP_EwIw: CMP r/m16, imm16 - dispatcher
-pub fn CMP_EwIw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &BxInstructionGenerated) -> Result<(), crate::cpu::CpuError> {
+pub fn CMP_EwIw<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     if instr.mod_c0() { CMP_EwIwR(cpu, instr) } else { CMP_EwIwM(cpu, instr); Ok(()) }
 }

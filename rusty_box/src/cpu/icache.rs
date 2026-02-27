@@ -2,7 +2,7 @@ use crate::{
     config::BxPhyAddress,
     cpu::{
         cpu::BX_ASYNC_EVENT_STOP_TRACE,
-        decoder::{fetchdecode32, fetchdecode64, BxInstructionGenerated, Opcode},
+        decoder::{fetchdecode32, fetchdecode64, Instruction, Opcode},
         tlb::{lpf_of, page_offset, ppf_of},
         BxCpuC, BxCpuIdTrait, Result,
     },
@@ -137,7 +137,7 @@ pub struct BxICacheEntry {
     // orignial replaced
     //tlen: u32, // Trace length in instructions
     pub(super) tlen: usize, // Trace length in instructions
-    pub(super) i: BxInstructionGenerated,
+    pub(super) i: Instruction,
     // mpool_start_idx: Index in mpool where this trace starts
     // In C++, entry->i is a pointer, so we can do pointer arithmetic
     // In Rust, we need to store the index explicitly
@@ -156,7 +156,7 @@ pub struct BxICache {
     pub(crate) entry: [BxICacheEntry; BX_ICACHE_ENTRIES],
     /// Vec to avoid stack overflow - this is ~15 MB!
     /// Using Vec instead of array moves allocation to heap
-    pub(crate) mpool: Vec<BxInstructionGenerated>,
+    pub(crate) mpool: Vec<Instruction>,
     pub(crate) mpindex: usize,
     next_page_split_index: usize,
     page_split_index: [PageSplitEntry; BX_ICACHE_ENTRIES],
@@ -188,7 +188,7 @@ impl Default for PageSplitEntry {
                 p_addr: IcacheAddress::Invalid,
                 trace_mask: 0,
                 tlen: 0,
-                i: BxInstructionGenerated::default(),
+                i: Instruction::default(),
                 mpool_start_idx: 0,
                 first_bytes: [0; 8],
             },
@@ -209,13 +209,13 @@ impl BxICache {
                 p_addr: IcacheAddress::Invalid,
                 trace_mask: 0,
                 tlen: 0,
-                i: BxInstructionGenerated::default(),
+                i: Instruction::default(),
                 mpool_start_idx: 0,
                 first_bytes: [0; 8],
             }),
             // Allocate on heap to avoid 15 MB stack allocation
             // vec![val; size] is efficient and heap-allocated
-            mpool: vec![BxInstructionGenerated::default(); BX_ICACHE_MEM_POOL],
+            mpool: vec![Instruction::default(); BX_ICACHE_MEM_POOL],
             mpindex: 0,
             next_page_split_index: 0,
             page_split_index: core::array::from_fn(|_| PageSplitEntry::default()),
@@ -520,7 +520,7 @@ fn flush_smc(e: &mut BxICacheEntry) {
     }
 }
 
-fn gen_dummy_icache_entry(i: &mut BxInstructionGenerated) {
+fn gen_dummy_icache_entry(i: &mut Instruction) {
     // Matching C++ line 88-90: genDummyICacheEntry
     i.set_ilen(0);
     i.set_ia_opcode(Opcode::InsertedOpcode);
@@ -849,17 +849,19 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     // issue - it's an invalid/unsupported instruction.
                     if current_remaining >= 15 {
                         tracing::error!(
-                            "Decode failed with {} bytes remaining (not a boundary issue)\n\
-                             RIP={:#x}, CS.base={:#x}, EIP={:#x}\n\
-                             Decode error: {:?}\n\
-                             First 16 bytes: {:02x?}",
+                            "Decode failed with {} bytes remaining (not a boundary issue)",
+                            current_remaining,
+                        );
+                        tracing::error!(
+                            "DECODE-FAIL: remaining={} RIP={:#x} CS.base={:#x} EIP={:#x} icount={}",
                             current_remaining,
                             self.rip(),
                             unsafe { self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize].cache.u.segment.base },
                             self.eip(),
-                            decode_err,
-                            &current_fetch_ptr[..core::cmp::min(16, current_fetch_ptr.len())]
+                            self.icount,
                         );
+                        tracing::error!("DECODE-FAIL: decode_err={:?}", decode_err);
+                        tracing::error!("DECODE-FAIL: first 32 bytes @ fetch_ptr: {:02x?}", &current_fetch_ptr[..core::cmp::min(32, current_fetch_ptr.len())]);
 
                         // Check if this is an illegal opcode - if so, generate #UD exception
                         // Based on Bochs exception.cc:937 and cpu.h:248 (Exception::Ud = 6)
@@ -998,7 +1000,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         remaining_in_page: usize,
         mem: &'c mut BxMemC<'c>,
         cpus: &[&Self],
-    ) -> Result<BxInstructionGenerated> {
+    ) -> Result<Instruction> {
         let mut fetch_buffer = [0u8; 32];
 
         // Based on BX_CPU_C::boundaryFetch in icache.cc

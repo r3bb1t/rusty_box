@@ -2,7 +2,7 @@ use bitflags::bitflags;
 
 use super::{
     ia_opcodes::Opcode,
-    instr_generated::{BxInstructionMetaInfo, InstructionGenerated, ModRmForm},
+    instr_generated::{BxInstructionMetaInfo, Instruction, ModRmForm},
     DecodeResult,
 };
 
@@ -13,10 +13,10 @@ pub(crate) struct BxInstruction {
     pub meta_data: [u8; 8],
 }
 
-impl TryFrom<InstructionGenerated> for BxInstruction {
+impl TryFrom<Instruction> for BxInstruction {
     type Error = super::error::DecodeError;
 
-    fn try_from(value: InstructionGenerated) -> DecodeResult<Self> {
+    fn try_from(value: Instruction) -> DecodeResult<Self> {
         let meta = value.meta_info;
 
         let metainfo = MetaInfo {
@@ -34,7 +34,7 @@ impl TryFrom<InstructionGenerated> for BxInstruction {
     }
 }
 
-impl TryFrom<BxInstruction> for InstructionGenerated {
+impl TryFrom<BxInstruction> for Instruction {
     type Error = super::error::DecodeError;
 
     fn try_from(value: BxInstruction) -> DecodeResult<Self> {
@@ -188,5 +188,5 @@ impl MetaInfoFlags {
     }
 }
 
-// NOTE: Methods for BxInstructionGenerated are defined in instr_generated.rs
+// NOTE: Methods for BxInstruction are defined in instr_generated.rs
 // These duplicate methods were removed to avoid conflicts with the public API

@@ -8,7 +8,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{BxInstructionGenerated, BxSegregs},
+    decoder::{Instruction, BxSegregs},
     error::Result,
     segment_ctrl_pro::parse_selector,
 };
@@ -19,7 +19,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// LEA r16, m - Load effective address into 16-bit register
-    pub fn lea_gw_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn lea_gw_m(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let eaddr = self.resolve_addr32(instr) as u16;
         self.set_gpr16(dst, eaddr);
@@ -27,7 +27,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LEA r32, m - Load effective address into 32-bit register
-    pub fn lea_gd_m(&mut self, instr: &BxInstructionGenerated) {
+    pub fn lea_gd_m(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let eaddr = self.resolve_addr32(instr);
         self.set_gpr32(dst, eaddr);
@@ -39,7 +39,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// XCHG r8, r/m8 - Exchange 8-bit values
-    pub fn xchg_eb_gb(&mut self, instr: &BxInstructionGenerated) {
+    pub fn xchg_eb_gb(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let src = instr.meta_data[1] as usize;
         let val_dst = self.get_gpr8(dst);
@@ -56,7 +56,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// XCHG r16, r/m16 - Exchange 16-bit values
-    pub fn xchg_ew_gw(&mut self, instr: &BxInstructionGenerated) {
+    pub fn xchg_ew_gw(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let src = instr.meta_data[1] as usize;
         let val_dst = self.get_gpr16(dst);
@@ -73,7 +73,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// XCHG r32, r/m32 - Exchange 32-bit values
-    pub fn xchg_ed_gd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn xchg_ed_gd(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let src = instr.meta_data[1] as usize;
         let val_dst = self.get_gpr32(dst);
@@ -90,7 +90,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// XCHG AX, r16 - Exchange AX with 16-bit register (short forms)
-    pub fn xchg_ax_rw(&mut self, instr: &BxInstructionGenerated) {
+    pub fn xchg_ax_rw(&mut self, instr: &Instruction) {
         let reg = instr.meta_data[0] as usize;
         let ax = self.ax();
         let val = self.get_gpr16(reg);
@@ -99,7 +99,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// XCHG EAX, r32 - Exchange EAX with 32-bit register (short forms)
-    pub fn xchg_eax_rd(&mut self, instr: &BxInstructionGenerated) {
+    pub fn xchg_eax_rd(&mut self, instr: &Instruction) {
         let reg = instr.meta_data[0] as usize;
         let eax = self.eax();
         let val = self.get_gpr32(reg);
@@ -108,11 +108,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
+    // Unified XCHG dispatch (register vs memory)
+    // =========================================================================
+
+    /// XCHG r/m8, r8 - Unified dispatch based on mod_c0()
+    pub fn xchg_eb_gb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() { self.xchg_eb_gb(instr); Ok(()) }
+        else { self.xchg_eb_gb_m(instr) }
+    }
+
+    /// XCHG r/m16, r16 - Unified dispatch based on mod_c0()
+    pub fn xchg_ew_gw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() { self.xchg_ew_gw(instr); Ok(()) }
+        else { self.xchg_ew_gw_m(instr) }
+    }
+
+    // =========================================================================
     // MOV segment register operations
     // =========================================================================
 
     /// MOV r/m16, Sreg - Move segment register to r/m16
-    pub fn mov_ew_sw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov_ew_sw(&mut self, instr: &Instruction) -> super::Result<()> {
         let src_seg = instr.meta_data[1] as usize;
 
         // Decoder should never give us invalid segment registers (6-7)
@@ -141,7 +157,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV Sreg, r/m16 - Move r/m16 to segment register
-    pub fn mov_sw_ew(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn mov_sw_ew(&mut self, instr: &Instruction) -> Result<()> {
         let dst_seg = instr.meta_data[0] as usize;
 
         // Decoder should never give us invalid segment registers (6-7)
@@ -192,14 +208,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// CBW - Convert Byte to Word (AL -> AX)
-    pub fn cbw(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn cbw(&mut self, _instr: &Instruction) {
         let al = self.al() as i8;
         self.set_ax(al as i16 as u16);
         tracing::trace!("CBW: AL={:#04x} -> AX={:#06x}", self.al(), self.ax());
     }
 
     /// CWD - Convert Word to Doubleword (AX -> DX:AX)
-    pub fn cwd(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn cwd(&mut self, _instr: &Instruction) {
         let ax = self.ax() as i16;
         if ax < 0 {
             self.set_dx(0xFFFF);
@@ -215,14 +231,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CWDE - Convert Word to Doubleword Extended (AX -> EAX)
-    pub fn cwde(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn cwde(&mut self, _instr: &Instruction) {
         let ax = self.ax() as i16;
         self.set_eax(ax as i32 as u32);
         tracing::trace!("CWDE: AX={:#06x} -> EAX={:#010x}", ax, self.eax());
     }
 
     /// CDQ - Convert Doubleword to Quadword (EAX -> EDX:EAX)
-    pub fn cdq(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn cdq(&mut self, _instr: &Instruction) {
         let eax = self.eax() as i32;
         if eax < 0 {
             self.set_edx(0xFFFFFFFF);
@@ -242,7 +258,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// XLAT - Translate byte (AL = [BX+AL])
-    pub fn xlat(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn xlat(&mut self, _instr: &Instruction) {
         let bx = self.bx() as u64;
         let al = self.al() as u64;
         let ds_base = self.get_segment_base(BxSegregs::Ds);
@@ -258,7 +274,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// LAHF - Load AH from Flags (SF:ZF:0:AF:0:PF:1:CF)
-    pub fn lahf(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn lahf(&mut self, _instr: &Instruction) {
         let flags = (self.eflags & 0xFF) as u8;
         // AH = SF:ZF:0:AF:0:PF:1:CF (bits 7,6,4,2,0 from flags, bit 1 always 1)
         let ah = (flags & 0xD5) | 0x02;
@@ -267,7 +283,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SAHF - Store AH into Flags
-    pub fn sahf(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn sahf(&mut self, _instr: &Instruction) {
         let ah = self.ah();
         // Only modify SF, ZF, AF, PF, CF (bits 7,6,4,2,0)
         self.eflags = (self.eflags & !0xD5) | ((ah as u32) & 0xD5);
@@ -279,7 +295,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// MOV r16, imm16
-    pub fn mov_rw_iw(&mut self, instr: &BxInstructionGenerated) {
+    pub fn mov_rw_iw(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let imm = instr.iw();
 
@@ -288,7 +304,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r8, imm8
-    pub fn mov_rb_ib(&mut self, instr: &BxInstructionGenerated) {
+    pub fn mov_rb_ib(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let imm = instr.ib();
         self.set_gpr8(dst, imm);
@@ -296,7 +312,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r16, r/m16 (register to register)
-    pub fn mov_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn mov_gw_ew_r(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let src = instr.meta_data[1] as usize;
         let val = self.get_gpr16(src);
@@ -306,14 +322,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r/m16, r16 (register to register)
     /// Opcode 0x89 (16-bit): decoder swaps: meta_data[0] = rm (DEST), meta_data[1] = nnn (SOURCE)
-    pub fn mov_ew_gw_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn mov_ew_gw_r(&mut self, instr: &Instruction) {
         let val = self.get_gpr16(instr.meta_data[1] as usize); // nnn = source
         self.set_gpr16(instr.meta_data[0] as usize, val);      // rm = destination
         tracing::trace!("MOV16: reg{} = reg{} ({:#06x})", instr.meta_data[0], instr.meta_data[1], val);
     }
 
     /// MOV r8, r/m8 (register to register)
-    pub fn mov_gb_eb_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn mov_gb_eb_r(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let src = instr.meta_data[1] as usize;
         let val = self.get_gpr8(src);
@@ -323,7 +339,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r/m8, r8 (register to register)
     /// Opcode 0x88: 8-bit does NOT match decoder swap — meta_data[0]=nnn=source, meta_data[1]=rm=dest
-    pub fn mov_eb_gb_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn mov_eb_gb_r(&mut self, instr: &Instruction) {
         let val = self.get_gpr8(instr.meta_data[0] as usize); // nnn = source
         self.set_gpr8(instr.meta_data[1] as usize, val);      // rm = destination
         tracing::trace!("MOV8: reg{} = reg{} ({:#04x})", instr.meta_data[1], instr.meta_data[0], val);
@@ -335,7 +351,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r/m8, imm8 (memory form)
     /// Matching C++ data_xfer8.cc:75-82 MOV_EbIbM
-    pub fn mov_eb_ib_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov_eb_ib_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
 
@@ -347,7 +363,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV r/m8, r8 (memory form)
     /// Matching C++ data_xfer8.cc:34-41 MOV_EbGbM
     /// 8-bit: no decoder swap, meta_data[0]=nnn=source register, dst()=meta_data[0]
-    pub fn mov_eb_gb_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov_eb_gb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let src_reg = instr.dst() as usize; // dst()=[0]=nnn=source register for 8-bit store
@@ -367,7 +383,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r8, r/m8 (memory form)
     /// Matching C++ data_xfer8.cc:43-51 MOV_GbEbM
-    pub fn mov_gb_eb_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov_gb_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let val8 = self.read_virtual_byte(seg, eaddr)?;
@@ -388,7 +404,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// XCHG r/m8, r8 (memory form)
     /// Matching C++ data_xfer8.cc:99-110 XCHG_EbGbM
     /// Note: always locked (read_RMW_virtual_byte)
-    pub fn xchg_eb_gb_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn xchg_eb_gb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let (op1, laddr) = self.read_rmw_virtual_byte(seg, eaddr)?; // always locked
@@ -430,16 +446,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // MOVZX/MOVSX - Move with Zero/Sign Extension
     // =========================================================================
 
-    /// MOVZX r16, r/m8 - Move with zero-extend
-    pub fn movzx_gw_eb(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let src = instr.meta_data[1] as usize;
-        let val = self.get_gpr8(src) as u16;
-        self.set_gpr16(dst, val);
+    /// MOVZX r16, r/m8 — unified dispatch (register or memory form)
+    pub fn movzx_gw_eb(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() { self.movzx_gw_eb_r(instr); Ok(()) } else { self.movzx_gw_eb_m(instr) }
     }
 
     /// MOVZX r32, r/m8 - Move with zero-extend
-    pub fn movzx_gd_eb(&mut self, instr: &BxInstructionGenerated) {
+    pub fn movzx_gd_eb(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let src = instr.meta_data[1] as usize;
         let val = self.get_gpr8(src) as u32;
@@ -447,23 +460,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVZX r32, r/m16 - Move with zero-extend
-    pub fn movzx_gd_ew(&mut self, instr: &BxInstructionGenerated) {
+    pub fn movzx_gd_ew(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let src = instr.meta_data[1] as usize;
         let val = self.get_gpr16(src) as u32;
         self.set_gpr32(dst, val);
     }
 
-    /// MOVSX r16, r/m8 - Move with sign-extend
-    pub fn movsx_gw_eb(&mut self, instr: &BxInstructionGenerated) {
-        let dst = instr.meta_data[0] as usize;
-        let src = instr.meta_data[1] as usize;
-        let val = self.get_gpr8(src) as i8 as i16 as u16;
-        self.set_gpr16(dst, val);
+    /// MOVSX r16, r/m8 — unified dispatch (register or memory form)
+    pub fn movsx_gw_eb(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() { self.movsx_gw_eb_r(instr); Ok(()) } else { self.movsx_gw_eb_m(instr) }
     }
 
     /// MOVSX r32, r/m8 - Move with sign-extend (legacy meta_data form, superseded by _r/_m variants)
-    pub fn movsx_gd_eb_legacy(&mut self, instr: &BxInstructionGenerated) {
+    pub fn movsx_gd_eb_legacy(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let src = instr.meta_data[1] as usize;
         let val = self.get_gpr8(src) as i8 as i32 as u32;
@@ -476,7 +486,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r/m16, imm16 (memory form)
     /// Matching C++ data_xfer16.cc:27-33 MOV_EwIwM
-    pub fn mov_ew_iw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov_ew_iw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
 
@@ -487,7 +497,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r16, imm16 (register form)
     /// Matching C++ data_xfer16.cc:35-40 MOV_EwIwR
-    pub fn mov_ew_iw_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn mov_ew_iw_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
 
         self.set_gpr16(dst, instr.iw());
@@ -497,7 +507,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV r/m16, r16 (memory form)
     /// Matching C++ data_xfer16.cc:42-49 MOV_EwGwM
     /// Decoder swaps for 16/32-bit store: src() = meta_data[1] = nnn = SOURCE register
-    pub fn mov_ew_gw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let src_reg = instr.src() as usize;
@@ -518,7 +528,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ data_xfer16.cc:58-65 MOV_GwEwM
     /// MOV r16, r/m16 (memory form)
     /// Matching C++ data_xfer16.cc:58-65 MOV_GwEwM
-    pub fn mov_gw_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let val16 = self.read_virtual_word(seg, eaddr)?;
@@ -535,7 +545,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ data_xfer16.cc:202-210 XCHG_EwGwM
     /// Note: always locked (read_RMW_virtual_word)
     /// reg field (dst()) = register operand for XCHG memory form
-    pub fn xchg_ew_gw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn xchg_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let (op1, laddr) = self.read_rmw_virtual_word(seg, eaddr)?; // always locked
@@ -558,7 +568,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVZX r16, r/m8 (memory form)
     /// Matching C++ data_xfer16.cc:158-168 MOVZX_GwEbM
     /// Zero extend byte op2 into word op1
-    pub fn movzx_gw_eb_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn movzx_gw_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op2_8 = self.read_virtual_byte(seg, eaddr)?;
@@ -578,7 +588,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVZX r16, r8 (register form)
     /// Matching C++ data_xfer16.cc:170-178 MOVZX_GwEbR
     /// Zero extend byte op2 into word op1
-    pub fn movzx_gw_eb_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn movzx_gw_eb_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
         let extend8bit_l = instr.extend8bit_l();
         let op2_8 = self.read_8bit_regx(src_reg, extend8bit_l);
@@ -591,7 +601,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVSX r16, r/m8 (memory form)
     /// Matching C++ data_xfer16.cc:180-190 MOVSX_GwEbM
     /// Sign extend byte op2 into word op1
-    pub fn movsx_gw_eb_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn movsx_gw_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op2_8 = self.read_virtual_byte(seg, eaddr)?;
@@ -613,7 +623,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVSX r16, r8 (register form)
     /// Matching C++ data_xfer16.cc:192-200 MOVSX_GwEbR
     /// Sign extend byte op2 into word op1
-    pub fn movsx_gw_eb_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn movsx_gw_eb_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
         let extend8bit_l = instr.extend8bit_l();
         let op2_8 = self.read_8bit_regx(src_reg, extend8bit_l);
@@ -640,7 +650,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Conditional move if overflow (OF=1)
     /// Matching C++ data_xfer16.cc:245-251 CMOVO_GwEwR
-    pub fn cmovo_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovo_gw_ew_r(&mut self, instr: &Instruction) {
         if self.get_of() {
             let src_reg = instr.src() as usize;
             let val16 = self.get_gpr16(src_reg);
@@ -650,7 +660,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMOVNO_GwEwR - Conditional move if not overflow (OF=0)
-    pub fn cmovno_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovno_gw_ew_r(&mut self, instr: &Instruction) {
         if !self.get_of() {
             let src_reg = instr.src() as usize;
             let val16 = self.get_gpr16(src_reg);
@@ -660,7 +670,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMOVB_GwEwR - Conditional move if below/carry (CF=1)
-    pub fn cmovb_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovb_gw_ew_r(&mut self, instr: &Instruction) {
         if self.get_cf() {
             let src_reg = instr.src() as usize;
             let val16 = self.get_gpr16(src_reg);
@@ -670,7 +680,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMOVNB_GwEwR - Conditional move if not below/no carry (CF=0)
-    pub fn cmovnb_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovnb_gw_ew_r(&mut self, instr: &Instruction) {
         if !self.get_cf() {
             let src_reg = instr.src() as usize;
             let val16 = self.get_gpr16(src_reg);
@@ -680,7 +690,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMOVZ_GwEwR - Conditional move if zero/equal (ZF=1)
-    pub fn cmovz_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovz_gw_ew_r(&mut self, instr: &Instruction) {
         if self.get_zf() {
             let src_reg = instr.src() as usize;
             let val16 = self.get_gpr16(src_reg);
@@ -690,7 +700,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMOVNZ_GwEwR - Conditional move if not zero/not equal (ZF=0)
-    pub fn cmovnz_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovnz_gw_ew_r(&mut self, instr: &Instruction) {
         if !self.get_zf() {
             let src_reg = instr.src() as usize;
             let val16 = self.get_gpr16(src_reg);
@@ -700,7 +710,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMOVBE_GwEwR - Conditional move if below or equal (CF=1 or ZF=1)
-    pub fn cmovbe_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovbe_gw_ew_r(&mut self, instr: &Instruction) {
         if self.get_cf() || self.get_zf() {
             let src_reg = instr.src() as usize;
             let val16 = self.get_gpr16(src_reg);
@@ -710,7 +720,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMOVNBE_GwEwR - Conditional move if not below or equal/above (CF=0 and ZF=0)
-    pub fn cmovnbe_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovnbe_gw_ew_r(&mut self, instr: &Instruction) {
         if !self.get_cf() && !self.get_zf() {
             let src_reg = instr.src() as usize;
             let val16 = self.get_gpr16(src_reg);
@@ -720,7 +730,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMOVS_GwEwR - Conditional move if sign (SF=1)
-    pub fn cmovs_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovs_gw_ew_r(&mut self, instr: &Instruction) {
         if self.get_sf() {
             let src_reg = instr.src() as usize;
             let val16 = self.get_gpr16(src_reg);
@@ -730,7 +740,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMOVNS_GwEwR - Conditional move if not sign (SF=0)
-    pub fn cmovns_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovns_gw_ew_r(&mut self, instr: &Instruction) {
         if !self.get_sf() {
             let src_reg = instr.src() as usize;
             let val16 = self.get_gpr16(src_reg);
@@ -740,7 +750,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMOVP_GwEwR - Conditional move if parity/parity even (PF=1)
-    pub fn cmovp_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovp_gw_ew_r(&mut self, instr: &Instruction) {
         if self.get_pf() {
             let src_reg = instr.src() as usize;
             let val16 = self.get_gpr16(src_reg);
@@ -750,7 +760,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMOVNP_GwEwR - Conditional move if no parity/parity odd (PF=0)
-    pub fn cmovnp_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovnp_gw_ew_r(&mut self, instr: &Instruction) {
         if !self.get_pf() {
             let src_reg = instr.src() as usize;
             let val16 = self.get_gpr16(src_reg);
@@ -760,7 +770,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMOVL_GwEwR - Conditional move if less (SF != OF)
-    pub fn cmovl_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovl_gw_ew_r(&mut self, instr: &Instruction) {
         if self.get_sf() != self.get_of() {
             let src_reg = instr.src() as usize;
             let val16 = self.get_gpr16(src_reg);
@@ -770,7 +780,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMOVNL_GwEwR - Conditional move if not less/greater or equal (SF == OF)
-    pub fn cmovnl_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovnl_gw_ew_r(&mut self, instr: &Instruction) {
         if self.get_sf() == self.get_of() {
             let src_reg = instr.src() as usize;
             let val16 = self.get_gpr16(src_reg);
@@ -780,7 +790,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMOVLE_GwEwR - Conditional move if less or equal (ZF=1 or SF!=OF)
-    pub fn cmovle_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovle_gw_ew_r(&mut self, instr: &Instruction) {
         if self.get_zf() || (self.get_sf() != self.get_of()) {
             let src_reg = instr.src() as usize;
             let val16 = self.get_gpr16(src_reg);
@@ -790,7 +800,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMOVNLE_GwEwR - Conditional move if not less or equal/greater (ZF=0 and SF==OF)
-    pub fn cmovnle_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovnle_gw_ew_r(&mut self, instr: &Instruction) {
         if !self.get_zf() && (self.get_sf() == self.get_of()) {
             let src_reg = instr.src() as usize;
             let val16 = self.get_gpr16(src_reg);
@@ -824,7 +834,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r/m32, imm32 (memory form)
     /// Matching C++ data_xfer32.cc:27-33 MOV_EdIdM
-    pub fn mov_ed_id_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov_ed_id_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
 
@@ -836,7 +846,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV r32, imm32 (register form)
     /// Matching C++ data_xfer32.cc:35-40 MOV_EdIdR
     /// Note: BX_CLEAR_64BIT_HIGH is handled in set_gpr32
-    pub fn mov_ed_id_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn mov_ed_id_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
 
         self.set_gpr32(dst, instr.id());
@@ -849,7 +859,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// The memory address is computed from the ModRM byte and segment register.
     ///
     /// Matching C++ data_xfer32.cc:42-49 BX_CPU_C::MOV32_EdGdM
-    pub fn mov32_ed_gd_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov32_ed_gd_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let src_reg = instr.src() as usize;
@@ -869,7 +879,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV r32, r/m32 (memory form)
     /// Matching C++ data_xfer32.cc:67-75 MOV32_GdEdM
     /// Note: BX_CLEAR_64BIT_HIGH is handled in set_gpr32
-    pub fn mov32_gd_ed_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov32_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let val32 = self.read_virtual_dword(seg, eaddr)?;
@@ -889,7 +899,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV r32, r/m32 (memory form with SS segment override)
     /// Matching C++ data_xfer32.cc:77-85 MOV32S_GdEdM
     /// Uses stack_read_dword instead of read_virtual_dword
-    pub fn mov32s_gd_ed_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov32s_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let val32 = self.stack_read_dword(eaddr)?;
         let dst_reg = instr.dst() as usize;
@@ -914,7 +924,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     ///
     /// # Operation
     /// Writes a 32-bit value from the source register to SS:offset.
-    pub fn mov32s_ed_gd_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov32s_ed_gd_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let src_reg = instr.src() as usize;
         let val32 = self.get_gpr32(src_reg);
@@ -933,7 +943,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ data_xfer32.cc:198-207 XCHG_EdGdM
     /// Note: always locked (read_RMW_virtual_dword)
     /// XCHG 0x87 is NOT in decoder swap list, so [0]=nnn=register, [1]=rm
-    pub fn xchg_ed_gd_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn xchg_ed_gd_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let (op1, laddr) = self.read_rmw_virtual_dword(seg, eaddr)?; // always locked
@@ -956,7 +966,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVZX r32, r/m8 (memory form)
     /// Matching C++ data_xfer32.cc:110-120 MOVZX_GdEbM
     /// Zero extend byte op2 into dword op1
-    pub fn movzx_gd_eb_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn movzx_gd_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op2_8 = self.read_virtual_byte(seg, eaddr)?;
@@ -976,7 +986,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVZX r32, r8 (register form)
     /// Matching C++ data_xfer32.cc:122-130 MOVZX_GdEbR
     /// Zero extend byte op2 into dword op1
-    pub fn movzx_gd_eb_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn movzx_gd_eb_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
         let extend8bit_l = instr.extend8bit_l();
         let op2_8 = self.read_8bit_regx(src_reg, extend8bit_l);
@@ -989,7 +999,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVZX r32, r/m16 (memory form)
     /// Matching C++ data_xfer32.cc:132-142 MOVZX_GdEwM
     /// Zero extend word op2 into dword op1
-    pub fn movzx_gd_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn movzx_gd_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op2_16 = self.read_virtual_word(seg, eaddr)?;
@@ -1009,7 +1019,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVZX r32, r16 (register form)
     /// Matching C++ data_xfer32.cc:144-152 MOVZX_GdEwR
     /// Zero extend word op2 into dword op1
-    pub fn movzx_gd_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn movzx_gd_ew_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
         let op2_16 = self.get_gpr16(src_reg);
         let dst_reg = instr.dst() as usize;
@@ -1021,7 +1031,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVSX r32, r/m8 (memory form)
     /// Matching C++ data_xfer32.cc:154-164 MOVSX_GdEbM
     /// Sign extend byte op2 into dword op1
-    pub fn movsx_gd_eb_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn movsx_gd_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op2_8 = self.read_virtual_byte(seg, eaddr)?;
@@ -1043,7 +1053,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVSX r32, r8 (register form)
     /// Matching C++ data_xfer32.cc:166-174 MOVSX_GdEbR
     /// Sign extend byte op2 into dword op1
-    pub fn movsx_gd_eb_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn movsx_gd_eb_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
         let extend8bit_l = instr.extend8bit_l();
         let op2_8 = self.read_8bit_regx(src_reg, extend8bit_l);
@@ -1063,7 +1073,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVSX r32, r/m16 (memory form)
     /// Matching C++ data_xfer32.cc:176-186 MOVSX_GdEwM
     /// Sign extend word op2 into dword op1
-    pub fn movsx_gd_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn movsx_gd_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op2_16 = self.read_virtual_word(seg, eaddr)?;
@@ -1085,7 +1095,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVSX r32, r16 (register form)
     /// Matching C++ data_xfer32.cc:188-196 MOVSX_GdEwR
     /// Sign extend word op2 into dword op1
-    pub fn movsx_gd_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn movsx_gd_ew_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
         let op2_16 = self.get_gpr16(src_reg);
         let dst_reg = instr.dst() as usize;
@@ -1112,7 +1122,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Conditional move if overflow (OF=1)
     /// Matching C++ data_xfer32.cc:223-231 CMOVO_GdEdR
     /// Always clear upper part of the register (BX_CLEAR_64BIT_HIGH)
-    pub fn cmovo_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovo_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_of() {
             let src_reg = instr.src() as usize;
             let val32 = self.get_gpr32(src_reg);
@@ -1126,7 +1136,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Conditional move if not overflow (OF=0)
     /// Matching C++ data_xfer32.cc:233-241 CMOVNO_GdEdR
     /// Always clear upper part of the register
-    pub fn cmovno_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovno_gd_ed_r(&mut self, instr: &Instruction) {
         if !self.get_of() {
             let src_reg = instr.src() as usize;
             let val32 = self.get_gpr32(src_reg);
@@ -1139,7 +1149,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Conditional move if below/carry (CF=1)
     /// Matching C++ data_xfer32.cc:243-251 CMOVB_GdEdR
     /// Always clear upper part of the register
-    pub fn cmovb_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovb_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_cf() {
             let src_reg = instr.src() as usize;
             let val32 = self.get_gpr32(src_reg);
@@ -1152,7 +1162,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Conditional move if not below/no carry (CF=0)
     /// Matching C++ data_xfer32.cc:253-261 CMOVNB_GdEdR
     /// Always clear upper part of the register
-    pub fn cmovnb_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovnb_gd_ed_r(&mut self, instr: &Instruction) {
         if !self.get_cf() {
             let src_reg = instr.src() as usize;
             let val32 = self.get_gpr32(src_reg);
@@ -1165,7 +1175,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Conditional move if zero/equal (ZF=1)
     /// Matching C++ data_xfer32.cc:263-271 CMOVZ_GdEdR
     /// Always clear upper part of the register
-    pub fn cmovz_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovz_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_zf() {
             let src_reg = instr.src() as usize;
             let val32 = self.get_gpr32(src_reg);
@@ -1178,7 +1188,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Conditional move if not zero/not equal (ZF=0)
     /// Matching C++ data_xfer32.cc:273-281 CMOVNZ_GdEdR
     /// Always clear upper part of the register
-    pub fn cmovnz_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovnz_gd_ed_r(&mut self, instr: &Instruction) {
         if !self.get_zf() {
             let src_reg = instr.src() as usize;
             let val32 = self.get_gpr32(src_reg);
@@ -1191,7 +1201,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Conditional move if below or equal (CF=1 or ZF=1)
     /// Matching C++ data_xfer32.cc:283-291 CMOVBE_GdEdR
     /// Always clear upper part of the register
-    pub fn cmovbe_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovbe_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_cf() || self.get_zf() {
             let src_reg = instr.src() as usize;
             let val32 = self.get_gpr32(src_reg);
@@ -1204,7 +1214,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Conditional move if not below or equal/above (CF=0 and ZF=0)
     /// Matching C++ data_xfer32.cc:293-301 CMOVNBE_GdEdR
     /// Always clear upper part of the register
-    pub fn cmovnbe_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovnbe_gd_ed_r(&mut self, instr: &Instruction) {
         if !self.get_cf() && !self.get_zf() {
             let src_reg = instr.src() as usize;
             let val32 = self.get_gpr32(src_reg);
@@ -1217,7 +1227,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Conditional move if sign (SF=1)
     /// Matching C++ data_xfer32.cc:303-311 CMOVS_GdEdR
     /// Always clear upper part of the register
-    pub fn cmovs_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovs_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_sf() {
             let src_reg = instr.src() as usize;
             let val32 = self.get_gpr32(src_reg);
@@ -1230,7 +1240,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Conditional move if not sign (SF=0)
     /// Matching C++ data_xfer32.cc:313-321 CMOVNS_GdEdR
     /// Always clear upper part of the register
-    pub fn cmovns_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovns_gd_ed_r(&mut self, instr: &Instruction) {
         if !self.get_sf() {
             let src_reg = instr.src() as usize;
             let val32 = self.get_gpr32(src_reg);
@@ -1243,7 +1253,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Conditional move if parity/parity even (PF=1)
     /// Matching C++ data_xfer32.cc:323-331 CMOVP_GdEdR
     /// Always clear upper part of the register
-    pub fn cmovp_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovp_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_pf() {
             let src_reg = instr.src() as usize;
             let val32 = self.get_gpr32(src_reg);
@@ -1256,7 +1266,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Conditional move if no parity/parity odd (PF=0)
     /// Matching C++ data_xfer32.cc:333-341 CMOVNP_GdEdR
     /// Always clear upper part of the register
-    pub fn cmovnp_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovnp_gd_ed_r(&mut self, instr: &Instruction) {
         if !self.get_pf() {
             let src_reg = instr.src() as usize;
             let val32 = self.get_gpr32(src_reg);
@@ -1269,7 +1279,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Conditional move if less (SF != OF)
     /// Matching C++ data_xfer32.cc:343-351 CMOVL_GdEdR
     /// Always clear upper part of the register
-    pub fn cmovl_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovl_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_sf() != self.get_of() {
             let src_reg = instr.src() as usize;
             let val32 = self.get_gpr32(src_reg);
@@ -1282,7 +1292,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Conditional move if not less/greater or equal (SF == OF)
     /// Matching C++ data_xfer32.cc:353-361 CMOVNL_GdEdR
     /// Always clear upper part of the register
-    pub fn cmovnl_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovnl_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_sf() == self.get_of() {
             let src_reg = instr.src() as usize;
             let val32 = self.get_gpr32(src_reg);
@@ -1295,7 +1305,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Conditional move if less or equal (ZF=1 or SF!=OF)
     /// Matching C++ data_xfer32.cc:363-371 CMOVLE_GdEdR
     /// Always clear upper part of the register
-    pub fn cmovle_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovle_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_zf() || (self.get_sf() != self.get_of()) {
             let src_reg = instr.src() as usize;
             let val32 = self.get_gpr32(src_reg);
@@ -1308,7 +1318,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Conditional move if not less or equal/greater (ZF=0 and SF==OF)
     /// Matching C++ data_xfer32.cc:373-381 CMOVNLE_GdEdR
     /// Always clear upper part of the register
-    pub fn cmovnle_gd_ed_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmovnle_gd_ed_r(&mut self, instr: &Instruction) {
         if !self.get_zf() && (self.get_sf() == self.get_of()) {
             let src_reg = instr.src() as usize;
             let val32 = self.get_gpr32(src_reg);
@@ -1341,44 +1351,44 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // based on the mod_c0 flag in the decoded instruction.
 
     /// MOV r8, r/m8 - unified dispatch
-    pub fn mov_gb_eb(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov_gb_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.mov_gb_eb_r(instr); Ok(()) } else { self.mov_gb_eb_m(instr) }
     }
 
     /// MOV r/m8, r8 - unified dispatch
-    pub fn mov_eb_gb(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov_eb_gb(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.mov_eb_gb_r(instr); Ok(()) } else { self.mov_eb_gb_m(instr) }
     }
 
     /// MOV r/m8, imm8 - unified dispatch
     /// Note: R form is mov_rb_ib (different naming convention)
-    pub fn mov_eb_ib(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.mov_rb_ib(instr); Ok(()) } else { self.mov_eb_ib_m(instr) }
     }
 
     /// MOV r16, r/m16 - unified dispatch
-    pub fn mov_gw_ew(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.mov_gw_ew_r(instr); Ok(()) } else { self.mov_gw_ew_m(instr) }
     }
 
     /// MOV r/m16, r16 - unified dispatch
-    pub fn mov_ew_gw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.mov_ew_gw_r(instr); Ok(()) } else { self.mov_ew_gw_m(instr) }
     }
 
     /// MOV r/m16, imm16 - unified dispatch
     /// Note: R form is mov_rw_iw (different naming convention)
-    pub fn mov_ew_iw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn mov_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.mov_rw_iw(instr); Ok(()) } else { self.mov_ew_iw_m(instr) }
     }
 
     /// MOVSX r32, r/m8 - unified dispatch
-    pub fn movsx_gd_eb(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn movsx_gd_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.movsx_gd_eb_r(instr); Ok(()) } else { self.movsx_gd_eb_m(instr) }
     }
 
     /// MOVSX r32, r/m16 - unified dispatch
-    pub fn movsx_gd_ew(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn movsx_gd_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.movsx_gd_ew_r(instr); Ok(()) } else { self.movsx_gd_ew_m(instr) }
     }
 
@@ -1389,7 +1399,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LES r16, m16:16 - Load ES:r16 from memory far pointer
     /// Matching Bochs segment_ctrl.cc LES_GwMp -> load_segw(i, BX_SEG_REG_ES)
-    pub fn les_gw_mp(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn les_gw_mp(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let reg_16 = self.read_virtual_word(seg, eaddr)?;
@@ -1404,7 +1414,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LES r32, m16:32 - Load ES:r32 from memory far pointer
     /// Matching Bochs segment_ctrl.cc LES_GdMp -> load_segd(i, BX_SEG_REG_ES)
-    pub fn les_gd_mp(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn les_gd_mp(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let reg_32 = self.read_virtual_dword(seg, eaddr)?;
@@ -1418,7 +1428,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LDS r16, m16:16 - Load DS:r16 from memory far pointer
     /// Matching Bochs segment_ctrl.cc LDS_GwMp -> load_segw(i, BX_SEG_REG_DS)
-    pub fn lds_gw_mp(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn lds_gw_mp(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let reg_16 = self.read_virtual_word(seg, eaddr)?;
@@ -1433,7 +1443,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LDS r32, m16:32 - Load DS:r32 from memory far pointer
     /// Matching Bochs segment_ctrl.cc LDS_GdMp -> load_segd(i, BX_SEG_REG_DS)
-    pub fn lds_gd_mp(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn lds_gd_mp(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let reg_32 = self.read_virtual_dword(seg, eaddr)?;
@@ -1446,7 +1456,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LSS r16, m16:16 - Load SS:r16 from memory far pointer
-    pub fn lss_gw_mp(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn lss_gw_mp(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let reg_16 = self.read_virtual_word(seg, eaddr)?;
@@ -1459,7 +1469,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LSS r32, m16:32 - Load SS:r32 from memory far pointer
-    pub fn lss_gd_mp(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn lss_gd_mp(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let reg_32 = self.read_virtual_dword(seg, eaddr)?;
@@ -1472,7 +1482,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LFS r16, m16:16 - Load FS:r16 from memory far pointer
-    pub fn lfs_gw_mp(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn lfs_gw_mp(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let reg_16 = self.read_virtual_word(seg, eaddr)?;
@@ -1485,7 +1495,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LFS r32, m16:32 - Load FS:r32 from memory far pointer
-    pub fn lfs_gd_mp(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn lfs_gd_mp(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let reg_32 = self.read_virtual_dword(seg, eaddr)?;
@@ -1498,7 +1508,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LGS r16, m16:16 - Load GS:r16 from memory far pointer
-    pub fn lgs_gw_mp(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn lgs_gw_mp(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let reg_16 = self.read_virtual_word(seg, eaddr)?;
@@ -1511,7 +1521,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LGS r32, m16:32 - Load GS:r32 from memory far pointer
-    pub fn lgs_gd_mp(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn lgs_gd_mp(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let reg_32 = self.read_virtual_dword(seg, eaddr)?;

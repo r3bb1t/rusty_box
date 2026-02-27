@@ -6,7 +6,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{BxInstructionGenerated, BxSegregs},
+    decoder::{Instruction, BxSegregs},
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -65,7 +65,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// PUSH r64 - Push 64-bit register
     /// Based on Bochs stack64.cc PUSH_EqR
-    pub fn push_eq_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn push_eq_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let value = self.get_gpr64(dst);
         self.push_64(value);
@@ -74,7 +74,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// PUSH imm64 (sign-extended from 32-bit)
     /// Based on Bochs stack64.cc PUSH_Iq
-    pub fn push_iq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn push_iq(&mut self, instr: &Instruction) {
         // Sign extend 32-bit immediate to 64-bit
         let value = instr.id() as i32 as i64 as u64;
         self.push_64(value);
@@ -88,7 +88,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// POP r64 - Pop into 64-bit register
     /// Based on Bochs stack64.cc POP_EqR
-    pub fn pop_eq_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn pop_eq_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let value = self.pop_64();
         self.set_gpr64(dst, value);
@@ -101,7 +101,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// PUSHFQ - Push flags (64-bit)
-    pub fn pushf_fq(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn pushf_fq(&mut self, _instr: &Instruction) {
         // VM & RF flags cleared in image stored on the stack
         let flags = (self.eflags & 0x00FCFFFF) as u64;
         self.push_64(flags);
@@ -109,7 +109,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// POPFQ - Pop flags (64-bit)
-    pub fn popf_fq(&mut self, _instr: &BxInstructionGenerated) {
+    pub fn popf_fq(&mut self, _instr: &Instruction) {
         let flags = self.pop_64();
 
         // RF is always zero after POPF

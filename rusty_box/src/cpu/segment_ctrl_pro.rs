@@ -710,7 +710,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
     /// LLDT - Load Local Descriptor Table Register
     /// Based on Bochs protect_ctrl.cc:374-476
-    pub(super) fn lldt_ew(&mut self, instr: &super::decoder::BxInstructionGenerated) -> Result<()> {
+    pub(super) fn lldt_ew(&mut self, instr: &super::decoder::Instruction) -> Result<()> {
         // Must be in protected mode
         if self.real_mode() {
             tracing::error!("LLDT: not recognized in real mode");
@@ -788,7 +788,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
     /// LTR - Load Task Register
     /// Based on Bochs protect_ctrl.cc:478-564
-    pub(super) fn ltr_ew(&mut self, instr: &super::decoder::BxInstructionGenerated) -> Result<()> {
+    pub(super) fn ltr_ew(&mut self, instr: &super::decoder::Instruction) -> Result<()> {
         // Must be in protected mode
         if self.real_mode() {
             tracing::error!("LTR: not recognized in real mode");

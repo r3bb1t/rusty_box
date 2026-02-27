@@ -543,4 +543,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     pub fn get_cr3_val(&self) -> u64 {
         self.cr3
     }
+
+    /// Get CR2 value (page-fault linear address, for diagnostics)
+    #[inline]
+    pub fn get_cr2_val(&self) -> u64 {
+        self.cr2
+    }
+
+    /// Get IDTR base (for diagnostics)
+    #[inline]
+    pub fn get_idtr_base(&self) -> u64 {
+        self.idtr.base
+    }
 }

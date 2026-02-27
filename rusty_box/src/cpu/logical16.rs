@@ -5,7 +5,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{BxInstructionGenerated, BxSegregs},
+    decoder::{Instruction, BxSegregs},
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -129,7 +129,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// ZERO_IDIOM_GwR: XOR r16, r16 (zero idiom - set register to 0)
     /// Opcode: XOR_EwGw_ZERO_IDIOM or XOR_GwEw_ZERO_IDIOM
     /// Matches BX_CPU_C::ZERO_IDIOM_GwR
-    pub fn zero_idiom_gw_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn zero_idiom_gw_r(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         self.set_gpr16(dst, 0);
         self.set_flags_oszapc_logic_16(0);
@@ -140,7 +140,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// CMP r16, r16
-    pub fn cmp_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmp_gw_ew_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let src = instr.src() as usize;
         let op1 = self.get_gpr16(dst);
@@ -156,7 +156,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMP AX, imm16
-    pub fn cmp_ax_iw(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmp_ax_iw(&mut self, instr: &Instruction) {
         let op1 = self.get_gpr16(0); // AX
         let op2 = instr.iw();
         let result = op1.wrapping_sub(op2);
@@ -165,7 +165,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMP r/m16, imm16
-    pub fn cmp_ew_iw_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn cmp_ew_iw_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let op1 = self.get_gpr16(dst);
         let op2 = instr.iw();
@@ -175,7 +175,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMP_GwEw_M: CMP r16, r/m16 (memory form)
-    pub fn cmp_gw_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn cmp_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op1 = self.get_gpr16(instr.dst() as usize);
@@ -186,7 +186,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMP_EwIw_M: CMP r/m16, imm16 (memory form)
-    pub fn cmp_ew_iw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn cmp_ew_iw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op1 = self.read_virtual_word(seg, eaddr)?;
@@ -201,7 +201,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// TEST r16, r16
-    pub fn test_ew_gw_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn test_ew_gw_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let src = instr.src() as usize;
         let op1 = self.get_gpr16(dst);
@@ -217,7 +217,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// TEST AX, imm16
-    pub fn test_ax_iw(&mut self, instr: &BxInstructionGenerated) {
+    pub fn test_ax_iw(&mut self, instr: &Instruction) {
         let op1 = self.get_gpr16(0); // AX
         let op2 = instr.iw();
         let result = op1 & op2;
@@ -226,7 +226,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// TEST r/m16, imm16
-    pub fn test_ew_iw_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn test_ew_iw_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let op1 = self.get_gpr16(dst);
         let op2 = instr.iw();
@@ -240,7 +240,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// AND r16, r16
-    pub fn and_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn and_gw_ew_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let src = instr.src() as usize;
         let op1 = self.get_gpr16(dst);
@@ -252,7 +252,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// AND_EwGwR: AND r/m16, r16 (register form, store-direction)
     /// Opcode 0x21: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
-    pub fn and_ew_gw_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn and_ew_gw_r(&mut self, instr: &Instruction) {
         let op1 = self.get_gpr16(instr.meta_data[0] as usize);  // rm = destination
         let op2 = self.get_gpr16(instr.meta_data[1] as usize);  // nnn = source
         let result = op1 & op2;
@@ -261,7 +261,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// AND AX, imm16
-    pub fn and_ax_iw(&mut self, instr: &BxInstructionGenerated) {
+    pub fn and_ax_iw(&mut self, instr: &Instruction) {
         let op1 = self.get_gpr16(0);
         let op2 = instr.iw();
         let result = op1 & op2;
@@ -270,7 +270,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// AND r/m16, imm16
-    pub fn and_ew_iw_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn and_ew_iw_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let op1 = self.get_gpr16(dst);
         let op2 = instr.iw();
@@ -285,7 +285,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XOR_GwEwR: XOR r16, r16 (register form)
     /// Matches BX_CPU_C::XOR_GwEwR
-    pub fn xor_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn xor_gw_ew_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let src = instr.src() as usize;
         let op1 = self.get_gpr16(dst);
@@ -297,7 +297,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XOR_EwGwR: XOR r/m16, r16 (register form, store-direction)
     /// Opcode 0x31: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
-    pub fn xor_ew_gw_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn xor_ew_gw_r(&mut self, instr: &Instruction) {
         let op1 = self.get_gpr16(instr.meta_data[0] as usize);  // rm = destination
         let op2 = self.get_gpr16(instr.meta_data[1] as usize);  // nnn = source
         let result = op1 ^ op2;
@@ -307,7 +307,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XOR_EwIwR: XOR r/m16, imm16 (register form)
     /// Matches BX_CPU_C::XOR_EwIwR
-    pub fn xor_ew_iw_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn xor_ew_iw_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let op1 = self.get_gpr16(dst);
         let op2 = instr.iw();
@@ -321,7 +321,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// OR r16, r16
-    pub fn or_gw_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn or_gw_ew_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let src = instr.src() as usize;
         let op1 = self.get_gpr16(dst);
@@ -333,7 +333,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// OR_EwGwR: OR r/m16, r16 (register form, store-direction)
     /// Opcode 0x09: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
-    pub fn or_ew_gw_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn or_ew_gw_r(&mut self, instr: &Instruction) {
         let op1 = self.get_gpr16(instr.meta_data[0] as usize);  // rm = destination
         let op2 = self.get_gpr16(instr.meta_data[1] as usize);  // nnn = source
         let result = op1 | op2;
@@ -342,7 +342,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// OR AX, imm16
-    pub fn or_ax_iw(&mut self, instr: &BxInstructionGenerated) {
+    pub fn or_ax_iw(&mut self, instr: &Instruction) {
         let op1 = self.get_gpr16(0);
         let op2 = instr.iw();
         let result = op1 | op2;
@@ -352,7 +352,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// OR_EwIwR: OR r/m16, imm16 (register form)
     /// Matches BX_CPU_C::OR_EwIwR
-    pub fn or_ew_iw_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn or_ew_iw_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let op1 = self.get_gpr16(dst);
         let op2 = instr.iw();
@@ -366,7 +366,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// NOT r16
-    pub fn not_ew_r(&mut self, instr: &BxInstructionGenerated) {
+    pub fn not_ew_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let op1 = self.get_gpr16(dst);
         self.set_gpr16(dst, !op1);
@@ -406,7 +406,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XOR_EwGwM: XOR r/m16, r16 (memory form)
     /// Matches BX_CPU_C::XOR_EwGwM
-    pub fn xor_ew_gw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn xor_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
@@ -429,7 +429,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XOR_GwEwM: XOR r16, r/m16 (memory form)
     /// Matches BX_CPU_C::XOR_GwEwM
-    pub fn xor_gw_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn xor_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op2_16 = self.read_virtual_word(seg, eaddr)?;
@@ -451,7 +451,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XOR_EwIwM: XOR r/m16, imm16 (memory form)
     /// Matches BX_CPU_C::XOR_EwIwM
-    pub fn xor_ew_iw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn xor_ew_iw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
@@ -473,7 +473,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// OR_EwGwM: OR r/m16, r16 (memory form)
     /// Matches BX_CPU_C::OR_EwGwM
-    pub fn or_ew_gw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn or_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
@@ -496,7 +496,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// OR_GwEwM: OR r16, r/m16 (memory form)
     /// Matches BX_CPU_C::OR_GwEwM
-    pub fn or_gw_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn or_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op2_16 = self.read_virtual_word(seg, eaddr)?;
@@ -518,7 +518,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// OR_EwIwM: OR r/m16, imm16 (memory form)
     /// Matches BX_CPU_C::OR_EwIwM
-    pub fn or_ew_iw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn or_ew_iw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
@@ -540,7 +540,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// AND_EwGwM: AND r/m16, r16 (memory form)
     /// Matches BX_CPU_C::AND_EwGwM
-    pub fn and_ew_gw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn and_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
@@ -563,7 +563,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// AND_GwEwM: AND r16, r/m16 (memory form)
     /// Matches BX_CPU_C::AND_GwEwM
-    pub fn and_gw_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn and_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op2_16 = self.read_virtual_word(seg, eaddr)?;
@@ -585,7 +585,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// AND_EwIwM: AND r/m16, imm16 (memory form)
     /// Matches BX_CPU_C::AND_EwIwM
-    pub fn and_ew_iw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn and_ew_iw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
@@ -607,7 +607,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// NOT_EwM: NOT r/m16 (memory form)
     /// Matches BX_CPU_C::NOT_EwM
-    pub fn not_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn not_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
@@ -626,7 +626,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// TEST_EwGwM: TEST r/m16, r16 (memory form)
     /// Opcode 0x85 is NOT store-direction, so dst() = nnn = register operand
-    pub fn test_ew_gw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn test_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op1_16 = self.read_virtual_word(seg, eaddr)?;
@@ -649,7 +649,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// TEST_EwIwM: TEST r/m16, imm16 (memory form)
     /// Matches BX_CPU_C::TEST_EwIwM
-    pub fn test_ew_iw_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn test_ew_iw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let op1_16 = self.read_virtual_word(seg, eaddr)?;
@@ -673,46 +673,46 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Unified handlers: dispatch R/M based on instr.mod_c0()
     // =========================================================================
 
-    pub fn xor_ew_gw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn xor_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.xor_ew_gw_r(instr); Ok(()) } else { self.xor_ew_gw_m(instr) }
     }
-    pub fn xor_gw_ew(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn xor_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.xor_gw_ew_r(instr); Ok(()) } else { self.xor_gw_ew_m(instr) }
     }
-    pub fn xor_ew_iw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn xor_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.xor_ew_iw_r(instr); Ok(()) } else { self.xor_ew_iw_m(instr) }
     }
-    pub fn and_ew_gw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn and_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.and_ew_gw_r(instr); Ok(()) } else { self.and_ew_gw_m(instr) }
     }
-    pub fn and_gw_ew(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn and_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.and_gw_ew_r(instr); Ok(()) } else { self.and_gw_ew_m(instr) }
     }
-    pub fn and_ew_iw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn and_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.and_ew_iw_r(instr); Ok(()) } else { self.and_ew_iw_m(instr) }
     }
-    pub fn or_ew_gw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn or_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.or_ew_gw_r(instr); Ok(()) } else { self.or_ew_gw_m(instr) }
     }
-    pub fn or_gw_ew(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn or_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.or_gw_ew_r(instr); Ok(()) } else { self.or_gw_ew_m(instr) }
     }
-    pub fn or_ew_iw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn or_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.or_ew_iw_r(instr); Ok(()) } else { self.or_ew_iw_m(instr) }
     }
-    pub fn not_ew(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn not_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.not_ew_r(instr); Ok(()) } else { self.not_ew_m(instr) }
     }
-    pub fn test_ew_gw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn test_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.test_ew_gw_r(instr); Ok(()) } else { self.test_ew_gw_m(instr) }
     }
-    pub fn test_ew_iw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn test_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.test_ew_iw_r(instr); Ok(()) } else { self.test_ew_iw_m(instr) }
     }
-    pub fn cmp_gw_ew(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn cmp_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.cmp_gw_ew_r(instr); Ok(()) } else { self.cmp_gw_ew_m(instr) }
     }
-    pub fn cmp_ew_iw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn cmp_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() { self.cmp_ew_iw_r(instr); Ok(()) } else { self.cmp_ew_iw_m(instr) }
     }
 }

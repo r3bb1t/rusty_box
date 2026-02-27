@@ -1,19 +1,19 @@
 use super::ia_opcodes::Opcode;
-use super::instr_generated::InstructionGenerated;
+use super::instr_generated::Instruction;
 
 // Very small, focused decoder supporting a handful of 32-bit
 // register-register and immediate forms for early boot code.
-// It only decodes enough to populate `BxInstructionGenerated`'s
+// It only decodes enough to populate `BxInstruction`'s
 // opcode, `meta_info.ilen` and `meta_data` fields for dst/src
 // register indices. Memory-modR/M (non-register) forms are not
 // implemented here.
-pub fn decode_simple_32(bytes: &[u8]) -> Option<InstructionGenerated> {
+pub fn decode_simple_32(bytes: &[u8]) -> Option<Instruction> {
     if bytes.is_empty() {
         return None;
     }
 
     let b0 = bytes[0];
-    let mut instr = InstructionGenerated::default();
+    let mut instr = Instruction::default();
 
     match b0 {
         0x90 => {

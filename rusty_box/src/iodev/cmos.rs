@@ -199,12 +199,7 @@ impl BxCmosC {
                         }
                     }
                 };
-                // Temporarily log reads of disk/boot-related registers at debug level
-                if matches!(addr as u8, 0x12 | 0x19 | 0x1A | 0x1B..=0x2D | 0x38 | 0x39 | 0x3D) {
-                    tracing::debug!("CMOS: Read [{:#04x}] = {:#04x}", addr, value);
-                } else {
-                    tracing::trace!("CMOS: Read [{:#04x}] = {:#04x}", addr, value);
-                }
+                tracing::trace!("CMOS: Read [{:#04x}] = {:#04x}", addr, value);
                 value as u32
             }
             _ => {

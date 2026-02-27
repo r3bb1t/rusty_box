@@ -6,7 +6,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::BxInstructionGenerated,
+    decoder::Instruction,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -17,7 +17,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// PUSH r16 - Push 16-bit register
     /// Based on Bochs stack16.cc PUSH_EwR
-    pub fn push_ew_r(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn push_ew_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let dst = instr.dst() as usize;
         let value = self.get_gpr16(dst);
         self.push_16(value)?;
@@ -27,7 +27,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// PUSH m16 - Push 16-bit value from memory
     /// Based on Bochs stack16.cc PUSH_EwM
-    pub fn push_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn push_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let value = self.read_virtual_word(seg, eaddr)?;
@@ -38,7 +38,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// PUSH Sw - Push segment register
     /// Based on Bochs stack16.cc PUSH16_Sw
-    pub fn push16_sw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn push16_sw(&mut self, instr: &Instruction) -> super::Result<()> {
         let src = instr.src() as usize;
         let value = self.sregs[src].selector.value;
         self.push_16(value)?;
@@ -48,7 +48,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// PUSH imm16
     /// Based on Bochs stack16.cc PUSH_Iw
-    pub fn push_iw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn push_iw(&mut self, instr: &Instruction) -> super::Result<()> {
         let value = instr.iw();
         self.push_16(value)?;
         tracing::trace!("PUSH imm16: {:#06x}", value);
@@ -57,7 +57,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// PUSH sign-extended imm8 (16-bit mode)
     /// Based on Bochs stack16.cc PUSH_Ib
-    pub fn push_sib16(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn push_sib16(&mut self, instr: &Instruction) -> super::Result<()> {
         // Sign-extend 8-bit immediate to 16-bit
         let imm8 = instr.ib() as i8;
         let value = imm8 as i16 as u16;
@@ -73,7 +73,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// POP r16 - Pop into 16-bit register
     /// Based on Bochs stack16.cc POP_EwR
-    pub fn pop_ew_r(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn pop_ew_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let dst = instr.dst() as usize;
         let value = self.pop_16()?;
         self.set_gpr16(dst, value);
@@ -83,7 +83,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// POP m16 - Pop into 16-bit memory location
     /// Based on Bochs stack16.cc POP_EwM
-    pub fn pop_ew_m(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn pop_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let value = self.pop_16()?;
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
@@ -94,7 +94,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// POP Sw - Pop into segment register
     /// Based on Bochs stack16.cc POP16_Sw
-    pub fn pop16_sw(&mut self, instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn pop16_sw(&mut self, instr: &Instruction) -> super::Result<()> {
         let dst = instr.dst() as usize;
         let value = self.pop_16()?;
 
@@ -114,7 +114,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// PUSHA - Push all 16-bit general registers
     /// Push order: AX, CX, DX, BX, SP (original), BP, SI, DI
     /// Based on Bochs stack16.cc:103-134
-    pub fn pusha16(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn pusha16(&mut self, _instr: &Instruction) -> super::Result<()> {
         // Get register values before any pushes
         let ax = self.ax();
         let cx = self.cx();
@@ -163,7 +163,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// POPA - Pop all 16-bit general registers
     /// Pop order: DI, SI, BP, (skip SP), BX, DX, CX, AX
     /// Based on Bochs stack16.cc:136-176
-    pub fn popa16(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn popa16(&mut self, _instr: &Instruction) -> super::Result<()> {
         let (di, si, bp, bx, dx, cx, ax) = if self.is_stack_32bit() {
             let temp_esp = self.esp();
 
@@ -218,7 +218,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// PUSHF - Push flags (16-bit)
-    pub fn pushf_fw(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn pushf_fw(&mut self, _instr: &Instruction) -> super::Result<()> {
         let flags = (self.eflags & 0xFFFF) as u16;
         self.push_16(flags)?;
         tracing::trace!("PUSHF: {:#06x}", flags);
@@ -226,7 +226,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// POPF - Pop flags (16-bit)
-    pub fn popf_fw(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn popf_fw(&mut self, _instr: &Instruction) -> super::Result<()> {
         let flags = self.pop_16()?;
 
         // Mask to preserve certain bits
@@ -238,10 +238,58 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
+    // =========================================================================
+    // PUSH/POP Sw - 16-bit mode segment register push/pop (unified dispatch)
+    // =========================================================================
+
+    /// PUSH Sw (16-bit opsize) - Push segment register from meta_data[0]
+    /// Used by the PushOp16Sw opcode
+    pub fn push_op16_sw(&mut self, instr: &Instruction) -> super::Result<()> {
+        let seg = instr.meta_data[0] as usize;
+        let val = self.sregs[seg].selector.value;
+        self.push_16(val)?;
+        tracing::trace!("PUSH16 Sw (seg {}): {:#06x}", seg, val);
+        Ok(())
+    }
+
+    /// POP Sw (16-bit opsize) - Pop into segment register from meta_data[0]
+    /// Used by the PopOp16Sw opcode (real mode path)
+    pub fn pop_op16_sw(&mut self, instr: &Instruction) -> super::Result<()> {
+        let seg = instr.meta_data[0] as usize;
+        let val = self.pop_16()?;
+        // Don't allow loading CS
+        if seg != super::decoder::BxSegregs::Cs as usize {
+            super::segment_ctrl_pro::parse_selector(val, &mut self.sregs[seg].selector);
+            unsafe {
+                self.sregs[seg].cache.u.segment.base = (val as u64) << 4;
+            }
+        }
+        tracing::trace!("POP16 Sw (seg {}): {:#06x}", seg, val);
+        Ok(())
+    }
+
+    // =========================================================================
+    // Unified PUSH/POP Ew dispatch (register vs memory)
+    // =========================================================================
+
+    /// PUSH r/m16 - Unified dispatch based on mod_c0()
+    pub fn push_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() { self.push_ew_r(instr) } else { self.push_ew_m(instr) }
+    }
+
+    /// POP r/m16 - Unified dispatch based on mod_c0()
+    pub fn pop_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() { self.pop_ew_r(instr) } else { self.pop_ew_m(instr) }
+    }
+
+    // =========================================================================
+    // LEAVE instruction
+    // =========================================================================
+
     /// LEAVE - High level procedure exit (16-bit)
     /// Equivalent to: MOV SP, BP; POP BP
     /// Based on Bochs stack16.cc:178-192
-    pub fn leave16(&mut self, _instr: &BxInstructionGenerated) -> super::Result<()> {
+    pub fn leave16(&mut self, _instr: &Instruction) -> super::Result<()> {
         // Load SP from BP
         let bp = self.bp();
         self.set_sp(bp);

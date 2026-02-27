@@ -1,4 +1,4 @@
-use super::{cpuid::BxCpuIdTrait, decoder::BxInstructionGenerated, BxCpuC};
+use super::{cpuid::BxCpuIdTrait, decoder::Instruction, BxCpuC};
 
 #[derive(Debug, Default)]
 pub struct BxCr0 {
@@ -328,8 +328,8 @@ impl MSR {
 //}
 
 type XSaveStateInUsePtr_tR = fn() -> bool;
-type XSavePtr_tR = fn(&BxInstructionGenerated, usize);
-type XRestorPtr_tR = fn(&BxInstructionGenerated, usize);
+type XSavePtr_tR = fn(&Instruction, usize);
+type XRestorPtr_tR = fn(&Instruction, usize);
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn xsave_xrestor_init(&mut self) {

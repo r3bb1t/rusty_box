@@ -30,7 +30,7 @@ const BX_LOCK_PREFIX_USED: u8 = 1;
 /// can be accessed via the iq() method which safely interprets the same memory.
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Default)]
-pub struct InstructionGenerated {
+pub struct Instruction {
     pub meta_info: BxInstructionMetaInfo,
     pub meta_data: [u8; 8],
     /// ModRM form - also used as storage for 64-bit immediates (IqForm) in x86-64
@@ -200,7 +200,7 @@ impl DisplacementData {
     }
 }
 
-impl InstructionGenerated {
+impl Instruction {
     // ============================================================
     // MetaInfo accessors
     // ============================================================

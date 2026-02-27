@@ -5,7 +5,7 @@
 use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
-    decoder::{BxInstructionGenerated, BxSegregs},
+    decoder::{Instruction, BxSegregs},
     error::{CpuError, Result},
     segment_ctrl_pro::parse_selector,
 };
@@ -79,7 +79,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// JMP rel32 - Near jump with 32-bit signed displacement
-    pub fn jmp_jd(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn jmp_jd(&mut self, instr: &Instruction) -> Result<()> {
         let disp = instr.id() as i32;
         let eip = self.eip();
         let new_eip = (eip as i32).wrapping_add(disp) as u32;
@@ -90,7 +90,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// JMP r32 - Indirect jump through register (register form)
     /// Matching Bochs ctrl_xfer32.cc JMP_EdR
-    pub fn jmp_ed_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn jmp_ed_r(&mut self, instr: &Instruction) -> Result<()> {
         let dst = instr.dst() as usize;
         let new_eip = self.get_gpr32(dst);
         self.branch_near32(new_eip)?;
@@ -100,7 +100,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// JMP m32 - Indirect jump through memory (memory form)
     /// Matching Bochs ctrl_xfer32.cc JMP_EdM
-    pub fn jmp_ed_m(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn jmp_ed_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let new_eip = self.read_virtual_dword(seg, eaddr)?;
@@ -110,7 +110,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JMP r/m32 - Unified dispatch (checks mod_c0)
-    pub fn jmp_ed(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn jmp_ed(&mut self, instr: &Instruction) -> Result<()> {
         if instr.mod_c0() {
             self.jmp_ed_r(instr)
         } else {
@@ -123,7 +123,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// CALL rel32 - Near call with 32-bit displacement
-    pub fn call_jd(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn call_jd(&mut self, instr: &Instruction) -> Result<()> {
         let disp = instr.id() as i32;
         let eip = self.eip();
 
@@ -139,7 +139,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// CALL r32 - Indirect call through register (register form)
     /// Matching Bochs ctrl_xfer32.cc CALL_EdR
-    pub fn call_ed_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn call_ed_r(&mut self, instr: &Instruction) -> Result<()> {
         let dst = instr.dst() as usize;
         let new_eip = self.get_gpr32(dst);
         let eip = self.eip();
@@ -152,7 +152,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// CALL m32 - Indirect call through memory (memory form)
     /// Matching Bochs ctrl_xfer32.cc CALL_EdM
-    pub fn call_ed_m(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn call_ed_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let new_eip = self.read_virtual_dword(seg, eaddr)?;
@@ -165,7 +165,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CALL r/m32 - Unified dispatch (checks mod_c0)
-    pub fn call_ed(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn call_ed(&mut self, instr: &Instruction) -> Result<()> {
         if instr.mod_c0() {
             self.call_ed_r(instr)
         } else {
@@ -178,14 +178,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// RET near - Return from procedure (32-bit)
-    pub fn ret_near32(&mut self, _instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn ret_near32(&mut self, _instr: &Instruction) -> Result<()> {
         let return_eip = self.pop_32()?;
         self.branch_near32(return_eip)?;
         Ok(())
     }
 
     /// RET near imm16 - Return and pop imm16 bytes (32-bit)
-    pub fn ret_near32_iw(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn ret_near32_iw(&mut self, instr: &Instruction) -> Result<()> {
         let return_eip = self.pop_32()?;
         let imm16 = instr.iw();
 
@@ -208,7 +208,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// JO rel32 - Jump if overflow (OF=1)
-    pub fn jo_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
+    pub fn jo_jd(&mut self, instr: &Instruction)  -> Result<()> {
         if self.get_of() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -220,7 +220,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JNO rel32 - Jump if not overflow (OF=0)
-    pub fn jno_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
+    pub fn jno_jd(&mut self, instr: &Instruction)  -> Result<()> {
         if !self.get_of() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -232,7 +232,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JB/JC/JNAE rel32 - Jump if below/carry (CF=1)
-    pub fn jb_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
+    pub fn jb_jd(&mut self, instr: &Instruction)  -> Result<()> {
         if self.get_cf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -244,7 +244,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JNB/JNC/JAE rel32 - Jump if not below/no carry (CF=0)
-    pub fn jnb_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
+    pub fn jnb_jd(&mut self, instr: &Instruction)  -> Result<()> {
         if !self.get_cf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -256,7 +256,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JZ/JE rel32 - Jump if zero/equal (ZF=1)
-    pub fn jz_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
+    pub fn jz_jd(&mut self, instr: &Instruction)  -> Result<()> {
         if self.get_zf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -268,7 +268,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JNZ/JNE rel32 - Jump if not zero/not equal (ZF=0)
-    pub fn jnz_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
+    pub fn jnz_jd(&mut self, instr: &Instruction)  -> Result<()> {
         if !self.get_zf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -280,7 +280,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JBE/JNA rel32 - Jump if below or equal (CF=1 or ZF=1)
-    pub fn jbe_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
+    pub fn jbe_jd(&mut self, instr: &Instruction)  -> Result<()> {
         if self.get_cf() || self.get_zf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -292,7 +292,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JNBE/JA rel32 - Jump if not below or equal/above (CF=0 and ZF=0)
-    pub fn jnbe_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
+    pub fn jnbe_jd(&mut self, instr: &Instruction)  -> Result<()> {
         if !self.get_cf() && !self.get_zf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -304,7 +304,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JS rel32 - Jump if sign (SF=1)
-    pub fn js_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
+    pub fn js_jd(&mut self, instr: &Instruction)  -> Result<()> {
         if self.get_sf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -316,7 +316,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JNS rel32 - Jump if not sign (SF=0)
-    pub fn jns_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
+    pub fn jns_jd(&mut self, instr: &Instruction)  -> Result<()> {
         if !self.get_sf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -328,7 +328,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JP/JPE rel32 - Jump if parity/parity even (PF=1)
-    pub fn jp_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
+    pub fn jp_jd(&mut self, instr: &Instruction)  -> Result<()> {
         if self.get_pf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -340,7 +340,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JNP/JPO rel32 - Jump if no parity/parity odd (PF=0)
-    pub fn jnp_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
+    pub fn jnp_jd(&mut self, instr: &Instruction)  -> Result<()> {
         if !self.get_pf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -352,7 +352,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JL/JNGE rel32 - Jump if less (SF != OF)
-    pub fn jl_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
+    pub fn jl_jd(&mut self, instr: &Instruction)  -> Result<()> {
         if self.get_sf() != self.get_of() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -364,7 +364,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JNL/JGE rel32 - Jump if not less/greater or equal (SF == OF)
-    pub fn jnl_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
+    pub fn jnl_jd(&mut self, instr: &Instruction)  -> Result<()> {
         if self.get_sf() == self.get_of() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -376,7 +376,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JLE/JNG rel32 - Jump if less or equal (ZF=1 or SF!=OF)
-    pub fn jle_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
+    pub fn jle_jd(&mut self, instr: &Instruction)  -> Result<()> {
         if self.get_zf() || (self.get_sf() != self.get_of()) {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -388,7 +388,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JNLE/JG rel32 - Jump if not less or equal/greater (ZF=0 and SF==OF)
-    pub fn jnle_jd(&mut self, instr: &BxInstructionGenerated)  -> Result<()> {
+    pub fn jnle_jd(&mut self, instr: &Instruction)  -> Result<()> {
         if !self.get_zf() && (self.get_sf() == self.get_of()) {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -400,12 +400,31 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
+    // JmpfAp - Far jump absolute pointer (16/32-bit operand size dispatch)
+    // =========================================================================
+
+    /// JmpfAp - Far jump with absolute pointer, dispatches 16/32-bit based on os32_l
+    pub fn jmpf_ap(&mut self, instr: &Instruction) -> Result<()> {
+        let segment = instr.iw2();
+        if instr.os32_l() != 0 {
+            let offset32 = instr.id();
+            tracing::debug!("JmpfAp: FAR JMP 32-BIT to {:04x}:{:08x}", segment, offset32);
+            self.jmp_far32(instr, segment, offset32)?;
+        } else {
+            let offset16 = instr.iw();
+            tracing::debug!("JmpfAp: FAR JMP 16-BIT to {:04x}:{:04x}", segment, offset16);
+            self.jmp_far16(instr, segment, offset16)?;
+        }
+        Ok(())
+    }
+
+    // =========================================================================
     // LOOP instructions (32-bit mode)
     // =========================================================================
 
     /// LOOP32 rel8 - Decrement ECX, jump if not zero (32-bit mode)
     /// Matching C++ ctrl_xfer32.cc (similar to LOOP16_Jb but 32-bit)
-    pub fn loop32_jb(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn loop32_jb(&mut self, instr: &Instruction) -> Result<()> {
         let ecx = self.get_gpr32(1);
         let count = ecx.wrapping_sub(1);
         self.set_gpr32(1, count);
@@ -421,7 +440,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LOOPE32/LOOPZ32 rel8 - Decrement ECX, jump if not zero and ZF=1 (32-bit mode)
-    pub fn loope32_jb(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn loope32_jb(&mut self, instr: &Instruction) -> Result<()> {
         let ecx = self.get_gpr32(1);
         let count = ecx.wrapping_sub(1);
         self.set_gpr32(1, count);
@@ -436,7 +455,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LOOPNE32/LOOPNZ32 rel8 - Decrement ECX, jump if not zero and ZF=0 (32-bit mode)
-    pub fn loopne32_jb(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn loopne32_jb(&mut self, instr: &Instruction) -> Result<()> {
         let ecx = self.get_gpr32(1);
         let count = ecx.wrapping_sub(1);
         self.set_gpr32(1, count);
@@ -468,7 +487,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Far jump 32-bit (matching C++ jmp_far32)
     /// Called by JMP32_Ap and JMP32_Ep
-    pub(super) fn jmp_far32(&mut self, instr: &BxInstructionGenerated, cs_raw: u16, disp32: u32) -> Result<()> {
+    pub(super) fn jmp_far32(&mut self, instr: &Instruction, cs_raw: u16, disp32: u32) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
@@ -495,7 +514,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Far call 32-bit (matching C++ call_far32)
     /// Called by CALL32_Ap and CALL32_Ep
-    fn call_far32(&mut self, instr: &BxInstructionGenerated, cs_raw: u16, disp32: u32) -> Result<()> {
+    fn call_far32(&mut self, instr: &Instruction, cs_raw: u16, disp32: u32) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
@@ -534,7 +553,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// CALL32_Ap - Far call with absolute pointer (32-bit)
     /// Matching C++ ctrl_xfer32.cc:219-229
-    pub fn call32_ap(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn call32_ap(&mut self, instr: &Instruction) -> Result<()> {
         let cs_raw = instr.iw2();
         let disp32 = instr.id();
         self.call_far32(instr, cs_raw, disp32)
@@ -542,7 +561,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// CALL32_Ep - Far call indirect (32-bit)
     /// Matching C++ ctrl_xfer32.cc (similar to CALL16_Ep but 32-bit)
-    pub fn call32_ep(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn call32_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Resolve effective address
         let eaddr = self.resolve_addr32(instr);
         
@@ -560,7 +579,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// JMP32_Ap - Far jump with absolute pointer (32-bit)
     /// Matching C++ ctrl_xfer32.cc (similar to CALL32_Ap but for jump)
-    pub fn jmp32_ap(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn jmp32_ap(&mut self, instr: &Instruction) -> Result<()> {
         let cs_raw = instr.iw2();
         let disp32 = instr.id();
         self.jmp_far32(instr, cs_raw, disp32)
@@ -568,7 +587,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// JMP32_Ep - Far jump indirect (32-bit)
     /// Matching C++ ctrl_xfer32.cc (similar to JMP16_Ep but 32-bit)
-    pub fn jmp32_ep(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn jmp32_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Resolve effective address
         let eaddr = self.resolve_addr32(instr);
         
@@ -586,7 +605,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// RETfar32 - Far return without immediate (32-bit)
     /// Matching C++ ctrl_xfer32.cc (similar to RETfar16 but 32-bit)
-    pub fn retfar32(&mut self, _instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn retfar32(&mut self, _instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
@@ -619,7 +638,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// RETfar32_Iw - Far return with immediate (32-bit)
     /// Matching C++ ctrl_xfer32.cc:149-192
-    pub fn retfar32_iw(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn retfar32_iw(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;

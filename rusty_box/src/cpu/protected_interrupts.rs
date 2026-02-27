@@ -190,14 +190,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             || super::descriptor::is_data_segment(cs_descriptor.r#type)
             || cs_descriptor.dpl > cpl
         {
+            // Diagnose GDT corruption: show physical address of the GDT entry
+            let gdt_entry_vaddr = self.gdtr.base + (cs_selector.index as u64 * 8);
+            let gdt_phys = self.translate_linear_system_read(gdt_entry_vaddr)
+                .map(|p| format!("{:#010x}", p))
+                .unwrap_or_else(|_| "TRANS_FAIL".to_string());
+            // Also read directly from physical (lower 4GB) using raw mem to compare
+            // raw mem read at expected kernel phys (vaddr - 0xC0000000)
+            let expected_phys = (gdt_entry_vaddr as u32).wrapping_sub(0xC0000000) as u64;
+            let raw_at_expected = self.mem_read_dword(expected_phys) as u64
+                | ((self.mem_read_dword(expected_phys + 4) as u64) << 32);
             tracing::warn!(
                 "handle_interrupt_trap_gate(): not accessible or not code segment cs={:#04x} \
                  raw={:#010x}_{:#010x} valid={} segment={} type={:#x} dpl={} cpl={} \
-                 GDTR.base={:#010x} GDTR.limit={:#06x} icount={}",
+                 GDTR.base={:#010x} GDTR.limit={:#06x} CR3={:#010x} \
+                 gdt_vaddr={:#010x} gdt_phys={} expected_phys={:#010x} raw_at_expected={:#018x} \
+                 icount={}",
                 cs_selector.value, cs_dword2, cs_dword1,
                 cs_descriptor.valid, cs_descriptor.segment,
                 cs_descriptor.r#type, cs_descriptor.dpl, cpl,
-                self.gdtr.base, self.gdtr.limit, self.icount
+                self.gdtr.base, self.gdtr.limit, self.cr3,
+                gdt_entry_vaddr, gdt_phys, expected_phys, raw_at_expected,
+                self.icount
             );
             return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
         }

@@ -5,7 +5,7 @@
 use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
-    decoder::{BxInstructionGenerated, BxSegregs},
+    decoder::{Instruction, BxSegregs},
     error::{CpuError, Result},
 };
 
@@ -16,7 +16,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Branch to a near 64-bit address
     /// Matching C++ ctrl_xfer64.cc:29-44 branch_near64
-    fn branch_near64(&mut self, instr: &BxInstructionGenerated) {
+    fn branch_near64(&mut self, instr: &Instruction) {
         let new_rip = self.rip().wrapping_add(instr.id() as i32 as u64);
 
         // Check canonical address (matching C++ line 33-36)
@@ -47,7 +47,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Near call with 64-bit displacement
     /// Matching C++ ctrl_xfer64.cc:104-133 CALL_Jq
-    pub fn call_jq(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn call_jq(&mut self, instr: &Instruction) -> Result<()> {
         let new_rip = self.rip().wrapping_add(instr.id() as i32 as u64);
 
         // Check canonical address (matching C++ line 121-124)
@@ -65,7 +65,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Near call indirect (64-bit register)
     /// Matching C++ ctrl_xfer64.cc:135-169 CALL_EqR
-    pub fn call_eq_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn call_eq_r(&mut self, instr: &Instruction) -> Result<()> {
         let new_rip = self.get_gpr64(instr.dst() as usize);
 
         // Check canonical address (matching C++ line 152-156)
@@ -83,7 +83,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Far call indirect (64-bit)
     /// Matching C++ ctrl_xfer64.cc:171-200 CALL64_Ep
-    pub fn call64_ep(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn call64_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue (matching C++ line 173)
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
@@ -119,7 +119,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Near jump with 64-bit displacement
     /// Matching C++ ctrl_xfer64.cc:202-216 JMP_Jq
-    pub fn jmp_jq(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn jmp_jq(&mut self, instr: &Instruction) -> Result<()> {
         let new_rip = self.rip().wrapping_add(instr.id() as i32 as u64);
 
         // Check canonical address (matching C++ line 206-209)
@@ -134,7 +134,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Near jump indirect (64-bit register)
     /// Matching C++ ctrl_xfer64.cc:410-427 JMP_EqR
-    pub fn jmp_eq_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn jmp_eq_r(&mut self, instr: &Instruction) -> Result<()> {
         let new_rip = self.get_gpr64(instr.dst() as usize);
 
         // Check canonical address (matching C++ line 414-417)
@@ -149,7 +149,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Far jump indirect (64-bit)
     /// Matching C++ ctrl_xfer64.cc:430-450 JMP64_Ep
-    pub fn jmp64_ep(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn jmp64_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue (matching C++ line 432)
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
@@ -184,7 +184,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Near return with immediate (64-bit)
     /// Matching C++ ctrl_xfer64.cc:46-76 RETnear64_Iw
-    pub fn retnear64_iw(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn retnear64_iw(&mut self, instr: &Instruction) -> Result<()> {
         let return_rip = self.pop_64();
 
         // Check canonical address (matching C++ line 63-66)
@@ -203,7 +203,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Far return with immediate (64-bit)
     /// Matching C++ ctrl_xfer64.cc:78-102 RETfar64_Iw
     /// Note: return_protected is RSP safe
-    pub fn retfar64_iw(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn retfar64_iw(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue (matching C++ line 80)
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
@@ -222,14 +222,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Far return without immediate (64-bit)
-    pub fn retfar64(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn retfar64(&mut self, instr: &Instruction) -> Result<()> {
         // Same as RETfar64_Iw but without imm16
         self.retfar64_iw(instr)
     }
 
     /// Interrupt return (64-bit)
     /// Matching C++ ctrl_xfer64.cc:456-505 IRET64
-    pub fn iret64(&mut self, _instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn iret64(&mut self, _instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue (matching C++ line 458)
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
@@ -248,7 +248,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if overflow (OF=1)
     /// Matching C++ ctrl_xfer64.cc:218-228 JO_Jq
-    pub fn jo_jq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jo_jq(&mut self, instr: &Instruction) {
         if self.get_of() {
             self.branch_near64(instr);
             tracing::trace!("JO rel64 taken: RIP = {:#x}", self.rip());
@@ -257,7 +257,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if not overflow (OF=0)
     /// Matching C++ ctrl_xfer64.cc:230-240 JNO_Jq
-    pub fn jno_jq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jno_jq(&mut self, instr: &Instruction) {
         if !self.get_of() {
             self.branch_near64(instr);
             tracing::trace!("JNO rel64 taken: RIP = {:#x}", self.rip());
@@ -266,7 +266,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if below/carry (CF=1)
     /// Matching C++ ctrl_xfer64.cc:242-252 JB_Jq
-    pub fn jb_jq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jb_jq(&mut self, instr: &Instruction) {
         if self.get_cf() {
             self.branch_near64(instr);
             tracing::trace!("JB/JC rel64 taken: RIP = {:#x}", self.rip());
@@ -275,7 +275,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if not below/no carry (CF=0)
     /// Matching C++ ctrl_xfer64.cc:254-264 JNB_Jq
-    pub fn jnb_jq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jnb_jq(&mut self, instr: &Instruction) {
         if !self.get_cf() {
             self.branch_near64(instr);
             tracing::trace!("JNB/JNC rel64 taken: RIP = {:#x}", self.rip());
@@ -284,7 +284,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if zero/equal (ZF=1)
     /// Matching C++ ctrl_xfer64.cc:266-276 JZ_Jq
-    pub fn jz_jq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jz_jq(&mut self, instr: &Instruction) {
         if self.get_zf() {
             self.branch_near64(instr);
             tracing::trace!("JZ/JE rel64 taken: RIP = {:#x}", self.rip());
@@ -293,7 +293,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if not zero/not equal (ZF=0)
     /// Matching C++ ctrl_xfer64.cc:278-288 JNZ_Jq
-    pub fn jnz_jq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jnz_jq(&mut self, instr: &Instruction) {
         if !self.get_zf() {
             self.branch_near64(instr);
             tracing::trace!("JNZ/JNE rel64 taken: RIP = {:#x}", self.rip());
@@ -302,7 +302,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if below or equal (CF=1 or ZF=1)
     /// Matching C++ ctrl_xfer64.cc:290-300 JBE_Jq
-    pub fn jbe_jq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jbe_jq(&mut self, instr: &Instruction) {
         if self.get_cf() || self.get_zf() {
             self.branch_near64(instr);
             tracing::trace!("JBE/JNA rel64 taken: RIP = {:#x}", self.rip());
@@ -311,7 +311,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if not below or equal/above (CF=0 and ZF=0)
     /// Matching C++ ctrl_xfer64.cc:302-312 JNBE_Jq
-    pub fn jnbe_jq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jnbe_jq(&mut self, instr: &Instruction) {
         if !self.get_cf() && !self.get_zf() {
             self.branch_near64(instr);
             tracing::trace!("JNBE/JA rel64 taken: RIP = {:#x}", self.rip());
@@ -320,7 +320,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if sign (SF=1)
     /// Matching C++ ctrl_xfer64.cc:314-324 JS_Jq
-    pub fn js_jq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn js_jq(&mut self, instr: &Instruction) {
         if self.get_sf() {
             self.branch_near64(instr);
             tracing::trace!("JS rel64 taken: RIP = {:#x}", self.rip());
@@ -329,7 +329,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if not sign (SF=0)
     /// Matching C++ ctrl_xfer64.cc:326-336 JNS_Jq
-    pub fn jns_jq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jns_jq(&mut self, instr: &Instruction) {
         if !self.get_sf() {
             self.branch_near64(instr);
             tracing::trace!("JNS rel64 taken: RIP = {:#x}", self.rip());
@@ -338,7 +338,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if parity/parity even (PF=1)
     /// Matching C++ ctrl_xfer64.cc:338-348 JP_Jq
-    pub fn jp_jq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jp_jq(&mut self, instr: &Instruction) {
         if self.get_pf() {
             self.branch_near64(instr);
             tracing::trace!("JP/JPE rel64 taken: RIP = {:#x}", self.rip());
@@ -347,7 +347,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if no parity/parity odd (PF=0)
     /// Matching C++ ctrl_xfer64.cc:350-360 JNP_Jq
-    pub fn jnp_jq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jnp_jq(&mut self, instr: &Instruction) {
         if !self.get_pf() {
             self.branch_near64(instr);
             tracing::trace!("JNP/JPO rel64 taken: RIP = {:#x}", self.rip());
@@ -356,7 +356,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if less (SF != OF)
     /// Matching C++ ctrl_xfer64.cc:362-372 JL_Jq
-    pub fn jl_jq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jl_jq(&mut self, instr: &Instruction) {
         if self.get_sf() != self.get_of() {
             self.branch_near64(instr);
             tracing::trace!("JL/JNGE rel64 taken: RIP = {:#x}", self.rip());
@@ -365,7 +365,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if not less/greater or equal (SF == OF)
     /// Matching C++ ctrl_xfer64.cc:374-384 JNL_Jq
-    pub fn jnl_jq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jnl_jq(&mut self, instr: &Instruction) {
         if self.get_sf() == self.get_of() {
             self.branch_near64(instr);
             tracing::trace!("JNL/JGE rel64 taken: RIP = {:#x}", self.rip());
@@ -374,7 +374,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if less or equal (ZF=1 or SF!=OF)
     /// Matching C++ ctrl_xfer64.cc:386-396 JLE_Jq
-    pub fn jle_jq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jle_jq(&mut self, instr: &Instruction) {
         if self.get_zf() || (self.get_sf() != self.get_of()) {
             self.branch_near64(instr);
             tracing::trace!("JLE/JNG rel64 taken: RIP = {:#x}", self.rip());
@@ -383,7 +383,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if not less or equal/greater (ZF=0 and SF==OF)
     /// Matching C++ ctrl_xfer64.cc:398-408 JNLE_Jq
-    pub fn jnle_jq(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jnle_jq(&mut self, instr: &Instruction) {
         if !self.get_zf() && (self.get_sf() == self.get_of()) {
             self.branch_near64(instr);
             tracing::trace!("JNLE/JG rel64 taken: RIP = {:#x}", self.rip());
@@ -402,7 +402,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// state prior to instruction execution.
     /// The final point that we are not allowed to decrement RCX register before
     /// it is known that no exceptions can happen.
-    pub fn loop64_jb(&mut self, instr: &BxInstructionGenerated) {
+    pub fn loop64_jb(&mut self, instr: &Instruction) {
         if instr.as64_l() != 0 {
             let count = self.get_gpr64(1).wrapping_sub(1);
 
@@ -424,7 +424,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Decrement RCX, jump if not zero and ZF=1 (64-bit mode)
     /// Matching C++ ctrl_xfer64.cc:572-603 LOOPE64_Jb
-    pub fn loope64_jb(&mut self, instr: &BxInstructionGenerated) {
+    pub fn loope64_jb(&mut self, instr: &Instruction) {
         if instr.as64_l() != 0 {
             let count = self.get_gpr64(1).wrapping_sub(1);
 
@@ -452,7 +452,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// state prior to instruction execution.
     /// The final point that we are not allowed to decrement RCX register before
     /// it is known that no exceptions can happen.
-    pub fn loopne64_jb(&mut self, instr: &BxInstructionGenerated) {
+    pub fn loopne64_jb(&mut self, instr: &Instruction) {
         if instr.as64_l() != 0 {
             let count = self.get_gpr64(1).wrapping_sub(1);
 
@@ -474,7 +474,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Jump if RCX is zero (64-bit)
     /// Matching C++ ctrl_xfer64.cc:507-524 JRCXZ_Jb
-    pub fn jrcxz_jb(&mut self, instr: &BxInstructionGenerated) {
+    pub fn jrcxz_jb(&mut self, instr: &Instruction) {
         let temp_rcx = if instr.as64_l() != 0 {
             self.get_gpr64(1) // RCX
         } else {

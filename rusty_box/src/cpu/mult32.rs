@@ -6,7 +6,7 @@
 use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
-    decoder::BxInstructionGenerated,
+    decoder::Instruction,
     error::{CpuError, Result},
 };
 
@@ -17,7 +17,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MUL r/m32 - Unsigned multiply EAX by r/m32, result in EDX:EAX
     /// Matching C++ mult32.cc:MUL_EAXEdR
-    pub fn mul_eax_ed_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn mul_eax_ed_r(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.get_gpr32(0); // EAX
         let src_reg = instr.dst() as usize;
         let op2 = self.get_gpr32(src_reg);
@@ -43,7 +43,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MUL r/m32 (memory form)
     /// Matching C++ mult32.cc:MUL_EAXEdM
-    pub fn mul_eax_ed_m(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn mul_eax_ed_m(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.get_gpr32(0); // EAX
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
@@ -70,7 +70,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// IMUL r/m32 - Signed multiply EAX by r/m32, result in EDX:EAX
     /// Matching C++ mult32.cc:IMUL_EAXEdR
-    pub fn imul_eax_ed_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn imul_eax_ed_r(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.get_gpr32(0) as i32; // EAX
         let src_reg = instr.dst() as usize;
         let op2 = self.get_gpr32(src_reg) as i32;
@@ -98,7 +98,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// IMUL r/m32 (memory form)
     /// Matching C++ mult32.cc:IMUL_EAXEdM
-    pub fn imul_eax_ed_m(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn imul_eax_ed_m(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.get_gpr32(0) as i32; // EAX
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
@@ -127,7 +127,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// DIV r/m32 - Unsigned divide EDX:EAX by r/m32, quotient in EAX, remainder in EDX
     /// Matching C++ mult32.cc:DIV_EAXEdR
-    pub fn div_eax_ed_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn div_eax_ed_r(&mut self, instr: &Instruction) -> Result<()> {
         let src_reg = instr.dst() as usize;
         let op2 = self.get_gpr32(src_reg);
 
@@ -157,7 +157,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// DIV r/m32 (memory form)
     /// Matching C++ mult32.cc:DIV_EAXEdM
-    pub fn div_eax_ed_m(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn div_eax_ed_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let op2 = self.read_virtual_dword(seg, eaddr)?;
@@ -188,7 +188,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// IDIV r/m32 - Signed divide EDX:EAX by r/m32, quotient in EAX, remainder in EDX
     /// Matching C++ mult32.cc:IDIV_EAXEdR
-    pub fn idiv_eax_ed_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn idiv_eax_ed_r(&mut self, instr: &Instruction) -> Result<()> {
         let edx = self.get_gpr32(2); // EDX
         let eax = self.get_gpr32(0); // EAX
         // Matching C++: Bit64s op1_64 = GET64_FROM_HI32_LO32(EDX, EAX);
@@ -226,7 +226,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// IDIV r/m32 (memory form)
     /// Matching C++ mult32.cc:IDIV_EAXEdM
-    pub fn idiv_eax_ed_m(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn idiv_eax_ed_m(&mut self, instr: &Instruction) -> Result<()> {
         let edx = self.get_gpr32(2); // EDX
         let eax = self.get_gpr32(0); // EAX
         // Matching C++: Bit64s op1_64 = GET64_FROM_HI32_LO32(EDX, EAX);
@@ -266,7 +266,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// IMUL Gd, Ed - Two-operand signed multiply (register form)
     /// dst = dst * src, only lower 32 bits stored
     /// Matching C++ mult32.cc:IMUL_GdEdR
-    pub fn imul_gd_ed_r(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn imul_gd_ed_r(&mut self, instr: &Instruction) -> Result<()> {
         let dst_reg = instr.dst() as usize;
         let src_reg = instr.src() as usize;
 
@@ -290,7 +290,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// IMUL Gd, Ed - Two-operand signed multiply (memory form)
     /// Matching C++ mult32.cc:IMUL_GdEdM
-    pub fn imul_gd_ed_m(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn imul_gd_ed_m(&mut self, instr: &Instruction) -> Result<()> {
         let dst_reg = instr.dst() as usize;
 
         let op1 = self.get_gpr32(dst_reg) as i32;
@@ -316,7 +316,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// IMUL Gd, Ed, Ib - Three-operand signed multiply with 8-bit immediate
     /// dst = src * sign_extend(imm8)
     /// Opcode: 6B /r ib
-    pub fn imul_gd_ed_ib(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn imul_gd_ed_ib(&mut self, instr: &Instruction) -> Result<()> {
         let dst_reg = instr.dst() as usize;
         let src_reg = instr.src() as usize;
 
@@ -347,28 +347,90 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
+    /// IMUL Gd, Ed, Id - Three-operand signed multiply with 32-bit immediate (register source)
+    /// dst = src * imm32
+    /// Opcode: 69 /r id
+    pub fn imul_gd_ed_id_r(&mut self, instr: &Instruction) -> Result<()> {
+        let dst_reg = instr.dst() as usize;
+        let src_reg = instr.src() as usize;
+
+        let op1 = self.get_gpr32(src_reg) as i32;
+        let op2 = instr.id() as i32;
+
+        let product_64 = (op1 as i64) * (op2 as i64);
+        let result_32 = product_64 as i32;
+
+        self.set_gpr32(dst_reg, result_32 as u32);
+
+        if product_64 != (result_32 as i64) {
+            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+        } else {
+            self.eflags &= !((1 << 0) | (1 << 11)); // CF=0, OF=0
+        }
+
+        tracing::trace!("IMUL32 Gd,Ed,Id: reg{} ({:#010x}) * imm32 ({:#010x}) = reg{} ({:#010x})",
+            src_reg, op1 as u32, op2 as u32, dst_reg, result_32 as u32);
+        Ok(())
+    }
+
+    /// IMUL Gd, Ed, Id - Three-operand signed multiply with 32-bit immediate (memory source)
+    /// Opcode: 69 /r id
+    pub fn imul_gd_ed_id_m(&mut self, instr: &Instruction) -> Result<()> {
+        let dst_reg = instr.dst() as usize;
+
+        let eaddr = self.resolve_addr32(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let op1 = self.read_virtual_dword(seg, eaddr)? as i32;
+        let op2 = instr.id() as i32;
+
+        let product_64 = (op1 as i64) * (op2 as i64);
+        let result_32 = product_64 as i32;
+
+        self.set_gpr32(dst_reg, result_32 as u32);
+
+        if product_64 != (result_32 as i64) {
+            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+        } else {
+            self.eflags &= !((1 << 0) | (1 << 11)); // CF=0, OF=0
+        }
+
+        tracing::trace!("IMUL32 Gd,Ed,Id mem: [{:?}:{:#x}] ({:#010x}) * imm32 ({:#010x}) = reg{} ({:#010x})",
+            seg, eaddr, op1 as u32, op2 as u32, dst_reg, result_32 as u32);
+        Ok(())
+    }
+
     // =========================================================================
     // Unified wrappers (dispatch register vs memory form based on mod_c0)
     // =========================================================================
 
     /// MUL EAX, r/m32 - Unified wrapper
-    pub fn mul_eax_ed(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn mul_eax_ed(&mut self, instr: &Instruction) -> Result<()> {
         if instr.mod_c0() { self.mul_eax_ed_r(instr) } else { self.mul_eax_ed_m(instr) }
     }
 
     /// IMUL EAX, r/m32 - Unified wrapper
-    pub fn imul_eax_ed(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn imul_eax_ed(&mut self, instr: &Instruction) -> Result<()> {
         if instr.mod_c0() { self.imul_eax_ed_r(instr) } else { self.imul_eax_ed_m(instr) }
     }
 
     /// DIV EAX, r/m32 - Unified wrapper
-    pub fn div_eax_ed(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn div_eax_ed(&mut self, instr: &Instruction) -> Result<()> {
         if instr.mod_c0() { self.div_eax_ed_r(instr) } else { self.div_eax_ed_m(instr) }
     }
 
     /// IDIV EAX, r/m32 - Unified wrapper
-    pub fn idiv_eax_ed(&mut self, instr: &BxInstructionGenerated) -> Result<()> {
+    pub fn idiv_eax_ed(&mut self, instr: &Instruction) -> Result<()> {
         if instr.mod_c0() { self.idiv_eax_ed_r(instr) } else { self.idiv_eax_ed_m(instr) }
+    }
+
+    /// IMUL Gd, Ed, Id - Three-operand signed multiply with 32-bit immediate - Unified wrapper
+    pub fn imul_gd_ed_id(&mut self, instr: &Instruction) -> Result<()> {
+        if instr.mod_c0() { self.imul_gd_ed_id_r(instr) } else { self.imul_gd_ed_id_m(instr) }
+    }
+
+    /// IMUL Gd, Ed - Two-operand signed multiply - Unified wrapper
+    pub fn imul_gd_ed(&mut self, instr: &Instruction) -> Result<()> {
+        if instr.mod_c0() { self.imul_gd_ed_r(instr) } else { self.imul_gd_ed_m(instr) }
     }
 
     // =========================================================================

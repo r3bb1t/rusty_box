@@ -1,8 +1,7 @@
 // Re-export everything from rusty_box_decoder
 pub use rusty_box_decoder::*;
 
-// Type alias for backward compatibility
-pub use rusty_box_decoder::instr_generated::InstructionGenerated as BxInstructionGenerated;
+pub use rusty_box_decoder::instr_generated::Instruction;
 
 // Re-export commonly used items with their original names
 pub use rusty_box_decoder::{

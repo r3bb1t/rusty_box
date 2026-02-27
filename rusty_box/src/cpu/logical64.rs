@@ -6,7 +6,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::BxInstructionGenerated,
+    decoder::Instruction,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {

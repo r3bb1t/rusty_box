@@ -268,16 +268,17 @@ impl BxPicC {
             let eoi_type = (value >> 5) & 0x07;
             match eoi_type {
                 0b001 => {
-                    // Non-specific EOI
+                    // Non-specific EOI — clear ISR then re-service for any remaining pending IRQs
                     self.clear_highest_interrupt(pic);
                     if is_master {
                         self.master = pic.clone();
                     } else {
                         self.slave = pic.clone();
                     }
+                    self.service_pic(&mut if is_master { self.master.clone() } else { self.slave.clone() }, is_master);
                 }
                 0b011 => {
-                    // Specific EOI
+                    // Specific EOI — clear ISR then re-service
                     let irq = value & 0x07;
                     pic.isr &= !(1 << irq);
                     if is_master {
@@ -285,6 +286,7 @@ impl BxPicC {
                     } else {
                         self.slave = pic.clone();
                     }
+                    self.service_pic(&mut if is_master { self.master.clone() } else { self.slave.clone() }, is_master);
                 }
                 0b101 => {
                     // Rotate on non-specific EOI
@@ -295,6 +297,7 @@ impl BxPicC {
                     } else {
                         self.slave = pic.clone();
                     }
+                    self.service_pic(&mut if is_master { self.master.clone() } else { self.slave.clone() }, is_master);
                 }
                 0b111 => {
                     // Rotate on specific EOI
@@ -306,6 +309,7 @@ impl BxPicC {
                     } else {
                         self.slave = pic.clone();
                     }
+                    self.service_pic(&mut if is_master { self.master.clone() } else { self.slave.clone() }, is_master);
                 }
                 0b110 => {
                     // Set priority
@@ -343,9 +347,10 @@ impl BxPicC {
         if self.master.init.in_init {
             self.write_icw(&mut self.master.clone(), value, true);
         } else {
-            // OCW1 - Set IMR
+            // OCW1 - Set IMR; re-service in case pending IRQs were just unmasked
             self.master.imr = value;
             tracing::trace!("PIC: Master IMR = {:#04x}", value);
+            self.service_pic(&mut self.master.clone(), true);
         }
     }
 
@@ -353,9 +358,10 @@ impl BxPicC {
         if self.slave.init.in_init {
             self.write_icw(&mut self.slave.clone(), value, false);
         } else {
-            // OCW1 - Set IMR
+            // OCW1 - Set IMR; re-service in case pending IRQs were just unmasked
             self.slave.imr = value;
             tracing::trace!("PIC: Slave IMR = {:#04x}", value);
+            self.service_pic(&mut self.slave.clone(), false);
         }
     }
 
