@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{boxed::Box, format, vec::Vec};
 use core::ffi::c_void;
 
 use crate::{

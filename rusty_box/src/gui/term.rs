@@ -264,14 +264,26 @@ impl BxGui for TermGui {
         &mut self,
         x: u32,
         y: u32,
-        _fheight: u32,
-        _fwidth: u32,
+        fheight: u32,
+        fwidth: u32,
         _bpp: u32,
     ) {
-        self.screen_width = x;
-        self.screen_height = y;
-        self.text_buffer.resize((x * y * 2) as usize, 0);
-        tracing::debug!("TermGUI: Dimensions updated to {}x{}", x, y);
+        // Matching Bochs term.cc dimension_update():
+        // text_cols = x / fwidth;  text_rows = y / fheight;
+        if fheight > 0 && fwidth > 0 {
+            self.screen_width = x / fwidth;
+            self.screen_height = y / fheight;
+        } else {
+            // Graphics mode or invalid — keep current values
+            self.screen_width = x;
+            self.screen_height = y;
+        }
+        let buf_size = (self.screen_width * self.screen_height * 2) as usize;
+        self.text_buffer.resize(buf_size, 0);
+        tracing::debug!(
+            "TermGUI: Dimensions updated to {}x{} ({}x{} pixels, font {}x{})",
+            self.screen_width, self.screen_height, x, y, fwidth, fheight
+        );
     }
 
     fn create_bitmap(&mut self, _bmap: &[u8], _xdim: u32, _ydim: u32) -> u32 {

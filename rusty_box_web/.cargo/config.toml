@@ -1,0 +1,6 @@
+# WASM memory configuration
+# The emulator needs ~50+ MB: 32 MB guest RAM, 10 MB disk image, internal structures
+[target.wasm32-unknown-unknown]
+rustflags = [
+    "-C", "link-args=--initial-memory=268435456 --max-memory=536870912 -z stack-size=16777216",
+]

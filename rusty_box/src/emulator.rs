@@ -415,6 +415,17 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     0xffff
                 };
 
+                // Notify GUI of dimension changes (matching vgacore.cc:1661)
+                if update_result.dimension_changed {
+                    gui.dimension_update(
+                        update_result.iwidth,
+                        update_result.iheight,
+                        update_result.fheight,
+                        update_result.fwidth,
+                        8, // bpp for text mode
+                    );
+                }
+
                 // Call GUI text_update with old snapshot and new buffer (matching vgacore.cc:1685)
                 gui.text_update(
                     &update_result.text_snapshot,
@@ -574,6 +585,19 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
     pub fn vga_probe_dump(&self) -> String {
         self.device_manager.vga.probe_summary()
+    }
+
+    /// Peek at raw RAM at a physical address range (for diagnostics).
+    /// Returns up to `len` bytes from the physical RAM array.
+    pub fn peek_ram_at(&self, addr: usize, len: usize) -> alloc::vec::Vec<u8> {
+        let ram = self.memory.ram_slice();
+        if addr + len <= ram.len() {
+            ram[addr..addr + len].to_vec()
+        } else if addr < ram.len() {
+            ram[addr..].to_vec()
+        } else {
+            alloc::vec::Vec::new()
+        }
     }
 
     /// Check if the emulator has been initialized
@@ -738,7 +762,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
         let mut instructions_executed = 0u64;
         let mut last_gui_update = std::time::Instant::now();
+        let mut last_ips_update = std::time::Instant::now();
+        let mut last_ips_instructions = 0u64;
         const GUI_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100); // Update every 100ms
+        const IPS_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
         let mut last_port92_value: u8 = self.system_control.value;
 
         const INSTRUCTION_BATCH_SIZE: u64 = 10000; // Larger batch size for better performance
@@ -1505,6 +1532,18 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 self.update_gui();
             }
 
+            // Update IPS counter every second
+            let ips_elapsed = last_ips_update.elapsed();
+            if ips_elapsed >= IPS_UPDATE_INTERVAL {
+                let delta_instr = instructions_executed - last_ips_instructions;
+                let ips = (delta_instr as f64 / ips_elapsed.as_secs_f64()) as u32;
+                last_ips_instructions = instructions_executed;
+                last_ips_update = std::time::Instant::now();
+                if let Some(ref mut gui) = self.gui {
+                    gui.show_ips(ips);
+                }
+            }
+
             // 5. Check if we should exit (e.g., shutdown requested)
             // TODO: Add shutdown flag check
         }
@@ -1515,6 +1554,278 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         );
 
         Ok(instructions_executed)
+    }
+
+    /// Execute a batch of instructions cooperatively (no blocking loop).
+    ///
+    /// Designed for single-threaded environments like WASM where the caller
+    /// must yield control back to the event loop regularly. Runs up to
+    /// `max_instructions`, ticks devices, syncs A20, then returns.
+    ///
+    /// Returns `(instructions_executed, is_shutdown)`.
+    pub fn step_batch(&mut self, max_instructions: u64) -> Result<(u64, bool)>
+    where
+        'a: 'static,
+    {
+        let result = unsafe {
+            let mem_extended: &'a mut BxMemC<'a> =
+                core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory);
+            let io_ptr = core::ptr::NonNull::from(&mut self.devices);
+            self.cpu
+                .cpu_loop_n_with_io(mem_extended, &[], max_instructions, io_ptr)
+        };
+
+        match result {
+            Ok(mut executed) => {
+                let ips = self.config.ips as u64;
+                let usec = if ips > 0 {
+                    (executed * 1_000_000 / ips).max(10)
+                } else {
+                    10
+                };
+                self.tick_devices(usec);
+
+                // When CPU is halted, advance one full PIT cycle so timer
+                // interrupts can fire (Bochs handleWaitForEvent BX_TICKN loop).
+                if matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::Hlt) {
+                    self.tick_devices(60_000);
+                }
+
+                // Deliver pending PIC interrupts — matches run_interactive().
+                // This must happen EVERY batch, not just during HLT, because
+                // the BIOS and OS rely on timer interrupts during normal
+                // execution (not only when halted).
+                if self.has_interrupt() && self.cpu.get_b_if() != 0
+                    && !self.cpu.interrupts_inhibited(0x01)
+                {
+                    let vector = self.iac();
+                    let _inject = unsafe {
+                        let mem_extended: &'a mut BxMemC<'a> =
+                            core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(
+                                &mut self.memory,
+                            );
+                        self.cpu
+                            .set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_extended));
+                        let r = self.cpu.inject_external_interrupt(vector);
+                        self.cpu.clear_mem_bus();
+                        r
+                    };
+                }
+
+                // If CPU was halted and we just delivered an interrupt,
+                // re-enter CPU loop so the handler runs in this batch.
+                if matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::Active)
+                    && executed == 0
+                {
+                    let result2 = unsafe {
+                        let mem_extended: &'a mut BxMemC<'a> =
+                            core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(
+                                &mut self.memory,
+                            );
+                        let io_ptr = core::ptr::NonNull::from(&mut self.devices);
+                        self.cpu
+                            .cpu_loop_n_with_io(mem_extended, &[], max_instructions, io_ptr)
+                    };
+                    if let Ok(executed2) = result2 {
+                        executed += executed2;
+                        let usec2 = if ips > 0 {
+                            (executed2 * 1_000_000 / ips).max(10)
+                        } else {
+                            10
+                        };
+                        self.tick_devices(usec2);
+                    }
+                }
+
+                // Sync A20 state
+                self.sync_a20_state();
+
+                // Handle keyboard scancodes from GUI
+                let mut scancodes_to_send = Vec::new();
+                if let Some(ref mut gui) = self.gui {
+                    gui.handle_events();
+                    scancodes_to_send = gui.get_pending_scancodes();
+                }
+                for scancode in scancodes_to_send {
+                    self.device_manager.keyboard.send_scancode(scancode);
+                }
+
+                let shutdown = self.cpu.is_in_shutdown();
+                Ok((executed, shutdown))
+            }
+            Err(e) => Err(crate::error::Error::Cpu(e)),
+        }
+    }
+
+    /// Attach a hard disk from in-memory data (for no_std / WASM environments).
+    ///
+    /// Wraps `HardDrive::attach_disk_data()` which stores the disk image
+    /// in a `Vec<u8>` instead of using file I/O.
+    #[cfg(not(feature = "std"))]
+    pub fn attach_disk_data(
+        &mut self,
+        channel: usize,
+        drive: usize,
+        data: alloc::vec::Vec<u8>,
+        cylinders: u16,
+        heads: u8,
+        spt: u8,
+    ) {
+        self.device_manager
+            .harddrv
+            .attach_disk_data(channel, drive, data, cylinders, heads, spt);
+    }
+
+    /// Render VGA text output into a `SharedDisplay` framebuffer.
+    ///
+    /// This is the single-threaded equivalent of `update_gui()` — instead of
+    /// going through the `BxGui` trait (which requires `Arc<Mutex<>>` for
+    /// thread-safe sharing), it writes directly to the provided display.
+    /// Ideal for WASM where the emulator and display are owned by the same
+    /// event loop.
+    pub fn update_display(&mut self, display: &mut crate::gui::shared_display::SharedDisplay) {
+        // Debug: log VGA state periodically
+        static mut DBG_CTR: u32 = 0;
+        unsafe { DBG_CTR += 1; }
+        let dbg = unsafe { DBG_CTR };
+
+        if let Some(update_result) = self.device_manager.vga.update() {
+            if dbg % 300 == 1 {
+                // Check if text_buffer has any non-zero bytes
+                let non_zero = update_result.text_buffer.iter().filter(|&&b| b != 0).count();
+                let first_16: Vec<u8> = update_result.text_buffer.iter().take(32).copied().collect();
+                tracing::warn!(
+                    "VGA update: dim_changed={}, needs_update={}, buf_non_zero={}, first_32={:02x?}, start_addr={}",
+                    update_result.dimension_changed,
+                    update_result.needs_update,
+                    non_zero,
+                    first_16,
+                    update_result.tm_info.start_address,
+                );
+            }
+            let cursor_x = if update_result.cursor_address < 0x7fff {
+                let offset_from_start = update_result
+                    .cursor_address
+                    .saturating_sub(update_result.tm_info.start_address);
+                (offset_from_start % update_result.tm_info.line_offset) / 2
+            } else {
+                0xffff
+            };
+
+            let cursor_y = if update_result.cursor_address < 0x7fff {
+                let offset_from_start = update_result
+                    .cursor_address
+                    .saturating_sub(update_result.tm_info.start_address);
+                (offset_from_start / update_result.tm_info.line_offset) as u32
+            } else {
+                0xffff
+            };
+
+            if update_result.dimension_changed {
+                display.resize(
+                    if update_result.fwidth > 0 {
+                        update_result.iwidth / update_result.fwidth
+                    } else {
+                        update_result.iwidth
+                    },
+                    if update_result.fheight > 0 {
+                        update_result.iheight / update_result.fheight
+                    } else {
+                        update_result.iheight
+                    },
+                    update_result.fwidth,
+                    update_result.fheight,
+                );
+            }
+
+            display.render_text_to_framebuffer(
+                &update_result.text_buffer,
+                cursor_x as u32,
+                cursor_y as u32,
+                update_result.tm_info.cs_start,
+                update_result.tm_info.cs_end,
+                update_result.tm_info.line_graphics,
+            );
+        } else if dbg % 300 == 1 {
+            // VGA returned None — not in text mode or not initialized
+            let gr6 = self.device_manager.vga.graphics_regs[6];
+            let ga = (gr6 & 0x01) != 0;
+            let mm = (gr6 >> 2) & 0x03;
+            tracing::warn!(
+                "VGA update returned None: graphics_alpha={}, memory_mapping={}, gr6=0x{:02x}",
+                ga, mm, gr6,
+            );
+        }
+    }
+
+    /// Send a PS/2 scancode to the keyboard device.
+    ///
+    /// For environments that handle keyboard input outside of `BxGui`
+    /// (e.g. the WASM app processes egui events directly).
+    pub fn send_scancode(&mut self, scancode: u8) {
+        self.device_manager.keyboard.send_scancode(scancode);
+    }
+
+    /// Force VGA to generate an initial update (call before first `update_display`).
+    pub fn force_vga_update(&mut self) {
+        self.device_manager.vga.force_initial_update();
+    }
+
+    /// Get VGA memory handler probe summary for diagnostics.
+    pub fn vga_probe_summary(&self) -> alloc::string::String {
+        self.device_manager.vga.probe_summary()
+    }
+
+    /// Get the number of registered memory handlers (for diagnostics).
+    pub fn memory_handler_count(&self) -> usize {
+        self.memory.memory_handler_info()
+    }
+
+    /// Get current CS:RIP for diagnostics.
+    pub fn get_cs_rip(&self) -> (u16, u64) {
+        (self.cpu.get_cs_selector(), self.cpu.rip())
+    }
+
+    /// Get CPU mode string for diagnostics.
+    pub fn get_cpu_mode_str(&self) -> &'static str {
+        match self.cpu.get_cpu_mode() {
+            0 => "real",
+            1 => "v8086",
+            2 => "protected",
+            3 => "long-compat",
+            4 => "long-64",
+            _ => "unknown",
+        }
+    }
+
+    /// Get CR0 for diagnostics (bit 0 = PE).
+    pub fn get_cr0(&self) -> u32 {
+        self.cpu.cr0.bits()
+    }
+
+    /// Get IF flag for diagnostics.
+    pub fn get_if_flag(&self) -> bool {
+        self.cpu.get_b_if() != 0
+    }
+
+    /// Read a few bytes from the BIOS ROM array at the given ROM offset.
+    pub fn peek_rom(&self, offset: usize, len: usize) -> alloc::vec::Vec<u8> {
+        self.memory.peek_rom(offset, len)
+    }
+
+    /// Get VGA Graphics Register 6 (memory mapping control).
+    pub fn peek_vga_gr6(&self) -> u8 {
+        self.device_manager.vga.graphics_regs[6]
+    }
+
+    /// Get the activity state string.
+    pub fn get_activity_str(&self) -> &'static str {
+        match self.cpu.activity_state {
+            crate::cpu::cpu::CpuActivityState::Active => "active",
+            crate::cpu::cpu::CpuActivityState::Hlt => "hlt",
+            crate::cpu::cpu::CpuActivityState::Shutdown => "shutdown",
+            _ => "other",
+        }
     }
 }
 

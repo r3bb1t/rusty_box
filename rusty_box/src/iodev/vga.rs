@@ -11,6 +11,8 @@
 //! - Multiple pages can be stored in the 32KB region
 
 use core::ffi::c_void;
+#[cfg(not(feature = "std"))]
+use alloc::vec;
 use alloc::{string::String, vec::Vec};
 
 use crate::{
@@ -66,6 +68,16 @@ pub(crate) struct VgaUpdateResult {
     pub cursor_address: u16,
     /// Text mode info
     pub tm_info: crate::gui::VgaTextModeInfo,
+    /// Whether dimension_update should be called on the GUI
+    pub dimension_changed: bool,
+    /// Pixel width (for dimension_update)
+    pub iwidth: u32,
+    /// Pixel height (for dimension_update)
+    pub iheight: u32,
+    /// Font height in pixels (for dimension_update)
+    pub fheight: u32,
+    /// Font/char width in pixels (for dimension_update)
+    pub fwidth: u32,
 }
 
 /// VGA controller state
@@ -88,7 +100,7 @@ pub(crate) struct BxVgaC {
     /// Graphics controller index
     graphics_index: u8,
     /// Graphics controller registers
-    graphics_regs: [u8; 9],
+    pub(crate) graphics_regs: [u8; 9],
     /// Status register value
     status_reg: u8,
     /// Misc output register
@@ -118,6 +130,8 @@ pub(crate) struct BxVgaC {
     // =====================================================================
     // Bochs-aligned observability (debug-only but always-on, no globals)
     // =====================================================================
+    /// Total handler invocations (incremented on every call to vga_mem_write_handler).
+    probe_handler_calls: u64,
     /// Count of writes that were accepted by current `memory_mapping` window gating.
     probe_mapped_writes: u64,
     /// Count of writes that were ignored because they fell outside the selected window.
@@ -176,6 +190,16 @@ pub(crate) struct BxVgaC {
 
     /// Bit 7: vert_sync_pol - vertical sync polarity
     misc_vert_sync_pol: bool,
+
+    // =====================================================================
+    // Dimension tracking (matching Bochs vgacore.cc s.last_xres etc.)
+    // Used to detect when dimension_update needs to be called on the GUI.
+    // =====================================================================
+    last_xres: u32,
+    last_yres: u32,
+    last_fw: u32,
+    last_fh: u32,
+    last_bpp: u32,
 }
 
 impl Default for BxVgaC {
@@ -208,6 +232,7 @@ impl BxVgaC {
             vga_mem_updated: 0,
             text_buffer_update: true, // Initial update needed
 
+            probe_handler_calls: 0,
             probe_mapped_writes: 0,
             probe_unmapped_writes: 0,
             probe_first_mapped: None,
@@ -230,6 +255,12 @@ impl BxVgaC {
             misc_select_high_bank: true,  // Bit 5: high bank
             misc_horiz_sync_pol: true,    // Bit 6
             misc_vert_sync_pol: false,    // Bit 7
+
+            last_xres: 0,
+            last_yres: 0,
+            last_fw: 0,
+            last_fh: 0,
+            last_bpp: 0,
         };
 
         // Initialize CRTC registers for 80x25 text mode
@@ -299,8 +330,8 @@ impl BxVgaC {
         let mut s = String::new();
         let _ = writeln!(
             s,
-            "mapped_writes={} unmapped_writes={}",
-            self.probe_mapped_writes, self.probe_unmapped_writes
+            "handler_calls={} mapped_writes={} unmapped_writes={}",
+            self.probe_handler_calls, self.probe_mapped_writes, self.probe_unmapped_writes
         );
         if let Some((addr, val, mm)) = self.probe_first_mapped {
             let _ = writeln!(s, "first_mapped: addr={:#x} val={:#02x} memory_mapping={}", addr, val, mm);
@@ -885,12 +916,40 @@ impl BxVgaC {
             self.text_dirty = false;
         }
         
+        // Compute dimension_update parameters (matching vgacore.cc:1653-1666)
+        let c_width = if (self.seq_regs[1] & 0x01) == 1 { 8u32 } else { 9u32 };
+        // x_dotclockdiv2 = sequencer.reg1 bit 3 (vgacore.cc:938)
+        let x_dotclockdiv2 = (self.seq_regs[1] & 0x08) != 0;
+        let c_width = if x_dotclockdiv2 { c_width << 1 } else { c_width };
+        let i_width = c_width * cols as u32;
+        let i_height = (vde + 1) as u32;
+        let fh = (msl + 1) as u32;
+
+        // Only signal dimension change when something actually changed (vgacore.cc:1657-1659)
+        let dimension_changed = i_width != self.last_xres
+            || i_height != self.last_yres
+            || c_width != self.last_fw
+            || fh != self.last_fh
+            || self.last_bpp > 8;
+        if dimension_changed {
+            self.last_xres = i_width;
+            self.last_yres = i_height;
+            self.last_fw = c_width;
+            self.last_fh = fh;
+            self.last_bpp = 8;
+        }
+
         Some(VgaUpdateResult {
             needs_update,
             text_buffer: new_buffer,
             text_snapshot: old_snapshot,
             cursor_address,
             tm_info,
+            dimension_changed,
+            iwidth: i_width,
+            iheight: i_height,
+            fheight: fh,
+            fwidth: c_width,
         })
     }
 }
@@ -973,6 +1032,7 @@ pub(super) fn vga_mem_write_handler(
     }
     
     let vga = unsafe { &mut *(param as *mut BxVgaC) };
+    vga.probe_handler_calls = vga.probe_handler_calls.wrapping_add(1);
 
     // Match Bochs window gating (vgacore.cc:1826..1842):
     // only the selected window maps to VGA memory; writes outside the window are ignored.

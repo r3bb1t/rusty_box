@@ -1,4 +1,4 @@
-use alloc::vec::Vec;
+use alloc::{vec, vec::Vec};
 use byteorder::{ByteOrder, LittleEndian};
 #[cfg(feature = "std")]
 use tempfile::tempfile;

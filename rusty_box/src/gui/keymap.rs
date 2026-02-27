@@ -3,6 +3,8 @@
 //! Maps ASCII characters and special keys to PS/2 scancode set 2.
 //! Based on standard PC/AT keyboard scancode set 2.
 
+use alloc::vec::Vec;
+
 /// PS/2 Scancode Set 2 mapping for ASCII characters
 /// Returns (make_code, break_code) for a given ASCII character
 /// Break code is 0xF0 followed by the make code

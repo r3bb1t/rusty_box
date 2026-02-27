@@ -9,6 +9,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use alloc::string::String;
+#[cfg(feature = "std")]
 use alloc::format;
 use core::ffi::c_void;
 

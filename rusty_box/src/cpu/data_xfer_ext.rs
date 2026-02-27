@@ -5,6 +5,8 @@
 //!
 //! Implements LEA, XCHG, MOV segment, LES, LDS, CBW, CWD, CWDE, CDQ
 
+use alloc::string::ToString;
+
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,

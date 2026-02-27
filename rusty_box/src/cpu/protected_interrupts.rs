@@ -3,6 +3,8 @@
 //! Based on Bochs cpu/exception.cc protected_mode_int
 //! Copyright (C) 2001-2019 The Bochs Project
 
+use alloc::{format, string::ToString, vec::Vec};
+
 use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,

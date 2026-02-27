@@ -3,6 +3,8 @@
 //! Based on Bochs stack32.cc
 //! Copyright (C) 2001-2018 The Bochs Project
 
+use alloc::vec::Vec;
+
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,

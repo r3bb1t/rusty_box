@@ -1,3 +1,5 @@
+use alloc::{format, string::String, vec, vec::Vec};
+
 use crate::{
     config::BxPhyAddress,
     cpu::{

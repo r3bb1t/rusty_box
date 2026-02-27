@@ -4,6 +4,8 @@
 //! This is the central dispatch table, equivalent to Bochs cpu.cc's
 //! BX_CPU_C::cpu_loop() switch statement.
 
+use alloc::format;
+
 use super::{
     cpuid::BxCpuIdTrait,
     decoder::{Instruction, Opcode},

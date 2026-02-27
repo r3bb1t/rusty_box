@@ -1,3 +1,5 @@
+use alloc::format;
+
 use super::{
     cpu::Exception,
     decoder::BxSegregs,

@@ -245,6 +245,24 @@ impl<'m> BxMemC<'m> {
         let len = self.inherited_memory_stub.actual_vector.len();
         (ptr, len)
     }
+
+    /// Count how many registered (non-None) memory handlers exist (for diagnostics).
+    pub fn memory_handler_info(&self) -> usize {
+        self.memory_handlers.iter().filter(|h| h.is_some()).count()
+    }
+
+    /// Read bytes from the ROM array at the given offset (for diagnostics).
+    pub fn peek_rom(&self, offset: usize, len: usize) -> Vec<u8> {
+        let stub = &self.inherited_memory_stub;
+        let rom_start = stub.rom_offset;
+        let rom = &stub.actual_vector[rom_start..];
+        let end = (offset + len).min(rom.len());
+        if offset < rom.len() {
+            rom[offset..end].to_vec()
+        } else {
+            Vec::new()
+        }
+    }
 }
 impl<'m> BxMemC<'m> {
     pub fn init_memory(

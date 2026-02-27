@@ -2,6 +2,8 @@
 //!
 //! Based on Bochs ctrl_xfer64.cc
 
+use alloc::string::ToString;
+
 use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,

@@ -1,3 +1,4 @@
+use alloc::{format, vec};
 use core::{marker::PhantomData, ptr::NonNull};
 
 use crate::{
@@ -409,7 +410,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) debug_trap: u32,
 
     // Control registers
-    pub(super) cr0: BxCr0,
+    pub(crate) cr0: BxCr0,
     pub(super) cr2: BxAddress,
     pub(super) cr3: BxAddress,
 
