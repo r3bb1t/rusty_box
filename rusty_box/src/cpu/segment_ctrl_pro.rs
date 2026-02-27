@@ -26,20 +26,20 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             // GDT
             let index_offset = (index as u32) * 8 + 7;
             if index_offset > self.gdtr.limit as u32 {
-                tracing::error!("fetch_raw_descriptor: GDT: index ({}) {} > limit ({})", index_offset, index, self.gdtr.limit);
+                tracing::debug!("fetch_raw_descriptor: GDT: index ({}) {} > limit ({})", index_offset, index, self.gdtr.limit);
                 return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
             }
             offset = self.gdtr.base + (index as u64 * 8);
         } else {
             // LDT
             if self.ldtr.cache.valid == 0 {
-                tracing::error!("fetch_raw_descriptor: LDTR.valid=0");
+                tracing::debug!("fetch_raw_descriptor: LDTR.valid=0");
                 return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
             }
             let ldt_limit = unsafe { self.ldtr.cache.u.segment.limit_scaled };
             let index_offset = (index as u32) * 8 + 7;
             if index_offset > ldt_limit {
-                tracing::error!("fetch_raw_descriptor: LDT: index ({}) {} > limit ({})", index_offset, index, ldt_limit);
+                tracing::debug!("fetch_raw_descriptor: LDT: index ({}) {} > limit ({})", index_offset, index, ldt_limit);
                 return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
             }
             offset = unsafe { self.ldtr.cache.u.segment.base } + (index as u64 * 8);
@@ -349,27 +349,27 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// Write byte to system address space (bypasses some checks)
+    /// Write byte to system address space (CPL=0, paging-aware)
     /// Based on BX_CPU_C::system_write_byte in access.cc
     pub(super) fn system_write_byte(&mut self, laddr: BxAddress, data: u8) -> Result<()> {
-        // For now, use simple memory write
-        self.mem_write_byte(laddr, data);
+        let paddr = self.translate_linear_system_write(laddr)?;
+        self.mem_write_byte(paddr, data);
         Ok(())
     }
 
-    /// Write word to system address space (bypasses some checks)
+    /// Write word to system address space (CPL=0, paging-aware)
     /// Based on BX_CPU_C::system_write_word in access.cc:572
     pub(super) fn system_write_word(&mut self, laddr: BxAddress, data: u16) -> Result<()> {
-        // For now, use simple memory write
-        self.mem_write_word(laddr, data);
+        let paddr = self.translate_linear_system_write(laddr)?;
+        self.mem_write_word(paddr, data);
         Ok(())
     }
 
-    /// Write dword to system address space (bypasses some checks)
+    /// Write dword to system address space (CPL=0, paging-aware)
     /// Based on BX_CPU_C::system_write_dword in access.cc:588
     pub(super) fn system_write_dword(&mut self, laddr: BxAddress, data: u32) -> Result<()> {
-        // For now, use simple memory write
-        self.mem_write_dword(laddr, data);
+        let paddr = self.translate_linear_system_write(laddr)?;
+        self.mem_write_dword(paddr, data);
         Ok(())
     }
 
@@ -457,6 +457,9 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         self.sregs[BxSegregs::Cs as usize].selector = selector.clone();
         self.sregs[BxSegregs::Cs as usize].cache = descriptor.clone();
         self.sregs[BxSegregs::Cs as usize].cache.valid = super::descriptor::SEG_VALID_CACHE;
+
+        // Update user privilege level flag (Bochs cpu.h:5501)
+        self.user_pl = cpl == 3;
 
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;

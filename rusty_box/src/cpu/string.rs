@@ -1165,7 +1165,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn mem_write_byte(&mut self, addr: u64, value: u8) {
         // Trace VGA text buffer writes of '%' character to debug vsprintf
         if value == 0x25 && addr >= 0xA0000 && addr < 0xC0000 {
-            tracing::warn!("VGA write 0x25 paddr={:#x} RIP={:#x} CS={:#x} icount={} odd={}",
+            tracing::trace!("VGA write 0x25 paddr={:#x} RIP={:#x} CS={:#x} icount={} odd={}",
                 addr, self.rip(), self.sregs[BxSegregs::Cs as usize].selector.value, self.icount, addr & 1);
         }
         // Prefer Bochs-style host access through the memory system when available.

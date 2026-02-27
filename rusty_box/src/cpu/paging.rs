@@ -183,7 +183,34 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Check for 4MB page (PSE bit in PDE, only if CR4.PSE enabled)
         if (entry[BX_LEVEL_PDE] & 0x80) != 0 && self.cr4.pse() {
-            // 4MB page
+            // 4MB page — permission check using combined access from PDE only
+            let combined = entry[BX_LEVEL_PDE] & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+            let is_write = matches!(rw, MemoryAccessType::Write);
+            let priv_index = ((self.cr0.wp() as u32) << 4)
+                | ((user as u32) << 3)
+                | combined
+                | (is_write as u32);
+            if PRIV_CHECK[priv_index as usize] == 0 {
+                tracing::debug!(
+                    "4MB page protection violation: laddr={:#x}, priv_index={}",
+                    laddr,
+                    priv_index
+                );
+                return Err(super::CpuError::Memory(
+                    crate::memory::MemoryError::PageProtectionViolation,
+                ));
+            }
+            // Set Accessed + Dirty bits on PDE (PDE is the leaf for 4MB pages)
+            let needed = 0x20 | if is_write { 0x40 } else { 0 };
+            if entry[BX_LEVEL_PDE] & needed != needed {
+                entry[BX_LEVEL_PDE] |= needed;
+                self.write_physical_dword(
+                    entry_addr[BX_LEVEL_PDE],
+                    entry[BX_LEVEL_PDE],
+                    mem,
+                    page_write_stamp_table,
+                )?;
+            }
             let ppf_4m = (entry[BX_LEVEL_PDE] & 0xFFC00000) as u64;
             let offset = laddr & 0x3FFFFF;
             return Ok(ppf_4m | offset);
@@ -342,6 +369,76 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 }
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    /// Page table walk for system writes (CPL=0).
+    /// Updates Accessed/Dirty bits on PDE/PTE as required by x86 paging.
+    /// Used by system_write_byte/word/dword for TSS, descriptor table writes.
+    /// Based on Bochs access.cc system_write_word/dword which call
+    /// access_write_linear → translate_linear with CPL=0.
+    pub(super) fn translate_linear_system_write(&mut self, laddr: BxAddress) -> Result<BxPhyAddress> {
+        let laddr = laddr & 0xFFFFFFFF; // Mask to 32 bits
+
+        // If paging disabled, linear = physical
+        if !self.cr0.pg() {
+            return Ok(laddr & self.a20_mask);
+        }
+
+        // Legacy 32-bit paging: two-level page table walk
+        let cr3 = self.cr3;
+        let ppf = (cr3 & BX_CR3_PAGING_MASK) as u32;
+
+        // Read PDE
+        let pde_index = ((laddr >> 22) & 0x3FF) as u32;
+        let pde_addr = ppf as u64 + (pde_index * 4) as u64;
+        let pde = self.mem_read_dword(pde_addr);
+
+        if (pde & 0x1) == 0 {
+            tracing::debug!("system_write page walk: PDE not present at {:#x}, laddr={:#x}", pde_addr, laddr);
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageNotPresent,
+            ));
+        }
+
+        // Check for 4MB page (PSE)
+        if (pde & 0x80) != 0 && self.cr4.pse() {
+            // Set Accessed + Dirty bits on PDE for 4MB page
+            let needed = 0x20 | 0x40; // A + D for write
+            if pde & needed != needed {
+                self.mem_write_dword(pde_addr, pde | needed);
+            }
+            let ppf_4m = (pde & 0xFFC00000) as u64;
+            let offset = laddr & 0x3FFFFF;
+            return Ok((ppf_4m | offset) & self.a20_mask);
+        }
+
+        // Read PTE
+        let pt_base = (pde & 0xFFFFF000) as u64;
+        let pte_index = ((laddr >> 12) & 0x3FF) as u32;
+        let pte_addr = pt_base + (pte_index * 4) as u64;
+        let pte = self.mem_read_dword(pte_addr);
+
+        if (pte & 0x1) == 0 {
+            tracing::debug!("system_write page walk: PTE not present at {:#x}, laddr={:#x}", pte_addr, laddr);
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageNotPresent,
+            ));
+        }
+
+        // Set Accessed bit on PDE if needed
+        if pde & 0x20 == 0 {
+            self.mem_write_dword(pde_addr, pde | 0x20);
+        }
+
+        // Set Accessed + Dirty bits on PTE for write
+        let pte_needed = 0x20 | 0x40; // A + D
+        if pte & pte_needed != pte_needed {
+            self.mem_write_dword(pte_addr, pte | pte_needed);
+        }
+
+        let page_base = (pte & 0xFFFFF000) as u64;
+        let offset = laddr & 0xFFF;
+        Ok((page_base | offset) & self.a20_mask)
+    }
+
     /// Lightweight page table walk for system reads (CPL=0, read-only).
     /// Uses mem_read_dword (reads from physical memory via mem_ptr).
     /// Does NOT update accessed/dirty bits or go through TLB.

@@ -1637,7 +1637,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     crate::cpu::icache::IcacheAddress::Address(a) => a as i64,
                     _ => -1i64,
                 };
-                tracing::warn!("ICACHE-MISS: p_addr={:#x}, hash={}, existing_paddr={}, ilen={}",
+                tracing::trace!("ICACHE-MISS: p_addr={:#x}, hash={}, existing_paddr={}, ilen={}",
                     p_addr, hash_idx, existing_paddr_val, existing.i.meta_info.ilen);
             }
             // iCache miss. Call serve_icache_miss

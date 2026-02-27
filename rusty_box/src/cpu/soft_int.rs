@@ -457,7 +457,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         // Log INT 15h calls (memory detection) — AH=88h returns extended memory in AX
         if vector == 0x15 {
-            tracing::warn!(
+            tracing::debug!(
                 "INT 15h: AH={:#04x} AX={:#06x} → handler at {:04x}:{:04x}, caller was {:04x}:{:04x}",
                 self.ah(), self.ax(), new_cs, new_ip, cs, ip
             );

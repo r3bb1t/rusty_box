@@ -504,24 +504,18 @@ fn run_dlxlinux() -> Result<()> {
         println!("===== VGA TEXT DUMP (headless) =====");
         println!("{}", emu.vga_text_dump());
 
-        println!();
-        println!("===== VGA WRITE PROBE (headless) =====");
-        println!("{}", emu.vga_probe_dump());
-
-        // BIOS POST codes are non-ASCII; print as hex so we can see progress.
+        // BIOS POST codes: show count and last 32 bytes only
         let post = emu.devices.take_port80_output();
         if !post.is_empty() {
-            print!("===== BIOS POST CODES (port 0x80/0x84) =====\n");
-            for (i, b) in post.iter().enumerate() {
+            print!("===== BIOS POST CODES (port 0x80/0x84): {} total =====\n", post.len());
+            let start = post.len().saturating_sub(32);
+            for (i, b) in post[start..].iter().enumerate() {
                 if i != 0 && (i % 16) == 0 {
                     print!("\n");
                 }
                 print!("{:02x} ", b);
             }
             print!("\n");
-        } else {
-            println!("===== BIOS POST CODES (port 0x80/0x84) =====");
-            println!("<none captured>");
         }
     }
 

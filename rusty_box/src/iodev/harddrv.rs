@@ -289,7 +289,7 @@ impl AtaDrive {
         file.read_exact(&mut self.controller.buffer[..bytes_to_read])
             .map_err(|e| format!("Read failed: {}", e))?;
         
-        tracing::warn!("ATA: Read {} sectors from LBA {} ({} bytes), first8=[{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}]",
+        tracing::debug!("ATA: Read {} sectors from LBA {} ({} bytes), first8=[{:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}]",
             count, lba, bytes_to_read,
             self.controller.buffer[0], self.controller.buffer[1],
             self.controller.buffer[2], self.controller.buffer[3],

@@ -16,7 +16,7 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-02-27):**
+**Current Status (2026-02-28):**
 - ✅ BIOS-bochs-latest (128 KB) is now the primary BIOS
 - ✅ Full BIOS POST completes: rombios32_init, VGA BIOS, ATA detection, boot
 - ✅ VGA text output working! Clean headless text dump:
@@ -30,7 +30,10 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
   ```
 - ✅ LILO boot loader runs, loads compressed Linux kernel
 - ✅ Kernel decompresses and starts executing (paging enabled, CR0=0x80000013)
-- ✅ Kernel runs ~200M instructions (timer interrupts, task switching, module loading)
+- ✅ Kernel runs ~219M instructions (timer interrupts, task switching, module loading)
+- ✅ Paging: system_write_byte/word/dword now translate linear→physical via page walk (Bug 1 fix)
+- ✅ Paging: user_pl updated in load_cs() — CPL=3 pages now properly permission-checked (Bug 2 fix)
+- ✅ Paging: 4MB PSE pages in translate_linear_legacy get permission checks + A/D bit updates (Bug 3 fix)
 - ✅ Paging translation: all 32-bit string ops use read/write_virtual_byte/word/dword
 - ✅ Segment limit checks in virtual memory access functions
 - ✅ Protected mode: segment loading, descriptor parsing, privilege checks
@@ -55,8 +58,13 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 - ✅ Enhanced RDMSR/WRMSR: actual MSR field storage (sysenter, PAT, MTRR)
 - ✅ handleCpuModeChange: updates cpu_mode from CR0.PE + EFLAGS.VM
 - ✅ Zero compiler warnings (crate-level allows for Bochs naming conventions and dead code)
-- 🔄 Triple fault at ~190-219M (timing-dependent): LDT selector 0x6047, index 3080 > limit 7
-  - Different from old GDT[2] bug (which is now fixed). #GP cascade → double → triple fault
+- ✅ Paging: system_write_byte/word/dword translate linear→physical via page walk with A/D bits
+- ✅ Paging: user_pl tracks CPL==3 in load_cs() — user-mode page permissions now enforced
+- ✅ Paging: 4MB PSE path in translate_linear_legacy has full permission checks + A/D updates
+- ✅ Fixed handle_alignment_check: reads CPL from CS.selector.rpl instead of CL register
+- ✅ Clean output: diagnostic warn!/error! downgraded to debug!/trace! (~925 → 7 messages)
+- 🔄 Triple fault at ~219M: GDT entry 2 (CS=0x10) corrupted — raw=0x62aa6010_0x6008ffff
+  - #PF delivery fails → #GP → double fault → #GP → triple fault at RIP=0x106029
 - 🔄 vsprintf broken: Linux kernel shows "Memory: %uk/%uk available" (raw format specifiers)
 - 🔄 "Trying to free nonexistent swap-page" repeated — kernel swap init loop
 
@@ -261,7 +269,12 @@ RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=1000000 ./target/release/examples/dlxlinux
 - ✅ Enhanced RDMSR/WRMSR with actual MSR fields (sysenter CS/ESP/EIP, PAT, MTRR)
 - ✅ handleCpuModeChange: cpu_mode updated from CR0.PE + EFLAGS.VM
 - ✅ Zero compiler warnings (crate-level allows for intentional Bochs naming + dead code)
-- 🔄 Triple fault at ~190-219M (timing-dependent): LDT selector 0x6047 cascade — different from old GDT bug
+- ✅ Paging: system_write_byte/word/dword translate via page walk (was bypassing paging entirely)
+- ✅ Paging: user_pl updated in load_cs() (was always false — no user-mode page protection)
+- ✅ Paging: 4MB PSE path permission checks + A/D bit updates (was skipping both)
+- ✅ handle_alignment_check: CPL from CS.selector.rpl not CL register
+- ✅ Clean output: diagnostic prints downgraded from warn!/error! to debug!/trace!
+- 🔄 Triple fault at ~219M: GDT[2] (CS=0x10) corrupted → #PF/#GP cascade
 - 🔄 vsprintf broken: "Memory: %uk/%uk" shows raw format specs — vsprintf internals issue
 - 🔄 "Trying to free nonexistent swap-page" — kernel swap pool init loop
 
@@ -520,7 +533,11 @@ Exception handling infrastructure exists (Exception enum, IVT delivery in real m
 
 ### Major Bug Fixes (Historical)
 
-1. **REP string prefix fix (2026-02-24)**: REP LODSB/STOSB/MOVSB/etc. always looped CX times even without REP prefix. Non-REP forms should execute once. Caused ~1000x slowdown when VGA BIOS executed single-iteration string ops.
+1. **Paging: system_write bypass fix (2026-02-28)**: `system_write_byte/word/dword` passed linear addresses directly to `mem_write_*`, bypassing paging. TSS writes, descriptor access-bit updates, and GDT/LDT writes went to wrong physical addresses when paging was enabled. Added `translate_linear_system_write()` with full page walk and A/D bit updates.
+2. **Paging: user_pl never updated (2026-02-28)**: `user_pl` was initialized to `false` and never assigned. All paging permission checks treated accesses as supervisor-level, meaning CPL=3 code could read/write kernel pages. Fixed by setting `self.user_pl = (cpl == 3)` in `load_cs()`.
+3. **Paging: 4MB PSE permission skip (2026-02-28)**: `translate_linear_legacy` 4MB page path returned immediately without permission checks or A/D bit updates. Added PRIV_CHECK + A/D update matching the 4KB path.
+4. **handle_alignment_check CPL (2026-02-28)**: Used `self.cl()` (CL register) instead of `self.sregs[CS].selector.rpl` for CPL check.
+5. **REP string prefix fix (2026-02-24)**: REP LODSB/STOSB/MOVSB/etc. always looped CX times even without REP prefix. Non-REP forms should execute once. Caused ~1000x slowdown when VGA BIOS executed single-iteration string ops.
 2. **#DE exception delivery fix (2026-02-24)**: DIV/IDIV handlers in mult8/16/32.rs returned `Err(BadVector)` which terminated the CPU loop. Changed to `self.exception(Exception::De, 0)` for proper IVT delivery.
 3. **SCAS/CMPS REPE/REPNE semantics (2026-02-24)**: Added ZF-based loop termination for REPE (break if ZF=0) and REPNE (break if ZF=1) string compare/scan ops.
 4. **INS/OUTS string I/O (2026-02-24)**: Implemented INSB/INSW/INSD and OUTSB/OUTSW/OUTSD with REP variants for ATA PIO disk access.

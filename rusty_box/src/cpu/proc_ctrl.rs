@@ -37,7 +37,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     fn handle_alignment_check(&mut self) {
-        if self.cl() == 3 && self.cr0.am() && self.get_ac() != 0 {
+        if self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl == 3 && self.cr0.am() && self.get_ac() != 0 {
             self.alignment_check_mask = 0xf;
         } else {
             self.alignment_check_mask = 0;
