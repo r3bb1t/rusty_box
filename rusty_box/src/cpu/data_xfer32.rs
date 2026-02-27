@@ -185,7 +185,7 @@ pub fn MOV_EAXOd<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let seg = unsafe { core::mem::transmute::<u8, crate::cpu::decoder::BxSegregs>(instr.seg()) };
+    let seg = crate::cpu::decoder::BxSegregs::from(instr.seg());
     let offset = instr.id();
     let value = cpu.read_virtual_dword(seg, offset)?;
     cpu.set_eax(value);
@@ -201,7 +201,7 @@ pub fn MOV_OdEAX<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let seg = unsafe { core::mem::transmute::<u8, crate::cpu::decoder::BxSegregs>(instr.seg()) };
+    let seg = crate::cpu::decoder::BxSegregs::from(instr.seg());
     let offset = instr.id();
     let eax_val = cpu.eax();
     cpu.write_virtual_dword(seg, offset, eax_val)?;

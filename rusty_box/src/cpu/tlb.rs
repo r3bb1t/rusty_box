@@ -138,7 +138,7 @@ impl<const SIZE: usize> Tlb<SIZE> {
 
     /// Get a mutable reference to the matching entry
     #[inline]
-    pub fn get_entry_of(&mut self, lpf: u64, len: u32) -> &mut TLBEntry {
+    pub(super) fn get_entry_of(&mut self, lpf: u64, len: u32) -> &mut TLBEntry {
         let i = self.get_index_of(lpf, len);
         &mut self.entries[i]
     }
@@ -165,7 +165,7 @@ impl<const SIZE: usize> Tlb<SIZE> {
             }
         }
         // If any large‐page mask bit remains, we keep split_large = true
-        self.split_large = (lpf_mask_accum > 0xFFF);
+        self.split_large = lpf_mask_accum > 0xFFF ;
     }
 
     /// Invalidate a single page (INVLPG)

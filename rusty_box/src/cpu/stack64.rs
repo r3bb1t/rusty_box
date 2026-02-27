@@ -7,6 +7,7 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{Instruction, BxSegregs},
+    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -103,7 +104,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// PUSHFQ - Push flags (64-bit)
     pub fn pushf_fq(&mut self, _instr: &Instruction) {
         // VM & RF flags cleared in image stored on the stack
-        let flags = (self.eflags & 0x00FCFFFF) as u64;
+        let flags = (self.eflags.bits() & 0x00FCFFFF) as u64;
         self.push_64(flags);
         tracing::trace!("PUSHFQ: {:#018x}", flags);
     }
@@ -116,7 +117,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // VM, VIP, VIF are unaffected
         const CHANGE_MASK: u32 = 0x00244FD5;
 
-        self.eflags = (self.eflags & !CHANGE_MASK) | ((flags as u32) & CHANGE_MASK);
+        self.eflags = EFlags::from_bits_retain((self.eflags.bits() & !CHANGE_MASK) | ((flags as u32) & CHANGE_MASK));
         tracing::trace!("POPFQ: {:#018x}", flags);
     }
 }

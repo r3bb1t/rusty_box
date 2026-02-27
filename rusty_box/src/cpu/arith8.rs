@@ -3,7 +3,7 @@
 
 use crate::cpu::decoder::{Instruction, BxSegregs};
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
-use crate::config::BxAddress;
+use crate::cpu::eflags::EFlags;
 
 // Helper methods are defined in logical8.rs and data_xfer_ext.rs
 // Free functions below use cpu.resolve_addr32(), cpu.read_8bit_regx(), etc.
@@ -14,7 +14,7 @@ use crate::config::BxAddress;
 /// Matches BX_CPU_C::ADD_EbGbM
 pub fn ADD_EbGbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let (op1, laddr) = cpu.read_rmw_virtual_byte(seg, eaddr)?;
     let op2 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l()); // reg field = source for store-direction
     let sum = op1.wrapping_add(op2);
@@ -32,10 +32,10 @@ pub fn ADD_GbEbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructi
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
     let op2 = cpu.read_8bit_regx(instr.src1() as usize, instr.extend8bit_l());
     let sum = op1.wrapping_add(op2);
-    
+
     cpu.write_8bit_regx(instr.dst() as usize, instr.extend8bit_l(), sum);
     cpu.update_flags_add8(op1, op2, sum);
-    
+
     Ok(())
 }
 
@@ -44,14 +44,14 @@ pub fn ADD_GbEbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructi
 /// Matches BX_CPU_C::ADD_GbEbM
 pub fn ADD_GbEbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
     let op2 = cpu.read_virtual_byte(seg, eaddr)?;
     let sum = op1.wrapping_add(op2);
-    
+
     cpu.write_8bit_regx(instr.dst() as usize, instr.extend8bit_l(), sum);
     cpu.update_flags_add8(op1, op2, sum);
-    
+
     Ok(())
 }
 
@@ -92,7 +92,7 @@ pub fn ADD_GbEb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructio
 /// Matches BX_CPU_C::SUB_EbGbM
 pub fn SUB_EbGbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let (op1, laddr) = cpu.read_rmw_virtual_byte(seg, eaddr)?;
     let op2 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l()); // reg field = source for store-direction
     let diff = op1.wrapping_sub(op2);
@@ -122,7 +122,7 @@ pub fn SUB_GbEbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructi
 /// Matches BX_CPU_C::SUB_GbEbM
 pub fn SUB_GbEbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
     let op2 = cpu.read_virtual_byte(seg, eaddr)?;
     let diff = op1.wrapping_sub(op2);
@@ -170,7 +170,7 @@ pub fn SUB_GbEb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructio
 /// Matches BX_CPU_C::AND_EbGbM
 pub fn AND_EbGbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let (op1, laddr) = cpu.read_rmw_virtual_byte(seg, eaddr)?;
     let op2 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l()); // reg field = source
     let result = op1 & op2;
@@ -180,12 +180,12 @@ pub fn AND_EbGbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructi
     let sf = (result & 0x80) != 0;
     let zf = result == 0;
     let pf = result.count_ones() % 2 == 0;
-    const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 6) | (1 << 7) | (1 << 11);
-    cpu.eflags &= !MASK;
-    if pf { cpu.eflags |= 1 << 2; }
-    if zf { cpu.eflags |= 1 << 6; }
-    if sf { cpu.eflags |= 1 << 7; }
-    
+    const MASK: EFlags = EFlags::CF.union(EFlags::PF).union(EFlags::ZF).union(EFlags::SF).union(EFlags::OF);
+    cpu.eflags.remove(MASK);
+    if pf { cpu.eflags.insert(EFlags::PF); }
+    if zf { cpu.eflags.insert(EFlags::ZF); }
+    if sf { cpu.eflags.insert(EFlags::SF); }
+
     Ok(())
 }
 
@@ -196,18 +196,18 @@ pub fn AND_GbEbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructi
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
     let op2 = cpu.read_8bit_regx(instr.src1() as usize, instr.extend8bit_l());
     let result = op1 & op2;
-    
+
     cpu.write_8bit_regx(instr.dst() as usize, instr.extend8bit_l(), result);
     // Update flags for logical operation (AND)
     let sf = (result & 0x80) != 0;
     let zf = result == 0;
     let pf = result.count_ones() % 2 == 0;
-    const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 6) | (1 << 7) | (1 << 11);
-    cpu.eflags &= !MASK;
-    if pf { cpu.eflags |= 1 << 2; }
-    if zf { cpu.eflags |= 1 << 6; }
-    if sf { cpu.eflags |= 1 << 7; }
-    
+    const MASK: EFlags = EFlags::CF.union(EFlags::PF).union(EFlags::ZF).union(EFlags::SF).union(EFlags::OF);
+    cpu.eflags.remove(MASK);
+    if pf { cpu.eflags.insert(EFlags::PF); }
+    if zf { cpu.eflags.insert(EFlags::ZF); }
+    if sf { cpu.eflags.insert(EFlags::SF); }
+
     Ok(())
 }
 
@@ -226,12 +226,12 @@ pub fn AND_EbGb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructio
         let sf = (result & 0x80) != 0;
         let zf = result == 0;
         let pf = result.count_ones() % 2 == 0;
-        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 6) | (1 << 7) | (1 << 11);
-        cpu.eflags &= !MASK;
-        if pf { cpu.eflags |= 1 << 2; }
-        if zf { cpu.eflags |= 1 << 6; }
-        if sf { cpu.eflags |= 1 << 7; }
-        
+        const MASK: EFlags = EFlags::CF.union(EFlags::PF).union(EFlags::ZF).union(EFlags::SF).union(EFlags::OF);
+        cpu.eflags.remove(MASK);
+        if pf { cpu.eflags.insert(EFlags::PF); }
+        if zf { cpu.eflags.insert(EFlags::ZF); }
+        if sf { cpu.eflags.insert(EFlags::SF); }
+
         Ok(())
     } else {
         // Memory form
@@ -244,7 +244,7 @@ pub fn AND_EbGb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructio
 /// Matches BX_CPU_C::ADC_EbGbM
 pub fn ADC_EbGbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let (op1, laddr) = cpu.read_rmw_virtual_byte(seg, eaddr)?;
     let op2 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l()); // reg field = source
     let cf = cpu.get_cf() as u8;
@@ -264,10 +264,10 @@ pub fn ADC_GbEbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructi
     let op2 = cpu.read_8bit_regx(instr.src1() as usize, instr.extend8bit_l());
     let cf = cpu.get_cf() as u8;
     let sum = op1.wrapping_add(op2).wrapping_add(cf);
-    
+
     cpu.write_8bit_regx(instr.dst() as usize, instr.extend8bit_l(), sum);
     cpu.update_flags_add8(op1, op2, sum);
-    
+
     Ok(())
 }
 
@@ -297,7 +297,7 @@ pub fn ADC_EbGb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructio
 /// Matches BX_CPU_C::ADC_GbEbM
 pub fn ADC_GbEbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
     let op2 = cpu.read_virtual_byte(seg, eaddr)?;
     let cf = cpu.get_cf() as u8;
@@ -326,17 +326,17 @@ pub fn ADD_EbIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructi
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
     let op2 = instr.ib();
     let sum = op1.wrapping_add(op2);
-    
+
     cpu.write_8bit_regx(instr.dst() as usize, instr.extend8bit_l(), sum);
     cpu.update_flags_add8(op1, op2, sum);
-    
+
     Ok(())
 }
 
 /// ADD_EbIbM: ADD r/m8, imm8 (memory form)
 pub fn ADD_EbIbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let (op1, laddr) = cpu.read_rmw_virtual_byte(seg, eaddr)?;
     let op2 = instr.ib();
     let sum = op1.wrapping_add(op2);
@@ -363,7 +363,7 @@ pub fn SUB_EbIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructi
 /// SUB_EbIbM: SUB r/m8, imm8 (memory form)
 pub fn SUB_EbIbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let (op1, laddr) = cpu.read_rmw_virtual_byte(seg, eaddr)?;
     let op2 = instr.ib();
     let diff = op1.wrapping_sub(op2);
@@ -391,7 +391,7 @@ pub fn ADC_EbIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructi
 /// ADC_EbIbM: ADC r/m8, imm8 (memory form)
 pub fn ADC_EbIbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let (op1, laddr) = cpu.read_rmw_virtual_byte(seg, eaddr)?;
     let op2 = instr.ib();
     let cf = cpu.get_cf() as u8;
@@ -420,7 +420,7 @@ pub fn SBB_EbIbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructi
 /// SBB_EbIbM: SBB r/m8, imm8 (memory form)
 pub fn SBB_EbIbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let (op1, laddr) = cpu.read_rmw_virtual_byte(seg, eaddr)?;
     let op2 = instr.ib();
     let cf = cpu.get_cf() as u8;
@@ -438,7 +438,7 @@ pub fn SBB_EbIb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructio
 /// SBB_EbGbM: SBB r/m8, r8 (memory form)
 pub fn SBB_EbGbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let (op1, laddr) = cpu.read_rmw_virtual_byte(seg, eaddr)?;
     let op2 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
     let cf = cpu.get_cf() as u8;
@@ -477,7 +477,7 @@ pub fn SBB_GbEbR<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instructi
 /// SBB_GbEbM: SBB r8, r/m8 (memory form)
 pub fn SBB_GbEbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
     let op2 = cpu.read_virtual_byte(seg, eaddr)?;
     let cf = cpu.get_cf() as u8;
@@ -510,13 +510,13 @@ pub fn INC_Eb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction)
     let pf = result.count_ones() % 2 == 0;
 
     // Update all flags except CF (bit 0)
-    const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-    cpu.eflags &= !MASK;
-    if pf { cpu.eflags |= 1 << 2; }
-    if af { cpu.eflags |= 1 << 4; }
-    if zf { cpu.eflags |= 1 << 6; }
-    if sf { cpu.eflags |= 1 << 7; }
-    if of { cpu.eflags |= 1 << 11; }
+    const MASK: EFlags = EFlags::PF.union(EFlags::AF).union(EFlags::ZF).union(EFlags::SF).union(EFlags::OF);
+    cpu.eflags.remove(MASK);
+    if pf { cpu.eflags.insert(EFlags::PF); }
+    if af { cpu.eflags.insert(EFlags::AF); }
+    if zf { cpu.eflags.insert(EFlags::ZF); }
+    if sf { cpu.eflags.insert(EFlags::SF); }
+    if of { cpu.eflags.insert(EFlags::OF); }
 
     Ok(())
 }
@@ -538,13 +538,13 @@ pub fn DEC_Eb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction)
     let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
     let pf = result.count_ones() % 2 == 0;
 
-    const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-    cpu.eflags &= !MASK;
-    if pf { cpu.eflags |= 1 << 2; }
-    if af { cpu.eflags |= 1 << 4; }
-    if zf { cpu.eflags |= 1 << 6; }
-    if sf { cpu.eflags |= 1 << 7; }
-    if of { cpu.eflags |= 1 << 11; }
+    const MASK: EFlags = EFlags::PF.union(EFlags::AF).union(EFlags::ZF).union(EFlags::SF).union(EFlags::OF);
+    cpu.eflags.remove(MASK);
+    if pf { cpu.eflags.insert(EFlags::PF); }
+    if af { cpu.eflags.insert(EFlags::AF); }
+    if zf { cpu.eflags.insert(EFlags::ZF); }
+    if sf { cpu.eflags.insert(EFlags::SF); }
+    if of { cpu.eflags.insert(EFlags::OF); }
 
     Ok(())
 }
@@ -552,7 +552,7 @@ pub fn DEC_Eb<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction)
 /// INC_EbM: INC r/m8 (memory form) — matches Bochs INC_EbM
 pub fn INC_EbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let (op1, laddr) = cpu.read_rmw_virtual_byte(seg, eaddr)?;
     let result = op1.wrapping_add(1);
     cpu.write_rmw_linear_byte(laddr, result);
@@ -563,13 +563,13 @@ pub fn INC_EbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction
     let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
     let pf = result.count_ones() % 2 == 0;
 
-    const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-    cpu.eflags &= !MASK;
-    if pf { cpu.eflags |= 1 << 2; }
-    if af { cpu.eflags |= 1 << 4; }
-    if zf { cpu.eflags |= 1 << 6; }
-    if sf { cpu.eflags |= 1 << 7; }
-    if of { cpu.eflags |= 1 << 11; }
+    const MASK: EFlags = EFlags::PF.union(EFlags::AF).union(EFlags::ZF).union(EFlags::SF).union(EFlags::OF);
+    cpu.eflags.remove(MASK);
+    if pf { cpu.eflags.insert(EFlags::PF); }
+    if af { cpu.eflags.insert(EFlags::AF); }
+    if zf { cpu.eflags.insert(EFlags::ZF); }
+    if sf { cpu.eflags.insert(EFlags::SF); }
+    if of { cpu.eflags.insert(EFlags::OF); }
 
     Ok(())
 }
@@ -577,7 +577,7 @@ pub fn INC_EbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction
 /// DEC_EbM: DEC r/m8 (memory form) — matches Bochs DEC_EbM
 pub fn DEC_EbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
     let eaddr = cpu.resolve_addr32(instr);
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let (op1, laddr) = cpu.read_rmw_virtual_byte(seg, eaddr)?;
     let result = op1.wrapping_sub(1);
     cpu.write_rmw_linear_byte(laddr, result);
@@ -588,13 +588,13 @@ pub fn DEC_EbM<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction
     let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
     let pf = result.count_ones() % 2 == 0;
 
-    const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-    cpu.eflags &= !MASK;
-    if pf { cpu.eflags |= 1 << 2; }
-    if af { cpu.eflags |= 1 << 4; }
-    if zf { cpu.eflags |= 1 << 6; }
-    if sf { cpu.eflags |= 1 << 7; }
-    if of { cpu.eflags |= 1 << 11; }
+    const MASK: EFlags = EFlags::PF.union(EFlags::AF).union(EFlags::ZF).union(EFlags::SF).union(EFlags::OF);
+    cpu.eflags.remove(MASK);
+    if pf { cpu.eflags.insert(EFlags::PF); }
+    if af { cpu.eflags.insert(EFlags::AF); }
+    if zf { cpu.eflags.insert(EFlags::ZF); }
+    if sf { cpu.eflags.insert(EFlags::SF); }
+    if of { cpu.eflags.insert(EFlags::OF); }
 
     Ok(())
 }

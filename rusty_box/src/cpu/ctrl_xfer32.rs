@@ -6,6 +6,7 @@ use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
     decoder::{Instruction, BxSegregs},
+    eflags::EFlags,
     error::{CpuError, Result},
     segment_ctrl_pro::parse_selector,
 };
@@ -46,32 +47,32 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Get Carry Flag
     pub fn get_cf(&self) -> bool {
-        (self.eflags & (1 << 0)) != 0
+        self.eflags.contains(EFlags::CF)
     }
 
     /// Get Zero Flag
     pub fn get_zf(&self) -> bool {
-        (self.eflags & (1 << 6)) != 0
+        self.eflags.contains(EFlags::ZF)
     }
 
     /// Get Sign Flag
     pub fn get_sf(&self) -> bool {
-        (self.eflags & (1 << 7)) != 0
+        self.eflags.contains(EFlags::SF)
     }
 
     /// Get Overflow Flag
     pub fn get_of(&self) -> bool {
-        (self.eflags & (1 << 11)) != 0
+        self.eflags.contains(EFlags::OF)
     }
 
     /// Get Parity Flag
     pub fn get_pf(&self) -> bool {
-        (self.eflags & (1 << 2)) != 0
+        self.eflags.contains(EFlags::PF)
     }
 
     /// Get Auxiliary Flag (not directly used in conditionals, but useful)
     pub fn get_af(&self) -> bool {
-        (self.eflags & (1 << 4)) != 0
+        self.eflags.contains(EFlags::AF)
     }
 
     // =========================================================================
@@ -487,7 +488,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Far jump 32-bit (matching C++ jmp_far32)
     /// Called by JMP32_Ap and JMP32_Ep
-    pub(super) fn jmp_far32(&mut self, instr: &Instruction, cs_raw: u16, disp32: u32) -> Result<()> {
+    pub(super) fn jmp_far32(&mut self, _instr: &Instruction, cs_raw: u16, disp32: u32) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
@@ -514,16 +515,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Far call 32-bit (matching C++ call_far32)
     /// Called by CALL32_Ap and CALL32_Ep
-    fn call_far32(&mut self, instr: &Instruction, cs_raw: u16, disp32: u32) -> Result<()> {
+    fn call_far32(&mut self, _instr: &Instruction, cs_raw: u16, disp32: u32) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
         if !self.real_mode() {
-            // TODO: Implement call_protected for protected mode
-            return Err(CpuError::UnimplementedOpcode {
-                opcode: "call_far32 protected mode".to_string(),
-            });
+            return self.call_protected(cs_raw, disp32, true);
         } else {
             // Real mode
             let limit = self.get_segment_limit(BxSegregs::Cs);
@@ -611,10 +609,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.eip_page_window_size = 0;
 
         if !self.real_mode() {
-            // TODO: Implement return_protected for protected mode
-            return Err(CpuError::UnimplementedOpcode {
-                opcode: "retfar32 protected mode".to_string(),
-            });
+            return self.return_protected(0, true);
         } else {
             // Real mode - pop EIP and CS (32-bit pop, MSW discarded for CS)
             let eip = self.pop_32()?;
@@ -646,10 +641,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let imm16 = instr.iw() as i16;
 
         if !self.real_mode() {
-            // TODO: Implement return_protected for protected mode
-            return Err(CpuError::UnimplementedOpcode {
-                opcode: "retfar32_iw protected mode".to_string(),
-            });
+            return self.return_protected(imm16 as u16, true);
         } else {
             // Real mode - pop EIP and CS (32-bit pop, MSW discarded for CS)
             let eip = self.pop_32()?;

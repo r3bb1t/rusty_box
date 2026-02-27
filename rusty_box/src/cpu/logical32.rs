@@ -6,6 +6,7 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{Instruction, BxSegregs},
+    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -18,13 +19,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let sf = (result & 0x80000000) != 0;
         let zf = result == 0;
         let pf = (result as u8).count_ones() % 2 == 0;
-        
-        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
-        
-        if pf { self.eflags |= 1 << 2; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
+
+        self.eflags.remove(EFlags::LOGIC_MASK);
+
+        if pf { self.eflags.insert(EFlags::PF); }
+        if zf { self.eflags.insert(EFlags::ZF); }
+        if sf { self.eflags.insert(EFlags::SF); }
     }
 
     /// Update flags for 32-bit subtraction
@@ -35,16 +35,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let of = ((op1 ^ op2) & (op1 ^ result) & 0x80000000) != 0;
         let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
         let pf = (result as u8).count_ones() % 2 == 0;
-        
-        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
-        
-        if cf { self.eflags |= 1 << 0; }
-        if pf { self.eflags |= 1 << 2; }
-        if af { self.eflags |= 1 << 4; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
-        if of { self.eflags |= 1 << 11; }
+
+        self.eflags.remove(EFlags::OSZAPC);
+
+        if cf { self.eflags.insert(EFlags::CF); }
+        if pf { self.eflags.insert(EFlags::PF); }
+        if af { self.eflags.insert(EFlags::AF); }
+        if zf { self.eflags.insert(EFlags::ZF); }
+        if sf { self.eflags.insert(EFlags::SF); }
+        if of { self.eflags.insert(EFlags::OF); }
     }
 
     // =========================================================================
@@ -82,9 +81,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_flags_oszapc_sub_32(op1, op2, result);
         // Trace '%' comparisons in kernel space
         if op2 == 0x25 && op1 == 0x25 && self.rip() > 0xC0000000 {
-            let zf = (self.eflags >> 6) & 1;
+            let zf = (self.eflags.bits() >> 6) & 1;
             tracing::warn!("CMP EAX=0x25, Id=0x25 at RIP={:#x} ZF={} eflags={:#x} icount={}",
-                self.rip(), zf, self.eflags, self.icount);
+                self.rip(), zf, self.eflags.bits(), self.icount);
         }
         tracing::trace!("CMP EAX, imm32: {:#010x} - {:#010x}", op1, op2);
     }
@@ -280,21 +279,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.get_gpr32(dst);
         let result = op1.wrapping_add(1);
         self.set_gpr32(dst, result);
-        
+
         let zf = result == 0;
         let sf = (result & 0x80000000) != 0;
         let of = result == 0x80000000;
         let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
         let pf = (result as u8).count_ones() % 2 == 0;
-        
-        const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
-        if pf { self.eflags |= 1 << 2; }
-        if af { self.eflags |= 1 << 4; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
-        if of { self.eflags |= 1 << 11; }
-        
+
+        const OSZAP: EFlags = EFlags::PF.union(EFlags::AF).union(EFlags::ZF).union(EFlags::SF).union(EFlags::OF);
+        self.eflags.remove(OSZAP);
+        if pf { self.eflags.insert(EFlags::PF); }
+        if af { self.eflags.insert(EFlags::AF); }
+        if zf { self.eflags.insert(EFlags::ZF); }
+        if sf { self.eflags.insert(EFlags::SF); }
+        if of { self.eflags.insert(EFlags::OF); }
+
         tracing::trace!("INC r32: {:#010x} + 1 = {:#010x}", op1, result);
     }
 
@@ -311,13 +310,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
         let pf = (result as u8).count_ones() % 2 == 0;
 
-        const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
-        if pf { self.eflags |= 1 << 2; }
-        if af { self.eflags |= 1 << 4; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
-        if of { self.eflags |= 1 << 11; }
+        const OSZAP: EFlags = EFlags::PF.union(EFlags::AF).union(EFlags::ZF).union(EFlags::SF).union(EFlags::OF);
+        self.eflags.remove(OSZAP);
+        if pf { self.eflags.insert(EFlags::PF); }
+        if af { self.eflags.insert(EFlags::AF); }
+        if zf { self.eflags.insert(EFlags::ZF); }
+        if sf { self.eflags.insert(EFlags::SF); }
+        if of { self.eflags.insert(EFlags::OF); }
 
         tracing::trace!("DEC r32: {:#010x} - 1 = {:#010x}", op1, result);
     }
@@ -336,13 +335,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
         let pf = (result as u8).count_ones() % 2 == 0;
 
-        const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
-        if pf { self.eflags |= 1 << 2; }
-        if af { self.eflags |= 1 << 4; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
-        if of { self.eflags |= 1 << 11; }
+        const OSZAP: EFlags = EFlags::PF.union(EFlags::AF).union(EFlags::ZF).union(EFlags::SF).union(EFlags::OF);
+        self.eflags.remove(OSZAP);
+        if pf { self.eflags.insert(EFlags::PF); }
+        if af { self.eflags.insert(EFlags::AF); }
+        if zf { self.eflags.insert(EFlags::ZF); }
+        if sf { self.eflags.insert(EFlags::SF); }
+        if of { self.eflags.insert(EFlags::OF); }
 
         Ok(())
     }
@@ -361,13 +360,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
         let pf = (result as u8).count_ones() % 2 == 0;
 
-        const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
-        if pf { self.eflags |= 1 << 2; }
-        if af { self.eflags |= 1 << 4; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
-        if of { self.eflags |= 1 << 11; }
+        const OSZAP: EFlags = EFlags::PF.union(EFlags::AF).union(EFlags::ZF).union(EFlags::SF).union(EFlags::OF);
+        self.eflags.remove(OSZAP);
+        if pf { self.eflags.insert(EFlags::PF); }
+        if af { self.eflags.insert(EFlags::AF); }
+        if zf { self.eflags.insert(EFlags::ZF); }
+        if sf { self.eflags.insert(EFlags::SF); }
+        if of { self.eflags.insert(EFlags::OF); }
 
         Ok(())
     }
@@ -743,7 +742,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         };
         let bit = (instr.ib() & 0x1F) as u32;
         let cf = (op1 >> bit) & 1;
-        if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; }
+        self.eflags.set(EFlags::CF, cf != 0);
         Ok(())
     }
 
@@ -755,14 +754,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let dst = instr.dst() as usize;
             let op1 = self.get_gpr32(dst);
             let cf = (op1 >> bit) & 1;
-            if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; }
+            self.eflags.set(EFlags::CF, cf != 0);
             self.set_gpr32(dst, op1 | (1 << bit));
         } else {
             let eaddr = self.resolve_addr32(instr);
             let seg = BxSegregs::from(instr.seg());
             let (op1, paddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
             let cf = (op1 >> bit) & 1;
-            if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; }
+            self.eflags.set(EFlags::CF, cf != 0);
             self.write_rmw_linear_dword(paddr, op1 | (1 << bit));
         }
         Ok(())
@@ -776,14 +775,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let dst = instr.dst() as usize;
             let op1 = self.get_gpr32(dst);
             let cf = (op1 >> bit) & 1;
-            if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; }
+            self.eflags.set(EFlags::CF, cf != 0);
             self.set_gpr32(dst, op1 & !(1 << bit));
         } else {
             let eaddr = self.resolve_addr32(instr);
             let seg = BxSegregs::from(instr.seg());
             let (op1, paddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
             let cf = (op1 >> bit) & 1;
-            if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; }
+            self.eflags.set(EFlags::CF, cf != 0);
             self.write_rmw_linear_dword(paddr, op1 & !(1 << bit));
         }
         Ok(())
@@ -797,14 +796,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let dst = instr.dst() as usize;
             let op1 = self.get_gpr32(dst);
             let cf = (op1 >> bit) & 1;
-            if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; }
+            self.eflags.set(EFlags::CF, cf != 0);
             self.set_gpr32(dst, op1 ^ (1 << bit));
         } else {
             let eaddr = self.resolve_addr32(instr);
             let seg = BxSegregs::from(instr.seg());
             let (op1, paddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
             let cf = (op1 >> bit) & 1;
-            if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; }
+            self.eflags.set(EFlags::CF, cf != 0);
             self.write_rmw_linear_dword(paddr, op1 ^ (1 << bit));
         }
         Ok(())
@@ -827,7 +826,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         };
         let bit = op2 & 0x1F;
         let cf = (op1 >> bit) & 1;
-        if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; }
+        self.eflags.set(EFlags::CF, cf != 0);
         Ok(())
     }
 
@@ -838,7 +837,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() {
             let dst = instr.dst() as usize;
             let op1 = self.get_gpr32(dst);
-            { let cf = (op1 >> bit) & 1; if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; } }
+            { let cf = (op1 >> bit) & 1; self.eflags.set(EFlags::CF, cf != 0); }
             self.set_gpr32(dst, op1 | (1 << bit));
         } else {
             let eaddr = self.resolve_addr32(instr);
@@ -846,7 +845,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let addr = (eaddr as i32).wrapping_add(displacement) as u32;
             let seg = BxSegregs::from(instr.seg());
             let (op1, paddr) = self.read_rmw_virtual_dword(seg, addr)?;
-            { let cf = (op1 >> bit) & 1; if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; } }
+            { let cf = (op1 >> bit) & 1; self.eflags.set(EFlags::CF, cf != 0); }
             self.write_rmw_linear_dword(paddr, op1 | (1 << bit));
         }
         Ok(())
@@ -859,7 +858,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() {
             let dst = instr.dst() as usize;
             let op1 = self.get_gpr32(dst);
-            { let cf = (op1 >> bit) & 1; if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; } }
+            { let cf = (op1 >> bit) & 1; self.eflags.set(EFlags::CF, cf != 0); }
             self.set_gpr32(dst, op1 & !(1 << bit));
         } else {
             let eaddr = self.resolve_addr32(instr);
@@ -867,7 +866,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let addr = (eaddr as i32).wrapping_add(displacement) as u32;
             let seg = BxSegregs::from(instr.seg());
             let (op1, paddr) = self.read_rmw_virtual_dword(seg, addr)?;
-            { let cf = (op1 >> bit) & 1; if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; } }
+            { let cf = (op1 >> bit) & 1; self.eflags.set(EFlags::CF, cf != 0); }
             self.write_rmw_linear_dword(paddr, op1 & !(1 << bit));
         }
         Ok(())
@@ -880,7 +879,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() {
             let dst = instr.dst() as usize;
             let op1 = self.get_gpr32(dst);
-            { let cf = (op1 >> bit) & 1; if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; } }
+            { let cf = (op1 >> bit) & 1; self.eflags.set(EFlags::CF, cf != 0); }
             self.set_gpr32(dst, op1 ^ (1 << bit));
         } else {
             let eaddr = self.resolve_addr32(instr);
@@ -888,7 +887,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let addr = (eaddr as i32).wrapping_add(displacement) as u32;
             let seg = BxSegregs::from(instr.seg());
             let (op1, paddr) = self.read_rmw_virtual_dword(seg, addr)?;
-            { let cf = (op1 >> bit) & 1; if cf != 0 { self.eflags |= 1; } else { self.eflags &= !1; } }
+            { let cf = (op1 >> bit) & 1; self.eflags.set(EFlags::CF, cf != 0); }
             self.write_rmw_linear_dword(paddr, op1 ^ (1 << bit));
         }
         Ok(())

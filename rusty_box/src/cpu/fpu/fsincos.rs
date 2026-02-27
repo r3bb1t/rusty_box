@@ -72,14 +72,14 @@ fn argument_reduction_kernel(a_sig0: u64, exp: i32, z_sig0: &mut u64, z_sig1: &m
     // shortShift128Left(aSig1=0, aSig0, Exp, &aSig1, &aSig0)
     let (hi, lo) = short_shift_left128(0, a_sig0_local, exp as u8);
     a_sig1 = hi;
-    let mut a_sig0_shifted = lo;
+    let a_sig0_shifted = lo;
 
     let q = estimate_div_128_to_64(a_sig1, a_sig0_shifted, FLOAT_PI_HI);
     let (term0, term1, mut term2) = mul128_by_64_to_192(FLOAT_PI_HI, FLOAT_PI_LO, q);
     let (mut r1, mut r0) = sub128(a_sig1, a_sig0_shifted, term0, term1);
 
     while (r1 as i64) < 0 {
-        let q_adj = q.wrapping_sub(1);
+        let _q_adj = q.wrapping_sub(1);
         let (n1, n0, nt2) = add192(r1, r0, term2, 0, FLOAT_PI_HI, FLOAT_PI_LO);
         r1 = n1;
         r0 = n0;
@@ -146,7 +146,7 @@ fn sincos_approximation(neg: bool, r: Float128, quotient: u64, status: &mut Soft
         result = poly_sin(r, status);
     }
 
-    let mut ext = f128_to_extf80(result, status);
+    let ext = f128_to_extf80(result, status);
     if (quotient & 2) != 0 {
         neg = !neg;
     }

@@ -5,13 +5,13 @@ use super::Result;
 use crate::{
     cpu::{
         apic::BX_LAPIC_BASE_ADDR,
-        avx::amx::AMX,
         cpu::{CpuActivityState, CpuMode},
         decoder::{features::X86Feature, BxSegregs, BX_GENERAL_REGISTERS, BX_NIL_REGISTER},
         descriptor::{
             BxDataAndCodeDescriptorEnum, SystemAndGateDescriptorEnum, SEG_ACCESS_ROK,
             SEG_ACCESS_WOK, SEG_VALID_CACHE,
         },
+        eflags::EFlags,
         segment_ctrl_pro::parse_selector,
         svm::VmcbCache,
         vmcs::BX_INVALID_VMCSPTR,
@@ -92,9 +92,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub fn reset(&mut self, source: ResetReason) {
         match source {
-            ResetReason::Software => info!("cpu hardware reset"),
-            ResetReason::Hardware => info!("cpu software reset"),
-            _ => info!("cpu reset"),
+            ResetReason::Software => info!("cpu software reset"),
+            ResetReason::Hardware => info!("cpu hardware reset"),
         }
 
         for i in 0..BX_GENERAL_REGISTERS {
@@ -111,7 +110,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.gen_reg[4].rrx = 0x7000; // RSP/ESP/SP
         tracing::info!("CPU reset: Initialized SP to {:#x}", unsafe { self.gen_reg[4].rrx });
 
-        self.eflags = 0x2; // Bit1 is always set
+        self.eflags = EFlags::from_bits_retain(0x2); // Bit1 is always set
 
         // clearEFlagsOSZAPC();
         if source == ResetReason::Hardware {

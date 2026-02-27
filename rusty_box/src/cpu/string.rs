@@ -13,6 +13,7 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{Instruction, BxSegregs},
+    eflags::EFlags,
 };
 
 use crate::{
@@ -28,7 +29,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Returns true if direction flag is set (decrement mode)
     #[inline]
     pub(super) fn get_df(&self) -> bool {
-        (self.eflags & (1 << 10)) != 0
+        self.eflags.contains(EFlags::DF)
     }
 
     // =========================================================================

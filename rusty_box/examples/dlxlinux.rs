@@ -422,13 +422,13 @@ fn run_dlxlinux() -> Result<()> {
     let start_time = Instant::now();
 
     // Run with instruction limit to allow debugging
-    let MAX_INSTRUCTIONS: u64 = std::env::var("MAX_INSTRUCTIONS")
+    let max_instructions: u64 = std::env::var("MAX_INSTRUCTIONS")
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(50_000_000); // 50M instructions default
 
     // Use interactive loop that handles GUI events
-    let result = emu.run_interactive(MAX_INSTRUCTIONS);
+    let result = emu.run_interactive(max_instructions);
 
     let elapsed = start_time.elapsed();
 

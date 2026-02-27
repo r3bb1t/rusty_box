@@ -10,6 +10,7 @@ use super::{
     cpuid::BxCpuIdTrait,
     decoder::{Instruction, BxSegregs},
     descriptor::BxSelector,
+    eflags::EFlags,
     segment_ctrl_pro::parse_selector,
 };
 
@@ -136,7 +137,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_ip(new_ip);
         
         // Update FLAGS (preserve some bits)
-        self.eflags = (self.eflags & 0xFFFF0000) | (new_flags as u32);
+        self.eflags = EFlags::from_bits_retain((self.eflags.bits() & 0xFFFF0000) | (new_flags as u32));
         
         // Invalidate prefetch
         self.eip_fetch_ptr = None;
@@ -168,7 +169,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_eip(new_eip);
 
         // Update EFLAGS (keep VM unchanged: 0x00257fd5 mask)
-        self.eflags = (self.eflags & 0x00020000) | (new_eflags & !0x00020000u32);
+        self.eflags = EFlags::from_bits_retain((self.eflags.bits() & 0x00020000) | (new_eflags & !0x00020000u32));
 
         // Invalidate prefetch
         self.eip_fetch_ptr = None;
@@ -184,14 +185,64 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Reads EIP/CS/EFLAGS from stack WITHOUT advancing ESP first, then after all
     /// validation passes loads CS from the GDT (NOT real-mode segment << 4).
     fn iret_protected(&mut self) -> super::Result<()> {
-        use super::{cpu::Exception, error::CpuError};
+        use super::cpu::Exception;
 
-        // Nested Task (NT) — task-switch IRET; not needed for Linux kernel
-        if (self.eflags & 0x0000_4000) != 0 {
-            tracing::error!("iret_protected: NT flag set — nested task IRET not implemented");
-            return Err(CpuError::UnimplementedOpcode {
-                opcode: "IRET with NT flag (nested task)".to_string(),
-            });
+        // Nested Task (NT) — task-switch IRET
+        // Based on Bochs iret.cc:44-95
+        if self.eflags.contains(EFlags::NT) {
+            tracing::debug!("IRET: nested task return (NT=1)");
+
+            // Read back-link selector from current TSS offset 0
+            let tss_base = unsafe { self.tr.cache.u.segment.base };
+            let raw_link_selector = self.system_read_word(tss_base)?;
+
+            let mut link_selector = BxSelector::default();
+            parse_selector(raw_link_selector, &mut link_selector);
+
+            // Must specify global (TI=0)
+            if link_selector.ti != 0 {
+                tracing::error!("iret: link selector.ti=1");
+                return self.exception(Exception::Ts, raw_link_selector & 0xfffc);
+            }
+
+            let (dword1, dword2) = match self.fetch_raw_descriptor(&link_selector) {
+                Ok(v) => v,
+                Err(_) => {
+                    return self.exception(Exception::Ts, raw_link_selector & 0xfffc);
+                }
+            };
+            let tss_descriptor = match self.parse_descriptor(dword1, dword2) {
+                Ok(v) => v,
+                Err(_) => {
+                    return self.exception(Exception::Ts, raw_link_selector & 0xfffc);
+                }
+            };
+
+            // Must be a busy TSS
+            if tss_descriptor.valid == 0 || tss_descriptor.segment {
+                tracing::error!("iret: TSS selector points to bad TSS");
+                return self.exception(Exception::Ts, raw_link_selector & 0xfffc);
+            }
+            if tss_descriptor.r#type != 0x3 && tss_descriptor.r#type != 0xB {
+                // Must be busy 286 (0x3) or busy 386 (0xB)
+                tracing::error!("iret: TSS not busy type={:#x}", tss_descriptor.r#type);
+                return self.exception(Exception::Ts, raw_link_selector & 0xfffc);
+            }
+            if !tss_descriptor.p {
+                tracing::error!("iret: task descriptor.p == 0");
+                return self.exception(Exception::Np, raw_link_selector & 0xfffc);
+            }
+
+            // Switch tasks (without nesting) to TSS specified by back link selector
+            return self.task_switch(
+                &link_selector,
+                &tss_descriptor,
+                super::tasking::BX_TASK_FROM_IRET,
+                dword1,
+                dword2,
+                false,
+                0,
+            );
         }
 
         // Peek at stack without modifying ESP
@@ -246,7 +297,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Compute EFLAGS changeMask based on OLD CPL (before loading new CS)
-        let iopl = ((self.eflags >> 12) & 3) as u8;
+        let iopl = self.eflags.iopl();
         let mut change_mask: u32 =
             0x0000_08D5 | // CF, PF, AF, ZF, SF, OF
             0x0000_0100 | // TF
@@ -274,7 +325,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.branch_far(&mut cs_selector, &mut cs_descriptor, new_eip as u64, new_cpl)?;
 
             // Restore EFLAGS with masked bits only
-            self.eflags = (self.eflags & !change_mask) | (new_eflags & change_mask);
+            self.eflags = EFlags::from_bits_retain((self.eflags.bits() & !change_mask) | (new_eflags & change_mask));
 
             // Advance ESP by 12 (EIP + CS-dword + EFLAGS = 3 × 4 bytes)
             if self.is_stack_32bit() {
@@ -339,7 +390,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.branch_far(&mut cs_selector, &mut cs_descriptor, new_eip as u64, new_cpl)?;
 
             // Restore EFLAGS (changeMask was computed from old CPL above)
-            self.eflags = (self.eflags & !change_mask) | (new_eflags & change_mask);
+            self.eflags = EFlags::from_bits_retain((self.eflags.bits() & !change_mask) | (new_eflags & change_mask));
 
             // Load SS and restore ESP
             self.load_ss(&mut ss_selector, &mut ss_descriptor, new_cpl)?;
@@ -351,8 +402,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             // validate_seg_regs(): null out DS/ES/FS/GS if no longer accessible
             // (needed for ring-0→ring-3 transitions to prevent leaking kernel selectors)
-            // Linux kernel-to-kernel transitions don't need this, but implement stub:
-            // TODO: full validate_seg_regs() if user-mode transitions are needed
+            self.validate_seg_regs();
         }
 
         Ok(())
@@ -365,7 +415,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Handle interrupt in real mode using IVT
     pub(super) fn interrupt_real_mode(&mut self, vector: u8) -> super::Result<()> {
         // Save current FLAGS, CS, IP on stack
-        let flags = (self.eflags & 0xFFFF) as u16;
+        let flags = (self.eflags.bits() & 0xFFFF) as u16;
         let cs = self.sregs[BxSegregs::Cs as usize].selector.value;
         let ip = self.get_ip();
         
@@ -375,7 +425,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.push_16(ip)?;
         
         // Clear IF and TF
-        self.eflags &= !((1 << 9) | (1 << 8)); // Clear IF (bit 9) and TF (bit 8)
+        self.eflags.remove(EFlags::IF_ | EFlags::TF); // Clear IF and TF
         
         // Read interrupt vector from IVT at 0000:vector*4
         let ivt_offset = (vector as u64) * 4;
@@ -423,11 +473,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// In Bochs: Sets activity_state to ActivityStateHlt and raises async_event
     pub fn hlt(&mut self, _instr: &Instruction) {
         // Check if interrupts are disabled (IF=0) - matches Bochs proc_ctrl.cc:206
-        if self.get_if() == 0 {
+        if !self.eflags.contains(EFlags::IF_) {
             tracing::warn!("HLT: CPU halted with IF=0 (interrupts disabled) - CPU will be stuck!");
         }
-        
-        tracing::debug!("HLT: CPU halted, IF={}", self.get_b_if());
+
+        tracing::debug!("HLT: CPU halted, IF={}", self.eflags.contains(EFlags::IF_) as u32);
         
         // Set activity state to halted (matches Bochs proc_ctrl.cc:203)
         self.activity_state = CpuActivityState::Hlt;

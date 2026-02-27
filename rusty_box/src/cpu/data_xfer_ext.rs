@@ -9,8 +9,8 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{Instruction, BxSegregs},
+    eflags::EFlags,
     error::Result,
-    segment_ctrl_pro::parse_selector,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -195,8 +195,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // MOV SS inhibits interrupts until next instruction boundary
         // (same as POP SS - Bochs data_xfer16.cc:124-129)
         if dst_seg == BxSegregs::Ss as usize {
-            tracing::debug!("MOV SS: inhibiting interrupts");
-            // TODO: Implement inhibit_interrupts(BX_INHIBIT_INTERRUPTS_BY_MOVSS)
+            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
         }
 
         tracing::trace!("MOV: seg{} = {:#06x}", dst_seg, new_sel);
@@ -275,7 +274,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LAHF - Load AH from Flags (SF:ZF:0:AF:0:PF:1:CF)
     pub fn lahf(&mut self, _instr: &Instruction) {
-        let flags = (self.eflags & 0xFF) as u8;
+        let flags = (self.eflags.bits() & 0xFF) as u8;
         // AH = SF:ZF:0:AF:0:PF:1:CF (bits 7,6,4,2,0 from flags, bit 1 always 1)
         let ah = (flags & 0xD5) | 0x02;
         self.set_ah(ah);
@@ -286,8 +285,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn sahf(&mut self, _instr: &Instruction) {
         let ah = self.ah();
         // Only modify SF, ZF, AF, PF, CF (bits 7,6,4,2,0)
-        self.eflags = (self.eflags & !0xD5) | ((ah as u32) & 0xD5);
-        tracing::trace!("SAHF: flags = {:#010x}", self.eflags);
+        self.eflags = EFlags::from_bits_retain((self.eflags.bits() & !0xD5) | ((ah as u32) & 0xD5));
+        tracing::trace!("SAHF: flags = {:#010x}", self.eflags.bits());
     }
 
     // =========================================================================

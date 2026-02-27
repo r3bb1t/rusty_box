@@ -7,7 +7,6 @@ use super::{
     cpuid::BxCpuIdTrait,
     decoder::{Instruction, BxSegregs},
     error::{CpuError, Result},
-    segment_ctrl_pro::parse_selector,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -668,7 +667,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Far jump 16-bit (matching C++ jmp_far16)
     /// Called by JMP16_Ap and JMP16_Ep
-    pub(super) fn jmp_far16(&mut self, instr: &Instruction, cs_raw: u16, disp16: u16) -> Result<()> {
+    pub(super) fn jmp_far16(&mut self, _instr: &Instruction, cs_raw: u16, disp16: u16) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
@@ -695,16 +694,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Far call 16-bit (matching C++ call_far16)
     /// Called by CALL16_Ap and CALL16_Ep
-    fn call_far16(&mut self, instr: &Instruction, cs_raw: u16, disp16: u16) -> Result<()> {
+    fn call_far16(&mut self, _instr: &Instruction, cs_raw: u16, disp16: u16) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
         if !self.real_mode() {
-            // TODO: Implement call_protected for protected mode
-            return Err(CpuError::UnimplementedOpcode {
-                opcode: "call_far16 protected mode".to_string(),
-            });
+            return self.call_protected(cs_raw, disp16 as u32, false);
         } else {
             // Real mode
             let limit = self.get_segment_limit(BxSegregs::Cs);
@@ -794,10 +790,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.eip_page_window_size = 0;
 
         if !self.real_mode() {
-            // TODO: Implement return_protected for protected mode
-            return Err(CpuError::UnimplementedOpcode {
-                opcode: "retfar16 protected mode".to_string(),
-            });
+            return self.return_protected(0, false);
         } else {
             // Real mode
             let ip = self.pop_16()?;
@@ -829,10 +822,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let imm16 = instr.iw() as i16;
 
         if !self.real_mode() {
-            // TODO: Implement return_protected for protected mode
-            return Err(CpuError::UnimplementedOpcode {
-                opcode: "retfar16_iw protected mode".to_string(),
-            });
+            return self.return_protected(imm16 as u16, false);
         } else {
             // Real mode
             let ip = self.pop_16()?;

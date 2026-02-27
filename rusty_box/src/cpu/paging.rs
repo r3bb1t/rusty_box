@@ -4,7 +4,7 @@
 //! Implements page table walking and address translation
 
 use super::{
-    cpu::{BxCpuC, Exception},
+    cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     Result,
 };
@@ -12,7 +12,7 @@ use crate::{
     config::{BxAddress, BxPhyAddress},
     cpu::{
         rusty_box::MemoryAccessType,
-        tlb::{BxHostpageaddr, TLBEntry},
+        tlb::TLBEntry,
     },
     memory::BxMemC,
 };
@@ -287,7 +287,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Returns Ok(paddr) on success, or Err with page fault info that caller should handle
     pub(super) fn translate_linear(
         &mut self,
-        tlb_entry: &TLBEntry,
+        _tlb_entry: &TLBEntry,
         laddr: BxAddress,
         user: bool,
         rw: MemoryAccessType,

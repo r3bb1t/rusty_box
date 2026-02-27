@@ -13,16 +13,20 @@ use super::{
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn execute_instruction(&mut self, instr: &mut Instruction) -> Result<()> {
-        use crate::cpu::arith;
-        use crate::cpu::data_xfer;
+        use crate::cpu::arith8;
+        use crate::cpu::arith16;
+        use crate::cpu::arith32;
+        use crate::cpu::data_xfer8;
+        use crate::cpu::data_xfer16;
+        use crate::cpu::data_xfer32;
 
         match instr.get_ia_opcode() {
             // =========================================================================
             // Data transfer (MOV) instructions - 32-bit
             // =========================================================================
-            Opcode::MovOp32GdEd => { data_xfer::MOV_GdEd(self, instr)?; Ok(()) }
-            Opcode::MovOp32EdGd => { data_xfer::MOV_EdGd(self, instr)?; Ok(()) }
-            Opcode::MovEdId => { data_xfer::MOV_EdId(self, instr)?; Ok(()) }
+            Opcode::MovOp32GdEd => { data_xfer32::MOV_GdEd(self, instr)?; Ok(()) }
+            Opcode::MovOp32EdGd => { data_xfer32::MOV_EdGd(self, instr)?; Ok(()) }
+            Opcode::MovEdId => { data_xfer32::MOV_EdId(self, instr)?; Ok(()) }
 
             // =========================================================================
             // Data transfer (MOV) instructions - 8-bit
@@ -34,14 +38,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // =========================================================================
             // 8-bit Arithmetic instructions (ADD, SUB, etc.)
             // =========================================================================
-            Opcode::AddEbGb => arith::ADD_EbGb(self, instr),
-            Opcode::AddGbEb => arith::ADD_GbEb(self, instr),
-            Opcode::AdcEbGb => arith::ADC_EbGb(self, instr),
-            Opcode::AdcGbEb => arith::ADC_GbEb(self, instr),
-            Opcode::AdcGwEw => arith::ADC_GwEw(self, instr),
-            Opcode::AdcEwsIb => arith::ADC_EwsIb(self, instr),
-            Opcode::SubEbGb => arith::SUB_EbGb(self, instr),
-            Opcode::SubGbEb => arith::SUB_GbEb(self, instr),
+            Opcode::AddEbGb => arith8::ADD_EbGb(self, instr),
+            Opcode::AddGbEb => arith8::ADD_GbEb(self, instr),
+            Opcode::AdcEbGb => arith8::ADC_EbGb(self, instr),
+            Opcode::AdcGbEb => arith8::ADC_GbEb(self, instr),
+            Opcode::AdcGwEw => arith16::ADC_GwEw(self, instr),
+            Opcode::AdcEwsIb => arith16::ADC_EwsIb(self, instr),
+            Opcode::SubEbGb => arith8::SUB_EbGb(self, instr),
+            Opcode::SubGbEb => arith8::SUB_GbEb(self, instr),
             Opcode::AndEbGb => { self.and_eb_gb(instr)?; Ok(()) }
             Opcode::AndGbEb => { self.and_gb_eb(instr)?; Ok(()) }
             Opcode::AndEbIb => { self.and_eb_ib(instr)?; Ok(()) }
@@ -71,12 +75,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // =========================================================================
             // MOV with direct memory offset
             // =========================================================================
-            Opcode::MovAlod => data_xfer::MOV_ALOd(self, instr),
-            Opcode::MovAxod => data_xfer::MOV_AXOd(self, instr),
-            Opcode::MovOdAl => data_xfer::MOV_OdAL(self, instr),
-            Opcode::MovOdAx => data_xfer::MOV_OdAX(self, instr),
-            Opcode::MovEaxod => data_xfer::MOV_EAXOd(self, instr),
-            Opcode::MovOdEax => data_xfer::MOV_OdEAX(self, instr),
+            Opcode::MovAlod => data_xfer8::MOV_ALOd(self, instr),
+            Opcode::MovAxod => data_xfer16::MOV_AXOd(self, instr),
+            Opcode::MovOdAl => data_xfer8::MOV_OdAL(self, instr),
+            Opcode::MovOdAx => data_xfer16::MOV_OdAX(self, instr),
+            Opcode::MovEaxod => data_xfer32::MOV_EAXOd(self, instr),
+            Opcode::MovOdEax => data_xfer32::MOV_OdEAX(self, instr),
 
             // =========================================================================
             // PUSH/POP segment registers
@@ -89,42 +93,42 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // =========================================================================
             // Arithmetic (ADD) instructions
             // =========================================================================
-            Opcode::AddGdEd => { arith::ADD_GdEd(self, instr)?; Ok(()) }
-            Opcode::AddEdGd => { arith::ADD_EdGd(self, instr)?; Ok(()) }
-            Opcode::AddEaxid => { arith::ADD_EAX_Id(self, instr); Ok(()) }
-            Opcode::AddAxiw => arith::ADD_Axiw(self, instr),
-            Opcode::AddAlib | Opcode::AddEbIb => arith::ADD_EbIb(self, instr),
-            Opcode::SubEbIb => arith::SUB_EbIb(self, instr),
-            Opcode::AdcEbIb => arith::ADC_EbIb(self, instr),
-            Opcode::SbbEbIb => arith::SBB_EbIb(self, instr),
-            Opcode::SbbEbGb => arith::SBB_EbGb(self, instr),
-            Opcode::SbbGbEb => arith::SBB_GbEb(self, instr),
-            Opcode::AddEwsIb => arith::ADD_EwIbR(self, instr),
-            Opcode::AddEwIw => arith::ADD_EwIw(self, instr),
-            Opcode::AddEwGw => arith::ADD_EwGw(self, instr),
-            Opcode::AddGwEw => arith::ADD_GwEw(self, instr),
-            Opcode::AddEdsIb | Opcode::AddEdId => { arith::ADD_EdId(self, instr)?; Ok(()) }
+            Opcode::AddGdEd => { arith32::ADD_GdEd(self, instr)?; Ok(()) }
+            Opcode::AddEdGd => { arith32::ADD_EdGd(self, instr)?; Ok(()) }
+            Opcode::AddEaxid => { arith32::ADD_EAX_Id(self, instr); Ok(()) }
+            Opcode::AddAxiw => arith16::ADD_Axiw(self, instr),
+            Opcode::AddAlib | Opcode::AddEbIb => arith8::ADD_EbIb(self, instr),
+            Opcode::SubEbIb => arith8::SUB_EbIb(self, instr),
+            Opcode::AdcEbIb => arith8::ADC_EbIb(self, instr),
+            Opcode::SbbEbIb => arith8::SBB_EbIb(self, instr),
+            Opcode::SbbEbGb => arith8::SBB_EbGb(self, instr),
+            Opcode::SbbGbEb => arith8::SBB_GbEb(self, instr),
+            Opcode::AddEwsIb => arith16::ADD_EwIbR(self, instr),
+            Opcode::AddEwIw => arith16::ADD_EwIw(self, instr),
+            Opcode::AddEwGw => arith16::ADD_EwGw(self, instr),
+            Opcode::AddGwEw => arith16::ADD_GwEw(self, instr),
+            Opcode::AddEdsIb | Opcode::AddEdId => { arith32::ADD_EdId(self, instr)?; Ok(()) }
 
             // =========================================================================
             // Arithmetic (SUB) instructions
             // =========================================================================
-            Opcode::SubGdEd => { arith::SUB_GdEd(self, instr)?; Ok(()) }
-            Opcode::SubEdGd => { arith::SUB_EdGd(self, instr)?; Ok(()) }
-            Opcode::SubGwEw => arith::SUB_GwEw(self, instr),
-            Opcode::SubEwGw => arith::SUB_EwGw(self, instr),
-            Opcode::SbbGwEw => arith::SBB_GwEw(self, instr),
-            Opcode::SbbEwGw => arith::SBB_EwGw(self, instr),
-            Opcode::SbbEdGd => arith::SBB_EdGd(self, instr),
-            Opcode::SbbGdEd => arith::SBB_GdEd(self, instr),
-            Opcode::SbbEaxid => { arith::SBB_EAX_Id(self, instr); Ok(()) }
-            Opcode::SbbEdId => { arith::SBB_EdId_R(self, instr); Ok(()) }
-            Opcode::SbbEdsIb => { arith::SBB_EdIb_R(self, instr); Ok(()) }
-            Opcode::SubEaxid => { arith::SUB_EAX_Id(self, instr); Ok(()) }
-            Opcode::SubAlib => arith::SUB_AL_Ib(self, instr),
-            Opcode::SubAxiw => arith::SUB_AX_Iw(self, instr),
-            Opcode::SubEwIw => arith::SUB_EwIw(self, instr),
-            Opcode::SubEwsIb => arith::SUB_EwsIb(self, instr),
-            Opcode::SubEdsIb | Opcode::SubEdId => { arith::SUB_EdId(self, instr)?; Ok(()) }
+            Opcode::SubGdEd => { arith32::SUB_GdEd(self, instr)?; Ok(()) }
+            Opcode::SubEdGd => { arith32::SUB_EdGd(self, instr)?; Ok(()) }
+            Opcode::SubGwEw => arith16::SUB_GwEw(self, instr),
+            Opcode::SubEwGw => arith16::SUB_EwGw(self, instr),
+            Opcode::SbbGwEw => arith16::SBB_GwEw(self, instr),
+            Opcode::SbbEwGw => arith16::SBB_EwGw(self, instr),
+            Opcode::SbbEdGd => arith32::SBB_EdGd(self, instr),
+            Opcode::SbbGdEd => arith32::SBB_GdEd(self, instr),
+            Opcode::SbbEaxid => { arith32::SBB_EAX_Id(self, instr); Ok(()) }
+            Opcode::SbbEdId => { arith32::SBB_EdId_R(self, instr); Ok(()) }
+            Opcode::SbbEdsIb => { arith32::SBB_EdIb_R(self, instr); Ok(()) }
+            Opcode::SubEaxid => { arith32::SUB_EAX_Id(self, instr); Ok(()) }
+            Opcode::SubAlib => arith8::SUB_AL_Ib(self, instr),
+            Opcode::SubAxiw => arith16::SUB_AX_Iw(self, instr),
+            Opcode::SubEwIw => arith16::SUB_EwIw(self, instr),
+            Opcode::SubEwsIb => arith16::SUB_EwsIb(self, instr),
+            Opcode::SubEdsIb | Opcode::SubEdId => { arith32::SUB_EdId(self, instr)?; Ok(()) }
             // SUB zero idioms (SUB reg, reg where src==dst -> result is always 0)
             Opcode::SubEwGwZeroIdiom | Opcode::SubGwEwZeroIdiom => { self.zero_idiom_gw_r(instr); Ok(()) }
             Opcode::SubEdGdZeroIdiom | Opcode::SubGdEdZeroIdiom => { self.zero_idiom_gd_r(instr); Ok(()) }
@@ -355,16 +359,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // =========================================================================
             Opcode::CmpGbEb => { self.cmp_gb_eb(instr)?; Ok(()) }
             Opcode::CmpGwEw => { self.cmp_gw_ew(instr)?; Ok(()) }
-            Opcode::CmpGdEd => { arith::arith32::CMP_GdEd(self, instr)?; Ok(()) }
-            Opcode::CmpEwGw => arith::CMP_EwGw(self, instr),
+            Opcode::CmpGdEd => { arith32::CMP_GdEd(self, instr)?; Ok(()) }
+            Opcode::CmpEwGw => arith16::CMP_EwGw(self, instr),
             Opcode::CmpAlib => { self.cmp_al_ib(instr); Ok(()) }
             Opcode::CmpEbIb => { self.cmp_eb_ib(instr)?; Ok(()) }
             Opcode::CmpEbGb => { self.cmp_eb_gb(instr)?; Ok(()) }
             Opcode::CmpAxiw => { self.cmp_ax_iw(instr); Ok(()) }
             Opcode::CmpEaxid => { self.cmp_eax_id(instr); Ok(()) }
             Opcode::CmpEwIw | Opcode::CmpEwsIb => { self.cmp_ew_iw(instr)?; Ok(()) }
-            Opcode::CmpEdId | Opcode::CmpEdsIb => { arith::arith32::CMP_EdId(self, instr)?; Ok(()) }
-            Opcode::CmpEdGd => { arith::arith32::CMP_EdGd(self, instr)?; Ok(()) }
+            Opcode::CmpEdId | Opcode::CmpEdsIb => { arith32::CMP_EdId(self, instr)?; Ok(()) }
+            Opcode::CmpEdGd => { arith32::CMP_EdGd(self, instr)?; Ok(()) }
 
             // =========================================================================
             // TEST instructions
@@ -403,7 +407,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::XorEdId => { self.xor_ed_id(instr)?; Ok(()) }
             Opcode::NotEw => { self.not_ew(instr)?; Ok(()) }
             Opcode::NotEd => { self.not_ed(instr)?; Ok(()) }
-            Opcode::NegEd => { arith::NEG_Ed(self, instr)?; Ok(()) }
+            Opcode::NegEd => { arith32::NEG_Ed(self, instr)?; Ok(()) }
 
             // =========================================================================
             // Bit Test instructions (BT, BTS, BTR, BTC)
@@ -450,8 +454,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // =========================================================================
             // INC/DEC instructions
             // =========================================================================
-            Opcode::IncEb => arith::inc_eb_dispatch(self, instr),
-            Opcode::DecEb => arith::dec_eb_dispatch(self, instr),
+            Opcode::IncEb => arith8::inc_eb_dispatch(self, instr),
+            Opcode::DecEb => arith8::dec_eb_dispatch(self, instr),
             Opcode::IncEw => self.inc_ew(instr),
             Opcode::IncEd => self.inc_ed(instr),
             Opcode::DecEw => self.dec_ew(instr),
@@ -664,8 +668,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Cbw => { self.cbw(instr); Ok(()) }
             Opcode::MovsxGdEb => { self.movsx_gd_eb(instr)?; Ok(()) }
             Opcode::MovsxGdEw => { self.movsx_gd_ew(instr)?; Ok(()) }
-            Opcode::MovzxGdEb => { data_xfer::MOVZX_GdEb_unified(self, instr)?; Ok(()) }
-            Opcode::MovzxGdEw => { data_xfer::MOVZX_GdEw_unified(self, instr)?; Ok(()) }
+            Opcode::MovzxGdEb => { data_xfer32::MOVZX_GdEb_unified(self, instr)?; Ok(()) }
+            Opcode::MovzxGdEw => { data_xfer32::MOVZX_GdEw_unified(self, instr)?; Ok(()) }
             Opcode::MovzxGwEb => self.movzx_gw_eb(instr),
             Opcode::MovsxGwEb => self.movsx_gw_eb(instr),
             Opcode::Cwd => { self.cwd(instr); Ok(()) }

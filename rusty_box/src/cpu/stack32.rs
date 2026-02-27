@@ -7,6 +7,7 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::Instruction,
+    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -187,8 +188,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // POP SS inhibits interrupts until next instruction boundary
         // (Bochs stack32.cc:102-108)
         if seg_idx == BxSegregs::Ss as usize {
-            tracing::debug!("POP SS: inhibiting interrupts");
-            // TODO: Implement inhibit_interrupts(BX_INHIBIT_INTERRUPTS_BY_MOVSS)
+            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
         }
 
         tracing::trace!("POP seg{}: selector={:#06x}", seg_idx, selector_value);
@@ -323,7 +323,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// PUSHFD - Push flags (32-bit)
     pub fn pushf_fd(&mut self, _instr: &Instruction) -> super::Result<()> {
         // VM & RF flags cleared in image stored on the stack
-        let flags = self.eflags & 0x00FCFFFF;
+        let flags = self.eflags.bits() & 0x00FCFFFF;
         self.push_32(flags)?;
         tracing::trace!("PUSHFD: {:#010x}", flags);
         Ok(())
@@ -337,7 +337,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // VM, VIP, VIF are unaffected in protected mode
         const CHANGE_MASK: u32 = 0x00244FD5;
 
-        self.eflags = (self.eflags & !CHANGE_MASK) | (flags & CHANGE_MASK);
+        self.eflags = EFlags::from_bits_retain((self.eflags.bits() & !CHANGE_MASK) | (flags & CHANGE_MASK));
         tracing::trace!("POPFD: {:#010x}", flags);
         Ok(())
     }

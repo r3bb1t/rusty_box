@@ -6,6 +6,7 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{Instruction, BxSegregs},
+    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -21,13 +22,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let sf = (result & 0x80) != 0;
         let zf = result == 0;
         let pf = result.count_ones() % 2 == 0;
-        
-        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
-        
-        if pf { self.eflags |= 1 << 2; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
+
+        self.eflags.remove(EFlags::LOGIC_MASK);
+
+        if pf { self.eflags.insert(EFlags::PF); }
+        if zf { self.eflags.insert(EFlags::ZF); }
+        if sf { self.eflags.insert(EFlags::SF); }
         // OF=0, CF=0 are already cleared
     }
 
@@ -39,16 +39,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let of = ((op1 ^ op2) & (op1 ^ result) & 0x80) != 0;
         let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
         let pf = result.count_ones() % 2 == 0;
-        
-        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
-        
-        if cf { self.eflags |= 1 << 0; }
-        if pf { self.eflags |= 1 << 2; }
-        if af { self.eflags |= 1 << 4; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
-        if of { self.eflags |= 1 << 11; }
+
+        self.eflags.remove(EFlags::OSZAPC);
+
+        if cf { self.eflags.insert(EFlags::CF); }
+        if pf { self.eflags.insert(EFlags::PF); }
+        if af { self.eflags.insert(EFlags::AF); }
+        if zf { self.eflags.insert(EFlags::ZF); }
+        if sf { self.eflags.insert(EFlags::SF); }
+        if of { self.eflags.insert(EFlags::OF); }
     }
 
     // =========================================================================
@@ -216,9 +215,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_flags_oszapc_sub_8(op1, op2, result);
         // Trace '%' comparisons in kernel space to debug vsprintf
         if op2 == 0x25 && op1 == 0x25 && self.rip() > 0xC0000000 {
-            let zf = (self.eflags >> 6) & 1;
+            let zf = (self.eflags.bits() >> 6) & 1;
             tracing::warn!("CMP AL=0x25, 0x25 at RIP={:#x} → ZF={} eflags={:#x} icount={}",
-                self.rip(), zf, self.eflags, self.icount);
+                self.rip(), zf, self.eflags.bits(), self.icount);
         }
         tracing::trace!("CMP AL, imm8: {:#04x} - {:#04x}", op1, op2);
     }
@@ -255,9 +254,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_flags_oszapc_sub_8(op1, op2, result);
         // Trace '%' comparisons in kernel space to debug vsprintf
         if op2 == 0x25 && op1 == 0x25 && self.rip() > 0xC0000000 {
-            let zf = (self.eflags >> 6) & 1;
+            let zf = (self.eflags.bits() >> 6) & 1;
             tracing::warn!("CMP [mem]=0x25, Ib=0x25 at RIP={:#x} eaddr={:#x} ZF={} eflags={:#x} icount={}",
-                self.rip(), eaddr, zf, self.eflags, self.icount);
+                self.rip(), eaddr, zf, self.eflags.bits(), self.icount);
         }
         Ok(())
     }
@@ -623,9 +622,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_flags_oszapc_sub_8(op1, op2, result);
         // Trace '%' comparisons in kernel space to debug vsprintf
         if op2 == 0x25 && op1 == 0x25 && self.rip() > 0xC0000000 {
-            let zf = (self.eflags >> 6) & 1;
+            let zf = (self.eflags.bits() >> 6) & 1;
             tracing::warn!("CMP Eb=0x25, Ib=0x25 at RIP={:#x} → ZF={} eflags={:#x} icount={} dst={}",
-                self.rip(), zf, self.eflags, self.icount, instr.dst());
+                self.rip(), zf, self.eflags.bits(), self.icount, instr.dst());
         }
     }
 

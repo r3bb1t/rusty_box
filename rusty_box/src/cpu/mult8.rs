@@ -7,7 +7,8 @@ use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
     decoder::Instruction,
-    error::{CpuError, Result},
+    eflags::EFlags,
+    error::Result,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -34,7 +35,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.update_flags_logic8(product_8l);
         if product_8h != 0 {
             // Set CF and OF if high byte is non-zero
-            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
         tracing::trace!("MUL8: AL ({:#04x}) * reg{} ({:#04x}) = AX ({:#06x})", op1, src_reg, op2, product_16);
@@ -60,7 +61,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.update_flags_logic8(product_8l);
         if product_8h != 0 {
             // Set CF and OF if high byte is non-zero
-            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
         tracing::trace!("MUL8 mem: AL ({:#04x}) * [{:?}:{:#x}] ({:#04x}) = AX ({:#06x})", op1, seg, eaddr, op2, product_16);
@@ -87,7 +88,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Matching C++: if(product_16 != (Bit8s) product_16)
         // This checks if the 16-bit value equals its sign-extended 8-bit version
         if product_16 != (product_16 as i8 as i16) {
-            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
         tracing::trace!("IMUL8: AL ({:#04x}) * reg{} ({:#04x}) = AX ({:#06x})", op1 as u8, src_reg, op2 as u8, product_16 as u16);
@@ -114,7 +115,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Matching C++: if(product_16 != (Bit8s) product_16)
         // This checks if the 16-bit value equals its sign-extended 8-bit version
         if product_16 != (product_16 as i8 as i16) {
-            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
         tracing::trace!("IMUL8 mem: AL ({:#04x}) * [{:?}:{:#x}] ({:#04x}) = AX ({:#06x})", op1 as u8, seg, eaddr, op2 as u8, product_16 as u16);

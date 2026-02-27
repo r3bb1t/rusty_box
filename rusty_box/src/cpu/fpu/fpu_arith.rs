@@ -5,7 +5,6 @@
 use super::super::cpu::BxCpuC;
 use super::super::cpuid::BxCpuIdTrait;
 use super::super::decoder::{Instruction, BxSegregs};
-use super::super::softfloat3e::softfloat::SoftFloatStatus;
 use super::super::softfloat3e::extf80_addsub::{extf80_add, extf80_sub};
 use super::super::softfloat3e::extf80_mul::extf80_mul;
 use super::super::softfloat3e::extf80_div::extf80_div;

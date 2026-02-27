@@ -3,7 +3,7 @@ use crate::cpu::{
     decoder::features::X86Feature,
 };
 
-use super::{cpuid::BxCpuIdTrait, BxCpuC, Result};
+use super::{cpuid::BxCpuIdTrait, eflags::EFlags, BxCpuC, Result};
 
 /// Interrupt type, based on BX_INTERRUPT_TYPE in Bochs
 #[derive(Debug, Clone, Copy)]
@@ -294,7 +294,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             // Bochs: if (vector != #DB) assert_RF();
             if vector != Exception::Db {
-                self.eflags |= 1 << 16; // RF bit
+                self.eflags.insert(EFlags::RF); // RF bit
             }
 
             // Triple fault: 3rd exception with no resolution after #DF.

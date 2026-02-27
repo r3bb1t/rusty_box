@@ -4,7 +4,6 @@
 
 use super::softfloat_types::*;
 use super::softfloat::*;
-use super::internals::*;
 use super::specialize::*;
 
 pub fn extf80_to_i16(a: floatx80, status: &mut SoftFloatStatus) -> i16 {

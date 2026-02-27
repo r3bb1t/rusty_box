@@ -6,7 +6,6 @@ use super::super::softfloat3e::softfloat::*;
 use super::super::softfloat3e::softfloat_types::floatx80;
 use super::super::softfloat3e::specialize::*;
 use super::super::softfloat3e::internals::*;
-use super::super::softfloat3e::primitives::*;
 use super::super::softfloat3e::extf80_addsub::{extf80_add, extf80_sub};
 use super::super::softfloat3e::f128::*;
 use super::poly::*;

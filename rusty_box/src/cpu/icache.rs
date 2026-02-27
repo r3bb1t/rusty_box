@@ -231,7 +231,7 @@ impl BxICache {
         }
     }
 
-    pub fn commit_trace(&mut self, tlen: usize) {
+    pub fn commit_trace(&mut self, _tlen: usize) {
         // Update mpindex to point past the last instruction in the trace
         // In C++, this is handled by the pointer arithmetic on entry->i
         // Here, we track it explicitly with mpindex
@@ -268,8 +268,8 @@ impl BxICache {
 
     pub(super) fn find_trace_start(
         &self,
-        entry: &BxICacheEntry,
-        entry_idx: usize,
+        _entry: &BxICacheEntry,
+        _entry_idx: usize,
     ) -> Option<usize> {
         // Find where the trace starts in mpool
         // This is a simplified implementation - in C++, entry->i is a pointer
@@ -706,7 +706,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let mut current_page_offset = page_offset;
         let mut current_fetch_ptr = fetch_ptr;
         // Preserve original remaining_in_page for boundary_fetch
-        let original_remaining_in_page = remaining_in_page;
+        let _original_remaining_in_page = remaining_in_page;
         let mut remaining = remaining_in_page as u32;
         let mut tlen = 0usize;
 
@@ -1066,7 +1066,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             fetchdecode32::fetch_decode32(&fetch_buffer[..total_bytes], is_32_bit_mode)
         };
 
-        let mut instr = decode_result.unwrap_or_else(|_| {
+        let instr = decode_result.unwrap_or_else(|_| {
             // Panic on decode failure with instruction bytes for debugging
             let bytes_str = fetch_buffer[..total_bytes.min(16)]
                 .iter()
@@ -1134,7 +1134,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let cached_first_instr = cached_entry.i;
 
         // determine max amount of instruction to take from another entry (matching C++ line 231)
-        let mut max_length = cached_tlen;
+        let max_length = cached_tlen;
 
         #[cfg(feature = "bx_support_handlers_chaining_speedups")]
         {

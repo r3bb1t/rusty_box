@@ -9,7 +9,7 @@ use crate::cpu::decoder::{Instruction, BxSegregs};
 /// Segment: DS (default) or override prefix
 /// Offset: 16-bit or 32-bit immediate offset (i.Id())
 pub fn MOV_AXOd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let offset = instr.id();
     let val = cpu.read_virtual_word(seg, offset)?;
     cpu.set_ax(val);
@@ -21,7 +21,7 @@ pub fn MOV_AXOd<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Re
 /// Segment: DS (default) or override prefix
 /// Offset: 16-bit or 32-bit immediate offset (i.Id())
 pub fn MOV_OdAX<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
-    let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+    let seg = BxSegregs::from(instr.seg());
     let offset = instr.id();
     cpu.write_virtual_word(seg, offset, cpu.ax())?;
     Ok(())

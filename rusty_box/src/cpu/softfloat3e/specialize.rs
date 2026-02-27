@@ -113,7 +113,7 @@ pub fn softfloat_propagate_nan_extf80(
     }
 
     // Quieten signaling NaN by setting the quiet bit
-    let mut a_signif_q = a_signif | 0x4000000000000000; // set quiet bit
+    let a_signif_q = a_signif | 0x4000000000000000; // set quiet bit
     let b_signif_q = b_signif | 0x4000000000000000;
 
     if a_is_snan {

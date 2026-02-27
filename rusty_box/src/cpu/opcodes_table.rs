@@ -13,7 +13,7 @@ use bitflags::bitflags;
 ///
 /// # Example
 /// ```ignore
-/// make_handler_wrapper!(mov_gd_ed_r_wrapper, data_xfer::MOV_GdEd_R);
+/// make_handler_wrapper!(mov_gd_ed_r_wrapper, data_xfer32::MOV_GdEd_R);
 /// ```
 ///
 /// This creates a function `mov_gd_ed_r_wrapper` that can be stored in the table.
@@ -40,10 +40,9 @@ macro_rules! make_handler_wrapper {
     };
 }
 
-/// OpFlags bitflags matching original C++ definitions from `fetchdecode.h`
-///
-/// These flags indicate feature requirements and special handling for instructions.
 bitflags! {
+    /// OpFlags bitflags matching original C++ definitions from `fetchdecode.h`.
+    /// These flags indicate feature requirements and special handling for instructions.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(super) struct OpFlags: u16 {
         /// End of trace marker
@@ -84,14 +83,12 @@ bitflags! {
     }
 }
 
-/// FetchModeMask bitflags matching original C++ definitions from `cpu.h`
-///
-/// These flags indicate which features are currently available/active in the CPU.
-/// They are checked against OpFlags to determine if an instruction can be executed
-/// or if an error handler should be assigned instead.
-///
-/// Matching C++ definitions in cpu.h:5455-5462
 bitflags! {
+    /// FetchModeMask bitflags matching original C++ definitions from `cpu.h`.
+    /// These flags indicate which features are currently available/active in the CPU.
+    /// They are checked against OpFlags to determine if an instruction can be executed
+    /// or if an error handler should be assigned instead.
+    /// Matching C++ definitions in cpu.h:5455-5462
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub(super) struct FetchModeMask: u32 {
         /// FPU/MMX available
@@ -172,7 +169,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::data_xfer::MOV_GdEd_R(cpu, instr);
+        crate::cpu::data_xfer32::MOV_GdEd_R(cpu, instr);
         Ok(())
     }
 
@@ -180,7 +177,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::data_xfer::MOV_GdEd_M(cpu, instr)?;
+        crate::cpu::data_xfer32::MOV_GdEd_M(cpu, instr)?;
         Ok(())
     }
 
@@ -188,7 +185,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::data_xfer::MOV_EdGd_R(cpu, instr);
+        crate::cpu::data_xfer32::MOV_EdGd_R(cpu, instr);
         Ok(())
     }
 
@@ -196,7 +193,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::data_xfer::MOV_EdGd_M(cpu, instr)?;
+        crate::cpu::data_xfer32::MOV_EdGd_M(cpu, instr)?;
         Ok(())
     }
 
@@ -204,7 +201,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::data_xfer::MOV_EdId_R(cpu, instr);
+        crate::cpu::data_xfer32::MOV_EdId_R(cpu, instr);
         Ok(())
     }
 
@@ -212,7 +209,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::data_xfer::MOV_EdId_M(cpu, instr)?;
+        crate::cpu::data_xfer32::MOV_EdId_M(cpu, instr)?;
         Ok(())
     }
 
@@ -220,21 +217,21 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::ADD_EbGb(cpu, instr)
+        crate::cpu::arith8::ADD_EbGb(cpu, instr)
     }
 
     fn add_gb_eb_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::ADD_GbEb(cpu, instr)
+        crate::cpu::arith8::ADD_GbEb(cpu, instr)
     }
 
     fn add_gd_ed_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::ADD_GdEd_R(cpu, instr);
+        crate::cpu::arith32::ADD_GdEd_R(cpu, instr);
         Ok(())
     }
 
@@ -242,7 +239,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::ADD_GdEd_M(cpu, instr)?;
+        crate::cpu::arith32::ADD_GdEd_M(cpu, instr)?;
         Ok(())
     }
 
@@ -250,7 +247,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::ADD_EdGd_R(cpu, instr);
+        crate::cpu::arith32::ADD_EdGd_R(cpu, instr);
         Ok(())
     }
 
@@ -258,7 +255,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::ADD_EdGd_M(cpu, instr)?;
+        crate::cpu::arith32::ADD_EdGd_M(cpu, instr)?;
         Ok(())
     }
 
@@ -266,7 +263,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::ADD_EAX_Id(cpu, instr);
+        crate::cpu::arith32::ADD_EAX_Id(cpu, instr);
         Ok(())
     }
 
@@ -274,21 +271,21 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::ADD_EbIb(cpu, instr)
+        crate::cpu::arith8::ADD_EbIb(cpu, instr)
     }
 
     fn add_ew_ib_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::ADD_EwIbR(cpu, instr)
+        crate::cpu::arith16::ADD_EwIbR(cpu, instr)
     }
 
     fn add_ew_ib_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::ADD_EwIbM(cpu, instr)?;
+        crate::cpu::arith16::ADD_EwIbM(cpu, instr)?;
         Ok(())
     }
 
@@ -296,7 +293,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::SUB_GdEd_R(cpu, instr);
+        crate::cpu::arith32::SUB_GdEd_R(cpu, instr);
         Ok(())
     }
 
@@ -304,7 +301,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::SUB_GdEd_M(cpu, instr)?;
+        crate::cpu::arith32::SUB_GdEd_M(cpu, instr)?;
         Ok(())
     }
 
@@ -312,7 +309,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::SUB_EdGd_R(cpu, instr);
+        crate::cpu::arith32::SUB_EdGd_R(cpu, instr);
         Ok(())
     }
 
@@ -320,7 +317,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::SUB_EdGd_M(cpu, instr)?;
+        crate::cpu::arith32::SUB_EdGd_M(cpu, instr)?;
         Ok(())
     }
 
@@ -328,7 +325,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::SUB_EAX_Id(cpu, instr);
+        crate::cpu::arith32::SUB_EAX_Id(cpu, instr);
         Ok(())
     }
 
@@ -489,28 +486,28 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::ADC_EbGb(cpu, instr)
+        crate::cpu::arith8::ADC_EbGb(cpu, instr)
     }
 
     fn adc_gw_ew_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::ADC_GwEw(cpu, instr)
+        crate::cpu::arith16::ADC_GwEw(cpu, instr)
     }
 
     fn adc_ew_gw_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::ADC_EwGw(cpu, instr)
+        crate::cpu::arith16::ADC_EwGw(cpu, instr)
     }
 
     fn adc_ed_gd_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::ADC_EdGd_R(cpu, instr);
+        crate::cpu::arith32::ADC_EdGd_R(cpu, instr);
         Ok(())
     }
 
@@ -518,7 +515,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::arith::ADC_GdEd_R(cpu, instr);
+        crate::cpu::arith32::ADC_GdEd_R(cpu, instr);
         Ok(())
     }
 
@@ -526,57 +523,57 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::data_xfer::MOV_ALOd(cpu, instr)
+        crate::cpu::data_xfer8::MOV_ALOd(cpu, instr)
     }
 
     fn mov_ax_od_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::data_xfer::MOV_AXOd(cpu, instr)
+        crate::cpu::data_xfer16::MOV_AXOd(cpu, instr)
     }
 
     fn mov_od_al_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::data_xfer::MOV_OdAL(cpu, instr)
+        crate::cpu::data_xfer8::MOV_OdAL(cpu, instr)
     }
 
     fn mov_od_ax_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::data_xfer::MOV_OdAX(cpu, instr)
+        crate::cpu::data_xfer16::MOV_OdAX(cpu, instr)
     }
 
-    // Wrapper functions for 8-bit MOV instructions (following Bochs data_xfer8.cc)
+    // Wrapper functions for 8-bit MOV instructions (following Bochs data_xfer8.rs)
     fn mov_gb_eb_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::data_xfer::MOV_GbEbM(cpu, instr)
+        crate::cpu::data_xfer8::MOV_GbEbM(cpu, instr)
     }
 
     fn mov_gb_eb_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::data_xfer::MOV_GbEbR(cpu, instr)
+        crate::cpu::data_xfer8::MOV_GbEbR(cpu, instr)
     }
 
     fn mov_eb_gb_m_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::data_xfer::MOV_EbGbM(cpu, instr)
+        crate::cpu::data_xfer8::MOV_EbGbM(cpu, instr)
     }
 
     fn mov_eb_gb_r_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        crate::cpu::data_xfer::MOV_EbGbR(cpu, instr)
+        crate::cpu::data_xfer8::MOV_EbGbR(cpu, instr)
     }
 
     fn mov_rb_ib_wrapper<I: BxCpuIdTrait>(
@@ -859,7 +856,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         _instr: &Instruction,
     ) -> Result<()> {
-        cpu.eflags &= !(1 << 9); // Clear IF
+        cpu.eflags.remove(super::eflags::EFlags::IF_);
         Ok(())
     }
 
@@ -867,7 +864,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         _instr: &Instruction,
     ) -> Result<()> {
-        cpu.eflags |= 1 << 9; // Set IF
+        cpu.eflags.insert(super::eflags::EFlags::IF_);
         Ok(())
     }
 
@@ -875,7 +872,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         _instr: &Instruction,
     ) -> Result<()> {
-        cpu.eflags &= !(1 << 10); // Clear DF
+        cpu.eflags.remove(super::eflags::EFlags::DF);
         Ok(())
     }
 
@@ -883,7 +880,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         _instr: &Instruction,
     ) -> Result<()> {
-        cpu.eflags |= 1 << 10; // Set DF
+        cpu.eflags.insert(super::eflags::EFlags::DF);
         Ok(())
     }
 

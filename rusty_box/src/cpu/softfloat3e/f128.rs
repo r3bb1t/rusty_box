@@ -282,7 +282,7 @@ pub(crate) fn mul128_by_32(a64: u64, a0: u64, b: u32) -> (u64, u64) {
     let z_v0 = a0.wrapping_mul(b);
     let mid = ((a0 >> 32) as u32 as u64).wrapping_mul(b);
     let carry = ((z_v0 >> 32) as u32).wrapping_sub(mid as u32);
-    let z_v64 = a64.wrapping_mul(b).wrapping_add(((mid.wrapping_add(carry as u64)) >> 32));
+    let z_v64 = a64.wrapping_mul(b).wrapping_add((mid.wrapping_add(carry as u64)) >> 32);
     (z_v64, z_v0)
 }
 
@@ -572,7 +572,7 @@ fn add_mags_f128(
     }
 
     let mut exp_z;
-    let mut sig_z_extra;
+    let sig_z_extra;
 
     if exp_diff < 0 {
         if exp_b == 0x7FFF {
@@ -646,7 +646,7 @@ fn add_mags_f128(
     }
 
     // newlyAligned (common path)
-    let (mut sig_z64, mut sig_z0) = add128(
+    let (sig_z64, sig_z0) = add128(
         sig_a.0 | 0x0001000000000000,
         sig_a.1,
         sig_b.0,
@@ -1085,7 +1085,7 @@ pub(crate) fn f128_mul_add(
     // Handle NaN/Inf for A
     if exp_a == 0x7FFF {
         if (sig_a.0 | sig_a.1) != 0 || ((exp_b == 0x7FFF) && (sig_b.0 | sig_b.1) != 0) {
-            let mut uiz = softfloat_propagate_nan_f128_ui(ui_a64, ui_a0, ui_b64, ui_b0, status);
+            let uiz = softfloat_propagate_nan_f128_ui(ui_a64, ui_a0, ui_b64, ui_b0, status);
             return softfloat_propagate_nan_f128_ui(uiz.v64, uiz.v0, ui_c64, ui_c0, status);
         }
         let mag_bits = (exp_b as u64) | sig_b.0 | sig_b.1;
@@ -1112,7 +1112,7 @@ pub(crate) fn f128_mul_add(
     // Handle NaN/Inf for B
     if exp_b == 0x7FFF {
         if (sig_b.0 | sig_b.1) != 0 {
-            let mut uiz = softfloat_propagate_nan_f128_ui(ui_a64, ui_a0, ui_b64, ui_b0, status);
+            let uiz = softfloat_propagate_nan_f128_ui(ui_a64, ui_a0, ui_b64, ui_b0, status);
             return softfloat_propagate_nan_f128_ui(uiz.v64, uiz.v0, ui_c64, ui_c0, status);
         }
         let mag_bits = (exp_a as u64) | sig_a.0 | sig_a.1;
@@ -1256,7 +1256,7 @@ pub(crate) fn f128_mul_add(
                 // exp_diff == 0 but shift_dist = -1
                 sig_z = short_shift_left128(sig_z.0, sig_z.1, 1);
             }
-            let (mut zz64, mut zz0) = add128(sig_c.0, sig_c.1, sig_z.0, sig_z.1);
+            let (zz64, zz0) = add128(sig_c.0, sig_c.1, sig_z.0, sig_z.1);
             let mut sd = 8;
             if (zz64 & 0x0200000000000000) != 0 {
                 exp_z += 1;
@@ -1291,7 +1291,7 @@ pub(crate) fn f128_mul_add(
                 };
                 sig_c = (new64, new0);
             }
-            let (mut zz64, mut zz0) = add128(sig_z.0, sig_z.1, sig_c.0, sig_c.1);
+            let (zz64, zz0) = add128(sig_z.0, sig_z.1, sig_c.0, sig_c.1);
             let mut sd = 8;
             if (zz64 & 0x0200000000000000) != 0 {
                 exp_z += 1;
@@ -1372,7 +1372,7 @@ pub(crate) fn f128_mul_add(
                 (0, ((sig_c.0 | sig_c.1) != 0) as u64)
             };
             sig_c = (new64, new0);
-            let (mut zz64, mut zz0) = sub128(sig_z.0, sig_z.1, sig_c.0, sig_c.1);
+            let (zz64, zz0) = sub128(sig_z.0, sig_z.1, sig_c.0, sig_c.1);
             let mut sd = 8;
             if (zz64 & 0x0100000000000000) == 0 {
                 sd = 7;

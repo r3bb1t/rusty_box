@@ -477,7 +477,7 @@ impl BxMemoryStubC {
         data: &mut [u8],
         a20_mask: A20Mask,
     ) -> Result<()> {
-        let mut a20_addr = addr & a20_mask;
+        let a20_addr = addr & a20_mask;
 
         // Note: accesses should always be contained within a single page
         if (addr >> 12) != ((addr + len as u64 - 1) >> 12) {

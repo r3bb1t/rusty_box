@@ -104,18 +104,18 @@ pub trait BxGui: Send + Sync {
     }
 
     /// Register a status bar item
-    fn register_statusitem(&mut self, text: &str, auto_off: bool) -> i32 {
+    fn register_statusitem(&mut self, _text: &str, _auto_off: bool) -> i32 {
         // Default: return -1 (not supported)
         -1
     }
 
     /// Unregister a status bar item
-    fn unregister_statusitem(&mut self, id: i32) {
+    fn unregister_statusitem(&mut self, _id: i32) {
         // Default: no-op
     }
 
     /// Set status bar item state
-    fn statusbar_setitem(&mut self, element: i32, active: bool, w: bool) {
+    fn statusbar_setitem(&mut self, _element: i32, _active: bool, _w: bool) {
         // Default: no-op
     }
 
@@ -125,7 +125,7 @@ pub trait BxGui: Send + Sync {
     }
 
     /// Show instructions per second
-    fn show_ips(&mut self, ips_count: u32) {
+    fn show_ips(&mut self, _ips_count: u32) {
         // Default: no-op
     }
 
@@ -136,12 +136,12 @@ pub trait BxGui: Send + Sync {
     }
 
     /// Handle a signal
-    fn sighandler(&mut self, sig: i32) {
+    fn sighandler(&mut self, _sig: i32) {
         // Default: no-op
     }
 
     /// Set display mode
-    fn set_display_mode(&mut self, mode: DisplayMode) {
+    fn set_display_mode(&mut self, _mode: DisplayMode) {
         // Default: no-op
     }
 

@@ -96,9 +96,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op1_64 = self.read_linear_qword(seg, laddr);
+        let _op1_64 = self.read_linear_qword(seg, laddr);
         let asize_mask = if instr.as64_l() != 0 { 0xFFFFFFFFFFFFFFFF } else { 0xFFFFFFFF };
-        let cs_raw = self.read_linear_word(seg, self.get_laddr64(seg_idx, (eaddr.wrapping_add(8)) & asize_mask));
+        let _cs_raw = self.read_linear_word(seg, self.get_laddr64(seg_idx, (eaddr.wrapping_add(8)) & asize_mask));
 
         // TODO: Implement call_protected for protected mode (matching C++ line 191)
         // For now, return error if not in real mode
@@ -161,9 +161,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op1_64 = self.read_linear_qword(seg, laddr);
+        let _op1_64 = self.read_linear_qword(seg, laddr);
         let asize_mask = if instr.as64_l() != 0 { 0xFFFFFFFFFFFFFFFF } else { 0xFFFFFFFF };
-        let cs_raw = self.read_linear_word(seg, self.get_laddr64(seg_idx, (eaddr.wrapping_add(8)) & asize_mask));
+        let _cs_raw = self.read_linear_word(seg, self.get_laddr64(seg_idx, (eaddr.wrapping_add(8)) & asize_mask));
 
         // TODO: Implement jump_protected for protected mode (matching C++ line 443)
         // For now, return error if not in real mode
@@ -203,7 +203,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Far return with immediate (64-bit)
     /// Matching C++ ctrl_xfer64.cc:78-102 RETfar64_Iw
     /// Note: return_protected is RSP safe
-    pub fn retfar64_iw(&mut self, instr: &Instruction) -> Result<()> {
+    pub fn retfar64_iw(&mut self, _instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue (matching C++ line 80)
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;

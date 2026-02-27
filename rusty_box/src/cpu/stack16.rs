@@ -7,6 +7,7 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::Instruction,
+    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -219,7 +220,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// PUSHF - Push flags (16-bit)
     pub fn pushf_fw(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let flags = (self.eflags & 0xFFFF) as u16;
+        let flags = (self.eflags.bits() & 0xFFFF) as u16;
         self.push_16(flags)?;
         tracing::trace!("PUSHF: {:#06x}", flags);
         Ok(())
@@ -233,7 +234,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Changeable: CF, PF, AF, ZF, SF, TF, DF, OF, NT
         const CHANGE_MASK: u32 = 0x0FD5; // bits 0,2,4,6,7,8,9,10,14
 
-        self.eflags = (self.eflags & !CHANGE_MASK) | ((flags as u32) & CHANGE_MASK);
+        self.eflags = EFlags::from_bits_retain((self.eflags.bits() & !CHANGE_MASK) | ((flags as u32) & CHANGE_MASK));
         tracing::trace!("POPF: {:#06x}", flags);
         Ok(())
     }

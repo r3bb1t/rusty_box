@@ -1,4 +1,4 @@
-use core::{cell::UnsafeCell, marker::PhantomData, ptr::NonNull};
+use core::{marker::PhantomData, ptr::NonNull};
 
 use crate::{
     config::{BxAddress, BxPhyAddress, BxPtrEquiv},
@@ -8,11 +8,11 @@ use crate::{
         decoder::{features::X86Feature, BxSegregs, BX_64BIT_REG_RIP},
         rusty_box::MemoryAccessType,
         smm::SMMRAM_Fields,
-        tlb::{lpf_of, page_offset, ppf_of, TLBEntry, Tlb},
+        tlb::{lpf_of, ppf_of, TLBEntry, Tlb},
         CpuError,
     },
     impl_eflag,
-    memory::{BxMemC, BxMemoryStubC},
+    memory::BxMemC,
 };
 
 use super::{
@@ -25,10 +25,10 @@ use super::{
         BX_XMM_REGISTERS,
     },
     descriptor::{BxGlobalSegmentReg, BxSegmentReg},
+    eflags::EFlags,
     i387::{BxPackedRegister, I387},
     icache::{BxICache, BxICacheEntry as BxIcacheEntry, BX_ICACHE_MEM_POOL},
     lazy_flags::BxLazyflagsEntry,
-    segment_ctrl_pro::parse_selector,
     svm::VmcbCache,
     tlb::BxHostpageaddr,
     vmx::{VmcsCache, VmcsMapping, VmxCap},
@@ -36,7 +36,6 @@ use super::{
     Result,
 };
 
-use crate::cpu::decoder::{decode_simple_32, fetchdecode32, fetchdecode64};
 
 pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
 
@@ -365,7 +364,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     // ==|==|=====| ==|==|==|==| ==|==|==|==| ==|==|==|==
     //  0|NT| IOPL| OF|DF|IF|TF| SF|ZF| 0|AF|  0|PF| 1|CF
     //
-    pub(super) eflags: u32, // Raw 32-bit value in x86 bit position.
+    pub(super) eflags: super::eflags::EFlags, // x86 EFLAGS register
 
     /// lazy arithmetic flags state
     pub(super) oszapc: BxLazyflagsEntry,
@@ -686,6 +685,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub(super) fn bx_write_opmask(&mut self, index: usize, val_64: u64) {
         self.opmask[index].rrx = val_64;
+    }
+
+    // ── Interrupt inhibition (MOV SS / POP SS) ──
+    // Bochs cpu.h:962-966
+    pub(super) const BX_INHIBIT_INTERRUPTS: u32 = 0x01;
+    pub(super) const BX_INHIBIT_DEBUG: u32 = 0x02;
+    pub(super) const BX_INHIBIT_INTERRUPTS_BY_MOVSS: u32 = 0x01 | 0x02;
+
+    /// Set interrupt inhibition mask for the next instruction boundary
+    pub(super) fn inhibit_interrupts(&mut self, mask: u32) {
+        self.inhibit_mask = mask;
+        self.inhibit_icount = self.icount + 1;
+    }
+
+    /// Check if interrupts of the given type are currently inhibited
+    pub(crate) fn interrupts_inhibited(&self, mask: u32) -> bool {
+        self.icount <= self.inhibit_icount && (self.inhibit_mask & mask) != 0
     }
 }
 
@@ -1096,7 +1112,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     pub fn cpu_loop(&mut self, mem: &'c mut BxMemC<'c>, cpus: &[&Self]) -> super::Result<()> {
-        let stack_anchor = 0;
+        let _stack_anchor = 0;
 
         self.cpuloop_stack_anchor = None;
 
@@ -1154,8 +1170,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let mut iteration = 0u64;
         let mut trace_break_count = 0u64;
         let mut get_icache_count = 0u64;
-        let mut icache_miss_count = 0u64;
-        let mut prefetch_count = 0u64;
+        let _icache_miss_count = 0u64;
+        let _prefetch_count = 0u64;
         #[cfg(feature = "profiling")]
         let mut prof_assign_ns = 0u64;
         #[cfg(feature = "profiling")]
@@ -1378,7 +1394,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                             tracing::error!("  ESP={:#x} EBP={:#x} ESI={:#x} EDI={:#x}",
                                 self.get_gpr32(4), self.get_gpr32(5), self.get_gpr32(6), self.get_gpr32(7));
                             tracing::error!("  CR0={:#x} EFLAGS={:#x} CPL={} GDTR.base={:#x} GDTR.limit={:#x} IDTR.base={:#x} IDTR.limit={:#x}",
-                                self.cr0.get32(), self.eflags, cs_value & 3,
+                                self.cr0.get32(), self.eflags.bits(), cs_value & 3,
                                 self.gdtr.base, self.gdtr.limit, self.idtr.base, self.idtr.limit);
                             // Show segment registers
                             for (idx, name) in [(0,"ES"),(1,"CS"),(2,"SS"),(3,"DS"),(4,"FS"),(5,"GS")] {
@@ -1707,26 +1723,25 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let parity = low.count_ones() % 2 == 0;
 
         // clear relevant flags
-        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
+        self.eflags.remove(EFlags::OSZAPC);
 
         if cf {
-            self.eflags |= 1 << 0;
+            self.eflags.insert(EFlags::CF);
         }
         if parity {
-            self.eflags |= 1 << 2;
+            self.eflags.insert(EFlags::PF);
         }
         if af {
-            self.eflags |= 1 << 4;
+            self.eflags.insert(EFlags::AF);
         }
         if zf {
-            self.eflags |= 1 << 6;
+            self.eflags.insert(EFlags::ZF);
         }
         if sf {
-            self.eflags |= 1 << 7;
+            self.eflags.insert(EFlags::SF);
         }
         if of {
-            self.eflags |= 1 << 11;
+            self.eflags.insert(EFlags::OF);
         }
     }
 
@@ -1741,26 +1756,25 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let low = (res & 0xff) as u8;
         let parity = low.count_ones() % 2 == 0;
 
-        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
+        self.eflags.remove(EFlags::OSZAPC);
 
         if cf {
-            self.eflags |= 1 << 0;
+            self.eflags.insert(EFlags::CF);
         }
         if parity {
-            self.eflags |= 1 << 2;
+            self.eflags.insert(EFlags::PF);
         }
         if af {
-            self.eflags |= 1 << 4;
+            self.eflags.insert(EFlags::AF);
         }
         if zf {
-            self.eflags |= 1 << 6;
+            self.eflags.insert(EFlags::ZF);
         }
         if sf {
-            self.eflags |= 1 << 7;
+            self.eflags.insert(EFlags::SF);
         }
         if of {
-            self.eflags |= 1 << 11;
+            self.eflags.insert(EFlags::OF);
         }
     }
 
@@ -1776,26 +1790,25 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
         let pf = (result.count_ones() % 2) == 0;
 
-        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
+        self.eflags.remove(EFlags::OSZAPC);
 
         if cf {
-            self.eflags |= 1 << 0;
+            self.eflags.insert(EFlags::CF);
         }
         if pf {
-            self.eflags |= 1 << 2;
+            self.eflags.insert(EFlags::PF);
         }
         if af {
-            self.eflags |= 1 << 4;
+            self.eflags.insert(EFlags::AF);
         }
         if zf {
-            self.eflags |= 1 << 6;
+            self.eflags.insert(EFlags::ZF);
         }
         if sf {
-            self.eflags |= 1 << 7;
+            self.eflags.insert(EFlags::SF);
         }
         if of {
-            self.eflags |= 1 << 11;
+            self.eflags.insert(EFlags::OF);
         }
     }
 
@@ -1807,26 +1820,25 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
         let pf = ((result & 0xFF) as u8).count_ones() % 2 == 0;
 
-        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
+        self.eflags.remove(EFlags::OSZAPC);
 
         if cf {
-            self.eflags |= 1 << 0;
+            self.eflags.insert(EFlags::CF);
         }
         if pf {
-            self.eflags |= 1 << 2;
+            self.eflags.insert(EFlags::PF);
         }
         if af {
-            self.eflags |= 1 << 4;
+            self.eflags.insert(EFlags::AF);
         }
         if zf {
-            self.eflags |= 1 << 6;
+            self.eflags.insert(EFlags::ZF);
         }
         if sf {
-            self.eflags |= 1 << 7;
+            self.eflags.insert(EFlags::SF);
         }
         if of {
-            self.eflags |= 1 << 11;
+            self.eflags.insert(EFlags::OF);
         }
     }
 
@@ -1838,26 +1850,25 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
         let pf = (result.count_ones() % 2) == 0;
 
-        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
+        self.eflags.remove(EFlags::OSZAPC);
 
         if cf {
-            self.eflags |= 1 << 0;
+            self.eflags.insert(EFlags::CF);
         }
         if pf {
-            self.eflags |= 1 << 2;
+            self.eflags.insert(EFlags::PF);
         }
         if af {
-            self.eflags |= 1 << 4;
+            self.eflags.insert(EFlags::AF);
         }
         if zf {
-            self.eflags |= 1 << 6;
+            self.eflags.insert(EFlags::ZF);
         }
         if sf {
-            self.eflags |= 1 << 7;
+            self.eflags.insert(EFlags::SF);
         }
         if of {
-            self.eflags |= 1 << 11;
+            self.eflags.insert(EFlags::OF);
         }
     }
 
@@ -1869,65 +1880,40 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
         let pf = ((result & 0xFF) as u8).count_ones() % 2 == 0;
 
-        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
+        self.eflags.remove(EFlags::OSZAPC);
 
         if cf {
-            self.eflags |= 1 << 0;
+            self.eflags.insert(EFlags::CF);
         }
         if pf {
-            self.eflags |= 1 << 2;
+            self.eflags.insert(EFlags::PF);
         }
         if af {
-            self.eflags |= 1 << 4;
+            self.eflags.insert(EFlags::AF);
         }
         if zf {
-            self.eflags |= 1 << 6;
+            self.eflags.insert(EFlags::ZF);
         }
         if sf {
-            self.eflags |= 1 << 7;
+            self.eflags.insert(EFlags::SF);
         }
         if of {
-            self.eflags |= 1 << 11;
+            self.eflags.insert(EFlags::OF);
         }
     }
 
     pub(super) fn update_flags_logic8(&mut self, result: u8) {
-        self.eflags &= !((1 << 11) | (1 << 0)); // OF=0, CF=0
-        if (result & 0x80) != 0 {
-            self.eflags |= 1 << 7;
-        } else {
-            self.eflags &= !(1 << 7);
-        }
-        if result == 0 {
-            self.eflags |= 1 << 6;
-        } else {
-            self.eflags &= !(1 << 6);
-        }
-        if (result.count_ones() % 2) == 0 {
-            self.eflags |= 1 << 2;
-        } else {
-            self.eflags &= !(1 << 2);
-        }
+        self.eflags.remove(EFlags::OF | EFlags::CF); // OF=0, CF=0
+        self.eflags.set(EFlags::SF, (result & 0x80) != 0);
+        self.eflags.set(EFlags::ZF, result == 0);
+        self.eflags.set(EFlags::PF, (result.count_ones() % 2) == 0);
     }
 
     pub(super) fn update_flags_logic16(&mut self, result: u16) {
-        self.eflags &= !((1 << 11) | (1 << 0)); // OF=0, CF=0
-        if (result & 0x8000) != 0 {
-            self.eflags |= 1 << 7;
-        } else {
-            self.eflags &= !(1 << 7);
-        }
-        if result == 0 {
-            self.eflags |= 1 << 6;
-        } else {
-            self.eflags &= !(1 << 6);
-        }
-        if (((result & 0xFF) as u8).count_ones() % 2) == 0 {
-            self.eflags |= 1 << 2;
-        } else {
-            self.eflags &= !(1 << 2);
-        }
+        self.eflags.remove(EFlags::OF | EFlags::CF); // OF=0, CF=0
+        self.eflags.set(EFlags::SF, (result & 0x8000) != 0);
+        self.eflags.set(EFlags::ZF, result == 0);
+        self.eflags.set(EFlags::PF, (((result & 0xFF) as u8).count_ones() % 2) == 0);
     }
 
     /// Get segment base address safely
@@ -1966,30 +1952,17 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
     pub(super) fn update_flags_logic32(&mut self, result: u32) {
         // Clear OF, CF (always 0 for logical operations)
-        self.eflags &= !((1 << 11) | (1 << 0)); // OF=0, CF=0
+        self.eflags.remove(EFlags::OF | EFlags::CF);
 
-        // Set SF (sign flag) - bit 7 of result for 32-bit
-        if (result & 0x80000000) != 0 {
-            self.eflags |= 1 << 7;
-        } else {
-            self.eflags &= !(1 << 7);
-        }
+        // Set SF (sign flag) - bit 31 of result for 32-bit
+        self.eflags.set(EFlags::SF, (result & 0x80000000) != 0);
 
-        // Set ZF (zero flag) - bit 6
-        if result == 0 {
-            self.eflags |= 1 << 6;
-        } else {
-            self.eflags &= !(1 << 6);
-        }
+        // Set ZF (zero flag)
+        self.eflags.set(EFlags::ZF, result == 0);
 
-        // Set PF (parity flag) - bit 2, based on low 8 bits
+        // Set PF (parity flag), based on low 8 bits
         let low_byte = (result & 0xFF) as u8;
-        let ones = low_byte.count_ones();
-        if ones % 2 == 0 {
-            self.eflags |= 1 << 2;
-        } else {
-            self.eflags &= !(1 << 2);
-        }
+        self.eflags.set(EFlags::PF, low_byte.count_ones() % 2 == 0);
     }
 
     fn before_execution(&mut self, _cpu_id: u32) {
@@ -2004,10 +1977,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     //  * page boundary:            4k
     //  * ROM boundary:             2k (dont care since we are only reading)
     //  * segment boundary:         any
-    pub(super) fn prefetch(&mut self, mem: &'c mut BxMemC<'c>, cpus: &[&Self]) -> Result<()> {
+    pub(super) fn prefetch(&mut self, mem: &'c mut BxMemC<'c>, _cpus: &[&Self]) -> Result<()> {
         // let cpus = [&self];
-        let mut laddr: BxAddress;
-        let mut page_offset;
+        let laddr: BxAddress;
+        let page_offset;
 
         if self.long64_mode() {
             if self.is_canonical_access(self.rip(), MemoryAccessType::Execute, self.user_pl()) {
@@ -2253,7 +2226,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// BxNoFPU - FPU not available handler
     /// Matches BX_CPU_C::BxNoFPU from proc_ctrl.cc:463
     /// Raises #NM (Device Not Available) if CR0.EM or CR0.TS is set
-    pub(super) fn bx_no_fpu(&mut self, instr: &Instruction) -> Result<()> {
+    pub(super) fn bx_no_fpu(&mut self, _instr: &Instruction) -> Result<()> {
         let cr0 = self.cr0.get32();
         let cr0_em = (cr0 & (1 << 2)) != 0; // CR0.EM bit 2
         let cr0_ts = (cr0 & (1 << 3)) != 0; // CR0.TS bit 3
@@ -2270,7 +2243,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// BxNoMMX - MMX not available handler
     /// Matches BX_CPU_C::BxNoMMX from proc_ctrl.cc:473
     /// Raises #UD if CR0.EM is set, #NM if CR0.TS is set
-    pub(super) fn bx_no_mmx(&mut self, instr: &Instruction) -> Result<()> {
+    pub(super) fn bx_no_mmx(&mut self, _instr: &Instruction) -> Result<()> {
         let cr0 = self.cr0.get32();
         let cr0_em = (cr0 & (1 << 2)) != 0; // CR0.EM bit 2
         let cr0_ts = (cr0 & (1 << 3)) != 0; // CR0.TS bit 3
@@ -2541,7 +2514,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Handler assignment logic (matching original lines 2045-2061)
         let mut selected_handler: Option<InstructionHandler<I>> = None;
-        let mut is_bx_error = false; // Track if BxError handler was assigned
+        let is_bx_error = false; // Track if BxError handler was assigned
 
         if let Some(entry) = &opcode_entry {
             // Handler assignment from table

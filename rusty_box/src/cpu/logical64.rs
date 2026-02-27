@@ -6,7 +6,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::Instruction,
+    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -19,13 +19,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let sf = (result & 0x8000000000000000) != 0;
         let zf = result == 0;
         let pf = (result as u8).count_ones() % 2 == 0;
-        
-        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
-        
-        if pf { self.eflags |= 1 << 2; }
-        if zf { self.eflags |= 1 << 6; }
-        if sf { self.eflags |= 1 << 7; }
+
+        self.eflags.remove(EFlags::LOGIC_MASK);
+
+        if pf { self.eflags.insert(EFlags::PF); }
+        if zf { self.eflags.insert(EFlags::ZF); }
+        if sf { self.eflags.insert(EFlags::SF); }
     }
 
     // Note: 64-bit logical instructions are not yet implemented.

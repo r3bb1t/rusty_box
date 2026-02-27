@@ -7,7 +7,8 @@ use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
     decoder::Instruction,
-    error::{CpuError, Result},
+    eflags::EFlags,
+    error::Result,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -34,7 +35,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.update_flags_logic32(product_32l);
         if product_32h != 0 {
             // Set CF and OF if high dword is non-zero
-            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
         tracing::trace!("MUL32: EAX ({:#010x}) * reg{} ({:#010x}) = EDX:EAX ({:#010x}:{:#010x})", op1, src_reg, op2, product_32h, product_32l);
@@ -61,7 +62,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.update_flags_logic32(product_32l);
         if product_32h != 0 {
             // Set CF and OF if high dword is non-zero
-            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
         tracing::trace!("MUL32 mem: EAX ({:#010x}) * [{:?}:{:#x}] ({:#010x}) = EDX:EAX ({:#010x}:{:#010x})", op1, seg, eaddr, op2, product_32h, product_32l);
@@ -89,7 +90,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Matching C++: if(product_64 != (Bit32s)product_64)
         // This checks if the 64-bit value equals its sign-extended 32-bit version
         if product_64 != (product_64 as i32 as i64) {
-            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
         tracing::trace!("IMUL32: EAX ({:#010x}) * reg{} ({:#010x}) = EDX:EAX ({:#010x}:{:#010x})", op1 as u32, src_reg, op2 as u32, product_32h, product_32l);
@@ -118,7 +119,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Matching C++: if(product_64 != (Bit32s)product_64)
         // This checks if the 64-bit value equals its sign-extended 32-bit version
         if product_64 != (product_64 as i32 as i64) {
-            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
         tracing::trace!("IMUL32 mem: EAX ({:#010x}) * [{:?}:{:#x}] ({:#010x}) = EDX:EAX ({:#010x}:{:#010x})", op1 as u32, seg, eaddr, op2 as u32, product_32h, product_32l);
@@ -280,7 +281,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.update_flags_logic32(product_32);
         if product_64 != (product_64 as i32 as i64) {
-            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
         tracing::trace!("IMUL Gd,Ed: reg{} ({:#010x}) * reg{} ({:#010x}) = {:#010x}",
@@ -305,7 +306,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.update_flags_logic32(product_32);
         if product_64 != (product_64 as i32 as i64) {
-            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
         tracing::trace!("IMUL Gd,Ed mem: reg{} ({:#010x}) * [{:?}:{:#x}] ({:#010x}) = {:#010x}",
@@ -337,9 +338,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Set CF and OF if result doesn't fit in signed 32-bit
         // (i.e., if sign-extension of result doesn't equal the full 64-bit product)
         if product_64 != (result_32 as i64) {
-            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         } else {
-            self.eflags &= !((1 << 0) | (1 << 11)); // CF=0, OF=0
+            self.eflags.remove(EFlags::CF.union(EFlags::OF)); // CF=0, OF=0
         }
 
         tracing::trace!("IMUL32: reg{} ({:#010x}) * imm8 ({:#04x}) = reg{} ({:#010x})",
@@ -363,9 +364,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr32(dst_reg, result_32 as u32);
 
         if product_64 != (result_32 as i64) {
-            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         } else {
-            self.eflags &= !((1 << 0) | (1 << 11)); // CF=0, OF=0
+            self.eflags.remove(EFlags::CF.union(EFlags::OF)); // CF=0, OF=0
         }
 
         tracing::trace!("IMUL32 Gd,Ed,Id: reg{} ({:#010x}) * imm32 ({:#010x}) = reg{} ({:#010x})",
@@ -389,9 +390,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr32(dst_reg, result_32 as u32);
 
         if product_64 != (result_32 as i64) {
-            self.eflags |= (1 << 0) | (1 << 11); // CF=1, OF=1
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         } else {
-            self.eflags &= !((1 << 0) | (1 << 11)); // CF=0, OF=0
+            self.eflags.remove(EFlags::CF.union(EFlags::OF)); // CF=0, OF=0
         }
 
         tracing::trace!("IMUL32 Gd,Ed,Id mem: [{:?}:{:#x}] ({:#010x}) * imm32 ({:#010x}) = reg{} ({:#010x})",

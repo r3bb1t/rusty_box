@@ -1,4 +1,14 @@
 #![cfg_attr(not(feature = "std"), no_std)]
+// Bochs port: function/field/type names intentionally match C++ originals
+#![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
+// Ported code not yet wired up — suppress until features are implemented
+#![allow(dead_code, unused_variables, unused_assignments)]
+// Union field accesses that may need unsafe in different configurations
+#![allow(unused_unsafe)]
+// Bochs port exposes types across module boundaries incrementally
+#![allow(private_interfaces)]
+// Feature flags for future extensions (SSE, AVX, EVEX, VMX, SVM, etc.)
+#![allow(unexpected_cfgs)]
 extern crate alloc;
 
 //#[cfg(all(feature = "bx_little_endian", feature = "bx_big_endian"))]

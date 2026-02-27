@@ -6,7 +6,6 @@ use super::super::cpu::BxCpuC;
 use super::super::cpuid::BxCpuIdTrait;
 use super::super::decoder::Instruction;
 use super::super::softfloat3e::softfloat_types::floatx80;
-use super::super::softfloat3e::specialize::pack_floatx80;
 use super::super::i387::{FPU_CW_RC, FPU_RC_DOWN, FPU_RC_UP};
 
 // Exact 80-bit constants from Bochs fpu_const.cc

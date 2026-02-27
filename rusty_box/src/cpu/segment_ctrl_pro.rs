@@ -1,5 +1,5 @@
 use super::{
-    cpu::{CpuMode, Exception},
+    cpu::Exception,
     decoder::BxSegregs,
     descriptor::{BxDescriptor, BxSelector, DescriptorGate, DescriptorSegment, DescriptorTaskGate,
                  SystemAndGateDescriptorEnum, SEG_VALID_CACHE},
@@ -534,15 +534,63 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             self.branch_far(&mut selector, &mut descriptor, disp, cpl)?;
             Ok(())
         } else {
-            // System descriptor (call gate, task gate, TSS)
-            // For now, return error - these are complex and rarely used during BIOS boot
-            tracing::error!(
-                "jump_protected: system descriptor type {:#x} not yet implemented",
-                descriptor.r#type
-            );
-            Err(super::error::CpuError::UnimplementedOpcode {
-                opcode: format!("jump_protected with system descriptor type {:#x}", descriptor.r#type),
-            })
+            // System descriptor — Based on Bochs jmp_far.cc:59-127
+            let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+
+            // DPL checks for gates
+            if descriptor.dpl < cpl {
+                tracing::error!("jump_protected: gate.dpl < CPL");
+                return self.exception(Exception::Gp, cs_raw & 0xfffc);
+            }
+            if descriptor.dpl < selector.rpl {
+                tracing::error!("jump_protected: gate.dpl < selector.rpl");
+                return self.exception(Exception::Gp, cs_raw & 0xfffc);
+            }
+
+            match descriptor.r#type {
+                0x1 | 0x9 => {
+                    // Available 286/386 TSS — JMP to TSS
+                    tracing::debug!("jump_protected: JMP to TSS type={:#x}", descriptor.r#type);
+                    if descriptor.valid == 0 || selector.ti != 0 {
+                        tracing::error!("jump_protected: bad TSS selector");
+                        return self.exception(Exception::Gp, cs_raw & 0xfffc);
+                    }
+                    if !descriptor.p {
+                        tracing::error!("jump_protected: TSS not present");
+                        return self.exception(Exception::Np, cs_raw & 0xfffc);
+                    }
+                    let (dword1, dword2) = self.fetch_raw_descriptor(&selector)?;
+                    self.task_switch(
+                        &selector,
+                        &descriptor,
+                        super::tasking::BX_TASK_FROM_JUMP,
+                        dword1,
+                        dword2,
+                        false,
+                        0,
+                    )?;
+                    Ok(())
+                }
+                0x5 => {
+                    // Task gate
+                    tracing::debug!("jump_protected: JMP via task gate");
+                    self.task_gate_jmp(&selector, &descriptor)?;
+                    Ok(())
+                }
+                0x4 | 0xC => {
+                    // 286/386 call gate — JMP through call gate
+                    tracing::debug!("jump_protected: JMP via call gate type={:#x}", descriptor.r#type);
+                    self.jmp_call_gate(&selector, &descriptor)?;
+                    Ok(())
+                }
+                _ => {
+                    tracing::error!(
+                        "jump_protected: unsupported system descriptor type {:#x}",
+                        descriptor.r#type
+                    );
+                    self.exception(Exception::Gp, cs_raw & 0xfffc)
+                }
+            }
         }
     }
 
@@ -875,5 +923,694 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
         tracing::trace!("LTR: loaded selector={:#06x}, marked busy", raw_selector);
         Ok(())
+    }
+
+    // =========================================================================
+    // validate_seg_regs — invalidate DS/ES/FS/GS on privilege change
+    // Based on Bochs segment_ctrl_pro.cc:238-272
+    // =========================================================================
+
+    /// Invalidate a single segment register if DPL < CPL and type is data or non-conforming code
+    fn validate_seg_reg(&mut self, seg: usize) {
+        use super::descriptor::{is_code_segment_non_conforming, is_data_segment};
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        let cache = &self.sregs[seg].cache;
+        if cache.dpl < cpl {
+            if cache.valid == 0
+                || !cache.segment
+                || is_data_segment(cache.r#type)
+                || is_code_segment_non_conforming(cache.r#type)
+            {
+                self.sregs[seg].selector.value = 0;
+                self.sregs[seg].cache.valid = 0;
+            }
+        }
+    }
+
+    /// Validate ES/DS/FS/GS after privilege level change
+    /// Based on Bochs segment_ctrl_pro.cc:265-272
+    pub(super) fn validate_seg_regs(&mut self) {
+        self.validate_seg_reg(BxSegregs::Es as usize);
+        self.validate_seg_reg(BxSegregs::Ds as usize);
+        self.validate_seg_reg(BxSegregs::Fs as usize);
+        self.validate_seg_reg(BxSegregs::Gs as usize);
+    }
+
+    // =========================================================================
+    // call_protected — protected mode far CALL
+    // Based on Bochs call_far.cc:29-228
+    // =========================================================================
+
+    /// Protected mode far CALL
+    /// Handles code segments and call gates (same-priv and inner-priv)
+    pub(super) fn call_protected(
+        &mut self,
+        cs_raw: u16,
+        disp: u32,
+        os32: bool,
+    ) -> Result<()> {
+        if (cs_raw & 0xfffc) == 0 {
+            tracing::error!("call_protected: CS selector null");
+            return self.exception(Exception::Gp, 0);
+        }
+
+        let mut cs_selector = BxSelector::default();
+        parse_selector(cs_raw, &mut cs_selector);
+
+        let (dword1, dword2) = match self.fetch_raw_descriptor(&cs_selector) {
+            Ok(v) => v,
+            Err(_) => return self.exception(Exception::Gp, cs_raw & 0xfffc),
+        };
+        let mut cs_descriptor = self.parse_descriptor(dword1, dword2)?;
+
+        if cs_descriptor.valid == 0 {
+            tracing::error!("call_protected: invalid CS descriptor");
+            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+        }
+
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+
+        if cs_descriptor.segment {
+            // ── Normal code segment ──
+            self.check_cs(&cs_descriptor, cs_raw, cs_selector.rpl, cpl)?;
+
+            let temp_rsp = if self.is_stack_32bit() {
+                self.esp()
+            } else {
+                self.sp() as u32
+            };
+
+            let ss_seg = self.sregs[BxSegregs::Ss as usize].clone();
+
+            if os32 {
+                self.write_new_stack_dword(
+                    &ss_seg,
+                    temp_rsp.wrapping_sub(4),
+                    cs_descriptor.dpl,
+                    self.sregs[BxSegregs::Cs as usize].selector.value as u32,
+                )?;
+                self.write_new_stack_dword(
+                    &ss_seg,
+                    temp_rsp.wrapping_sub(8),
+                    cs_descriptor.dpl,
+                    self.eip(),
+                )?;
+                self.branch_far(&mut cs_selector, &mut cs_descriptor, disp as u64, cpl)?;
+                if self.is_stack_32bit() {
+                    self.set_esp(temp_rsp.wrapping_sub(8));
+                } else {
+                    self.set_sp((temp_rsp.wrapping_sub(8)) as u16);
+                }
+            } else {
+                self.write_new_stack_word(
+                    &ss_seg,
+                    temp_rsp.wrapping_sub(2),
+                    cs_descriptor.dpl,
+                    self.sregs[BxSegregs::Cs as usize].selector.value,
+                )?;
+                self.write_new_stack_word(
+                    &ss_seg,
+                    temp_rsp.wrapping_sub(4),
+                    cs_descriptor.dpl,
+                    self.get_ip(),
+                )?;
+                self.branch_far(&mut cs_selector, &mut cs_descriptor, disp as u64, cpl)?;
+                if self.is_stack_32bit() {
+                    self.set_esp(temp_rsp.wrapping_sub(4));
+                } else {
+                    self.set_sp((temp_rsp.wrapping_sub(4)) as u16);
+                }
+            }
+            return Ok(());
+        }
+
+        // ── System descriptor (gate) ──
+        // Check DPL >= CPL and DPL >= RPL
+        if cs_descriptor.dpl < cpl {
+            tracing::error!("call_protected: gate.dpl < CPL");
+            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+        }
+        if cs_descriptor.dpl < cs_selector.rpl {
+            tracing::error!("call_protected: gate.dpl < selector.rpl");
+            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+        }
+
+        match cs_descriptor.r#type {
+            0x5 => {
+                // Task gate
+                self.task_gate_call(&cs_selector, &cs_descriptor)?;
+            }
+            0x4 | 0xC => {
+                // 286/386 call gate
+                self.call_gate(&cs_selector, &cs_descriptor, os32)?;
+            }
+            0x1 | 0x9 => {
+                // Available TSS — CALL causes task switch
+                if !cs_descriptor.p {
+                    tracing::error!("call_protected: TSS not present");
+                    return self.exception(Exception::Np, cs_raw & 0xfffc);
+                }
+                self.task_switch(
+                    &cs_selector,
+                    &cs_descriptor,
+                    super::tasking::BX_TASK_FROM_CALL,
+                    dword1,
+                    dword2,
+                    false,
+                    0,
+                )?;
+            }
+            _ => {
+                tracing::error!(
+                    "call_protected: unsupported system descriptor type {:#x}",
+                    cs_descriptor.r#type
+                );
+                return self.exception(Exception::Gp, cs_raw & 0xfffc);
+            }
+        }
+
+        Ok(())
+    }
+
+    /// Call through a call gate (same or inner privilege)
+    /// Based on Bochs call_far.cc call_gate() function
+    fn call_gate(
+        &mut self,
+        _gate_selector: &BxSelector,
+        gate_descriptor: &BxDescriptor,
+        _os32: bool,
+    ) -> Result<()> {
+        use super::descriptor::{is_code_segment_non_conforming, is_data_segment, is_data_segment_writable, is_code_segment};
+
+        // Gate must be present
+        if !gate_descriptor.p {
+            tracing::error!("call_gate: gate not present");
+            return self.exception(Exception::Np, _gate_selector.value & 0xfffc);
+        }
+
+        // Get CS:EIP from gate
+        let gate_cs_raw = unsafe { gate_descriptor.u.gate.dest_selector };
+        let new_eip = unsafe { gate_descriptor.u.gate.dest_offset };
+
+        if (gate_cs_raw & 0xfffc) == 0 {
+            tracing::error!("call_gate: CS selector null");
+            return self.exception(Exception::Gp, 0);
+        }
+
+        let mut gate_cs_selector = BxSelector::default();
+        parse_selector(gate_cs_raw, &mut gate_cs_selector);
+
+        let (dword1, dword2) = match self.fetch_raw_descriptor(&gate_cs_selector) {
+            Ok(v) => v,
+            Err(_) => return self.exception(Exception::Gp, gate_cs_raw & 0xfffc),
+        };
+        let mut cs_descriptor = self.parse_descriptor(dword1, dword2)?;
+
+        // Must be code segment
+        if cs_descriptor.valid == 0 || !cs_descriptor.segment || is_data_segment(cs_descriptor.r#type) {
+            tracing::error!("call_gate: not code segment");
+            return self.exception(Exception::Gp, gate_cs_raw & 0xfffc);
+        }
+
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+
+        // Check: non-conforming and DPL < CPL → more privilege (inner privilege call)
+        if is_code_segment_non_conforming(cs_descriptor.r#type) && cs_descriptor.dpl < cpl {
+            // ── CALL GATE TO MORE PRIVILEGE ──
+            tracing::debug!("call_gate: to MORE privilege (DPL={} < CPL={})", cs_descriptor.dpl, cpl);
+
+            // Get new SS:ESP from TSS
+            let (ss_for_cpl_x, esp_for_cpl_x) = self.get_ss_esp_from_tss(cs_descriptor.dpl)?;
+
+            if (ss_for_cpl_x & 0xfffc) == 0 {
+                tracing::error!("call_gate: new SS null");
+                return self.exception(Exception::Ts, 0);
+            }
+
+            let mut ss_selector = BxSelector::default();
+            parse_selector(ss_for_cpl_x, &mut ss_selector);
+
+            let (ss_dw1, ss_dw2) = match self.fetch_raw_descriptor(&ss_selector) {
+                Ok(v) => v,
+                Err(_) => return self.exception(Exception::Ts, ss_for_cpl_x & 0xfffc),
+            };
+            let mut ss_descriptor = self.parse_descriptor(ss_dw1, ss_dw2)?;
+
+            // Validate new SS
+            if ss_selector.rpl != cs_descriptor.dpl {
+                return self.exception(Exception::Ts, ss_for_cpl_x & 0xfffc);
+            }
+            if ss_descriptor.dpl != cs_descriptor.dpl {
+                return self.exception(Exception::Ts, ss_for_cpl_x & 0xfffc);
+            }
+            if ss_descriptor.valid == 0
+                || !ss_descriptor.segment
+                || is_code_segment(ss_descriptor.r#type)
+                || !is_data_segment_writable(ss_descriptor.r#type)
+            {
+                return self.exception(Exception::Ts, ss_for_cpl_x & 0xfffc);
+            }
+            if !ss_descriptor.p {
+                return self.exception(Exception::Ss, ss_for_cpl_x & 0xfffc);
+            }
+
+            let param_count = unsafe { gate_descriptor.u.gate.param_count } & 0x1f;
+
+            // Save return SS:ESP and CS:EIP
+            let return_ss = self.sregs[BxSegregs::Ss as usize].selector.value;
+            let return_esp = if self.is_stack_32bit() { self.esp() } else { self.sp() as u32 };
+            let return_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
+            let return_eip = self.eip();
+
+            // Prepare new stack segment
+            let mut new_stack = self.sregs[BxSegregs::Ss as usize].clone();
+            new_stack.selector = ss_selector.clone();
+            new_stack.cache = ss_descriptor.clone();
+            new_stack.selector.rpl = cs_descriptor.dpl;
+            new_stack.selector.value = (new_stack.selector.value & 0xfffc) | new_stack.selector.rpl as u16;
+
+            let is_386_gate = gate_descriptor.r#type == 0xC;
+
+            if unsafe { ss_descriptor.u.segment.d_b } {
+                let mut temp_esp = esp_for_cpl_x;
+
+                if is_386_gate {
+                    self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(4), cs_descriptor.dpl, return_ss as u32)?;
+                    self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(8), cs_descriptor.dpl, return_esp)?;
+                    temp_esp = temp_esp.wrapping_sub(8);
+
+                    for n in (1..=param_count as u32).rev() {
+                        temp_esp = temp_esp.wrapping_sub(4);
+                        let param = self.stack_read_dword(return_esp.wrapping_add((n - 1) * 4))?;
+                        self.write_new_stack_dword(&new_stack, temp_esp, cs_descriptor.dpl, param)?;
+                    }
+
+                    self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(4), cs_descriptor.dpl, return_cs as u32)?;
+                    self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(8), cs_descriptor.dpl, return_eip)?;
+                    temp_esp = temp_esp.wrapping_sub(8);
+                } else {
+                    self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(2), cs_descriptor.dpl, return_ss)?;
+                    self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(4), cs_descriptor.dpl, return_esp as u16)?;
+                    temp_esp = temp_esp.wrapping_sub(4);
+
+                    for n in (1..=param_count as u32).rev() {
+                        temp_esp = temp_esp.wrapping_sub(2);
+                        let param = self.stack_read_word(return_esp.wrapping_add((n - 1) * 2))? as u16;
+                        self.write_new_stack_word(&new_stack, temp_esp, cs_descriptor.dpl, param)?;
+                    }
+
+                    self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(2), cs_descriptor.dpl, return_cs)?;
+                    self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(4), cs_descriptor.dpl, return_eip as u16)?;
+                    temp_esp = temp_esp.wrapping_sub(4);
+                }
+
+                // Load new SS and CS
+                let new_cpl = cs_descriptor.dpl;
+                self.load_ss(&mut ss_selector, &mut ss_descriptor, new_cpl)?;
+                self.load_cs(&mut gate_cs_selector, &mut cs_descriptor, new_cpl)?;
+                self.set_eip(new_eip);
+                self.set_esp(temp_esp);
+            } else {
+                let mut temp_sp = esp_for_cpl_x as u16;
+
+                if is_386_gate {
+                    self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(4) as u32, cs_descriptor.dpl, return_ss as u32)?;
+                    self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(8) as u32, cs_descriptor.dpl, return_esp)?;
+                    temp_sp = temp_sp.wrapping_sub(8);
+
+                    for n in (1..=param_count as u32).rev() {
+                        temp_sp = temp_sp.wrapping_sub(4);
+                        let param = self.stack_read_dword(return_esp.wrapping_add((n - 1) * 4))?;
+                        self.write_new_stack_dword(&new_stack, temp_sp as u32, cs_descriptor.dpl, param)?;
+                    }
+
+                    self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(4) as u32, cs_descriptor.dpl, return_cs as u32)?;
+                    self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(8) as u32, cs_descriptor.dpl, return_eip)?;
+                    temp_sp = temp_sp.wrapping_sub(8);
+                } else {
+                    self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(2) as u32, cs_descriptor.dpl, return_ss)?;
+                    self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(4) as u32, cs_descriptor.dpl, return_esp as u16)?;
+                    temp_sp = temp_sp.wrapping_sub(4);
+
+                    for n in (1..=param_count as u32).rev() {
+                        temp_sp = temp_sp.wrapping_sub(2);
+                        let param = self.stack_read_word(return_esp.wrapping_add((n - 1) * 2))? as u16;
+                        self.write_new_stack_word(&new_stack, temp_sp as u32, cs_descriptor.dpl, param)?;
+                    }
+
+                    self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(2) as u32, cs_descriptor.dpl, return_cs)?;
+                    self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(4) as u32, cs_descriptor.dpl, return_eip as u16)?;
+                    temp_sp = temp_sp.wrapping_sub(4);
+                }
+
+                let new_cpl = cs_descriptor.dpl;
+                self.load_ss(&mut ss_selector, &mut ss_descriptor, new_cpl)?;
+                self.load_cs(&mut gate_cs_selector, &mut cs_descriptor, new_cpl)?;
+                self.set_eip(new_eip);
+                self.set_sp(temp_sp);
+            }
+        } else {
+            // ── CALL GATE TO SAME PRIVILEGE ──
+            tracing::debug!("call_gate: to SAME privilege");
+
+            if gate_descriptor.r#type == 0xC {
+                // 386 call gate
+                self.push_32(self.sregs[BxSegregs::Cs as usize].selector.value as u32)?;
+                self.push_32(self.eip())?;
+            } else {
+                // 286 call gate
+                self.push_16(self.sregs[BxSegregs::Cs as usize].selector.value)?;
+                self.push_16(self.get_ip())?;
+            }
+
+            self.branch_far(&mut gate_cs_selector, &mut cs_descriptor, new_eip as u64, cpl)?;
+        }
+
+        Ok(())
+    }
+
+    /// Handle task gate for CALL/JMP
+    /// Based on Bochs jmp_far.cc task_gate()
+    fn task_gate_call(
+        &mut self,
+        selector: &BxSelector,
+        gate_descriptor: &BxDescriptor,
+    ) -> Result<()> {
+        if !gate_descriptor.p {
+            tracing::error!("task_gate: not present");
+            return self.exception(Exception::Np, selector.value & 0xfffc);
+        }
+
+        let raw_tss_selector = unsafe { gate_descriptor.u.task_gate.tss_selector };
+        let mut tss_selector = BxSelector::default();
+        parse_selector(raw_tss_selector, &mut tss_selector);
+
+        if tss_selector.ti != 0 {
+            tracing::error!("task_gate: tss_selector.ti=1");
+            return self.exception(Exception::Gp, raw_tss_selector & 0xfffc);
+        }
+
+        let (dword1, dword2) = match self.fetch_raw_descriptor(&tss_selector) {
+            Ok(v) => v,
+            Err(_) => return self.exception(Exception::Gp, raw_tss_selector & 0xfffc),
+        };
+        let tss_descriptor = self.parse_descriptor(dword1, dword2)?;
+
+        if tss_descriptor.valid == 0 || tss_descriptor.segment {
+            tracing::error!("task_gate: TSS descriptor invalid");
+            return self.exception(Exception::Gp, raw_tss_selector & 0xfffc);
+        }
+        if tss_descriptor.r#type != 0x1 && tss_descriptor.r#type != 0x9 {
+            tracing::error!("task_gate: TSS not available type");
+            return self.exception(Exception::Gp, raw_tss_selector & 0xfffc);
+        }
+        if !tss_descriptor.p {
+            tracing::error!("task_gate: TSS not present");
+            return self.exception(Exception::Np, raw_tss_selector & 0xfffc);
+        }
+
+        self.task_switch(
+            &tss_selector,
+            &tss_descriptor,
+            super::tasking::BX_TASK_FROM_CALL,
+            dword1,
+            dword2,
+            false,
+            0,
+        )
+    }
+
+    // =========================================================================
+    // return_protected — protected mode far RET
+    // Based on Bochs ret_far.cc:29-268
+    // =========================================================================
+
+    /// Protected mode far RET
+    pub(super) fn return_protected(
+        &mut self,
+        pop_bytes: u16,
+        os32: bool,
+    ) -> Result<()> {
+        let temp_rsp = if self.is_stack_32bit() {
+            self.esp()
+        } else {
+            self.sp() as u32
+        };
+
+        let (raw_cs_raw, return_eip, stack_param_offset) = if os32 {
+            let eip = self.stack_read_dword(temp_rsp)?;
+            let cs = self.stack_read_dword(temp_rsp.wrapping_add(4))? as u16;
+            (cs, eip, 8u32)
+        } else {
+            let ip = self.stack_read_word(temp_rsp)? as u32;
+            let cs = self.stack_read_word(temp_rsp.wrapping_add(2))?;
+            (cs, ip, 4u32)
+        };
+
+        if (raw_cs_raw & 0xfffc) == 0 {
+            tracing::error!("return_protected: CS selector null");
+            return self.exception(Exception::Gp, 0);
+        }
+
+        let mut cs_selector = BxSelector::default();
+        parse_selector(raw_cs_raw, &mut cs_selector);
+
+        let (dword1, dword2) = match self.fetch_raw_descriptor(&cs_selector) {
+            Ok(v) => v,
+            Err(_) => return self.exception(Exception::Gp, raw_cs_raw & 0xfffc),
+        };
+        let mut cs_descriptor = self.parse_descriptor(dword1, dword2)?;
+
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        if cs_selector.rpl < cpl {
+            tracing::error!("return_protected: CS.rpl < CPL");
+            return self.exception(Exception::Gp, raw_cs_raw & 0xfffc);
+        }
+
+        // check_cs validates code segment, DPL, and presence
+        if let Err(_) = self.check_cs(&cs_descriptor, raw_cs_raw, 0, cs_selector.rpl) {
+            return self.exception(Exception::Gp, raw_cs_raw & 0xfffc);
+        }
+
+        if cs_selector.rpl == cpl {
+            // ── Same privilege return ──
+            tracing::debug!(
+                "return_protected: same-priv return CS={:#06x} EIP={:#010x}",
+                raw_cs_raw,
+                return_eip
+            );
+
+            self.branch_far(
+                &mut cs_selector,
+                &mut cs_descriptor,
+                return_eip as u64,
+                cpl,
+            )?;
+
+            if self.is_stack_32bit() {
+                self.set_esp(
+                    self.esp()
+                        .wrapping_add(stack_param_offset)
+                        .wrapping_add(pop_bytes as u32),
+                );
+            } else {
+                self.set_sp(
+                    self.sp()
+                        .wrapping_add(stack_param_offset as u16)
+                        .wrapping_add(pop_bytes),
+                );
+            }
+        } else {
+            // ── Outer privilege return ──
+            tracing::debug!(
+                "return_protected: outer-priv return CS={:#06x} EIP={:#010x}",
+                raw_cs_raw,
+                return_eip
+            );
+
+            let (raw_ss_raw, return_rsp) = if os32 {
+                let ss = self.stack_read_word(
+                    temp_rsp
+                        .wrapping_add(stack_param_offset)
+                        .wrapping_add(pop_bytes as u32)
+                        .wrapping_add(4),
+                )?;
+                let rsp = self.stack_read_dword(
+                    temp_rsp
+                        .wrapping_add(stack_param_offset)
+                        .wrapping_add(pop_bytes as u32),
+                )?;
+                (ss, rsp)
+            } else {
+                let ss = self.stack_read_word(
+                    temp_rsp
+                        .wrapping_add(stack_param_offset)
+                        .wrapping_add(pop_bytes as u32)
+                        .wrapping_add(2),
+                )?;
+                let rsp = self.stack_read_word(
+                    temp_rsp
+                        .wrapping_add(stack_param_offset)
+                        .wrapping_add(pop_bytes as u32),
+                )? as u32;
+                (ss, rsp)
+            };
+
+            if (raw_ss_raw & 0xfffc) == 0 {
+                tracing::error!("return_protected: SS selector null");
+                return self.exception(Exception::Gp, 0);
+            }
+
+            let mut ss_selector = BxSelector::default();
+            parse_selector(raw_ss_raw, &mut ss_selector);
+
+            let (ss_dw1, ss_dw2) = match self.fetch_raw_descriptor(&ss_selector) {
+                Ok(v) => v,
+                Err(_) => {
+                    return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+                }
+            };
+            let mut ss_descriptor = self.parse_descriptor(ss_dw1, ss_dw2)?;
+
+            // Validate SS
+            if ss_selector.rpl != cs_selector.rpl {
+                tracing::error!("return_protected: SS.rpl != CS.rpl");
+                return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+            }
+            if ss_descriptor.valid == 0
+                || !ss_descriptor.segment
+                || ss_descriptor.r#type >= 8 // code segment
+                || (ss_descriptor.r#type & 2) == 0
+            // not writable
+            {
+                tracing::error!("return_protected: SS not writable data");
+                return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+            }
+            if ss_descriptor.dpl != cs_selector.rpl {
+                tracing::error!("return_protected: SS.dpl != CS.rpl");
+                return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+            }
+            if !ss_descriptor.p {
+                tracing::error!("return_protected: SS not present");
+                return self.exception(Exception::Ss, raw_ss_raw & 0xfffc);
+            }
+
+            // Load new CS
+            let new_cpl = cs_selector.rpl;
+            self.branch_far(
+                &mut cs_selector,
+                &mut cs_descriptor,
+                return_eip as u64,
+                new_cpl,
+            )?;
+
+            // Load new SS
+            self.load_ss(&mut ss_selector, &mut ss_descriptor, new_cpl)?;
+
+            if unsafe { ss_descriptor.u.segment.d_b } {
+                self.set_esp(return_rsp.wrapping_add(pop_bytes as u32));
+            } else {
+                self.set_sp((return_rsp as u16).wrapping_add(pop_bytes));
+            }
+
+            // Invalidate DS/ES/FS/GS if no longer accessible at new privilege level
+            self.validate_seg_regs();
+        }
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // JMP call gate — JMP through a call gate (no stack frame push)
+    // Based on Bochs jmp_far.cc:180-221 jmp_call_gate()
+    // =========================================================================
+
+    fn jmp_call_gate(
+        &mut self,
+        _selector: &BxSelector,
+        gate_descriptor: &BxDescriptor,
+    ) -> Result<()> {
+        if !gate_descriptor.p {
+            tracing::error!("jmp_call_gate: gate not present");
+            return self.exception(Exception::Np, _selector.value & 0xfffc);
+        }
+
+        let gate_cs_raw = unsafe { gate_descriptor.u.gate.dest_selector };
+        if (gate_cs_raw & 0xfffc) == 0 {
+            tracing::error!("jmp_call_gate: CS selector null");
+            return self.exception(Exception::Gp, 0);
+        }
+
+        let mut gate_cs_selector = BxSelector::default();
+        parse_selector(gate_cs_raw, &mut gate_cs_selector);
+
+        let (dword1, dword2) = match self.fetch_raw_descriptor(&gate_cs_selector) {
+            Ok(v) => v,
+            Err(_) => return self.exception(Exception::Gp, gate_cs_raw & 0xfffc),
+        };
+        let mut cs_descriptor = self.parse_descriptor(dword1, dword2)?;
+
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        self.check_cs(&cs_descriptor, gate_cs_raw, 0, cpl)?;
+
+        let temp_eip = unsafe { gate_descriptor.u.gate.dest_offset };
+        self.branch_far(&mut gate_cs_selector, &mut cs_descriptor, temp_eip as u64, cpl)?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // Task gate for JMP — JMP through a task gate
+    // Based on Bochs jmp_far.cc:129-178 task_gate()
+    // =========================================================================
+
+    fn task_gate_jmp(
+        &mut self,
+        selector: &BxSelector,
+        gate_descriptor: &BxDescriptor,
+    ) -> Result<()> {
+        if !gate_descriptor.p {
+            tracing::error!("task_gate_jmp: not present");
+            return self.exception(Exception::Np, selector.value & 0xfffc);
+        }
+
+        let raw_tss_selector = unsafe { gate_descriptor.u.task_gate.tss_selector };
+        let mut tss_selector = BxSelector::default();
+        parse_selector(raw_tss_selector, &mut tss_selector);
+
+        if tss_selector.ti != 0 {
+            tracing::error!("task_gate_jmp: tss_selector.ti=1");
+            return self.exception(Exception::Gp, raw_tss_selector & 0xfffc);
+        }
+
+        let (dword1, dword2) = match self.fetch_raw_descriptor(&tss_selector) {
+            Ok(v) => v,
+            Err(_) => {
+                return self.exception(Exception::Gp, raw_tss_selector & 0xfffc);
+            }
+        };
+        let tss_descriptor = self.parse_descriptor(dword1, dword2)?;
+
+        if tss_descriptor.valid == 0 || tss_descriptor.segment {
+            tracing::error!("task_gate_jmp: bad TSS descriptor");
+            return self.exception(Exception::Gp, raw_tss_selector & 0xfffc);
+        }
+        if tss_descriptor.r#type != 0x1 && tss_descriptor.r#type != 0x9 {
+            tracing::error!("task_gate_jmp: TSS not available");
+            return self.exception(Exception::Gp, raw_tss_selector & 0xfffc);
+        }
+        if !tss_descriptor.p {
+            tracing::error!("task_gate_jmp: TSS not present");
+            return self.exception(Exception::Np, raw_tss_selector & 0xfffc);
+        }
+
+        self.task_switch(
+            &tss_selector,
+            &tss_descriptor,
+            super::tasking::BX_TASK_FROM_JUMP,
+            dword1,
+            dword2,
+            false,
+            0,
+        )
     }
 }

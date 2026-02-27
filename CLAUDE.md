@@ -16,7 +16,7 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-02-26):**
+**Current Status (2026-02-27):**
 - ✅ BIOS-bochs-latest (128 KB) is now the primary BIOS
 - ✅ Full BIOS POST completes: rombios32_init, VGA BIOS, ATA detection, boot
 - ✅ VGA text output working! Clean headless text dump:
@@ -30,7 +30,7 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
   ```
 - ✅ LILO boot loader runs, loads compressed Linux kernel
 - ✅ Kernel decompresses and starts executing (paging enabled, CR0=0x80000013)
-- ✅ Kernel runs ~190M instructions (timer interrupts, task switching, module loading)
+- ✅ Kernel runs ~200M instructions (timer interrupts, task switching, module loading)
 - ✅ Paging translation: all 32-bit string ops use read/write_virtual_byte/word/dword
 - ✅ Segment limit checks in virtual memory access functions
 - ✅ Protected mode: segment loading, descriptor parsing, privilege checks
@@ -46,9 +46,17 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
   - Float128 polynomial evaluation for sin/cos/atan/log/exp transcendentals
   - File structure mirrors Bochs `cpu/fpu/` 1:1 (ferr.rs, fpu.rs, fpu_arith.rs, etc.)
 - ✅ Exception delivery: protected_mode_int BadVector → recursive exception() for double/triple fault
-- ✅ task_switch: TSS GPR load now writes EAX-EDI to CPU registers
-- 🔄 Triple fault at icount=190880499: GDT[2] reads as wrong descriptor (not code segment)
-  - raw=0x62aa6010_0x6008ffff at GDTR.base=0xC0106870+16, need to find why/when overwritten
+- ✅ Complete task_switch: TSS state save/restore (286+386), CR3+TLB, CR0.TS, segment validation
+- ✅ Protected mode far CALL/RET: call_protected() with call gates (same/inner-priv), return_protected()
+- ✅ Far JMP system descriptors: TSS, task gates, call gates in jump_protected()
+- ✅ IRET NT nested task return: reads back-link from TSS, validates busy TSS, task_switch
+- ✅ validate_seg_regs(): nulls ES/DS/FS/GS on outer-priv return if DPL < CPL
+- ✅ MOV SS / POP SS interrupt inhibition (inhibit_mask + inhibit_icount)
+- ✅ Enhanced RDMSR/WRMSR: actual MSR field storage (sysenter, PAT, MTRR)
+- ✅ handleCpuModeChange: updates cpu_mode from CR0.PE + EFLAGS.VM
+- ✅ Zero compiler warnings (crate-level allows for Bochs naming conventions and dead code)
+- 🔄 Triple fault at ~190-219M (timing-dependent): LDT selector 0x6047, index 3080 > limit 7
+  - Different from old GDT[2] bug (which is now fixed). #GP cascade → double → triple fault
 - 🔄 vsprintf broken: Linux kernel shows "Memory: %uk/%uk available" (raw format specifiers)
 - 🔄 "Trying to free nonexistent swap-page" repeated — kernel swap init loop
 
@@ -189,7 +197,7 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ## Known Issues & Next Steps
 
 ### Next Steps
-1. **Fix GDT[2] triple fault** — At icount=190M, CS=0x10 from IDT gate reads as system descriptor instead of code segment. Need to trace physical address of GDTR.base+16 and determine if GDT got overwritten.
+1. **Fix LDT triple fault** — At ~190-219M (timing-dependent), LDT selector 0x6047 (index 3080) exceeds LDT limit (7). #GP cascade → double → triple fault. Need to trace what loads this bogus selector.
 2. **Fix vsprintf** — Linux kernel "Memory: %uk/%uk" shows raw format specifiers. vsprintf internals broken.
 3. **Fix swap init loop** — "Trying to free nonexistent swap-page" repeated hundreds of times.
 4. **Reach DLX Linux login prompt** — Continue iterative bug fixing until the full boot completes
@@ -244,7 +252,16 @@ RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=1000000 ./target/release/examples/dlxlinux
 - ✅ Exception delivery: protected_mode_int BadVector → recursive exception() (double/triple fault chain)
 - ✅ task_switch: TSS GPR load now writes EAX-EDI to CPU (compiler warning revealed dead assignment)
 - ✅ Full x87 FPU: SoftFloat3e + all ~80 opcodes + Float128 transcendentals (Bochs-mirrored file structure)
-- 🔄 Triple fault at icount=190M: GDT[2] (CS=0x10) reads as wrong descriptor — need root cause
+- ✅ Complete task_switch: 286+386 TSS save, CR3+TLB flush, CR0.TS, LDTR/CS/SS/DS/ES/FS/GS validation
+- ✅ Protected mode far CALL: call_protected() with code segs, call gates (same+inner priv), task gates
+- ✅ Protected mode far RET: return_protected() with same-priv and outer-priv paths + validate_seg_regs()
+- ✅ Far JMP system descriptors: TSS direct, task gates, call gates in jump_protected()
+- ✅ IRET NT nested task return: back-link selector from TSS, validates busy TSS, task_switch
+- ✅ MOV SS / POP SS interrupt inhibition (inhibit_mask + inhibit_icount checked before IRQ delivery)
+- ✅ Enhanced RDMSR/WRMSR with actual MSR fields (sysenter CS/ESP/EIP, PAT, MTRR)
+- ✅ handleCpuModeChange: cpu_mode updated from CR0.PE + EFLAGS.VM
+- ✅ Zero compiler warnings (crate-level allows for intentional Bochs naming + dead code)
+- 🔄 Triple fault at ~190-219M (timing-dependent): LDT selector 0x6047 cascade — different from old GDT bug
 - 🔄 vsprintf broken: "Memory: %uk/%uk" shows raw format specs — vsprintf internals issue
 - 🔄 "Trying to free nonexistent swap-page" — kernel swap pool init loop
 
@@ -314,12 +331,12 @@ emu.cpu.cpu_loop(&mut emu.memory, &[])?;
 ### CPU Module Organization
 
 Instructions are organized by category (matching original Bochs cpp_orig/bochs/cpu/ structure):
-- `cpu/arith/`: ADD, SUB, ADC, SBB, DEC, INC (arith8.rs, arith16.rs, arith32.rs)
+- `cpu/arith8.rs`, `cpu/arith16.rs`, `cpu/arith32.rs`: ADD, SUB, ADC, SBB, DEC, INC
 - `cpu/logical*/`: AND, OR, XOR, NOT (8/16/32/64-bit variants)
 - `cpu/mult*/`: MUL, IMUL (8/16/32/64-bit variants)
-- `cpu/shift.rs`: SHL, SHR, SAR, ROR, ROL
+- `cpu/shift8.rs`, `cpu/shift16.rs`, `cpu/shift32.rs`: SHL, SHR, SAR, ROR, ROL
 - `cpu/ctrl_xfer*/`: JMP, CALL, RET, loops (ctrl_xfer16.rs, ctrl_xfer32.rs, ctrl_xfer64.rs)
-- `cpu/data_xfer/`: MOV, LEA, XCHG (data_xfer8.rs, data_xfer16.rs, data_xfer32.rs, data_xfer64.rs)
+- `cpu/data_xfer8.rs`, `cpu/data_xfer16.rs`, `cpu/data_xfer32.rs`, `cpu/data_xfer64.rs`: MOV, LEA, XCHG
 - `cpu/stack.rs`: Common stack primitives (push_16/32, pop_16/32, stack memory access)
 - `cpu/stack16.rs`: 16-bit stack ops (PUSH/POP r16, PUSHA16, POPA16, PUSHF, POPF)
 - `cpu/stack32.rs`: 32-bit stack ops (PUSH/POP r32, PUSHAD, POPAD, PUSHFD, POPFD)

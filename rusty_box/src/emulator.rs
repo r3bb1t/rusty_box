@@ -1063,8 +1063,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     // Also check BDA memory size at 0x413
                                     let bda_mem = u16::from_le_bytes([mem[0x413], mem[0x414]]);
                                     // Check CMOS values directly (what the BIOS should have read)
-                                    let cmos_ext_lo = mem.get(0x90030).copied().unwrap_or(0);
-                                    let cmos_ext_hi = mem.get(0x90031).copied().unwrap_or(0);
+                                    let _cmos_ext_lo = mem.get(0x90030).copied().unwrap_or(0);
+                                    let _cmos_ext_hi = mem.get(0x90031).copied().unwrap_or(0);
                                     tracing::warn!(
                                         "Boot params: ext_mem_k(0x90002)={} KB, alt_mem_k(0x901e0)={} KB, BDA_mem(0x413)={} KB",
                                         ext_mem_k, alt_mem_k, bda_mem,
@@ -1250,7 +1250,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             let inptr_val = u32::from_le_bytes([peek_inptr[0], peek_inptr[1], peek_inptr[2], peek_inptr[3]]);
                             // Dump code at the inflate loop addresses
                             let mem = self.memory.ram_slice();
-                            let code_23e0: Vec<String> = mem[0x23E0..0x2420].iter().map(|b| format!("{:02x}", b)).collect();
+                            let _code_23e0: Vec<String> = mem[0x23E0..0x2420].iter().map(|b| format!("{:02x}", b)).collect();
                             // Decompressor global vars
                             let peek = |addr: usize| -> u32 {
                                 let p = self.memory.peek_ram(addr, 4);
@@ -1258,15 +1258,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             };
                             let outcnt = peek(0x4008);
                             let bytes_out = peek(0x400C);
-                            let wp = peek(0x4010);  // window position / output_ptr
+                            let _wp = peek(0x4010);  // window position / output_ptr
                             // Check output at 0x100000 and 0x108000
                             let peek_out = self.memory.peek_ram(0x100000, 8);
                             let out_hex: Vec<String> = peek_out.iter().map(|b| format!("{:02x}", b)).collect();
                             let peek_out2 = self.memory.peek_ram(0x108000, 8);
-                            let out2_hex: Vec<String> = peek_out2.iter().map(|b| format!("{:02x}", b)).collect();
+                            let _out2_hex: Vec<String> = peek_out2.iter().map(|b| format!("{:02x}", b)).collect();
                             // Check the window buffer area (0x51100-0x59100 based on BSS layout)
                             let peek_win = self.memory.peek_ram(0x51100, 8);
-                            let win_hex: Vec<String> = peek_win.iter().map(|b| format!("{:02x}", b)).collect();
+                            let _win_hex: Vec<String> = peek_win.iter().map(|b| format!("{:02x}", b)).collect();
                             // Also check window buffer contents (wider sample)
                             let peek_win16 = self.memory.peek_ram(0x510b8, 32);
                             let win16_hex: Vec<String> = peek_win16.iter().map(|b| format!("{:02x}", b)).collect();
@@ -1443,7 +1443,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 has_int, if_flag, self.cpu.activity_state, self.cpu.rip());
                         }
                     }
-                    if self.has_interrupt() && self.cpu.get_b_if() != 0 {
+                    if self.has_interrupt() && self.cpu.get_b_if() != 0
+                        && !self.cpu.interrupts_inhibited(0x01) // BX_INHIBIT_INTERRUPTS
+                    {
                         let vector = self.iac();
                         tracing::trace!("INT-INJECT: vector={:#04x}, activity_before={:?}",
                             vector, self.cpu.activity_state);

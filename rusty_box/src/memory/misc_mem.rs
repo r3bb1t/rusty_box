@@ -483,7 +483,7 @@ impl BxMemC<'_> {
         len: usize,
         data: &mut [u8],
     ) -> Result<()> {
-        use crate::memory::memory_rusty_box::{bios_map_last128k, BIOSROMSZ, BIOS_MASK, EXROM_MASK, MemoryAreaT};
+        use crate::memory::memory_rusty_box::{bios_map_last128k, BIOSROMSZ, MemoryAreaT};
 
         let mut a20_addr = self.a20_addr(addr);
 
@@ -655,7 +655,7 @@ impl BxMemC<'_> {
         len: usize,
         data: &mut [u8],
     ) -> Result<()> {
-        use crate::memory::memory_rusty_box::{bios_map_last128k, BIOSROMSZ, BIOS_MASK, EXROM_MASK, MemoryAreaT};
+        use crate::memory::memory_rusty_box::{bios_map_last128k, BIOSROMSZ, EXROM_MASK, MemoryAreaT};
 
         let mut a20_addr = self.a20_addr(addr);
 

@@ -4,13 +4,14 @@
 //! Copyright (C) 2001-2019 The Bochs Project
 
 use super::{
-    cpu::{BxCpuC, CpuMode, Exception},
+    cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
     decoder::BxSegregs,
     descriptor::{
         BxDescriptor, BxSelector, BxSegmentReg, SystemAndGateDescriptorEnum, SEG_VALID_CACHE,
     },
-    segment_ctrl_pro::{parse_selector, self},
+    eflags::EFlags,
+    segment_ctrl_pro::parse_selector,
     Result,
 };
 
@@ -49,7 +50,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 vector, gate_addr, dword1, dword2);
         }
 
-        let mut gate_descriptor = self.parse_descriptor(dword1, dword2)?;
+        let gate_descriptor = self.parse_descriptor(dword1, dword2)?;
 
         if gate_descriptor.valid == 0 || gate_descriptor.segment {
             tracing::error!(
@@ -153,12 +154,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // if interrupt gate then set IF to 0
         if (gate_descriptor.r#type & 1) == 0 {
             // even is int-gate
-            self.eflags &= !(1 << 9); // Clear IF flag
+            self.eflags.remove(EFlags::IF_);
         }
-        self.eflags &= !(1 << 8); // Clear TF flag
-        self.eflags &= !(1 << 14); // Clear NT flag
-        self.eflags &= !(1 << 17); // Clear VM flag
-        self.eflags &= !(1 << 16); // Clear RF flag
+        self.eflags.remove(EFlags::TF);
+        self.eflags.remove(EFlags::NT);
+        self.eflags.remove(EFlags::VM);
+        self.eflags.remove(EFlags::RF);
 
         Ok(())
     }
@@ -249,14 +250,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let is_386_gate = gate_descriptor.r#type >= 14;
 
             if is_386_gate {
-                self.push_32(self.eflags)?;
+                self.push_32(self.eflags.bits())?;
                 self.push_32(self.sregs[BxSegregs::Cs as usize].selector.value as u32)?;
                 self.push_32(self.eip())?;
                 if push_error {
                     self.push_32(error_code as u32)?;
                 }
             } else {
-                self.push_16((self.eflags & 0xFFFF) as u16)?;
+                self.push_16((self.eflags.bits() & 0xFFFF) as u16)?;
                 self.push_16(self.sregs[BxSegregs::Cs as usize].selector.value)?;
                 self.push_16(self.eip() as u16)?;
                 if push_error {
@@ -438,7 +439,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if is_386_gate {
                 self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(4), cs_descriptor.dpl, old_ss as u32)?;
                 self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(8), cs_descriptor.dpl, old_esp)?;
-                self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(12), cs_descriptor.dpl, self.eflags)?;
+                self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(12), cs_descriptor.dpl, self.eflags.bits())?;
                 self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(16), cs_descriptor.dpl, old_cs as u32)?;
                 self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(20), cs_descriptor.dpl, old_eip)?;
                 temp_esp = temp_esp.wrapping_sub(20);
@@ -451,7 +452,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 // 286 gate
                 self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(2), cs_descriptor.dpl, old_ss)?;
                 self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(4), cs_descriptor.dpl, old_esp as u16)?;
-                self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(6), cs_descriptor.dpl, (self.eflags & 0xFFFF) as u16)?;
+                self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(6), cs_descriptor.dpl, (self.eflags.bits() & 0xFFFF) as u16)?;
                 self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(8), cs_descriptor.dpl, old_cs)?;
                 self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(10), cs_descriptor.dpl, old_eip as u16)?;
                 temp_esp = temp_esp.wrapping_sub(10);
@@ -496,7 +497,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if is_386_gate {
                 self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(4) as u32, cs_descriptor.dpl, old_ss as u32)?;
                 self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(8) as u32, cs_descriptor.dpl, old_esp)?;
-                self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(12) as u32, cs_descriptor.dpl, self.eflags)?;
+                self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(12) as u32, cs_descriptor.dpl, self.eflags.bits())?;
                 self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(16) as u32, cs_descriptor.dpl, old_cs as u32)?;
                 self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(20) as u32, cs_descriptor.dpl, old_eip)?;
                 temp_sp = temp_sp.wrapping_sub(20);
@@ -509,7 +510,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 // 286 gate
                 self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(2) as u32, cs_descriptor.dpl, old_ss)?;
                 self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(4) as u32, cs_descriptor.dpl, old_esp as u16)?;
-                self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(6) as u32, cs_descriptor.dpl, (self.eflags & 0xFFFF) as u16)?;
+                self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(6) as u32, cs_descriptor.dpl, (self.eflags.bits() & 0xFFFF) as u16)?;
                 self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(8) as u32, cs_descriptor.dpl, old_cs)?;
                 self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(10) as u32, cs_descriptor.dpl, old_eip as u16)?;
                 temp_sp = temp_sp.wrapping_sub(10);

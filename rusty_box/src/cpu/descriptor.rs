@@ -13,8 +13,6 @@
 // |------------------------|--------------------|
 //
 
-use core::{default, ffi::c_uint};
-
 use crate::config::BxAddress;
 
 #[derive(Debug, Default, Clone)]

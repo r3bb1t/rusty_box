@@ -10,11 +10,10 @@ pub use super::error::Result;
 use crate::{
     config::BxPhyAddress,
     cpu::{rusty_box::MemoryAccessType, BxCpuC, BxCpuIdTrait},
-    memory::misc_mem::FLASH_READ_ARRAY,
 };
 use alloc::{
     boxed::Box,
-    vec::{self, Vec},
+    vec::Vec,
 };
 pub use error::*;
 

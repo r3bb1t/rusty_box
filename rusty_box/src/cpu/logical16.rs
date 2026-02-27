@@ -6,6 +6,7 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{Instruction, BxSegregs},
+    eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -19,17 +20,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let zf = result == 0;
         let pf = (result as u8).count_ones() % 2 == 0;
 
-        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
+        self.eflags.remove(EFlags::LOGIC_MASK);
 
         if pf {
-            self.eflags |= 1 << 2;
+            self.eflags.insert(EFlags::PF);
         }
         if zf {
-            self.eflags |= 1 << 6;
+            self.eflags.insert(EFlags::ZF);
         }
         if sf {
-            self.eflags |= 1 << 7;
+            self.eflags.insert(EFlags::SF);
         }
     }
 
@@ -42,26 +42,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
         let pf = (result as u8).count_ones() % 2 == 0;
 
-        const MASK: u32 = (1 << 0) | (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
+        self.eflags.remove(EFlags::OSZAPC);
 
         if cf {
-            self.eflags |= 1 << 0;
+            self.eflags.insert(EFlags::CF);
         }
         if pf {
-            self.eflags |= 1 << 2;
+            self.eflags.insert(EFlags::PF);
         }
         if af {
-            self.eflags |= 1 << 4;
+            self.eflags.insert(EFlags::AF);
         }
         if zf {
-            self.eflags |= 1 << 6;
+            self.eflags.insert(EFlags::ZF);
         }
         if sf {
-            self.eflags |= 1 << 7;
+            self.eflags.insert(EFlags::SF);
         }
         if of {
-            self.eflags |= 1 << 11;
+            self.eflags.insert(EFlags::OF);
         }
     }
 
@@ -74,23 +73,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let pf = (result as u8).count_ones() % 2 == 0;
 
         // CF is not affected by INC
-        const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
+        const OSZAP: EFlags = EFlags::PF.union(EFlags::AF).union(EFlags::ZF).union(EFlags::SF).union(EFlags::OF);
+        self.eflags.remove(OSZAP);
 
         if pf {
-            self.eflags |= 1 << 2;
+            self.eflags.insert(EFlags::PF);
         }
         if af {
-            self.eflags |= 1 << 4;
+            self.eflags.insert(EFlags::AF);
         }
         if zf {
-            self.eflags |= 1 << 6;
+            self.eflags.insert(EFlags::ZF);
         }
         if sf {
-            self.eflags |= 1 << 7;
+            self.eflags.insert(EFlags::SF);
         }
         if of {
-            self.eflags |= 1 << 11;
+            self.eflags.insert(EFlags::OF);
         }
     }
 
@@ -102,23 +101,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
         let pf = (result as u8).count_ones() % 2 == 0;
 
-        const MASK: u32 = (1 << 2) | (1 << 4) | (1 << 6) | (1 << 7) | (1 << 11);
-        self.eflags &= !MASK;
+        const OSZAP: EFlags = EFlags::PF.union(EFlags::AF).union(EFlags::ZF).union(EFlags::SF).union(EFlags::OF);
+        self.eflags.remove(OSZAP);
 
         if pf {
-            self.eflags |= 1 << 2;
+            self.eflags.insert(EFlags::PF);
         }
         if af {
-            self.eflags |= 1 << 4;
+            self.eflags.insert(EFlags::AF);
         }
         if zf {
-            self.eflags |= 1 << 6;
+            self.eflags.insert(EFlags::ZF);
         }
         if sf {
-            self.eflags |= 1 << 7;
+            self.eflags.insert(EFlags::SF);
         }
         if of {
-            self.eflags |= 1 << 11;
+            self.eflags.insert(EFlags::OF);
         }
     }
 

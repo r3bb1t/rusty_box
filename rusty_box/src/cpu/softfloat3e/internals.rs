@@ -91,7 +91,7 @@ pub fn round_pack_to_f32(sign: bool, exp: i16, sig: u32, status: &mut SoftFloatS
                 if is_tiny { softfloat_raiseFlags(status, FLAG_UNDERFLOW); }
             }
             sig = sig.wrapping_add(round_increment);
-            exp = (((sig & 0x80000000) != 0) as i16);
+            exp = ((sig & 0x80000000) != 0) as i16;
             let ri = round_increment;
             if round_near_even && ((round_bits ^ 0x40) == 0) {
                 sig &= !(ri);
@@ -156,7 +156,7 @@ pub fn round_pack_to_f64(sign: bool, exp: i16, sig: u64, status: &mut SoftFloatS
                 if is_tiny { softfloat_raiseFlags(status, FLAG_UNDERFLOW); }
             }
             sig = sig.wrapping_add(round_increment);
-            exp = (((sig & 0x8000000000000000) != 0) as i16);
+            exp = ((sig & 0x8000000000000000) != 0) as i16;
             if round_near_even && ((round_bits ^ 0x200) == 0) {
                 sig &= !0x3FFu64;
             } else {
@@ -220,7 +220,7 @@ pub fn round_pack_to_extf80(
     sign: bool,
     mut exp: i32,
     mut sig: u64,
-    mut sig_extra: u64,
+    sig_extra: u64,
     rounding_precision: u8,
     status: &mut SoftFloatStatus,
 ) -> floatx80 {

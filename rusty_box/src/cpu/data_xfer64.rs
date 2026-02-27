@@ -25,7 +25,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ data_xfer64.cc:36-43 MOV64_GdEdM
     pub fn mov64_gd_ed_m(&mut self, instr: &Instruction) {
         let eaddr = self.resolve_addr64(instr);
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let val32 = self.read_linear_dword(seg, laddr);
@@ -39,7 +39,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ data_xfer64.cc:45-52 MOV64_EdGdM
     pub fn mov64_ed_gd_m(&mut self, instr: &Instruction) {
         let eaddr = self.resolve_addr64(instr);
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let src_reg = instr.src() as usize;
@@ -53,7 +53,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ data_xfer64.cc:54-61 MOV_EqGqM
     pub fn mov_eq_gq_m(&mut self, instr: &Instruction) {
         let eaddr = self.resolve_addr64(instr);
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let src_reg = instr.src() as usize;
@@ -78,7 +78,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ data_xfer64.cc:72-80 MOV_GqEqM
     pub fn mov_gq_eq_m(&mut self, instr: &Instruction) {
         let eaddr = self.resolve_addr64(instr);
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let val64 = self.read_linear_qword(seg, laddr);
@@ -123,7 +123,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV AL, moffs64
     /// Matching C++ data_xfer64.cc:107-112 MOV_ALOq
     pub fn mov_aloq(&mut self, instr: &Instruction) {
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, instr.iq());
         let val8 = self.read_linear_byte(seg, laddr);
@@ -135,7 +135,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV moffs64, AL
     /// Matching C++ data_xfer64.cc:114-119 MOV_OqAL
     pub fn mov_oq_al(&mut self, instr: &Instruction) {
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, instr.iq());
         let val8 = self.get_gpr8(0); // AL
@@ -147,7 +147,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV AX, moffs64
     /// Matching C++ data_xfer64.cc:121-126 MOV_AXOq
     pub fn mov_ax_oq(&mut self, instr: &Instruction) {
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, instr.iq());
         let val16 = self.read_linear_word(seg, laddr);
@@ -159,7 +159,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV moffs64, AX
     /// Matching C++ data_xfer64.cc:128-133 MOV_OqAX
     pub fn mov_oq_ax(&mut self, instr: &Instruction) {
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, instr.iq());
         let val16 = self.get_gpr16(0); // AX
@@ -171,7 +171,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV EAX, moffs64
     /// Matching C++ data_xfer64.cc:135-140 MOV_EAXOq
     pub fn mov_eax_oq(&mut self, instr: &Instruction) {
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, instr.iq());
         let val32 = self.read_linear_dword(seg, laddr);
@@ -183,7 +183,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV moffs64, EAX
     /// Matching C++ data_xfer64.cc:142-147 MOV_OqEAX
     pub fn mov_oq_eax(&mut self, instr: &Instruction) {
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, instr.iq());
         let val32 = self.get_gpr32(0); // EAX
@@ -195,7 +195,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV RAX, moffs64
     /// Matching C++ data_xfer64.cc:149-154 MOV_RAXOq
     pub fn mov_rax_oq(&mut self, instr: &Instruction) {
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, instr.iq());
         let val64 = self.read_linear_qword(seg, laddr);
@@ -207,7 +207,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV moffs64, RAX
     /// Matching C++ data_xfer64.cc:156-161 MOV_OqRAX
     pub fn mov_oq_rax(&mut self, instr: &Instruction) {
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, instr.iq());
         let val64 = self.get_gpr64(0); // RAX
@@ -221,7 +221,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn mov_eq_id_m(&mut self, instr: &Instruction) {
         let op_64 = instr.id() as i32 as u64; // sign extend imm32 to 64-bit
         let eaddr = self.resolve_addr64(instr);
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
 
@@ -248,7 +248,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Zero extend byte op2 into qword op1
     pub fn movzx_gq_eb_m(&mut self, instr: &Instruction) {
         let eaddr = self.resolve_addr64(instr);
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let op2_8 = self.read_linear_byte(seg, laddr);
@@ -276,7 +276,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Zero extend word op2 into qword op1
     pub fn movzx_gq_ew_m(&mut self, instr: &Instruction) {
         let eaddr = self.resolve_addr64(instr);
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let op2_16 = self.read_linear_word(seg, laddr);
@@ -307,7 +307,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Sign extend byte op2 into qword op1
     pub fn movsx_gq_eb_m(&mut self, instr: &Instruction) {
         let eaddr = self.resolve_addr64(instr);
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let op2_8 = self.read_linear_byte(seg, laddr);
@@ -337,7 +337,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Sign extend word op2 into qword op1
     pub fn movsx_gq_ew_m(&mut self, instr: &Instruction) {
         let eaddr = self.resolve_addr64(instr);
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let op2_16 = self.read_linear_word(seg, laddr);
@@ -366,7 +366,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Sign extend dword op2 into qword op1
     pub fn movsx_gq_ed_m(&mut self, instr: &Instruction) {
         let eaddr = self.resolve_addr64(instr);
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let op2_32 = self.read_linear_dword(seg, laddr);
@@ -399,7 +399,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Note: always locked (read_RMW_linear_qword)
     pub fn xchg_eq_gq_m(&mut self, instr: &Instruction) {
         let eaddr = self.resolve_addr64(instr);
-        let seg = unsafe { core::mem::transmute::<u8, BxSegregs>(instr.seg()) };
+        let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let (op1_64, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr); // always locked
