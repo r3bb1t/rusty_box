@@ -40,7 +40,11 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 - ✅ TLB flush on CR0/CR3/CR4 writes, INVLPG handler
 - ✅ VGA word-wide I/O: port mask 0x3 (byte+word) matching Bochs vgacore.cc
 - ✅ VGA memory plane filtering: map mask check prevents font data corrupting text buffer
-- ✅ x87 FPU stubs inlined (FNINIT, FNSTSW, FNSTCW, etc.)
+- ✅ Full x87 FPU implementation with Berkeley SoftFloat 3e (true 80-bit extended precision)
+  - All ~80 FPU opcodes: load/store, arithmetic, compare, transcendentals, constants, FCMOV
+  - FNSAVE/FRSTOR for kernel context switching, FNSTENV/FLDENV, FBLD/FBSTP (packed BCD)
+  - Float128 polynomial evaluation for sin/cos/atan/log/exp transcendentals
+  - File structure mirrors Bochs `cpu/fpu/` 1:1 (ferr.rs, fpu.rs, fpu_arith.rs, etc.)
 - ✅ Exception delivery: protected_mode_int BadVector → recursive exception() for double/triple fault
 - ✅ task_switch: TSS GPR load now writes EAX-EDI to CPU registers
 - 🔄 Triple fault at icount=190880499: GDT[2] reads as wrong descriptor (not code segment)
@@ -239,6 +243,7 @@ RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=1000000 ./target/release/examples/dlxlinux
 - ✅ Linux "Linux version 1.3.89" visible in VGA output — kernel console IS working
 - ✅ Exception delivery: protected_mode_int BadVector → recursive exception() (double/triple fault chain)
 - ✅ task_switch: TSS GPR load now writes EAX-EDI to CPU (compiler warning revealed dead assignment)
+- ✅ Full x87 FPU: SoftFloat3e + all ~80 opcodes + Float128 transcendentals (Bochs-mirrored file structure)
 - 🔄 Triple fault at icount=190M: GDT[2] (CS=0x10) reads as wrong descriptor — need root cause
 - 🔄 vsprintf broken: "Memory: %uk/%uk" shows raw format specs — vsprintf internals issue
 - 🔄 "Trying to free nonexistent swap-page" — kernel swap pool init loop
@@ -322,6 +327,23 @@ Instructions are organized by category (matching original Bochs cpp_orig/bochs/c
 - `cpu/string.rs`: MOVSB, STOSB, LODSB, REP string operations
 - `cpu/io.rs`: IN, OUT, INS, OUTS
 - `cpu/soft_int.rs`: INT, IRET, INTO, BOUND, HLT
+- `cpu/fpu/`: Full x87 FPU (mirrors Bochs `cpu/fpu/` file structure):
+  - `fpu.rs` (FNINIT, FNSAVE, FRSTOR, FLDCW — mirrors `fpu.cc`)
+  - `ferr.rs` (exception handling, stack overflow/underflow — mirrors `ferr.cc`)
+  - `fpu_arith.rs` (FADD, FSUB, FMUL, FDIV + memory/integer variants)
+  - `fpu_load_store.rs` (FLD, FST, FILD, FIST, FBLD, FBSTP, FISTTP)
+  - `fpu_compare.rs` (FCOM, FUCOM, FCOMI, FTST, FXAM)
+  - `fpu_trans.rs` (transcendental CPU handlers — mirrors `fpu_trans.cc`)
+  - `fpu_misc.rs` (FXCH, FCHS, FABS, FDECSTP, FINCSTP, FFREE)
+  - `fpu_const.rs` (FLD1, FLDPI, FLDL2T, etc.)
+  - `fpu_cmov.rs` (FCMOV conditional moves)
+  - `fsincos.rs`, `fpatan.rs`, `fyl2x.rs`, `f2xm1.rs`, `fprem.rs` (transcendental implementations)
+  - `poly.rs` (Float128 polynomial evaluation)
+  - `constants.rs` (CW/SW/TW bit definitions)
+- `cpu/softfloat3e/`: Berkeley SoftFloat 3e port (true 80-bit extended precision):
+  - `internals.rs` (round-and-pack core), `primitives.rs` (128-bit math), `specialize.rs` (NaN handling)
+  - `extf80_*.rs` (add/sub, mul, div, sqrt, compare, conversions, misc)
+  - `f128_*.rs` (Float128 operations for polynomial evaluation)
 
 ### CPU State Access
 
@@ -404,6 +426,7 @@ Key Cargo features in `rusty_box/Cargo.toml`:
 | Add new I/O device | `iodev/` (new file), `iodev/devices.rs` (registration) |
 | Modify memory mapping | `memory/misc_mem.rs`, `memory/mod.rs` |
 | Add CPUID model | `cpu/cpuid/` |
+| Add/modify FPU instruction | `cpu/fpu/` (handlers), `cpu/softfloat3e/` (math), `cpu/i387.rs` (state) |
 | Debug execution | Enable tracing: `Level::DEBUG` or `Level::TRACE` in examples |
 
 ## Error Handling
