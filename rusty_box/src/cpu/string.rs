@@ -12,7 +12,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{Instruction, BxSegregs},
+    decoder::{BxSegregs, Instruction},
     eflags::EFlags,
 };
 
@@ -58,7 +58,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_di(self.di().wrapping_add(1));
         }
 
-        tracing::trace!("MOVSB16: DS:{:04x} -> ES:{:04x}, byte={:#04x}", si, di, byte);
+        tracing::trace!(
+            "MOVSB16: DS:{:04x} -> ES:{:04x}, byte={:#04x}",
+            si,
+            di,
+            byte
+        );
     }
 
     /// MOVSB - Move byte from DS:ESI to ES:EDI (32-bit address mode)
@@ -74,7 +79,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rsi(esi.wrapping_add(increment) as u64);
         self.set_rdi(edi.wrapping_add(increment) as u64);
 
-        tracing::trace!("MOVSB32: DS:{:#x} -> ES:{:#x}, byte={:#04x}", esi, edi, byte);
+        tracing::trace!(
+            "MOVSB32: DS:{:#x} -> ES:{:#x}, byte={:#04x}",
+            esi,
+            edi,
+            byte
+        );
         Ok(())
     }
 
@@ -156,7 +166,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rsi(esi.wrapping_add(increment) as u64);
         self.set_rdi(edi.wrapping_add(increment) as u64);
 
-        tracing::trace!("MOVSD32: dword={:#010x}, ESI={:#x}, EDI={:#x}", dword, self.esi(), self.edi());
+        tracing::trace!(
+            "MOVSD32: dword={:#010x}, ESI={:#x}, EDI={:#x}",
+            dword,
+            self.esi(),
+            self.edi()
+        );
         Ok(())
     }
 
@@ -727,7 +742,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsb16(instr);
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            if !self.get_zf() { break; }
+            if !self.get_zf() {
+                break;
+            }
         }
     }
 
@@ -738,7 +755,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsb16(instr);
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            if self.get_zf() { break; }
+            if self.get_zf() {
+                break;
+            }
         }
     }
 
@@ -749,7 +768,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsw16(instr);
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            if !self.get_zf() { break; }
+            if !self.get_zf() {
+                break;
+            }
         }
     }
 
@@ -760,7 +781,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsw16(instr);
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            if self.get_zf() { break; }
+            if self.get_zf() {
+                break;
+            }
         }
     }
 
@@ -771,7 +794,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsd16(instr);
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            if !self.get_zf() { break; }
+            if !self.get_zf() {
+                break;
+            }
         }
     }
 
@@ -782,7 +807,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsd16(instr);
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            if self.get_zf() { break; }
+            if self.get_zf() {
+                break;
+            }
         }
     }
 
@@ -793,7 +820,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasb16(instr);
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            if !self.get_zf() { break; }
+            if !self.get_zf() {
+                break;
+            }
         }
     }
 
@@ -804,7 +833,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasb16(instr);
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            if self.get_zf() { break; }
+            if self.get_zf() {
+                break;
+            }
         }
     }
 
@@ -815,7 +846,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasw16(instr);
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            if !self.get_zf() { break; }
+            if !self.get_zf() {
+                break;
+            }
         }
     }
 
@@ -826,7 +859,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasw16(instr);
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            if self.get_zf() { break; }
+            if self.get_zf() {
+                break;
+            }
         }
     }
 
@@ -837,7 +872,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasd16(instr);
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            if !self.get_zf() { break; }
+            if !self.get_zf() {
+                break;
+            }
         }
     }
 
@@ -848,7 +885,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasd16(instr);
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            if self.get_zf() { break; }
+            if self.get_zf() {
+                break;
+            }
         }
     }
 
@@ -971,7 +1010,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsb32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if !self.get_zf() { break; }
+            if !self.get_zf() {
+                break;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         Ok(())
@@ -984,7 +1025,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsb32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if self.get_zf() { break; }
+            if self.get_zf() {
+                break;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         Ok(())
@@ -997,7 +1040,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsw32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if !self.get_zf() { break; }
+            if !self.get_zf() {
+                break;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         Ok(())
@@ -1010,7 +1055,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsw32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if self.get_zf() { break; }
+            if self.get_zf() {
+                break;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         Ok(())
@@ -1023,7 +1070,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsd32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if !self.get_zf() { break; }
+            if !self.get_zf() {
+                break;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         Ok(())
@@ -1036,7 +1085,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsd32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if self.get_zf() { break; }
+            if self.get_zf() {
+                break;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         Ok(())
@@ -1049,7 +1100,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasb32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if !self.get_zf() { break; }
+            if !self.get_zf() {
+                break;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         Ok(())
@@ -1062,7 +1115,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasb32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if self.get_zf() { break; }
+            if self.get_zf() {
+                break;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         Ok(())
@@ -1075,7 +1130,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasw32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if !self.get_zf() { break; }
+            if !self.get_zf() {
+                break;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         Ok(())
@@ -1088,7 +1145,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasw32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if self.get_zf() { break; }
+            if self.get_zf() {
+                break;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         Ok(())
@@ -1101,7 +1160,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasd32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if !self.get_zf() { break; }
+            if !self.get_zf() {
+                break;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         Ok(())
@@ -1114,7 +1175,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasd32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if self.get_zf() { break; }
+            if self.get_zf() {
+                break;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         Ok(())
@@ -1124,6 +1187,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Memory access helpers using the stored memory pointer
     // =========================================================================
 
+    #[inline(always)]
     pub(super) fn mem_read_byte(&self, addr: u64) -> u8 {
         // Prefer Bochs-style host access through the memory system when available:
         // - If direct host access is allowed, get_host_mem_addr returns Some(&mut [u8])
@@ -1138,13 +1202,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
             let paddr: BxPhyAddress = addr as BxPhyAddress;
 
-            if let Ok(Some(slice)) = mem.get_host_mem_addr(paddr, MemoryAccessType::Read, &[cpu_ref]) {
+            if let Ok(Some(slice)) =
+                mem.get_host_mem_addr(paddr, MemoryAccessType::Read, &[cpu_ref])
+            {
                 let val = slice.get(0).copied().unwrap_or(0);
                 return val;
             }
 
             let mut data = [0u8; 1];
-            if mem.read_physical_page(&[cpu_ref], paddr, 1, &mut data).is_ok() {
+            if mem
+                .read_physical_page(&[cpu_ref], paddr, 1, &mut data)
+                .is_ok()
+            {
                 return data[0];
             }
 
@@ -1162,12 +1231,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         0
     }
 
+    #[inline(always)]
     pub(super) fn mem_write_byte(&mut self, addr: u64, value: u8) {
-        // Trace VGA text buffer writes of '%' character to debug vsprintf
-        if value == 0x25 && addr >= 0xA0000 && addr < 0xC0000 {
-            tracing::trace!("VGA write 0x25 paddr={:#x} RIP={:#x} CS={:#x} icount={} odd={}",
-                addr, self.rip(), self.sregs[BxSegregs::Cs as usize].selector.value, self.icount, addr & 1);
-        }
         // Prefer Bochs-style host access through the memory system when available.
         if let Some(mem_bus) = self.mem_bus {
             // SAFETY: see mem_read_byte.
@@ -1210,24 +1275,102 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
+    #[inline(always)]
     pub(super) fn mem_read_word(&self, addr: u64) -> u16 {
+        // Fast path: single get_host_mem_addr call for 2 bytes
+        if let Some(mem_bus) = self.mem_bus {
+            let mem = unsafe { &mut *mem_bus.as_ptr() };
+            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            let paddr: BxPhyAddress = addr as BxPhyAddress;
+
+            if let Ok(Some(slice)) =
+                mem.get_host_mem_addr(paddr, MemoryAccessType::Read, &[cpu_ref])
+            {
+                if slice.len() >= 2 {
+                    return u16::from_le_bytes([slice[0], slice[1]]);
+                }
+            }
+        }
+        // Slow path: fall through to per-byte reads
         let lo = self.mem_read_byte(addr) as u16;
         let hi = self.mem_read_byte(addr + 1) as u16;
         lo | (hi << 8)
     }
 
+    #[inline(always)]
     pub(super) fn mem_write_word(&mut self, addr: u64, value: u16) {
+        // Fast path: single get_host_mem_addr call for 2 bytes
+        if let Some(mem_bus) = self.mem_bus {
+            let mem = unsafe { &mut *mem_bus.as_ptr() };
+            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            let paddr: BxPhyAddress = addr as BxPhyAddress;
+
+            if let Ok(Some(slice)) =
+                mem.get_host_mem_addr(paddr, MemoryAccessType::Write, &[cpu_ref])
+            {
+                if slice.len() >= 2 {
+                    let bytes = value.to_le_bytes();
+                    slice[0] = bytes[0];
+                    slice[1] = bytes[1];
+                    self.i_cache.smc_write_check(paddr, 2);
+                    return;
+                }
+            }
+        }
+        // Slow path: fall through to per-byte writes
         self.mem_write_byte(addr, value as u8);
         self.mem_write_byte(addr + 1, (value >> 8) as u8);
     }
 
+    #[inline(always)]
     pub(super) fn mem_read_dword(&self, addr: u64) -> u32 {
+        // Fast path: single get_host_mem_addr call for 4 bytes
+        if let Some(mem_bus) = self.mem_bus {
+            let mem = unsafe { &mut *mem_bus.as_ptr() };
+            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            let paddr: BxPhyAddress = addr as BxPhyAddress;
+
+            if let Ok(Some(slice)) =
+                mem.get_host_mem_addr(paddr, MemoryAccessType::Read, &[cpu_ref])
+            {
+                if slice.len() >= 4 {
+                    return u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]);
+                }
+            }
+        }
+        // Slow path: fall through to per-byte reads
         let lo = self.mem_read_word(addr) as u32;
         let hi = self.mem_read_word(addr + 2) as u32;
         lo | (hi << 16)
     }
 
+    #[inline(always)]
     pub(super) fn mem_write_dword(&mut self, addr: u64, value: u32) {
+        // Fast path: single get_host_mem_addr call for 4 bytes
+        if let Some(mem_bus) = self.mem_bus {
+            let mem = unsafe { &mut *mem_bus.as_ptr() };
+            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            let paddr: BxPhyAddress = addr as BxPhyAddress;
+
+            if let Ok(Some(slice)) =
+                mem.get_host_mem_addr(paddr, MemoryAccessType::Write, &[cpu_ref])
+            {
+                if slice.len() >= 4 {
+                    let bytes = value.to_le_bytes();
+                    slice[0] = bytes[0];
+                    slice[1] = bytes[1];
+                    slice[2] = bytes[2];
+                    slice[3] = bytes[3];
+                    self.i_cache.smc_write_check(paddr, 4);
+                    return;
+                }
+            }
+        }
+        // Slow path: fall through to per-byte writes
         self.mem_write_word(addr, value as u16);
         self.mem_write_word(addr + 2, (value >> 16) as u16);
     }
@@ -1245,11 +1388,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Dispatch MOVSB: 16/32-bit address, with or without REP prefix.
     pub fn movsb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.as32_l() != 0 {
-            if instr.lock_rep_used_value() != 0 { self.rep_movsb32(instr)?; }
-            else { self.movsb32(instr)?; }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_movsb32(instr)?;
+            } else {
+                self.movsb32(instr)?;
+            }
         } else {
-            if instr.lock_rep_used_value() != 0 { self.rep_movsb16(instr); }
-            else { self.movsb16(instr); }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_movsb16(instr);
+            } else {
+                self.movsb16(instr);
+            }
         }
         Ok(())
     }
@@ -1257,11 +1406,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Dispatch MOVSW: 16/32-bit address, with or without REP prefix.
     pub fn movsw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.as32_l() != 0 {
-            if instr.lock_rep_used_value() != 0 { self.rep_movsw32(instr)?; }
-            else { self.movsw32(instr)?; }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_movsw32(instr)?;
+            } else {
+                self.movsw32(instr)?;
+            }
         } else {
-            if instr.lock_rep_used_value() != 0 { self.rep_movsw16(instr); }
-            else { self.movsw16(instr); }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_movsw16(instr);
+            } else {
+                self.movsw16(instr);
+            }
         }
         Ok(())
     }
@@ -1269,11 +1424,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Dispatch MOVSD: 16/32-bit address, with or without REP prefix.
     pub fn movsd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.as32_l() != 0 {
-            if instr.lock_rep_used_value() != 0 { self.rep_movsd32(instr)?; }
-            else { self.movsd32(instr)?; }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_movsd32(instr)?;
+            } else {
+                self.movsd32(instr)?;
+            }
         } else {
-            if instr.lock_rep_used_value() != 0 { self.rep_movsd16(instr); }
-            else { self.movsd16(instr); }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_movsd16(instr);
+            } else {
+                self.movsd16(instr);
+            }
         }
         Ok(())
     }
@@ -1283,11 +1444,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Dispatch STOSB: 16/32-bit address, with or without REP prefix.
     pub fn stosb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.as32_l() != 0 {
-            if instr.lock_rep_used_value() != 0 { self.rep_stosb32(instr)?; }
-            else { self.stosb32(instr)?; }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_stosb32(instr)?;
+            } else {
+                self.stosb32(instr)?;
+            }
         } else {
-            if instr.lock_rep_used_value() != 0 { self.rep_stosb16(instr); }
-            else { self.stosb16(instr); }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_stosb16(instr);
+            } else {
+                self.stosb16(instr);
+            }
         }
         Ok(())
     }
@@ -1295,11 +1462,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Dispatch STOSW: 16/32-bit address, with or without REP prefix.
     pub fn stosw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.as32_l() != 0 {
-            if instr.lock_rep_used_value() != 0 { self.rep_stosw32(instr)?; }
-            else { self.stosw32(instr)?; }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_stosw32(instr)?;
+            } else {
+                self.stosw32(instr)?;
+            }
         } else {
-            if instr.lock_rep_used_value() != 0 { self.rep_stosw16(instr); }
-            else { self.stosw16(instr); }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_stosw16(instr);
+            } else {
+                self.stosw16(instr);
+            }
         }
         Ok(())
     }
@@ -1307,11 +1480,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Dispatch STOSD: 16/32-bit address, with or without REP prefix.
     pub fn stosd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.as32_l() != 0 {
-            if instr.lock_rep_used_value() != 0 { self.rep_stosd32(instr)?; }
-            else { self.stosd32(instr)?; }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_stosd32(instr)?;
+            } else {
+                self.stosd32(instr)?;
+            }
         } else {
-            if instr.lock_rep_used_value() != 0 { self.rep_stosd16(instr); }
-            else { self.stosd16(instr); }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_stosd16(instr);
+            } else {
+                self.stosd16(instr);
+            }
         }
         Ok(())
     }
@@ -1321,11 +1500,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Dispatch LODSB: 16/32-bit address, with or without REP prefix.
     pub fn lodsb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.as32_l() != 0 {
-            if instr.lock_rep_used_value() != 0 { self.rep_lodsb32(instr)?; }
-            else { self.lodsb32(instr)?; }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_lodsb32(instr)?;
+            } else {
+                self.lodsb32(instr)?;
+            }
         } else {
-            if instr.lock_rep_used_value() != 0 { self.rep_lodsb16(instr); }
-            else { self.lodsb16(instr); }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_lodsb16(instr);
+            } else {
+                self.lodsb16(instr);
+            }
         }
         Ok(())
     }
@@ -1333,11 +1518,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Dispatch LODSW: 16/32-bit address, with or without REP prefix.
     pub fn lodsw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.as32_l() != 0 {
-            if instr.lock_rep_used_value() != 0 { self.rep_lodsw32(instr)?; }
-            else { self.lodsw32(instr)?; }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_lodsw32(instr)?;
+            } else {
+                self.lodsw32(instr)?;
+            }
         } else {
-            if instr.lock_rep_used_value() != 0 { self.rep_lodsw16(instr); }
-            else { self.lodsw16(instr); }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_lodsw16(instr);
+            } else {
+                self.lodsw16(instr);
+            }
         }
         Ok(())
     }
@@ -1345,11 +1536,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Dispatch LODSD: 16/32-bit address, with or without REP prefix.
     pub fn lodsd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.as32_l() != 0 {
-            if instr.lock_rep_used_value() != 0 { self.rep_lodsd32(instr)?; }
-            else { self.lodsd32(instr)?; }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_lodsd32(instr)?;
+            } else {
+                self.lodsd32(instr)?;
+            }
         } else {
-            if instr.lock_rep_used_value() != 0 { self.rep_lodsd16(instr); }
-            else { self.lodsd16(instr); }
+            if instr.lock_rep_used_value() != 0 {
+                self.rep_lodsd16(instr);
+            } else {
+                self.lodsd16(instr);
+            }
         }
         Ok(())
     }
@@ -1360,13 +1557,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn scasb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
         if instr.as32_l() != 0 {
-            if rep == 3 { self.repe_scasb32(instr)?; }
-            else if rep == 2 { self.repne_scasb32(instr)?; }
-            else { self.scasb32(instr)?; }
+            if rep == 3 {
+                self.repe_scasb32(instr)?;
+            } else if rep == 2 {
+                self.repne_scasb32(instr)?;
+            } else {
+                self.scasb32(instr)?;
+            }
         } else {
-            if rep == 3 { self.repe_scasb16(instr); }
-            else if rep == 2 { self.repne_scasb16(instr); }
-            else { self.scasb16(instr); }
+            if rep == 3 {
+                self.repe_scasb16(instr);
+            } else if rep == 2 {
+                self.repne_scasb16(instr);
+            } else {
+                self.scasb16(instr);
+            }
         }
         Ok(())
     }
@@ -1375,13 +1580,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn scasw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
         if instr.as32_l() != 0 {
-            if rep == 3 { self.repe_scasw32(instr)?; }
-            else if rep == 2 { self.repne_scasw32(instr)?; }
-            else { self.scasw32(instr)?; }
+            if rep == 3 {
+                self.repe_scasw32(instr)?;
+            } else if rep == 2 {
+                self.repne_scasw32(instr)?;
+            } else {
+                self.scasw32(instr)?;
+            }
         } else {
-            if rep == 3 { self.repe_scasw16(instr); }
-            else if rep == 2 { self.repne_scasw16(instr); }
-            else { self.scasw16(instr); }
+            if rep == 3 {
+                self.repe_scasw16(instr);
+            } else if rep == 2 {
+                self.repne_scasw16(instr);
+            } else {
+                self.scasw16(instr);
+            }
         }
         Ok(())
     }
@@ -1390,13 +1603,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn scasd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
         if instr.as32_l() != 0 {
-            if rep == 3 { self.repe_scasd32(instr)?; }
-            else if rep == 2 { self.repne_scasd32(instr)?; }
-            else { self.scasd32(instr)?; }
+            if rep == 3 {
+                self.repe_scasd32(instr)?;
+            } else if rep == 2 {
+                self.repne_scasd32(instr)?;
+            } else {
+                self.scasd32(instr)?;
+            }
         } else {
-            if rep == 3 { self.repe_scasd16(instr); }
-            else if rep == 2 { self.repne_scasd16(instr); }
-            else { self.scasd16(instr); }
+            if rep == 3 {
+                self.repe_scasd16(instr);
+            } else if rep == 2 {
+                self.repne_scasd16(instr);
+            } else {
+                self.scasd16(instr);
+            }
         }
         Ok(())
     }
@@ -1407,13 +1628,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn cmpsb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
         if instr.as32_l() != 0 {
-            if rep == 3 { self.repe_cmpsb32(instr)?; }
-            else if rep == 2 { self.repne_cmpsb32(instr)?; }
-            else { self.cmpsb32(instr)?; }
+            if rep == 3 {
+                self.repe_cmpsb32(instr)?;
+            } else if rep == 2 {
+                self.repne_cmpsb32(instr)?;
+            } else {
+                self.cmpsb32(instr)?;
+            }
         } else {
-            if rep == 3 { self.repe_cmpsb16(instr); }
-            else if rep == 2 { self.repne_cmpsb16(instr); }
-            else { self.cmpsb16(instr); }
+            if rep == 3 {
+                self.repe_cmpsb16(instr);
+            } else if rep == 2 {
+                self.repne_cmpsb16(instr);
+            } else {
+                self.cmpsb16(instr);
+            }
         }
         Ok(())
     }
@@ -1422,13 +1651,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn cmpsw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
         if instr.as32_l() != 0 {
-            if rep == 3 { self.repe_cmpsw32(instr)?; }
-            else if rep == 2 { self.repne_cmpsw32(instr)?; }
-            else { self.cmpsw32(instr)?; }
+            if rep == 3 {
+                self.repe_cmpsw32(instr)?;
+            } else if rep == 2 {
+                self.repne_cmpsw32(instr)?;
+            } else {
+                self.cmpsw32(instr)?;
+            }
         } else {
-            if rep == 3 { self.repe_cmpsw16(instr); }
-            else if rep == 2 { self.repne_cmpsw16(instr); }
-            else { self.cmpsw16(instr); }
+            if rep == 3 {
+                self.repe_cmpsw16(instr);
+            } else if rep == 2 {
+                self.repne_cmpsw16(instr);
+            } else {
+                self.cmpsw16(instr);
+            }
         }
         Ok(())
     }
@@ -1437,13 +1674,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn cmpsd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         let rep = instr.lock_rep_used_value();
         if instr.as32_l() != 0 {
-            if rep == 3 { self.repe_cmpsd32(instr)?; }
-            else if rep == 2 { self.repne_cmpsd32(instr)?; }
-            else { self.cmpsd32(instr)?; }
+            if rep == 3 {
+                self.repe_cmpsd32(instr)?;
+            } else if rep == 2 {
+                self.repne_cmpsd32(instr)?;
+            } else {
+                self.cmpsd32(instr)?;
+            }
         } else {
-            if rep == 3 { self.repe_cmpsd16(instr); }
-            else if rep == 2 { self.repne_cmpsd16(instr); }
-            else { self.cmpsd16(instr); }
+            if rep == 3 {
+                self.repe_cmpsd16(instr);
+            } else if rep == 2 {
+                self.repne_cmpsd16(instr);
+            } else {
+                self.cmpsd16(instr);
+            }
         }
         Ok(())
     }

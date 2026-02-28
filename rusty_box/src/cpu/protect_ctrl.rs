@@ -34,7 +34,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let base = self.read_virtual_dword(seg, eaddr.wrapping_add(2))? as u64;
         self.idtr.base = base;
         self.idtr.limit = limit;
-        tracing::trace!("LIDT: base={:#010x}, limit={:#06x}", base, limit);
         Ok(())
     }
 }

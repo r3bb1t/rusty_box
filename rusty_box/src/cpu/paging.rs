@@ -3,17 +3,10 @@
 //! Based on Bochs cpu/paging.cc
 //! Implements page table walking and address translation
 
-use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
-    Result,
-};
+use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, Result};
 use crate::{
     config::{BxAddress, BxPhyAddress},
-    cpu::{
-        rusty_box::MemoryAccessType,
-        tlb::TLBEntry,
-    },
+    cpu::{rusty_box::MemoryAccessType, tlb::TLBEntry},
     memory::BxMemC,
 };
 
@@ -28,6 +21,12 @@ const ERROR_CODE_ACCESS: u32 = 0x10;
 // Combined access bits
 const BX_COMBINED_ACCESS_WRITE: u32 = 0x2;
 const BX_COMBINED_ACCESS_USER: u32 = 0x4;
+
+// DTLB access permission bits (matching Bochs tlb.h)
+const TLB_SYS_READ_OK: u32 = 0x01;
+const TLB_USER_READ_OK: u32 = 0x02;
+const TLB_SYS_WRITE_OK: u32 = 0x04;
+const TLB_USER_WRITE_OK: u32 = 0x08;
 
 // Paging level constants
 const BX_LEVEL_PDE: usize = 1;
@@ -126,7 +125,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         mem: &mut BxMemC,
         page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
     ) -> Result<()> {
-        let mut data = value.to_le_bytes().to_vec();
+        let mut data = value.to_le_bytes();
         // We need to pass &[&BxCpuC] but we have &mut self
         // Create a temporary immutable reference - safe because write_physical_page doesn't mutate CPU
         let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
@@ -184,12 +183,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Check for 4MB page (PSE bit in PDE, only if CR4.PSE enabled)
         if (entry[BX_LEVEL_PDE] & 0x80) != 0 && self.cr4.pse() {
             // 4MB page — permission check using combined access from PDE only
-            let combined = entry[BX_LEVEL_PDE] & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+            let combined =
+                entry[BX_LEVEL_PDE] & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
             let is_write = matches!(rw, MemoryAccessType::Write);
-            let priv_index = ((self.cr0.wp() as u32) << 4)
-                | ((user as u32) << 3)
-                | combined
-                | (is_write as u32);
+            let priv_index =
+                ((self.cr0.wp() as u32) << 4) | ((user as u32) << 3) | combined | (is_write as u32);
             if PRIV_CHECK[priv_index as usize] == 0 {
                 tracing::debug!(
                     "4MB page protection violation: laddr={:#x}, priv_index={}",
@@ -374,7 +372,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Used by system_write_byte/word/dword for TSS, descriptor table writes.
     /// Based on Bochs access.cc system_write_word/dword which call
     /// access_write_linear → translate_linear with CPL=0.
-    pub(super) fn translate_linear_system_write(&mut self, laddr: BxAddress) -> Result<BxPhyAddress> {
+    pub(super) fn translate_linear_system_write(
+        &mut self,
+        laddr: BxAddress,
+    ) -> Result<BxPhyAddress> {
         let laddr = laddr & 0xFFFFFFFF; // Mask to 32 bits
 
         // If paging disabled, linear = physical
@@ -392,7 +393,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let pde = self.mem_read_dword(pde_addr);
 
         if (pde & 0x1) == 0 {
-            tracing::debug!("system_write page walk: PDE not present at {:#x}, laddr={:#x}", pde_addr, laddr);
+            tracing::debug!(
+                "system_write page walk: PDE not present at {:#x}, laddr={:#x}",
+                pde_addr,
+                laddr
+            );
             return Err(super::CpuError::Memory(
                 crate::memory::MemoryError::PageNotPresent,
             ));
@@ -417,7 +422,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let pte = self.mem_read_dword(pte_addr);
 
         if (pte & 0x1) == 0 {
-            tracing::debug!("system_write page walk: PTE not present at {:#x}, laddr={:#x}", pte_addr, laddr);
+            tracing::debug!(
+                "system_write page walk: PTE not present at {:#x}, laddr={:#x}",
+                pte_addr,
+                laddr
+            );
             return Err(super::CpuError::Memory(
                 crate::memory::MemoryError::PageNotPresent,
             ));
@@ -461,7 +470,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let pde = self.mem_read_dword(pde_addr);
 
         if (pde & 0x1) == 0 {
-            tracing::debug!("system_read page walk: PDE not present at {:#x}, laddr={:#x}", pde_addr, laddr);
+            tracing::debug!(
+                "system_read page walk: PDE not present at {:#x}, laddr={:#x}",
+                pde_addr,
+                laddr
+            );
             return Err(super::CpuError::Memory(
                 crate::memory::MemoryError::PageNotPresent,
             ));
@@ -481,7 +494,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let pte = self.mem_read_dword(pte_addr);
 
         if (pte & 0x1) == 0 {
-            tracing::debug!("system_read page walk: PTE not present at {:#x}, laddr={:#x}", pte_addr, laddr);
+            tracing::debug!(
+                "system_read page walk: PTE not present at {:#x}, laddr={:#x}",
+                pte_addr,
+                laddr
+            );
             return Err(super::CpuError::Memory(
                 crate::memory::MemoryError::PageNotPresent,
             ));
@@ -499,17 +516,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Deliver a #PF exception.
-    fn page_fault(
-        &mut self,
-        fault: u32,
-        laddr: u64,
-        user: bool,
-        is_write: bool,
-    ) -> Result<()> {
+    fn page_fault(&mut self, fault: u32, laddr: u64, user: bool, is_write: bool) -> Result<()> {
         self.cr2 = laddr;
-        let error_code = fault
-            | ((user as u32) << 2)
-            | ((is_write as u32) << 1);
+        let error_code = fault | ((user as u32) << 2) | ((is_write as u32) << 1);
         self.exception(super::cpu::Exception::Pf, error_code as u16)
     }
 
@@ -537,10 +546,87 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         let user = self.user_pl;
+        let lpf = laddr & 0xFFFF_F000; // linear page frame
 
+        // ---- DTLB lookup ----
+        // Compute which access bit we need:
+        //   read  + supervisor(0) → bit 0 (TLB_SYS_READ_OK)
+        //   read  + user(1)       → bit 1 (TLB_USER_READ_OK)
+        //   write + supervisor(0) → bit 2 (TLB_SYS_WRITE_OK)
+        //   write + user(1)       → bit 3 (TLB_USER_WRITE_OK)
+        let needed_bit = 1u32 << (((is_write as u32) << 1) | (user as u32));
+        {
+            let tlb_entry = self.dtlb.get_entry_of(laddr, 0);
+            if tlb_entry.lpf == lpf && (tlb_entry.access_bits & needed_bit) != 0 {
+                // TLB hit — return cached physical address directly.
+                let paddr = tlb_entry.ppf | (laddr & 0xFFF);
+                return Ok(paddr);
+            }
+        }
+
+        // ---- DTLB miss — full page table walk ----
+        let (paddr, combined_access, is_large_page) =
+            self.page_walk_for_dtlb(laddr, user, is_write)?;
+        let paddr = self.apply_a20(paddr);
+
+        // ---- Populate DTLB entry ----
+        // Compute full access bits for this page so future accesses with
+        // different user/write combinations can also hit the TLB.
+        let wp = self.cr0.wp() as u32;
+        let mut access_bits = 0u32;
+        // Check all 4 combinations: {sys_read, user_read, sys_write, user_write}
+        for &(bit, u, w) in &[
+            (TLB_SYS_READ_OK, 0u32, 0u32),
+            (TLB_USER_READ_OK, 1, 0),
+            (TLB_SYS_WRITE_OK, 0, 1),
+            (TLB_USER_WRITE_OK, 1, 1),
+        ] {
+            let priv_index = (wp << 4) | (u << 3) | combined_access | w;
+            if PRIV_CHECK[priv_index as usize] != 0 {
+                access_bits |= bit;
+            }
+        }
+        // For writes, we also need the dirty bit to have been set.
+        // If this was a read access but the page is writable, the dirty bit
+        // may not be set yet. When a future write hits this TLB entry, we
+        // need to ensure the dirty bit gets set. We handle this by only
+        // granting write permission in the TLB if the dirty bit is already set,
+        // OR if this was a write access (which already set the dirty bit).
+        // For simplicity and correctness, only grant write TLB permission
+        // when the current access is a write (dirty bit was just set).
+        if !is_write {
+            access_bits &= !(TLB_SYS_WRITE_OK | TLB_USER_WRITE_OK);
+        }
+
+        let ppf = paddr & 0xFFFF_F000;
+        {
+            let tlb_entry = self.dtlb.get_entry_of(laddr, 0);
+            tlb_entry.lpf = lpf;
+            tlb_entry.ppf = ppf;
+            tlb_entry.access_bits = access_bits;
+            tlb_entry.lpf_mask = if is_large_page { 0x3F_FFFF } else { 0xFFF };
+            tlb_entry.host_page_addr = 0; // Not used for data access
+        }
+
+        if is_large_page {
+            self.dtlb.split_large = true;
+        }
+
+        Ok(paddr)
+    }
+
+    /// Perform the actual page table walk for a data access.
+    /// Returns (physical_address_before_a20, combined_access_bits, is_large_page).
+    /// The combined_access_bits are the intersection of PDE and PTE R/W + U/S bits
+    /// (only bits 1 and 2), suitable for indexing into PRIV_CHECK.
+    fn page_walk_for_dtlb(
+        &mut self,
+        laddr: u64,
+        user: bool,
+        is_write: bool,
+    ) -> Result<(u64, u32, bool)> {
         // ---- PDE ----
-        let pde_addr = (self.cr3 & BX_CR3_PAGING_MASK)
-            | (((laddr >> 22) & 0x3FF) << 2);
+        let pde_addr = (self.cr3 & BX_CR3_PAGING_MASK) | (((laddr >> 22) & 0x3FF) << 2);
         let pde = self.mem_read_dword(pde_addr);
 
         if pde & 0x1 == 0 {
@@ -551,10 +637,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // ---- 4 MB page (PSE) ----
         if pde & 0x80 != 0 && self.cr4.pse() {
             let combined = pde & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
-            let priv_index = ((self.cr0.wp() as u32) << 4)
-                | ((user as u32) << 3)
-                | combined
-                | (is_write as u32);
+            let priv_index =
+                ((self.cr0.wp() as u32) << 4) | ((user as u32) << 3) | combined | (is_write as u32);
             if PRIV_CHECK[priv_index as usize] == 0 {
                 self.page_fault(ERROR_PROTECTION, laddr, user, is_write)?;
                 return Err(super::CpuError::CpuLoopRestart);
@@ -564,13 +648,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if pde & needed != needed {
                 self.mem_write_dword(pde_addr, pde | needed);
             }
-            let ppf = (pde as u64 & 0xFFC0_0000) | (laddr & 0x003F_FFFF);
-            return Ok(self.apply_a20(ppf));
+            let paddr = (pde as u64 & 0xFFC0_0000) | (laddr & 0x003F_FFFF);
+            return Ok((paddr, combined, true));
         }
 
         // ---- PTE ----
-        let pte_addr = (pde as u64 & 0xFFFF_F000)
-            | (((laddr >> 12) & 0x3FF) << 2);
+        let pte_addr = (pde as u64 & 0xFFFF_F000) | (((laddr >> 12) & 0x3FF) << 2);
         let pte = self.mem_read_dword(pte_addr);
 
         if pte & 0x1 == 0 {
@@ -579,10 +662,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         let combined = (pde & pte) & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
-        let priv_index = ((self.cr0.wp() as u32) << 4)
-            | ((user as u32) << 3)
-            | combined
-            | (is_write as u32);
+        let priv_index =
+            ((self.cr0.wp() as u32) << 4) | ((user as u32) << 3) | combined | (is_write as u32);
         if PRIV_CHECK[priv_index as usize] == 0 {
             self.page_fault(ERROR_PROTECTION, laddr, user, is_write)?;
             return Err(super::CpuError::CpuLoopRestart);
@@ -599,7 +680,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         let paddr = (pte as u64 & 0xFFFF_F000) | (laddr & 0xFFF);
-        Ok(self.apply_a20(paddr))
+        Ok((paddr, combined, false))
     }
 }
 

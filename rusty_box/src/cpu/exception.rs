@@ -245,7 +245,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Log the caller site for #GP to identify spurious exceptions during debugging
         if vector == Exception::Gp && !self.real_mode() {
             let caller = core::panic::Location::caller();
-            tracing::debug!("GP_CALLER: {}:{} icount={} RIP={:#x}", caller.file(), caller.line(), self.icount, self.prev_rip);
+            tracing::debug!(
+                "GP_CALLER: {}:{} icount={} RIP={:#x}",
+                caller.file(),
+                caller.line(),
+                self.icount,
+                self.prev_rip
+            );
         }
         let mut push_error = if (vector as usize) < BX_CPU_HANDLED_EXCEPTIONS {
             self.exception_push_error(vector as usize)
@@ -341,7 +347,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Call interrupt handler based on CPU mode
         let vector_u8 = vector as u8;
-        
+
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
@@ -373,7 +379,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     // Double-fault / triple-fault detection is in the recursive call.
                     tracing::warn!(
                         "protected_mode_int({:?}) failed, raising {:?}; icount={}",
-                        vector, new_vector, self.icount
+                        vector,
+                        new_vector,
+                        self.icount
                     );
                     return self.exception(new_vector, 0);
                 }

@@ -21,10 +21,7 @@ use super::{
     cpuid::BxCpuIdTrait,
     cpustats::BxCpuStatistics,
     crregs::{BxCr0, BxCr4, BxDr6, BxDr7, Xcr0, MSR},
-    decoder::{
-        Instruction, BX_GENERAL_REGISTERS, BX_ISA_EXTENSIONS_ARRAY_SIZE,
-        BX_XMM_REGISTERS,
-    },
+    decoder::{Instruction, BX_GENERAL_REGISTERS, BX_ISA_EXTENSIONS_ARRAY_SIZE, BX_XMM_REGISTERS},
     descriptor::{BxGlobalSegmentReg, BxSegmentReg},
     eflags::EFlags,
     i387::{BxPackedRegister, I387},
@@ -36,7 +33,6 @@ use super::{
     xmm::{BxMxcsr, BxZmmReg},
     Result,
 };
-
 
 pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
 
@@ -55,34 +51,34 @@ use super::tlb::BxMemType;
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union BxGenRegWord {
-    pub dword_filler: u16,
-    pub word_filler: u16,
-    pub rx: u16,
-    pub byte: BxWordByte,
+    pub(crate) dword_filler: u16,
+    pub(crate) word_filler: u16,
+    pub(crate) rx: u16,
+    pub(crate) byte: BxWordByte,
 }
 
 #[cfg(feature = "bx_big_endian")]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct BxGenRegDword {
-    pub hrx: u32,
-    pub erx: u32,
+    pub(crate) hrx: u32,
+    pub(crate) erx: u32,
 }
 
 #[cfg(feature = "bx_big_endian")]
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union BxGenRegWordInner {
-    pub rx: u16,
-    pub byte: BxWordByte,
+    pub(crate) rx: u16,
+    pub(crate) byte: BxWordByte,
 }
 
 #[cfg(feature = "bx_big_endian")]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct BxWordByte {
-    pub rh: u8,
-    pub rl: u8,
+    pub(crate) rh: u8,
+    pub(crate) rl: u8,
 }
 
 // endregion:  x64 big endian
@@ -92,9 +88,9 @@ pub struct BxWordByte {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union BxGenReg {
-    pub word: BxGenRegWord,
-    pub rrx: u64,
-    pub dword: BxGenRegDword,
+    pub(crate) word: BxGenRegWord,
+    pub(crate) rrx: u64,
+    pub(crate) dword: BxGenRegDword,
 }
 
 impl Default for BxGenReg {
@@ -107,26 +103,26 @@ impl Default for BxGenReg {
 #[repr(C)]
 #[derive(Copy, Clone)]
 pub union BxGenRegWord {
-    pub rx: u16,
-    pub byte: BxWordByte,
-    pub word_filler: u16,
-    pub dword_filler: u16,
+    pub(crate) rx: u16,
+    pub(crate) byte: BxWordByte,
+    pub(crate) word_filler: u16,
+    pub(crate) dword_filler: u16,
 }
 
 #[cfg(not(feature = "bx_big_endian"))]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct BxGenRegDword {
-    pub erx: u32,
-    pub hrx: u32,
+    pub(crate) erx: u32,
+    pub(crate) hrx: u32,
 }
 
 #[cfg(not(feature = "bx_big_endian"))]
 #[repr(C)]
 #[derive(Debug, Copy, Clone)]
 pub struct BxWordByte {
-    pub rl: u8,
-    pub rh: u8,
+    pub(crate) rl: u8,
+    pub(crate) rh: u8,
 }
 
 // endregion:  x64 little endian
@@ -527,7 +523,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
 
     // Todo: Maybe enum?
     // pub(super) activity_state: u32,
-    pub activity_state: CpuActivityState,
+    pub(crate) activity_state: CpuActivityState,
 
     pub(super) pending_event: u32,
     pub(super) event_mask: u32,
@@ -737,13 +733,13 @@ pub(super) struct AddressXlation {
 
 #[derive(Debug, Default)]
 pub(super) struct PdptrCache {
-    pub entry: [u64; 4],
+    pub(crate) entry: [u64; 4],
 }
 
 #[derive(Debug, Default)]
 pub(super) struct FarBranch {
-    pub rev_cs: u16,
-    pub rev_rip: BxAddress,
+    pub(crate) rev_cs: u16,
+    pub(crate) rev_rip: BxAddress,
 }
 
 #[derive(Debug)]
@@ -781,46 +777,46 @@ impl Default for BxCpuActivityState {
 #[derive(Debug, Default)]
 pub struct BxRegsMsr {
     #[cfg(feature = "bx_support_apic")]
-    pub apicbase: BxPhyAddress,
+    pub(crate) apicbase: BxPhyAddress,
 
     // SYSCALL/SYSRET instruction msr's
-    pub star: u64,
+    pub(crate) star: u64,
 
-    pub lstar: u64,
-    pub cstar: u64,
-    pub fmask: u32,
-    pub kernelgsbase: u64,
-    pub tsc_aux: u32,
+    pub(crate) lstar: u64,
+    pub(crate) cstar: u64,
+    pub(crate) fmask: u32,
+    pub(crate) kernelgsbase: u64,
+    pub(crate) tsc_aux: u32,
 
     // SYSENTER/SYSEXIT instruction msr's
-    pub sysenter_cs_msr: u32,
-    pub sysenter_esp_msr: BxAddress,
-    pub sysenter_eip_msr: BxAddress,
+    pub(crate) sysenter_cs_msr: u32,
+    pub(crate) sysenter_esp_msr: BxAddress,
+    pub(crate) sysenter_eip_msr: BxAddress,
 
-    pub pat: BxPackedRegister,
-    pub mtrrphys: [u64; 16],
-    pub mtrrfix64k: BxPackedRegister,
-    pub mtrrfix16k: [BxPackedRegister; 2],
-    pub mtrrfix4k: [BxPackedRegister; 8],
-    pub mtrr_deftype: u32,
+    pub(crate) pat: BxPackedRegister,
+    pub(crate) mtrrphys: [u64; 16],
+    pub(crate) mtrrfix64k: BxPackedRegister,
+    pub(crate) mtrrfix16k: [BxPackedRegister; 2],
+    pub(crate) mtrrfix4k: [BxPackedRegister; 8],
+    pub(crate) mtrr_deftype: u32,
 
-    pub ia32_feature_ctrl: u32,
+    pub(crate) ia32_feature_ctrl: u32,
 
-    pub svm_vm_cr: u32,
-    pub svm_hsave_pa: u64,
+    pub(crate) svm_vm_cr: u32,
+    pub(crate) svm_hsave_pa: u64,
 
-    pub ia32_xss: u64,
+    pub(crate) ia32_xss: u64,
 
-    pub ia32_cet_control: [u64; 2], // indexed by CPL==3
-    pub ia32_pl_ssp: [u64; 4],
-    pub ia32_interrupt_ssp_table: u64,
+    pub(crate) ia32_cet_control: [u64; 2], // indexed by CPL==3
+    pub(crate) ia32_pl_ssp: [u64; 4],
+    pub(crate) ia32_interrupt_ssp_table: u64,
 
-    pub ia32_umwait_ctrl: u32,
-    pub ia32_spec_ctrl: u32, // SCA
+    pub(crate) ia32_umwait_ctrl: u32,
+    pub(crate) ia32_spec_ctrl: u32, // SCA
 
-                             // note from bochs source code:
-                             /* TODO finish of the others */
-                             //
+                                    // note from bochs source code:
+                                    /* TODO finish of the others */
+                                    //
 }
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -1180,9 +1176,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         #[cfg(feature = "profiling")]
         let mut prof_icache_ns = 0u64;
 
-        tracing::info!("CPU loop starting at CS:IP = {:04X}:{:08X}",
+        tracing::info!(
+            "CPU loop starting at CS:IP = {:04X}:{:08X}",
             unsafe { self.sregs[BxSegregs::Cs as usize].selector.value },
-            self.rip());
+            self.rip()
+        );
 
         let result = 'cpu_loop: loop {
             iteration += 1;
@@ -1191,11 +1189,19 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // Safety limit - pause when instruction limit is reached
             if iteration > max_instructions {
                 #[cfg(feature = "profiling")]
-                tracing::warn!("CPU-LOOP-STATS: {} instr, icache={}ms assign={}ms exec={}ms",
-                    iteration - 1, prof_icache_ns / 1_000_000,
-                    prof_assign_ns / 1_000_000, prof_exec_ns / 1_000_000);
+                tracing::warn!(
+                    "CPU-LOOP-STATS: {} instr, icache={}ms assign={}ms exec={}ms",
+                    iteration - 1,
+                    prof_icache_ns / 1_000_000,
+                    prof_assign_ns / 1_000_000,
+                    prof_exec_ns / 1_000_000
+                );
                 #[cfg(feature = "profiling")]
-                { prof_icache_ns = 0; prof_assign_ns = 0; prof_exec_ns = 0; }
+                {
+                    prof_icache_ns = 0;
+                    prof_assign_ns = 0;
+                    prof_exec_ns = 0;
+                }
                 self.perf_icache_miss = 0;
                 self.perf_prefetch = 0;
                 break Ok(iteration - 1);
@@ -1232,7 +1238,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 }
             };
             #[cfg(feature = "profiling")]
-            { prof_icache_ns += _t0.elapsed().as_nanos() as u64; }
+            {
+                prof_icache_ns += _t0.elapsed().as_nanos() as u64;
+            }
             tracing::trace!(
                 "get_icache_entry: RIP={:#x}, entry.tlen={}",
                 self.rip(),
@@ -1352,7 +1360,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
                 tracing::trace!(
                     "Executing {:?} at RIP={:#x}, ilen={}, next_rip={:#x}",
-                    i.get_ia_opcode(), current_rip, ilen, next_rip
+                    i.get_ia_opcode(),
+                    current_rip,
+                    ilen,
+                    next_rip
                 );
 
                 // Execute instruction directly
@@ -1368,41 +1379,70 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         }
                         Err(crate::cpu::CpuError::UnimplementedOpcode { opcode }) => {
                             let rip = current_rip;
-                            let cs_base = unsafe {
-                                self.sregs[BxSegregs::Cs as usize].cache.u.segment.base
-                            };
+                            let cs_base =
+                                unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
                             let laddr = cs_base + rip;
                             let cs_value =
                                 unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
                             let instr_bytes = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
                                 let page_base = cs_base + (self.eip_page_bias as u64);
                                 let offset = (rip.wrapping_sub(page_base)) as usize;
-                                if offset < fetch_ptr.len() && offset + ilen as usize <= fetch_ptr.len() {
+                                if offset < fetch_ptr.len()
+                                    && offset + ilen as usize <= fetch_ptr.len()
+                                {
                                     fetch_ptr[offset..offset + ilen as usize].to_vec()
-                                } else { vec![] }
-                            } else { vec![] };
+                                } else {
+                                    vec![]
+                                }
+                            } else {
+                                vec![]
+                            };
                             panic!("UNIMPLEMENTED OPCODE: {} at RIP={:#x} CS:IP={:#x}:{:#x} laddr={:#x} bytes={:02x?}",
                                 opcode, rip, cs_value, rip, laddr, instr_bytes);
                         }
                         Err(e) => {
                             let rip = current_rip;
-                            let cs_value = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
+                            let cs_value =
+                                unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
                             let opcode = i.get_ia_opcode();
                             tracing::error!("CPU ERROR at icount={} (iter={}) RIP={:#x} CS={:#x} opcode={:?}: {}",
                                 self.icount, iteration, rip, cs_value, opcode, e);
-                            tracing::error!("  EAX={:#x} ECX={:#x} EDX={:#x} EBX={:#x}",
-                                self.get_gpr32(0), self.get_gpr32(1), self.get_gpr32(2), self.get_gpr32(3));
-                            tracing::error!("  ESP={:#x} EBP={:#x} ESI={:#x} EDI={:#x}",
-                                self.get_gpr32(4), self.get_gpr32(5), self.get_gpr32(6), self.get_gpr32(7));
+                            tracing::error!(
+                                "  EAX={:#x} ECX={:#x} EDX={:#x} EBX={:#x}",
+                                self.get_gpr32(0),
+                                self.get_gpr32(1),
+                                self.get_gpr32(2),
+                                self.get_gpr32(3)
+                            );
+                            tracing::error!(
+                                "  ESP={:#x} EBP={:#x} ESI={:#x} EDI={:#x}",
+                                self.get_gpr32(4),
+                                self.get_gpr32(5),
+                                self.get_gpr32(6),
+                                self.get_gpr32(7)
+                            );
                             tracing::error!("  CR0={:#x} EFLAGS={:#x} CPL={} GDTR.base={:#x} GDTR.limit={:#x} IDTR.base={:#x} IDTR.limit={:#x}",
                                 self.cr0.get32(), self.eflags.bits(), cs_value & 3,
                                 self.gdtr.base, self.gdtr.limit, self.idtr.base, self.idtr.limit);
                             // Show segment registers
-                            for (idx, name) in [(0,"ES"),(1,"CS"),(2,"SS"),(3,"DS"),(4,"FS"),(5,"GS")] {
+                            for (idx, name) in [
+                                (0, "ES"),
+                                (1, "CS"),
+                                (2, "SS"),
+                                (3, "DS"),
+                                (4, "FS"),
+                                (5, "GS"),
+                            ] {
                                 let sel = unsafe { self.sregs[idx].selector.value };
                                 let base = unsafe { self.sregs[idx].cache.u.segment.base };
                                 let limit = unsafe { self.sregs[idx].cache.u.segment.limit_scaled };
-                                tracing::error!("  {}={:#06x} base={:#x} limit={:#x}", name, sel, base, limit);
+                                tracing::error!(
+                                    "  {}={:#06x} base={:#x} limit={:#x}",
+                                    name,
+                                    sel,
+                                    base,
+                                    limit
+                                );
                             }
                             break 'cpu_loop Err(e);
                         }
@@ -1435,8 +1475,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // Matching C++ line 215: if (BX_CPU_THIS_PTR async_event) break;
                 if self.async_event != 0 {
                     trace_break_count += 1;
-                    tracing::trace!("TRACE-BREAK: async_event={:#x} at iter={}, RIP={:#x}, opcode={:?}",
-                        self.async_event, iteration, self.rip(), i.get_ia_opcode());
+                    tracing::trace!(
+                        "TRACE-BREAK: async_event={:#x} at iter={}, RIP={:#x}, opcode={:?}",
+                        self.async_event,
+                        iteration,
+                        self.rip(),
+                        i.get_ia_opcode()
+                    );
                     break;
                 }
 
@@ -1638,8 +1683,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     crate::cpu::icache::IcacheAddress::Address(a) => a as i64,
                     _ => -1i64,
                 };
-                tracing::trace!("ICACHE-MISS: p_addr={:#x}, hash={}, existing_paddr={}, ilen={}",
-                    p_addr, hash_idx, existing_paddr_val, existing.i.meta_info.ilen);
+                tracing::trace!(
+                    "ICACHE-MISS: p_addr={:#x}, hash={}, existing_paddr={}, ilen={}",
+                    p_addr,
+                    hash_idx,
+                    existing_paddr_val,
+                    existing.i.meta_info.ilen
+                );
             }
             // iCache miss. Call serve_icache_miss
             // Create a dummy page_write_stamp_table for now (matches prefetch approach)
@@ -1914,7 +1964,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.eflags.remove(EFlags::OF | EFlags::CF); // OF=0, CF=0
         self.eflags.set(EFlags::SF, (result & 0x8000) != 0);
         self.eflags.set(EFlags::ZF, result == 0);
-        self.eflags.set(EFlags::PF, (((result & 0xFF) as u8).count_ones() % 2) == 0);
+        self.eflags
+            .set(EFlags::PF, (((result & 0xFF) as u8).count_ones() % 2) == 0);
     }
 
     /// Get segment base address safely
