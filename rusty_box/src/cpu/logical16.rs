@@ -387,9 +387,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // get_laddr32_seg is defined in logical8.rs to avoid duplicate definitions
 
-    /// Write word to a previously-translated physical address (RMW write-back).
-    pub fn write_rmw_linear_word(&mut self, paddr: u64, val: u16) {
-        self.mem_write_word(paddr, val);
+    /// Write-back phase of a read-modify-write word access.
+    /// Uses address_xlation populated by read_rmw_virtual_word.
+    /// Bochs: write_RMW_linear_word (access2.cc:762)
+    #[inline]
+    pub fn write_rmw_linear_word(&mut self, val: u16) {
+        if self.address_xlation.pages > 2 {
+            // Host pointer cached from TLB hit — direct write
+            unsafe { (self.address_xlation.pages as *mut u16).write_unaligned(val) };
+        } else if self.address_xlation.pages == 1 {
+            // Single-page physical write
+            self.mem_write_word(self.address_xlation.paddress1, val);
+        } else {
+            // Cross-page (pages == 2): split write (little-endian)
+            let bytes = val.to_le_bytes();
+            self.mem_write_byte(self.address_xlation.paddress1, bytes[0]);
+            self.mem_write_byte(self.address_xlation.paddress2, bytes[1]);
+        }
     }
 
     // =========================================================================
@@ -401,12 +415,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn xor_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
+        let op1_16 = self.read_rmw_virtual_word(seg, eaddr)?;
         let src_reg = instr.src() as usize; // src()=[1]=nnn=register for 16-bit store (decoder swaps)
         let op2_16 = self.get_gpr16(src_reg);
         let result = op1_16 ^ op2_16;
 
-        self.write_rmw_linear_word(laddr, result);
+        self.write_rmw_linear_word(result);
         self.set_flags_oszapc_logic_16(result);
         tracing::trace!(
             "XOR16 mem: [{:?}:{:#x}] = {:#06x} ^ {:#06x} = {:#06x}",
@@ -446,11 +460,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn xor_ew_iw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
+        let op1_16 = self.read_rmw_virtual_word(seg, eaddr)?;
         let op2_16 = instr.iw();
         let result = op1_16 ^ op2_16;
 
-        self.write_rmw_linear_word(laddr, result);
+        self.write_rmw_linear_word(result);
         self.set_flags_oszapc_logic_16(result);
         tracing::trace!(
             "XOR16 mem: [{:?}:{:#x}] = {:#06x} ^ {:#06x} = {:#06x}",
@@ -468,12 +482,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn or_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
+        let op1_16 = self.read_rmw_virtual_word(seg, eaddr)?;
         let src_reg = instr.src() as usize; // src()=[1]=nnn=register for 16-bit store (decoder swaps)
         let op2_16 = self.get_gpr16(src_reg);
         let result = op1_16 | op2_16;
 
-        self.write_rmw_linear_word(laddr, result);
+        self.write_rmw_linear_word(result);
         self.set_flags_oszapc_logic_16(result);
         tracing::trace!(
             "OR16 mem: [{:?}:{:#x}] = {:#06x} | {:#06x} = {:#06x}",
@@ -513,11 +527,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn or_ew_iw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
+        let op1_16 = self.read_rmw_virtual_word(seg, eaddr)?;
         let op2_16 = instr.iw();
         let result = op1_16 | op2_16;
 
-        self.write_rmw_linear_word(laddr, result);
+        self.write_rmw_linear_word(result);
         self.set_flags_oszapc_logic_16(result);
         tracing::trace!(
             "OR16 mem: [{:?}:{:#x}] = {:#06x} | {:#06x} = {:#06x}",
@@ -535,12 +549,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn and_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
+        let op1_16 = self.read_rmw_virtual_word(seg, eaddr)?;
         let src_reg = instr.src() as usize; // src()=[1]=nnn=register for 16-bit store (decoder swaps)
         let op2_16 = self.get_gpr16(src_reg);
         let result = op1_16 & op2_16;
 
-        self.write_rmw_linear_word(laddr, result);
+        self.write_rmw_linear_word(result);
         self.set_flags_oszapc_logic_16(result);
         tracing::trace!(
             "AND16 mem: [{:?}:{:#x}] = {:#06x} & {:#06x} = {:#06x}",
@@ -580,11 +594,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn and_ew_iw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
+        let op1_16 = self.read_rmw_virtual_word(seg, eaddr)?;
         let op2_16 = instr.iw();
         let result = op1_16 & op2_16;
 
-        self.write_rmw_linear_word(laddr, result);
+        self.write_rmw_linear_word(result);
         self.set_flags_oszapc_logic_16(result);
         tracing::trace!(
             "AND16 mem: [{:?}:{:#x}] = {:#06x} & {:#06x} = {:#06x}",
@@ -602,10 +616,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn not_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_16, laddr) = self.read_rmw_virtual_word(seg, eaddr)?;
+        let op1_16 = self.read_rmw_virtual_word(seg, eaddr)?;
         let result = !op1_16;
 
-        self.write_rmw_linear_word(laddr, result);
+        self.write_rmw_linear_word(result);
         tracing::trace!(
             "NOT16 mem: [{:?}:{:#x}] = !{:#06x} = {:#06x}",
             seg,

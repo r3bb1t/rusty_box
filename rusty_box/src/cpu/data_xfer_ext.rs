@@ -426,12 +426,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn xchg_eb_gb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1, laddr) = self.read_rmw_virtual_byte(seg, eaddr)?; // always locked
+        let op1 = self.read_rmw_virtual_byte(seg, eaddr)?; // always locked
         let src_reg = instr.dst() as usize; // dst()=[0]=nnn=register (8-bit XCHG not in decoder swap list)
         let extend8bit_l = instr.extend8bit_l();
         let op2 = self.read_8bit_regx(src_reg, extend8bit_l);
 
-        self.write_rmw_linear_byte(laddr, op2);
+        self.write_rmw_linear_byte(op2);
         self.write_8bit_regx(src_reg, extend8bit_l, op1);
         tracing::trace!(
             "XCHG8 mem: [{:?}:{:#x}]={:#04x} <-> reg{}={:#04x}",
@@ -574,11 +574,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn xchg_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1, laddr) = self.read_rmw_virtual_word(seg, eaddr)?; // always locked
+        let op1 = self.read_rmw_virtual_word(seg, eaddr)?; // always locked
         let src_reg = instr.dst() as usize;
         let op2 = self.get_gpr16(src_reg);
 
-        self.write_rmw_linear_word(laddr, op2);
+        self.write_rmw_linear_word(op2);
         self.set_gpr16(src_reg, op1);
         tracing::trace!(
             "XCHG16 mem: [{:?}:{:#x}]={:#06x} <-> reg{}={:#06x}",
@@ -965,11 +965,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn xchg_ed_gd_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1, laddr) = self.read_rmw_virtual_dword(seg, eaddr)?; // always locked
+        let op1 = self.read_rmw_virtual_dword(seg, eaddr)?; // always locked
         let src_reg = instr.dst() as usize; // dst()=[0]=nnn=register operand
         let op2 = self.get_gpr32(src_reg);
 
-        self.write_rmw_linear_dword(laddr, op2);
+        self.write_rmw_linear_dword(op2);
         self.set_gpr32(src_reg, op1);
         tracing::trace!(
             "XCHG32 mem: [{:?}:{:#x}]={:#010x} <-> reg{}={:#010x}",

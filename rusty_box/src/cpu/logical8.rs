@@ -179,9 +179,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
-    /// Write byte to a previously-translated physical address (RMW write-back).
-    pub fn write_rmw_linear_byte(&mut self, paddr: u64, val: u8) {
-        self.mem_write_byte(paddr, val);
+    /// Write-back phase of a read-modify-write byte access.
+    /// Uses address_xlation populated by read_rmw_virtual_byte.
+    /// Bochs: write_RMW_linear_byte (access2.cc:745)
+    #[inline]
+    pub fn write_rmw_linear_byte(&mut self, val: u8) {
+        if self.address_xlation.pages > 2 {
+            // Host pointer cached from TLB hit — direct write (fastest path)
+            // SAFETY: pointer was valid during read phase and hasn't been invalidated
+            unsafe { *(self.address_xlation.pages as *mut u8) = val };
+        } else {
+            // pages == 1: single-page physical write
+            self.mem_write_byte(self.address_xlation.paddress1, val);
+        }
     }
 
     // =========================================================================
@@ -404,10 +414,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn not_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1_8, laddr) = self.read_rmw_virtual_byte(seg, eaddr)?;
+        let op1_8 = self.read_rmw_virtual_byte(seg, eaddr)?;
         let result = !op1_8;
 
-        self.write_rmw_linear_byte(laddr, result);
+        self.write_rmw_linear_byte(result);
         tracing::trace!(
             "NOT8 mem: [{:?}:{:#x}] = !{:#04x} = {:#04x}",
             seg,
@@ -427,13 +437,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn xor_eb_gb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1, laddr) = self.read_rmw_virtual_byte(seg, eaddr)?;
+        let op1 = self.read_rmw_virtual_byte(seg, eaddr)?;
         let src_reg = instr.dst() as usize; // reg field = source for store-direction
         let extend8bit_l = instr.extend8bit_l();
         let op2 = self.read_8bit_regx(src_reg, extend8bit_l);
         let result = op1 ^ op2;
 
-        self.write_rmw_linear_byte(laddr, result);
+        self.write_rmw_linear_byte(result);
         self.set_flags_oszapc_logic_8(result);
         tracing::trace!(
             "XOR8 mem: [{:?}:{:#x}] = {:#04x} ^ {:#04x} = {:#04x}",
@@ -474,11 +484,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn xor_eb_ib_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1, laddr) = self.read_rmw_virtual_byte(seg, eaddr)?;
+        let op1 = self.read_rmw_virtual_byte(seg, eaddr)?;
         let op2 = instr.ib();
         let result = op1 ^ op2;
 
-        self.write_rmw_linear_byte(laddr, result);
+        self.write_rmw_linear_byte(result);
         self.set_flags_oszapc_logic_8(result);
         tracing::trace!(
             "XOR8 mem: [{:?}:{:#x}] = {:#04x} ^ {:#04x} = {:#04x}",
@@ -496,13 +506,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn or_eb_gb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1, laddr) = self.read_rmw_virtual_byte(seg, eaddr)?;
+        let op1 = self.read_rmw_virtual_byte(seg, eaddr)?;
         let src_reg = instr.dst() as usize; // reg field = source for store-direction
         let extend8bit_l = instr.extend8bit_l();
         let op2 = self.read_8bit_regx(src_reg, extend8bit_l);
         let result = op1 | op2;
 
-        self.write_rmw_linear_byte(laddr, result);
+        self.write_rmw_linear_byte(result);
         self.set_flags_oszapc_logic_8(result);
         tracing::trace!(
             "OR8 mem: [{:?}:{:#x}] = {:#04x} | {:#04x} = {:#04x}",
@@ -543,11 +553,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn or_eb_ib_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1, laddr) = self.read_rmw_virtual_byte(seg, eaddr)?;
+        let op1 = self.read_rmw_virtual_byte(seg, eaddr)?;
         let op2 = instr.ib();
         let result = op1 | op2;
 
-        self.write_rmw_linear_byte(laddr, result);
+        self.write_rmw_linear_byte(result);
         self.set_flags_oszapc_logic_8(result);
         tracing::trace!(
             "OR8 mem: [{:?}:{:#x}] = {:#04x} | {:#04x} = {:#04x}",
@@ -565,13 +575,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn and_eb_gb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1, laddr) = self.read_rmw_virtual_byte(seg, eaddr)?;
+        let op1 = self.read_rmw_virtual_byte(seg, eaddr)?;
         let src_reg = instr.dst() as usize; // reg field = source for store-direction
         let extend8bit_l = instr.extend8bit_l();
         let op2 = self.read_8bit_regx(src_reg, extend8bit_l);
         let result = op1 & op2;
 
-        self.write_rmw_linear_byte(laddr, result);
+        self.write_rmw_linear_byte(result);
         self.set_flags_oszapc_logic_8(result);
         tracing::trace!(
             "AND8 mem: [{:?}:{:#x}] = {:#04x} & {:#04x} = {:#04x}",
@@ -612,11 +622,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn and_eb_ib_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let (op1, laddr) = self.read_rmw_virtual_byte(seg, eaddr)?;
+        let op1 = self.read_rmw_virtual_byte(seg, eaddr)?;
         let op2 = instr.ib();
         let result = op1 & op2;
 
-        self.write_rmw_linear_byte(laddr, result);
+        self.write_rmw_linear_byte(result);
         self.set_flags_oszapc_logic_8(result);
         tracing::trace!(
             "AND8 mem: [{:?}:{:#x}] = {:#04x} & {:#04x} = {:#04x}",

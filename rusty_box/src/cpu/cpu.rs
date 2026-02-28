@@ -711,17 +711,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 }
 
 #[derive(Debug, Default)]
-pub(super) struct AddressXlation {
+pub(crate) struct AddressXlation {
     /// The address offset after resolution
-    rm_addr: BxPhyAddress,
+    pub(crate) rm_addr: BxPhyAddress,
     /// physical address after translation of 1st len1 bytes of data
-    paddress1: BxPhyAddress,
+    pub(crate) paddress1: BxPhyAddress,
     /// physical address after translation of 2nd len2 bytes of data
-    paddress2: BxPhyAddress,
+    pub(crate) paddress2: BxPhyAddress,
     /// Number of bytes in page 1
-    len1: u32,
+    pub(crate) len1: u32,
     // Number of bytes in page 2
-    len2: u32,
+    pub(crate) len2: u32,
     /// Number of pages access spans (1 or 2).  Also used
     /// for the case when a native host pointer is
     /// available for the R-M-W instructions.  The host
@@ -730,13 +730,13 @@ pub(super) struct AddressXlation {
     /// is greated than 2 (the maximum possible for
     /// normal cases) it is a native pointer and is used
     /// for a direct write access.
-    pages: BxPtrEquiv,
+    pub(crate) pages: BxPtrEquiv,
     #[cfg(feature = "bx_support_memtype")]
     /// memory type of the page 1
-    memtype1: BxMemType,
+    pub(crate) memtype1: BxMemType,
     #[cfg(feature = "bx_support_memtype")]
     /// memory type of the page 1
-    memtype2: BxMemType,
+    pub(crate) memtype2: BxMemType,
 }
 
 #[derive(Debug, Default)]

@@ -17,7 +17,7 @@ use super::descriptor::{
 };
 use super::rusty_box::MemoryAccessType;
 use super::{BxCpuC, BxCpuIdTrait, Result};
-use crate::config::BxAddress;
+use crate::config::{BxAddress, BxPtrEquiv};
 
 /// BX_MAX_MEM_ACCESS_LENGTH from Bochs — maximum access size for
 /// segment limit checks.  Matches the largest scalar access (qword=8).
@@ -274,25 +274,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[inline]
     pub fn read_virtual_word(&mut self, seg: BxSegregs, offset: u32) -> Result<u16> {
         let laddr = self.agen_read32(seg, offset, 2)? as u64;
-        let page_offset = laddr & 0xFFF;
 
-        if page_offset + 2 <= 0x1000 {
-            // ---- Inline TLB fast path ----
-            if self.cr0.pg() {
-                let lpf = laddr & 0xFFFF_F000;
-                let needed_bit = 1u32 << (self.user_pl as u32);
-                let tlb = self.dtlb.get_entry_of(laddr, 0);
-                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0
-                {
-                    let host = tlb.host_page_addr as *const u8;
-                    let ptr = unsafe { host.add(page_offset as usize) };
-                    return Ok(unsafe { (ptr as *const u16).read_unaligned() });
-                }
+        // ---- Inline TLB fast path (Bochs: BX_DTLB_ENTRY_OF(laddr, 1)) ----
+        // The len=1 trick indexes TLB by the LAST byte. If access crosses a page
+        // boundary, laddr+1 is on the next page → different TLB slot → guaranteed miss.
+        if self.cr0.pg() {
+            let lpf = laddr & 0xFFFF_F000;
+            let needed_bit = 1u32 << (self.user_pl as u32);
+            let tlb = self.dtlb.get_entry_of(laddr, 1);
+            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                let page_offset = (laddr & 0xFFF) as usize;
+                let host = tlb.host_page_addr as *const u8;
+                let ptr = unsafe { host.add(page_offset) };
+                return Ok(unsafe { (ptr as *const u16).read_unaligned() });
             }
+        }
+
+        // ---- Slow path: check cross-page ----
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
             Ok(self.mem_read_word(paddr))
         } else {
-            // Cross-page: split into two single-byte reads
             let b0 = self.read_virtual_byte_at_laddr(laddr)?;
             let b1 = self.read_virtual_byte_at_laddr(
                 (laddr & 0xFFFF_F000).wrapping_add(0x1000) & 0xFFFF_FFFF,
@@ -306,25 +309,26 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[inline]
     pub fn read_virtual_dword(&mut self, seg: BxSegregs, offset: u32) -> Result<u32> {
         let laddr = self.agen_read32(seg, offset, 4)? as u64;
-        let page_offset = laddr & 0xFFF;
 
-        if page_offset + 4 <= 0x1000 {
-            // ---- Inline TLB fast path ----
-            if self.cr0.pg() {
-                let lpf = laddr & 0xFFFF_F000;
-                let needed_bit = 1u32 << (self.user_pl as u32);
-                let tlb = self.dtlb.get_entry_of(laddr, 0);
-                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0
-                {
-                    let host = tlb.host_page_addr as *const u8;
-                    let ptr = unsafe { host.add(page_offset as usize) };
-                    return Ok(unsafe { (ptr as *const u32).read_unaligned() });
-                }
+        // ---- Inline TLB fast path (Bochs: BX_DTLB_ENTRY_OF(laddr, 3)) ----
+        if self.cr0.pg() {
+            let lpf = laddr & 0xFFFF_F000;
+            let needed_bit = 1u32 << (self.user_pl as u32);
+            let tlb = self.dtlb.get_entry_of(laddr, 3);
+            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                let page_offset = (laddr & 0xFFF) as usize;
+                let host = tlb.host_page_addr as *const u8;
+                let ptr = unsafe { host.add(page_offset) };
+                return Ok(unsafe { (ptr as *const u32).read_unaligned() });
             }
+        }
+
+        // ---- Slow path: check cross-page ----
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 4 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
             Ok(self.mem_read_dword(paddr))
         } else {
-            // Cross-page: read byte-by-byte with individual translations
             let mut buf = [0u8; 4];
             for i in 0..4u64 {
                 buf[i as usize] =
@@ -339,21 +343,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[inline]
     pub(crate) fn read_virtual_qword(&mut self, seg: BxSegregs, offset: u32) -> Result<u64> {
         let laddr = self.agen_read32(seg, offset, 8)? as u64;
-        let page_offset = laddr & 0xFFF;
 
-        if page_offset + 8 <= 0x1000 {
-            // ---- Inline TLB fast path ----
-            if self.cr0.pg() {
-                let lpf = laddr & 0xFFFF_F000;
-                let needed_bit = 1u32 << (self.user_pl as u32);
-                let tlb = self.dtlb.get_entry_of(laddr, 0);
-                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0
-                {
-                    let host = tlb.host_page_addr as *const u8;
-                    let ptr = unsafe { host.add(page_offset as usize) };
-                    return Ok(unsafe { (ptr as *const u64).read_unaligned() });
-                }
+        // ---- Inline TLB fast path (Bochs: BX_DTLB_ENTRY_OF(laddr, 7)) ----
+        if self.cr0.pg() {
+            let lpf = laddr & 0xFFFF_F000;
+            let needed_bit = 1u32 << (self.user_pl as u32);
+            let tlb = self.dtlb.get_entry_of(laddr, 7);
+            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                let page_offset = (laddr & 0xFFF) as usize;
+                let host = tlb.host_page_addr as *const u8;
+                let ptr = unsafe { host.add(page_offset) };
+                return Ok(unsafe { (ptr as *const u64).read_unaligned() });
             }
+        }
+
+        // ---- Slow path: check cross-page ----
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
             Ok(self.mem_read_qword(paddr))
         } else {
@@ -419,22 +425,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         val: u16,
     ) -> Result<()> {
         let laddr = self.agen_write32(seg, offset, 2)? as u64;
-        let page_offset = laddr & 0xFFF;
 
-        if page_offset + 2 <= 0x1000 {
-            // ---- Inline TLB fast path ----
-            if self.cr0.pg() {
-                let lpf = laddr & 0xFFFF_F000;
-                let needed_bit = 1u32 << (2 + self.user_pl as u32);
-                let tlb = self.dtlb.get_entry_of(laddr, 0);
-                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0
-                {
-                    let host = tlb.host_page_addr as *mut u8;
-                    let ptr = unsafe { host.add(page_offset as usize) };
-                    unsafe { (ptr as *mut u16).write_unaligned(val) };
-                    return Ok(());
-                }
+        // ---- Inline TLB fast path (Bochs: BX_DTLB_ENTRY_OF(laddr, 1)) ----
+        if self.cr0.pg() {
+            let lpf = laddr & 0xFFFF_F000;
+            let needed_bit = 1u32 << (2 + self.user_pl as u32);
+            let tlb = self.dtlb.get_entry_of(laddr, 1);
+            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                let page_offset = (laddr & 0xFFF) as usize;
+                let host = tlb.host_page_addr as *mut u8;
+                let ptr = unsafe { host.add(page_offset) };
+                unsafe { (ptr as *mut u16).write_unaligned(val) };
+                return Ok(());
             }
+        }
+
+        // ---- Slow path: check cross-page ----
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
             self.mem_write_word(paddr, val);
         } else {
@@ -456,22 +464,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         val: u32,
     ) -> Result<()> {
         let laddr = self.agen_write32(seg, offset, 4)? as u64;
-        let page_offset = laddr & 0xFFF;
 
-        if page_offset + 4 <= 0x1000 {
-            // ---- Inline TLB fast path ----
-            if self.cr0.pg() {
-                let lpf = laddr & 0xFFFF_F000;
-                let needed_bit = 1u32 << (2 + self.user_pl as u32);
-                let tlb = self.dtlb.get_entry_of(laddr, 0);
-                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0
-                {
-                    let host = tlb.host_page_addr as *mut u8;
-                    let ptr = unsafe { host.add(page_offset as usize) };
-                    unsafe { (ptr as *mut u32).write_unaligned(val) };
-                    return Ok(());
-                }
+        // ---- Inline TLB fast path (Bochs: BX_DTLB_ENTRY_OF(laddr, 3)) ----
+        if self.cr0.pg() {
+            let lpf = laddr & 0xFFFF_F000;
+            let needed_bit = 1u32 << (2 + self.user_pl as u32);
+            let tlb = self.dtlb.get_entry_of(laddr, 3);
+            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                let page_offset = (laddr & 0xFFF) as usize;
+                let host = tlb.host_page_addr as *mut u8;
+                let ptr = unsafe { host.add(page_offset) };
+                unsafe { (ptr as *mut u32).write_unaligned(val) };
+                return Ok(());
             }
+        }
+
+        // ---- Slow path: check cross-page ----
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 4 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
             self.mem_write_dword(paddr, val);
         } else {
@@ -494,22 +504,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         val: u64,
     ) -> Result<()> {
         let laddr = self.agen_write32(seg, offset, 8)? as u64;
-        let page_offset = laddr & 0xFFF;
 
-        if page_offset + 8 <= 0x1000 {
-            // ---- Inline TLB fast path ----
-            if self.cr0.pg() {
-                let lpf = laddr & 0xFFFF_F000;
-                let needed_bit = 1u32 << (2 + self.user_pl as u32);
-                let tlb = self.dtlb.get_entry_of(laddr, 0);
-                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0
-                {
-                    let host = tlb.host_page_addr as *mut u8;
-                    let ptr = unsafe { host.add(page_offset as usize) };
-                    unsafe { (ptr as *mut u64).write_unaligned(val) };
-                    return Ok(());
-                }
+        // ---- Inline TLB fast path (Bochs: BX_DTLB_ENTRY_OF(laddr, 7)) ----
+        if self.cr0.pg() {
+            let lpf = laddr & 0xFFFF_F000;
+            let needed_bit = 1u32 << (2 + self.user_pl as u32);
+            let tlb = self.dtlb.get_entry_of(laddr, 7);
+            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                let page_offset = (laddr & 0xFFF) as usize;
+                let host = tlb.host_page_addr as *mut u8;
+                let ptr = unsafe { host.add(page_offset) };
+                unsafe { (ptr as *mut u64).write_unaligned(val) };
+                return Ok(());
             }
+        }
+
+        // ---- Slow path: check cross-page ----
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
             self.mem_write_qword(paddr, val);
         } else {
@@ -542,96 +554,136 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // ===== Read-Modify-Write virtual functions (Bochs access2.cc) =====
+    //
+    // These populate `self.address_xlation` for the write-back phase:
+    //   pages > 2  →  host pointer stored (direct write-back, fastest)
+    //   pages == 1 →  single-page physical address in paddress1
+    //   pages == 2 →  cross-page: paddress1/paddress2 + len1/len2
 
     /// Read phase of a read-modify-write byte access.
-    /// Checks WRITE permission (since it's RMW) and returns (value, paddr).
+    /// Bochs: read_RMW_virtual_byte_32 -> read_RMW_linear_byte (access2.cc:608)
     #[inline]
-    pub fn read_rmw_virtual_byte(&mut self, seg: BxSegregs, offset: u32) -> Result<(u8, u64)> {
+    pub fn read_rmw_virtual_byte(&mut self, seg: BxSegregs, offset: u32) -> Result<u8> {
         let laddr = self.agen_write32(seg, offset, 1)? as u64;
 
-        // ---- Inline TLB fast path (write permission for RMW) ----
+        // ---- Inline TLB fast path (Bochs access2.cc:613-631) ----
         if self.cr0.pg() {
             let lpf = laddr & 0xFFFF_F000;
             let needed_bit = 1u32 << (2 + self.user_pl as u32);
             let tlb = self.dtlb.get_entry_of(laddr, 0);
             if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
-                let host = tlb.host_page_addr as *const u8;
-                let val = unsafe { *host.add((laddr & 0xFFF) as usize) };
-                let paddr = tlb.ppf | (laddr & 0xFFF);
-                return Ok((val, paddr));
+                let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
+                let host_addr = tlb.host_page_addr | page_offset;
+                let data = unsafe { *(host_addr as *const u8) };
+                // Cache host pointer for write-back (Bochs: pages > 2 = host addr)
+                self.address_xlation.pages = host_addr;
+                self.address_xlation.paddress1 = tlb.ppf | (laddr & 0xFFF);
+                return Ok(data);
             }
         }
 
+        // ---- Slow path ----
         let paddr = self.translate_data_write(laddr)?;
-        Ok((self.mem_read_byte(paddr), paddr))
+        let data = self.mem_read_byte(paddr);
+        self.address_xlation.pages = 1;
+        self.address_xlation.paddress1 = paddr;
+        Ok(data)
     }
 
-    /// Read phase of a read-modify-write word access with cross-page handling.
+    /// Read phase of a read-modify-write word access.
+    /// Bochs: read_RMW_virtual_word_32 -> read_RMW_linear_word (access2.cc:639)
     #[inline]
-    pub fn read_rmw_virtual_word(&mut self, seg: BxSegregs, offset: u32) -> Result<(u16, u64)> {
+    pub fn read_rmw_virtual_word(&mut self, seg: BxSegregs, offset: u32) -> Result<u16> {
         let laddr = self.agen_write32(seg, offset, 2)? as u64;
-        let page_offset = laddr & 0xFFF;
 
-        if page_offset + 2 <= 0x1000 {
-            // ---- Inline TLB fast path ----
-            if self.cr0.pg() {
-                let lpf = laddr & 0xFFFF_F000;
-                let needed_bit = 1u32 << (2 + self.user_pl as u32);
-                let tlb = self.dtlb.get_entry_of(laddr, 0);
-                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0
-                {
-                    let host = tlb.host_page_addr as *const u8;
-                    let ptr = unsafe { host.add(page_offset as usize) };
-                    let val = unsafe { (ptr as *const u16).read_unaligned() };
-                    let paddr = tlb.ppf | (laddr & 0xFFF);
-                    return Ok((val, paddr));
-                }
+        // ---- Inline TLB fast path (Bochs: BX_DTLB_ENTRY_OF(laddr, 1)) ----
+        if self.cr0.pg() {
+            let lpf = laddr & 0xFFFF_F000;
+            let needed_bit = 1u32 << (2 + self.user_pl as u32);
+            let tlb = self.dtlb.get_entry_of(laddr, 1);
+            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
+                let host_addr = tlb.host_page_addr | page_offset;
+                let data = unsafe { (host_addr as *const u16).read_unaligned() };
+                self.address_xlation.pages = host_addr;
+                self.address_xlation.paddress1 = tlb.ppf | (laddr & 0xFFF);
+                return Ok(data);
             }
+        }
+
+        // ---- Slow path: check cross-page ----
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
-            Ok((self.mem_read_word(paddr), paddr))
+            let data = self.mem_read_word(paddr);
+            self.address_xlation.pages = 1;
+            self.address_xlation.paddress1 = paddr;
+            Ok(data)
         } else {
-            // Cross-page RMW: read bytes individually
+            // Cross-page RMW (Bochs: access_read_linear sets pages=2)
             let p0 = self.translate_data_write(laddr)?;
             let b0 = self.mem_read_byte(p0);
             let laddr2 = (laddr & 0xFFFF_F000).wrapping_add(0x1000) & 0xFFFF_FFFF;
             let p1 = self.translate_data_write(laddr2)?;
             let b1 = self.mem_read_byte(p1);
-            // Return first page address; write_rmw_linear_word will handle the split
-            Ok((u16::from_le_bytes([b0, b1]), paddr_cross_page_sentinel()))
+            self.address_xlation.pages = 2;
+            self.address_xlation.paddress1 = p0;
+            self.address_xlation.paddress2 = p1;
+            self.address_xlation.len1 = 1;
+            self.address_xlation.len2 = 1;
+            Ok(u16::from_le_bytes([b0, b1]))
         }
     }
 
-    /// Read phase of a read-modify-write dword access with cross-page handling.
+    /// Read phase of a read-modify-write dword access.
+    /// Bochs: read_RMW_virtual_dword_32 -> read_RMW_linear_dword (access2.cc:674)
     #[inline]
-    pub fn read_rmw_virtual_dword(&mut self, seg: BxSegregs, offset: u32) -> Result<(u32, u64)> {
+    pub fn read_rmw_virtual_dword(&mut self, seg: BxSegregs, offset: u32) -> Result<u32> {
         let laddr = self.agen_write32(seg, offset, 4)? as u64;
-        let page_offset = laddr & 0xFFF;
 
+        // ---- Inline TLB fast path (Bochs: BX_DTLB_ENTRY_OF(laddr, 3)) ----
+        if self.cr0.pg() {
+            let lpf = laddr & 0xFFFF_F000;
+            let needed_bit = 1u32 << (2 + self.user_pl as u32);
+            let tlb = self.dtlb.get_entry_of(laddr, 3);
+            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
+                let host_addr = tlb.host_page_addr | page_offset;
+                let data = unsafe { (host_addr as *const u32).read_unaligned() };
+                self.address_xlation.pages = host_addr;
+                self.address_xlation.paddress1 = tlb.ppf | (laddr & 0xFFF);
+                return Ok(data);
+            }
+        }
+
+        // ---- Slow path: check cross-page ----
+        let page_offset = laddr & 0xFFF;
         if page_offset + 4 <= 0x1000 {
-            // ---- Inline TLB fast path ----
-            if self.cr0.pg() {
-                let lpf = laddr & 0xFFFF_F000;
-                let needed_bit = 1u32 << (2 + self.user_pl as u32);
-                let tlb = self.dtlb.get_entry_of(laddr, 0);
-                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0
-                {
-                    let host = tlb.host_page_addr as *const u8;
-                    let ptr = unsafe { host.add(page_offset as usize) };
-                    let val = unsafe { (ptr as *const u32).read_unaligned() };
-                    let paddr = tlb.ppf | (laddr & 0xFFF);
-                    return Ok((val, paddr));
-                }
-            }
             let paddr = self.translate_data_write(laddr)?;
-            Ok((self.mem_read_dword(paddr), paddr))
+            let data = self.mem_read_dword(paddr);
+            self.address_xlation.pages = 1;
+            self.address_xlation.paddress1 = paddr;
+            Ok(data)
         } else {
+            // Cross-page RMW
+            let len1 = (0x1000 - page_offset) as u32;
+            let len2 = 4 - len1;
+            let p0 = self.translate_data_write(laddr)?;
+            let laddr2 = (laddr & 0xFFFF_F000).wrapping_add(0x1000) & 0xFFFF_FFFF;
+            let p1 = self.translate_data_write(laddr2)?;
             let mut buf = [0u8; 4];
-            for i in 0..4u64 {
-                let la = (laddr.wrapping_add(i)) & 0xFFFF_FFFF;
-                let pa = self.translate_data_write(la)?;
-                buf[i as usize] = self.mem_read_byte(pa);
+            for i in 0..len1 as usize {
+                buf[i] = self.mem_read_byte(p0 + i as u64);
             }
-            Ok((u32::from_le_bytes(buf), paddr_cross_page_sentinel()))
+            for i in 0..len2 as usize {
+                buf[len1 as usize + i] = self.mem_read_byte(p1 + i as u64);
+            }
+            self.address_xlation.pages = 2;
+            self.address_xlation.paddress1 = p0;
+            self.address_xlation.paddress2 = p1;
+            self.address_xlation.len1 = len1;
+            self.address_xlation.len2 = len2;
+            Ok(u32::from_le_bytes(buf))
         }
     }
 
@@ -772,12 +824,4 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg_base = self.get_segment_base(seg);
         (seg_base.wrapping_add(offset as u64)) as u32
     }
-}
-
-/// Sentinel value returned by cross-page RMW reads to indicate that the
-/// write phase must re-translate.  Using u64::MAX since no real physical
-/// address will be that large.
-#[inline]
-fn paddr_cross_page_sentinel() -> u64 {
-    u64::MAX
 }

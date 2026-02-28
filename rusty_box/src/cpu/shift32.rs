@@ -8,25 +8,25 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{Instruction, BxSegregs},
+    decoder::{BxSegregs, Instruction},
     eflags::EFlags,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ---- 32-bit read/write helpers for shift instructions ----
-    fn shift_read32(&mut self, instr: &Instruction) -> super::Result<(u32, Option<u64>)> {
+    fn shift_read32(&mut self, instr: &Instruction) -> super::Result<(u32, Option<()>)> {
         if instr.mod_c0() {
             Ok((self.get_gpr32(instr.dst() as usize), None))
         } else {
             let eaddr = self.resolve_addr32(instr);
             let seg = BxSegregs::from(instr.seg());
-            let (val, paddr) = self.read_rmw_virtual_dword(seg, eaddr)?;
-            Ok((val, Some(paddr)))
+            let val = self.read_rmw_virtual_dword(seg, eaddr)?;
+            Ok((val, Some(())))
         }
     }
-    fn shift_write32(&mut self, instr: &Instruction, paddr: Option<u64>, result: u32) {
-        if let Some(pa) = paddr {
-            self.write_rmw_linear_dword(pa, result);
+    fn shift_write32(&mut self, instr: &Instruction, paddr: Option<()>, result: u32) {
+        if let Some(_) = paddr {
+            self.write_rmw_linear_dword(result);
         } else {
             self.set_gpr32(instr.dst() as usize, result);
         }
@@ -45,37 +45,49 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cf = (op1 & 0x80000000) != 0;
         let of = ((result ^ op1) & 0x80000000) != 0;
         self.update_flags_shl32(result, cf, of);
-            Ok(())
+        Ok(())
     }
 
     /// SHL r/m32, CL
     pub fn shl_ed_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x1F;
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
 
         let (op1, laddr) = self.shift_read32(instr)?;
         let result = op1 << count;
         self.shift_write32(instr, laddr, result);
 
         let cf = ((op1 << (count - 1)) & 0x80000000) != 0;
-        let of = if count == 1 { ((result ^ op1) & 0x80000000) != 0 } else { false };
+        let of = if count == 1 {
+            ((result ^ op1) & 0x80000000) != 0
+        } else {
+            false
+        };
         self.update_flags_shl32(result, cf, of);
-            Ok(())
+        Ok(())
     }
 
     /// SHL r/m32, imm8
     pub fn shl_ed_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (instr.ib() & 0x1F) as u32;
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
 
         let (op1, laddr) = self.shift_read32(instr)?;
         let result = op1 << count;
         self.shift_write32(instr, laddr, result);
 
         let cf = ((op1 << (count - 1)) & 0x80000000) != 0;
-        let of = if count == 1 { ((result ^ op1) & 0x80000000) != 0 } else { false };
+        let of = if count == 1 {
+            ((result ^ op1) & 0x80000000) != 0
+        } else {
+            false
+        };
         self.update_flags_shl32(result, cf, of);
-            Ok(())
+        Ok(())
     }
 
     // =========================================================================
@@ -91,37 +103,49 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cf = (op1 & 0x00000001) != 0;
         let of = (op1 & 0x80000000) != 0;
         self.update_flags_shr32(result, cf, of);
-            Ok(())
+        Ok(())
     }
 
     /// SHR r/m32, CL
     pub fn shr_ed_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x1F;
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
 
         let (op1, laddr) = self.shift_read32(instr)?;
         let result = op1 >> count;
         self.shift_write32(instr, laddr, result);
 
         let cf = ((op1 >> (count - 1)) & 0x00000001) != 0;
-        let of = if count == 1 { (op1 & 0x80000000) != 0 } else { false };
+        let of = if count == 1 {
+            (op1 & 0x80000000) != 0
+        } else {
+            false
+        };
         self.update_flags_shr32(result, cf, of);
-            Ok(())
+        Ok(())
     }
 
     /// SHR r/m32, imm8
     pub fn shr_ed_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (instr.ib() & 0x1F) as u32;
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
 
         let (op1, laddr) = self.shift_read32(instr)?;
         let result = op1 >> count;
         self.shift_write32(instr, laddr, result);
 
         let cf = ((op1 >> (count - 1)) & 0x00000001) != 0;
-        let of = if count == 1 { (op1 & 0x80000000) != 0 } else { false };
+        let of = if count == 1 {
+            (op1 & 0x80000000) != 0
+        } else {
+            false
+        };
         self.update_flags_shr32(result, cf, of);
-            Ok(())
+        Ok(())
     }
 
     // =========================================================================
@@ -137,13 +161,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let cf = (op1 & 0x00000001) != 0;
         self.update_flags_sar32(result, cf);
-            Ok(())
+        Ok(())
     }
 
     /// SAR r/m32, CL
     pub fn sar_ed_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x1F;
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
 
         let (op1_u, laddr) = self.shift_read32(instr)?;
         let op1 = op1_u as i32;
@@ -153,13 +179,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let cf = ((op1 >> (count - 1)) & 0x00000001) != 0;
         self.update_flags_sar32(result, cf);
-            Ok(())
+        Ok(())
     }
 
     /// SAR r/m32, imm8
     pub fn sar_ed_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = instr.ib() & 0x1F;
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
 
         let (op1_u, laddr) = self.shift_read32(instr)?;
         let op1 = op1_u as i32;
@@ -169,7 +197,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let cf = ((op1 >> (count - 1)) & 0x00000001) != 0;
         self.update_flags_sar32(result, cf);
-            Ok(())
+        Ok(())
     }
 
     // =========================================================================
@@ -185,37 +213,49 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cf = result & 1 != 0;
         let of = ((result ^ (result >> 31)) & 1) != 0;
         self.set_cf_of(cf, of);
-            Ok(())
+        Ok(())
     }
 
     /// ROL r/m32, CL
     pub fn rol_ed_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x1F;
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
 
         let (op1, laddr) = self.shift_read32(instr)?;
         let result = op1.rotate_left(count as u32);
         self.shift_write32(instr, laddr, result);
 
         let cf = result & 1 != 0;
-        let of = if count == 1 { ((result ^ (result >> 31)) & 1) != 0 } else { false };
+        let of = if count == 1 {
+            ((result ^ (result >> 31)) & 1) != 0
+        } else {
+            false
+        };
         self.set_cf_of(cf, of);
-            Ok(())
+        Ok(())
     }
 
     /// ROL r/m32, imm8
     pub fn rol_ed_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (instr.ib() & 0x1F) as u32;
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
 
         let (op1, laddr) = self.shift_read32(instr)?;
         let result = op1.rotate_left(count);
         self.shift_write32(instr, laddr, result);
 
         let cf = result & 1 != 0;
-        let of = if count == 1 { ((result ^ (result >> 31)) & 1) != 0 } else { false };
+        let of = if count == 1 {
+            ((result ^ (result >> 31)) & 1) != 0
+        } else {
+            false
+        };
         self.set_cf_of(cf, of);
-            Ok(())
+        Ok(())
     }
 
     // =========================================================================
@@ -231,37 +271,49 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cf = (result & 0x80000000) != 0;
         let of = ((result ^ (result << 1)) & 0x80000000) != 0;
         self.set_cf_of(cf, of);
-            Ok(())
+        Ok(())
     }
 
     /// ROR r/m32, CL
     pub fn ror_ed_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = self.cl() & 0x1F;
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
 
         let (op1, laddr) = self.shift_read32(instr)?;
         let result = op1.rotate_right(count as u32);
         self.shift_write32(instr, laddr, result);
 
         let cf = (result & 0x80000000) != 0;
-        let of = if count == 1 { ((result ^ (result << 1)) & 0x80000000) != 0 } else { false };
+        let of = if count == 1 {
+            ((result ^ (result << 1)) & 0x80000000) != 0
+        } else {
+            false
+        };
         self.set_cf_of(cf, of);
-            Ok(())
+        Ok(())
     }
 
     /// ROR r/m32, imm8
     pub fn ror_ed_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (instr.ib() & 0x1F) as u32;
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
 
         let (op1, laddr) = self.shift_read32(instr)?;
         let result = op1.rotate_right(count);
         self.shift_write32(instr, laddr, result);
 
         let cf = (result & 0x80000000) != 0;
-        let of = if count == 1 { ((result ^ (result << 1)) & 0x80000000) != 0 } else { false };
+        let of = if count == 1 {
+            ((result ^ (result << 1)) & 0x80000000) != 0
+        } else {
+            false
+        };
         self.set_cf_of(cf, of);
-            Ok(())
+        Ok(())
     }
 
     // =========================================================================
@@ -280,7 +332,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     fn update_flags_sar32(&mut self, result: u32, cf: bool) {
         self.update_flags_logic32(result);
-        if cf { self.eflags.insert(EFlags::CF); } else { self.eflags.remove(EFlags::CF); }
+        if cf {
+            self.eflags.insert(EFlags::CF);
+        } else {
+            self.eflags.remove(EFlags::CF);
+        }
         self.eflags.remove(EFlags::OF);
     }
 
@@ -293,7 +349,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Opcode: 0x0F 0xA4
     pub fn shld_ed_gd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (instr.ib() & 0x1F) as u32;
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
 
         let (op1_32, laddr) = self.shift_read32(instr)?;
         let op2_32 = self.get_gpr32(instr.src() as usize);
@@ -305,14 +363,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cf = ((op1_32 >> (32 - count)) & 0x1) != 0;
         let of = cf ^ ((result_32 >> 31) != 0);
         self.set_cf_of(cf, of);
-            Ok(())
+        Ok(())
     }
 
     /// SHLD r/m32, r32, CL
     /// Opcode: 0x0F 0xA5
     pub fn shld_ed_gd_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (self.cl() & 0x1F) as u32;
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
 
         let (op1_32, laddr) = self.shift_read32(instr)?;
         let op2_32 = self.get_gpr32(instr.src() as usize);
@@ -324,7 +384,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cf = ((op1_32 >> (32 - count)) & 0x1) != 0;
         let of = cf ^ ((result_32 >> 31) != 0);
         self.set_cf_of(cf, of);
-            Ok(())
+        Ok(())
     }
 
     // =========================================================================
@@ -336,7 +396,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Opcode: 0x0F 0xAC
     pub fn shrd_ed_gd_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (instr.ib() & 0x1F) as u32;
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
 
         let (op1_32, laddr) = self.shift_read32(instr)?;
         let op2_32 = self.get_gpr32(instr.src() as usize);
@@ -348,14 +410,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cf = ((op1_32 >> (count - 1)) & 0x1) != 0;
         let of = (((result_32 << 1) ^ result_32) >> 31) != 0;
         self.set_cf_of(cf, of);
-            Ok(())
+        Ok(())
     }
 
     /// SHRD r/m32, r32, CL
     /// Opcode: 0x0F 0xAD
     pub fn shrd_ed_gd_cl(&mut self, instr: &Instruction) -> super::Result<()> {
         let count = (self.cl() & 0x1F) as u32;
-        if count == 0 { return Ok(()); }
+        if count == 0 {
+            return Ok(());
+        }
 
         let (op1_32, laddr) = self.shift_read32(instr)?;
         let op2_32 = self.get_gpr32(instr.src() as usize);
@@ -367,6 +431,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cf = ((op1_32 >> (count - 1)) & 0x1) != 0;
         let of = (((result_32 << 1) ^ result_32) >> 31) != 0;
         self.set_cf_of(cf, of);
-            Ok(())
+        Ok(())
     }
 }
