@@ -1317,7 +1317,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         // Get new entry (matching C++ line 218-220)
                         entry = unsafe {
                             let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
-                            self.get_icache_entry(mem_reborrowed, cpus)?
+                            match self.get_icache_entry(mem_reborrowed, cpus) {
+                                Ok(e) => e,
+                                Err(crate::cpu::CpuError::CpuLoopRestart) => {
+                                    self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+                                    continue 'cpu_loop;
+                                }
+                                Err(e) => break 'cpu_loop Err(e),
+                            }
                         };
                         trace_start_idx = entry.mpool_start_idx;
                         instr_idx = 0;
@@ -1365,6 +1372,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     ilen,
                     next_rip
                 );
+
+                // Diagnostic trace block (currently disabled)
+                // To trace at a specific icount range, uncomment and set the range:
+                // if self.icount >= START && self.icount <= END {
+                //     eprintln!("TRACE: ic={} RIP={:#x} {:?} ...", self.icount, current_rip, i.get_ia_opcode());
+                // }
 
                 // Execute instruction directly
                 {
