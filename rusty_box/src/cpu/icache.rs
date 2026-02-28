@@ -1,8 +1,5 @@
 use alloc::{format, string::String, vec, vec::Vec};
 
-#[cfg(feature = "data_parallelism")]
-use rayon::prelude::*;
-
 use crate::{
     config::BxPhyAddress,
     cpu::{
@@ -312,21 +309,10 @@ impl BxICache {
 
         // Check page split entries
         let ppf = ppf_of(p_addr);
-        #[cfg(feature = "data_parallelism")]
-        {
-            self.page_split_index.par_iter_mut().for_each(|pse| {
-                if pse.ppf != BX_ICACHE_INVALID_PHY_ADDRESS && ppf_of(pse.ppf) == ppf {
-                    flush_smc(&mut pse.e);
-                }
-            });
-        }
-        #[cfg(not(feature = "data_parallelism"))]
-        {
-            for i in 0..BX_ICACHE_ENTRIES {
-                if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-                    if ppf_of(self.page_split_index[i].ppf) == ppf {
-                        flush_smc(&mut self.page_split_index[i].e);
-                    }
+        for i in 0..BX_ICACHE_ENTRIES {
+            if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
+                if ppf_of(self.page_split_index[i].ppf) == ppf {
+                    flush_smc(&mut self.page_split_index[i].e);
                 }
             }
         }
@@ -343,47 +329,23 @@ impl BxICache {
         }
 
         // Flush page split entries
-        #[cfg(feature = "data_parallelism")]
-        {
-            self.page_split_index.par_iter_mut().for_each(|pse| {
-                if pse.ppf != BX_ICACHE_INVALID_PHY_ADDRESS && ppf_of(pse.ppf) == ppf {
-                    flush_smc(&mut pse.e);
-                }
-            });
-        }
-        #[cfg(not(feature = "data_parallelism"))]
-        {
-            for i in 0..BX_ICACHE_ENTRIES {
-                if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-                    if ppf_of(self.page_split_index[i].ppf) == ppf {
-                        flush_smc(&mut self.page_split_index[i].e);
-                    }
+        for i in 0..BX_ICACHE_ENTRIES {
+            if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
+                if ppf_of(self.page_split_index[i].ppf) == ppf {
+                    flush_smc(&mut self.page_split_index[i].e);
                 }
             }
         }
     }
 
     pub fn flush_all(&mut self) {
-        #[cfg(feature = "data_parallelism")]
-        {
-            self.entry.par_iter_mut().for_each(|entry| flush_smc(entry));
-            self.page_split_index.par_iter_mut().for_each(|entry| {
-                if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-                    entry.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                    flush_smc(&mut entry.e);
-                }
-            });
+        for entry in &mut self.entry {
+            flush_smc(entry);
         }
-        #[cfg(not(feature = "data_parallelism"))]
-        {
-            for entry in &mut self.entry {
-                flush_smc(entry);
-            }
-            for entry in &mut self.page_split_index {
-                if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-                    entry.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                    flush_smc(&mut entry.e);
-                }
+        for entry in &mut self.page_split_index {
+            if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
+                entry.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
+                flush_smc(&mut entry.e);
             }
         }
 
@@ -405,51 +367,24 @@ impl BxICache {
         }
 
         // Invalidate page split entries
-        #[cfg(feature = "data_parallelism")]
-        {
-            self.page_split_index.par_iter_mut().for_each(|pse| {
-                if pse.ppf != BX_ICACHE_INVALID_PHY_ADDRESS && ppf_of(pse.ppf) == ppf {
-                    pse.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                    flush_smc(&mut pse.e);
-                }
-            });
-        }
-        #[cfg(not(feature = "data_parallelism"))]
-        {
-            for i in 0..BX_ICACHE_ENTRIES {
-                if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-                    if ppf_of(self.page_split_index[i].ppf) == ppf {
-                        self.page_split_index[i].ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                        flush_smc(&mut self.page_split_index[i].e);
-                    }
+        for i in 0..BX_ICACHE_ENTRIES {
+            if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
+                if ppf_of(self.page_split_index[i].ppf) == ppf {
+                    self.page_split_index[i].ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
+                    flush_smc(&mut self.page_split_index[i].e);
                 }
             }
         }
     }
 
     pub fn invalidate_all(&mut self) {
-        #[cfg(feature = "data_parallelism")]
-        {
-            self.entry
-                .par_iter_mut()
-                .for_each(|entry| entry.p_addr = IcacheAddress::Invalid);
-            self.page_split_index.par_iter_mut().for_each(|entry| {
-                if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-                    entry.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                    flush_smc(&mut entry.e);
-                }
-            });
+        for entry in &mut self.entry {
+            entry.p_addr = IcacheAddress::Invalid;
         }
-        #[cfg(not(feature = "data_parallelism"))]
-        {
-            for entry in &mut self.entry {
-                entry.p_addr = IcacheAddress::Invalid;
-            }
-            for entry in &mut self.page_split_index {
-                if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-                    entry.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                    flush_smc(&mut entry.e);
-                }
+        for entry in &mut self.page_split_index {
+            if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
+                entry.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
+                flush_smc(&mut entry.e);
             }
         }
     }
@@ -537,27 +472,12 @@ impl BxICache {
 
         // Scan all icache entries for ones that belong to the affected page
         // and have overlapping trace_mask bits.
-        #[cfg(feature = "data_parallelism")]
-        {
-            self.entry.par_iter_mut().for_each(|entry| {
-                if let IcacheAddress::Address(entry_addr) = entry.p_addr {
-                    if Self::stamp_hash(entry_addr) == target_page_index
-                        && (entry.trace_mask & mask) != 0
-                    {
-                        flush_smc(entry);
-                    }
-                }
-            });
-        }
-        #[cfg(not(feature = "data_parallelism"))]
-        {
-            for entry in &mut self.entry {
-                if let IcacheAddress::Address(entry_addr) = entry.p_addr {
-                    if Self::stamp_hash(entry_addr) == target_page_index
-                        && (entry.trace_mask & mask) != 0
-                    {
-                        flush_smc(entry);
-                    }
+        for entry in &mut self.entry {
+            if let IcacheAddress::Address(entry_addr) = entry.p_addr {
+                if Self::stamp_hash(entry_addr) == target_page_index
+                    && (entry.trace_mask & mask) != 0
+                {
+                    flush_smc(entry);
                 }
             }
         }
@@ -565,26 +485,12 @@ impl BxICache {
         // Also check page split entries — a write to the first cache line could
         // affect traces that start on the previous page and spill into this one.
         if mask & 0x1 != 0 {
-            #[cfg(feature = "data_parallelism")]
-            {
-                self.page_split_index.par_iter_mut().for_each(|pse| {
-                    if pse.ppf != BX_ICACHE_INVALID_PHY_ADDRESS
-                        && Self::stamp_hash(pse.ppf) == target_page_index
-                    {
-                        pse.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                        flush_smc(&mut pse.e);
-                    }
-                });
-            }
-            #[cfg(not(feature = "data_parallelism"))]
-            {
-                for pse in &mut self.page_split_index {
-                    if pse.ppf != BX_ICACHE_INVALID_PHY_ADDRESS
-                        && Self::stamp_hash(pse.ppf) == target_page_index
-                    {
-                        pse.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                        flush_smc(&mut pse.e);
-                    }
+            for pse in &mut self.page_split_index {
+                if pse.ppf != BX_ICACHE_INVALID_PHY_ADDRESS
+                    && Self::stamp_hash(pse.ppf) == target_page_index
+                {
+                    pse.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
+                    flush_smc(&mut pse.e);
                 }
             }
         }
@@ -592,16 +498,7 @@ impl BxICache {
 
     /// Reset all page write stamps (e.g., on full icache flush).
     pub fn reset_write_stamps(&mut self) {
-        #[cfg(feature = "data_parallelism")]
-        {
-            self.page_write_stamps
-                .par_iter_mut()
-                .for_each(|stamp| *stamp = 0);
-        }
-        #[cfg(not(feature = "data_parallelism"))]
-        {
-            self.page_write_stamps.fill(0);
-        }
+        self.page_write_stamps.fill(0);
     }
 }
 

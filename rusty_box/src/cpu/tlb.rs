@@ -1,8 +1,5 @@
 use alloc::vec::Vec;
 
-#[cfg(feature = "data_parallelism")]
-use rayon::prelude::*;
-
 use crate::config::{BxAddress, BxPhyAddress, BxPtrEquiv};
 
 pub type BxMemType = u32;
@@ -148,56 +145,24 @@ impl<const SIZE: usize> Tlb<SIZE> {
 
     /// Invalidate all entries
     pub fn flush(&mut self) {
-        #[cfg(feature = "data_parallelism")]
-        {
-            self.entries.par_iter_mut().for_each(|entry| entry.invalidate());
-        }
-        #[cfg(not(feature = "data_parallelism"))]
-        {
-            for entry in &mut self.entries {
-                entry.invalidate();
-            }
+        for entry in &mut self.entries {
+            entry.invalidate();
         }
         self.split_large = false;
     }
 
     /// Invalidate all non‐global entries (only if CPU ≥ 6)
     pub fn flush_non_global(&mut self) {
-        #[cfg(feature = "data_parallelism")]
-        let lpf_mask_accum = {
-            self.entries
-                .par_iter_mut()
-                .fold(
-                    || 0u32,
-                    |acc, entry| {
-                        if entry.valid() {
-                            if (entry.access_bits & TLB_GLOBAL_PAGE) == 0 {
-                                entry.invalidate();
-                                acc
-                            } else {
-                                acc | entry.lpf_mask
-                            }
-                        } else {
-                            acc
-                        }
-                    },
-                )
-                .reduce(|| 0, |a, b| a | b)
-        };
-        #[cfg(not(feature = "data_parallelism"))]
-        let lpf_mask_accum = {
-            let mut acc: u32 = 0;
-            for entry in &mut self.entries {
-                if entry.valid() {
-                    if (entry.access_bits & TLB_GLOBAL_PAGE) == 0 {
-                        entry.invalidate();
-                    } else {
-                        acc |= entry.lpf_mask;
-                    }
+        let mut lpf_mask_accum: u32 = 0;
+        for entry in &mut self.entries {
+            if entry.valid() {
+                if (entry.access_bits & TLB_GLOBAL_PAGE) == 0 {
+                    entry.invalidate();
+                } else {
+                    lpf_mask_accum |= entry.lpf_mask;
                 }
             }
-            acc
-        };
+        }
         // If any large‐page mask bit remains, we keep split_large = true
         self.split_large = lpf_mask_accum > 0xFFF;
     }
@@ -206,43 +171,17 @@ impl<const SIZE: usize> Tlb<SIZE> {
     pub fn invlpg(&mut self, laddr: u64) {
         if self.split_large {
             // We have to scan all entries to handle large pages specially
-            #[cfg(feature = "data_parallelism")]
-            let lpf_mask_accum = {
-                self.entries
-                    .par_iter_mut()
-                    .fold(
-                        || 0u32,
-                        |acc, entry| {
-                            if entry.valid() {
-                                let emask = entry.lpf_mask as u64;
-                                if (laddr & !emask) == (entry.lpf & !emask) {
-                                    entry.invalidate();
-                                    acc
-                                } else {
-                                    acc | entry.lpf_mask
-                                }
-                            } else {
-                                acc
-                            }
-                        },
-                    )
-                    .reduce(|| 0, |a, b| a | b)
-            };
-            #[cfg(not(feature = "data_parallelism"))]
-            let lpf_mask_accum = {
-                let mut acc: u32 = 0;
-                for entry in &mut self.entries {
-                    if entry.valid() {
-                        let emask = entry.lpf_mask as u64;
-                        if (laddr & !emask) == (entry.lpf & !emask) {
-                            entry.invalidate();
-                        } else {
-                            acc |= entry.lpf_mask;
-                        }
+            let mut lpf_mask_accum: u32 = 0;
+            for entry in &mut self.entries {
+                if entry.valid() {
+                    let emask = entry.lpf_mask as u64;
+                    if (laddr & !emask) == (entry.lpf & !emask) {
+                        entry.invalidate();
+                    } else {
+                        lpf_mask_accum |= entry.lpf_mask;
                     }
                 }
-                acc
-            };
+            }
 
             self.split_large = lpf_mask_accum > 0xFFF;
             return;

@@ -1,7 +1,5 @@
 use alloc::{vec, vec::Vec};
 use byteorder::{ByteOrder, LittleEndian};
-#[cfg(feature = "data_parallelism")]
-use rayon::prelude::*;
 #[cfg(feature = "std")]
 use tempfile::tempfile;
 
@@ -86,16 +84,7 @@ impl BxMemoryStubC {
         let rom_start = vector_offset + rom_offset;
         let rom_end = rom_start + BIOSROMSZ + EXROMSIZE + 4096;
         if rom_end <= actual_vector.len() {
-            #[cfg(feature = "data_parallelism")]
-            {
-                actual_vector[rom_start..rom_end]
-                    .par_iter_mut()
-                    .for_each(|b| *b = 0xFF);
-            }
-            #[cfg(not(feature = "data_parallelism"))]
-            {
-                actual_vector[rom_start..rom_end].fill(0xFF);
-            }
+            actual_vector[rom_start..rom_end].fill(0xFF);
         }
 
         // block must be large enough to fit num_blocks in 32-bit

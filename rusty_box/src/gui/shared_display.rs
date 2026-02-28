@@ -9,9 +9,6 @@ use super::vga_font::{VGA_DEFAULT_PALETTE_16, VGA_FONT_8X16};
 use alloc::vec;
 use alloc::vec::Vec;
 
-#[cfg(feature = "data_parallelism")]
-use rayon::prelude::*;
-
 /// Shared state between the emulator and GUI threads.
 ///
 /// Protected by `Arc<Mutex<SharedDisplay>>` in both `BridgeGui` and `RustyBoxApp`.
@@ -177,99 +174,6 @@ impl SharedDisplay {
                 }
             };
 
-        #[cfg(feature = "data_parallelism")]
-        {
-            // Parallelize over rows: each row writes to disjoint framebuffer region
-            let row_bytes = (fh * stride) as usize;
-            let fb = &mut self.framebuffer;
-            // Use par_chunks_mut to give each thread its own row slice
-            fb.par_chunks_mut(row_bytes)
-                .enumerate()
-                .for_each(|(row, row_fb)| {
-                    let row = row as u32;
-                    if row >= rows {
-                        return;
-                    }
-                    for col in 0..cols {
-                        let text_idx = ((row * cols + col) * 2) as usize;
-                        if text_idx + 1 >= text.len() {
-                            continue;
-                        }
-                        let ch = text[text_idx] as usize;
-                        let attr = text[text_idx + 1];
-                        let is_cursor = col == cursor_x && row == cursor_y;
-
-                        // Render into the full framebuffer (row_fb starts at row * row_bytes)
-                        // We need to adjust offsets since row_fb is a sub-slice
-                        let fg_idx = (attr & 0x0F) as usize;
-                        let bg_idx = ((attr >> 4) & 0x07) as usize;
-                        let fg = if fg_idx < 16 {
-                            palette[fg_idx]
-                        } else {
-                            [0xFF, 0xFF, 0xFF]
-                        };
-                        let bg = if bg_idx < 16 {
-                            palette[bg_idx]
-                        } else {
-                            [0x00, 0x00, 0x00]
-                        };
-                        let px = col * fw;
-
-                        for scanline in 0..fh {
-                            let font_byte = if (scanline as usize) < 16 {
-                                VGA_FONT_8X16[ch][scanline as usize]
-                            } else {
-                                0
-                            };
-                            let cursor_invert = is_cursor
-                                && cs_start <= cs_end
-                                && scanline as u8 >= cs_start
-                                && scanline as u8 <= cs_end;
-
-                            for bit in 0..8u32 {
-                                let pixel_on = (font_byte >> bit) & 1 != 0;
-                                let color = if cursor_invert {
-                                    if pixel_on { bg } else { fg }
-                                } else {
-                                    if pixel_on { fg } else { bg }
-                                };
-                                let fb_x = px + bit;
-                                // Offset within row_fb (scanline * stride + fb_x * 4)
-                                let offset = (scanline * stride + fb_x * 4) as usize;
-                                if offset + 3 < row_fb.len() {
-                                    row_fb[offset] = color[0];
-                                    row_fb[offset + 1] = color[1];
-                                    row_fb[offset + 2] = color[2];
-                                    row_fb[offset + 3] = 0xFF;
-                                }
-                            }
-
-                            if fw >= 9 {
-                                let ninth_on =
-                                    if line_graphics && (0xC0..=0xDF).contains(&ch) {
-                                        (font_byte >> 7) & 1 != 0
-                                    } else {
-                                        false
-                                    };
-                                let color = if cursor_invert {
-                                    if ninth_on { bg } else { fg }
-                                } else {
-                                    if ninth_on { fg } else { bg }
-                                };
-                                let fb_x = px + 8;
-                                let offset = (scanline * stride + fb_x * 4) as usize;
-                                if offset + 3 < row_fb.len() {
-                                    row_fb[offset] = color[0];
-                                    row_fb[offset + 1] = color[1];
-                                    row_fb[offset + 2] = color[2];
-                                    row_fb[offset + 3] = 0xFF;
-                                }
-                            }
-                        }
-                    }
-                });
-        }
-        #[cfg(not(feature = "data_parallelism"))]
         {
             let fb = &mut self.framebuffer;
             for row in 0..rows {
