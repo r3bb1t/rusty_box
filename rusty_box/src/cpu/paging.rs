@@ -6,7 +6,10 @@
 use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, Result};
 use crate::{
     config::{BxAddress, BxPhyAddress},
-    cpu::{rusty_box::MemoryAccessType, tlb::{BxHostpageaddr, TLBEntry}},
+    cpu::{
+        rusty_box::MemoryAccessType,
+        tlb::{BxHostpageaddr, TLBEntry},
+    },
     memory::BxMemC,
 };
 
@@ -387,10 +390,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cr3 = self.cr3;
         let ppf = (cr3 & BX_CR3_PAGING_MASK) as u32;
 
-        // Read PDE
+        // Read PDE (use fast host pointer path for page table entries)
         let pde_index = ((laddr >> 22) & 0x3FF) as u32;
         let pde_addr = ppf as u64 + (pde_index * 4) as u64;
-        let pde = self.mem_read_dword(pde_addr);
+        let pde = self.page_walk_read_dword(pde_addr);
 
         if (pde & 0x1) == 0 {
             tracing::debug!(
@@ -408,7 +411,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Set Accessed + Dirty bits on PDE for 4MB page
             let needed = 0x20 | 0x40; // A + D for write
             if pde & needed != needed {
-                self.mem_write_dword(pde_addr, pde | needed);
+                self.page_walk_write_dword(pde_addr, pde | needed);
             }
             let ppf_4m = (pde & 0xFFC00000) as u64;
             let offset = laddr & 0x3FFFFF;
@@ -419,7 +422,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let pt_base = (pde & 0xFFFFF000) as u64;
         let pte_index = ((laddr >> 12) & 0x3FF) as u32;
         let pte_addr = pt_base + (pte_index * 4) as u64;
-        let pte = self.mem_read_dword(pte_addr);
+        let pte = self.page_walk_read_dword(pte_addr);
 
         if (pte & 0x1) == 0 {
             tracing::debug!(
@@ -434,13 +437,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Set Accessed bit on PDE if needed
         if pde & 0x20 == 0 {
-            self.mem_write_dword(pde_addr, pde | 0x20);
+            self.page_walk_write_dword(pde_addr, pde | 0x20);
         }
 
         // Set Accessed + Dirty bits on PTE for write
         let pte_needed = 0x20 | 0x40; // A + D
         if pte & pte_needed != pte_needed {
-            self.mem_write_dword(pte_addr, pte | pte_needed);
+            self.page_walk_write_dword(pte_addr, pte | pte_needed);
         }
 
         let page_base = (pte & 0xFFFFF000) as u64;
@@ -464,10 +467,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cr3 = self.cr3;
         let ppf = (cr3 & BX_CR3_PAGING_MASK) as u32;
 
-        // Read PDE
+        // Read PDE (use fast host pointer path for page table entries)
         let pde_index = ((laddr >> 22) & 0x3FF) as u32;
         let pde_addr = ppf as u64 + (pde_index * 4) as u64;
-        let pde = self.mem_read_dword(pde_addr);
+        let pde = self.page_walk_read_dword_ro(pde_addr);
 
         if (pde & 0x1) == 0 {
             tracing::debug!(
@@ -491,7 +494,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let pt_base = (pde & 0xFFFFF000) as u64;
         let pte_index = ((laddr >> 12) & 0x3FF) as u32;
         let pte_addr = pt_base + (pte_index * 4) as u64;
-        let pte = self.mem_read_dword(pte_addr);
+        let pte = self.page_walk_read_dword_ro(pte_addr);
 
         if (pte & 0x1) == 0 {
             tracing::debug!(
@@ -635,6 +638,38 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(paddr)
     }
 
+    /// Fast physical dword read for page walks — bypass full mem_read_dword overhead.
+    /// Page table entries are always in plain RAM, so we can use mem_host_base directly.
+    /// Used by both &self and &mut self callers.
+    #[inline(always)]
+    fn page_walk_read_dword_ro(&self, paddr: u64) -> u32 {
+        self.page_walk_read_dword(paddr)
+    }
+
+    /// Fast physical dword read for page walks (mutable self variant).
+    #[inline(always)]
+    fn page_walk_read_dword(&self, paddr: u64) -> u32 {
+        let a20_addr = (paddr & self.a20_mask) as usize;
+        let host_base = self.mem_host_base;
+        if !host_base.is_null() && a20_addr + 4 <= self.mem_host_len {
+            return unsafe { (host_base.add(a20_addr) as *const u32).read_unaligned() };
+        }
+        // Fallback for addresses outside RAM (shouldn't happen for page tables)
+        self.mem_read_dword(paddr)
+    }
+
+    /// Fast physical dword write for page walk A/D bit updates.
+    #[inline(always)]
+    fn page_walk_write_dword(&mut self, paddr: u64, val: u32) {
+        let a20_addr = (paddr & self.a20_mask) as usize;
+        let host_base = self.mem_host_base;
+        if !host_base.is_null() && a20_addr + 4 <= self.mem_host_len {
+            unsafe { (host_base.add(a20_addr) as *mut u32).write_unaligned(val) };
+            return;
+        }
+        self.mem_write_dword(paddr, val);
+    }
+
     /// Perform the actual page table walk for a data access.
     /// Returns (physical_address_before_a20, combined_access_bits, is_large_page).
     /// The combined_access_bits are the intersection of PDE and PTE R/W + U/S bits
@@ -647,7 +682,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     ) -> Result<(u64, u32, bool)> {
         // ---- PDE ----
         let pde_addr = (self.cr3 & BX_CR3_PAGING_MASK) | (((laddr >> 22) & 0x3FF) << 2);
-        let pde = self.mem_read_dword(pde_addr);
+        let pde = self.page_walk_read_dword(pde_addr);
 
         if pde & 0x1 == 0 {
             self.page_fault(ERROR_NOT_PRESENT, laddr, user, is_write)?;
@@ -666,7 +701,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Set A/D bits on the PDE.
             let needed = 0x20 | if is_write { 0x40 } else { 0 };
             if pde & needed != needed {
-                self.mem_write_dword(pde_addr, pde | needed);
+                self.page_walk_write_dword(pde_addr, pde | needed);
             }
             let paddr = (pde as u64 & 0xFFC0_0000) | (laddr & 0x003F_FFFF);
             return Ok((paddr, combined, true));
@@ -674,7 +709,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // ---- PTE ----
         let pte_addr = (pde as u64 & 0xFFFF_F000) | (((laddr >> 12) & 0x3FF) << 2);
-        let pte = self.mem_read_dword(pte_addr);
+        let pte = self.page_walk_read_dword(pte_addr);
 
         if pte & 0x1 == 0 {
             self.page_fault(ERROR_NOT_PRESENT, laddr, user, is_write)?;
@@ -691,12 +726,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Set A bit on PDE if needed.
         if pde & 0x20 == 0 {
-            self.mem_write_dword(pde_addr, pde | 0x20);
+            self.page_walk_write_dword(pde_addr, pde | 0x20);
         }
         // Set A/D bits on PTE.
         let pte_needed = 0x20 | if is_write { 0x40 } else { 0 };
         if pte & pte_needed != pte_needed {
-            self.mem_write_dword(pte_addr, pte | pte_needed);
+            self.page_walk_write_dword(pte_addr, pte | pte_needed);
         }
 
         let paddr = (pte as u64 & 0xFFFF_F000) | (laddr & 0xFFF);

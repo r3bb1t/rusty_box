@@ -10,15 +10,14 @@
 //
 // Includes cross-page boundary handling for multi-byte accesses.
 
-use crate::config::BxAddress;
 use super::cpu::Exception;
 use super::decoder::BxSegregs;
 use super::descriptor::{
-    SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G,
-    SEG_VALID_CACHE,
+    SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
 };
 use super::rusty_box::MemoryAccessType;
 use super::{BxCpuC, BxCpuIdTrait, Result};
+use crate::config::BxAddress;
 
 /// BX_MAX_MEM_ACCESS_LENGTH from Bochs — maximum access size for
 /// segment limit checks.  Matches the largest scalar access (qword=8).
@@ -76,12 +75,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// descriptor cache for future fast-path use.
     ///
     /// Bochs: write_virtual_checks (access.cc)
-    fn write_virtual_checks(
-        &mut self,
-        seg_idx: usize,
-        offset: u32,
-        length: u32,
-    ) -> bool {
+    fn write_virtual_checks(&mut self, seg_idx: usize, offset: u32, length: u32) -> bool {
         let seg = &self.sregs[seg_idx];
         let cache = &seg.cache;
 
@@ -131,10 +125,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Expand-down data segment (types 6,7)
             let d_b = unsafe { cache.u.segment.d_b };
             let upper_limit: u32 = if d_b { 0xFFFFFFFF } else { 0x0000FFFF };
-            if offset <= limit_scaled
-                || offset > upper_limit
-                || (upper_limit - offset) < length
-            {
+            if offset <= limit_scaled || offset > upper_limit || (upper_limit - offset) < length {
                 return false;
             }
         }
@@ -146,12 +137,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Returns true if the access is permitted.
     ///
     /// Bochs: read_virtual_checks (access.cc)
-    fn read_virtual_checks(
-        &mut self,
-        seg_idx: usize,
-        offset: u32,
-        length: u32,
-    ) -> bool {
+    fn read_virtual_checks(&mut self, seg_idx: usize, offset: u32, length: u32) -> bool {
         let seg = &self.sregs[seg_idx];
         let cache = &seg.cache;
 
@@ -179,10 +165,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if (seg_type & 0x08) == 0 && (seg_type & 0x04) != 0 {
             let d_b = unsafe { cache.u.segment.d_b };
             let upper_limit: u32 = if d_b { 0xFFFFFFFF } else { 0x0000FFFF };
-            if offset <= limit_scaled
-                || offset > upper_limit
-                || (upper_limit - offset) < length
-            {
+            if offset <= limit_scaled || offset > upper_limit || (upper_limit - offset) < length {
                 return false;
             }
             return true;
@@ -209,12 +192,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Compute linear address for a read access with full segment validation.
     /// Bochs: agen_read32
     #[inline]
-    pub(super) fn agen_read32(
-        &mut self,
-        seg: BxSegregs,
-        offset: u32,
-        len: u32,
-    ) -> Result<u32> {
+    pub(super) fn agen_read32(&mut self, seg: BxSegregs, offset: u32, len: u32) -> Result<u32> {
         let seg_idx = seg as usize;
 
         // Fast path: flat 4GB readable segment
@@ -240,12 +218,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Compute linear address for a write access with full segment validation.
     /// Bochs: agen_write32
     #[inline]
-    pub(super) fn agen_write32(
-        &mut self,
-        seg: BxSegregs,
-        offset: u32,
-        len: u32,
-    ) -> Result<u32> {
+    pub(super) fn agen_write32(&mut self, seg: BxSegregs, offset: u32, len: u32) -> Result<u32> {
         let seg_idx = seg as usize;
 
         // Fast path: flat 4GB writable segment
@@ -277,11 +250,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Read a byte from virtual memory.
     /// Bochs: read_virtual_byte_32 -> agen_read32 + read_linear_byte
     #[inline]
-    pub fn read_virtual_byte(
-        &mut self,
-        seg: BxSegregs,
-        offset: u32,
-    ) -> Result<u8> {
+    pub fn read_virtual_byte(&mut self, seg: BxSegregs, offset: u32) -> Result<u8> {
         let laddr = self.agen_read32(seg, offset, 1)? as u64;
 
         // ---- Inline TLB fast path (Bochs access2.cc pattern) ----
@@ -303,11 +272,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Read a word from virtual memory with cross-page handling.
     /// Bochs: read_virtual_word_32 -> agen_read32 + read_linear_word
     #[inline]
-    pub fn read_virtual_word(
-        &mut self,
-        seg: BxSegregs,
-        offset: u32,
-    ) -> Result<u16> {
+    pub fn read_virtual_word(&mut self, seg: BxSegregs, offset: u32) -> Result<u16> {
         let laddr = self.agen_read32(seg, offset, 2)? as u64;
         let page_offset = laddr & 0xFFF;
 
@@ -317,7 +282,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let lpf = laddr & 0xFFFF_F000;
                 let needed_bit = 1u32 << (self.user_pl as u32);
                 let tlb = self.dtlb.get_entry_of(laddr, 0);
-                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0
+                {
                     let host = tlb.host_page_addr as *const u8;
                     let ptr = unsafe { host.add(page_offset as usize) };
                     return Ok(unsafe { (ptr as *const u16).read_unaligned() });
@@ -338,11 +304,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Read a dword from virtual memory with cross-page handling.
     /// Bochs: read_virtual_dword_32 -> agen_read32 + read_linear_dword
     #[inline]
-    pub fn read_virtual_dword(
-        &mut self,
-        seg: BxSegregs,
-        offset: u32,
-    ) -> Result<u32> {
+    pub fn read_virtual_dword(&mut self, seg: BxSegregs, offset: u32) -> Result<u32> {
         let laddr = self.agen_read32(seg, offset, 4)? as u64;
         let page_offset = laddr & 0xFFF;
 
@@ -352,7 +314,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let lpf = laddr & 0xFFFF_F000;
                 let needed_bit = 1u32 << (self.user_pl as u32);
                 let tlb = self.dtlb.get_entry_of(laddr, 0);
-                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0
+                {
                     let host = tlb.host_page_addr as *const u8;
                     let ptr = unsafe { host.add(page_offset as usize) };
                     return Ok(unsafe { (ptr as *const u32).read_unaligned() });
@@ -364,9 +327,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Cross-page: read byte-by-byte with individual translations
             let mut buf = [0u8; 4];
             for i in 0..4u64 {
-                buf[i as usize] = self.read_virtual_byte_at_laddr(
-                    (laddr.wrapping_add(i)) & 0xFFFF_FFFF,
-                )?;
+                buf[i as usize] =
+                    self.read_virtual_byte_at_laddr((laddr.wrapping_add(i)) & 0xFFFF_FFFF)?;
             }
             Ok(u32::from_le_bytes(buf))
         }
@@ -375,11 +337,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Read a qword from virtual memory with cross-page handling.
     /// Bochs: read_virtual_qword_32 -> agen_read32 + read_linear_qword
     #[inline]
-    pub(crate) fn read_virtual_qword(
-        &mut self,
-        seg: BxSegregs,
-        offset: u32,
-    ) -> Result<u64> {
+    pub(crate) fn read_virtual_qword(&mut self, seg: BxSegregs, offset: u32) -> Result<u64> {
         let laddr = self.agen_read32(seg, offset, 8)? as u64;
         let page_offset = laddr & 0xFFF;
 
@@ -389,7 +347,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let lpf = laddr & 0xFFFF_F000;
                 let needed_bit = 1u32 << (self.user_pl as u32);
                 let tlb = self.dtlb.get_entry_of(laddr, 0);
-                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0
+                {
                     let host = tlb.host_page_addr as *const u8;
                     let ptr = unsafe { host.add(page_offset as usize) };
                     return Ok(unsafe { (ptr as *const u64).read_unaligned() });
@@ -400,9 +359,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             let mut buf = [0u8; 8];
             for i in 0..8u64 {
-                buf[i as usize] = self.read_virtual_byte_at_laddr(
-                    (laddr.wrapping_add(i)) & 0xFFFF_FFFF,
-                )?;
+                buf[i as usize] =
+                    self.read_virtual_byte_at_laddr((laddr.wrapping_add(i)) & 0xFFFF_FFFF)?;
             }
             Ok(u64::from_le_bytes(buf))
         }
@@ -430,12 +388,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Write a byte to virtual memory.
     /// Bochs: write_virtual_byte_32 -> agen_write32 + write_linear_byte
     #[inline]
-    pub fn write_virtual_byte(
-        &mut self,
-        seg: BxSegregs,
-        offset: u32,
-        val: u8,
-    ) -> Result<()> {
+    pub fn write_virtual_byte(&mut self, seg: BxSegregs, offset: u32, val: u8) -> Result<()> {
         let laddr = self.agen_write32(seg, offset, 1)? as u64;
 
         // ---- Inline TLB fast path ----
@@ -474,7 +427,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let lpf = laddr & 0xFFFF_F000;
                 let needed_bit = 1u32 << (2 + self.user_pl as u32);
                 let tlb = self.dtlb.get_entry_of(laddr, 0);
-                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0
+                {
                     let host = tlb.host_page_addr as *mut u8;
                     let ptr = unsafe { host.add(page_offset as usize) };
                     unsafe { (ptr as *mut u16).write_unaligned(val) };
@@ -510,7 +464,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let lpf = laddr & 0xFFFF_F000;
                 let needed_bit = 1u32 << (2 + self.user_pl as u32);
                 let tlb = self.dtlb.get_entry_of(laddr, 0);
-                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0
+                {
                     let host = tlb.host_page_addr as *mut u8;
                     let ptr = unsafe { host.add(page_offset as usize) };
                     unsafe { (ptr as *mut u32).write_unaligned(val) };
@@ -547,7 +502,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let lpf = laddr & 0xFFFF_F000;
                 let needed_bit = 1u32 << (2 + self.user_pl as u32);
                 let tlb = self.dtlb.get_entry_of(laddr, 0);
-                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0
+                {
                     let host = tlb.host_page_addr as *mut u8;
                     let ptr = unsafe { host.add(page_offset as usize) };
                     unsafe { (ptr as *mut u64).write_unaligned(val) };
@@ -589,26 +545,48 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Read phase of a read-modify-write byte access.
     /// Checks WRITE permission (since it's RMW) and returns (value, paddr).
-    pub fn read_rmw_virtual_byte(
-        &mut self,
-        seg: BxSegregs,
-        offset: u32,
-    ) -> Result<(u8, u64)> {
+    #[inline]
+    pub fn read_rmw_virtual_byte(&mut self, seg: BxSegregs, offset: u32) -> Result<(u8, u64)> {
         let laddr = self.agen_write32(seg, offset, 1)? as u64;
+
+        // ---- Inline TLB fast path (write permission for RMW) ----
+        if self.cr0.pg() {
+            let lpf = laddr & 0xFFFF_F000;
+            let needed_bit = 1u32 << (2 + self.user_pl as u32);
+            let tlb = self.dtlb.get_entry_of(laddr, 0);
+            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                let host = tlb.host_page_addr as *const u8;
+                let val = unsafe { *host.add((laddr & 0xFFF) as usize) };
+                let paddr = tlb.ppf | (laddr & 0xFFF);
+                return Ok((val, paddr));
+            }
+        }
+
         let paddr = self.translate_data_write(laddr)?;
         Ok((self.mem_read_byte(paddr), paddr))
     }
 
     /// Read phase of a read-modify-write word access with cross-page handling.
-    pub fn read_rmw_virtual_word(
-        &mut self,
-        seg: BxSegregs,
-        offset: u32,
-    ) -> Result<(u16, u64)> {
+    #[inline]
+    pub fn read_rmw_virtual_word(&mut self, seg: BxSegregs, offset: u32) -> Result<(u16, u64)> {
         let laddr = self.agen_write32(seg, offset, 2)? as u64;
         let page_offset = laddr & 0xFFF;
 
         if page_offset + 2 <= 0x1000 {
+            // ---- Inline TLB fast path ----
+            if self.cr0.pg() {
+                let lpf = laddr & 0xFFFF_F000;
+                let needed_bit = 1u32 << (2 + self.user_pl as u32);
+                let tlb = self.dtlb.get_entry_of(laddr, 0);
+                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0
+                {
+                    let host = tlb.host_page_addr as *const u8;
+                    let ptr = unsafe { host.add(page_offset as usize) };
+                    let val = unsafe { (ptr as *const u16).read_unaligned() };
+                    let paddr = tlb.ppf | (laddr & 0xFFF);
+                    return Ok((val, paddr));
+                }
+            }
             let paddr = self.translate_data_write(laddr)?;
             Ok((self.mem_read_word(paddr), paddr))
         } else {
@@ -624,15 +602,26 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Read phase of a read-modify-write dword access with cross-page handling.
-    pub fn read_rmw_virtual_dword(
-        &mut self,
-        seg: BxSegregs,
-        offset: u32,
-    ) -> Result<(u32, u64)> {
+    #[inline]
+    pub fn read_rmw_virtual_dword(&mut self, seg: BxSegregs, offset: u32) -> Result<(u32, u64)> {
         let laddr = self.agen_write32(seg, offset, 4)? as u64;
         let page_offset = laddr & 0xFFF;
 
         if page_offset + 4 <= 0x1000 {
+            // ---- Inline TLB fast path ----
+            if self.cr0.pg() {
+                let lpf = laddr & 0xFFFF_F000;
+                let needed_bit = 1u32 << (2 + self.user_pl as u32);
+                let tlb = self.dtlb.get_entry_of(laddr, 0);
+                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0
+                {
+                    let host = tlb.host_page_addr as *const u8;
+                    let ptr = unsafe { host.add(page_offset as usize) };
+                    let val = unsafe { (ptr as *const u32).read_unaligned() };
+                    let paddr = tlb.ppf | (laddr & 0xFFF);
+                    return Ok((val, paddr));
+                }
+            }
             let paddr = self.translate_data_write(laddr)?;
             Ok((self.mem_read_dword(paddr), paddr))
         } else {

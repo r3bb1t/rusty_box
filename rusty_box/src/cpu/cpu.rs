@@ -1,4 +1,4 @@
-use alloc::{format, vec};
+use alloc::vec;
 use core::{marker::PhantomData, ptr::NonNull};
 
 use crate::{
@@ -1361,11 +1361,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             CpuError::UnimplementedOpcode { ref opcode } => {
                 let rip = self.prev_rip; // prev_rip was the RIP before advancement
-                let cs_base =
-                    unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+                let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
                 let laddr = cs_base + rip;
-                let cs_value =
-                    unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
+                let cs_value = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
                 let instr_bytes = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
                     let page_base = cs_base + (self.eip_page_bias as u64);
                     let offset = (rip.wrapping_sub(page_base)) as usize;
@@ -1385,12 +1383,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             _ => {
                 let rip = self.prev_rip;
-                let cs_value =
-                    unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
+                let cs_value = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
                 let opcode = instr.get_ia_opcode();
                 tracing::error!(
                     "CPU ERROR at icount={} RIP={:#x} CS={:#x} opcode={:?}: {}",
-                    self.icount, rip, cs_value, opcode, e
+                    self.icount,
+                    rip,
+                    cs_value,
+                    opcode,
+                    e
                 );
                 tracing::error!(
                     "  EAX={:#x} ECX={:#x} EDX={:#x} EBX={:#x} ESP={:#x} EBP={:#x} ESI={:#x} EDI={:#x}",

@@ -253,7 +253,12 @@ impl<'m> BxMemC<'m> {
     /// SAFETY: Caller must ensure the pointer is only used while memory is valid.
     pub fn get_ram_base_ptr(&mut self) -> (*mut u8, usize) {
         let vo = self.inherited_memory_stub.vector_offset;
-        let ptr = unsafe { self.inherited_memory_stub.actual_vector.as_mut_ptr().add(vo) };
+        let ptr = unsafe {
+            self.inherited_memory_stub
+                .actual_vector
+                .as_mut_ptr()
+                .add(vo)
+        };
         let len = self.inherited_memory_stub.len; // guest RAM size
         (ptr, len)
     }
