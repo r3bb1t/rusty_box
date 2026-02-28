@@ -2,9 +2,9 @@
 //! ExtFloat80 classification.
 //! Ported from Berkeley SoftFloat 3e: extF80_class.c
 
-use super::softfloat_types::*;
-use super::softfloat::*;
 use super::internals::*;
+use super::softfloat::*;
+use super::softfloat_types::*;
 
 /// Classify an extFloat80 value.
 pub fn extf80_class(a: floatx80) -> SoftFloatClass {

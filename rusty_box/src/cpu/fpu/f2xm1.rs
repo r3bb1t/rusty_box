@@ -2,12 +2,12 @@
 //! F2XM1 implementation: compute 2^x - 1.
 //! Ported from Bochs cpu/fpu/f2xm1.cc using Float128 polynomial evaluation.
 
+use super::super::softfloat3e::f128::*;
+use super::super::softfloat3e::internals::*;
+use super::super::softfloat3e::primitives::*;
 use super::super::softfloat3e::softfloat::*;
 use super::super::softfloat3e::softfloat_types::floatx80;
 use super::super::softfloat3e::specialize::*;
-use super::super::softfloat3e::internals::*;
-use super::super::softfloat3e::primitives::*;
-use super::super::softfloat3e::f128::*;
 use super::poly::*;
 
 /// 1.0 in floatx80 format

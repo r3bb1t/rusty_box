@@ -384,7 +384,21 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
         // Group opcodes: 80, 81, 83, C0, C1, D0-D3, F6, F7, FE, FF
         // For these, nnn field is the opcode extension (which operation), rm is the operand
-        let is_group_opcode = matches!(b1, 0x80 | 0x81 | 0x83 | 0xC0 | 0xC1 | 0xD0 | 0xD1 | 0xD2 | 0xD3 | 0xF6 | 0xF7 | 0xFE | 0xFF);
+        let is_group_opcode = matches!(
+            b1,
+            0x80 | 0x81
+                | 0x83
+                | 0xC0
+                | 0xC1
+                | 0xD0
+                | 0xD1
+                | 0xD2
+                | 0xD3
+                | 0xF6
+                | 0xF7
+                | 0xFE
+                | 0xFF
+        );
 
         // Segment register move instructions: 8C (MOV Ew,Sw) and 8E (MOV Sw,Ew)
         // For 0x8C: nnn=segment (source), rm=gpr (destination) -> DST=rm, SRC1=nnn

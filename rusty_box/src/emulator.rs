@@ -751,9 +751,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 ipl_bytes
             );
             // Check total memory size
-            tracing::debug!(
-                "Memory len={:#x}", self.memory.get_memory_len()
-            );
+            tracing::debug!("Memory len={:#x}", self.memory.get_memory_len());
         }
 
         // Force initial GUI update to show initial state
@@ -852,16 +850,22 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         );
                     }
 
+                    // vsprintf diagnostic removed (bug found and fixed: ADD AL,Ib operated on AH)
+
                     // Detailed EIP trace to track POST progression
                     // Log every batch in the critical PM→POST transition range
                     if (440_000..480_000).contains(&instructions_executed) {
                         let mem = self.memory.ram_slice();
                         let ipl_count = if 0x9FF81 < mem.len() {
                             u16::from_le_bytes([mem[0x9FF80], mem[0x9FF81]])
-                        } else { 0 };
+                        } else {
+                            0
+                        };
                         let ipl0_type = if 0x9FF01 < mem.len() {
                             u16::from_le_bytes([mem[0x9FF00], mem[0x9FF01]])
-                        } else { 0 };
+                        } else {
+                            0
+                        };
                         tracing::debug!(
                             "EIP trace: {} instr, CS:IP={:#06x}:{:#06x}, mode={}, IPL_count={}, IPL0_type={}",
                             instructions_executed,
@@ -885,13 +889,19 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             let mem_peek = self.memory.ram_slice();
                             let bp2 = if bp_phys + 3 < mem_peek.len() {
                                 u16::from_le_bytes([mem_peek[bp_phys + 2], mem_peek[bp_phys + 3]])
-                            } else { 0 };
+                            } else {
+                                0
+                            };
                             let bp4 = if bp_phys + 5 < mem_peek.len() {
                                 u16::from_le_bytes([mem_peek[bp_phys + 4], mem_peek[bp_phys + 5]])
-                            } else { 0 };
+                            } else {
+                                0
+                            };
                             let bp6 = if bp_phys + 7 < mem_peek.len() {
                                 u16::from_le_bytes([mem_peek[bp_phys + 6], mem_peek[bp_phys + 7]])
-                            } else { 0 };
+                            } else {
+                                0
+                            };
                             tracing::debug!(
                                 "BIOS stuck at RIP={:#x} after {}k instructions, last I/O read: port={:#06x} value={:#x}, CS={:#06x} mode={}, BP={:#06x} AX={:#06x} [BP+2]={:#06x} [BP+4]={:#06x} [BP+6]={:#06x}",
                                 current_rip,
@@ -944,10 +954,30 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 // For PM stuck points: dump 32-bit stack frame (saved EBP, return addr, args)
                                 let ebp = self.cpu.ebp() as usize;
                                 if ebp + 16 < mem.len() {
-                                    let saved_ebp = u32::from_le_bytes([mem[ebp], mem[ebp+1], mem[ebp+2], mem[ebp+3]]);
-                                    let ret_addr = u32::from_le_bytes([mem[ebp+4], mem[ebp+5], mem[ebp+6], mem[ebp+7]]);
-                                    let arg1 = u32::from_le_bytes([mem[ebp+8], mem[ebp+9], mem[ebp+10], mem[ebp+11]]);
-                                    let arg2 = u32::from_le_bytes([mem[ebp+12], mem[ebp+13], mem[ebp+14], mem[ebp+15]]);
+                                    let saved_ebp = u32::from_le_bytes([
+                                        mem[ebp],
+                                        mem[ebp + 1],
+                                        mem[ebp + 2],
+                                        mem[ebp + 3],
+                                    ]);
+                                    let ret_addr = u32::from_le_bytes([
+                                        mem[ebp + 4],
+                                        mem[ebp + 5],
+                                        mem[ebp + 6],
+                                        mem[ebp + 7],
+                                    ]);
+                                    let arg1 = u32::from_le_bytes([
+                                        mem[ebp + 8],
+                                        mem[ebp + 9],
+                                        mem[ebp + 10],
+                                        mem[ebp + 11],
+                                    ]);
+                                    let arg2 = u32::from_le_bytes([
+                                        mem[ebp + 12],
+                                        mem[ebp + 13],
+                                        mem[ebp + 14],
+                                        mem[ebp + 15],
+                                    ]);
                                     tracing::debug!(
                                         "Stack frame: saved_EBP={:#010x} ret_addr={:#010x} arg1={:#010x} arg2={:#010x}",
                                         saved_ebp, ret_addr, arg1, arg2,
@@ -957,34 +987,73 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     if ra > 128 && ra + 32 < mem.len() {
                                         for off in (ra.saturating_sub(128)..ra).step_by(32) {
                                             let end = (off + 32).min(ra);
-                                            let bytes: Vec<String> = mem[off..end].iter().map(|b| format!("{:02x}", b)).collect();
-                                            tracing::debug!("Caller@{:#06x}: {}", off, bytes.join(" "));
+                                            let bytes: Vec<String> = mem[off..end]
+                                                .iter()
+                                                .map(|b| format!("{:02x}", b))
+                                                .collect();
+                                            tracing::debug!(
+                                                "Caller@{:#06x}: {}",
+                                                off,
+                                                bytes.join(" ")
+                                            );
                                         }
-                                        let after: Vec<String> = mem[ra..ra+32].iter().map(|b| format!("{:02x}", b)).collect();
-                                        tracing::debug!("Caller code at ret_addr: {}", after.join(" "));
+                                        let after: Vec<String> = mem[ra..ra + 32]
+                                            .iter()
+                                            .map(|b| format!("{:02x}", b))
+                                            .collect();
+                                        tracing::debug!(
+                                            "Caller code at ret_addr: {}",
+                                            after.join(" ")
+                                        );
                                     }
                                     // Dump the error message string (EBX = msg ptr in error())
                                     let ebx = self.cpu.ebx() as usize;
                                     if ebx + 64 < mem.len() {
-                                        let msg_bytes = &mem[ebx..ebx+64];
-                                        let msg_end = msg_bytes.iter().position(|&b| b == 0).unwrap_or(64);
-                                        let msg_str = String::from_utf8_lossy(&msg_bytes[..msg_end]);
-                                        tracing::debug!("Error msg at EBX={:#x}: {:?}", ebx, msg_str);
+                                        let msg_bytes = &mem[ebx..ebx + 64];
+                                        let msg_end =
+                                            msg_bytes.iter().position(|&b| b == 0).unwrap_or(64);
+                                        let msg_str =
+                                            String::from_utf8_lossy(&msg_bytes[..msg_end]);
+                                        tracing::debug!(
+                                            "Error msg at EBX={:#x}: {:?}",
+                                            ebx,
+                                            msg_str
+                                        );
                                     }
                                     // Also dump string at arg1
                                     let a1 = arg1 as usize;
                                     if a1 + 64 < mem.len() && a1 != ebx {
-                                        let msg_bytes = &mem[a1..a1+64];
-                                        let msg_end = msg_bytes.iter().position(|&b| b == 0).unwrap_or(64);
-                                        let msg_str = String::from_utf8_lossy(&msg_bytes[..msg_end]);
-                                        tracing::debug!("Error msg at arg1={:#x}: {:?}", a1, msg_str);
+                                        let msg_bytes = &mem[a1..a1 + 64];
+                                        let msg_end =
+                                            msg_bytes.iter().position(|&b| b == 0).unwrap_or(64);
+                                        let msg_str =
+                                            String::from_utf8_lossy(&msg_bytes[..msg_end]);
+                                        tracing::debug!(
+                                            "Error msg at arg1={:#x}: {:?}",
+                                            a1,
+                                            msg_str
+                                        );
                                     }
                                     // Walk one more frame up
                                     let parent_ebp = saved_ebp as usize;
                                     if parent_ebp + 16 < mem.len() {
-                                        let p_saved = u32::from_le_bytes([mem[parent_ebp], mem[parent_ebp+1], mem[parent_ebp+2], mem[parent_ebp+3]]);
-                                        let p_ret = u32::from_le_bytes([mem[parent_ebp+4], mem[parent_ebp+5], mem[parent_ebp+6], mem[parent_ebp+7]]);
-                                        tracing::debug!("Parent frame: saved_EBP={:#010x} ret_addr={:#010x}", p_saved, p_ret);
+                                        let p_saved = u32::from_le_bytes([
+                                            mem[parent_ebp],
+                                            mem[parent_ebp + 1],
+                                            mem[parent_ebp + 2],
+                                            mem[parent_ebp + 3],
+                                        ]);
+                                        let p_ret = u32::from_le_bytes([
+                                            mem[parent_ebp + 4],
+                                            mem[parent_ebp + 5],
+                                            mem[parent_ebp + 6],
+                                            mem[parent_ebp + 7],
+                                        ]);
+                                        tracing::debug!(
+                                            "Parent frame: saved_EBP={:#010x} ret_addr={:#010x}",
+                                            p_saved,
+                                            p_ret
+                                        );
                                     }
                                 }
                                 // Search memory for gzip magic (1f 8b 08) to find where compressed kernel data is
@@ -992,12 +1061,26 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     let search_end = mem.len().min(0x200000); // search first 2MB
                                     let mut found_count = 0;
                                     for i in 0..search_end.saturating_sub(3) {
-                                        if mem[i] == 0x1f && mem[i+1] == 0x8b && mem[i+2] == 0x08 {
-                                            let context: Vec<String> = mem[i..i.min(search_end).wrapping_add(32).min(search_end)]
-                                                .iter().map(|b| format!("{:02x}", b)).collect();
-                                            tracing::debug!("GZIP magic found at {:#x}: {}", i, context.join(" "));
+                                        if mem[i] == 0x1f
+                                            && mem[i + 1] == 0x8b
+                                            && mem[i + 2] == 0x08
+                                        {
+                                            let context: Vec<String> = mem[i..i
+                                                .min(search_end)
+                                                .wrapping_add(32)
+                                                .min(search_end)]
+                                                .iter()
+                                                .map(|b| format!("{:02x}", b))
+                                                .collect();
+                                            tracing::debug!(
+                                                "GZIP magic found at {:#x}: {}",
+                                                i,
+                                                context.join(" ")
+                                            );
                                             found_count += 1;
-                                            if found_count >= 10 { break; }
+                                            if found_count >= 10 {
+                                                break;
+                                            }
                                         }
                                     }
                                     if found_count == 0 {
@@ -1005,34 +1088,74 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     }
                                     // Dump expected locations for compressed kernel data:
                                     // After head.S relocates: system code at 0x1000, compressed data at offset ~0x2000-0x4000
-                                    for addr in [0x1000usize, 0x2000, 0x3000, 0x4000, 0x5000, 0x10000, 0x11000, 0x52E00, 0x53E00, 0x62E00, 0x63E00] {
+                                    for addr in [
+                                        0x1000usize,
+                                        0x2000,
+                                        0x3000,
+                                        0x4000,
+                                        0x5000,
+                                        0x10000,
+                                        0x11000,
+                                        0x52E00,
+                                        0x53E00,
+                                        0x62E00,
+                                        0x63E00,
+                                    ] {
                                         if addr + 16 < mem.len() {
-                                            let bytes: Vec<String> = mem[addr..addr+16].iter().map(|b| format!("{:02x}", b)).collect();
-                                            tracing::debug!("Mem@{:#07x}: {}", addr, bytes.join(" "));
+                                            let bytes: Vec<String> = mem[addr..addr + 16]
+                                                .iter()
+                                                .map(|b| format!("{:02x}", b))
+                                                .collect();
+                                            tracing::debug!(
+                                                "Mem@{:#07x}: {}",
+                                                addr,
+                                                bytes.join(" ")
+                                            );
                                         }
                                     }
                                     // Dump the decompressor's input_data pointer
                                     let esi = self.cpu.esi() as usize;
                                     if esi + 32 < mem.len() {
-                                        let bytes: Vec<String> = mem[esi..esi+32].iter().map(|b| format!("{:02x}", b)).collect();
-                                        tracing::debug!("Data at ESI={:#x}: {}", esi, bytes.join(" "));
+                                        let bytes: Vec<String> = mem[esi..esi + 32]
+                                            .iter()
+                                            .map(|b| format!("{:02x}", b))
+                                            .collect();
+                                        tracing::debug!(
+                                            "Data at ESI={:#x}: {}",
+                                            esi,
+                                            bytes.join(" ")
+                                        );
                                     }
                                     // Search for the address 0x41d8 (little-endian) in code region 0x1000-0x4200
                                     // This should appear in instructions that reference input_data
                                     let search_val = [0xd8u8, 0x41, 0x00, 0x00];
                                     for i in 0x1000..0x4200usize {
-                                        if i + 4 <= mem.len() && mem[i..i+4] == search_val {
+                                        if i + 4 <= mem.len() && mem[i..i + 4] == search_val {
                                             let ctx_start = i.saturating_sub(4);
                                             let ctx_end = (i + 8).min(mem.len());
-                                            let ctx: Vec<String> = mem[ctx_start..ctx_end].iter().map(|b| format!("{:02x}", b)).collect();
-                                            tracing::debug!("Found 0x41d8 ref at {:#06x}: {}", i, ctx.join(" "));
+                                            let ctx: Vec<String> = mem[ctx_start..ctx_end]
+                                                .iter()
+                                                .map(|b| format!("{:02x}", b))
+                                                .collect();
+                                            tracing::debug!(
+                                                "Found 0x41d8 ref at {:#06x}: {}",
+                                                i,
+                                                ctx.join(" ")
+                                            );
                                         }
                                     }
                                     // Dump memory right around the gzip data to check alignment
                                     for addr in [0x41d0usize, 0x41d8, 0x41e0, 0x41e8, 0x41f0] {
                                         if addr + 16 < mem.len() {
-                                            let bytes: Vec<String> = mem[addr..addr+16].iter().map(|b| format!("{:02x}", b)).collect();
-                                            tracing::debug!("Mem@{:#07x}: {}", addr, bytes.join(" "));
+                                            let bytes: Vec<String> = mem[addr..addr + 16]
+                                                .iter()
+                                                .map(|b| format!("{:02x}", b))
+                                                .collect();
+                                            tracing::debug!(
+                                                "Mem@{:#07x}: {}",
+                                                addr,
+                                                bytes.join(" ")
+                                            );
                                         }
                                     }
                                     // Dump decompressor key variables (found from code analysis):
@@ -1040,23 +1163,62 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     // Also dump surrounding BSS to find inptr/insize
                                     for addr in (0x51080..0x51100).step_by(16) {
                                         if addr + 16 < mem.len() {
-                                            let v0 = u32::from_le_bytes([mem[addr], mem[addr+1], mem[addr+2], mem[addr+3]]);
-                                            let v1 = u32::from_le_bytes([mem[addr+4], mem[addr+5], mem[addr+6], mem[addr+7]]);
-                                            let v2 = u32::from_le_bytes([mem[addr+8], mem[addr+9], mem[addr+10], mem[addr+11]]);
-                                            let v3 = u32::from_le_bytes([mem[addr+12], mem[addr+13], mem[addr+14], mem[addr+15]]);
-                                            tracing::debug!("BSS@{:#07x}: {:08x} {:08x} {:08x} {:08x}", addr, v0, v1, v2, v3);
+                                            let v0 = u32::from_le_bytes([
+                                                mem[addr],
+                                                mem[addr + 1],
+                                                mem[addr + 2],
+                                                mem[addr + 3],
+                                            ]);
+                                            let v1 = u32::from_le_bytes([
+                                                mem[addr + 4],
+                                                mem[addr + 5],
+                                                mem[addr + 6],
+                                                mem[addr + 7],
+                                            ]);
+                                            let v2 = u32::from_le_bytes([
+                                                mem[addr + 8],
+                                                mem[addr + 9],
+                                                mem[addr + 10],
+                                                mem[addr + 11],
+                                            ]);
+                                            let v3 = u32::from_le_bytes([
+                                                mem[addr + 12],
+                                                mem[addr + 13],
+                                                mem[addr + 14],
+                                                mem[addr + 15],
+                                            ]);
+                                            tracing::debug!(
+                                                "BSS@{:#07x}: {:08x} {:08x} {:08x} {:08x}",
+                                                addr,
+                                                v0,
+                                                v1,
+                                                v2,
+                                                v3
+                                            );
                                         }
                                     }
                                     // Also dump inbuf pointer specifically
                                     if 0x510B4 < mem.len() {
-                                        let inbuf_ptr = u32::from_le_bytes([mem[0x510B0], mem[0x510B1], mem[0x510B2], mem[0x510B3]]);
-                                        let insize = u32::from_le_bytes([mem[0x510AC], mem[0x510AD], mem[0x510AE], mem[0x510AF]]);
+                                        let inbuf_ptr = u32::from_le_bytes([
+                                            mem[0x510B0],
+                                            mem[0x510B1],
+                                            mem[0x510B2],
+                                            mem[0x510B3],
+                                        ]);
+                                        let insize = u32::from_le_bytes([
+                                            mem[0x510AC],
+                                            mem[0x510AD],
+                                            mem[0x510AE],
+                                            mem[0x510AF],
+                                        ]);
                                         tracing::debug!("Decompressor: inbuf={:#010x} (should be 0x41d8), val_at_0x510AC={:#010x}", inbuf_ptr, insize);
                                         // DIRECT CHECK: Read via peek_ram (which applies vector_offset)
                                         let peek = self.memory.peek_ram(0x510B0, 4);
                                         let peek_val = if peek.len() >= 4 {
                                             u32::from_le_bytes([peek[0], peek[1], peek[2], peek[3]])
-                                        } else { 0xDEAD };
+                                        } else {
+                                            0xDEAD
+                                        };
                                         tracing::debug!(
                                             "  DIRECT CHECK: peek_ram(0x510B0)={:#010x} ram_slice[0x510B0]={:#010x}",
                                             peek_val, inbuf_ptr,
@@ -1065,28 +1227,50 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                         // (mem_read_dword is private, so use peek_ram from a different offset)
                                         let peek2 = self.memory.peek_ram(0x510A0, 32);
                                         if peek2.len() >= 32 {
-                                            let bytes: Vec<String> = peek2.iter().map(|b| format!("{:02x}", b)).collect();
-                                            tracing::debug!("  peek_ram(0x510A0..0x510C0): {}", bytes.join(" "));
+                                            let bytes: Vec<String> = peek2
+                                                .iter()
+                                                .map(|b| format!("{:02x}", b))
+                                                .collect();
+                                            tracing::debug!(
+                                                "  peek_ram(0x510A0..0x510C0): {}",
+                                                bytes.join(" ")
+                                            );
                                         }
                                         // If inbuf is valid, dump what inbuf points to
                                         let ibp = inbuf_ptr as usize;
                                         if ibp + 16 < mem.len() {
-                                            let bytes: Vec<String> = mem[ibp..ibp+16].iter().map(|b| format!("{:02x}", b)).collect();
+                                            let bytes: Vec<String> = mem[ibp..ibp + 16]
+                                                .iter()
+                                                .map(|b| format!("{:02x}", b))
+                                                .collect();
                                             tracing::debug!("  *inbuf = {}", bytes.join(" "));
                                         }
                                     }
                                     // Also dump wider BSS around 0x50000-0x51200 to find all decompressor globals
                                     for addr in (0x50F80..0x51200).step_by(32) {
                                         if addr + 32 < mem.len() {
-                                            let bytes: Vec<String> = mem[addr..addr+32].iter().map(|b| format!("{:02x}", b)).collect();
-                                            tracing::debug!("WiderBSS@{:#07x}: {}", addr, bytes.join(" "));
+                                            let bytes: Vec<String> = mem[addr..addr + 32]
+                                                .iter()
+                                                .map(|b| format!("{:02x}", b))
+                                                .collect();
+                                            tracing::debug!(
+                                                "WiderBSS@{:#07x}: {}",
+                                                addr,
+                                                bytes.join(" ")
+                                            );
                                         }
                                     }
                                 }
                                 // Dump Linux boot parameters (memory detection)
                                 if mem.len() > 0x90100 {
-                                    let ext_mem_k = u16::from_le_bytes([mem[0x90002], mem[0x90003]]);
-                                    let alt_mem_k = u32::from_le_bytes([mem[0x901e0], mem[0x901e1], mem[0x901e2], mem[0x901e3]]);
+                                    let ext_mem_k =
+                                        u16::from_le_bytes([mem[0x90002], mem[0x90003]]);
+                                    let alt_mem_k = u32::from_le_bytes([
+                                        mem[0x901e0],
+                                        mem[0x901e1],
+                                        mem[0x901e2],
+                                        mem[0x901e3],
+                                    ]);
                                     // Also check BDA memory size at 0x413
                                     let bda_mem = u16::from_le_bytes([mem[0x413], mem[0x414]]);
                                     // Check CMOS values directly (what the BIOS should have read)
@@ -1097,13 +1281,20 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                         ext_mem_k, alt_mem_k, bda_mem,
                                     );
                                     // Dump first 16 bytes of boot params header at 0x90000
-                                    let hdr: Vec<String> = mem[0x90000..0x90010].iter()
-                                        .map(|b| format!("{:02x}", b)).collect();
+                                    let hdr: Vec<String> = mem[0x90000..0x90010]
+                                        .iter()
+                                        .map(|b| format!("{:02x}", b))
+                                        .collect();
                                     tracing::debug!("Boot params @0x90000: {}", hdr.join(" "));
                                     // Dump setup header at 0x901F1+ (boot protocol version)
-                                    let setup_hdr: Vec<String> = mem[0x901F0..0x90200].iter()
-                                        .map(|b| format!("{:02x}", b)).collect();
-                                    tracing::debug!("Setup header @0x901F0: {}", setup_hdr.join(" "));
+                                    let setup_hdr: Vec<String> = mem[0x901F0..0x90200]
+                                        .iter()
+                                        .map(|b| format!("{:02x}", b))
+                                        .collect();
+                                    tracing::debug!(
+                                        "Setup header @0x901F0: {}",
+                                        setup_hdr.join(" ")
+                                    );
                                 }
                             }
                             // Dump IPL table and stack for debugging
@@ -1112,7 +1303,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 let read_u16 = |addr: usize| -> u16 {
                                     if addr + 1 < mem.len() {
                                         u16::from_le_bytes([mem[addr], mem[addr + 1]])
-                                    } else { 0 }
+                                    } else {
+                                        0
+                                    }
                                 };
                                 let ipl_count = read_u16(0x9FF80);
                                 let ipl_seq = read_u16(0x9FF82);
@@ -1143,13 +1336,18 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 // Also dump the full stack from SP to 0xFFFE
                                 let full_stack_start = stack_addr;
                                 let full_stack_end = (ss_base + 0xFFFE).min(mem.len());
-                                let full_words: Vec<u16> = (full_stack_start..full_stack_end).step_by(2)
+                                let full_words: Vec<u16> = (full_stack_start..full_stack_end)
+                                    .step_by(2)
                                     .map(|a| read_u16(a))
                                     .collect();
-                                let full_hex: Vec<String> = full_words.iter().map(|w| format!("{:04x}", w)).collect();
+                                let full_hex: Vec<String> =
+                                    full_words.iter().map(|w| format!("{:04x}", w)).collect();
                                 tracing::debug!(
                                     "Full stack SS:SP={:#06x}:{:#06x} ({} words): {}",
-                                    ss_sel, sp, full_words.len(), full_hex.join(" "),
+                                    ss_sel,
+                                    sp,
+                                    full_words.len(),
+                                    full_hex.join(" "),
                                 );
                                 tracing::debug!(
                                     "Stack dump SS:SP={:#06x}:{:#06x} (phys {:#x}): {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x}",
@@ -1161,10 +1359,14 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 );
                                 // Also dump BDA and IVT for diagnostics
                                 let ebda_seg = read_u16(0x040E);
-                                let int08_vec = read_u16(0x0020) as u32 | ((read_u16(0x0022) as u32) << 16);
-                                let int13_vec = read_u16(0x004C) as u32 | ((read_u16(0x004E) as u32) << 16);
-                                let int19_vec = read_u16(0x0064) as u32 | ((read_u16(0x0066) as u32) << 16);
-                                let bda_ticks = read_u16(0x046C) as u32 | ((read_u16(0x046E) as u32) << 16);
+                                let int08_vec =
+                                    read_u16(0x0020) as u32 | ((read_u16(0x0022) as u32) << 16);
+                                let int13_vec =
+                                    read_u16(0x004C) as u32 | ((read_u16(0x004E) as u32) << 16);
+                                let int19_vec =
+                                    read_u16(0x0064) as u32 | ((read_u16(0x0066) as u32) << 16);
+                                let bda_ticks =
+                                    read_u16(0x046C) as u32 | ((read_u16(0x046E) as u32) << 16);
                                 let bda_kbd_head = read_u16(0x041A);
                                 tracing::debug!(
                                     "IVT: INT08={:#010x} INT13={:#010x} INT19={:#010x} | BDA: EBDA={:#06x} ticks={} kbd_head={:#06x}",
@@ -1205,11 +1407,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     // Advance virtual time (Bochs-like ticking).
                     // Required so PIT can generate IRQ0 and BIOS can progress past HLT waits.
                     if self.config.ips != 0 {
-                        let usec_from_instr = (executed.saturating_mul(1_000_000)) / (self.config.ips as u64);
+                        let usec_from_instr =
+                            (executed.saturating_mul(1_000_000)) / (self.config.ips as u64);
                         // When CPU is halted, advance time aggressively (5ms per batch) so PIT
                         // fires IRQ0 quickly (~11 batches per 54.9ms PIT cycle). When active,
                         // use min 10 usec to prevent timer starvation at low instruction counts.
-                        let min_usec = if matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::Hlt) {
+                        let min_usec = if matches!(
+                            self.cpu.activity_state,
+                            crate::cpu::cpu::CpuActivityState::Hlt
+                        ) {
                             5000
                         } else {
                             10
@@ -1228,7 +1434,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     }
 
                     // Log batch sizes and check if timer ticking works
-                    if instructions_executed < 5 * INSTRUCTION_BATCH_SIZE || instructions_executed % 100_000 < INSTRUCTION_BATCH_SIZE {
+                    if instructions_executed < 5 * INSTRUCTION_BATCH_SIZE
+                        || instructions_executed % 100_000 < INSTRUCTION_BATCH_SIZE
+                    {
                         let pit_c0_count = self.device_manager.pit.counters[0].count;
                         // Read BDA timer tick counter at 0x046C (4 bytes) directly from RAM
                         let bda_ticks = {
@@ -1238,7 +1446,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     let p = ptr.add(0x046C) as *const u32;
                                     *p
                                 }
-                            } else { 0 }
+                            } else {
+                                0
+                            }
                         };
                         tracing::debug!("BATCH-DIAG: executed={}, total={}k, RIP={:#x}, PIT_count={}, activity={:?}, BDA_ticks={}",
                             executed, instructions_executed / 1000, self.cpu.rip(), pit_c0_count,
@@ -1274,10 +1484,18 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         // Check if we're in the decompressor (RIP in 0x1000-0x6000 range)
                         if rip >= 0x1000 && rip < 0x6000 {
                             let peek_inptr = self.memory.peek_ram(0x4004, 4);
-                            let inptr_val = u32::from_le_bytes([peek_inptr[0], peek_inptr[1], peek_inptr[2], peek_inptr[3]]);
+                            let inptr_val = u32::from_le_bytes([
+                                peek_inptr[0],
+                                peek_inptr[1],
+                                peek_inptr[2],
+                                peek_inptr[3],
+                            ]);
                             // Dump code at the inflate loop addresses
                             let mem = self.memory.ram_slice();
-                            let _code_23e0: Vec<String> = mem[0x23E0..0x2420].iter().map(|b| format!("{:02x}", b)).collect();
+                            let _code_23e0: Vec<String> = mem[0x23E0..0x2420]
+                                .iter()
+                                .map(|b| format!("{:02x}", b))
+                                .collect();
                             // Decompressor global vars
                             let peek = |addr: usize| -> u32 {
                                 let p = self.memory.peek_ram(addr, 4);
@@ -1285,26 +1503,33 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             };
                             let outcnt = peek(0x4008);
                             let bytes_out = peek(0x400C);
-                            let _wp = peek(0x4010);  // window position / output_ptr
-                            // Check output at 0x100000 and 0x108000
+                            let _wp = peek(0x4010); // window position / output_ptr
+                                                    // Check output at 0x100000 and 0x108000
                             let peek_out = self.memory.peek_ram(0x100000, 8);
-                            let out_hex: Vec<String> = peek_out.iter().map(|b| format!("{:02x}", b)).collect();
+                            let out_hex: Vec<String> =
+                                peek_out.iter().map(|b| format!("{:02x}", b)).collect();
                             let peek_out2 = self.memory.peek_ram(0x108000, 8);
-                            let _out2_hex: Vec<String> = peek_out2.iter().map(|b| format!("{:02x}", b)).collect();
+                            let _out2_hex: Vec<String> =
+                                peek_out2.iter().map(|b| format!("{:02x}", b)).collect();
                             // Check the window buffer area (0x51100-0x59100 based on BSS layout)
                             let peek_win = self.memory.peek_ram(0x51100, 8);
-                            let _win_hex: Vec<String> = peek_win.iter().map(|b| format!("{:02x}", b)).collect();
+                            let _win_hex: Vec<String> =
+                                peek_win.iter().map(|b| format!("{:02x}", b)).collect();
                             // Also check window buffer contents (wider sample)
                             let peek_win16 = self.memory.peek_ram(0x510b8, 32);
-                            let win16_hex: Vec<String> = peek_win16.iter().map(|b| format!("{:02x}", b)).collect();
+                            let win16_hex: Vec<String> =
+                                peek_win16.iter().map(|b| format!("{:02x}", b)).collect();
                             // Check Huffman table area — tl/td pointers stored somewhere
                             // Dump the key inflate globals (bb, bk might be on stack)
                             let esp_val = self.cpu.esp() as usize;
                             let stack_peek = if esp_val > 0 && esp_val < 0x100000 {
                                 let s = self.memory.peek_ram(esp_val, 32);
-                                let h: Vec<String> = s.iter().map(|b| format!("{:02x}", b)).collect();
+                                let h: Vec<String> =
+                                    s.iter().map(|b| format!("{:02x}", b)).collect();
                                 h.join(" ")
-                            } else { "N/A".to_string() };
+                            } else {
+                                "N/A".to_string()
+                            };
                             tracing::debug!(
                                 "DECOMP-PROGRESS: {}M instr, inptr={}/{} outcnt={} bytes_out={:#x} RIP={:#x} out@100000:{} win@510b8:{} stack@ESP:{}",
                                 instructions_executed / 1_000_000,
@@ -1312,82 +1537,127 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 outcnt, bytes_out,
                                 rip, out_hex.join(" "), win16_hex.join(" "), stack_peek,
                             );
-                            if instructions_executed / 1_000_000 >= 1 && instructions_executed / 1_000_000 <= 3 {
+                            if instructions_executed / 1_000_000 >= 1
+                                && instructions_executed / 1_000_000 <= 3
+                            {
                                 // inflate_codes EBP is 0x5CF1C (from trace), not the current EBP (which may be memcpy's)
                                 let ic_ebp = 0x5CF1Cu32 as usize;
                                 if ic_ebp + 0x30 < mem.len() {
                                     let rd = |off: usize| -> u32 {
-                                        u32::from_le_bytes([mem[ic_ebp+off], mem[ic_ebp+off+1], mem[ic_ebp+off+2], mem[ic_ebp+off+3]])
+                                        u32::from_le_bytes([
+                                            mem[ic_ebp + off],
+                                            mem[ic_ebp + off + 1],
+                                            mem[ic_ebp + off + 2],
+                                            mem[ic_ebp + off + 3],
+                                        ])
                                     };
                                     let saved_ebp = rd(0);
                                     let ret_addr = rd(4);
-                                    let arg1 = rd(8);    // tl
-                                    let arg2 = rd(0xC);  // td
+                                    let arg1 = rd(8); // tl
+                                    let arg2 = rd(0xC); // td
                                     let arg3 = rd(0x10); // bl
                                     let arg4 = rd(0x14); // bd
                                     tracing::debug!("INFLATE-CODES @EBP=0x5CF1C: saved_EBP={:#x} ret={:#x} tl={:#x} td={:#x} bl={} bd={}",
                                         saved_ebp, ret_addr, arg1, arg2, arg3, arg4);
                                     // Also dump the inflate_codes local variables
                                     let locals = self.memory.peek_ram(ic_ebp - 0x30, 0x60);
-                                    let locals_hex: Vec<String> = locals.iter().map(|b| format!("{:02x}", b)).collect();
-                                    tracing::debug!("inflate_codes frame [EBP-0x30..EBP+0x30]: {}", locals_hex.join(" "));
+                                    let locals_hex: Vec<String> =
+                                        locals.iter().map(|b| format!("{:02x}", b)).collect();
+                                    tracing::debug!(
+                                        "inflate_codes frame [EBP-0x30..EBP+0x30]: {}",
+                                        locals_hex.join(" ")
+                                    );
                                     // Check heap pointer
-                                    let free_mem_ptr = u32::from_le_bytes([mem[0x4014], mem[0x4015], mem[0x4016], mem[0x4017]]);
+                                    let free_mem_ptr = u32::from_le_bytes([
+                                        mem[0x4014],
+                                        mem[0x4015],
+                                        mem[0x4016],
+                                        mem[0x4017],
+                                    ]);
                                     tracing::debug!("free_mem_ptr@0x4014={:#x}", free_mem_ptr);
                                     // Dump compressed data (gzip+deflate) at 0x41D8
                                     let cdata = self.memory.peek_ram(0x41D8, 64);
-                                    let cdata_hex: Vec<String> = cdata.iter().map(|b| format!("{:02x}", b)).collect();
-                                    tracing::debug!("Compressed data @0x41D8: {}", cdata_hex.join(" "));
+                                    let cdata_hex: Vec<String> =
+                                        cdata.iter().map(|b| format!("{:02x}", b)).collect();
+                                    tracing::debug!(
+                                        "Compressed data @0x41D8: {}",
+                                        cdata_hex.join(" ")
+                                    );
                                     // Check who called inflate_codes (return address 0x253D)
                                     // Dump code around 0x2530 to see the CALL instruction
                                     let call_area = self.memory.peek_ram(0x2520, 64);
-                                    let call_hex: Vec<String> = call_area.iter().map(|b| format!("{:02x}", b)).collect();
-                                    tracing::debug!("Code around inflate_codes CALL @0x2520: {}", call_hex.join(" "));
+                                    let call_hex: Vec<String> =
+                                        call_area.iter().map(|b| format!("{:02x}", b)).collect();
+                                    tracing::debug!(
+                                        "Code around inflate_codes CALL @0x2520: {}",
+                                        call_hex.join(" ")
+                                    );
                                     // Dump the full inflate_dynamic loop body (0x21A0-0x2430)
                                     let loop_code1 = self.memory.peek_ram(0x21A0, 96);
-                                    let lc1_hex: Vec<String> = loop_code1.iter().map(|b| format!("{:02x}", b)).collect();
+                                    let lc1_hex: Vec<String> =
+                                        loop_code1.iter().map(|b| format!("{:02x}", b)).collect();
                                     tracing::debug!("Code @0x21A0-0x21FF: {}", lc1_hex.join(" "));
                                     let loop_code2 = self.memory.peek_ram(0x2200, 32);
-                                    let lc2_hex: Vec<String> = loop_code2.iter().map(|b| format!("{:02x}", b)).collect();
+                                    let lc2_hex: Vec<String> =
+                                        loop_code2.iter().map(|b| format!("{:02x}", b)).collect();
                                     tracing::debug!("Code @0x2200-0x221F: {}", lc2_hex.join(" "));
                                     let loop_code3 = self.memory.peek_ram(0x2410, 32);
-                                    let lc3_hex: Vec<String> = loop_code3.iter().map(|b| format!("{:02x}", b)).collect();
+                                    let lc3_hex: Vec<String> =
+                                        loop_code3.iter().map(|b| format!("{:02x}", b)).collect();
                                     tracing::debug!("Code @0x2410-0x242F: {}", lc3_hex.join(" "));
                                     // Dump code before the second loop to find the first loop
                                     let code_2100 = self.memory.peek_ram(0x2100, 96);
-                                    let c2100_hex: Vec<String> = code_2100.iter().map(|b| format!("{:02x}", b)).collect();
+                                    let c2100_hex: Vec<String> =
+                                        code_2100.iter().map(|b| format!("{:02x}", b)).collect();
                                     tracing::debug!("Code @0x2100-0x215F: {}", c2100_hex.join(" "));
                                     let code_2160 = self.memory.peek_ram(0x2160, 64);
-                                    let c2160_hex: Vec<String> = code_2160.iter().map(|b| format!("{:02x}", b)).collect();
+                                    let c2160_hex: Vec<String> =
+                                        code_2160.iter().map(|b| format!("{:02x}", b)).collect();
                                     tracing::debug!("Code @0x2160-0x219F: {}", c2160_hex.join(" "));
                                     // Dump huft_build function (starts at 0x108C)
                                     for chunk_start in (0x108Cu32..0x1700u32).step_by(64) {
                                         let cs = chunk_start as usize;
                                         let code = self.memory.peek_ram(cs, 64);
-                                        let hex: Vec<String> = code.iter().map(|b| format!("{:02x}", b)).collect();
-                                        tracing::debug!("Code @{:#06x}: {}", chunk_start, hex.join(" "));
+                                        let hex: Vec<String> =
+                                            code.iter().map(|b| format!("{:02x}", b)).collect();
+                                        tracing::debug!(
+                                            "Code @{:#06x}: {}",
+                                            chunk_start,
+                                            hex.join(" ")
+                                        );
                                     }
                                     // Also check the caller's (inflate_fixed/dynamic) stack frame
                                     // Dump code-length Huffman table at tl=0x5d4e0
                                     // Each entry is 8 bytes: [exop:1][bits:1][pad:2][base:4]
                                     // Bochs inflate huft: { e:u8, b:u8, v:{n:u16 or t:ptr} }
                                     let tl_addr = 0x5d4e0usize;
-                                    if tl_addr + 128*8 < mem.len() {
+                                    if tl_addr + 128 * 8 < mem.len() {
                                         // Dump ALL non-zero entries in first 128
                                         let mut nonzero_count = 0;
                                         for idx in 0..128 {
                                             let off = tl_addr + idx * 8;
                                             let e = mem[off];
                                             let b = mem[off + 1];
-                                            let vn = u16::from_le_bytes([mem[off+4], mem[off+5]]);
+                                            let vn =
+                                                u16::from_le_bytes([mem[off + 4], mem[off + 5]]);
                                             if e != 0 || b != 0 || vn != 0 {
                                                 nonzero_count += 1;
                                                 if nonzero_count <= 40 {
-                                                    tracing::debug!("HUFT[{}] @{:#x}: e={} b={} v.n={}", idx, off, e, b, vn);
+                                                    tracing::debug!(
+                                                        "HUFT[{}] @{:#x}: e={} b={} v.n={}",
+                                                        idx,
+                                                        off,
+                                                        e,
+                                                        b,
+                                                        vn
+                                                    );
                                                 }
                                             }
                                         }
-                                        tracing::debug!("HUFT table: {} non-zero entries out of 128", nonzero_count);
+                                        tracing::debug!(
+                                            "HUFT table: {} non-zero entries out of 128",
+                                            nonzero_count
+                                        );
                                         // Also dump entry 39
                                         let idx = 39;
                                         let off = tl_addr + idx * 8;
@@ -1398,30 +1668,55 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     // inflate_dynamic EBP = 0x5D45C
                                     let id_ebp = 0x5D45Cusize;
                                     let ll_base = id_ebp - 0x4F0; // 0x5CF6C
-                                    // ll[] has 19 entries for code-length codes (border[0..18])
-                                    // Actually ll[] is 286+30=316 entries of unsigned int
-                                    // First dump the 19 code-length code lengths
+                                                                  // ll[] has 19 entries for code-length codes (border[0..18])
+                                                                  // Actually ll[] is 286+30=316 entries of unsigned int
+                                                                  // First dump the 19 code-length code lengths
                                     let mut ll_vals = Vec::new();
                                     for idx in 0..19 {
                                         let off = ll_base + idx * 4;
                                         if off + 4 <= mem.len() {
-                                            let v = u32::from_le_bytes([mem[off], mem[off+1], mem[off+2], mem[off+3]]);
+                                            let v = u32::from_le_bytes([
+                                                mem[off],
+                                                mem[off + 1],
+                                                mem[off + 2],
+                                                mem[off + 3],
+                                            ]);
                                             ll_vals.push(format!("{}:{}", idx, v));
                                         }
                                     }
-                                    tracing::debug!("ll[0..19] (code-length code lengths): {}", ll_vals.join(" "));
+                                    tracing::debug!(
+                                        "ll[0..19] (code-length code lengths): {}",
+                                        ll_vals.join(" ")
+                                    );
                                     // Also check bl and nb values
-                                    let bl_val = u32::from_le_bytes([mem[id_ebp-0x4F8], mem[id_ebp-0x4F7], mem[id_ebp-0x4F6], mem[id_ebp-0x4F5]]);
-                                    tracing::debug!("inflate_dynamic: bl=[EBP-0x4F8]={}, tl=[EBP-0x4F4]={:#x}",
+                                    let bl_val = u32::from_le_bytes([
+                                        mem[id_ebp - 0x4F8],
+                                        mem[id_ebp - 0x4F7],
+                                        mem[id_ebp - 0x4F6],
+                                        mem[id_ebp - 0x4F5],
+                                    ]);
+                                    tracing::debug!(
+                                        "inflate_dynamic: bl=[EBP-0x4F8]={}, tl=[EBP-0x4F4]={:#x}",
                                         bl_val,
-                                        u32::from_le_bytes([mem[id_ebp-0x4F4], mem[id_ebp-0x4F3], mem[id_ebp-0x4F2], mem[id_ebp-0x4F1]]));
+                                        u32::from_le_bytes([
+                                            mem[id_ebp - 0x4F4],
+                                            mem[id_ebp - 0x4F3],
+                                            mem[id_ebp - 0x4F2],
+                                            mem[id_ebp - 0x4F1]
+                                        ])
+                                    );
                                     // Dump border[] array at 0x4024 (19 entries of 4 bytes)
                                     let border_addr = 0x4024usize;
-                                    if border_addr + 19*4 <= mem.len() {
+                                    if border_addr + 19 * 4 <= mem.len() {
                                         let mut bvals = Vec::new();
                                         for idx in 0..19 {
                                             let off = border_addr + idx * 4;
-                                            let v = u32::from_le_bytes([mem[off], mem[off+1], mem[off+2], mem[off+3]]);
+                                            let v = u32::from_le_bytes([
+                                                mem[off],
+                                                mem[off + 1],
+                                                mem[off + 2],
+                                                mem[off + 3],
+                                            ]);
                                             bvals.push(format!("{}", v));
                                         }
                                         tracing::debug!("border[] @0x4024: {}", bvals.join(" "));
@@ -1433,11 +1728,11 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     //   0f b7 04 45 64 41 00 00 = MOVZX EAX, word [EAX*2+0x4164]
                                     // So mask_bits is at 0x4164
                                     let mask_addr = 0x4164usize;
-                                    if mask_addr + 17*2 <= mem.len() {
+                                    if mask_addr + 17 * 2 <= mem.len() {
                                         let mut mvals = Vec::new();
                                         for idx in 0..17 {
                                             let off = mask_addr + idx * 2;
-                                            let v = u16::from_le_bytes([mem[off], mem[off+1]]);
+                                            let v = u16::from_le_bytes([mem[off], mem[off + 1]]);
                                             mvals.push(format!("{}", v));
                                         }
                                         tracing::debug!("mask_bits[] @0x4164: {}", mvals.join(" "));
@@ -1445,12 +1740,28 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     // saved_EBP from inflate_codes points to caller
                                     if saved_ebp > 0 && (saved_ebp as usize) + 0x30 < mem.len() {
                                         let caller_ebp = saved_ebp as usize;
-                                        let caller_ret = u32::from_le_bytes([mem[caller_ebp+4], mem[caller_ebp+5], mem[caller_ebp+6], mem[caller_ebp+7]]);
-                                        tracing::debug!("Caller frame @EBP={:#x}: ret={:#x}", saved_ebp, caller_ret);
+                                        let caller_ret = u32::from_le_bytes([
+                                            mem[caller_ebp + 4],
+                                            mem[caller_ebp + 5],
+                                            mem[caller_ebp + 6],
+                                            mem[caller_ebp + 7],
+                                        ]);
+                                        tracing::debug!(
+                                            "Caller frame @EBP={:#x}: ret={:#x}",
+                                            saved_ebp,
+                                            caller_ret
+                                        );
                                         // Dump caller's local variables
-                                        let caller_locals = self.memory.peek_ram(caller_ebp - 0x10, 0x30);
-                                        let cl_hex: Vec<String> = caller_locals.iter().map(|b| format!("{:02x}", b)).collect();
-                                        tracing::debug!("Caller locals [EBP-0x10..EBP+0x20]: {}", cl_hex.join(" "));
+                                        let caller_locals =
+                                            self.memory.peek_ram(caller_ebp - 0x10, 0x30);
+                                        let cl_hex: Vec<String> = caller_locals
+                                            .iter()
+                                            .map(|b| format!("{:02x}", b))
+                                            .collect();
+                                        tracing::debug!(
+                                            "Caller locals [EBP-0x10..EBP+0x20]: {}",
+                                            cl_hex.join(" ")
+                                        );
                                     }
                                 }
                                 // Also dump registers
@@ -1466,16 +1777,26 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         let has_int = self.has_interrupt();
                         let if_flag = self.cpu.get_b_if();
                         if has_int {
-                            tracing::trace!("INT-DELIVER: has_int={}, IF={}, activity={:?}, RIP={:#x}",
-                                has_int, if_flag, self.cpu.activity_state, self.cpu.rip());
+                            tracing::trace!(
+                                "INT-DELIVER: has_int={}, IF={}, activity={:?}, RIP={:#x}",
+                                has_int,
+                                if_flag,
+                                self.cpu.activity_state,
+                                self.cpu.rip()
+                            );
                         }
                     }
-                    if self.has_interrupt() && self.cpu.get_b_if() != 0
-                        && !self.cpu.interrupts_inhibited(0x01) // BX_INHIBIT_INTERRUPTS
+                    if self.has_interrupt()
+                        && self.cpu.get_b_if() != 0
+                        && !self.cpu.interrupts_inhibited(0x01)
+                    // BX_INHIBIT_INTERRUPTS
                     {
                         let vector = self.iac();
-                        tracing::trace!("INT-INJECT: vector={:#04x}, activity_before={:?}",
-                            vector, self.cpu.activity_state);
+                        tracing::trace!(
+                            "INT-INJECT: vector={:#04x}, activity_before={:?}",
+                            vector,
+                            self.cpu.activity_state
+                        );
 
                         // Temporarily wire the memory bus so the interrupt path can
                         // read IVT/IDT and push stack frames correctly.
@@ -1493,8 +1814,11 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
                         match &inject_result {
                             Ok(()) => {
-                                tracing::debug!("INT-INJECT: OK! activity_after={:?}, RIP={:#x}",
-                                    self.cpu.activity_state, self.cpu.rip());
+                                tracing::debug!(
+                                    "INT-INJECT: OK! activity_after={:?}, RIP={:#x}",
+                                    self.cpu.activity_state,
+                                    self.cpu.rip()
+                                );
                             }
                             Err(e) => {
                                 tracing::error!("INT-INJECT: FAILED: {:?}", e);
@@ -1587,7 +1911,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
                 // When CPU is halted, advance one full PIT cycle so timer
                 // interrupts can fire (Bochs handleWaitForEvent BX_TICKN loop).
-                if matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::Hlt) {
+                if matches!(
+                    self.cpu.activity_state,
+                    crate::cpu::cpu::CpuActivityState::Hlt
+                ) {
                     self.tick_devices(60_000);
                 }
 
@@ -1595,7 +1922,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 // This must happen EVERY batch, not just during HLT, because
                 // the BIOS and OS rely on timer interrupts during normal
                 // execution (not only when halted).
-                if self.has_interrupt() && self.cpu.get_b_if() != 0
+                if self.has_interrupt()
+                    && self.cpu.get_b_if() != 0
                     && !self.cpu.interrupts_inhibited(0x01)
                 {
                     let vector = self.iac();
@@ -1614,8 +1942,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
                 // If CPU was halted and we just delivered an interrupt,
                 // re-enter CPU loop so the handler runs in this batch.
-                if matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::Active)
-                    && executed == 0
+                if matches!(
+                    self.cpu.activity_state,
+                    crate::cpu::cpu::CpuActivityState::Active
+                ) && executed == 0
                 {
                     let result2 = unsafe {
                         let mem_extended: &'a mut BxMemC<'a> =
@@ -1686,14 +2016,21 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     pub fn update_display(&mut self, display: &mut crate::gui::shared_display::SharedDisplay) {
         // Debug: log VGA state periodically
         static mut DBG_CTR: u32 = 0;
-        unsafe { DBG_CTR += 1; }
+        unsafe {
+            DBG_CTR += 1;
+        }
         let dbg = unsafe { DBG_CTR };
 
         if let Some(update_result) = self.device_manager.vga.update() {
             if dbg % 300 == 1 {
                 // Check if text_buffer has any non-zero bytes
-                let non_zero = update_result.text_buffer.iter().filter(|&&b| b != 0).count();
-                let first_16: Vec<u8> = update_result.text_buffer.iter().take(32).copied().collect();
+                let non_zero = update_result
+                    .text_buffer
+                    .iter()
+                    .filter(|&&b| b != 0)
+                    .count();
+                let first_16: Vec<u8> =
+                    update_result.text_buffer.iter().take(32).copied().collect();
                 tracing::warn!(
                     "VGA update: dim_changed={}, needs_update={}, buf_non_zero={}, first_32={:02x?}, start_addr={}",
                     update_result.dimension_changed,
@@ -1753,7 +2090,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             let mm = (gr6 >> 2) & 0x03;
             tracing::warn!(
                 "VGA update returned None: graphics_alpha={}, memory_mapping={}, gr6=0x{:02x}",
-                ga, mm, gr6,
+                ga,
+                mm,
+                gr6,
             );
         }
     }

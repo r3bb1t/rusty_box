@@ -2,11 +2,11 @@
 //! ExtFloat80 to float64 conversion.
 //! Ported from Berkeley SoftFloat 3e: extF80_to_f64.c
 
-use super::softfloat_types::*;
-use super::softfloat::*;
-use super::primitives::*;
-use super::specialize::*;
 use super::internals::*;
+use super::primitives::*;
+use super::softfloat::*;
+use super::softfloat_types::*;
+use super::specialize::*;
 
 pub fn extf80_to_f64(a: floatx80, status: &mut SoftFloatStatus) -> float64 {
     // Handle unsupported

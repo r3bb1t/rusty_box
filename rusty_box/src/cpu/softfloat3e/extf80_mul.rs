@@ -2,11 +2,11 @@
 //! ExtFloat80 multiplication.
 //! Ported from Berkeley SoftFloat 3e: extF80_mul.c
 
-use super::softfloat_types::*;
-use super::softfloat::*;
-use super::primitives::*;
-use super::specialize::*;
 use super::internals::*;
+use super::primitives::*;
+use super::softfloat::*;
+use super::softfloat_types::*;
+use super::specialize::*;
 
 pub fn extf80_mul(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
     // Handle unsupported encodings
@@ -28,7 +28,9 @@ pub fn extf80_mul(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> flo
         if (sig_a & 0x7FFFFFFFFFFFFFFF) != 0
             || ((exp_b == 0x7FFF) && (sig_b & 0x7FFFFFFFFFFFFFFF) != 0)
         {
-            return softfloat_propagate_nan_extf80(a.sign_exp, a.signif, b.sign_exp, b.signif, status);
+            return softfloat_propagate_nan_extf80(
+                a.sign_exp, a.signif, b.sign_exp, b.signif, status,
+            );
         }
         let mag_bits = (exp_b as u64) | sig_b;
         if mag_bits == 0 {
@@ -43,7 +45,9 @@ pub fn extf80_mul(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> flo
     }
     if exp_b == 0x7FFF {
         if (sig_b & 0x7FFFFFFFFFFFFFFF) != 0 {
-            return softfloat_propagate_nan_extf80(a.sign_exp, a.signif, b.sign_exp, b.signif, status);
+            return softfloat_propagate_nan_extf80(
+                a.sign_exp, a.signif, b.sign_exp, b.signif, status,
+            );
         }
         let mag_bits = (exp_a as u64) | sig_a;
         if mag_bits == 0 {
@@ -102,13 +106,21 @@ pub fn extf80_mul(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> flo
         let (h, l) = add128(sig_z_hi, sig_z_lo, sig_z_hi, sig_z_lo);
         sig_z_hi = h;
         round_pack_to_extf80(
-            sign_z, exp_z, sig_z_hi, l,
-            softfloat_extF80_roundingPrecision(status), status,
+            sign_z,
+            exp_z,
+            sig_z_hi,
+            l,
+            softfloat_extF80_roundingPrecision(status),
+            status,
         )
     } else {
         round_pack_to_extf80(
-            sign_z, exp_z, sig_z_hi, sig_z_lo,
-            softfloat_extF80_roundingPrecision(status), status,
+            sign_z,
+            exp_z,
+            sig_z_hi,
+            sig_z_lo,
+            softfloat_extF80_roundingPrecision(status),
+            status,
         )
     }
 }

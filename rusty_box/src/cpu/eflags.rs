@@ -42,12 +42,19 @@ impl EFlags {
     pub const IOPL_MASK: EFlags = Self::IOPL1.union(Self::IOPL2);
 
     /// Common flag group: OF, SF, ZF, AF, PF, CF
-    pub const OSZAPC: EFlags = Self::OF.union(Self::SF).union(Self::ZF)
-        .union(Self::AF).union(Self::PF).union(Self::CF);
+    pub const OSZAPC: EFlags = Self::OF
+        .union(Self::SF)
+        .union(Self::ZF)
+        .union(Self::AF)
+        .union(Self::PF)
+        .union(Self::CF);
 
     /// Logic operation flags: OF=0, SF, ZF, PF, CF=0 (AF undefined)
-    pub const LOGIC_MASK: EFlags = Self::OF.union(Self::SF).union(Self::ZF)
-        .union(Self::PF).union(Self::CF);
+    pub const LOGIC_MASK: EFlags = Self::OF
+        .union(Self::SF)
+        .union(Self::ZF)
+        .union(Self::PF)
+        .union(Self::CF);
 
     /// Get the IOPL value (0-3)
     #[inline]

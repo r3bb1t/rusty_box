@@ -1,4 +1,8 @@
-use super::{cpuid::BxCpuIdTrait, cpu::{BxCpuC, CpuActivityState}, Result};
+use super::{
+    cpu::{BxCpuC, CpuActivityState},
+    cpuid::BxCpuIdTrait,
+    Result,
+};
 use crate::config::BxPhyAddress;
 
 impl<'c, I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -31,7 +35,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Wake up from MWAIT state
     fn wakeup_monitor(&mut self) {
         // wakeup from MWAIT state
-        if matches!(self.activity_state, CpuActivityState::Mwait | CpuActivityState::MwaitIf) {
+        if matches!(
+            self.activity_state,
+            CpuActivityState::Mwait | CpuActivityState::MwaitIf
+        ) {
             self.activity_state = CpuActivityState::Active;
         }
         // clear monitor

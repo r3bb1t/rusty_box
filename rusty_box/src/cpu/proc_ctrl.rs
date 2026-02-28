@@ -74,7 +74,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub(super) fn invlpg(&mut self, instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         // INVLPG is a privileged instruction (CPL=0 only)
-        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
         if cpl != 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
         }

@@ -2,8 +2,8 @@
 //! ExtFloat80 to i16 conversion.
 //! Ported from Berkeley SoftFloat 3e.
 
-use super::softfloat_types::*;
 use super::softfloat::*;
+use super::softfloat_types::*;
 use super::specialize::*;
 
 pub fn extf80_to_i16(a: floatx80, status: &mut SoftFloatStatus) -> i16 {

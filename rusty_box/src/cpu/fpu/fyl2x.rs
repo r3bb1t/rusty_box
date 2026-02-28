@@ -2,13 +2,13 @@
 //! FYL2X and FYL2XP1 implementation: compute y*log2(x) and y*log2(x+1).
 //! Ported from Bochs cpu/fpu/fyl2x.cc using Float128 polynomial evaluation.
 
+use super::super::softfloat3e::extf80_addsub::extf80_add;
+use super::super::softfloat3e::f128::*;
+use super::super::softfloat3e::internals::*;
+use super::super::softfloat3e::primitives::*;
 use super::super::softfloat3e::softfloat::*;
 use super::super::softfloat3e::softfloat_types::floatx80;
 use super::super::softfloat3e::specialize::*;
-use super::super::softfloat3e::internals::*;
-use super::super::softfloat3e::primitives::*;
-use super::super::softfloat3e::extf80_addsub::extf80_add;
-use super::super::softfloat3e::f128::*;
 use super::poly::*;
 
 /// 1.0 in floatx80 format
@@ -288,7 +288,8 @@ pub(crate) fn fyl2xp1_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatu
     if a_exp < (FLOATX80_EXP_BIAS as i32) - 70 {
         let mut z_exp = a_exp + FLOAT_LN2INV_EXP - 0x3FFE;
 
-        let (mut z_sig0, mut z_sig1, _z_sig2) = mul128_by_64_to_192(FLOAT_LN2INV_HI, FLOAT_LN2INV_LO, a_sig);
+        let (mut z_sig0, mut z_sig1, _z_sig2) =
+            mul128_by_64_to_192(FLOAT_LN2INV_HI, FLOAT_LN2INV_LO, a_sig);
         if (z_sig0 as i64) >= 0 {
             let (s0, s1) = short_shift_left128(z_sig0, z_sig1, 1);
             z_sig0 = s0;

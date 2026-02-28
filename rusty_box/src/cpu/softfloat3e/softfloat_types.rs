@@ -18,16 +18,16 @@ pub type float128_t = u128;
 #[cfg(feature = "bx_little_endian")]
 #[derive(Debug, PartialEq, Eq, Default, Clone, Copy)]
 pub struct extFloat80M {
-    pub signif: u64,
-    pub sign_exp: u16,
+    pub(crate) signif: u64,
+    pub(crate) sign_exp: u16,
 }
 
 /// 80-bit extended precision float (big-endian layout)
 #[cfg(not(feature = "bx_little_endian"))]
 #[derive(Debug, PartialEq, Eq, Default, Clone, Copy)]
 pub struct extFloat80M {
-    pub sign_exp: u16,
-    pub signif: u64,
+    pub(crate) sign_exp: u16,
+    pub(crate) signif: u64,
 }
 
 pub type extFloat80_t = extFloat80M;

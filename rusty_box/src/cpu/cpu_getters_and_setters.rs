@@ -278,18 +278,39 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         unsafe { *(&self.cpu_mode as *const _ as *const u8) }
     }
 
+    /// Get CPU diagnostic string (IF, activity, inhibit)
+    pub fn cpu_diag_string(&self) -> alloc::string::String {
+        alloc::format!(
+            "IF={} activity={:?} inhibit={} async_event={:#x}",
+            self.get_b_if(),
+            self.activity_state,
+            self.interrupts_inhibited(0x01),
+            self.async_event,
+        )
+    }
+
     /// Get CS selector value (for diagnostics)
     #[inline]
     pub fn get_cs_selector(&self) -> u16 {
-        self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value
+        self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .value
     }
 
     pub fn get_ss_selector(&self) -> u16 {
-        self.sregs[super::decoder::BxSegregs::Ss as usize].selector.value
+        self.sregs[super::decoder::BxSegregs::Ss as usize]
+            .selector
+            .value
     }
 
     pub fn get_ss_base(&self) -> u64 {
-        unsafe { self.sregs[super::decoder::BxSegregs::Ss as usize].cache.u.segment.base }
+        unsafe {
+            self.sregs[super::decoder::BxSegregs::Ss as usize]
+                .cache
+                .u
+                .segment
+                .base
+        }
     }
 
     // getters for 64 bit general registers
@@ -554,5 +575,55 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     #[inline]
     pub fn get_idtr_base(&self) -> u64 {
         self.idtr.base
+    }
+
+    /// Get IDTR limit (for diagnostics)
+    #[inline]
+    pub fn get_idtr_limit(&self) -> u16 {
+        self.idtr.limit
+    }
+
+    /// Get GDTR base (for diagnostics)
+    #[inline]
+    pub fn get_gdtr_base(&self) -> u64 {
+        self.gdtr.base
+    }
+
+    /// Get GDTR limit (for diagnostics)
+    #[inline]
+    pub fn get_gdtr_limit(&self) -> u16 {
+        self.gdtr.limit
+    }
+
+    /// Get CS base from cached descriptor (for diagnostics)
+    #[inline]
+    pub fn get_cs_base(&self) -> u64 {
+        unsafe {
+            self.sregs[super::decoder::BxSegregs::Cs as usize]
+                .cache
+                .u
+                .segment
+                .base
+        }
+    }
+
+    /// Get DS base from cached descriptor (for diagnostics)
+    #[inline]
+    pub fn get_ds_base(&self) -> u64 {
+        unsafe {
+            self.sregs[super::decoder::BxSegregs::Ds as usize]
+                .cache
+                .u
+                .segment
+                .base
+        }
+    }
+
+    /// Get DS selector (for diagnostics)
+    #[inline]
+    pub fn get_ds_selector(&self) -> u16 {
+        self.sregs[super::decoder::BxSegregs::Ds as usize]
+            .selector
+            .value
     }
 }

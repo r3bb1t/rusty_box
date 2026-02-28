@@ -2,12 +2,12 @@
 //! FSIN, FCOS, FSINCOS, FPTAN implementation.
 //! Ported from Bochs cpu/fpu/fsincos.cc using Float128 polynomial evaluation.
 
+use super::super::softfloat3e::f128::*;
+use super::super::softfloat3e::internals::*;
+use super::super::softfloat3e::primitives::*;
 use super::super::softfloat3e::softfloat::*;
 use super::super::softfloat3e::softfloat_types::floatx80;
 use super::super::softfloat3e::specialize::*;
-use super::super::softfloat3e::internals::*;
-use super::super::softfloat3e::primitives::*;
-use super::super::softfloat3e::f128::*;
 use super::poly::*;
 
 /// 1.0 in floatx80 format
@@ -135,7 +135,12 @@ fn reduce_trig_arg(exp_diff: i32, z_sign: &mut bool, a_sig0: &mut u64, a_sig1: &
 
 /// Compute sin or cos approximation from reduced argument.
 /// Ported from Bochs fsincos.cc sincos_approximation().
-fn sincos_approximation(neg: bool, r: Float128, quotient: u64, status: &mut SoftFloatStatus) -> floatx80 {
+fn sincos_approximation(
+    neg: bool,
+    r: Float128,
+    quotient: u64,
+    status: &mut SoftFloatStatus,
+) -> floatx80 {
     let mut neg = neg;
     let result;
 
@@ -150,7 +155,11 @@ fn sincos_approximation(neg: bool, r: Float128, quotient: u64, status: &mut Soft
     if (quotient & 2) != 0 {
         neg = !neg;
     }
-    if neg { floatx80_chs(ext) } else { ext }
+    if neg {
+        floatx80_chs(ext)
+    } else {
+        ext
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -189,7 +198,11 @@ pub(crate) enum FtanResult {
 
 /// Compute sin or cos of a floatx80 value using Float128 polynomial evaluation.
 /// Ported from Bochs fsincos.cc fsincos().
-pub(crate) fn fsincos_single(a: floatx80, want_sin: bool, status: &mut SoftFloatStatus) -> SinCosResult {
+pub(crate) fn fsincos_single(
+    a: floatx80,
+    want_sin: bool,
+    status: &mut SoftFloatStatus,
+) -> SinCosResult {
     // Handle unsupported encodings
     if extf80_is_unsupported(a) {
         softfloat_raiseFlags(status, FLAG_INVALID);
@@ -282,13 +295,20 @@ pub(crate) fn fsincos_single(a: floatx80, want_sin: bool, status: &mut SoftFloat
     // Argument reduction completed — use Float128 for approximation
     let r = norm_round_pack_to_f128(false, z_exp_final - 0x10, a_sig0, a_sig1, status);
 
-    if a_sign { q = -q; }
+    if a_sign {
+        q = -q;
+    }
     let q_unsigned = q as u64;
 
     if want_sin {
         SinCosResult::Value(sincos_approximation(z_sign, r, q_unsigned, status))
     } else {
-        SinCosResult::Value(sincos_approximation(z_sign, r, q_unsigned.wrapping_add(1), status))
+        SinCosResult::Value(sincos_approximation(
+            z_sign,
+            r,
+            q_unsigned.wrapping_add(1),
+            status,
+        ))
     }
 }
 
@@ -371,7 +391,9 @@ pub(crate) fn fsincos_both(a: floatx80, status: &mut SoftFloatStatus) -> SinCosB
     // Argument reduction completed
     let r = norm_round_pack_to_f128(false, z_exp_final - 0x10, a_sig0, a_sig1, status);
 
-    if a_sign { q = -q; }
+    if a_sign {
+        q = -q;
+    }
     let q_unsigned = q as u64;
 
     let sin_result = sincos_approximation(z_sign, r, q_unsigned, status);

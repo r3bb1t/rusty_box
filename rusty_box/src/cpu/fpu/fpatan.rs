@@ -2,12 +2,12 @@
 //! FPATAN implementation: compute atan2(y, x).
 //! Ported from Bochs cpu/fpu/fpatan.cc using Float128 polynomial evaluation.
 
+use super::super::softfloat3e::extf80_addsub::{extf80_add, extf80_sub};
+use super::super::softfloat3e::f128::*;
+use super::super::softfloat3e::internals::*;
 use super::super::softfloat3e::softfloat::*;
 use super::super::softfloat3e::softfloat_types::floatx80;
 use super::super::softfloat3e::specialize::*;
-use super::super::softfloat3e::internals::*;
-use super::super::softfloat3e::extf80_addsub::{extf80_add, extf80_sub};
-use super::super::softfloat3e::f128::*;
 use super::poly::*;
 
 /// PI as floatx80 (for fpatan)
@@ -64,18 +64,30 @@ pub(crate) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus
         // b is infinity
         if a_exp == 0x7FFF {
             if (a_sig << 1) != 0 {
-                return softfloat_propagate_nan_extf80(a.sign_exp, a_sig, b.sign_exp, b_sig, status);
+                return softfloat_propagate_nan_extf80(
+                    a.sign_exp, a_sig, b.sign_exp, b_sig, status,
+                );
             }
             // Both infinity
             if a_sign {
                 // atan2(y, -inf) = 3pi/4 * sign(y)
                 return round_pack_to_extf80(
-                    b_sign, FLOATX80_3PI4_EXP as i32, FLOAT_3PI4_HI, FLOAT_3PI4_LO, 80, status,
+                    b_sign,
+                    FLOATX80_3PI4_EXP as i32,
+                    FLOAT_3PI4_HI,
+                    FLOAT_3PI4_LO,
+                    80,
+                    status,
                 );
             } else {
                 // atan2(y, +inf) = pi/4 * sign(y)
                 return round_pack_to_extf80(
-                    b_sign, FLOATX80_PI4_EXP as i32, FLOAT_PI_HI, FLOAT_PI_LO, 80, status,
+                    b_sign,
+                    FLOATX80_PI4_EXP as i32,
+                    FLOAT_PI_HI,
+                    FLOAT_PI_LO,
+                    80,
+                    status,
                 );
             }
         }
@@ -84,7 +96,12 @@ pub(crate) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus
         }
         // atan2(inf, finite) = pi/2 * sign(y)
         return round_pack_to_extf80(
-            b_sign, FLOATX80_PI2_EXP as i32, FLOAT_PI_HI, FLOAT_PI_LO, 80, status,
+            b_sign,
+            FLOATX80_PI2_EXP as i32,
+            FLOAT_PI_HI,
+            FLOAT_PI_LO,
+            80,
+            status,
         );
     }
 
@@ -100,7 +117,12 @@ pub(crate) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus
         if a_sign {
             // atan2(y, -inf) = pi * sign(y)
             return round_pack_to_extf80(
-                b_sign, FLOATX80_PI_EXP as i32, FLOAT_PI_HI, FLOAT_PI_LO, 80, status,
+                b_sign,
+                FLOATX80_PI_EXP as i32,
+                FLOAT_PI_HI,
+                FLOAT_PI_LO,
+                80,
+                status,
             );
         } else {
             // atan2(y, +inf) = 0 * sign(y)
@@ -117,7 +139,12 @@ pub(crate) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus
             // atan2(0, x): if x negative -> pi, if x positive -> 0
             if a_sign {
                 return round_pack_to_extf80(
-                    b_sign, FLOATX80_PI_EXP as i32, FLOAT_PI_HI, FLOAT_PI_LO, 80, status,
+                    b_sign,
+                    FLOATX80_PI_EXP as i32,
+                    FLOAT_PI_HI,
+                    FLOAT_PI_LO,
+                    80,
+                    status,
                 );
             } else {
                 return pack_floatx80(b_sign, 0, 0);
@@ -133,7 +160,12 @@ pub(crate) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus
         if a_sig == 0 {
             // atan2(y, 0) = pi/2 * sign(y)
             return round_pack_to_extf80(
-                b_sign, FLOATX80_PI2_EXP as i32, FLOAT_PI_HI, FLOAT_PI_LO, 80, status,
+                b_sign,
+                FLOATX80_PI2_EXP as i32,
+                FLOAT_PI_HI,
+                FLOAT_PI_LO,
+                80,
+                status,
             );
         }
         softfloat_raiseFlags(status, FLAG_DENORMAL);
@@ -158,9 +190,23 @@ pub(crate) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus
     // |a| = |b| ==> return PI/4
     if a_sig == b_sig && a_exp == b_exp {
         if a_sign {
-            return round_pack_to_extf80(b_sign, FLOATX80_3PI4_EXP as i32, FLOAT_3PI4_HI, FLOAT_3PI4_LO, 80, status);
+            return round_pack_to_extf80(
+                b_sign,
+                FLOATX80_3PI4_EXP as i32,
+                FLOAT_3PI4_HI,
+                FLOAT_3PI4_LO,
+                80,
+                status,
+            );
         } else {
-            return round_pack_to_extf80(b_sign, FLOATX80_PI4_EXP as i32, FLOAT_PI_HI, FLOAT_PI_LO, 80, status);
+            return round_pack_to_extf80(
+                b_sign,
+                FLOATX80_PI4_EXP as i32,
+                FLOAT_PI_HI,
+                FLOAT_PI_LO,
+                80,
+                status,
+            );
         }
     }
 
@@ -191,7 +237,9 @@ pub(crate) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus
         add_pi4 = true;
 
         x = poly_atan(x, status);
-        if add_pi4 { x = f128_add(x, FLOAT128_PI4, status); }
+        if add_pi4 {
+            x = f128_add(x, FLOAT128_PI4, status);
+        }
     } else if x_exp >= 0x3FFD {
         // 1/4 < x < 3/4: arctan(x) = arctan((x*sqrt(3)-1)/(x+sqrt(3))) + pi/6
         let t1 = f128_mul(x, FLOAT128_SQRT3, status);
@@ -201,7 +249,9 @@ pub(crate) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus
         add_pi6 = true;
 
         x = poly_atan(x, status);
-        if add_pi6 { x = f128_add(x, FLOAT128_PI6, status); }
+        if add_pi6 {
+            x = f128_add(x, FLOAT128_PI6, status);
+        }
     } else {
         // |x| < 1/4: direct polynomial
         x = poly_atan(x, status);

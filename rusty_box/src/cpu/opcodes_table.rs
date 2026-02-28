@@ -852,34 +852,22 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
     }
 
     // Wrapper functions for flag manipulation
-    fn cli_wrapper<I: BxCpuIdTrait>(
-        cpu: &mut BxCpuC<'_, I>,
-        _instr: &Instruction,
-    ) -> Result<()> {
+    fn cli_wrapper<I: BxCpuIdTrait>(cpu: &mut BxCpuC<'_, I>, _instr: &Instruction) -> Result<()> {
         cpu.eflags.remove(super::eflags::EFlags::IF_);
         Ok(())
     }
 
-    fn sti_wrapper<I: BxCpuIdTrait>(
-        cpu: &mut BxCpuC<'_, I>,
-        _instr: &Instruction,
-    ) -> Result<()> {
+    fn sti_wrapper<I: BxCpuIdTrait>(cpu: &mut BxCpuC<'_, I>, _instr: &Instruction) -> Result<()> {
         cpu.eflags.insert(super::eflags::EFlags::IF_);
         Ok(())
     }
 
-    fn cld_wrapper<I: BxCpuIdTrait>(
-        cpu: &mut BxCpuC<'_, I>,
-        _instr: &Instruction,
-    ) -> Result<()> {
+    fn cld_wrapper<I: BxCpuIdTrait>(cpu: &mut BxCpuC<'_, I>, _instr: &Instruction) -> Result<()> {
         cpu.eflags.remove(super::eflags::EFlags::DF);
         Ok(())
     }
 
-    fn std_wrapper<I: BxCpuIdTrait>(
-        cpu: &mut BxCpuC<'_, I>,
-        _instr: &Instruction,
-    ) -> Result<()> {
+    fn std_wrapper<I: BxCpuIdTrait>(cpu: &mut BxCpuC<'_, I>, _instr: &Instruction) -> Result<()> {
         cpu.eflags.insert(super::eflags::EFlags::DF);
         Ok(())
     }
@@ -1185,8 +1173,8 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             opflags: OpFlags::empty(),
         }),
         Opcode::MovEbIb => Some(BxOpcodeEntry {
-            execute1: mov_eb_ib_m_wrapper,       // Memory form: MOV [mem], imm8
-            execute2: Some(mov_rb_ib_wrapper),   // Register form: MOV r8, imm8
+            execute1: mov_eb_ib_m_wrapper,     // Memory form: MOV [mem], imm8
+            execute2: Some(mov_rb_ib_wrapper), // Register form: MOV r8, imm8
             opflags: OpFlags::empty(),
         }),
 
@@ -1202,8 +1190,8 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
             opflags: OpFlags::empty(),
         }),
         Opcode::MovEwIw => Some(BxOpcodeEntry {
-            execute1: mov_ew_iw_m_wrapper,       // Memory form: MOV [mem], imm16
-            execute2: Some(mov_rw_iw_wrapper),   // Register form: MOV r16, imm16
+            execute1: mov_ew_iw_m_wrapper,     // Memory form: MOV [mem], imm16
+            execute2: Some(mov_rw_iw_wrapper), // Register form: MOV r16, imm16
             opflags: OpFlags::empty(),
         }),
 
@@ -1501,9 +1489,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
 
         // NOP
         Opcode::Nop => Some(BxOpcodeEntry {
-            execute1: |_cpu: &mut BxCpuC<'_, I>, _instr: &Instruction| -> Result<()> {
-                Ok(())
-            },
+            execute1: |_cpu: &mut BxCpuC<'_, I>, _instr: &Instruction| -> Result<()> { Ok(()) },
             execute2: None,
             opflags: OpFlags::empty(),
         }),

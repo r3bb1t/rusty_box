@@ -14,20 +14,22 @@ use super::super::cpu::BxCpuC;
 use super::super::cpuid::BxCpuIdTrait;
 use super::super::decoder::Instruction;
 use super::super::i387::*;
+use super::super::softfloat3e::extf80_scale::extf80_scale;
+use super::super::softfloat3e::i32_to_extf80::i32_to_extf80;
+use super::super::softfloat3e::internals::*;
 use super::super::softfloat3e::softfloat::*;
 use super::super::softfloat3e::softfloat_types::floatx80;
 use super::super::softfloat3e::specialize::*;
-use super::super::softfloat3e::internals::*;
-use super::super::softfloat3e::extf80_scale::extf80_scale;
-use super::super::softfloat3e::i32_to_extf80::i32_to_extf80;
 use super::ferr::i387cw_to_softfloat_status_word;
 
 // Import implementation functions from split files
-use super::fprem::do_fprem;
 use super::f2xm1::f2xm1_impl;
-use super::fyl2x::{fyl2x_impl, fyl2xp1_impl};
 use super::fpatan::fpatan_impl;
-use super::fsincos::{fsincos_single, fsincos_both, ftan_impl, SinCosResult, SinCosBothResult, FtanResult};
+use super::fprem::do_fprem;
+use super::fsincos::{
+    fsincos_both, fsincos_single, ftan_impl, FtanResult, SinCosBothResult, SinCosResult,
+};
+use super::fyl2x::{fyl2x_impl, fyl2xp1_impl};
 
 /// 1.0 in floatx80 format
 const FLOATX80_ONE: floatx80 = floatx80 {
@@ -98,9 +100,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status = i387cw_to_softfloat_status_word(
-            self.the_i387.get_control_word() | FPU_PR_80_BITS,
-        );
+        let mut status =
+            i387cw_to_softfloat_status_word(self.the_i387.get_control_word() | FPU_PR_80_BITS);
 
         let a = self.read_fpu_reg(0);
         let (significand, exponent) = extf80_extract_impl(a, &mut status);
@@ -149,9 +150,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 if flags != 0 {
                     cc = FPU_SW_C2;
                 } else {
-                    if quotient & 1 != 0 { cc |= FPU_SW_C1; }
-                    if quotient & 2 != 0 { cc |= FPU_SW_C3; }
-                    if quotient & 4 != 0 { cc |= FPU_SW_C0; }
+                    if quotient & 1 != 0 {
+                        cc |= FPU_SW_C1;
+                    }
+                    if quotient & 2 != 0 {
+                        cc |= FPU_SW_C3;
+                    }
+                    if quotient & 4 != 0 {
+                        cc |= FPU_SW_C0;
+                    }
                 }
                 self.setcc(cc);
             }
@@ -186,7 +193,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut result = floatx80::default();
         let mut quotient: u64 = 0;
 
-        let flags = do_fprem(a, b, &mut result, &mut quotient, ROUND_NEAR_EVEN, &mut status);
+        let flags = do_fprem(
+            a,
+            b,
+            &mut result,
+            &mut quotient,
+            ROUND_NEAR_EVEN,
+            &mut status,
+        );
 
         if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
             if flags >= 0 {
@@ -194,9 +208,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 if flags != 0 {
                     cc = FPU_SW_C2;
                 } else {
-                    if quotient & 1 != 0 { cc |= FPU_SW_C1; }
-                    if quotient & 2 != 0 { cc |= FPU_SW_C3; }
-                    if quotient & 4 != 0 { cc |= FPU_SW_C0; }
+                    if quotient & 1 != 0 {
+                        cc |= FPU_SW_C1;
+                    }
+                    if quotient & 2 != 0 {
+                        cc |= FPU_SW_C3;
+                    }
+                    if quotient & 4 != 0 {
+                        cc |= FPU_SW_C0;
+                    }
                 }
                 self.setcc(cc);
             }
@@ -223,9 +243,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status = i387cw_to_softfloat_status_word(
-            self.the_i387.get_control_word() | FPU_PR_80_BITS,
-        );
+        let mut status =
+            i387cw_to_softfloat_status_word(self.the_i387.get_control_word() | FPU_PR_80_BITS);
 
         let a = self.read_fpu_reg(0);
         let result = f2xm1_impl(a, &mut status);
@@ -254,9 +273,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status = i387cw_to_softfloat_status_word(
-            self.the_i387.get_control_word() | FPU_PR_80_BITS,
-        );
+        let mut status =
+            i387cw_to_softfloat_status_word(self.the_i387.get_control_word() | FPU_PR_80_BITS);
 
         let a = self.read_fpu_reg(0); // x
         let b = self.read_fpu_reg(1); // y
@@ -287,9 +305,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status = i387cw_to_softfloat_status_word(
-            self.the_i387.get_control_word() | FPU_PR_80_BITS,
-        );
+        let mut status =
+            i387cw_to_softfloat_status_word(self.the_i387.get_control_word() | FPU_PR_80_BITS);
 
         let a = self.read_fpu_reg(0); // x
         let b = self.read_fpu_reg(1); // y
@@ -333,9 +350,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status = i387cw_to_softfloat_status_word(
-            self.the_i387.get_control_word() | FPU_PR_80_BITS,
-        );
+        let mut status =
+            i387cw_to_softfloat_status_word(self.the_i387.get_control_word() | FPU_PR_80_BITS);
 
         let a = self.read_fpu_reg(0);
         let tan_result = ftan_impl(a, &mut status);
@@ -382,9 +398,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status = i387cw_to_softfloat_status_word(
-            self.the_i387.get_control_word() | FPU_PR_80_BITS,
-        );
+        let mut status =
+            i387cw_to_softfloat_status_word(self.the_i387.get_control_word() | FPU_PR_80_BITS);
 
         let a = self.read_fpu_reg(0); // x (divisor)
         let b = self.read_fpu_reg(1); // y (dividend)
@@ -417,9 +432,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status = i387cw_to_softfloat_status_word(
-            self.the_i387.get_control_word() | FPU_PR_80_BITS,
-        );
+        let mut status =
+            i387cw_to_softfloat_status_word(self.the_i387.get_control_word() | FPU_PR_80_BITS);
 
         let a = self.read_fpu_reg(0);
         let result = fsincos_single(a, true /* want_sin */, &mut status);
@@ -457,9 +471,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status = i387cw_to_softfloat_status_word(
-            self.the_i387.get_control_word() | FPU_PR_80_BITS,
-        );
+        let mut status =
+            i387cw_to_softfloat_status_word(self.the_i387.get_control_word() | FPU_PR_80_BITS);
 
         let a = self.read_fpu_reg(0);
         let result = fsincos_single(a, false /* want_cos */, &mut status);
@@ -510,9 +523,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status = i387cw_to_softfloat_status_word(
-            self.the_i387.get_control_word() | FPU_PR_80_BITS,
-        );
+        let mut status =
+            i387cw_to_softfloat_status_word(self.the_i387.get_control_word() | FPU_PR_80_BITS);
 
         let a = self.read_fpu_reg(0);
         let result = fsincos_both(a, &mut status);

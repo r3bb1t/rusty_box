@@ -41,7 +41,7 @@ impl BxMemC<'_> {
             memory_handlers,
 
             pci_enabled,
-            bios_write_enabled: true,  // Enable BIOS ROM writes (for flash ROM and early stack)
+            bios_write_enabled: true, // Enable BIOS ROM writes (for flash ROM and early stack)
             bios_rom_addr: 0xffff0000,
             flash_type: 0,
             flash_status: 0x80,
@@ -71,7 +71,8 @@ impl<'c> BxMemC<'c> {
         // Match Bochs: 0xE0000-0xFFFFF is ALWAYS BIOS ROM, plus addresses >= bios_rom_addr
         // This is critical for rombios32 which is linked to run at 0xE0000!
         // From cpp_orig/bochs/memory/misc_mem.cc:674 and memory-bochs.h:40
-        let is_bios = (a20_addr >= 0xE0000 && a20_addr < 0x100000) || a20_addr >= self.bios_rom_addr.into();
+        let is_bios =
+            (a20_addr >= 0xE0000 && a20_addr < 0x100000) || a20_addr >= self.bios_rom_addr.into();
 
         #[cfg(feature = "bx_phy_address_long")]
         let is_bios = if a20_addr > 0xffffffffu64 {
@@ -154,7 +155,8 @@ impl<'c> BxMemC<'c> {
                     if offset_from_bios < rom.len() - bios_load_offset {
                         let check_offset = bios_load_offset + offset_from_bios;
                         if check_offset + 0xFF0 < rom.len() {
-                            let reset_vector_bytes = &rom[check_offset + 0xFF0..check_offset + 0xFF0 + 16];
+                            let reset_vector_bytes =
+                                &rom[check_offset + 0xFF0..check_offset + 0xFF0 + 16];
                             tracing::info!(
                                 "get_host_mem_addr: a20_addr={:#x}, mapped={:#x}, final_offset={:#x}, offset_from_bios={:#x}, reset_vector_bytes={:02x?}",
                                 a20_addr, mapped, final_offset, offset_from_bios, reset_vector_bytes
@@ -162,9 +164,7 @@ impl<'c> BxMemC<'c> {
                         }
                     }
                 }
-                Ok(Some(
-                    &mut self.inherited_memory_stub.rom()[final_offset..],
-                ))
+                Ok(Some(&mut self.inherited_memory_stub.rom()[final_offset..]))
             } else if cfg!(feature = "bx_support_pci")
                 && self.pci_enabled
                 && (a20_addr >= 0x000c0000 && a20_addr < 0x00100000)
@@ -200,9 +200,7 @@ impl<'c> BxMemC<'c> {
                     // Matching C++ line 739: return (Bit8u *) &BX_MEM_THIS rom[BIOS_MAP_LAST128K(a20addr)];
                     let mapped = bios_map_last128k(a20_addr.try_into()?);
                     let final_offset = mapped;
-                    Ok(Some(
-                        &mut self.inherited_memory_stub.rom()[final_offset..],
-                    ))
+                    Ok(Some(&mut self.inherited_memory_stub.rom()[final_offset..]))
                 } else {
                     // non-last-128K ROM (C0000-DFFFF)
                     // Matching C++ line 742: return((Bit8u *) &BX_MEM_THIS rom[(a20addr & EXROM_MASK) + BIOSROMSZ]);
@@ -221,14 +219,14 @@ impl<'c> BxMemC<'c> {
             } else if a20_addr >= 0xFEE00000 && a20_addr < 0xFEF00000 {
                 // APIC MMIO at 0xFEE00000-0xFEEFFFFF: return zeroed scratch (not 0xFF bogus)
                 let offset = ((a20_addr - 0xFEE00000) & 0xFFF) as usize;
-                Ok(Some(&mut self.inherited_memory_stub.apic_scratch()[offset..]))
+                Ok(Some(
+                    &mut self.inherited_memory_stub.apic_scratch()[offset..],
+                ))
             } else if is_bios {
                 // BIOS ROM access - use bios_map_last128k to map 0xE0000-0xFFFFF
                 // to the last 128KB of the 4MB ROM array (matching Bochs misc_mem.cc:721)
                 let rom_offset = bios_map_last128k(a20_addr.try_into()?);
-                Ok(Some(
-                    &mut self.inherited_memory_stub.rom()[rom_offset..],
-                ))
+                Ok(Some(&mut self.inherited_memory_stub.rom()[rom_offset..]))
             } else {
                 // Out of bounds - return bogus memory (matches Bochs)
                 // From cpp_orig/bochs/memory/misc_mem.cc:746-758
@@ -241,7 +239,9 @@ impl<'c> BxMemC<'c> {
             if a20_addr >= 0xFEE00000 && a20_addr < 0xFEF00000 {
                 // APIC MMIO at 0xFEE00000-0xFEEFFFFF: accept writes into scratch buffer
                 let offset = ((a20_addr - 0xFEE00000) & 0xFFF) as usize;
-                return Ok(Some(&mut self.inherited_memory_stub.apic_scratch()[offset..]));
+                return Ok(Some(
+                    &mut self.inherited_memory_stub.apic_scratch()[offset..],
+                ));
             }
             if (a20_addr >= self.inherited_memory_stub.len.try_into()?) || is_bios {
                 // Error, requested addr is out of bounds or writing to BIOS ROM
@@ -294,7 +294,10 @@ impl BxMemC<'_> {
             }
             tracing::info!(
                 "BIOS loaded: rom_address={:#x}, offset={:#x}, size={}, bios_rom_addr={:#x}",
-                rom_address, offset, size, self.bios_rom_addr
+                rom_address,
+                offset,
+                size,
+                self.bios_rom_addr
             );
             // Verify first few bytes are not all zeros
             if size > 16 {
@@ -318,7 +321,8 @@ impl BxMemC<'_> {
             if size > 0x155A {
                 let check_offset = offset + 0x155A;
                 if check_offset < rom.len() {
-                    let check_bytes = &rom[check_offset..check_offset + 16.min(rom.len() - check_offset)];
+                    let check_bytes =
+                        &rom[check_offset..check_offset + 16.min(rom.len() - check_offset)];
                     tracing::info!(
                         "BIOS bytes at offset {:#x} (corresponds to 0xFF55A): {:02x?}",
                         check_offset,
@@ -330,7 +334,8 @@ impl BxMemC<'_> {
             if size > 0x1FFF0 {
                 let check_offset = offset + 0x1FFF0;
                 if check_offset < rom.len() {
-                    let check_bytes = &rom[check_offset..check_offset + 16.min(rom.len() - check_offset)];
+                    let check_bytes =
+                        &rom[check_offset..check_offset + 16.min(rom.len() - check_offset)];
                     tracing::info!(
                         "BIOS bytes at offset {:#x} (corresponds to 0xFFFF0, reset vector): {:02x?}",
                         check_offset,
@@ -378,7 +383,10 @@ impl BxMemC<'_> {
         // === ROM Content Verification Logging ===
         tracing::info!(
             "ROM loaded: type={}, address={:#x}, size={:#x}, offset={:#x}",
-            rom_type, rom_address, size, offset
+            rom_type,
+            rom_address,
+            size,
+            offset
         );
 
         // Log first 16 bytes of ROM
@@ -483,7 +491,7 @@ impl BxMemC<'_> {
         len: usize,
         data: &mut [u8],
     ) -> Result<()> {
-        use crate::memory::memory_rusty_box::{bios_map_last128k, BIOSROMSZ, MemoryAreaT};
+        use crate::memory::memory_rusty_box::{bios_map_last128k, MemoryAreaT, BIOSROMSZ};
 
         let mut a20_addr = self.a20_addr(addr);
 
@@ -497,14 +505,22 @@ impl BxMemC<'_> {
 
         // Match Bochs: 0xE0000-0xFFFFF is ALWAYS BIOS ROM, plus addresses >= bios_rom_addr
         // This is critical for rombios32 which is linked to run at 0xE0000!
-        let is_bios = (a20_addr >= 0xE0000 && a20_addr < 0x100000) || a20_addr >= self.bios_rom_addr.into();
+        let is_bios =
+            (a20_addr >= 0xE0000 && a20_addr < 0x100000) || a20_addr >= self.bios_rom_addr.into();
         #[cfg(feature = "bx_phy_address_long")]
-        let is_bios = if a20_addr > 0xffffffffu64 { false } else { is_bios };
+        let is_bios = if a20_addr > 0xffffffffu64 {
+            false
+        } else {
+            is_bios
+        };
 
         let cpu_opt = cpus.first();
 
         // Check SMRAM first (before memory handlers)
-        if cpu_opt.is_some() && (a20_addr >= 0x000a0000 && a20_addr < 0x000c0000) && self.smram_available {
+        if cpu_opt.is_some()
+            && (a20_addr >= 0x000a0000 && a20_addr < 0x000c0000)
+            && self.smram_available
+        {
             if let Some(cpu) = cpu_opt {
                 if self.smram_enable || (cpu.smm_mode() && !self.smram_restricted) {
                     // Write to SMRAM - delegate to stub for regular memory write
@@ -558,7 +574,12 @@ impl BxMemC<'_> {
                     } else {
                         format!("{:02x?}...", &data[0..8])
                     };
-                    tracing::trace!("💾 LOW_RAM_WRITE: addr={:#x}, len={}, data={}", a20_addr, len, data_preview);
+                    tracing::trace!(
+                        "💾 LOW_RAM_WRITE: addr={:#x}, len={}, data={}",
+                        a20_addr,
+                        len,
+                        data_preview
+                    );
                 }
                 // Regular RAM - delegate to stub
                 return self.inherited_memory_stub.write_physical_page(
@@ -596,7 +617,11 @@ impl BxMemC<'_> {
 
                     if self.memory_type[area][1] {
                         // Writes to ShadowRAM
-                        tracing::debug!("Writing to ShadowRAM: address {:#x}, data {:02x}", a20_addr, data[i]);
+                        tracing::debug!(
+                            "Writing to ShadowRAM: address {:#x}, data {:02x}",
+                            a20_addr,
+                            data[i]
+                        );
                         let vector = self.get_vector(cpus, a20_addr)?;
                         if let Some(byte) = vector.get_mut(0) {
                             *byte = data[i];
@@ -612,14 +637,22 @@ impl BxMemC<'_> {
                         }
                     } else {
                         // Writes to ROM, Inhibit
-                        tracing::debug!("Write to ROM ignored: address {:#x}, data {:02x}", a20_addr, data[i]);
+                        tracing::debug!(
+                            "Write to ROM ignored: address {:#x}, data {:02x}",
+                            a20_addr,
+                            data[i]
+                        );
                     }
                 }
 
                 #[cfg(not(feature = "bx_support_pci"))]
                 {
                     // Without PCI support, ignore writes to ROM
-                    tracing::debug!("Write to ROM ignored (no PCI): address {:#x}, data {:02x}", a20_addr, data[i]);
+                    tracing::debug!(
+                        "Write to ROM ignored (no PCI): address {:#x}, data {:02x}",
+                        a20_addr,
+                        data[i]
+                    );
                 }
 
                 a20_addr += 1;
@@ -641,7 +674,10 @@ impl BxMemC<'_> {
             return Ok(());
         } else {
             // Access outside limits of physical memory, ignore (from memory.cc:172-174)
-            tracing::trace!("Write outside the limits of physical memory ({:#x}) (ignore)", a20_addr);
+            tracing::trace!(
+                "Write outside the limits of physical memory ({:#x}) (ignore)",
+                a20_addr
+            );
             return Ok(());
         }
     }
@@ -655,7 +691,9 @@ impl BxMemC<'_> {
         len: usize,
         data: &mut [u8],
     ) -> Result<()> {
-        use crate::memory::memory_rusty_box::{bios_map_last128k, BIOSROMSZ, EXROM_MASK, MemoryAreaT};
+        use crate::memory::memory_rusty_box::{
+            bios_map_last128k, MemoryAreaT, BIOSROMSZ, EXROM_MASK,
+        };
 
         let mut a20_addr = self.a20_addr(addr);
 
@@ -666,19 +704,32 @@ impl BxMemC<'_> {
 
         // Match Bochs: 0xE0000-0xFFFFF is ALWAYS BIOS ROM, plus addresses >= bios_rom_addr
         // This is critical for rombios32 which is linked to run at 0xE0000!
-        let is_bios = (a20_addr >= 0xE0000 && a20_addr < 0x100000) || a20_addr >= self.bios_rom_addr.into();
+        let is_bios =
+            (a20_addr >= 0xE0000 && a20_addr < 0x100000) || a20_addr >= self.bios_rom_addr.into();
         #[cfg(feature = "bx_phy_address_long")]
-        let is_bios = if a20_addr > 0xffffffffu64 { false } else { is_bios };
+        let is_bios = if a20_addr > 0xffffffffu64 {
+            false
+        } else {
+            is_bios
+        };
 
         let cpu_opt = cpus.first();
 
         // Check SMRAM first (before memory handlers)
-        if cpu_opt.is_some() && (a20_addr >= 0x000a0000 && a20_addr < 0x000c0000) && self.smram_available {
+        if cpu_opt.is_some()
+            && (a20_addr >= 0x000a0000 && a20_addr < 0x000c0000)
+            && self.smram_available
+        {
             if let Some(cpu) = cpu_opt {
                 if self.smram_enable || (cpu.smm_mode() && !self.smram_restricted) {
                     // Read from SMRAM - delegate to stub for regular memory read
-                    return self.inherited_memory_stub
-                        .read_physical_page(cpus, addr, len, data, self.a20_mask);
+                    return self.inherited_memory_stub.read_physical_page(
+                        cpus,
+                        addr,
+                        len,
+                        data,
+                        self.a20_mask,
+                    );
                 }
             }
         }
@@ -725,8 +776,13 @@ impl BxMemC<'_> {
             // All of data is within limits of physical memory
             if a20_addr < 0x000a0000 || a20_addr >= 0x00100000 {
                 // Regular RAM - delegate to stub
-                return self.inherited_memory_stub
-                    .read_physical_page(cpus, addr, len, data, self.a20_mask);
+                return self.inherited_memory_stub.read_physical_page(
+                    cpus,
+                    addr,
+                    len,
+                    data,
+                    self.a20_mask,
+                );
             }
 
             // Address must be in range 0x000A0000..0x000FFFFF
@@ -763,7 +819,8 @@ impl BxMemC<'_> {
                             }
                         } else {
                             // Expansion ROM (0xC0000-0xDFFFF)
-                            let rom_offset = ((a20_addr & EXROM_MASK as u64) + BIOSROMSZ as u64) as usize;
+                            let rom_offset =
+                                ((a20_addr & EXROM_MASK as u64) + BIOSROMSZ as u64) as usize;
                             let rom = self.inherited_memory_stub.rom();
                             if let Some(byte) = rom.get(rom_offset) {
                                 data[i] = *byte;
@@ -797,7 +854,8 @@ impl BxMemC<'_> {
                         }
                     } else {
                         // Expansion ROM (0xC0000-0xDFFFF)
-                        let rom_offset = ((a20_addr & EXROM_MASK as u64) + BIOSROMSZ as u64) as usize;
+                        let rom_offset =
+                            ((a20_addr & EXROM_MASK as u64) + BIOSROMSZ as u64) as usize;
                         let rom = self.inherited_memory_stub.rom();
                         if let Some(byte) = rom.get(rom_offset) {
                             data[i] = *byte;

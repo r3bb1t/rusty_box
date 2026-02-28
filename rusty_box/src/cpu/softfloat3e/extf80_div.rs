@@ -2,11 +2,11 @@
 //! ExtFloat80 division.
 //! Ported from Berkeley SoftFloat 3e: extF80_div.c
 
-use super::softfloat_types::*;
-use super::softfloat::*;
-use super::primitives::*;
-use super::specialize::*;
 use super::internals::*;
+use super::primitives::*;
+use super::softfloat::*;
+use super::softfloat_types::*;
+use super::specialize::*;
 
 pub fn extf80_div(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
     // Handle unsupported encodings
@@ -26,11 +26,15 @@ pub fn extf80_div(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> flo
     // NaN/Inf handling
     if exp_a == 0x7FFF {
         if (sig_a & 0x7FFFFFFFFFFFFFFF) != 0 {
-            return softfloat_propagate_nan_extf80(a.sign_exp, a.signif, b.sign_exp, b.signif, status);
+            return softfloat_propagate_nan_extf80(
+                a.sign_exp, a.signif, b.sign_exp, b.signif, status,
+            );
         }
         if exp_b == 0x7FFF {
             if (sig_b & 0x7FFFFFFFFFFFFFFF) != 0 {
-                return softfloat_propagate_nan_extf80(a.sign_exp, a.signif, b.sign_exp, b.signif, status);
+                return softfloat_propagate_nan_extf80(
+                    a.sign_exp, a.signif, b.sign_exp, b.signif, status,
+                );
             }
             // Inf / Inf = invalid
             softfloat_raiseFlags(status, FLAG_INVALID);
@@ -43,7 +47,9 @@ pub fn extf80_div(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> flo
     }
     if exp_b == 0x7FFF {
         if (sig_b & 0x7FFFFFFFFFFFFFFF) != 0 {
-            return softfloat_propagate_nan_extf80(a.sign_exp, a.signif, b.sign_exp, b.signif, status);
+            return softfloat_propagate_nan_extf80(
+                a.sign_exp, a.signif, b.sign_exp, b.signif, status,
+            );
         }
         if exp_a == 0 && sig_a != 0 {
             softfloat_raiseFlags(status, FLAG_DENORMAL);
@@ -146,7 +152,11 @@ pub fn extf80_div(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> flo
     let sig_z_extra = (q as u64) << 41;
 
     round_pack_to_extf80(
-        sign_z, exp_z, sig_z, sig_z_extra,
-        softfloat_extF80_roundingPrecision(status), status,
+        sign_z,
+        exp_z,
+        sig_z,
+        sig_z_extra,
+        softfloat_extF80_roundingPrecision(status),
+        status,
     )
 }

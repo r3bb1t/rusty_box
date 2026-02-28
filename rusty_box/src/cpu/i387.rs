@@ -60,25 +60,25 @@ pub const FPU_EX_STACK_UNDERFLOW: u16 = 0x0041;
 #[derive(Debug, Default)]
 pub struct I387 {
     /// Control word (u16, was incorrectly u64)
-    pub cwd: u16,
+    pub(crate) cwd: u16,
     /// Status word
-    pub swd: u16,
+    pub(crate) swd: u16,
     /// Tag word
-    pub twd: u16,
+    pub(crate) twd: u16,
     /// Last instruction opcode
-    pub foo: u16,
+    pub(crate) foo: u16,
 
-    pub fip: BxAddress,
-    pub fdp: BxAddress,
-    pub fcs: u16,
-    pub fds: u16,
+    pub(crate) fip: BxAddress,
+    pub(crate) fdp: BxAddress,
+    pub(crate) fcs: u16,
+    pub(crate) fds: u16,
 
-    pub st_space: [floatx80; 8],
+    pub(crate) st_space: [floatx80; 8],
 
-    pub tos: u8,
-    pub align1: u8,
-    pub align2: u8,
-    pub align3: u8,
+    pub(crate) tos: u8,
+    pub(crate) align1: u8,
+    pub(crate) align2: u8,
+    pub(crate) align3: u8,
 }
 
 impl I387 {

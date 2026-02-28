@@ -6,7 +6,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{Instruction, BxSegregs},
+    decoder::{BxSegregs, Instruction},
     eflags::EFlags,
 };
 
@@ -117,7 +117,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // VM, VIP, VIF are unaffected
         const CHANGE_MASK: u32 = 0x00244FD5;
 
-        self.eflags = EFlags::from_bits_retain((self.eflags.bits() & !CHANGE_MASK) | ((flags as u32) & CHANGE_MASK));
+        self.eflags = EFlags::from_bits_retain(
+            (self.eflags.bits() & !CHANGE_MASK) | ((flags as u32) & CHANGE_MASK),
+        );
         tracing::trace!("POPFQ: {:#018x}", flags);
     }
 }

@@ -15,7 +15,12 @@ mod test_call_decode {
                 println!("Expected: 2 bytes");
 
                 // Verify length is 2
-                assert_eq!(instr.ilen(), 2, "CALL EAX should be 2 bytes, got {}", instr.ilen());
+                assert_eq!(
+                    instr.ilen(),
+                    2,
+                    "CALL EAX should be 2 bytes, got {}",
+                    instr.ilen()
+                );
             }
             Err(e) => {
                 panic!("Decode failed: {:?}", e);

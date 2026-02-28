@@ -30,7 +30,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 /// Matches BX_CPU_C::DAS
 /// The algorithm for DAS is fashioned after the pseudo code in the
 /// Pentium Processor Family Developer's Manual, volume 3.
-pub fn DAS<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, _instr: &Instruction) -> Result<(), crate::cpu::CpuError> {
+pub fn DAS<I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<I>,
+    _instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
     /* DAS effect the following flags: A,C,S,Z,P */
 
     let tmp_al = cpu.al();

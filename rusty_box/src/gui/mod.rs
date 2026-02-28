@@ -1,9 +1,9 @@
-mod siminterface;
 pub mod gui_trait;
 pub mod keymap;
 pub mod nogui;
-pub mod vga_font;
 pub mod shared_display;
+mod siminterface;
+pub mod vga_font;
 
 pub use gui_trait::{BxGui, DisplayMode, VgaTextModeInfo};
 pub use keymap::{ascii_to_scancode, char_to_scancode_sequence, needs_shift};

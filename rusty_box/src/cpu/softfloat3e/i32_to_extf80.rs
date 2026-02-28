@@ -2,13 +2,16 @@
 //! i32 to extFloat80 conversion.
 //! Ported from Berkeley SoftFloat 3e: i32_to_extF80.c
 
-use super::softfloat_types::*;
-use super::primitives::*;
 use super::internals::*;
+use super::primitives::*;
+use super::softfloat_types::*;
 
 pub fn i32_to_extf80(a: i32) -> floatx80 {
     if a == 0 {
-        return floatx80 { signif: 0, sign_exp: 0 };
+        return floatx80 {
+            signif: 0,
+            sign_exp: 0,
+        };
     }
 
     let sign = a < 0;

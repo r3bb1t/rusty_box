@@ -17,17 +17,17 @@ pub enum DisplayMode {
 /// VGA text mode information
 #[derive(Debug, Clone)]
 pub struct VgaTextModeInfo {
-    pub start_address: u16,
-    pub cs_start: u8,
-    pub cs_end: u8,
-    pub line_offset: u16,
-    pub line_compare: u16,
-    pub h_panning: u8,
-    pub v_panning: u8,
-    pub line_graphics: bool,
-    pub split_hpanning: bool,
-    pub blink_flags: u8,
-    pub actl_palette: [u8; 16],
+    pub(crate) start_address: u16,
+    pub(crate) cs_start: u8,
+    pub(crate) cs_end: u8,
+    pub(crate) line_offset: u16,
+    pub(crate) line_compare: u16,
+    pub(crate) h_panning: u8,
+    pub(crate) v_panning: u8,
+    pub(crate) line_graphics: bool,
+    pub(crate) split_hpanning: bool,
+    pub(crate) blink_flags: u8,
+    pub(crate) actl_palette: [u8; 16],
 }
 
 /// GUI trait - all GUI implementations must provide these methods
@@ -63,14 +63,7 @@ pub trait BxGui: Send + Sync {
     fn palette_change(&mut self, index: u8, red: u8, green: u8, blue: u8) -> bool;
 
     /// Update display dimensions
-    fn dimension_update(
-        &mut self,
-        x: u32,
-        y: u32,
-        fheight: u32,
-        fwidth: u32,
-        bpp: u32,
-    );
+    fn dimension_update(&mut self, x: u32, y: u32, fheight: u32, fwidth: u32, bpp: u32);
 
     /// Create a bitmap
     fn create_bitmap(&mut self, bmap: &[u8], xdim: u32, ydim: u32) -> u32;

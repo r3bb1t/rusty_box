@@ -4,10 +4,10 @@ use thiserror::Error;
 pub type DecodeResult<T> = core::result::Result<T, DecodeError>;
 
 /// Decoder error type
-/// 
+///
 /// This enum represents all possible errors that can occur during instruction decoding.
 /// It includes both decoder-specific errors, buffer underflow errors, and common conversion errors.
-/// 
+///
 /// Error mapping from C++ source:
 /// - `return(-1)` in C++ → Buffer underflow errors (PrefixBufferUnderflow, OpcodeBufferUnderflow, etc.)
 /// - `return(BX_IA_ERROR)` or `ia_opcode = BX_IA_ERROR` → Decoder(BxDecodeError::BxIllegalOpcode)
@@ -17,67 +17,67 @@ pub type DecodeResult<T> = core::result::Result<T, DecodeError>;
 #[derive(Error, Debug)]
 pub enum DecodeError {
     /// Bochs decoder-specific errors
-    /// 
+    ///
     /// Maps to: `BxDecodeError` enum values from `assign_srcs()` and other validation functions.
     /// These include illegal opcode, illegal VEX/EVEX/XOP conditions, illegal lock prefix, etc.
     #[error(transparent)]
     Decoder(#[from] BxDecodeError),
-    
+
     /// Integer conversion error - occurs when a value cannot be converted to the target type
-    /// 
+    ///
     /// This error is automatically converted from `TryFromIntError` when using `try_into()`
     /// or `TryFrom` conversions. For example, when converting a u32 to u8 and the value
     /// is too large.
     #[error("integer conversion failed: value out of range for target type")]
     IntegerConversion(#[from] core::num::TryFromIntError),
-    
+
     /// Buffer underflow: not enough bytes to complete instruction decoding
-    /// 
+    ///
     /// Maps to: `return(-1)` when `bytes.is_empty()` or general buffer exhaustion.
     /// C++ equivalent: `if (remainingInPage == 0) return(-1)` at function start.
     #[error("buffer underflow: not enough bytes to complete instruction decoding")]
     BufferUnderflow,
-    
+
     /// Buffer underflow while parsing prefixes
-    /// 
+    ///
     /// Maps to: `return(-1)` in prefix parsing switch cases when `remain == 0`.
     /// C++ locations: fetchdecode64.cc lines 1396, 1403, 1412, 1421, 1429, 1437, 1444, 1451
     ///                 fetchdecode32.cc lines 1924, 1932, 1938, 1946, 1955, 1962, 1968
     #[error("buffer underflow while parsing prefixes")]
     PrefixBufferUnderflow,
-    
+
     /// Buffer underflow while parsing opcode
-    /// 
+    ///
     /// Maps to: `return(-1)` when parsing 0x0F escape or 0F 38/3A opcodes and `remain == 0`.
     /// C++ locations: fetchdecode64.cc lines 1403, 1463
     ///                 fetchdecode32.cc lines 1924, 1980
     #[error("buffer underflow while parsing opcode")]
     OpcodeBufferUnderflow,
-    
+
     /// Buffer underflow while parsing ModRM byte
-    /// 
+    ///
     /// Maps to: `return(-1)` when `parseModrm64/32()` returns NULL (remain == 0 before ModRM).
     /// C++ locations: fetchdecode64.cc lines 742, 830, 987, 1100, 1150, 1188, 1255, 1295
     ///                 fetchdecode32.cc lines 866, 1431, 1572, 1670, 1707, 1740, 1791, 1824
     #[error("buffer underflow while parsing ModRM byte")]
     ModRmBufferUnderflow,
-    
+
     /// Buffer underflow while parsing SIB byte
-    /// 
+    ///
     /// Maps to: `return(-1)` when `decodeModrm64/32()` needs SIB but `remain == 0`.
     /// C++ locations: fetchdecode64.cc line 682 (decodeModrm64)
     ///                 fetchdecode32.cc line 752 (decodeModrm32)
     #[error("buffer underflow while parsing SIB byte")]
     SibBufferUnderflow,
-    
+
     /// Buffer underflow while parsing displacement
-    /// 
+    ///
     /// Maps to: `return(-1)` when `decodeModrm64/32()` needs displacement but insufficient bytes.
     /// C++ locations: fetchdecode64.cc lines 714, 728 (decodeModrm64)
     ///                 fetchdecode32.cc lines 738, 775, 804, 824, 840, 851 (decodeModrm32)
     #[error("buffer underflow while parsing displacement")]
     DisplacementBufferUnderflow,
-    
+
     /// Buffer underflow while parsing immediate value
     ///
     /// Maps to: `return(-1)` from `fetchImmediate()` when insufficient bytes for immediate.
@@ -104,19 +104,35 @@ impl core::fmt::Display for BxDecodeError {
             BxDecodeError::BxIllegalOpcode => write!(f, "illegal opcode"),
             BxDecodeError::BxIllegalLockPrefix => write!(f, "illegal lock prefix"),
             BxDecodeError::BxIllegalVexXopVvv => write!(f, "illegal VEX/XOP VVV"),
-            BxDecodeError::BxIllegalVexXopWithSsePrefix => write!(f, "illegal VEX/XOP with SSE prefix"),
-            BxDecodeError::BxIllegalVexXopWithRexPrefix => write!(f, "illegal VEX/XOP with REX prefix"),
+            BxDecodeError::BxIllegalVexXopWithSsePrefix => {
+                write!(f, "illegal VEX/XOP with SSE prefix")
+            }
+            BxDecodeError::BxIllegalVexXopWithRexPrefix => {
+                write!(f, "illegal VEX/XOP with REX prefix")
+            }
             BxDecodeError::BxIllegalVexXopOpcodeMap => write!(f, "illegal VEX/XOP opcode map"),
             BxDecodeError::BxVexXopBadVectorLength => write!(f, "VEX/XOP bad vector length"),
-            BxDecodeError::BxVsibForbiddenAsize16 => write!(f, "VSIB forbidden in 16-bit address size"),
+            BxDecodeError::BxVsibForbiddenAsize16 => {
+                write!(f, "VSIB forbidden in 16-bit address size")
+            }
             BxDecodeError::BxVsibIllegalSibIndex => write!(f, "VSIB illegal SIB index"),
             BxDecodeError::BxEvexReservedBitsSet => write!(f, "EVEX reserved bits set"),
-            BxDecodeError::BxEvexIllegalEvexBSaeNotAllowed => write!(f, "EVEX illegal B/SAE not allowed"),
-            BxDecodeError::BxEvexIllegalEvexBBroadcastNotAllowed => write!(f, "EVEX illegal broadcast not allowed"),
+            BxDecodeError::BxEvexIllegalEvexBSaeNotAllowed => {
+                write!(f, "EVEX illegal B/SAE not allowed")
+            }
+            BxDecodeError::BxEvexIllegalEvexBBroadcastNotAllowed => {
+                write!(f, "EVEX illegal broadcast not allowed")
+            }
             BxDecodeError::BxEvexIllegalKmaskRegister => write!(f, "EVEX illegal k-mask register"),
-            BxDecodeError::BxEvexIllegalZeroMaskingWithKmaskSrcOrDest => write!(f, "EVEX illegal zero masking with k-mask src/dest"),
-            BxDecodeError::BxEvexIllegalZeroMaskingVsib => write!(f, "EVEX illegal zero masking VSIB"),
-            BxDecodeError::BxEvexIllegalZeroMaskingMemoryDestination => write!(f, "EVEX illegal zero masking memory destination"),
+            BxDecodeError::BxEvexIllegalZeroMaskingWithKmaskSrcOrDest => {
+                write!(f, "EVEX illegal zero masking with k-mask src/dest")
+            }
+            BxDecodeError::BxEvexIllegalZeroMaskingVsib => {
+                write!(f, "EVEX illegal zero masking VSIB")
+            }
+            BxDecodeError::BxEvexIllegalZeroMaskingMemoryDestination => {
+                write!(f, "EVEX illegal zero masking memory destination")
+            }
             BxDecodeError::BxAmxIllegalTileRegister => write!(f, "AMX illegal tile register"),
             BxDecodeError::Other => write!(f, "other decode error"),
             BxDecodeError::NoMoreLen => write!(f, "no more length available"),

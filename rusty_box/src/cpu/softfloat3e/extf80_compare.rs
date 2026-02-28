@@ -2,10 +2,10 @@
 //! ExtFloat80 comparison.
 //! Ported from Berkeley SoftFloat 3e: extF80_compare.c
 
-use super::softfloat_types::*;
-use super::softfloat::*;
-use super::internals::*;
 use super::extf80_class::extf80_class;
+use super::internals::*;
+use super::softfloat::*;
+use super::softfloat_types::*;
 
 /// Compare two extFloat80 values.
 /// Returns RELATION_EQUAL, RELATION_LESS, RELATION_GREATER, or RELATION_UNORDERED.
@@ -46,10 +46,18 @@ pub fn extf80_compare(a: floatx80, b: floatx80, quiet: bool, status: &mut SoftFl
         if b_class == SoftFloatClass::Zero {
             return RELATION_EQUAL;
         }
-        return if sign_b { RELATION_GREATER } else { RELATION_LESS };
+        return if sign_b {
+            RELATION_GREATER
+        } else {
+            RELATION_LESS
+        };
     }
     if b_class == SoftFloatClass::Zero || sign_a != sign_b {
-        return if sign_a { RELATION_LESS } else { RELATION_GREATER };
+        return if sign_a {
+            RELATION_LESS
+        } else {
+            RELATION_GREATER
+        };
     }
 
     // Normalize denormals
@@ -74,5 +82,9 @@ pub fn extf80_compare(a: floatx80, b: floatx80, quiet: bool, status: &mut SoftFl
         (exp_a < exp_b) || ((exp_a == exp_b) && (sig_a < sig_b))
     };
 
-    if less_than { RELATION_LESS } else { RELATION_GREATER }
+    if less_than {
+        RELATION_LESS
+    } else {
+        RELATION_GREATER
+    }
 }

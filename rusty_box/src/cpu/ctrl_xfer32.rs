@@ -5,7 +5,7 @@
 use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
-    decoder::{Instruction, BxSegregs},
+    decoder::{BxSegregs, Instruction},
     eflags::EFlags,
     error::{CpuError, Result},
     segment_ctrl_pro::parse_selector,
@@ -23,9 +23,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Original: Bochs cpu/ctrl_xfer32.cc:33-37
         let limit = self.get_segment_limit(BxSegregs::Cs);
         if new_eip > limit {
-            tracing::error!("branch_near32: offset {:#010x} outside of CS limits {:#010x}", new_eip, limit);
+            tracing::error!(
+                "branch_near32: offset {:#010x} outside of CS limits {:#010x}",
+                new_eip,
+                limit
+            );
             // Original: Bochs calls exception(BX_GP_EXCEPTION, 0) which doesn't return
-            return Err(CpuError::BadVector { vector: Exception::Gp });
+            return Err(CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         // Matching C++ line 39: EIP = new_EIP;
@@ -106,7 +112,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let new_eip = self.read_virtual_dword(seg, eaddr)?;
         self.branch_near32(new_eip)?;
-        tracing::trace!("JMP m32: [{:?}:{:#010x}] -> EIP = {:#010x}", seg, eaddr, new_eip);
+        tracing::trace!(
+            "JMP m32: [{:?}:{:#010x}] -> EIP = {:#010x}",
+            seg,
+            eaddr,
+            new_eip
+        );
         Ok(())
     }
 
@@ -161,7 +172,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.push_32(eip)?;
         self.branch_near32(new_eip)?;
-        tracing::trace!("CALL m32: [{:?}:{:#010x}] -> EIP = {:#010x}, ret = {:#010x}", seg, eaddr, new_eip, eip);
+        tracing::trace!(
+            "CALL m32: [{:?}:{:#010x}] -> EIP = {:#010x}, ret = {:#010x}",
+            seg,
+            eaddr,
+            new_eip,
+            eip
+        );
         Ok(())
     }
 
@@ -200,7 +217,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let sp = self.get_gpr16(4);
             self.set_gpr16(4, sp.wrapping_add(imm16));
         }
-        tracing::trace!("RET near32 imm16: EIP = {:#010x}, pop = {}", return_eip, imm16);
+        tracing::trace!(
+            "RET near32 imm16: EIP = {:#010x}, pop = {}",
+            return_eip,
+            imm16
+        );
         Ok(())
     }
 
@@ -209,7 +230,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// JO rel32 - Jump if overflow (OF=1)
-    pub fn jo_jd(&mut self, instr: &Instruction)  -> Result<()> {
+    pub fn jo_jd(&mut self, instr: &Instruction) -> Result<()> {
         if self.get_of() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -221,7 +242,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JNO rel32 - Jump if not overflow (OF=0)
-    pub fn jno_jd(&mut self, instr: &Instruction)  -> Result<()> {
+    pub fn jno_jd(&mut self, instr: &Instruction) -> Result<()> {
         if !self.get_of() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -233,7 +254,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JB/JC/JNAE rel32 - Jump if below/carry (CF=1)
-    pub fn jb_jd(&mut self, instr: &Instruction)  -> Result<()> {
+    pub fn jb_jd(&mut self, instr: &Instruction) -> Result<()> {
         if self.get_cf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -245,7 +266,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JNB/JNC/JAE rel32 - Jump if not below/no carry (CF=0)
-    pub fn jnb_jd(&mut self, instr: &Instruction)  -> Result<()> {
+    pub fn jnb_jd(&mut self, instr: &Instruction) -> Result<()> {
         if !self.get_cf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -257,7 +278,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JZ/JE rel32 - Jump if zero/equal (ZF=1)
-    pub fn jz_jd(&mut self, instr: &Instruction)  -> Result<()> {
+    pub fn jz_jd(&mut self, instr: &Instruction) -> Result<()> {
         if self.get_zf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -269,7 +290,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JNZ/JNE rel32 - Jump if not zero/not equal (ZF=0)
-    pub fn jnz_jd(&mut self, instr: &Instruction)  -> Result<()> {
+    pub fn jnz_jd(&mut self, instr: &Instruction) -> Result<()> {
         if !self.get_zf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -281,7 +302,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JBE/JNA rel32 - Jump if below or equal (CF=1 or ZF=1)
-    pub fn jbe_jd(&mut self, instr: &Instruction)  -> Result<()> {
+    pub fn jbe_jd(&mut self, instr: &Instruction) -> Result<()> {
         if self.get_cf() || self.get_zf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -293,7 +314,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JNBE/JA rel32 - Jump if not below or equal/above (CF=0 and ZF=0)
-    pub fn jnbe_jd(&mut self, instr: &Instruction)  -> Result<()> {
+    pub fn jnbe_jd(&mut self, instr: &Instruction) -> Result<()> {
         if !self.get_cf() && !self.get_zf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -305,7 +326,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JS rel32 - Jump if sign (SF=1)
-    pub fn js_jd(&mut self, instr: &Instruction)  -> Result<()> {
+    pub fn js_jd(&mut self, instr: &Instruction) -> Result<()> {
         if self.get_sf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -317,7 +338,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JNS rel32 - Jump if not sign (SF=0)
-    pub fn jns_jd(&mut self, instr: &Instruction)  -> Result<()> {
+    pub fn jns_jd(&mut self, instr: &Instruction) -> Result<()> {
         if !self.get_sf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -329,7 +350,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JP/JPE rel32 - Jump if parity/parity even (PF=1)
-    pub fn jp_jd(&mut self, instr: &Instruction)  -> Result<()> {
+    pub fn jp_jd(&mut self, instr: &Instruction) -> Result<()> {
         if self.get_pf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -341,7 +362,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JNP/JPO rel32 - Jump if no parity/parity odd (PF=0)
-    pub fn jnp_jd(&mut self, instr: &Instruction)  -> Result<()> {
+    pub fn jnp_jd(&mut self, instr: &Instruction) -> Result<()> {
         if !self.get_pf() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -353,7 +374,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JL/JNGE rel32 - Jump if less (SF != OF)
-    pub fn jl_jd(&mut self, instr: &Instruction)  -> Result<()> {
+    pub fn jl_jd(&mut self, instr: &Instruction) -> Result<()> {
         if self.get_sf() != self.get_of() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -365,7 +386,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JNL/JGE rel32 - Jump if not less/greater or equal (SF == OF)
-    pub fn jnl_jd(&mut self, instr: &Instruction)  -> Result<()> {
+    pub fn jnl_jd(&mut self, instr: &Instruction) -> Result<()> {
         if self.get_sf() == self.get_of() {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -377,7 +398,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JLE/JNG rel32 - Jump if less or equal (ZF=1 or SF!=OF)
-    pub fn jle_jd(&mut self, instr: &Instruction)  -> Result<()> {
+    pub fn jle_jd(&mut self, instr: &Instruction) -> Result<()> {
         if self.get_zf() || (self.get_sf() != self.get_of()) {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -389,7 +410,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JNLE/JG rel32 - Jump if not less or equal/greater (ZF=0 and SF==OF)
-    pub fn jnle_jd(&mut self, instr: &Instruction)  -> Result<()> {
+    pub fn jnle_jd(&mut self, instr: &Instruction) -> Result<()> {
         if !self.get_zf() && (self.get_sf() == self.get_of()) {
             let disp = instr.id() as i32;
             let eip = self.eip();
@@ -488,7 +509,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Far jump 32-bit (matching C++ jmp_far32)
     /// Called by JMP32_Ap and JMP32_Ep
-    pub(super) fn jmp_far32(&mut self, _instr: &Instruction, cs_raw: u16, disp32: u32) -> Result<()> {
+    pub(super) fn jmp_far32(
+        &mut self,
+        _instr: &Instruction,
+        cs_raw: u16,
+        disp32: u32,
+    ) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
@@ -500,8 +526,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Real mode
             let limit = self.get_segment_limit(BxSegregs::Cs);
             if disp32 > limit {
-                tracing::error!("jmp_far32: offset {:#010x} outside of CS limits {:#010x}", disp32, limit);
-                return Err(CpuError::BadVector { vector: Exception::Gp });
+                tracing::error!(
+                    "jmp_far32: offset {:#010x} outside of CS limits {:#010x}",
+                    disp32,
+                    limit
+                );
+                return Err(CpuError::BadVector {
+                    vector: Exception::Gp,
+                });
             }
 
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
@@ -526,8 +558,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Real mode
             let limit = self.get_segment_limit(BxSegregs::Cs);
             if disp32 > limit {
-                tracing::error!("call_far32: offset {:#010x} outside of CS limits {:#010x}", disp32, limit);
-                return Err(CpuError::BadVector { vector: Exception::Gp });
+                tracing::error!(
+                    "call_far32: offset {:#010x} outside of CS limits {:#010x}",
+                    disp32,
+                    limit
+                );
+                return Err(CpuError::BadVector {
+                    vector: Exception::Gp,
+                });
             }
 
             // Push return address (CS:EIP)
@@ -562,12 +600,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn call32_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Resolve effective address
         let eaddr = self.resolve_addr32(instr);
-        
+
         // Read offset and segment from memory
         let seg = BxSegregs::from(instr.seg());
         let op1_32 = self.read_virtual_dword(seg, eaddr)?;
-        let cs_raw = self.read_virtual_word(seg, (eaddr.wrapping_add(4)) & (if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF }))?;
-        
+        let cs_raw = self.read_virtual_word(
+            seg,
+            (eaddr.wrapping_add(4))
+                & (if instr.as32_l() == 0 {
+                    0xFFFF
+                } else {
+                    0xFFFFFFFF
+                }),
+        )?;
+
         self.call_far32(instr, cs_raw, op1_32)
     }
 
@@ -588,12 +634,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn jmp32_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Resolve effective address
         let eaddr = self.resolve_addr32(instr);
-        
+
         // Read offset and segment from memory
         let seg = BxSegregs::from(instr.seg());
         let op1_32 = self.read_virtual_dword(seg, eaddr)?;
-        let cs_raw = self.read_virtual_word(seg, (eaddr.wrapping_add(4)) & (if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF }))?;
-        
+        let cs_raw = self.read_virtual_word(
+            seg,
+            (eaddr.wrapping_add(4))
+                & (if instr.as32_l() == 0 {
+                    0xFFFF
+                } else {
+                    0xFFFFFFFF
+                }),
+        )?;
+
         self.jmp_far32(instr, cs_raw, op1_32)
     }
 
@@ -618,8 +672,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Check CS limit
             let limit = self.get_segment_limit(BxSegregs::Cs);
             if eip > limit {
-                tracing::error!("retfar32: offset {:#010x} outside of CS limits {:#010x}", eip, limit);
-                return Err(CpuError::BadVector { vector: Exception::Gp });
+                tracing::error!(
+                    "retfar32: offset {:#010x} outside of CS limits {:#010x}",
+                    eip,
+                    limit
+                );
+                return Err(CpuError::BadVector {
+                    vector: Exception::Gp,
+                });
             }
 
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
@@ -650,8 +710,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Check CS limit
             let limit = self.get_segment_limit(BxSegregs::Cs);
             if eip > limit {
-                tracing::error!("retfar32_iw: offset {:#010x} outside of CS limits {:#010x}", eip, limit);
-                return Err(CpuError::BadVector { vector: Exception::Gp });
+                tracing::error!(
+                    "retfar32_iw: offset {:#010x} outside of CS limits {:#010x}",
+                    eip,
+                    limit
+                );
+                return Err(CpuError::BadVector {
+                    vector: Exception::Gp,
+                });
             }
 
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);

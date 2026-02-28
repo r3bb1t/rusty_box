@@ -5,7 +5,7 @@
 use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
-    decoder::{Instruction, BxSegregs},
+    decoder::{BxSegregs, Instruction},
     error::{CpuError, Result},
 };
 
@@ -20,14 +20,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Check CS limit (matching C++ line 32-36)
         let limit = self.get_segment_limit(BxSegregs::Cs);
         if (new_ip as u32) > limit {
-            tracing::error!("branch_near16: offset {:#06x} outside of CS limits {:#010x}", new_ip, limit);
+            tracing::error!(
+                "branch_near16: offset {:#06x} outside of CS limits {:#010x}",
+                new_ip,
+                limit
+            );
             // In C++, this calls exception(BX_GP_EXCEPTION, 0) which doesn't return
             // In Rust, we should handle this properly
         }
-        
+
         // Matching C++ line 38: EIP = new_IP;
         self.set_eip(new_ip as u32);
-        
+
         // Matching C++ lines 40-43: Set STOP_TRACE when handlers chaining is disabled
         // In C++, this is conditional on BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS == 0
         // Since we don't have handlers chaining yet, we always set it
@@ -88,7 +92,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// JMP r/m16 - Unified dispatch (checks mod_c0)
     pub fn jmp_ew(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.jmp_ew_r(instr); Ok(()) } else { self.jmp_ew_m(instr) }
+        if instr.mod_c0() {
+            self.jmp_ew_r(instr);
+            Ok(())
+        } else {
+            self.jmp_ew_m(instr)
+        }
     }
 
     // =========================================================================
@@ -99,10 +108,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn call_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         let disp = instr.iw() as i16;
         let ip = self.get_ip();
-        
+
         // Push return address
         self.push_16(ip)?;
-        
+
         let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
         self.branch_near16(new_ip);
         tracing::trace!("CALL rel16: IP = {:#06x}, ret = {:#06x}", new_ip, ip);
@@ -132,13 +141,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.push_16(ip)?;
         self.branch_near16(new_ip);
-        tracing::trace!("CALL m16: [{:?}:{:#x}] -> IP = {:#06x}, ret = {:#06x}", seg, eaddr, new_ip, ip);
+        tracing::trace!(
+            "CALL m16: [{:?}:{:#x}] -> IP = {:#06x}, ret = {:#06x}",
+            seg,
+            eaddr,
+            new_ip,
+            ip
+        );
         Ok(())
     }
 
     /// CALL r/m16 - Unified dispatch (checks mod_c0)
     pub fn call_ew(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.call_ew_r(instr) } else { self.call_ew_m(instr) }
+        if instr.mod_c0() {
+            self.call_ew_r(instr)
+        } else {
+            self.call_ew_m(instr)
+        }
     }
 
     // =========================================================================
@@ -157,9 +176,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn ret_near16_iw(&mut self, instr: &Instruction) -> super::Result<()> {
         let return_ip = self.pop_16()?;
         let imm16 = instr.iw();
-        
+
         self.branch_near16(return_ip);
-        
+
         // Pop additional bytes from stack
         let ss_d_b = self.get_segment_d_b(BxSegregs::Ss);
         if ss_d_b {
@@ -540,12 +559,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// LOOP rel8 - Decrement CX/ECX, jump if not zero
     pub fn loop16_jb(&mut self, instr: &Instruction) {
         let as32l = instr.as32_l() != 0;
-        
+
         if as32l {
             let ecx = self.get_gpr32(1);
             let count = ecx.wrapping_sub(1);
             self.set_gpr32(1, count);
-            
+
             if count != 0 {
                 let disp = instr.ib() as i8;
                 let ip = self.get_ip();
@@ -557,7 +576,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let cx = self.get_gpr16(1);
             let count = cx.wrapping_sub(1);
             self.set_gpr16(1, count);
-            
+
             if count != 0 {
                 let disp = instr.ib() as i8;
                 let ip = self.get_ip();
@@ -571,12 +590,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// LOOPE/LOOPZ rel8 - Decrement CX/ECX, jump if not zero and ZF=1
     pub fn loope16_jb(&mut self, instr: &Instruction) {
         let as32l = instr.as32_l() != 0;
-        
+
         if as32l {
             let ecx = self.get_gpr32(1);
             let count = ecx.wrapping_sub(1);
             self.set_gpr32(1, count);
-            
+
             if count != 0 && self.get_zf() {
                 let disp = instr.ib() as i8;
                 let ip = self.get_ip();
@@ -587,7 +606,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let cx = self.get_gpr16(1);
             let count = cx.wrapping_sub(1);
             self.set_gpr16(1, count);
-            
+
             if count != 0 && self.get_zf() {
                 let disp = instr.ib() as i8;
                 let ip = self.get_ip();
@@ -600,12 +619,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// LOOPNE/LOOPNZ rel8 - Decrement CX/ECX, jump if not zero and ZF=0
     pub fn loopne16_jb(&mut self, instr: &Instruction) {
         let as32l = instr.as32_l() != 0;
-        
+
         if as32l {
             let ecx = self.get_gpr32(1);
             let count = ecx.wrapping_sub(1);
             self.set_gpr32(1, count);
-            
+
             if count != 0 && !self.get_zf() {
                 let disp = instr.ib() as i8;
                 let ip = self.get_ip();
@@ -616,7 +635,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let cx = self.get_gpr16(1);
             let count = cx.wrapping_sub(1);
             self.set_gpr16(1, count);
-            
+
             if count != 0 && !self.get_zf() {
                 let disp = instr.ib() as i8;
                 let ip = self.get_ip();
@@ -629,8 +648,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// JCXZ rel8 - Jump if CX is zero
     pub fn jcxz_jb(&mut self, instr: &Instruction) {
         let as32l = instr.as32_l() != 0;
-        let count = if as32l { self.get_gpr32(1) } else { self.get_gpr16(1) as u32 };
-        
+        let count = if as32l {
+            self.get_gpr32(1)
+        } else {
+            self.get_gpr16(1) as u32
+        };
+
         if count == 0 {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
@@ -644,7 +667,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ ctrl_xfer16.cc:592-613 JCXZ_Jb
     pub fn jecxz_jb(&mut self, instr: &Instruction) {
         let ecx = self.get_gpr32(1);
-        
+
         if ecx == 0 {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
@@ -667,7 +690,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Far jump 16-bit (matching C++ jmp_far16)
     /// Called by JMP16_Ap and JMP16_Ep
-    pub(super) fn jmp_far16(&mut self, _instr: &Instruction, cs_raw: u16, disp16: u16) -> Result<()> {
+    pub(super) fn jmp_far16(
+        &mut self,
+        _instr: &Instruction,
+        cs_raw: u16,
+        disp16: u16,
+    ) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
@@ -679,8 +707,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Real mode
             let limit = self.get_segment_limit(BxSegregs::Cs);
             if (disp16 as u32) > limit {
-                tracing::error!("jmp_far16: offset {:#06x} outside of CS limits {:#010x}", disp16, limit);
-                return Err(CpuError::BadVector { vector: Exception::Gp });
+                tracing::error!(
+                    "jmp_far16: offset {:#06x} outside of CS limits {:#010x}",
+                    disp16,
+                    limit
+                );
+                return Err(CpuError::BadVector {
+                    vector: Exception::Gp,
+                });
             }
 
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
@@ -705,8 +739,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Real mode
             let limit = self.get_segment_limit(BxSegregs::Cs);
             if (disp16 as u32) > limit {
-                tracing::error!("call_far16: offset {:#06x} outside of CS limits {:#010x}", disp16, limit);
-                return Err(CpuError::BadVector { vector: Exception::Gp });
+                tracing::error!(
+                    "call_far16: offset {:#06x} outside of CS limits {:#010x}",
+                    disp16,
+                    limit
+                );
+                return Err(CpuError::BadVector {
+                    vector: Exception::Gp,
+                });
             }
 
             // Push return address (CS:IP)
@@ -741,13 +781,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn call16_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Resolve effective address
         let eaddr = self.resolve_addr32(instr);
-        
+
         // Read offset and segment from memory
         let seg = BxSegregs::from(instr.seg());
         let op1_16 = self.read_virtual_word(seg, eaddr)?;
-        let asize_mask = if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF };
+        let asize_mask = if instr.as32_l() == 0 {
+            0xFFFF
+        } else {
+            0xFFFFFFFF
+        };
         let cs_raw = self.read_virtual_word(seg, (eaddr.wrapping_add(2)) & asize_mask)?;
-        
+
         self.call_far16(instr, cs_raw, op1_16)
     }
 
@@ -768,13 +812,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn jmp16_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Resolve effective address
         let eaddr = self.resolve_addr32(instr);
-        
+
         // Read offset and segment from memory
         let seg = BxSegregs::from(instr.seg());
         let op1_16 = self.read_virtual_word(seg, eaddr)?;
-        let asize_mask = if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF };
+        let asize_mask = if instr.as32_l() == 0 {
+            0xFFFF
+        } else {
+            0xFFFFFFFF
+        };
         let cs_raw = self.read_virtual_word(seg, (eaddr.wrapping_add(2)) & asize_mask)?;
-        
+
         self.jmp_far16(instr, cs_raw, op1_16)
     }
 
@@ -799,8 +847,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Check CS limit
             let limit = self.get_segment_limit(BxSegregs::Cs);
             if (ip as u32) > limit {
-                tracing::error!("retfar16: offset {:#06x} outside of CS limits {:#010x}", ip, limit);
-                return Err(CpuError::BadVector { vector: Exception::Gp });
+                tracing::error!(
+                    "retfar16: offset {:#06x} outside of CS limits {:#010x}",
+                    ip,
+                    limit
+                );
+                return Err(CpuError::BadVector {
+                    vector: Exception::Gp,
+                });
             }
 
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
@@ -831,8 +885,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Check CS limit
             let limit = self.get_segment_limit(BxSegregs::Cs);
             if (ip as u32) > limit {
-                tracing::error!("retfar16_iw: offset {:#06x} outside of CS limits {:#010x}", ip, limit);
-                return Err(CpuError::BadVector { vector: Exception::Gp });
+                tracing::error!(
+                    "retfar16_iw: offset {:#06x} outside of CS limits {:#010x}",
+                    ip,
+                    limit
+                );
+                return Err(CpuError::BadVector {
+                    vector: Exception::Gp,
+                });
             }
 
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);

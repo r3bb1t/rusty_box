@@ -12,9 +12,9 @@ use rusty_box::{
 };
 
 // Embedded binary assets (compiled into the WASM)
-const BIOS_DATA: &[u8] = include_bytes!("../../cpp_orig/bochs/bios/BIOS-bochs-latest");
-const VGA_BIOS_DATA: &[u8] = include_bytes!("../../cpp_orig/bochs/bios/VGABIOS-lgpl-latest.bin");
-const DISK_DATA: &[u8] = include_bytes!("../../dlxlinux/hd10meg.img");
+const BIOS_DATA: &[u8] = include_bytes!("../../../cpp_orig/bochs/bios/BIOS-bochs-latest");
+const VGA_BIOS_DATA: &[u8] = include_bytes!("../../../cpp_orig/bochs/bios/VGABIOS-lgpl-latest.bin");
+const DISK_DATA: &[u8] = include_bytes!("../../../dlxlinux/hd10meg.img");
 
 /// DLX Linux disk geometry
 const DLX_CYLINDERS: u16 = 306;
@@ -113,14 +113,7 @@ impl WasmEmulatorApp {
             emu.configure_boot_sequence(2, 0, 0);
 
             // Attach disk from embedded data (rusty_box compiled without std)
-            emu.attach_disk_data(
-                0,
-                0,
-                DISK_DATA.to_vec(),
-                DLX_CYLINDERS,
-                DLX_HEADS,
-                DLX_SPT,
-            );
+            emu.attach_disk_data(0, 0, DISK_DATA.to_vec(), DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
 
             // Initialize (no GUI needed — we render via update_display)
             emu.init_gui(0, &[])?;
@@ -154,30 +147,21 @@ impl WasmEmulatorApp {
         visuals.faint_bg_color = BG_SURFACE;
 
         visuals.widgets.noninteractive.bg_fill = BG_SURFACE;
-        visuals.widgets.noninteractive.fg_stroke =
-            egui::Stroke::new(1.0, TEXT_DIM);
-        visuals.widgets.noninteractive.bg_stroke =
-            egui::Stroke::new(0.5, BORDER_SUBTLE);
+        visuals.widgets.noninteractive.fg_stroke = egui::Stroke::new(1.0, TEXT_DIM);
+        visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(0.5, BORDER_SUBTLE);
 
         visuals.widgets.inactive.bg_fill = BG_SURFACE;
-        visuals.widgets.inactive.fg_stroke =
-            egui::Stroke::new(1.0, TEXT_PRIMARY);
-        visuals.widgets.inactive.bg_stroke =
-            egui::Stroke::new(0.5, BORDER_SUBTLE);
+        visuals.widgets.inactive.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
+        visuals.widgets.inactive.bg_stroke = egui::Stroke::new(0.5, BORDER_SUBTLE);
 
-        visuals.widgets.hovered.bg_fill =
-            egui::Color32::from_rgb(0x2E, 0x2E, 0x4A);
-        visuals.widgets.hovered.fg_stroke =
-            egui::Stroke::new(1.0, TEXT_PRIMARY);
+        visuals.widgets.hovered.bg_fill = egui::Color32::from_rgb(0x2E, 0x2E, 0x4A);
+        visuals.widgets.hovered.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
 
         visuals.widgets.active.bg_fill = ACCENT_BLUE;
-        visuals.widgets.active.fg_stroke =
-            egui::Stroke::new(1.0, TEXT_PRIMARY);
+        visuals.widgets.active.fg_stroke = egui::Stroke::new(1.0, TEXT_PRIMARY);
 
-        visuals.selection.bg_fill =
-            egui::Color32::from_rgba_premultiplied(0x56, 0x9C, 0xD6, 0x40);
-        visuals.selection.stroke =
-            egui::Stroke::new(1.0, ACCENT_BLUE);
+        visuals.selection.bg_fill = egui::Color32::from_rgba_premultiplied(0x56, 0x9C, 0xD6, 0x40);
+        visuals.selection.stroke = egui::Stroke::new(1.0, ACCENT_BLUE);
 
         ctx.set_visuals(visuals);
     }
@@ -187,8 +171,7 @@ impl WasmEmulatorApp {
         let now = web_time::Instant::now();
         let elapsed = now.duration_since(self.last_ips_time);
         if elapsed.as_secs_f64() >= 1.0 {
-            let delta_instr =
-                self.total_instructions - self.last_ips_instructions;
+            let delta_instr = self.total_instructions - self.last_ips_instructions;
             self.cached_ips = delta_instr as f64 / elapsed.as_secs_f64();
             self.last_ips_time = now;
             self.last_ips_instructions = self.total_instructions;
@@ -224,9 +207,7 @@ impl WasmEmulatorApp {
             .display
             .framebuffer
             .chunks_exact(4)
-            .map(|rgba| {
-                egui::Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3])
-            })
+            .map(|rgba| egui::Color32::from_rgba_unmultiplied(rgba[0], rgba[1], rgba[2], rgba[3]))
             .collect();
 
         let expected = w * h;
@@ -251,8 +232,7 @@ impl WasmEmulatorApp {
         match &mut self.texture {
             Some(tex) => tex.set(image, options),
             None => {
-                self.texture =
-                    Some(ctx.load_texture("vga_display", image, options));
+                self.texture = Some(ctx.load_texture("vga_display", image, options));
             }
         }
     }
@@ -312,33 +292,24 @@ impl WasmEmulatorApp {
                             .color(TEXT_MUTED),
                     );
 
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            // Right-aligned info
-                            let instr_text = if self.total_instructions > 0 {
-                                if self.total_instructions >= 1_000_000 {
-                                    format!(
-                                        "{}M instr",
-                                        self.total_instructions / 1_000_000
-                                    )
-                                } else {
-                                    format!(
-                                        "{}K instr",
-                                        self.total_instructions / 1_000
-                                    )
-                                }
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        // Right-aligned info
+                        let instr_text = if self.total_instructions > 0 {
+                            if self.total_instructions >= 1_000_000 {
+                                format!("{}M instr", self.total_instructions / 1_000_000)
                             } else {
-                                "0 instr".to_string()
-                            };
-                            ui.label(
-                                egui::RichText::new(instr_text)
-                                    .monospace()
-                                    .size(11.0)
-                                    .color(TEXT_DIM),
-                            );
-                        },
-                    );
+                                format!("{}K instr", self.total_instructions / 1_000)
+                            }
+                        } else {
+                            "0 instr".to_string()
+                        };
+                        ui.label(
+                            egui::RichText::new(instr_text)
+                                .monospace()
+                                .size(11.0)
+                                .color(TEXT_DIM),
+                        );
+                    });
                 });
             });
     }
@@ -369,10 +340,8 @@ impl WasmEmulatorApp {
                     };
 
                     // Colored dot
-                    let (rect, _) = ui.allocate_exact_size(
-                        egui::vec2(8.0, 8.0),
-                        egui::Sense::hover(),
-                    );
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                     ui.painter().circle_filled(rect.center(), 3.5, dot_color);
 
                     ui.label(
@@ -383,11 +352,7 @@ impl WasmEmulatorApp {
                     );
 
                     // Separator
-                    ui.label(
-                        egui::RichText::new("|")
-                            .size(11.0)
-                            .color(BORDER_SUBTLE),
-                    );
+                    ui.label(egui::RichText::new("|").size(11.0).color(BORDER_SUBTLE));
 
                     // IPS
                     let ips_str = Self::format_ips(self.cached_ips);
@@ -399,11 +364,7 @@ impl WasmEmulatorApp {
                     );
 
                     // Separator
-                    ui.label(
-                        egui::RichText::new("|")
-                            .size(11.0)
-                            .color(BORDER_SUBTLE),
-                    );
+                    ui.label(egui::RichText::new("|").size(11.0).color(BORDER_SUBTLE));
 
                     // Frame counter
                     ui.label(
@@ -414,20 +375,14 @@ impl WasmEmulatorApp {
                     );
 
                     // Right-aligned: batch size info
-                    ui.with_layout(
-                        egui::Layout::right_to_left(egui::Align::Center),
-                        |ui| {
-                            ui.label(
-                                egui::RichText::new(format!(
-                                    "batch: {}K/frame",
-                                    BATCH_SIZE / 1000
-                                ))
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        ui.label(
+                            egui::RichText::new(format!("batch: {}K/frame", BATCH_SIZE / 1000))
                                 .monospace()
                                 .size(11.0)
                                 .color(TEXT_MUTED),
-                            );
-                        },
-                    );
+                        );
+                    });
                 });
             });
     }
@@ -487,10 +442,7 @@ impl WasmEmulatorApp {
                     ui.add_space(offset_y);
                     ui.horizontal(|ui| {
                         ui.add_space(offset_x);
-                        ui.image(egui::load::SizedTexture::new(
-                            tex.id(),
-                            egui::vec2(w, h),
-                        ));
+                        ui.image(egui::load::SizedTexture::new(tex.id(), egui::vec2(w, h)));
                     });
                 } else if !self.initialized {
                     // Loading state
@@ -565,7 +517,10 @@ impl eframe::App for WasmEmulatorApp {
 
                 // Diagnostic: log display state periodically
                 if self.frame_count % 300 == 1 {
-                    let non_zero = self.display.framebuffer.chunks(4)
+                    let non_zero = self
+                        .display
+                        .framebuffer
+                        .chunks(4)
                         .filter(|px| px[0] != 0 || px[1] != 0 || px[2] != 0)
                         .count();
                     // Check VGA text memory directly
@@ -577,9 +532,12 @@ impl eframe::App for WasmEmulatorApp {
                     let handler_count = emu.memory_handler_count();
                     log::info!(
                         "Display: {}x{}, dirty={}, non_zero_px={}, vga_dump_len={}, preview=[{}]",
-                        self.display.fb_width, self.display.fb_height,
-                        self.display.fb_dirty, non_zero,
-                        vga_trimmed.len(), vga_preview
+                        self.display.fb_width,
+                        self.display.fb_height,
+                        self.display.fb_dirty,
+                        non_zero,
+                        vga_trimmed.len(),
+                        vga_preview
                     );
                     // Check raw RAM at 0xB8000 (VGA text area) and ROM at 0xC0000 (VGA BIOS)
                     let ram_b8000 = emu.peek_ram_at(0xB8000, 32);

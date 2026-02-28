@@ -61,7 +61,7 @@ pub enum BxPackedYmmRegister {
 
 #[derive(Debug, Default)]
 pub struct BxMxcsr {
-    pub mxcsr: u32,
+    pub(crate) mxcsr: u32,
 }
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {

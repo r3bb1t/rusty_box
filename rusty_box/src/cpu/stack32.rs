@@ -5,12 +5,7 @@
 
 use alloc::vec::Vec;
 
-use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
-    decoder::Instruction,
-    eflags::EFlags,
-};
+use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, eflags::EFlags};
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
@@ -122,14 +117,26 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
                 let fetch_result = self.fetch_raw_descriptor(&selector);
                 if fetch_result.is_err() {
-                    let ss_base = unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.base };
+                    let ss_base =
+                        unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.base };
                     let laddr = ss_base + self.esp() as u64;
                     // Try to translate and show what's at the stack
                     let paddr = self.translate_data_read(laddr).unwrap_or(0xDEAD);
                     tracing::warn!("POP32_Sw: fetch_raw_descriptor FAILED for selector={:#06x} (index={}, TI={}), seg_idx={}, icount={}",
                         selector_value, selector.index, selector.ti, seg_idx, self.icount);
-                    tracing::warn!("  ESP={:#x} SS.base={:#x} laddr={:#x} paddr={:#x}", self.esp(), ss_base, laddr, paddr);
-                    tracing::warn!("  GDTR.base={:#x} GDTR.limit={:#x} CR3={:#x}", self.gdtr.base, self.gdtr.limit, self.cr3);
+                    tracing::warn!(
+                        "  ESP={:#x} SS.base={:#x} laddr={:#x} paddr={:#x}",
+                        self.esp(),
+                        ss_base,
+                        laddr,
+                        paddr
+                    );
+                    tracing::warn!(
+                        "  GDTR.base={:#x} GDTR.limit={:#x} CR3={:#x}",
+                        self.gdtr.base,
+                        self.gdtr.limit,
+                        self.cr3
+                    );
                     // Dump stack dwords around ESP
                     let esp = self.esp();
                     for i in 0..8u32 {
@@ -137,7 +144,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         let la = ss_base + offset as u64;
                         if let Ok(pa) = self.translate_data_read(la) {
                             let val = self.mem_read_dword(pa);
-                            tracing::warn!("  Stack[ESP+{:#x}] = {:#010x}  (laddr={:#x} paddr={:#x})", i*4, val, la, pa);
+                            tracing::warn!(
+                                "  Stack[ESP+{:#x}] = {:#010x}  (laddr={:#x} paddr={:#x})",
+                                i * 4,
+                                val,
+                                la,
+                                pa
+                            );
                         }
                     }
                     // Also show previous ESP entries (what was popped before)
@@ -146,11 +159,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         let la = ss_base + offset as u64;
                         if let Ok(pa) = self.translate_data_read(la) {
                             let val = self.mem_read_dword(pa);
-                            tracing::warn!("  Stack[ESP-{:#x}] = {:#010x}  (laddr={:#x} paddr={:#x})", i*4, val, la, pa);
+                            tracing::warn!(
+                                "  Stack[ESP-{:#x}] = {:#010x}  (laddr={:#x} paddr={:#x})",
+                                i * 4,
+                                val,
+                                la,
+                                pa
+                            );
                         }
                     }
                     // Dump code bytes near the failing instruction
-                    let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+                    let cs_base =
+                        unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
                     let code_vaddr = cs_base + self.eip() as u64;
                     // Read 32 bytes before and 16 bytes after
                     let mut code_bytes = Vec::new();
@@ -162,7 +182,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                             code_bytes.push(0xCC);
                         }
                     }
-                    tracing::warn!("  Code at CS:EIP-32 to CS:EIP+16 (EIP={:#x}, CS.base={:#x}):", self.eip(), cs_base);
+                    tracing::warn!(
+                        "  Code at CS:EIP-32 to CS:EIP+16 (EIP={:#x}, CS.base={:#x}):",
+                        self.eip(),
+                        cs_base
+                    );
                     tracing::warn!("  {:02x?}", &code_bytes);
                 }
                 let (dword1, dword2) = fetch_result?;
@@ -203,12 +227,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// PUSH r/m32 - Unified dispatch based on mod_c0()
     pub fn push_ed(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.push_ed_r(instr) } else { self.push_ed_m(instr) }
+        if instr.mod_c0() {
+            self.push_ed_r(instr)
+        } else {
+            self.push_ed_m(instr)
+        }
     }
 
     /// POP r/m32 - Unified dispatch based on mod_c0()
     pub fn pop_ed(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.pop_ed_r(instr) } else { self.pop_ed_m(instr) }
+        if instr.mod_c0() {
+            self.pop_ed_r(instr)
+        } else {
+            self.pop_ed_m(instr)
+        }
     }
 
     // =========================================================================
@@ -260,8 +292,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_sp(temp_sp.wrapping_sub(32));
         }
 
-        tracing::trace!("PUSHAD: EAX={:08x} ECX={:08x} EDX={:08x} EBX={:08x} EBP={:08x} ESI={:08x} EDI={:08x}",
-            eax, ecx, edx, ebx, ebp, esi, edi);
+        tracing::trace!(
+            "PUSHAD: EAX={:08x} ECX={:08x} EDX={:08x} EBX={:08x} EBP={:08x} ESI={:08x} EDI={:08x}",
+            eax,
+            ecx,
+            edx,
+            ebx,
+            ebp,
+            esi,
+            edi
+        );
         Ok(())
     }
 
@@ -312,8 +352,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_ecx(ecx);
         self.set_eax(eax);
 
-        tracing::trace!("POPAD: EDI={:08x} ESI={:08x} EBP={:08x} EBX={:08x} EDX={:08x} ECX={:08x} EAX={:08x}",
-            edi, esi, ebp, ebx, edx, ecx, eax);
+        tracing::trace!(
+            "POPAD: EDI={:08x} ESI={:08x} EBP={:08x} EBX={:08x} EDX={:08x} ECX={:08x} EAX={:08x}",
+            edi,
+            esi,
+            ebp,
+            ebx,
+            edx,
+            ecx,
+            eax
+        );
         Ok(())
     }
 
@@ -339,7 +387,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // VM, VIP, VIF are unaffected in protected mode
         const CHANGE_MASK: u32 = 0x00244FD5;
 
-        self.eflags = EFlags::from_bits_retain((self.eflags.bits() & !CHANGE_MASK) | (flags & CHANGE_MASK));
+        self.eflags =
+            EFlags::from_bits_retain((self.eflags.bits() & !CHANGE_MASK) | (flags & CHANGE_MASK));
         tracing::trace!("POPFD: {:#010x}", flags);
         Ok(())
     }
@@ -351,7 +400,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg_idx = instr.dst() as usize; // nnn field = segment register index
         let val_16 = self.sregs[seg_idx].selector.value;
         // Bochs writes only a word at ESP-4, not a full dword
-        let ss_d_b = unsafe { self.sregs[super::decoder::BxSegregs::Ss as usize].cache.u.segment.d_b };
+        let ss_d_b = unsafe {
+            self.sregs[super::decoder::BxSegregs::Ss as usize]
+                .cache
+                .u
+                .segment
+                .d_b
+        };
         if ss_d_b {
             let esp = self.get_gpr32(4);
             self.stack_write_word(esp.wrapping_sub(4), val_16)?;
@@ -367,7 +422,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// LEAVE (32-bit operand size)
     /// Based on Bochs stack32.cc:258-273
     pub fn leave_op32(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
-        let ss_d_b = unsafe { self.sregs[super::decoder::BxSegregs::Ss as usize].cache.u.segment.d_b };
+        let ss_d_b = unsafe {
+            self.sregs[super::decoder::BxSegregs::Ss as usize]
+                .cache
+                .u
+                .segment
+                .d_b
+        };
         let value32 = if ss_d_b {
             // 32-bit stack
             let ebp = self.get_gpr32(5); // EBP

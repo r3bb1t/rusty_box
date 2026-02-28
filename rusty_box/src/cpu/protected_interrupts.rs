@@ -10,7 +10,7 @@ use super::{
     cpuid::BxCpuIdTrait,
     decoder::BxSegregs,
     descriptor::{
-        BxDescriptor, BxSelector, BxSegmentReg, SystemAndGateDescriptorEnum, SEG_VALID_CACHE,
+        BxDescriptor, BxSegmentReg, BxSelector, SystemAndGateDescriptorEnum, SEG_VALID_CACHE,
     },
     eflags::EFlags,
     segment_ctrl_pro::parse_selector,
@@ -40,7 +40,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 "protected_mode_int(): vector must be within IDT table limits, IDT.limit = {:#x}",
                 self.idtr.limit
             );
-            return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         let gate_addr = self.idtr.base + vector as u64 * 8;
@@ -48,8 +50,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dword1 = raw_descriptor as u32;
         let dword2 = (raw_descriptor >> 32) as u32;
         if vector < 32 {
-            tracing::debug!("PM_INT: IDT[{:#04x}] @ {:#010x}: dword1={:#010x} dword2={:#010x}",
-                vector, gate_addr, dword1, dword2);
+            tracing::debug!(
+                "PM_INT: IDT[{:#04x}] @ {:#010x}: dword1={:#010x} dword2={:#010x}",
+                vector,
+                gate_addr,
+                dword1,
+                dword2
+            );
         }
 
         let gate_descriptor = self.parse_descriptor(dword1, dword2)?;
@@ -59,21 +66,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 "protected_mode_int(): gate descriptor is not valid sys seg (vector={:#04x})",
                 vector
             );
-            return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         // descriptor AR byte must indicate interrupt gate, trap gate, or task gate, else #GP(vector*8 + 2 + EXT)
         let gate_type = gate_descriptor.r#type;
-        let is_valid_gate = matches!(gate_type, 
-            0x5 | 0x6 | 0x7 | 0xE | 0xF
-        );
-        
+        let is_valid_gate = matches!(gate_type, 0x5 | 0x6 | 0x7 | 0xE | 0xF);
+
         if !is_valid_gate {
             tracing::error!(
                 "protected_mode_int(): gate.type({:#x}) != {{5,6,7,14,15}}",
                 gate_type
             );
-            return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         // Convert gate type to enum for matching
@@ -85,7 +94,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             0xF => SystemAndGateDescriptorEnum::Bx386TrapGate,
             _ => unreachable!(),
         };
-        
+
         match gate_type_enum {
             SystemAndGateDescriptorEnum::BxTaskGate
             | SystemAndGateDescriptorEnum::Bx286InterruptGate
@@ -97,7 +106,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     "protected_mode_int(): gate.type({:#x}) != {{5,6,7,14,15}}",
                     gate_descriptor.r#type
                 );
-                return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+                return Err(super::error::CpuError::BadVector {
+                    vector: Exception::Gp,
+                });
             }
         }
 
@@ -105,13 +116,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         if soft_int && gate_descriptor.dpl < cpl {
             tracing::error!("protected_mode_int(): soft_int && (gate.dpl < CPL)");
-            return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         // Gate must be present, else #NP(vector * 8 + 2 + EXT)
         if !gate_descriptor.p {
             tracing::error!("protected_mode_int(): gate not present");
-            return Err(super::error::CpuError::BadVector { vector: Exception::Np });
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Np,
+            });
         }
 
         match gate_type_enum {
@@ -120,10 +135,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let raw_tss_selector = unsafe { gate_descriptor.u.task_gate.tss_selector };
                 let mut tss_selector = BxSelector::default();
                 parse_selector(raw_tss_selector, &mut tss_selector);
-                
+
                 let (tss_dword1, tss_dword2) = self.fetch_raw_descriptor(&tss_selector)?;
                 let tss_descriptor = self.parse_descriptor(tss_dword1, tss_dword2)?;
-                
+
                 // Call task_switch with BX_TASK_FROM_INT (0x2)
                 self.task_switch(
                     &tss_selector,
@@ -140,16 +155,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             | SystemAndGateDescriptorEnum::Bx386InterruptGate
             | SystemAndGateDescriptorEnum::Bx386TrapGate => {
                 let gate_dest_offset = unsafe { gate_descriptor.u.gate.dest_offset };
-                self.handle_interrupt_trap_gate(
-                    &gate_descriptor,
-                    push_error,
-                    error_code,
-                )?;
+                self.handle_interrupt_trap_gate(&gate_descriptor, push_error, error_code)?;
                 // Set EIP after handling the gate (matches original line 714)
                 self.set_eip(gate_dest_offset);
             }
             _ => {
-                return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+                return Err(super::error::CpuError::BadVector {
+                    vector: Exception::Gp,
+                });
             }
         }
 
@@ -178,7 +191,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         if (gate_dest_selector & 0xfffc) == 0 {
             tracing::error!("handle_interrupt_trap_gate(): selector null");
-            return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         let mut cs_selector = BxSelector::default();
@@ -195,7 +210,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         {
             // Diagnose GDT corruption: show physical address of the GDT entry
             let gdt_entry_vaddr = self.gdtr.base + (cs_selector.index as u64 * 8);
-            let gdt_phys = self.translate_linear_system_read(gdt_entry_vaddr)
+            let gdt_phys = self
+                .translate_linear_system_read(gdt_entry_vaddr)
                 .map(|p| format!("{:#010x}", p))
                 .unwrap_or_else(|_| "TRANS_FAIL".to_string());
             // Also read directly from physical (lower 4GB) using raw mem to compare
@@ -209,19 +225,33 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                  GDTR.base={:#010x} GDTR.limit={:#06x} CR3={:#010x} \
                  gdt_vaddr={:#010x} gdt_phys={} expected_phys={:#010x} raw_at_expected={:#018x} \
                  icount={}",
-                cs_selector.value, cs_dword2, cs_dword1,
-                cs_descriptor.valid, cs_descriptor.segment,
-                cs_descriptor.r#type, cs_descriptor.dpl, cpl,
-                self.gdtr.base, self.gdtr.limit, self.cr3,
-                gdt_entry_vaddr, gdt_phys, expected_phys, raw_at_expected,
+                cs_selector.value,
+                cs_dword2,
+                cs_dword1,
+                cs_descriptor.valid,
+                cs_descriptor.segment,
+                cs_descriptor.r#type,
+                cs_descriptor.dpl,
+                cpl,
+                self.gdtr.base,
+                self.gdtr.limit,
+                self.cr3,
+                gdt_entry_vaddr,
+                gdt_phys,
+                expected_phys,
+                raw_at_expected,
                 self.icount
             );
-            return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         if !cs_descriptor.p {
             tracing::error!("handle_interrupt_trap_gate(): segment not present");
-            return Err(super::error::CpuError::BadVector { vector: Exception::Np });
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Np,
+            });
         }
 
         // Save old register values (matches original lines 421-424)
@@ -232,20 +262,49 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // For now, handle same privilege level case (simplest)
         // TODO: Implement inner privilege level case
-        if super::descriptor::is_code_segment_conforming(cs_descriptor.r#type) || cs_descriptor.dpl == cpl {
+        if super::descriptor::is_code_segment_conforming(cs_descriptor.r#type)
+            || cs_descriptor.dpl == cpl
+        {
             // INTERRUPT TO SAME PRIVILEGE LEVEL
             tracing::debug!("handle_interrupt_trap_gate(): INTERRUPT TO SAME PRIVILEGE");
 
             // v8086 mode check (matches original lines 671-675)
-            if self.v8086_mode() && (super::descriptor::is_code_segment_conforming(cs_descriptor.r#type) || cs_descriptor.dpl != 0) {
+            if self.v8086_mode()
+                && (super::descriptor::is_code_segment_conforming(cs_descriptor.r#type)
+                    || cs_descriptor.dpl != 0)
+            {
                 tracing::error!("handle_interrupt_trap_gate(): code segment conforming or DPL({}) != 0 in v8086 mode", cs_descriptor.dpl);
-                return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+                return Err(super::error::CpuError::BadVector {
+                    vector: Exception::Gp,
+                });
             }
 
             // EIP must be in CS limit else #GP(0) (matches original line 678)
             if gate_dest_offset > unsafe { cs_descriptor.u.segment.limit_scaled } {
-                tracing::error!("handle_interrupt_trap_gate(): IP > CS descriptor limit");
-                return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+                let gdt_entry_laddr = self.gdtr.base + (cs_selector.index as u64 * 8);
+                let gdt_phys = gdt_entry_laddr.wrapping_sub(0xC0000000);
+                let raw_lo = self.mem_read_dword(gdt_phys);
+                let raw_hi = self.mem_read_dword(gdt_phys + 4);
+                tracing::error!(
+                    "handle_interrupt_trap_gate(): IP > CS descriptor limit: \
+                     gate_dest_offset={:#x} limit_scaled={:#x} cs_sel={:#06x} \
+                     GDT[{}] raw={:#010x}_{:#010x} at phys={:#010x} \
+                     GDTR.base={:#010x} GDTR.limit={:#06x} RIP={:#010x} icount={}",
+                    gate_dest_offset,
+                    unsafe { cs_descriptor.u.segment.limit_scaled },
+                    cs_selector.value,
+                    cs_selector.index,
+                    raw_hi,
+                    raw_lo,
+                    gdt_phys,
+                    self.gdtr.base,
+                    self.gdtr.limit,
+                    self.rip(),
+                    self.icount
+                );
+                return Err(super::error::CpuError::BadVector {
+                    vector: Exception::Gp,
+                });
             }
 
             // Check if 386 gate (type >= 14) - matches original line 686
@@ -276,11 +335,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if tracing::enabled!(tracing::Level::DEBUG) {
                 let base = unsafe { cs_descriptor.u.segment.base };
                 let linear = base + gate_dest_offset as u64;
-                let bytes: Vec<u8> = (0..48u64).map(|i| {
-                    if let Ok(pa) = self.translate_linear_system_read(linear + i) {
-                        self.mem_read_byte(pa)
-                    } else { 0xFF }
-                }).collect();
+                let bytes: Vec<u8> = (0..48u64)
+                    .map(|i| {
+                        if let Ok(pa) = self.translate_linear_system_read(linear + i) {
+                            self.mem_read_byte(pa)
+                        } else {
+                            0xFF
+                        }
+                    })
+                    .collect();
                 tracing::debug!("PM_INT: loading CS sel={:#06x} base={:#010x} limit={:#010x} d_b={} -> EIP={:#010x} (linear={:#010x})",
                     new_cs_selector.value, base,
                     unsafe { cs_descriptor.u.segment.limit_scaled },
@@ -296,7 +359,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Invalidate prefetch queue when CS changes
             self.eip_fetch_ptr = None;
             self.eip_page_window_size = 0;
-        } else if super::descriptor::is_code_segment_non_conforming(cs_descriptor.r#type) && cs_descriptor.dpl < cpl {
+        } else if super::descriptor::is_code_segment_non_conforming(cs_descriptor.r#type)
+            && cs_descriptor.dpl < cpl
+        {
             // INTERRUPT TO INNER PRIVILEGE
             self.handle_interrupt_to_inner_privilege(
                 &gate_descriptor,
@@ -316,7 +381,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 cs_descriptor.dpl,
                 cpl
             );
-            return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         // EIP is set in the caller after this function returns
@@ -346,14 +413,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let is_v8086_mode = self.v8086_mode();
         if is_v8086_mode && cs_descriptor.dpl != 0 {
-            tracing::error!("handle_interrupt_to_inner_privilege(): code segment DPL({}) != 0 in v8086 mode", cs_descriptor.dpl);
-            return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+            tracing::error!(
+                "handle_interrupt_to_inner_privilege(): code segment DPL({}) != 0 in v8086 mode",
+                cs_descriptor.dpl
+            );
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         // Selector must be non-null else #TS(EXT) (matches line 455)
         if (ss_for_cpl_x & 0xfffc) == 0 {
             tracing::error!("handle_interrupt_to_inner_privilege(): SS selector null");
-            return Err(super::error::CpuError::BadVector { vector: Exception::Ts });
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Ts,
+            });
         }
 
         // Parse SS selector and fetch descriptor (matches lines 462-465)
@@ -365,13 +439,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // selector rpl must = dpl of code segment, else #TS(SS selector + ext) (matches line 469)
         if ss_selector.rpl != cs_descriptor.dpl {
             tracing::error!("handle_interrupt_to_inner_privilege(): SS.rpl != CS.dpl");
-            return Err(super::error::CpuError::BadVector { vector: Exception::Ts });
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Ts,
+            });
         }
 
         // stack seg DPL must = DPL of code segment, else #TS(SS selector + ext) (matches line 476)
         if ss_descriptor.dpl != cs_descriptor.dpl {
             tracing::error!("handle_interrupt_to_inner_privilege(): SS.dpl != CS.dpl");
-            return Err(super::error::CpuError::BadVector { vector: Exception::Ts });
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Ts,
+            });
         }
 
         // descriptor must indicate writable data segment, else #TS(SS selector + EXT) (matches line 483)
@@ -380,21 +458,29 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             || super::descriptor::is_code_segment(ss_descriptor.r#type)
             || !super::descriptor::is_data_segment_writable(ss_descriptor.r#type)
         {
-            tracing::error!("handle_interrupt_to_inner_privilege(): SS is not writable data segment");
-            return Err(super::error::CpuError::BadVector { vector: Exception::Ts });
+            tracing::error!(
+                "handle_interrupt_to_inner_privilege(): SS is not writable data segment"
+            );
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Ts,
+            });
         }
 
         // seg must be present, else #SS(SS selector + ext) (matches line 492)
         if !ss_descriptor.p {
             tracing::error!("handle_interrupt_to_inner_privilege(): SS not present");
-            return Err(super::error::CpuError::BadVector { vector: Exception::Ss });
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Ss,
+            });
         }
 
         // IP must be within CS segment boundaries, else #GP(0) (matches line 498)
         let gate_dest_offset = unsafe { gate_descriptor.u.gate.dest_offset };
         if gate_dest_offset > unsafe { cs_descriptor.u.segment.limit_scaled } {
             tracing::error!("handle_interrupt_to_inner_privilege(): gate EIP > CS.limit");
-            return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         // Prepare new stack segment (matches lines 503-509)
@@ -403,7 +489,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             cache: ss_descriptor.clone(),
         };
         new_stack.selector.rpl = cs_descriptor.dpl;
-        new_stack.selector.value = (new_stack.selector.value & 0xfffc) | new_stack.selector.rpl as u16;
+        new_stack.selector.value =
+            (new_stack.selector.value & 0xfffc) | new_stack.selector.rpl as u16;
 
         let is_386_gate = gate_descriptor.r#type >= 14;
 
@@ -415,48 +502,135 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Push segment registers for v8086 mode (matches lines 514-538)
             if is_v8086_mode {
                 if is_386_gate {
-                    self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(4), cs_descriptor.dpl, 
-                        self.sregs[BxSegregs::Gs as usize].selector.value as u32)?;
-                    self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(8), cs_descriptor.dpl,
-                        self.sregs[BxSegregs::Fs as usize].selector.value as u32)?;
-                    self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(12), cs_descriptor.dpl,
-                        self.sregs[BxSegregs::Ds as usize].selector.value as u32)?;
-                    self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(16), cs_descriptor.dpl,
-                        self.sregs[BxSegregs::Es as usize].selector.value as u32)?;
+                    self.write_new_stack_dword(
+                        &new_stack,
+                        temp_esp.wrapping_sub(4),
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Gs as usize].selector.value as u32,
+                    )?;
+                    self.write_new_stack_dword(
+                        &new_stack,
+                        temp_esp.wrapping_sub(8),
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Fs as usize].selector.value as u32,
+                    )?;
+                    self.write_new_stack_dword(
+                        &new_stack,
+                        temp_esp.wrapping_sub(12),
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Ds as usize].selector.value as u32,
+                    )?;
+                    self.write_new_stack_dword(
+                        &new_stack,
+                        temp_esp.wrapping_sub(16),
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Es as usize].selector.value as u32,
+                    )?;
                     temp_esp = temp_esp.wrapping_sub(16);
                 } else {
-                    self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(2), cs_descriptor.dpl,
-                        self.sregs[BxSegregs::Gs as usize].selector.value)?;
-                    self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(4), cs_descriptor.dpl,
-                        self.sregs[BxSegregs::Fs as usize].selector.value)?;
-                    self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(6), cs_descriptor.dpl,
-                        self.sregs[BxSegregs::Ds as usize].selector.value)?;
-                    self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(8), cs_descriptor.dpl,
-                        self.sregs[BxSegregs::Es as usize].selector.value)?;
+                    self.write_new_stack_word(
+                        &new_stack,
+                        temp_esp.wrapping_sub(2),
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Gs as usize].selector.value,
+                    )?;
+                    self.write_new_stack_word(
+                        &new_stack,
+                        temp_esp.wrapping_sub(4),
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Fs as usize].selector.value,
+                    )?;
+                    self.write_new_stack_word(
+                        &new_stack,
+                        temp_esp.wrapping_sub(6),
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Ds as usize].selector.value,
+                    )?;
+                    self.write_new_stack_word(
+                        &new_stack,
+                        temp_esp.wrapping_sub(8),
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Es as usize].selector.value,
+                    )?;
                     temp_esp = temp_esp.wrapping_sub(8);
                 }
             }
 
             // Push return frame (matches lines 540-567)
             if is_386_gate {
-                self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(4), cs_descriptor.dpl, old_ss as u32)?;
-                self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(8), cs_descriptor.dpl, old_esp)?;
-                self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(12), cs_descriptor.dpl, self.eflags.bits())?;
-                self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(16), cs_descriptor.dpl, old_cs as u32)?;
-                self.write_new_stack_dword(&new_stack, temp_esp.wrapping_sub(20), cs_descriptor.dpl, old_eip)?;
+                self.write_new_stack_dword(
+                    &new_stack,
+                    temp_esp.wrapping_sub(4),
+                    cs_descriptor.dpl,
+                    old_ss as u32,
+                )?;
+                self.write_new_stack_dword(
+                    &new_stack,
+                    temp_esp.wrapping_sub(8),
+                    cs_descriptor.dpl,
+                    old_esp,
+                )?;
+                self.write_new_stack_dword(
+                    &new_stack,
+                    temp_esp.wrapping_sub(12),
+                    cs_descriptor.dpl,
+                    self.eflags.bits(),
+                )?;
+                self.write_new_stack_dword(
+                    &new_stack,
+                    temp_esp.wrapping_sub(16),
+                    cs_descriptor.dpl,
+                    old_cs as u32,
+                )?;
+                self.write_new_stack_dword(
+                    &new_stack,
+                    temp_esp.wrapping_sub(20),
+                    cs_descriptor.dpl,
+                    old_eip,
+                )?;
                 temp_esp = temp_esp.wrapping_sub(20);
 
                 if push_error {
                     temp_esp = temp_esp.wrapping_sub(4);
-                    self.write_new_stack_dword(&new_stack, temp_esp, cs_descriptor.dpl, error_code as u32)?;
+                    self.write_new_stack_dword(
+                        &new_stack,
+                        temp_esp,
+                        cs_descriptor.dpl,
+                        error_code as u32,
+                    )?;
                 }
             } else {
                 // 286 gate
-                self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(2), cs_descriptor.dpl, old_ss)?;
-                self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(4), cs_descriptor.dpl, old_esp as u16)?;
-                self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(6), cs_descriptor.dpl, (self.eflags.bits() & 0xFFFF) as u16)?;
-                self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(8), cs_descriptor.dpl, old_cs)?;
-                self.write_new_stack_word(&new_stack, temp_esp.wrapping_sub(10), cs_descriptor.dpl, old_eip as u16)?;
+                self.write_new_stack_word(
+                    &new_stack,
+                    temp_esp.wrapping_sub(2),
+                    cs_descriptor.dpl,
+                    old_ss,
+                )?;
+                self.write_new_stack_word(
+                    &new_stack,
+                    temp_esp.wrapping_sub(4),
+                    cs_descriptor.dpl,
+                    old_esp as u16,
+                )?;
+                self.write_new_stack_word(
+                    &new_stack,
+                    temp_esp.wrapping_sub(6),
+                    cs_descriptor.dpl,
+                    (self.eflags.bits() & 0xFFFF) as u16,
+                )?;
+                self.write_new_stack_word(
+                    &new_stack,
+                    temp_esp.wrapping_sub(8),
+                    cs_descriptor.dpl,
+                    old_cs,
+                )?;
+                self.write_new_stack_word(
+                    &new_stack,
+                    temp_esp.wrapping_sub(10),
+                    cs_descriptor.dpl,
+                    old_eip as u16,
+                )?;
                 temp_esp = temp_esp.wrapping_sub(10);
 
                 if push_error {
@@ -473,53 +647,145 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Push segment registers for v8086 mode (matches lines 574-598)
             if is_v8086_mode {
                 if is_386_gate {
-                    self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(4) as u32, cs_descriptor.dpl,
-                        self.sregs[BxSegregs::Gs as usize].selector.value as u32)?;
-                    self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(8) as u32, cs_descriptor.dpl,
-                        self.sregs[BxSegregs::Fs as usize].selector.value as u32)?;
-                    self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(12) as u32, cs_descriptor.dpl,
-                        self.sregs[BxSegregs::Ds as usize].selector.value as u32)?;
-                    self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(16) as u32, cs_descriptor.dpl,
-                        self.sregs[BxSegregs::Es as usize].selector.value as u32)?;
+                    self.write_new_stack_dword(
+                        &new_stack,
+                        temp_sp.wrapping_sub(4) as u32,
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Gs as usize].selector.value as u32,
+                    )?;
+                    self.write_new_stack_dword(
+                        &new_stack,
+                        temp_sp.wrapping_sub(8) as u32,
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Fs as usize].selector.value as u32,
+                    )?;
+                    self.write_new_stack_dword(
+                        &new_stack,
+                        temp_sp.wrapping_sub(12) as u32,
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Ds as usize].selector.value as u32,
+                    )?;
+                    self.write_new_stack_dword(
+                        &new_stack,
+                        temp_sp.wrapping_sub(16) as u32,
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Es as usize].selector.value as u32,
+                    )?;
                     temp_sp = temp_sp.wrapping_sub(16);
                 } else {
-                    self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(2) as u32, cs_descriptor.dpl,
-                        self.sregs[BxSegregs::Gs as usize].selector.value)?;
-                    self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(4) as u32, cs_descriptor.dpl,
-                        self.sregs[BxSegregs::Fs as usize].selector.value)?;
-                    self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(6) as u32, cs_descriptor.dpl,
-                        self.sregs[BxSegregs::Ds as usize].selector.value)?;
-                    self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(8) as u32, cs_descriptor.dpl,
-                        self.sregs[BxSegregs::Es as usize].selector.value)?;
+                    self.write_new_stack_word(
+                        &new_stack,
+                        temp_sp.wrapping_sub(2) as u32,
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Gs as usize].selector.value,
+                    )?;
+                    self.write_new_stack_word(
+                        &new_stack,
+                        temp_sp.wrapping_sub(4) as u32,
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Fs as usize].selector.value,
+                    )?;
+                    self.write_new_stack_word(
+                        &new_stack,
+                        temp_sp.wrapping_sub(6) as u32,
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Ds as usize].selector.value,
+                    )?;
+                    self.write_new_stack_word(
+                        &new_stack,
+                        temp_sp.wrapping_sub(8) as u32,
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Es as usize].selector.value,
+                    )?;
                     temp_sp = temp_sp.wrapping_sub(8);
                 }
             }
 
             // Push return frame (matches lines 600-627)
             if is_386_gate {
-                self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(4) as u32, cs_descriptor.dpl, old_ss as u32)?;
-                self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(8) as u32, cs_descriptor.dpl, old_esp)?;
-                self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(12) as u32, cs_descriptor.dpl, self.eflags.bits())?;
-                self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(16) as u32, cs_descriptor.dpl, old_cs as u32)?;
-                self.write_new_stack_dword(&new_stack, temp_sp.wrapping_sub(20) as u32, cs_descriptor.dpl, old_eip)?;
+                self.write_new_stack_dword(
+                    &new_stack,
+                    temp_sp.wrapping_sub(4) as u32,
+                    cs_descriptor.dpl,
+                    old_ss as u32,
+                )?;
+                self.write_new_stack_dword(
+                    &new_stack,
+                    temp_sp.wrapping_sub(8) as u32,
+                    cs_descriptor.dpl,
+                    old_esp,
+                )?;
+                self.write_new_stack_dword(
+                    &new_stack,
+                    temp_sp.wrapping_sub(12) as u32,
+                    cs_descriptor.dpl,
+                    self.eflags.bits(),
+                )?;
+                self.write_new_stack_dword(
+                    &new_stack,
+                    temp_sp.wrapping_sub(16) as u32,
+                    cs_descriptor.dpl,
+                    old_cs as u32,
+                )?;
+                self.write_new_stack_dword(
+                    &new_stack,
+                    temp_sp.wrapping_sub(20) as u32,
+                    cs_descriptor.dpl,
+                    old_eip,
+                )?;
                 temp_sp = temp_sp.wrapping_sub(20);
 
                 if push_error {
                     temp_sp = temp_sp.wrapping_sub(4);
-                    self.write_new_stack_dword(&new_stack, temp_sp as u32, cs_descriptor.dpl, error_code as u32)?;
+                    self.write_new_stack_dword(
+                        &new_stack,
+                        temp_sp as u32,
+                        cs_descriptor.dpl,
+                        error_code as u32,
+                    )?;
                 }
             } else {
                 // 286 gate
-                self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(2) as u32, cs_descriptor.dpl, old_ss)?;
-                self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(4) as u32, cs_descriptor.dpl, old_esp as u16)?;
-                self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(6) as u32, cs_descriptor.dpl, (self.eflags.bits() & 0xFFFF) as u16)?;
-                self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(8) as u32, cs_descriptor.dpl, old_cs)?;
-                self.write_new_stack_word(&new_stack, temp_sp.wrapping_sub(10) as u32, cs_descriptor.dpl, old_eip as u16)?;
+                self.write_new_stack_word(
+                    &new_stack,
+                    temp_sp.wrapping_sub(2) as u32,
+                    cs_descriptor.dpl,
+                    old_ss,
+                )?;
+                self.write_new_stack_word(
+                    &new_stack,
+                    temp_sp.wrapping_sub(4) as u32,
+                    cs_descriptor.dpl,
+                    old_esp as u16,
+                )?;
+                self.write_new_stack_word(
+                    &new_stack,
+                    temp_sp.wrapping_sub(6) as u32,
+                    cs_descriptor.dpl,
+                    (self.eflags.bits() & 0xFFFF) as u16,
+                )?;
+                self.write_new_stack_word(
+                    &new_stack,
+                    temp_sp.wrapping_sub(8) as u32,
+                    cs_descriptor.dpl,
+                    old_cs,
+                )?;
+                self.write_new_stack_word(
+                    &new_stack,
+                    temp_sp.wrapping_sub(10) as u32,
+                    cs_descriptor.dpl,
+                    old_eip as u16,
+                )?;
                 temp_sp = temp_sp.wrapping_sub(10);
 
                 if push_error {
                     temp_sp = temp_sp.wrapping_sub(2);
-                    self.write_new_stack_word(&new_stack, temp_sp as u32, cs_descriptor.dpl, error_code)?;
+                    self.write_new_stack_word(
+                        &new_stack,
+                        temp_sp as u32,
+                        cs_descriptor.dpl,
+                        error_code,
+                    )?;
                 }
             }
 
@@ -539,7 +805,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Load new SS:ESP values from TSS (matches line 638)
         let mut new_ss_selector = new_stack.selector.clone();
         let mut ss_descriptor_mut = ss_descriptor.clone();
-        self.load_ss(&mut new_ss_selector, &mut ss_descriptor_mut, cs_descriptor.dpl)?;
+        self.load_ss(
+            &mut new_ss_selector,
+            &mut ss_descriptor_mut,
+            cs_descriptor.dpl,
+        )?;
 
         // Clear segment registers in v8086 mode (matches lines 655-665)
         if is_v8086_mode {
@@ -571,8 +841,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // must specify global in the local/global bit, else #GP(TSS selector) (matches line 348)
         if tss_selector.ti != 0 {
-            tracing::error!("handle_task_gate(): tss_selector.ti=1 from gate descriptor - #GP(tss_selector)");
-            return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+            tracing::error!(
+                "handle_task_gate(): tss_selector.ti=1 from gate descriptor - #GP(tss_selector)"
+            );
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         // index must be within GDT limits, else #TS(TSS selector) (matches line 354)
@@ -581,8 +855,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // AR byte must specify available TSS, else #GP(TSS selector) (matches line 360)
         if tss_descriptor.valid == 0 || tss_descriptor.segment {
-            tracing::error!("handle_task_gate(): TSS selector points to invalid or bad TSS - #GP(tss_selector)");
-            return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+            tracing::error!(
+                "handle_task_gate(): TSS selector points to invalid or bad TSS - #GP(tss_selector)"
+            );
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         // Check TSS type (matches line 365)
@@ -590,13 +868,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if tss_type != 0x1 && tss_type != 0x9 {
             // Must be AVAIL_286_TSS (0x1) or AVAIL_386_TSS (0x9)
             tracing::error!("handle_task_gate(): TSS selector points to bad TSS type ({:#x}) - #GP(tss_selector)", tss_type);
-            return Err(super::error::CpuError::BadVector { vector: Exception::Gp });
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         // TSS must be present, else #NP(TSS selector) (matches line 373)
         if !tss_descriptor.p {
             tracing::error!("handle_task_gate(): TSS descriptor.p == 0");
-            return Err(super::error::CpuError::BadVector { vector: Exception::Np });
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Np,
+            });
         }
 
         // Task switching is a complex operation that requires:
@@ -615,7 +897,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             raw_tss_selector,
             tss_type
         );
-        
+
         // Return a more specific error to indicate this is an unimplemented feature
         Err(super::error::CpuError::UnimplementedInstruction)
     }

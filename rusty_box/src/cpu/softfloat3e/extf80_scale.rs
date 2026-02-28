@@ -2,10 +2,10 @@
 //! ExtFloat80 scale (FSCALE instruction support).
 //! Ported from Berkeley SoftFloat 3e: extF80_scale.c
 
-use super::softfloat_types::*;
-use super::softfloat::*;
-use super::specialize::*;
 use super::internals::*;
+use super::softfloat::*;
+use super::softfloat_types::*;
+use super::specialize::*;
 
 /// Scale extFloat80 value `a` by `b`:
 /// Truncates `b` to integer, adds to exponent of `a`.
@@ -26,7 +26,9 @@ pub fn extf80_scale(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> f
     // A is NaN/Inf
     if exp_a == 0x7FFF {
         if (sig_a << 1) != 0 || ((exp_b == 0x7FFF) && (sig_b << 1) != 0) {
-            return softfloat_propagate_nan_extf80(a.sign_exp, a.signif, b.sign_exp, b.signif, status);
+            return softfloat_propagate_nan_extf80(
+                a.sign_exp, a.signif, b.sign_exp, b.signif, status,
+            );
         }
         if (exp_b == 0x7FFF) && sign_b {
             softfloat_raiseFlags(status, FLAG_INVALID);
@@ -41,7 +43,9 @@ pub fn extf80_scale(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> f
     // B is NaN/Inf
     if exp_b == 0x7FFF {
         if (sig_b << 1) != 0 {
-            return softfloat_propagate_nan_extf80(a.sign_exp, a.signif, b.sign_exp, b.signif, status);
+            return softfloat_propagate_nan_extf80(
+                a.sign_exp, a.signif, b.sign_exp, b.signif, status,
+            );
         }
         if (exp_a as u64 | sig_a) == 0 {
             if !sign_b {
@@ -94,7 +98,10 @@ pub fn extf80_scale(a: floatx80, b: floatx80, status: &mut SoftFloatStatus) -> f
         return round_pack_to_extf80(
             sign_a,
             if sign_b { -0x3FFF } else { 0x7FFF },
-            sig_a, 0, 80, status,
+            sig_a,
+            0,
+            80,
+            status,
         );
     }
 

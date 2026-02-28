@@ -37,17 +37,50 @@ bitflags::bitflags! {
 }
 
 impl BxCr0 {
-    #[inline] pub fn pe(self) -> bool { self.contains(Self::PE) }
-    #[inline] pub fn mp(self) -> bool { self.contains(Self::MP) }
-    #[inline] pub fn em(self) -> bool { self.contains(Self::EM) }
-    #[inline] pub fn ts(self) -> bool { self.contains(Self::TS) }
-    #[inline] pub fn et(self) -> bool { self.contains(Self::ET) }
-    #[inline] pub fn ne(self) -> bool { self.contains(Self::NE) }
-    #[inline] pub fn wp(self) -> bool { self.contains(Self::WP) }
-    #[inline] pub fn am(self) -> bool { self.contains(Self::AM) }
-    #[inline] pub fn nw(self) -> bool { self.contains(Self::NW) }
-    #[inline] pub fn cd(self) -> bool { self.contains(Self::CD) }
-    #[inline] pub fn pg(self) -> bool { self.contains(Self::PG) }
+    #[inline]
+    pub fn pe(self) -> bool {
+        self.contains(Self::PE)
+    }
+    #[inline]
+    pub fn mp(self) -> bool {
+        self.contains(Self::MP)
+    }
+    #[inline]
+    pub fn em(self) -> bool {
+        self.contains(Self::EM)
+    }
+    #[inline]
+    pub fn ts(self) -> bool {
+        self.contains(Self::TS)
+    }
+    #[inline]
+    pub fn et(self) -> bool {
+        self.contains(Self::ET)
+    }
+    #[inline]
+    pub fn ne(self) -> bool {
+        self.contains(Self::NE)
+    }
+    #[inline]
+    pub fn wp(self) -> bool {
+        self.contains(Self::WP)
+    }
+    #[inline]
+    pub fn am(self) -> bool {
+        self.contains(Self::AM)
+    }
+    #[inline]
+    pub fn nw(self) -> bool {
+        self.contains(Self::NW)
+    }
+    #[inline]
+    pub fn cd(self) -> bool {
+        self.contains(Self::CD)
+    }
+    #[inline]
+    pub fn pg(self) -> bool {
+        self.contains(Self::PG)
+    }
 
     #[inline]
     pub(super) fn get32(self) -> u32 {
@@ -119,33 +152,114 @@ bitflags::bitflags! {
 }
 
 impl BxCr4 {
-    #[inline] pub fn vme(self) -> bool { self.contains(Self::VME) }
-    #[inline] pub fn pvi(self) -> bool { self.contains(Self::PVI) }
-    #[inline] pub fn tsd(self) -> bool { self.contains(Self::TSD) }
-    #[inline] pub fn de(self) -> bool { self.contains(Self::DE) }
-    #[inline] pub fn pse(self) -> bool { self.contains(Self::PSE) }
-    #[inline] pub fn pae(self) -> bool { self.contains(Self::PAE) }
-    #[inline] pub fn mce(self) -> bool { self.contains(Self::MCE) }
-    #[inline] pub fn pge(self) -> bool { self.contains(Self::PGE) }
-    #[inline] pub fn pce(self) -> bool { self.contains(Self::PCE) }
-    #[inline] pub fn osfxsr(self) -> bool { self.contains(Self::OSFXSR) }
-    #[inline] pub fn osxmmexcpt(self) -> bool { self.contains(Self::OSXMMEXCPT) }
-    #[inline] pub fn umip(self) -> bool { self.contains(Self::UMIP) }
-    #[inline] pub fn la57(self) -> bool { self.contains(Self::LA57) }
-    #[inline] pub fn vmxe(self) -> bool { self.contains(Self::VMXE) }
-    #[inline] pub fn smxe(self) -> bool { self.contains(Self::SMXE) }
-    #[inline] pub fn fsgsbase(self) -> bool { self.contains(Self::FSGSBASE) }
-    #[inline] pub fn pcide(self) -> bool { self.contains(Self::PCIDE) }
-    #[inline] pub fn osxsave(self) -> bool { self.contains(Self::OSXSAVE) }
-    #[inline] pub fn keylocker(self) -> bool { self.contains(Self::KEYLOCKER) }
-    #[inline] pub fn smep(self) -> bool { self.contains(Self::SMEP) }
-    #[inline] pub fn smap(self) -> bool { self.contains(Self::SMAP) }
-    #[inline] pub fn pke(self) -> bool { self.contains(Self::PKE) }
-    #[inline] pub fn cet(self) -> bool { self.contains(Self::CET) }
-    #[inline] pub fn pks(self) -> bool { self.contains(Self::PKS) }
-    #[inline] pub fn uintr(self) -> bool { self.contains(Self::UINTR) }
-    #[inline] pub fn lass(self) -> bool { self.contains(Self::LASS) }
-    #[inline] pub fn lam_supervisor(self) -> bool { self.contains(Self::LAM_SUPERVISOR) }
+    #[inline]
+    pub fn vme(self) -> bool {
+        self.contains(Self::VME)
+    }
+    #[inline]
+    pub fn pvi(self) -> bool {
+        self.contains(Self::PVI)
+    }
+    #[inline]
+    pub fn tsd(self) -> bool {
+        self.contains(Self::TSD)
+    }
+    #[inline]
+    pub fn de(self) -> bool {
+        self.contains(Self::DE)
+    }
+    #[inline]
+    pub fn pse(self) -> bool {
+        self.contains(Self::PSE)
+    }
+    #[inline]
+    pub fn pae(self) -> bool {
+        self.contains(Self::PAE)
+    }
+    #[inline]
+    pub fn mce(self) -> bool {
+        self.contains(Self::MCE)
+    }
+    #[inline]
+    pub fn pge(self) -> bool {
+        self.contains(Self::PGE)
+    }
+    #[inline]
+    pub fn pce(self) -> bool {
+        self.contains(Self::PCE)
+    }
+    #[inline]
+    pub fn osfxsr(self) -> bool {
+        self.contains(Self::OSFXSR)
+    }
+    #[inline]
+    pub fn osxmmexcpt(self) -> bool {
+        self.contains(Self::OSXMMEXCPT)
+    }
+    #[inline]
+    pub fn umip(self) -> bool {
+        self.contains(Self::UMIP)
+    }
+    #[inline]
+    pub fn la57(self) -> bool {
+        self.contains(Self::LA57)
+    }
+    #[inline]
+    pub fn vmxe(self) -> bool {
+        self.contains(Self::VMXE)
+    }
+    #[inline]
+    pub fn smxe(self) -> bool {
+        self.contains(Self::SMXE)
+    }
+    #[inline]
+    pub fn fsgsbase(self) -> bool {
+        self.contains(Self::FSGSBASE)
+    }
+    #[inline]
+    pub fn pcide(self) -> bool {
+        self.contains(Self::PCIDE)
+    }
+    #[inline]
+    pub fn osxsave(self) -> bool {
+        self.contains(Self::OSXSAVE)
+    }
+    #[inline]
+    pub fn keylocker(self) -> bool {
+        self.contains(Self::KEYLOCKER)
+    }
+    #[inline]
+    pub fn smep(self) -> bool {
+        self.contains(Self::SMEP)
+    }
+    #[inline]
+    pub fn smap(self) -> bool {
+        self.contains(Self::SMAP)
+    }
+    #[inline]
+    pub fn pke(self) -> bool {
+        self.contains(Self::PKE)
+    }
+    #[inline]
+    pub fn cet(self) -> bool {
+        self.contains(Self::CET)
+    }
+    #[inline]
+    pub fn pks(self) -> bool {
+        self.contains(Self::PKS)
+    }
+    #[inline]
+    pub fn uintr(self) -> bool {
+        self.contains(Self::UINTR)
+    }
+    #[inline]
+    pub fn lass(self) -> bool {
+        self.contains(Self::LASS)
+    }
+    #[inline]
+    pub fn lam_supervisor(self) -> bool {
+        self.contains(Self::LAM_SUPERVISOR)
+    }
 
     #[inline]
     pub(super) fn get32(self) -> u32 {
@@ -159,7 +273,7 @@ impl BxCr4 {
 
 #[derive(Debug, Default)]
 pub struct BxDr6 {
-    pub val32: u32, // 32bit value of register
+    pub(crate) val32: u32, // 32bit value of register
 }
 
 impl_crreg_accessors!(BxDr6, b0, 0);
@@ -184,7 +298,7 @@ impl BxDr6 {
 
 #[derive(Debug, Default)]
 pub struct BxDr7 {
-    pub val32: u32, // 32bit value of register
+    pub(crate) val32: u32, // 32bit value of register
 }
 
 macro_rules! impl_drreg_accessors {
@@ -234,7 +348,7 @@ impl BxDr7 {
 
 #[derive(Debug, Default)]
 pub struct BxEfer {
-    pub val32: u32,
+    pub(crate) val32: u32,
 }
 
 impl_crreg_accessors!(BxEfer, sce, 0);
@@ -293,7 +407,7 @@ const XSAVE_APX_STATE_OFFSET: u32 = 960; // repurpose deprecated BND (MPX) state
 
 #[derive(Debug, Default)]
 pub struct Xcr0 {
-    pub value: u32,
+    pub(crate) value: u32,
 }
 
 impl Xcr0 {
@@ -301,7 +415,7 @@ impl Xcr0 {
     pub(super) fn get32(&self) -> u32 {
         self.value
     }
-    
+
     #[inline]
     pub(super) fn set32(&mut self, val: u32) {
         self.value = val
@@ -433,8 +547,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.invalidate_prefetch_q();
         }
 
-        tracing::trace!("MOV CR0, r32: {:#010x} -> {:#010x} (PE={}, PG={})",
-            old_cr0, val_32, self.cr0.pe(), (val_32 >> 31) & 1);
+        tracing::trace!(
+            "MOV CR0, r32: {:#010x} -> {:#010x} (PE={}, PG={})",
+            old_cr0,
+            val_32,
+            self.cr0.pe(),
+            (val_32 >> 31) & 1
+        );
         Ok(())
     }
 
@@ -507,7 +626,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
-        tracing::debug!("LMSW: msw={:#06x}, CR0={:#010x} (PE={})", msw, cr0_val, self.cr0.pe());
+        tracing::debug!(
+            "LMSW: msw={:#06x}, CR0={:#010x} (PE={})",
+            msw,
+            cr0_val,
+            self.cr0.pe()
+        );
         Ok(())
     }
 }

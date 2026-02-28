@@ -2,9 +2,9 @@
 //! Internal routines: field extraction, normalization, round-and-pack.
 //! Ported from Berkeley SoftFloat 3e internals.h / s_roundPackTo*.c / s_normRoundPackTo*.c.
 
-use super::softfloat_types::*;
-use super::softfloat::*;
 use super::primitives::*;
+use super::softfloat::*;
+use super::softfloat_types::*;
 use super::specialize::*;
 
 // ============================================================
@@ -12,29 +12,60 @@ use super::specialize::*;
 // ============================================================
 
 // --- float32 ---
-#[inline] pub fn sign_f32(a: u32) -> bool { (a >> 31) != 0 }
-#[inline] pub fn exp_f32(a: u32) -> i16 { ((a >> 23) & 0xFF) as i16 }
-#[inline] pub fn frac_f32(a: u32) -> u32 { a & 0x007FFFFF }
-#[inline] pub fn pack_to_f32(sign: bool, exp: i16, sig: u32) -> u32 {
+#[inline]
+pub fn sign_f32(a: u32) -> bool {
+    (a >> 31) != 0
+}
+#[inline]
+pub fn exp_f32(a: u32) -> i16 {
+    ((a >> 23) & 0xFF) as i16
+}
+#[inline]
+pub fn frac_f32(a: u32) -> u32 {
+    a & 0x007FFFFF
+}
+#[inline]
+pub fn pack_to_f32(sign: bool, exp: i16, sig: u32) -> u32 {
     ((sign as u32) << 31) | ((exp as u32) << 23) | sig
 }
-#[inline] pub fn is_nan_f32(a: u32) -> bool { ((!a & 0x7F800000) == 0) && ((a & 0x007FFFFF) != 0) }
+#[inline]
+pub fn is_nan_f32(a: u32) -> bool {
+    ((!a & 0x7F800000) == 0) && ((a & 0x007FFFFF) != 0)
+}
 
 // --- float64 ---
-#[inline] pub fn sign_f64(a: u64) -> bool { (a >> 63) != 0 }
-#[inline] pub fn exp_f64(a: u64) -> i16 { ((a >> 52) & 0x7FF) as i16 }
-#[inline] pub fn frac_f64(a: u64) -> u64 { a & 0x000FFFFFFFFFFFFF }
-#[inline] pub fn pack_to_f64(sign: bool, exp: i16, sig: u64) -> u64 {
+#[inline]
+pub fn sign_f64(a: u64) -> bool {
+    (a >> 63) != 0
+}
+#[inline]
+pub fn exp_f64(a: u64) -> i16 {
+    ((a >> 52) & 0x7FF) as i16
+}
+#[inline]
+pub fn frac_f64(a: u64) -> u64 {
+    a & 0x000FFFFFFFFFFFFF
+}
+#[inline]
+pub fn pack_to_f64(sign: bool, exp: i16, sig: u64) -> u64 {
     ((sign as u64) << 63) | ((exp as u64) << 52) | sig
 }
-#[inline] pub fn is_nan_f64(a: u64) -> bool {
+#[inline]
+pub fn is_nan_f64(a: u64) -> bool {
     ((!a & 0x7FF0000000000000) == 0) && ((a & 0x000FFFFFFFFFFFFF) != 0)
 }
 
 // --- extFloat80 ---
-#[inline] pub fn sign_extf80(a64: u16) -> bool { (a64 >> 15) != 0 }
-#[inline] pub fn exp_extf80(a64: u16) -> u16 { a64 & 0x7FFF }
-#[inline] pub fn pack_to_extf80_sign_exp(sign: bool, exp: u16) -> u16 {
+#[inline]
+pub fn sign_extf80(a64: u16) -> bool {
+    (a64 >> 15) != 0
+}
+#[inline]
+pub fn exp_extf80(a64: u16) -> u16 {
+    a64 & 0x7FFF
+}
+#[inline]
+pub fn pack_to_extf80_sign_exp(sign: bool, exp: u16) -> u16 {
     ((sign as u16) << 15) | exp
 }
 
@@ -42,23 +73,41 @@ use super::specialize::*;
 // Normalization of subnormal significands
 // ============================================================
 
-pub struct ExpSig32 { pub exp: i16, pub sig: u32 }
-pub struct ExpSig64 { pub exp: i16, pub sig: u64 }
-pub struct ExpSig64_32 { pub exp: i32, pub sig: u64 }
+pub struct ExpSig32 {
+    pub(crate) exp: i16,
+    pub(crate) sig: u32,
+}
+pub struct ExpSig64 {
+    pub(crate) exp: i16,
+    pub(crate) sig: u64,
+}
+pub struct ExpSig64_32 {
+    pub(crate) exp: i32,
+    pub(crate) sig: u64,
+}
 
 pub fn norm_subnormal_f32_sig(sig: u32) -> ExpSig32 {
     let shift = count_leading_zeros32(sig) as i16 - 8;
-    ExpSig32 { exp: 1 - shift, sig: sig << shift }
+    ExpSig32 {
+        exp: 1 - shift,
+        sig: sig << shift,
+    }
 }
 
 pub fn norm_subnormal_f64_sig(sig: u64) -> ExpSig64 {
     let shift = count_leading_zeros64(sig) as i16 - 11;
-    ExpSig64 { exp: 1 - shift, sig: sig << shift }
+    ExpSig64 {
+        exp: 1 - shift,
+        sig: sig << shift,
+    }
 }
 
 pub fn norm_subnormal_extf80_sig(sig: u64) -> ExpSig64_32 {
     let shift = count_leading_zeros64(sig) as i32;
-    ExpSig64_32 { exp: -shift, sig: sig << shift }
+    ExpSig64_32 {
+        exp: -shift,
+        sig: sig << shift,
+    }
 }
 
 // ============================================================
@@ -88,7 +137,9 @@ pub fn round_pack_to_f32(sign: bool, exp: i16, sig: u32, status: &mut SoftFloatS
             let round_bits = sig & 0x7F;
             if round_bits != 0 {
                 softfloat_raiseFlags(status, FLAG_INEXACT);
-                if is_tiny { softfloat_raiseFlags(status, FLAG_UNDERFLOW); }
+                if is_tiny {
+                    softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                }
             }
             sig = sig.wrapping_add(round_increment);
             exp = ((sig & 0x80000000) != 0) as i16;
@@ -102,7 +153,8 @@ pub fn round_pack_to_f32(sign: bool, exp: i16, sig: u32, status: &mut SoftFloatS
         }
         if (0xFD < exp) || (0x80000000 <= sig.wrapping_add(round_increment)) {
             softfloat_raiseFlags(status, FLAG_OVERFLOW | FLAG_INEXACT);
-            if round_near_even || rounding_mode == ROUND_NEAR_MAXMAG
+            if round_near_even
+                || rounding_mode == ROUND_NEAR_MAXMAG
                 || rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX })
             {
                 return pack_to_f32(sign, 0xFF, 0);
@@ -112,16 +164,25 @@ pub fn round_pack_to_f32(sign: bool, exp: i16, sig: u32, status: &mut SoftFloatS
         }
     }
     sig = sig.wrapping_add(round_increment);
-    if sig < round_increment { exp += 1; }
+    if sig < round_increment {
+        exp += 1;
+    }
     if round_near_even && ((round_bits ^ 0x40) == 0) {
         sig &= !0x7Fu32;
     }
-    if round_bits != 0 { softfloat_raiseFlags(status, FLAG_INEXACT); }
+    if round_bits != 0 {
+        softfloat_raiseFlags(status, FLAG_INEXACT);
+    }
     sig >>= 7;
     pack_to_f32(sign, exp, sig & 0x007FFFFF)
 }
 
-pub fn norm_round_pack_to_f32(sign: bool, exp: i16, sig: u32, status: &mut SoftFloatStatus) -> float32 {
+pub fn norm_round_pack_to_f32(
+    sign: bool,
+    exp: i16,
+    sig: u32,
+    status: &mut SoftFloatStatus,
+) -> float32 {
     let shift = count_leading_zeros32(sig) as i16 - 1;
     round_pack_to_f32(sign, exp - shift, sig << shift, status)
 }
@@ -153,7 +214,9 @@ pub fn round_pack_to_f64(sign: bool, exp: i16, sig: u64, status: &mut SoftFloatS
             let round_bits = (sig & 0x3FF) as u32;
             if round_bits != 0 {
                 softfloat_raiseFlags(status, FLAG_INEXACT);
-                if is_tiny { softfloat_raiseFlags(status, FLAG_UNDERFLOW); }
+                if is_tiny {
+                    softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                }
             }
             sig = sig.wrapping_add(round_increment);
             exp = ((sig & 0x8000000000000000) != 0) as i16;
@@ -166,7 +229,8 @@ pub fn round_pack_to_f64(sign: bool, exp: i16, sig: u64, status: &mut SoftFloatS
         }
         if (0x7FD < exp) || (0x8000000000000000 <= sig.wrapping_add(round_increment)) {
             softfloat_raiseFlags(status, FLAG_OVERFLOW | FLAG_INEXACT);
-            if round_near_even || rounding_mode == ROUND_NEAR_MAXMAG
+            if round_near_even
+                || rounding_mode == ROUND_NEAR_MAXMAG
                 || rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX })
             {
                 return pack_to_f64(sign, 0x7FF, 0);
@@ -176,16 +240,25 @@ pub fn round_pack_to_f64(sign: bool, exp: i16, sig: u64, status: &mut SoftFloatS
         }
     }
     sig = sig.wrapping_add(round_increment);
-    if sig < round_increment { exp += 1; }
+    if sig < round_increment {
+        exp += 1;
+    }
     if round_near_even && ((round_bits ^ 0x200) == 0) {
         sig &= !0x3FFu64;
     }
-    if round_bits != 0 { softfloat_raiseFlags(status, FLAG_INEXACT); }
+    if round_bits != 0 {
+        softfloat_raiseFlags(status, FLAG_INEXACT);
+    }
     sig >>= 10;
     pack_to_f64(sign, exp, sig & 0x000FFFFFFFFFFFFF)
 }
 
-pub fn norm_round_pack_to_f64(sign: bool, exp: i16, sig: u64, status: &mut SoftFloatStatus) -> float64 {
+pub fn norm_round_pack_to_f64(
+    sign: bool,
+    exp: i16,
+    sig: u64,
+    status: &mut SoftFloatStatus,
+) -> float64 {
     let shift = count_leading_zeros64(sig) as i16 - 1;
     round_pack_to_f64(sign, exp - shift, sig << shift, status)
 }
@@ -196,10 +269,11 @@ pub fn norm_round_pack_to_f64(sign: bool, exp: i16, sig: u64, status: &mut SoftF
 #[inline]
 pub fn shift_right_jam64_extra(a: u64, extra: u64, dist: u32) -> (u64, u64) {
     if dist < 64 {
-        if dist == 0 { return (a, extra); }
+        if dist == 0 {
+            return (a, extra);
+        }
         let v = a >> dist;
-        let new_extra = (a << ((!dist).wrapping_add(1) & 63))
-            | ((extra != 0) as u64);
+        let new_extra = (a << ((!dist).wrapping_add(1) & 63)) | ((extra != 0) as u64);
         (v, new_extra)
     } else {
         let v = 0u64;
@@ -269,8 +343,12 @@ pub fn round_pack_to_extf80(
                     sig &= !round_mask;
                     if round_bits != 0 {
                         softfloat_raiseFlags(status, FLAG_INEXACT);
-                        if sig > sig_exact { softfloat_setRoundingUp(status); }
-                        if is_tiny { softfloat_raiseFlags(status, FLAG_UNDERFLOW); }
+                        if sig > sig_exact {
+                            softfloat_setRoundingUp(status);
+                        }
+                        if is_tiny {
+                            softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                        }
                     }
                     return pack_floatx80(sign, exp, sig);
                 }
@@ -280,10 +358,12 @@ pub fn round_pack_to_extf80(
                     softfloat_raiseFlags(status, FLAG_OVERFLOW);
                     exp -= 0x6000;
                 }
-                if (0x7FFE < exp) || ((exp == 0x7FFE) && (sig.wrapping_add(round_increment) < sig)) {
+                if (0x7FFE < exp) || ((exp == 0x7FFE) && (sig.wrapping_add(round_increment) < sig))
+                {
                     // overflow
                     softfloat_raiseFlags(status, FLAG_OVERFLOW | FLAG_INEXACT);
-                    if round_near_even || rounding_mode == ROUND_NEAR_MAXMAG
+                    if round_near_even
+                        || rounding_mode == ROUND_NEAR_MAXMAG
                         || rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX })
                     {
                         softfloat_setRoundingUp(status);
@@ -309,7 +389,9 @@ pub fn round_pack_to_extf80(
         sig &= !round_mask;
         if round_bits != 0 {
             softfloat_raiseFlags(status, FLAG_INEXACT);
-            if sig > sig_exact { softfloat_setRoundingUp(status); }
+            if sig > sig_exact {
+                softfloat_setRoundingUp(status);
+            }
         }
         return pack_floatx80(sign, exp, sig);
     }
@@ -330,7 +412,8 @@ fn round_pack_to_extf80_precision80(
 
     let mut do_increment = 0x8000000000000000 <= sig_extra;
     if !round_near_even && rounding_mode != ROUND_NEAR_MAXMAG {
-        do_increment = (rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX })) && sig_extra != 0;
+        do_increment =
+            (rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX })) && sig_extra != 0;
     }
 
     if 0x7FFD <= (exp.wrapping_sub(1) as u32) {
@@ -340,24 +423,30 @@ fn round_pack_to_extf80_precision80(
                 softfloat_raiseFlags(status, FLAG_UNDERFLOW);
                 exp += 0x6000;
             } else {
-                let (new_sig, new_extra) = shift_right_jam64_extra(sig, sig_extra, (1 - exp) as u32);
+                let (new_sig, new_extra) =
+                    shift_right_jam64_extra(sig, sig_extra, (1 - exp) as u32);
                 exp = 0;
                 sig = new_sig;
                 let sig_extra = new_extra;
                 if sig_extra != 0 {
                     softfloat_raiseFlags(status, FLAG_INEXACT);
-                    if is_tiny { softfloat_raiseFlags(status, FLAG_UNDERFLOW); }
+                    if is_tiny {
+                        softfloat_raiseFlags(status, FLAG_UNDERFLOW);
+                    }
                 }
                 do_increment = 0x8000000000000000 <= sig_extra;
                 if !round_near_even && rounding_mode != ROUND_NEAR_MAXMAG {
-                    do_increment = (rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX })) && sig_extra != 0;
+                    do_increment = (rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX }))
+                        && sig_extra != 0;
                 }
                 if do_increment {
                     let sig_exact = sig;
                     sig = sig.wrapping_add(1);
                     sig &= !((((sig_extra & 0x7FFFFFFFFFFFFFFF) == 0) && round_near_even) as u64);
                     exp = ((sig & 0x8000000000000000) != 0) as i32;
-                    if sig > sig_exact { softfloat_setRoundingUp(status); }
+                    if sig > sig_exact {
+                        softfloat_setRoundingUp(status);
+                    }
                 }
                 return pack_floatx80(sign, exp, sig);
             }
@@ -369,7 +458,8 @@ fn round_pack_to_extf80_precision80(
             }
             if (0x7FFE < exp) || ((exp == 0x7FFE) && (sig == 0xFFFFFFFFFFFFFFFF) && do_increment) {
                 softfloat_raiseFlags(status, FLAG_OVERFLOW | FLAG_INEXACT);
-                if round_near_even || rounding_mode == ROUND_NEAR_MAXMAG
+                if round_near_even
+                    || rounding_mode == ROUND_NEAR_MAXMAG
                     || rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX })
                 {
                     softfloat_setRoundingUp(status);
@@ -393,9 +483,13 @@ fn round_pack_to_extf80_precision80(
         } else {
             sig &= !((((sig_extra & 0x7FFFFFFFFFFFFFFF) == 0) && round_near_even) as u64);
         }
-        if sig > sig_exact { softfloat_setRoundingUp(status); }
+        if sig > sig_exact {
+            softfloat_setRoundingUp(status);
+        }
     } else {
-        if sig == 0 { exp = 0; }
+        if sig == 0 {
+            exp = 0;
+        }
     }
     pack_floatx80(sign, exp, sig)
 }
@@ -451,10 +545,16 @@ pub fn softfloat_round_to_i32(
         sig
     };
     let mut z = sig as i32;
-    if sign { z = -z; }
+    if sign {
+        z = -z;
+    }
     if z != 0 && ((z < 0) ^ sign) {
         softfloat_raiseFlags(status, FLAG_INVALID);
-        return if sign { I32_FROM_NEG_OVERFLOW } else { I32_FROM_POS_OVERFLOW };
+        return if sign {
+            I32_FROM_NEG_OVERFLOW
+        } else {
+            I32_FROM_POS_OVERFLOW
+        };
     }
     if round_bits != 0 && exact {
         softfloat_raiseFlags(status, FLAG_INEXACT);
@@ -473,24 +573,35 @@ pub fn softfloat_round_to_i64(
     let round_near_even = rounding_mode == ROUND_NEAR_EVEN;
     let mut do_increment = 0x8000000000000000 <= sig_extra;
     if !round_near_even && rounding_mode != ROUND_NEAR_MAXMAG {
-        do_increment = (rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX })) && sig_extra != 0;
+        do_increment =
+            (rounding_mode == (if sign { ROUND_MIN } else { ROUND_MAX })) && sig_extra != 0;
     }
     let mut sig = sig;
     if do_increment {
         sig = sig.wrapping_add(1);
         if sig == 0 {
             softfloat_raiseFlags(status, FLAG_INVALID);
-            return if sign { I64_FROM_NEG_OVERFLOW } else { I64_FROM_POS_OVERFLOW };
+            return if sign {
+                I64_FROM_NEG_OVERFLOW
+            } else {
+                I64_FROM_POS_OVERFLOW
+            };
         }
         if round_near_even && (sig_extra == 0x8000000000000000) {
             sig &= !1;
         }
     }
     let mut z = sig as i64;
-    if sign { z = -z; }
+    if sign {
+        z = -z;
+    }
     if z != 0 && ((z < 0) ^ sign) {
         softfloat_raiseFlags(status, FLAG_INVALID);
-        return if sign { I64_FROM_NEG_OVERFLOW } else { I64_FROM_POS_OVERFLOW };
+        return if sign {
+            I64_FROM_NEG_OVERFLOW
+        } else {
+            I64_FROM_POS_OVERFLOW
+        };
     }
     if sig_extra != 0 && exact {
         softfloat_raiseFlags(status, FLAG_INEXACT);

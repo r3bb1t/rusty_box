@@ -15,26 +15,26 @@ impl BxCpuIdTrait for Corei7SkylakeX {
         use crate::cpu::cpuid::VMXExtensions;
         Some(
             VMXExtensions::TprShadow
-            | VMXExtensions::VirtualNmi
-            | VMXExtensions::ApicVirtualization
-            | VMXExtensions::WbinvdVmexit
-            | VMXExtensions::PerfGlobalCtrl
-            | VMXExtensions::MonitorTrapFlag
-            | VMXExtensions::X2apicVirtualization
-            | VMXExtensions::EPT
-            | VMXExtensions::VPID
-            | VMXExtensions::UnrestrictedGuest
-            | VMXExtensions::PreemptionTimer
-            | VMXExtensions::PAT
-            | VMXExtensions::EFER
-            | VMXExtensions::DescriptorTableExit
-            | VMXExtensions::PauseLoopExiting
-            | VMXExtensions::EptpSwitching
-            | VMXExtensions::EptAccessDirty
-            | VMXExtensions::VintrDelivery
-            | VMXExtensions::PostedInterrupts
-            | VMXExtensions::VmcsShadowing
-            | VMXExtensions::EptException,
+                | VMXExtensions::VirtualNmi
+                | VMXExtensions::ApicVirtualization
+                | VMXExtensions::WbinvdVmexit
+                | VMXExtensions::PerfGlobalCtrl
+                | VMXExtensions::MonitorTrapFlag
+                | VMXExtensions::X2apicVirtualization
+                | VMXExtensions::EPT
+                | VMXExtensions::VPID
+                | VMXExtensions::UnrestrictedGuest
+                | VMXExtensions::PreemptionTimer
+                | VMXExtensions::PAT
+                | VMXExtensions::EFER
+                | VMXExtensions::DescriptorTableExit
+                | VMXExtensions::PauseLoopExiting
+                | VMXExtensions::EptpSwitching
+                | VMXExtensions::EptAccessDirty
+                | VMXExtensions::VintrDelivery
+                | VMXExtensions::PostedInterrupts
+                | VMXExtensions::VmcsShadowing
+                | VMXExtensions::EptException,
         )
     }
 
@@ -70,16 +70,14 @@ impl BxCpuIdTrait for Corei7SkylakeX {
                 0x00050654, // Family 6, Extended Model 5, Model 5 → Skylake-X (stepping U0)
                 0x00010800, // Brand index 0, CLFLUSH=8 (64B line), 1 logical proc, APIC ID 0
                 0x7FFEFBBF, // ECX: SSE3,PCLMULQDQ,DTES64,MON,DSCPL,VMX,EST,TM2,SSSE3,FMA,
-                            //      CX16,xTPR,PDCM,PCID,SSE4.1,SSE4.2,X2APIC,MOVBE,POPCNT,
-                            //      TSC-DL,AES,XSAVE,OSXSAVE,AVX,F16C,RDRAND
+                //      CX16,xTPR,PDCM,PCID,SSE4.1,SSE4.2,X2APIC,MOVBE,POPCNT,
+                //      TSC-DL,AES,XSAVE,OSXSAVE,AVX,F16C,RDRAND
                 0xBFEBFBFF, // EDX: FPU,VME,DE,PSE,TSC,MSR,PAE,MCE,CX8,APIC,SEP,MTRR,PGE,
                             //      MCA,CMOV,PAT,PSE36,CLFLUSH,DS,ACPI,MMX,FXSR,SSE,SSE2,SS,HTT,TM,PBE
             ),
             0x00000002 => (
                 0x76036301, // Cache/TLB descriptor info (from hardware)
-                0x00F0B5FF,
-                0x00000000,
-                0x00C30000,
+                0x00F0B5FF, 0x00000000, 0x00C30000,
             ),
             0x00000004 => {
                 // Deterministic Cache Parameters — sub-leaf in ECX
@@ -98,8 +96,8 @@ impl BxCpuIdTrait for Corei7SkylakeX {
                     0 => (
                         0x00000000, // max sub-leaf
                         0xD39FFFFB, // EBX: FSGSBASE,TSC_ADJ,BMI1,AVX2,FDP_DEP,SMEP,BMI2,
-                                    //      ERMS,INVPCID,FCS_FDS,AVX512F,AVX512DQ,RDSEED,ADX,
-                                    //      SMAP,AVX512CD,CLFLUSHOPT,CLWB,AVX512BW,AVX512VL
+                        //      ERMS,INVPCID,FCS_FDS,AVX512F,AVX512DQ,RDSEED,ADX,
+                        //      SMAP,AVX512CD,CLFLUSHOPT,CLWB,AVX512BW,AVX512VL
                         0x00000000, // ECX
                         0x00000000, // EDX
                     ),
@@ -110,14 +108,10 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             // Extended CPUID Information
             0x80000000 => (
                 0x80000008, // Max extended leaf
-                0x00000000,
-                0x00000000,
-                0x00000000,
+                0x00000000, 0x00000000, 0x00000000,
             ),
             0x80000001 => (
-                0x00000000,
-                0x00000000,
-                0x00000121, // ECX: LAHF64, LZCNT, PREFETCHW
+                0x00000000, 0x00000000, 0x00000121, // ECX: LAHF64, LZCNT, PREFETCHW
                 0x2C100000, // EDX: NX, 1G-pages, RDTSCP, LM, SYSCALL
             ),
             // Brand string: "Intel(R) Core(TM) i7-7800X CPU @ 3.50GHz"
@@ -127,24 +121,16 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             0x80000004 => (0x352E3320, 0x7A484730, 0x00000000, 0x00000000), // " 3.50GHz\0..."
             0x80000005 => (0x00000000, 0x00000000, 0x00000000, 0x00000000), // reserved for Intel
             0x80000006 => (
-                0x00000000,
-                0x00000000,
-                0x01006040, // L2: 512KB, 8-way, 64B line
+                0x00000000, 0x00000000, 0x01006040, // L2: 512KB, 8-way, 64B line
                 0x00000000,
             ),
             0x80000007 => (
-                0x00000000,
-                0x00000000,
-                0x00000000,
-                0x00000100, // Invariant TSC
+                0x00000000, 0x00000000, 0x00000000, 0x00000100, // Invariant TSC
             ),
             0x80000008 => (
                 // [7:0]=36 phys addr bits (4GB emulator), [15:8]=48 virt addr bits
                 // Hardware has 46 phys bits; we use 36 to match our 4GB address space
-                0x00003024,
-                0x00000000,
-                0x00000000,
-                0x00000000,
+                0x00003024, 0x00000000, 0x00000000, 0x00000000,
             ),
             // All other leaves return zeros
             _ => (0, 0, 0, 0),

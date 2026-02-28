@@ -9,11 +9,7 @@
 //! - stack32.rs: 32-bit stack instructions (PUSH/POP r32, PUSHAD, POPAD, etc.)
 //! - stack64.rs: 64-bit stack instructions (PUSH/POP r64, etc.)
 
-use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
-    decoder::BxSegregs,
-};
+use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::BxSegregs};
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================

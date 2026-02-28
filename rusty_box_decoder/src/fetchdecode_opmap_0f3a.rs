@@ -47,7 +47,8 @@ pub(super) const BxOpcodeTable0F3A16: [u64; 2] = [
 
 pub(super) const BxOpcodeTable0F3A17: [u64; 1] =
     [last_opcode(ATTR_SSE_PREFIX_66, Opcode::ExtractpsEdVpsIb)];
-pub(super) const BxOpcodeTable0F3A20: [u64; 1] = [last_opcode(ATTR_SSE_PREFIX_66, Opcode::PinsrbVdqEbIb)];
+pub(super) const BxOpcodeTable0F3A20: [u64; 1] =
+    [last_opcode(ATTR_SSE_PREFIX_66, Opcode::PinsrbVdqEbIb)];
 pub(super) const BxOpcodeTable0F3A21: [u64; 1] =
     [last_opcode(ATTR_SSE_PREFIX_66, Opcode::InsertpsVpsWssIb)];
 
@@ -57,8 +58,10 @@ pub(super) const BxOpcodeTable0F3A22: [u64; 2] = [
     last_opcode(ATTR_SSE_PREFIX_66, Opcode::PinsrdVdqEdIb),
 ];
 
-pub(super) const BxOpcodeTable0F3A40: [u64; 1] = [last_opcode(ATTR_SSE_PREFIX_66, Opcode::DppsVpsWpsIb)];
-pub(super) const BxOpcodeTable0F3A41: [u64; 1] = [last_opcode(ATTR_SSE_PREFIX_66, Opcode::DppdVpdWpdIb)];
+pub(super) const BxOpcodeTable0F3A40: [u64; 1] =
+    [last_opcode(ATTR_SSE_PREFIX_66, Opcode::DppsVpsWpsIb)];
+pub(super) const BxOpcodeTable0F3A41: [u64; 1] =
+    [last_opcode(ATTR_SSE_PREFIX_66, Opcode::DppdVpdWpdIb)];
 pub(super) const BxOpcodeTable0F3A42: [u64; 1] =
     [last_opcode(ATTR_SSE_PREFIX_66, Opcode::MpsadbwVdqWdqIb)];
 pub(super) const BxOpcodeTable0F3A44: [u64; 1] =

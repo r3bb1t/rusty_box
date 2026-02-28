@@ -69,8 +69,8 @@ pub enum DmaTransferMode {
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DmaDirection {
     Verify = 0,
-    Write = 1,  // Memory to I/O
-    Read = 2,   // I/O to Memory
+    Write = 1, // Memory to I/O
+    Read = 2,  // I/O to Memory
     Invalid = 3,
 }
 
@@ -78,25 +78,25 @@ pub enum DmaDirection {
 #[derive(Debug, Clone, Default)]
 pub struct DmaChannel {
     /// Channel number (0-7)
-    pub number: u8,
+    pub(crate) number: u8,
     /// Current address register
-    pub current_addr: u16,
+    pub(crate) current_addr: u16,
     /// Current count register
-    pub current_count: u16,
+    pub(crate) current_count: u16,
     /// Base address register
-    pub base_addr: u16,
+    pub(crate) base_addr: u16,
     /// Base count register
-    pub base_count: u16,
+    pub(crate) base_count: u16,
     /// Page register (bits 16-23 of address)
-    pub page: u8,
+    pub(crate) page: u8,
     /// Channel mode
-    pub mode: u8,
+    pub(crate) mode: u8,
     /// Channel is masked (disabled)
-    pub masked: bool,
+    pub(crate) masked: bool,
     /// Transfer complete
-    pub tc: bool,
+    pub(crate) tc: bool,
     /// Request pending
-    pub request: bool,
+    pub(crate) request: bool,
 }
 
 impl DmaChannel {
@@ -155,15 +155,15 @@ impl DmaChannel {
 #[derive(Debug, Clone)]
 pub struct Dma8237 {
     /// Channels (0-3 or 4-7)
-    pub channels: [DmaChannel; 4],
+    pub(crate) channels: [DmaChannel; 4],
     /// Command register
-    pub command: u8,
+    pub(crate) command: u8,
     /// Status register
-    pub status: u8,
+    pub(crate) status: u8,
     /// Flip-flop for address/count access
-    pub flip_flop: bool,
+    pub(crate) flip_flop: bool,
     /// Controller number (0=DMA1, 1=DMA2)
-    pub controller_num: u8,
+    pub(crate) controller_num: u8,
 }
 
 impl Dma8237 {
@@ -201,11 +201,11 @@ impl Dma8237 {
 #[derive(Debug)]
 pub struct BxDmaC {
     /// DMA1 (8-bit channels 0-3)
-    pub dma1: Dma8237,
+    pub(crate) dma1: Dma8237,
     /// DMA2 (16-bit channels 4-7)
-    pub dma2: Dma8237,
+    pub(crate) dma2: Dma8237,
     /// Extra page registers
-    pub extra_pages: [u8; 8],
+    pub(crate) extra_pages: [u8; 8],
 }
 
 impl Default for BxDmaC {
@@ -228,7 +228,7 @@ impl BxDmaC {
     pub fn init(&mut self) {
         tracing::info!("DMA: Initializing 8237 DMA Controllers");
         self.reset();
-        
+
         // Channel 4 is used for cascade
         self.dma2.channels[0].mode = 0xC0; // Cascade mode
         self.dma2.channels[0].masked = false;
@@ -260,7 +260,9 @@ impl BxDmaC {
             // DMA1 address/count registers
             0x0000..=0x0007 => self.read_addr_count(&mut self.dma1.clone(), port as u8),
             // DMA2 address/count registers
-            0x00C0..=0x00CF => self.read_addr_count(&mut self.dma2.clone(), ((port - 0xC0) >> 1) as u8),
+            0x00C0..=0x00CF => {
+                self.read_addr_count(&mut self.dma2.clone(), ((port - 0xC0) >> 1) as u8)
+            }
             // Page registers
             DMA_PAGE_CH0 => self.dma1.channels[0].page as u32,
             DMA_PAGE_CH1 => self.dma1.channels[1].page as u32,
@@ -280,17 +282,17 @@ impl BxDmaC {
     fn read_addr_count(&mut self, dma: &mut Dma8237, reg: u8) -> u32 {
         let channel_num = (reg >> 1) as usize;
         let is_count = (reg & 1) != 0;
-        
+
         if channel_num >= 4 {
             return 0xFF;
         }
-        
+
         let value = if is_count {
             dma.channels[channel_num].current_count
         } else {
             dma.channels[channel_num].current_addr
         };
-        
+
         let byte = if dma.flip_flop {
             dma.flip_flop = false;
             (value >> 8) as u8
@@ -298,14 +300,14 @@ impl BxDmaC {
             dma.flip_flop = true;
             (value & 0xFF) as u8
         };
-        
+
         // Update original
         if dma.controller_num == 0 {
             self.dma1 = dma.clone();
         } else {
             self.dma2 = dma.clone();
         }
-        
+
         byte as u32
     }
 
@@ -323,7 +325,7 @@ impl BxDmaC {
             DMA1_MASTER_CLEAR => self.dma1.reset(),
             DMA1_CLEAR_MASK => self.clear_mask(0),
             DMA1_WRITE_ALL_MASK => self.write_all_mask(0, value),
-            
+
             // DMA2 registers
             0x00C0..=0x00CF => self.write_addr_count(1, ((port - 0xC0) >> 1) as u8, value),
             DMA2_COMMAND => self.dma2.command = value,
@@ -334,7 +336,7 @@ impl BxDmaC {
             DMA2_MASTER_CLEAR => self.dma2.reset(),
             DMA2_CLEAR_MASK => self.clear_mask(1),
             DMA2_WRITE_ALL_MASK => self.write_all_mask(1, value),
-            
+
             // Page registers
             DMA_PAGE_CH0 => self.dma1.channels[0].page = value,
             DMA_PAGE_CH1 => self.dma1.channels[1].page = value,
@@ -344,7 +346,7 @@ impl BxDmaC {
             DMA_PAGE_CH6 => self.dma2.channels[2].page = value,
             DMA_PAGE_CH7 => self.dma2.channels[3].page = value,
             DMA_PAGE_REFRESH => self.extra_pages[0] = value,
-            
+
             _ => {
                 tracing::trace!("DMA: Unknown write port {:#06x} value={:#04x}", port, value);
             }
@@ -352,30 +354,34 @@ impl BxDmaC {
     }
 
     fn write_addr_count(&mut self, controller: u8, reg: u8, value: u8) {
-        let dma = if controller == 0 { &mut self.dma1 } else { &mut self.dma2 };
+        let dma = if controller == 0 {
+            &mut self.dma1
+        } else {
+            &mut self.dma2
+        };
         let channel_num = (reg >> 1) as usize;
         let is_count = (reg & 1) != 0;
-        
+
         if channel_num >= 4 {
             return;
         }
-        
+
         if is_count {
             if dma.flip_flop {
-                dma.channels[channel_num].base_count = 
+                dma.channels[channel_num].base_count =
                     (dma.channels[channel_num].base_count & 0x00FF) | ((value as u16) << 8);
                 dma.channels[channel_num].current_count = dma.channels[channel_num].base_count;
             } else {
-                dma.channels[channel_num].base_count = 
+                dma.channels[channel_num].base_count =
                     (dma.channels[channel_num].base_count & 0xFF00) | (value as u16);
             }
         } else {
             if dma.flip_flop {
-                dma.channels[channel_num].base_addr = 
+                dma.channels[channel_num].base_addr =
                     (dma.channels[channel_num].base_addr & 0x00FF) | ((value as u16) << 8);
                 dma.channels[channel_num].current_addr = dma.channels[channel_num].base_addr;
             } else {
-                dma.channels[channel_num].base_addr = 
+                dma.channels[channel_num].base_addr =
                     (dma.channels[channel_num].base_addr & 0xFF00) | (value as u16);
             }
         }
@@ -383,36 +389,57 @@ impl BxDmaC {
     }
 
     fn set_request(&mut self, controller: u8, value: u8) {
-        let dma = if controller == 0 { &mut self.dma1 } else { &mut self.dma2 };
+        let dma = if controller == 0 {
+            &mut self.dma1
+        } else {
+            &mut self.dma2
+        };
         let channel = (value & 0x03) as usize;
         dma.channels[channel].request = (value & 0x04) != 0;
     }
 
     fn set_mask(&mut self, controller: u8, value: u8) {
-        let dma = if controller == 0 { &mut self.dma1 } else { &mut self.dma2 };
+        let dma = if controller == 0 {
+            &mut self.dma1
+        } else {
+            &mut self.dma2
+        };
         let channel = (value & 0x03) as usize;
         dma.channels[channel].masked = (value & 0x04) != 0;
     }
 
     fn set_mode(&mut self, controller: u8, value: u8) {
-        let dma = if controller == 0 { &mut self.dma1 } else { &mut self.dma2 };
+        let dma = if controller == 0 {
+            &mut self.dma1
+        } else {
+            &mut self.dma2
+        };
         let channel = (value & 0x03) as usize;
         dma.channels[channel].mode = value;
         tracing::debug!(
-            "DMA: Channel {} mode set to {:#04x}", 
-            channel + (controller * 4) as usize, value
+            "DMA: Channel {} mode set to {:#04x}",
+            channel + (controller * 4) as usize,
+            value
         );
     }
 
     fn clear_mask(&mut self, controller: u8) {
-        let dma = if controller == 0 { &mut self.dma1 } else { &mut self.dma2 };
+        let dma = if controller == 0 {
+            &mut self.dma1
+        } else {
+            &mut self.dma2
+        };
         for channel in &mut dma.channels {
             channel.masked = false;
         }
     }
 
     fn write_all_mask(&mut self, controller: u8, value: u8) {
-        let dma = if controller == 0 { &mut self.dma1 } else { &mut self.dma2 };
+        let dma = if controller == 0 {
+            &mut self.dma1
+        } else {
+            &mut self.dma2
+        };
         for (i, channel) in dma.channels.iter_mut().enumerate() {
             channel.masked = (value & (1 << i)) != 0;
         }
@@ -470,8 +497,7 @@ mod tests {
         let mut channel = DmaChannel::new(2);
         channel.current_addr = 0x1234;
         channel.page = 0x56;
-        
+
         assert_eq!(channel.get_address(), 0x00561234);
     }
 }
-

@@ -5,9 +5,9 @@
 
 use super::super::cpu::{BxCpuC, CpuMode};
 use super::super::cpuid::BxCpuIdTrait;
-use super::super::decoder::{Instruction, BxSegregs};
-use super::super::softfloat3e::softfloat_types::floatx80;
+use super::super::decoder::{BxSegregs, Instruction};
 use super::super::i387::*;
+use super::super::softfloat3e::softfloat_types::floatx80;
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FNINIT — Initialize FPU state
@@ -18,9 +18,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FNCLEX — Clear FPU exception flags
     pub fn fnclex(&mut self, _instr: &Instruction) -> super::super::Result<()> {
-        self.the_i387.swd &= !(FPU_SW_BACKWARD | FPU_SW_SUMMARY | FPU_SW_STACK_FAULT |
-                                FPU_SW_PRECISION | FPU_SW_UNDERFLOW | FPU_SW_OVERFLOW |
-                                FPU_SW_ZERO_DIV | FPU_SW_DENORMAL_OP | FPU_SW_INVALID);
+        self.the_i387.swd &= !(FPU_SW_BACKWARD
+            | FPU_SW_SUMMARY
+            | FPU_SW_STACK_FAULT
+            | FPU_SW_PRECISION
+            | FPU_SW_UNDERFLOW
+            | FPU_SW_OVERFLOW
+            | FPU_SW_ZERO_DIV
+            | FPU_SW_DENORMAL_OP
+            | FPU_SW_INVALID);
         Ok(())
     }
 
@@ -119,7 +125,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fnsave(&mut self, instr: &Instruction) -> super::super::Result<()> {
         let offset = self.fpu_save_environment(instr)?;
         let seg = BxSegregs::from(instr.seg());
-        let asize_mask: u32 = if instr.as32_l() != 0 { 0xFFFFFFFF } else { 0xFFFF };
+        let asize_mask: u32 = if instr.as32_l() != 0 {
+            0xFFFFFFFF
+        } else {
+            0xFFFF
+        };
 
         // Save all 8 registers in stack order
         for n in 0..8i32 {
@@ -145,7 +155,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let offset = self.fpu_load_environment(instr)?;
         let seg = BxSegregs::from(instr.seg());
-        let asize_mask: u32 = if instr.as32_l() != 0 { 0xFFFFFFFF } else { 0xFFFF };
+        let asize_mask: u32 = if instr.as32_l() != 0 {
+            0xFFFFFFFF
+        } else {
+            0xFFFF
+        };
 
         // Read all 8 registers in stack order
         for n in 0..8i32 {
@@ -172,9 +186,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Check if in protected mode (not real mode and not V8086)
     #[inline]
     fn is_protected_mode(&self) -> bool {
-        self.cpu_mode == CpuMode::Ia32Protected ||
-        self.cpu_mode == CpuMode::LongCompat ||
-        self.cpu_mode == CpuMode::Long64
+        self.cpu_mode == CpuMode::Ia32Protected
+            || self.cpu_mode == CpuMode::LongCompat
+            || self.cpu_mode == CpuMode::Long64
     }
 
     fn fpu_save_environment(&mut self, instr: &Instruction) -> super::super::Result<u32> {
@@ -189,7 +203,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let asize_mask: u32 = if instr.as32_l() != 0 { 0xFFFFFFFF } else { 0xFFFF };
+        let asize_mask: u32 = if instr.as32_l() != 0 {
+            0xFFFFFFFF
+        } else {
+            0xFFFF
+        };
 
         let offset: u32;
 
@@ -214,12 +232,36 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             } else {
                 // Protected mode - 16 bit
                 self.write_virtual_word(seg, eaddr, self.the_i387.get_control_word())?;
-                self.write_virtual_word(seg, eaddr.wrapping_add(0x02) & asize_mask, self.the_i387.get_status_word())?;
-                self.write_virtual_word(seg, eaddr.wrapping_add(0x04) & asize_mask, self.the_i387.get_tag_word())?;
-                self.write_virtual_word(seg, eaddr.wrapping_add(0x06) & asize_mask, (self.the_i387.fip & 0xFFFF) as u16)?;
-                self.write_virtual_word(seg, eaddr.wrapping_add(0x08) & asize_mask, self.the_i387.fcs)?;
-                self.write_virtual_word(seg, eaddr.wrapping_add(0x0a) & asize_mask, (self.the_i387.fdp & 0xFFFF) as u16)?;
-                self.write_virtual_word(seg, eaddr.wrapping_add(0x0c) & asize_mask, self.the_i387.fds)?;
+                self.write_virtual_word(
+                    seg,
+                    eaddr.wrapping_add(0x02) & asize_mask,
+                    self.the_i387.get_status_word(),
+                )?;
+                self.write_virtual_word(
+                    seg,
+                    eaddr.wrapping_add(0x04) & asize_mask,
+                    self.the_i387.get_tag_word(),
+                )?;
+                self.write_virtual_word(
+                    seg,
+                    eaddr.wrapping_add(0x06) & asize_mask,
+                    (self.the_i387.fip & 0xFFFF) as u16,
+                )?;
+                self.write_virtual_word(
+                    seg,
+                    eaddr.wrapping_add(0x08) & asize_mask,
+                    self.the_i387.fcs,
+                )?;
+                self.write_virtual_word(
+                    seg,
+                    eaddr.wrapping_add(0x0a) & asize_mask,
+                    (self.the_i387.fdp & 0xFFFF) as u16,
+                )?;
+                self.write_virtual_word(
+                    seg,
+                    eaddr.wrapping_add(0x0c) & asize_mask,
+                    self.the_i387.fds,
+                )?;
                 offset = 0x0e;
             }
         } else {
@@ -246,12 +288,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             } else {
                 // Real mode - 16 bit
                 self.write_virtual_word(seg, eaddr, self.the_i387.get_control_word())?;
-                self.write_virtual_word(seg, eaddr.wrapping_add(0x02) & asize_mask, self.the_i387.get_status_word())?;
-                self.write_virtual_word(seg, eaddr.wrapping_add(0x04) & asize_mask, self.the_i387.get_tag_word())?;
-                self.write_virtual_word(seg, eaddr.wrapping_add(0x06) & asize_mask, (fp_ip & 0xFFFF) as u16)?;
+                self.write_virtual_word(
+                    seg,
+                    eaddr.wrapping_add(0x02) & asize_mask,
+                    self.the_i387.get_status_word(),
+                )?;
+                self.write_virtual_word(
+                    seg,
+                    eaddr.wrapping_add(0x04) & asize_mask,
+                    self.the_i387.get_tag_word(),
+                )?;
+                self.write_virtual_word(
+                    seg,
+                    eaddr.wrapping_add(0x06) & asize_mask,
+                    (fp_ip & 0xFFFF) as u16,
+                )?;
                 let tmp = ((fp_ip & 0xF0000) >> 4) as u16 | self.the_i387.foo;
                 self.write_virtual_word(seg, eaddr.wrapping_add(0x08) & asize_mask, tmp)?;
-                self.write_virtual_word(seg, eaddr.wrapping_add(0x0a) & asize_mask, (fp_dp & 0xFFFF) as u16)?;
+                self.write_virtual_word(
+                    seg,
+                    eaddr.wrapping_add(0x0a) & asize_mask,
+                    (fp_dp & 0xFFFF) as u16,
+                )?;
                 let tmp = ((fp_dp & 0xF0000) >> 4) as u16;
                 self.write_virtual_word(seg, eaddr.wrapping_add(0x0c) & asize_mask, tmp)?;
                 offset = 0x0e;
@@ -264,7 +322,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn fpu_load_environment(&mut self, instr: &Instruction) -> super::super::Result<u32> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        let asize_mask: u32 = if instr.as32_l() != 0 { 0xFFFFFFFF } else { 0xFFFF };
+        let asize_mask: u32 = if instr.as32_l() != 0 {
+            0xFFFFFFFF
+        } else {
+            0xFFFF
+        };
 
         let offset: u32;
 

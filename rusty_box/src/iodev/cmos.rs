@@ -63,15 +63,15 @@ fn bin_to_bcd(value: u8, is_binary: bool) -> u8 {
 #[derive(Debug)]
 pub struct BxCmosC {
     /// CMOS RAM contents
-    pub ram: [u8; CMOS_SIZE],
+    pub(crate) ram: [u8; CMOS_SIZE],
     /// Current address register
-    pub address: u8,
+    pub(crate) address: u8,
     /// NMI mask (bit 7 of address port)
-    pub nmi_mask: bool,
+    pub(crate) nmi_mask: bool,
     /// Periodic interrupt rate
-    pub periodic_rate: u8,
+    pub(crate) periodic_rate: u8,
     /// IRQ8 pending
-    pub irq8_pending: bool,
+    pub(crate) irq8_pending: bool,
     /// Time of last update
     last_update_time: u64,
 }
@@ -111,8 +111,13 @@ impl BxCmosC {
         // Status Register D: RTC valid, battery good
         self.ram[REG_STAT_D as usize] = 0x80;
 
-        // Equipment byte: 2 floppy drives, VGA display
-        self.ram[REG_EQUIPMENT as usize] = 0x41;
+        // Equipment byte — built up the same way Bochs does it:
+        //   cmos.cc init():   |= 0x02 (FPU present)
+        //   keyboard.cc init(): |= 0x04 (mouse port on system board)
+        //   vgacore.cc init_standard_vga(): &= 0xcf | 0x00 (EGA/VGA display)
+        //   No floppy controller: bits 0,6-7 stay 0
+        // Final: 0x06 = FPU + mouse port, no floppy, EGA/VGA
+        self.ram[REG_EQUIPMENT as usize] = 0x06;
 
         // Set a default time (2025-01-01 12:00:00)
         self.set_time(0, 0, 12, 1, 1, 25);
@@ -216,7 +221,11 @@ impl BxCmosC {
             CMOS_ADDR => {
                 self.nmi_mask = (value & 0x80) != 0;
                 self.address = value & 0x7F;
-                tracing::trace!("CMOS: Select register {:#04x} (NMI mask={})", self.address, self.nmi_mask);
+                tracing::trace!(
+                    "CMOS: Select register {:#04x} (NMI mask={})",
+                    self.address,
+                    self.nmi_mask
+                );
             }
             CMOS_DATA => {
                 let addr = (self.address & 0x7F) as usize;
@@ -298,13 +307,7 @@ impl BxCmosC {
     /// Sets drive type byte (0x12) plus extended geometry registers:
     /// - Drive 0: registers 0x19, 0x1B-0x23
     /// - Drive 1: registers 0x1A, 0x24-0x2C
-    pub fn configure_disk_geometry(
-        &mut self,
-        drive: u8,
-        cylinders: u16,
-        heads: u8,
-        spt: u8,
-    ) {
+    pub fn configure_disk_geometry(&mut self, drive: u8, cylinders: u16, heads: u8, spt: u8) {
         if drive == 0 {
             // Flag drive type as 0xF (extended), upper nibble of 0x12
             self.ram[0x12] = (self.ram[0x12] & 0x0F) | 0xF0;
@@ -319,8 +322,7 @@ impl BxCmosC {
             self.ram[0x1E] = 0xFF;
             self.ram[0x1F] = 0xFF;
             // Control byte: bit 7,6 always set; bit 3 = heads > 8
-            self.ram[0x20] =
-                0xC0 | if heads > 8 { 0x08 } else { 0 };
+            self.ram[0x20] = 0xC0 | if heads > 8 { 0x08 } else { 0 };
             // Landing zone = cylinders
             self.ram[0x21] = self.ram[0x1B];
             self.ram[0x22] = self.ram[0x1C];
@@ -335,8 +337,7 @@ impl BxCmosC {
             self.ram[0x26] = heads;
             self.ram[0x27] = 0xFF;
             self.ram[0x28] = 0xFF;
-            self.ram[0x29] =
-                0xC0 | if heads > 8 { 0x08 } else { 0 };
+            self.ram[0x29] = 0xC0 | if heads > 8 { 0x08 } else { 0 };
             self.ram[0x2A] = self.ram[0x24];
             self.ram[0x2B] = self.ram[0x25];
             self.ram[0x2C] = spt;

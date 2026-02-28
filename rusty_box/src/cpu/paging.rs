@@ -531,15 +531,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Otherwise it performs a two-level page-table walk using the physical
     /// memory bus (`mem_read_dword` / `mem_write_dword`), exactly matching
     /// Bochs `translate_linear` for legacy 32-bit paging.
+    #[inline]
     pub(super) fn translate_data_read(&mut self, laddr: u64) -> Result<u64> {
         self.translate_data_access(laddr, false)
     }
 
     /// Translate a linear address to physical for a data write.
+    #[inline]
     pub(super) fn translate_data_write(&mut self, laddr: u64) -> Result<u64> {
         self.translate_data_access(laddr, true)
     }
 
+    #[inline]
     fn translate_data_access(&mut self, laddr: u64, is_write: bool) -> Result<u64> {
         let laddr = laddr & 0xFFFF_FFFF;
 

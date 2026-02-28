@@ -2,11 +2,11 @@
 //! ExtFloat80 square root.
 //! Ported from Berkeley SoftFloat 3e: extF80_sqrt.c
 
-use super::softfloat_types::*;
-use super::softfloat::*;
-use super::primitives::*;
-use super::specialize::*;
 use super::internals::*;
+use super::primitives::*;
+use super::softfloat::*;
+use super::softfloat_types::*;
+use super::specialize::*;
 
 pub fn extf80_sqrt(a: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
     // Handle unsupported encodings
@@ -71,7 +71,9 @@ pub fn extf80_sqrt(a: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
     } else {
         rem = short_shift_left128(0, sig_a, 62);
     }
-    rem.0 = rem.0.wrapping_sub((sig32_z as u64).wrapping_mul(sig32_z as u64));
+    rem.0 = rem
+        .0
+        .wrapping_sub((sig32_z as u64).wrapping_mul(sig32_z as u64));
 
     // First Newton-Raphson refinement
     let mut q = (((rem.0 >> 2) as u32 as u64).wrapping_mul(recip_sqrt32 as u64) >> 32) as u64;
@@ -116,7 +118,11 @@ pub fn extf80_sqrt(a: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
     }
 
     round_pack_to_extf80(
-        false, exp_z, sig_z, sig_z_extra,
-        softfloat_extF80_roundingPrecision(status), status,
+        false,
+        exp_z,
+        sig_z,
+        sig_z_extra,
+        softfloat_extF80_roundingPrecision(status),
+        status,
     )
 }

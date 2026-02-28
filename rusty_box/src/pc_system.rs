@@ -29,21 +29,21 @@ pub type BxTimerHandlerT = fn(this_ptr: *mut c_void);
 #[derive(Debug, Clone)]
 pub struct Timer {
     /// Whether this timer slot is in use
-    pub in_use: bool,
+    pub(crate) in_use: bool,
     /// Timer period in ticks
-    pub period: u64,
+    pub(crate) period: u64,
     /// Absolute tick count when timer should fire
-    pub time_to_fire: u64,
+    pub(crate) time_to_fire: u64,
     /// Whether timer is currently active
-    pub active: bool,
+    pub(crate) active: bool,
     /// Whether timer repeats continuously
-    pub continuous: bool,
+    pub(crate) continuous: bool,
     /// Handler function to call when timer fires
-    pub handler: Option<BxTimerHandlerT>,
+    pub(crate) handler: Option<BxTimerHandlerT>,
     /// Timer identifier string
-    pub id: [u8; BX_MAX_TIMER_ID_LEN],
+    pub(crate) id: [u8; BX_MAX_TIMER_ID_LEN],
     /// User parameter passed to handler
-    pub param: *mut c_void,
+    pub(crate) param: *mut c_void,
 }
 
 impl Default for Timer {
@@ -96,7 +96,7 @@ pub struct BxPcSystemC {
     /// Hardware Request (DMA)
     hrq: bool,
     /// Request to terminate emulation
-    pub kill_bochs_request: bool,
+    pub(crate) kill_bochs_request: bool,
 }
 
 impl Default for BxPcSystemC {
@@ -227,10 +227,7 @@ impl BxPcSystemC {
     /// For hardware reset: enables A20, resets CPU and all devices
     /// For software reset: just resets CPU
     pub fn reset(&mut self, reset_type: ResetReason) -> crate::Result<()> {
-        tracing::info!(
-            "BxPcSystemC::reset({:?}) called",
-            reset_type
-        );
+        tracing::info!("BxPcSystemC::reset({:?}) called", reset_type);
 
         // A20 line is ENABLED at hardware reset on 386+ CPUs
         // (Only 286 systems start with A20 disabled)
@@ -273,11 +270,7 @@ impl BxPcSystemC {
             if !self.timers[i].in_use {
                 self.timers[i].in_use = true;
                 self.timers[i].period = period;
-                self.timers[i].time_to_fire = if active {
-                    self.ticks_total + period
-                } else {
-                    0
-                };
+                self.timers[i].time_to_fire = if active { self.ticks_total + period } else { 0 };
                 self.timers[i].active = active;
                 self.timers[i].continuous = continuous;
                 self.timers[i].handler = Some(handler);

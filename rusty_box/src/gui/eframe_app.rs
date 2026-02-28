@@ -185,12 +185,20 @@ impl eframe::App for RustyBoxApp {
                     } else {
                         "--- IPS".to_string()
                     };
-                    ui.label(egui::RichText::new(ips_text).monospace().size(11.0).color(accent_blue));
+                    ui.label(
+                        egui::RichText::new(ips_text)
+                            .monospace()
+                            .size(11.0)
+                            .color(accent_blue),
+                    );
 
                     // Subtle separator
-                    ui.label(egui::RichText::new("|").monospace().size(11.0).color(
-                        egui::Color32::from_rgb(0x3A, 0x3A, 0x50),
-                    ));
+                    ui.label(
+                        egui::RichText::new("|")
+                            .monospace()
+                            .size(11.0)
+                            .color(egui::Color32::from_rgb(0x3A, 0x3A, 0x50)),
+                    );
 
                     // Emulator status with color coding
                     let (status_text, status_color) = if self.cached_emu_running {
@@ -200,7 +208,12 @@ impl eframe::App for RustyBoxApp {
                     } else {
                         ("Stopped", text_dim)
                     };
-                    ui.label(egui::RichText::new(status_text).monospace().size(11.0).color(status_color));
+                    ui.label(
+                        egui::RichText::new(status_text)
+                            .monospace()
+                            .size(11.0)
+                            .color(status_color),
+                    );
                 });
             });
 
@@ -225,10 +238,7 @@ impl eframe::App for RustyBoxApp {
                     ui.add_space(offset_y);
                     ui.horizontal(|ui| {
                         ui.add_space(offset_x);
-                        ui.image(egui::load::SizedTexture::new(
-                            tex.id(),
-                            egui::vec2(w, h),
-                        ));
+                        ui.image(egui::load::SizedTexture::new(tex.id(), egui::vec2(w, h)));
                     });
                 } else {
                     ui.centered_and_justified(|ui| {

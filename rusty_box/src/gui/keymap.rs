@@ -38,7 +38,7 @@ pub fn ascii_to_scancode(ch: char) -> Option<(u8, u8)> {
         'x' | 'X' => Some(0x22),
         'y' | 'Y' => Some(0x35),
         'z' | 'Z' => Some(0x1A),
-        
+
         // Numbers (top row)
         '1' | '!' => Some(0x16),
         '2' | '@' => Some(0x1E),
@@ -50,7 +50,7 @@ pub fn ascii_to_scancode(ch: char) -> Option<(u8, u8)> {
         '8' | '*' => Some(0x3E),
         '9' | '(' => Some(0x46),
         '0' | ')' => Some(0x45),
-        
+
         // Special characters
         '-' | '_' => Some(0x4E),
         '=' | '+' => Some(0x55),
@@ -64,16 +64,16 @@ pub fn ascii_to_scancode(ch: char) -> Option<(u8, u8)> {
         '.' | '>' => Some(0x49),
         '/' | '?' => Some(0x4A),
         ' ' => Some(0x29), // Space
-        
+
         // Control characters
         '\n' | '\r' => Some(0x5A), // Enter
-        '\t' => Some(0x0D), // Tab
-        '\x08' => Some(0x66), // Backspace
-        '\x1B' => Some(0x76), // Escape
-        
+        '\t' => Some(0x0D),        // Tab
+        '\x08' => Some(0x66),      // Backspace
+        '\x1B' => Some(0x76),      // Escape
+
         _ => None,
     };
-    
+
     make_code.map(|make| (make, 0xF0)) // Break code prefix
 }
 
@@ -93,25 +93,25 @@ pub fn needs_shift(ch: char) -> bool {
 pub fn char_to_scancode_sequence(ch: char) -> Vec<u8> {
     if let Some((make, break_prefix)) = ascii_to_scancode(ch) {
         let mut sequence = Vec::new();
-        
+
         if needs_shift(ch) {
             // Press shift
             sequence.push(0x12); // Left shift make
         }
-        
+
         // Press key
         sequence.push(make);
-        
+
         // Release key
         sequence.push(break_prefix);
         sequence.push(make);
-        
+
         if needs_shift(ch) {
             // Release shift
             sequence.push(0xF0); // Break prefix
             sequence.push(0x12); // Left shift break
         }
-        
+
         sequence
     } else {
         Vec::new()

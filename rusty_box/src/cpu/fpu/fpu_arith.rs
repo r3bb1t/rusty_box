@@ -4,12 +4,12 @@
 
 use super::super::cpu::BxCpuC;
 use super::super::cpuid::BxCpuIdTrait;
-use super::super::decoder::{Instruction, BxSegregs};
+use super::super::decoder::{BxSegregs, Instruction};
 use super::super::softfloat3e::extf80_addsub::{extf80_add, extf80_sub};
-use super::super::softfloat3e::extf80_mul::extf80_mul;
 use super::super::softfloat3e::extf80_div::extf80_div;
-use super::super::softfloat3e::extf80_sqrt::extf80_sqrt;
+use super::super::softfloat3e::extf80_mul::extf80_mul;
 use super::super::softfloat3e::extf80_roundToInt::extf80_round_to_int;
+use super::super::softfloat3e::extf80_sqrt::extf80_sqrt;
 use super::super::softfloat3e::f32_to_extf80::f32_to_extf80;
 use super::super::softfloat3e::f64_to_extf80::f64_to_extf80;
 use super::super::softfloat3e::i32_to_extf80::i32_to_extf80;

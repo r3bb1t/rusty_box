@@ -8,8 +8,8 @@ use super::{
     cpuid::BxCpuIdTrait,
     decoder::BxSegregs,
     descriptor::{
-        is_code_segment, is_code_segment_non_conforming, is_code_segment_readable,
-        is_data_segment, is_data_segment_writable, BxDescriptor, BxSelector,
+        is_code_segment, is_code_segment_non_conforming, is_code_segment_readable, is_data_segment,
+        is_data_segment_writable, BxDescriptor, BxSelector,
     },
     eflags::EFlags,
     segment_ctrl_pro::parse_selector,
@@ -103,14 +103,8 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         // STEP 5: Save the current task state in the TSS (matches lines 269-332)
         if self.tr.cache.r#type <= 3 {
             // 286 TSS - save 16-bit registers
-            self.system_write_word(
-                (obase32 + 14) as u64,
-                self.get_ip(),
-            )?;
-            self.system_write_word(
-                (obase32 + 16) as u64,
-                old_eflags as u16,
-            )?;
+            self.system_write_word((obase32 + 14) as u64, self.get_ip())?;
+            self.system_write_word((obase32 + 16) as u64, old_eflags as u16)?;
             self.system_write_word((obase32 + 18) as u64, self.ax())?;
             self.system_write_word((obase32 + 20) as u64, self.cx())?;
             self.system_write_word((obase32 + 22) as u64, self.dx())?;
@@ -201,33 +195,23 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         ) = if tss_descriptor.r#type <= 3 {
             // 286 TSS
             let new_eip = self.system_read_word((nbase32 + 14) as u64)? as u32;
-            let new_eflags =
-                (self.system_read_word((nbase32 + 16) as u64)? as u32) & 0xFFFF;
-            let new_eax =
-                0xFFFF0000 | (self.system_read_word((nbase32 + 18) as u64)? as u32);
-            let new_ecx =
-                0xFFFF0000 | (self.system_read_word((nbase32 + 20) as u64)? as u32);
-            let new_edx =
-                0xFFFF0000 | (self.system_read_word((nbase32 + 22) as u64)? as u32);
-            let new_ebx =
-                0xFFFF0000 | (self.system_read_word((nbase32 + 24) as u64)? as u32);
-            let new_esp =
-                0xFFFF0000 | (self.system_read_word((nbase32 + 26) as u64)? as u32);
-            let new_ebp =
-                0xFFFF0000 | (self.system_read_word((nbase32 + 28) as u64)? as u32);
-            let new_esi =
-                0xFFFF0000 | (self.system_read_word((nbase32 + 30) as u64)? as u32);
-            let new_edi =
-                0xFFFF0000 | (self.system_read_word((nbase32 + 32) as u64)? as u32);
+            let new_eflags = (self.system_read_word((nbase32 + 16) as u64)? as u32) & 0xFFFF;
+            let new_eax = 0xFFFF0000 | (self.system_read_word((nbase32 + 18) as u64)? as u32);
+            let new_ecx = 0xFFFF0000 | (self.system_read_word((nbase32 + 20) as u64)? as u32);
+            let new_edx = 0xFFFF0000 | (self.system_read_word((nbase32 + 22) as u64)? as u32);
+            let new_ebx = 0xFFFF0000 | (self.system_read_word((nbase32 + 24) as u64)? as u32);
+            let new_esp = 0xFFFF0000 | (self.system_read_word((nbase32 + 26) as u64)? as u32);
+            let new_ebp = 0xFFFF0000 | (self.system_read_word((nbase32 + 28) as u64)? as u32);
+            let new_esi = 0xFFFF0000 | (self.system_read_word((nbase32 + 30) as u64)? as u32);
+            let new_edi = 0xFFFF0000 | (self.system_read_word((nbase32 + 32) as u64)? as u32);
             let raw_es = self.system_read_word((nbase32 + 34) as u64)?;
             let raw_cs = self.system_read_word((nbase32 + 36) as u64)?;
             let raw_ss = self.system_read_word((nbase32 + 38) as u64)?;
             let raw_ds = self.system_read_word((nbase32 + 40) as u64)?;
             let raw_ldt = self.system_read_word((nbase32 + 42) as u64)?;
             (
-                new_eip, new_eflags, new_eax, new_ecx, new_edx, new_ebx, new_esp,
-                new_ebp, new_esi, new_edi, raw_es, raw_cs, raw_ss, raw_ds, 0u16, 0u16,
-                raw_ldt,
+                new_eip, new_eflags, new_eax, new_ecx, new_edx, new_ebx, new_esp, new_ebp, new_esi,
+                new_edi, raw_es, raw_cs, raw_ss, raw_ds, 0u16, 0u16, raw_ldt,
             )
         } else {
             // 386 TSS
@@ -265,9 +249,8 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             let raw_gs = self.system_read_word((nbase32 + 0x5c) as u64)?;
             let raw_ldt = self.system_read_word((nbase32 + 0x60) as u64)?;
             (
-                new_eip, new_eflags, new_eax, new_ecx, new_edx, new_ebx, new_esp,
-                new_ebp, new_esi, new_edi, raw_es, raw_cs, raw_ss, raw_ds, raw_fs,
-                raw_gs, raw_ldt,
+                new_eip, new_eflags, new_eax, new_ecx, new_edx, new_ebx, new_esp, new_ebp, new_esi,
+                new_edi, raw_es, raw_cs, raw_ss, raw_ds, raw_fs, raw_gs, raw_ldt,
             )
         };
 
@@ -484,9 +467,7 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                         if is_code_segment_non_conforming(cs_descriptor.r#type)
                             && cs_descriptor.dpl != cs_selector.rpl
                         {
-                            tracing::error!(
-                                "task_switch: non-conforming CS.dpl!=CS.RPL"
-                            );
+                            tracing::error!("task_switch: non-conforming CS.dpl!=CS.RPL");
                             return self.exception(Exception::Ts, raw_cs_selector & 0xfffc);
                         }
                         if !is_code_segment_non_conforming(cs_descriptor.r#type)
@@ -557,10 +538,7 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                         || (is_code_segment(descriptor.r#type)
                             && !is_code_segment_readable(descriptor.r#type))
                     {
-                        tracing::error!(
-                            "task_switch({:?}): not data or readable code",
-                            seg
-                        );
+                        tracing::error!("task_switch({:?}): not data or readable code", seg);
                         return self.exception(Exception::Ts, raw_selector & 0xfffc);
                     }
 
@@ -569,10 +547,7 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                         || is_code_segment_non_conforming(descriptor.r#type)
                     {
                         if selector.rpl > descriptor.dpl || cs_rpl > descriptor.dpl {
-                            tracing::error!(
-                                "task_switch({:?}): RPL & CPL must be <= DPL",
-                                seg
-                            );
+                            tracing::error!("task_switch({:?}): RPL & CPL must be <= DPL", seg);
                             return self.exception(Exception::Ts, raw_selector & 0xfffc);
                         }
                     }

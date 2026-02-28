@@ -111,12 +111,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     ///
     /// `is_store` affects whether unmasked overflow/underflow are reported
     /// (only significant for store operations).
-    pub fn fpu_exception(
-        &mut self,
-        _instr: &Instruction,
-        exception: u32,
-        is_store: bool,
-    ) -> u32 {
+    pub fn fpu_exception(&mut self, _instr: &Instruction, exception: u32, is_store: bool) -> u32 {
         let exception = exception & (FPU_SW_EXCEPTIONS_MASK as u32);
         let status = self.the_i387.swd as u32;
         let cw = self.the_i387.cwd as u32;
@@ -166,13 +161,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // For overflow/underflow, masking depends on whether this is a store.
-        let mut unmasked =
-            unmasked & !((FPU_SW_PRECISION as u32));
+        let mut unmasked = unmasked & !(FPU_SW_PRECISION as u32);
 
         if unmasked & ((FPU_SW_UNDERFLOW as u32) | (FPU_SW_OVERFLOW as u32)) != 0 {
             if !is_store {
-                unmasked &=
-                    !((FPU_SW_UNDERFLOW as u32) | (FPU_SW_OVERFLOW as u32));
+                unmasked &= !((FPU_SW_UNDERFLOW as u32) | (FPU_SW_OVERFLOW as u32));
             } else {
                 self.the_i387.swd &= !(FPU_SW_C1);
                 if (status & (FPU_SW_PRECISION as u32)) == 0 {
@@ -204,12 +197,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Handle FPU stack underflow: if the IA exception is masked, write a
     /// default-NaN to `st(stnr)` and optionally pop.  Then report the exception.
-    pub fn fpu_stack_underflow(
-        &mut self,
-        instr: &Instruction,
-        stnr: i32,
-        pop_stack: bool,
-    ) {
+    pub fn fpu_stack_underflow(&mut self, instr: &Instruction, stnr: i32, pop_stack: bool) {
         if self.the_i387.is_ia_masked() {
             self.write_fpu_reg(FLOATX80_DEFAULT_NAN, stnr);
             if pop_stack {

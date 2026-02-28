@@ -2,13 +2,18 @@
 //! ExtFloat80 round-to-integer.
 //! Ported from Berkeley SoftFloat 3e: extF80_roundToInt.c
 
-use super::softfloat_types::*;
-use super::softfloat::*;
-use super::specialize::*;
 use super::internals::*;
+use super::softfloat::*;
+use super::softfloat_types::*;
+use super::specialize::*;
 
 /// Round extFloat80 to integer using given rounding mode.
-pub fn extf80_round_to_int(a: floatx80, rounding_mode: u8, exact: bool, status: &mut SoftFloatStatus) -> floatx80 {
+pub fn extf80_round_to_int(
+    a: floatx80,
+    rounding_mode: u8,
+    exact: bool,
+    status: &mut SoftFloatStatus,
+) -> floatx80 {
     // Handle unsupported
     if extf80_is_unsupported(a) {
         softfloat_raiseFlags(status, FLAG_INVALID);

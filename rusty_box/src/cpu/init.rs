@@ -2,6 +2,9 @@ use alloc::vec::Vec;
 use tracing::info;
 
 use super::Result;
+#[cfg(feature = "bx_support_amx")]
+use crate::cpu::avx::amx::AMX;
+
 use crate::{
     cpu::{
         apic::BX_LAPIC_BASE_ADDR,
@@ -12,19 +15,19 @@ use crate::{
             SEG_ACCESS_WOK, SEG_VALID_CACHE,
         },
         eflags::EFlags,
+        i387::BxPackedRegister,
         segment_ctrl_pro::parse_selector,
         svm::VmcbCache,
         vmcs::BX_INVALID_VMCSPTR,
         xmm::MXCSR_RESET,
-            BxCpuC,
-            i387::BxPackedRegister,
+        BxCpuC,
     },
     params::BxParams,
 };
 
-    // Minimal MXCSR/feature related masks used at reset-time.
-    const MXCSR_DAZ: u32 = 1 << 6;
-    const MXCSR_MISALIGNED_EXCEPTION_MASK: u32 = 1 << 13;
+// Minimal MXCSR/feature related masks used at reset-time.
+const MXCSR_DAZ: u32 = 1 << 6;
+const MXCSR_MISALIGNED_EXCEPTION_MASK: u32 = 1 << 13;
 
 use super::{
     cpudb::intel::core_i7_skylake::Corei7SkylakeX, cpuid::BxCpuIdTrait, decoder::X86FeatureName,
@@ -108,7 +111,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Using 0x7000 as a safe location - below typical BIOS data area at 0x400-0x500
         // and gives plenty of room for stack growth
         self.gen_reg[4].rrx = 0x7000; // RSP/ESP/SP
-        tracing::info!("CPU reset: Initialized SP to {:#x}", unsafe { self.gen_reg[4].rrx });
+        tracing::info!("CPU reset: Initialized SP to {:#x}", unsafe {
+            self.gen_reg[4].rrx
+        });
 
         self.eflags = EFlags::from_bits_retain(0x2); // Bit1 is always set
 
@@ -334,7 +339,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // All configurable MSRs do not change on INIT
         #[cfg(feature = "bx_configure_msrs")]
         {
-            self.msrs.iter_mut().for_each(|msr| *msr = Default::default());
+            self.msrs
+                .iter_mut()
+                .for_each(|msr| *msr = Default::default());
         }
 
         self.ext = false;
@@ -483,7 +490,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Perform CPU sanity checks
-    /// 
+    ///
     /// Called after initialize() and before register_state() to match original Bochs order.
     /// Original: BX_CPU(0)->initialize(); BX_CPU(0)->sanity_checks(); BX_CPU(0)->register_state();
     pub fn sanity_checks(&mut self) -> Result<()> {
@@ -512,4 +519,5 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn set_VMCBPTR(&mut self, _vmcb_ptr: u64) {
         // Note: In a full implementation, this would set up the VMCB host
         // pointer and memory mapping. For now, this is a placeholder.
-    }}
+    }
+}

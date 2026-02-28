@@ -501,6 +501,10 @@ fn test_not_rip_relative_in_32bit() {
     let i = fetch_decode32(&[0x8B, 0x05, 0x78, 0x56, 0x34, 0x12], true).unwrap();
     assert_eq!(i.ilen(), 6);
     // In 32-bit mode, this should be BX_NIL_REGISTER (19), not RIP
-    assert_eq!(i.sib_base(), 19, "Base should be BX_NIL_REGISTER (19) in 32-bit mode");
+    assert_eq!(
+        i.sib_base(),
+        19,
+        "Base should be BX_NIL_REGISTER (19) in 32-bit mode"
+    );
     assert_eq!(i.modrm_form.displacement.displ32u(), 0x12345678);
 }

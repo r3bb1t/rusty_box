@@ -151,6 +151,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Resolve effective address (matches BX_CPU_RESOLVE_ADDR)
+    #[inline]
     pub fn resolve_addr32(&self, instr: &Instruction) -> u32 {
         let base_reg = instr.sib_base() as usize;
         let mut eaddr = if base_reg < 16 {

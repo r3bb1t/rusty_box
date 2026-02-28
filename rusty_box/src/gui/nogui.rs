@@ -63,14 +63,7 @@ impl BxGui for NoGui {
         true
     }
 
-    fn dimension_update(
-        &mut self,
-        _x: u32,
-        _y: u32,
-        _fheight: u32,
-        _fwidth: u32,
-        _bpp: u32,
-    ) {
+    fn dimension_update(&mut self, _x: u32, _y: u32, _fheight: u32, _fwidth: u32, _bpp: u32) {
         // No-op
     }
 

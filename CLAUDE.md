@@ -21,16 +21,32 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 - ✅ Full BIOS POST completes: rombios32_init, VGA BIOS, ATA detection, boot
 - ✅ VGA text output working! Clean headless text dump:
   ```
-  Bochs VGABios (PCI) 0.9c 08 Jan 2025
-  ...
-  Bochs 3.0.devel BIOS - build: 05/15/25
-  LILO boot:
-  Loading linux......
+  Console: 16 point font, 400 scans
+  Console: colour VGA+ 80x25, 1 virtual console (max 63)
+  Calibrating delay loop.. ok - 9.98 BogoMIPS
+  Memory: 31140k/32768k available (612k kernel code, 384k reserved, 632k data)
+  Swansea University Computer Society NET3.034 for Linux 1.3.77
+  NET3: Unix domain sockets 0.12 for Linux NET3.033.
+  Swansea University Computer Society TCP/IP for NET3.034
+  IP Protocols: ICMP, UDP, TCP
+  Checking 386/387 coupling... Ok, fpu using old IRQ13 error reporting
+  Checking 'hlt' instruction... Ok.
   Linux version 1.3.89 (root@merlin) (gcc version 2.7.2)
+  Serial driver version 4.11a with no serial options enabled
+  PS/2 auxiliary pointing device detected -- driver installed.
+  loop: registered device at major 7
   ```
 - ✅ LILO boot loader runs, loads compressed Linux kernel
 - ✅ Kernel decompresses and starts executing (paging enabled, CR0=0x80000013)
-- ✅ Kernel runs ~219M instructions (timer interrupts, task switching, module loading)
+- ✅ Kernel runs 1B+ instructions cleanly (no crashes, no errors)
+- ✅ Kernel initializes console, calibrates BogoMIPS, loads serial/PS2/loop drivers
+- ✅ Software interrupt (INT) dispatch: unified interrupt() method matches Bochs
+  - INT/INT3/INTO/INT1 now correctly dispatch through IDT in protected mode
+  - Previously always used real-mode IVT, causing kernel re-execution from startup_32
+- ✅ XCHG r32, r/m32: mod_c0() dispatch fix — memory form was treated as register form
+  - Caused `XCHG EAX, [ESP+offset]` to become `XCHG EAX, ESP` → ESP=0xFFFFFFFF → triple fault
+- ✅ BOUND uses exception(Br, 0) instead of interrupt_real_mode(5) — matches Bochs
+- ✅ CpuLoopRestart leak fixed: InsertedOpcode path in cpu_loop_n now catches CpuLoopRestart
 - ✅ Paging: system_write_byte/word/dword now translate linear→physical via page walk (Bug 1 fix)
 - ✅ Paging: user_pl updated in load_cs() — CPL=3 pages now properly permission-checked (Bug 2 fix)
 - ✅ Paging: 4MB PSE pages in translate_linear_legacy get permission checks + A/D bit updates (Bug 3 fix)
@@ -62,11 +78,11 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 - ✅ Paging: user_pl tracks CPL==3 in load_cs() — user-mode page permissions now enforced
 - ✅ Paging: 4MB PSE path in translate_linear_legacy has full permission checks + A/D updates
 - ✅ Fixed handle_alignment_check: reads CPL from CS.selector.rpl instead of CL register
-- ✅ Clean output: diagnostic warn!/error! downgraded to debug!/trace! (~925 → 7 messages)
-- 🔄 Triple fault at ~219M: GDT entry 2 (CS=0x10) corrupted — raw=0x62aa6010_0x6008ffff
-  - #PF delivery fails → #GP → double fault → #GP → triple fault at RIP=0x106029
-- 🔄 vsprintf broken: Linux kernel shows "Memory: %uk/%uk available" (raw format specifiers)
-- 🔄 "Trying to free nonexistent swap-page" repeated — kernel swap init loop
+- ✅ Clean output: diagnostic warn!/error! downgraded to debug!/trace! (~925 → 0 error messages)
+- ✅ Triple fault FIXED: was caused by INT always using IVT (real-mode) + XCHG mod_c0 bug
+- ✅ vsprintf FIXED: ADD AL,Ib (opcode 0x04) was operating on AH instead of AL — jump table index wrong
+- ✅ "Trying to free nonexistent swap-page" RESOLVED: caused by triple-fault-induced IDT corruption
+- 🔄 Kernel stalls after "loop: registered device at major 7" — needs disk I/O or init to continue
 
 **What Fixed the "Corrupted Symbols":**
 The previous investigation concluded BIOS ROM had wrong symbol addresses. In reality, the segment default bug caused stack reads via `[BP+offset]` to use DS (base=0) instead of SS, and the execute1/execute2 swap caused memory reads to return register values. Together, these made the BIOS load wrong values for `_end`, `__data_start`, etc. With both bugs fixed, the BIOS reads correct values from the stack and memory.
@@ -205,10 +221,11 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ## Known Issues & Next Steps
 
 ### Next Steps
-1. **Fix LDT triple fault** — At ~190-219M (timing-dependent), LDT selector 0x6047 (index 3080) exceeds LDT limit (7). #GP cascade → double → triple fault. Need to trace what loads this bogus selector.
-2. **Fix vsprintf** — Linux kernel "Memory: %uk/%uk" shows raw format specifiers. vsprintf internals broken.
-3. **Fix swap init loop** — "Trying to free nonexistent swap-page" repeated hundreds of times.
-4. **Reach DLX Linux login prompt** — Continue iterative bug fixing until the full boot completes
+1. **Investigate kernel stall after driver init** — Kernel stops at "loop: registered device at major 7" (~500M instructions). Runs 1B+ instructions without crashing but doesn't print more. Likely needs disk I/O (reading rootfs) or init process startup to continue.
+2. **Reach DLX Linux login prompt** — Continue iterative bug fixing until the full boot completes
+3. ~~**Fix LDT triple fault**~~ — FIXED: root cause was INT using IVT in PM + XCHG mod_c0 bug
+4. ~~**Fix vsprintf**~~ — FIXED: ADD AL,Ib (opcode 0x04) operated on AH, breaking vsprintf's jump table index computation
+5. ~~**Fix swap init loop**~~ — RESOLVED: "Trying to free nonexistent swap-page" was caused by IDT corruption from the INT dispatch bug
 
 ### Quick Debug Commands
 ```bash
@@ -274,9 +291,15 @@ RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=1000000 ./target/release/examples/dlxlinux
 - ✅ Paging: 4MB PSE path permission checks + A/D bit updates (was skipping both)
 - ✅ handle_alignment_check: CPL from CS.selector.rpl not CL register
 - ✅ Clean output: diagnostic prints downgraded from warn!/error! to debug!/trace!
-- 🔄 Triple fault at ~219M: GDT[2] (CS=0x10) corrupted → #PF/#GP cascade
-- 🔄 vsprintf broken: "Memory: %uk/%uk" shows raw format specs — vsprintf internals issue
-- 🔄 "Trying to free nonexistent swap-page" — kernel swap pool init loop
+- ✅ Triple fault FIXED: two root causes found and fixed:
+  1. INT/INT3/INTO/INT1 always used interrupt_real_mode() even in protected mode — fixed with unified interrupt() dispatch
+  2. XCHG r32, r/m32 (XchgEdGd) missing mod_c0() dispatch — memory form treated as register form
+- ✅ vsprintf FIXED: accumulator-immediate 8-bit opcodes (ADD/XOR/ADC/SBB AL,Ib) used AH instead of AL
+- ✅ "Trying to free nonexistent swap-page" RESOLVED: was caused by IDT corruption from INT dispatch bug
+- ✅ BOUND uses exception(Br, 0) instead of interrupt_real_mode(5) — matches Bochs
+- ✅ CpuLoopRestart leak fixed: InsertedOpcode path in cpu_loop_n properly catches CpuLoopRestart
+- ✅ Kernel boots to driver init: console, BogoMIPS, networking, serial, PS/2, loop device
+- 🔄 Kernel stalls after "loop: registered device at major 7" — needs investigation
 
 ## Build Commands
 
@@ -533,6 +556,9 @@ Exception handling infrastructure exists (Exception enum, IVT delivery in real m
 
 ### Major Bug Fixes (Historical)
 
+0. **INT/INT3/INTO always used IVT in protected mode (2026-02-28)**: `int_ib()`, `int3()`, `into()`, and `int1()` unconditionally called `interrupt_real_mode(vector)` regardless of CPU mode. In protected mode, this read the IVT at physical `vector*4` instead of dispatching through the IDT. For Linux INT 0x80 (syscall), this caused the kernel to jump to startup_32 (0x100000) with CS=0x0000, re-executing `setup_idt` which overwrote all IDT entries with the default `ignore_int` handler, then any subsequent exception would recursively call `printk` → stack overflow → GDT corruption → triple fault. Fixed by creating a unified `interrupt()` method (matching Bochs `exception.cc:762-839`) that dispatches to `interrupt_real_mode()` or `protected_mode_int()` based on CPU mode. Also fixed BOUND to use `exception(Br, 0)` matching Bochs.
+1. **XCHG r32, r/m32 missing mod_c0 dispatch (2026-02-28)**: `XchgEdGd` in the dispatcher always called the register form, never checking `instr.mod_c0()` for memory operands. `XCHG EAX, [ESP+offset]` in the Linux exception handler was treated as `XCHG EAX, ESP`, setting ESP=0xFFFFFFFF. The subsequent `PUSH` caused a page fault, leading to double/triple fault. Fixed by adding mod_c0 dispatch matching the 8-bit and 16-bit XCHG forms.
+2. **Accumulator-immediate 8-bit register bug (2026-02-28)**: Opcodes 0x04 (ADD AL,Ib) and 0x34 (XOR AL,Ib) operated on AH instead of AL. The decoder extracts `rm = opcode & 7` which is 4 for these opcodes, and the generic `ADD_EbIb`/`xor_eb_ib_r` handlers used `instr.dst()` (=4=AH) instead of hardcoding register 0 (AL). Fixed by adding dedicated `ADD_ALIb`, `XOR_ALIb`, `ADC_ALIb`, `SBB_ALIb` handlers that hardcode AL. This was the root cause of the vsprintf bug: Linux 1.3.89 vsprintf uses `ADD AL, 0xA8` to compute a jump table index for format conversion characters, but since AH was modified instead of AL, the index was always wrong and the default case ran, outputting raw format specifiers like "%uk/%uk".
 1. **Paging: system_write bypass fix (2026-02-28)**: `system_write_byte/word/dword` passed linear addresses directly to `mem_write_*`, bypassing paging. TSS writes, descriptor access-bit updates, and GDT/LDT writes went to wrong physical addresses when paging was enabled. Added `translate_linear_system_write()` with full page walk and A/D bit updates.
 2. **Paging: user_pl never updated (2026-02-28)**: `user_pl` was initialized to `false` and never assigned. All paging permission checks treated accesses as supervisor-level, meaning CPL=3 code could read/write kernel pages. Fixed by setting `self.user_pl = (cpl == 3)` in `load_cs()`.
 3. **Paging: 4MB PSE permission skip (2026-02-28)**: `translate_linear_legacy` 4MB page path returned immediately without permission checks or A/D bit updates. Added PRIV_CHECK + A/D update matching the 4KB path.

@@ -2,19 +2,21 @@
 //! ExtFloat80 addition and subtraction.
 //! Ported from Berkeley SoftFloat 3e: extF80_addsub.c, s_addMagsExtF80.c, s_subMagsExtF80.c
 
-use super::softfloat_types::*;
-use super::softfloat::*;
-use super::primitives::*;
-use super::specialize::*;
 use super::internals::*;
+use super::primitives::*;
+use super::softfloat::*;
+use super::softfloat_types::*;
+use super::specialize::*;
 
 // ============================================================
 // addMagsExtF80: internal add-magnitudes
 // ============================================================
 
 fn add_mags_extf80(
-    ui_a64: u16, ui_a0: u64,
-    ui_b64: u16, ui_b0: u64,
+    ui_a64: u16,
+    ui_a0: u64,
+    ui_b64: u16,
+    ui_b0: u64,
     sign_z: bool,
     status: &mut SoftFloatStatus,
 ) -> floatx80 {
@@ -53,8 +55,12 @@ fn add_mags_extf80(
                 sig_b = norm.sig;
             }
             return round_pack_to_extf80(
-                sign_z, exp_b, sig_b, 0,
-                softfloat_extF80_roundingPrecision(status), status,
+                sign_z,
+                exp_b,
+                sig_b,
+                0,
+                softfloat_extF80_roundingPrecision(status),
+                status,
             );
         }
         softfloat_raiseFlags(status, FLAG_DENORMAL);
@@ -67,8 +73,12 @@ fn add_mags_extf80(
     if exp_b == 0 {
         if sig_b == 0 {
             return round_pack_to_extf80(
-                sign_z, exp_a, sig_a, 0,
-                softfloat_extF80_roundingPrecision(status), status,
+                sign_z,
+                exp_a,
+                sig_a,
+                0,
+                softfloat_extF80_roundingPrecision(status),
+                status,
             );
         }
         softfloat_raiseFlags(status, FLAG_DENORMAL);
@@ -123,8 +133,12 @@ fn add_mags_extf80(
     }
 
     round_pack_to_extf80(
-        sign_z, exp_z, sig_z, sig_z_extra,
-        softfloat_extF80_roundingPrecision(status), status,
+        sign_z,
+        exp_z,
+        sig_z,
+        sig_z_extra,
+        softfloat_extF80_roundingPrecision(status),
+        status,
     )
 }
 
@@ -133,8 +147,10 @@ fn add_mags_extf80(
 // ============================================================
 
 fn sub_mags_extf80(
-    ui_a64: u16, ui_a0: u64,
-    ui_b64: u16, ui_b0: u64,
+    ui_a64: u16,
+    ui_a0: u64,
+    ui_b64: u16,
+    ui_b0: u64,
     mut sign_z: bool,
     status: &mut SoftFloatStatus,
 ) -> floatx80 {
@@ -181,19 +197,25 @@ fn sub_mags_extf80(
                     let exp_b2 = norm.exp + 1;
                     let sig_b2 = norm.sig;
                     return round_pack_to_extf80(
-                        !sign_z, exp_b2, sig_b2, 0,
-                        softfloat_extF80_roundingPrecision(status), status,
+                        !sign_z,
+                        exp_b2,
+                        sig_b2,
+                        0,
+                        softfloat_extF80_roundingPrecision(status),
+                        status,
                     );
                 }
                 // 0 - 0
-                return pack_floatx80(
-                    softfloat_getRoundingMode(status) == ROUND_MIN, 0, 0,
-                );
+                return pack_floatx80(softfloat_getRoundingMode(status) == ROUND_MIN, 0, 0);
             }
             // 0 - B
             return round_pack_to_extf80(
-                !sign_z, exp_b, sig_b, 0,
-                softfloat_extF80_roundingPrecision(status), status,
+                !sign_z,
+                exp_b,
+                sig_b,
+                0,
+                softfloat_extF80_roundingPrecision(status),
+                status,
             );
         }
         softfloat_raiseFlags(status, FLAG_DENORMAL);
@@ -206,8 +228,12 @@ fn sub_mags_extf80(
     if exp_b == 0 {
         if sig_b == 0 {
             return round_pack_to_extf80(
-                sign_z, exp_a, sig_a, 0,
-                softfloat_extF80_roundingPrecision(status), status,
+                sign_z,
+                exp_a,
+                sig_a,
+                0,
+                softfloat_extF80_roundingPrecision(status),
+                status,
             );
         }
         softfloat_raiseFlags(status, FLAG_DENORMAL);
@@ -227,8 +253,12 @@ fn sub_mags_extf80(
         let exp_z = exp_a;
         let (r64, r0) = sub128(sig_a, 0, sig_b, sig_extra);
         return norm_round_pack_to_extf80(
-            sign_z, exp_z, r64, r0,
-            softfloat_extF80_roundingPrecision(status), status,
+            sign_z,
+            exp_z,
+            r64,
+            r0,
+            softfloat_extF80_roundingPrecision(status),
+            status,
         );
     }
     if exp_diff < 0 {
@@ -240,8 +270,12 @@ fn sub_mags_extf80(
         sign_z = !sign_z;
         let (r64, r0) = sub128(sig_b, 0, sig_a, sig_extra);
         return norm_round_pack_to_extf80(
-            sign_z, exp_z, r64, r0,
-            softfloat_extF80_roundingPrecision(status), status,
+            sign_z,
+            exp_z,
+            r64,
+            r0,
+            softfloat_extF80_roundingPrecision(status),
+            status,
         );
     }
 
@@ -250,16 +284,24 @@ fn sub_mags_extf80(
     if sig_b < sig_a {
         let (r64, r0) = sub128(sig_a, 0, sig_b, 0);
         return norm_round_pack_to_extf80(
-            sign_z, exp_z, r64, r0,
-            softfloat_extF80_roundingPrecision(status), status,
+            sign_z,
+            exp_z,
+            r64,
+            r0,
+            softfloat_extF80_roundingPrecision(status),
+            status,
         );
     }
     if sig_a < sig_b {
         sign_z = !sign_z;
         let (r64, r0) = sub128(sig_b, 0, sig_a, 0);
         return norm_round_pack_to_extf80(
-            sign_z, exp_z, r64, r0,
-            softfloat_extF80_roundingPrecision(status), status,
+            sign_z,
+            exp_z,
+            r64,
+            r0,
+            softfloat_extF80_roundingPrecision(status),
+            status,
         );
     }
     // Equal: result is ±0

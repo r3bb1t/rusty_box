@@ -10,16 +10,12 @@
 //! - 80 columns × 25 rows × 2 bytes = 4000 bytes per page
 //! - Multiple pages can be stored in the 32KB region
 
-use core::ffi::c_void;
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 use alloc::{string::String, vec::Vec};
+use core::ffi::c_void;
 
-use crate::{
-    config::BxPhyAddress,
-    memory::BxMemC,
-    Result,
-};
+use crate::{config::BxPhyAddress, memory::BxMemC, Result};
 
 use super::BxDevicesC;
 
@@ -43,11 +39,173 @@ const VGA_SEQ_DATA: u16 = 0x3C5;
 const VGA_GRAPHICS_INDEX: u16 = 0x3CE;
 const VGA_GRAPHICS_DATA: u16 = 0x3CF;
 
-/// CRTC register indices
-const CRTC_CURSOR_START: u8 = 0x0A;
-const CRTC_CURSOR_END: u8 = 0x0B;
-const CRTC_CURSOR_LOC_HIGH: u8 = 0x0E;
-const CRTC_CURSOR_LOC_LOW: u8 = 0x0F;
+// ---- Additional VGA I/O ports ----
+const VGA_MISC_OUTPUT_WRITE: u16 = 0x3C2;
+const VGA_ENABLE: u16 = 0x3C3;
+const VGA_PEL_MASK: u16 = 0x3C6;
+const VGA_DAC_STATE: u16 = 0x3C7;
+const VGA_PEL_ADDR_WRITE: u16 = 0x3C8;
+const VGA_PEL_DATA: u16 = 0x3C9;
+
+// ---- CRTC register indices ----
+const CRTC_HORIZ_TOTAL: usize = 0x00;
+const CRTC_HORIZ_DISPLAY_END: usize = 0x01;
+const CRTC_START_HORIZ_BLANK: usize = 0x02;
+const CRTC_END_HORIZ_BLANK: usize = 0x03;
+const CRTC_START_HORIZ_RETRACE: usize = 0x04;
+const CRTC_END_HORIZ_RETRACE: usize = 0x05;
+const CRTC_VERT_TOTAL: usize = 0x06;
+const CRTC_OVERFLOW: usize = 0x07;
+const CRTC_PRESET_ROW_SCAN: usize = 0x08;
+const CRTC_MAX_SCAN_LINE: usize = 0x09;
+const CRTC_CURSOR_START: usize = 0x0A;
+const CRTC_CURSOR_END: usize = 0x0B;
+const CRTC_START_ADDR_HIGH: usize = 0x0C;
+const CRTC_START_ADDR_LOW: usize = 0x0D;
+const CRTC_CURSOR_LOC_HIGH: usize = 0x0E;
+const CRTC_CURSOR_LOC_LOW: usize = 0x0F;
+const CRTC_VERT_RETRACE_START: usize = 0x10;
+const CRTC_VERT_RETRACE_END: usize = 0x11;
+const CRTC_VERT_DISPLAY_END: usize = 0x12;
+const CRTC_OFFSET: usize = 0x13;
+const CRTC_UNDERLINE_LOC: usize = 0x14;
+const CRTC_VERT_BLANK_START: usize = 0x15;
+const CRTC_VERT_BLANK_END: usize = 0x16;
+const CRTC_MODE_CONTROL: usize = 0x17;
+const CRTC_LINE_COMPARE: usize = 0x18;
+
+// ---- CRTC register bit masks ----
+const CRTC_OVERFLOW_VDE_BIT8: u8 = 0x02;
+const CRTC_OVERFLOW_VDE_BIT9: u8 = 0x40;
+const CRTC_CURSOR_START_MASK: u8 = 0x3F;
+const CRTC_CURSOR_END_MASK: u8 = 0x1F;
+const CRTC_MSL_MASK: u8 = 0x1F;
+const CRTC_PRESET_ROW_MASK: u8 = 0x1F;
+
+// ---- Sequencer register indices ----
+const SEQ_REG_RESET: usize = 0;
+const SEQ_REG_CLOCKING_MODE: usize = 1;
+const SEQ_REG_MAP_MASK: usize = 2;
+const SEQ_REG_CHAR_MAP_SELECT: usize = 3;
+const SEQ_REG_MEMORY_MODE: usize = 4;
+
+// Clocking mode bits (sequencer reg 1)
+const SEQ_CLOCKING_8DOT_CHAR: u8 = 0x01;
+const SEQ_CLOCKING_DOTCLOCKDIV2: u8 = 0x08;
+
+// Map mask bits (sequencer reg 2)
+const SEQ_MAP_MASK_PLANES: u8 = 0x0F;
+const SEQ_MAP_MASK_TEXT_PLANES: u8 = 0x03;
+
+// ---- Graphics controller register indices ----
+const GFX_REG_SET_RESET: usize = 0;
+const GFX_REG_ENABLE_SET_RESET: usize = 1;
+const GFX_REG_COLOR_COMPARE: usize = 2;
+const GFX_REG_DATA_ROTATE: usize = 3;
+const GFX_REG_READ_MAP_SELECT: usize = 4;
+const GFX_REG_GRAPHICS_MODE: usize = 5;
+const GFX_REG_MISC: usize = 6;
+const GFX_REG_COLOR_DONT_CARE: usize = 7;
+const GFX_REG_BIT_MASK: usize = 8;
+
+// Miscellaneous Graphics register bits (reg 6)
+const GFX_MISC_GRAPHICS_ALPHA: u8 = 0x01;
+const GFX_MISC_MEMORY_MAP_SHIFT: u8 = 2;
+const GFX_MISC_MEMORY_MAP_MASK: u8 = 0x03;
+
+// ---- Attribute controller register indices ----
+const ATTR_REG_MODE_CONTROL: usize = 0x10;
+const ATTR_REG_OVERSCAN_COLOR: usize = 0x11;
+const ATTR_REG_COLOR_PLANE_EN: usize = 0x12;
+const ATTR_REG_HORIZ_PIXEL_PAN: usize = 0x13;
+const ATTR_REG_COLOR_SELECT: usize = 0x14;
+
+// Attribute mode control bits (reg 0x10)
+const ATTR_MODE_LINE_GRAPHICS: u8 = 0x04;
+const ATTR_MODE_SPLIT_HPANNING: u8 = 0x20;
+const ATTR_HPANNING_MASK: u8 = 0x0F;
+
+// ---- VGA memory mapping values (from graphics reg 6, bits 2-3) ----
+/// Memory mapping mode selected by Graphics Controller register 6 bits 2-3.
+///
+/// Determines which address range maps to VGA memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub(crate) enum VgaMemoryMapping {
+    /// 128KB at 0xA0000-0xBFFFF (EGA graphics)
+    Ega128k = 0,
+    /// 64KB at 0xA0000-0xAFFFF (VGA graphics)
+    Vga64k = 1,
+    /// 32KB at 0xB0000-0xB7FFF (monochrome text)
+    MonoText32k = 2,
+    /// 32KB at 0xB8000-0xBFFFF (color text)
+    ColorText32k = 3,
+}
+
+impl VgaMemoryMapping {
+    fn from_u8(val: u8) -> Self {
+        match val & 0x03 {
+            0 => Self::Ega128k,
+            1 => Self::Vga64k,
+            2 => Self::MonoText32k,
+            3 => Self::ColorText32k,
+            _ => unreachable!(),
+        }
+    }
+
+    /// Returns the base address of the VGA memory window for this mapping mode.
+    fn window_base(self) -> BxPhyAddress {
+        match self {
+            Self::MonoText32k => VGA_WINDOW_MONO_BASE,
+            Self::ColorText32k => VGA_WINDOW_COLOR_BASE,
+            Self::Vga64k | Self::Ega128k => VGA_WINDOW_GRAPHICS_BASE,
+        }
+    }
+
+    /// Returns true if the given address falls within the VGA memory window for this mapping mode.
+    fn contains_addr(self, addr: BxPhyAddress) -> bool {
+        match self {
+            Self::MonoText32k => addr >= VGA_WINDOW_MONO_BASE && addr <= VGA_WINDOW_MONO_END,
+            Self::ColorText32k => addr >= VGA_WINDOW_COLOR_BASE && addr <= VGA_WINDOW_COLOR_END,
+            Self::Vga64k => addr >= VGA_WINDOW_GRAPHICS_BASE && addr <= VGA_WINDOW_VGA64K_END,
+            Self::Ega128k => addr >= VGA_WINDOW_GRAPHICS_BASE && addr <= VGA_WINDOW_GRAPHICS_END,
+        }
+    }
+}
+
+// ---- VGA memory window addresses ----
+const VGA_WINDOW_MONO_BASE: BxPhyAddress = 0xB0000;
+const VGA_WINDOW_MONO_END: BxPhyAddress = 0xB7FFF;
+const VGA_WINDOW_COLOR_BASE: BxPhyAddress = 0xB8000;
+const VGA_WINDOW_COLOR_END: BxPhyAddress = 0xBFFFF;
+const VGA_WINDOW_GRAPHICS_BASE: BxPhyAddress = 0xA0000;
+const VGA_WINDOW_GRAPHICS_END: BxPhyAddress = 0xBFFFF;
+const VGA_WINDOW_VGA64K_END: BxPhyAddress = 0xAFFFF;
+
+// ---- Misc output register bits ----
+const MISC_OUT_COLOR_EMULATION: u8 = 0x01;
+const MISC_OUT_ENABLE_RAM: u8 = 0x02;
+const MISC_OUT_CLOCK_SEL_SHIFT: u8 = 2;
+const MISC_OUT_CLOCK_SEL_MASK: u8 = 0x03;
+const MISC_OUT_HIGH_BANK: u8 = 0x20;
+const MISC_OUT_HORIZ_POL: u8 = 0x40;
+const MISC_OUT_VERT_POL: u8 = 0x80;
+
+// ---- Status register bits ----
+const VGA_STATUS_DISPLAY_ENABLE: u8 = 0x01;
+const VGA_STATUS_VERT_RETRACE: u8 = 0x08;
+const VGA_STATUS_TOGGLE_MASK: u8 = VGA_STATUS_DISPLAY_ENABLE | VGA_STATUS_VERT_RETRACE;
+
+// ---- DAC state values ----
+const DAC_STATE_WRITE_MODE: u8 = 0x00;
+const DAC_STATE_READ_MODE: u8 = 0x03;
+const PEL_CYCLES_PER_COLOR: u8 = 3;
+
+// ---- Register index masks ----
+const CRTC_INDEX_MASK: u8 = 0x1F;
+const ATTR_INDEX_MASK: u8 = 0x1F;
+const SEQ_INDEX_MASK: u8 = 0x07;
+const GFX_INDEX_MASK: u8 = 0x0F;
 
 /// Text mode dimensions
 const TEXT_COLS: usize = 80;
@@ -59,25 +217,25 @@ const BYTES_PER_ROW: usize = TEXT_COLS * BYTES_PER_CHAR;
 /// This is returned by update() to allow no_std compatibility
 pub(crate) struct VgaUpdateResult {
     /// Whether an update is needed
-    pub needs_update: bool,
+    pub(crate) needs_update: bool,
     /// Text buffer (new state)
-    pub text_buffer: Vec<u8>,
+    pub(crate) text_buffer: Vec<u8>,
     /// Text snapshot (old state) for comparison
-    pub text_snapshot: Vec<u8>,
+    pub(crate) text_snapshot: Vec<u8>,
     /// Cursor address in text buffer
-    pub cursor_address: u16,
+    pub(crate) cursor_address: u16,
     /// Text mode info
-    pub tm_info: crate::gui::VgaTextModeInfo,
+    pub(crate) tm_info: crate::gui::VgaTextModeInfo,
     /// Whether dimension_update should be called on the GUI
-    pub dimension_changed: bool,
+    pub(crate) dimension_changed: bool,
     /// Pixel width (for dimension_update)
-    pub iwidth: u32,
+    pub(crate) iwidth: u32,
     /// Pixel height (for dimension_update)
-    pub iheight: u32,
+    pub(crate) iheight: u32,
     /// Font height in pixels (for dimension_update)
-    pub fheight: u32,
+    pub(crate) fheight: u32,
     /// Font/char width in pixels (for dimension_update)
-    pub fwidth: u32,
+    pub(crate) fwidth: u32,
 }
 
 /// VGA controller state
@@ -137,9 +295,9 @@ pub(crate) struct BxVgaC {
     /// Count of writes that were ignored because they fell outside the selected window.
     probe_unmapped_writes: u64,
     /// First mapped write observed: (phys_addr, value, memory_mapping)
-    probe_first_mapped: Option<(BxPhyAddress, u8, u8)>,
+    probe_first_mapped: Option<(BxPhyAddress, u8, VgaMemoryMapping)>,
     /// First unmapped write observed: (phys_addr, value, memory_mapping)
-    probe_first_unmapped: Option<(BxPhyAddress, u8, u8)>,
+    probe_first_unmapped: Option<(BxPhyAddress, u8, VgaMemoryMapping)>,
 
     // =====================================================================
     // VGA Enable and PEL/DAC registers (ports 0x3C3, 0x3C6-0x3C9)
@@ -222,7 +380,10 @@ impl BxVgaC {
             graphics_index: 0,
             graphics_regs: [0; 9],
             status_reg: 0x00,
-            misc_output: 0x67, // Color mode, 80x25 text
+            // Bochs init_standard_vga(): color_emulation=1, enable_ram=1,
+            // horiz_sync_pol=1, vert_sync_pol=1, clock_select=0, select_high_bank=0
+            // = 0b11000011 = 0xC3
+            misc_output: 0xC3,
             text_memory: vec![0; VGA_TEXT_MEM_SIZE],
             cursor_pos: (0, 0),
             text_dirty: false,
@@ -239,87 +400,57 @@ impl BxVgaC {
             probe_first_unmapped: None,
 
             // VGA Enable and PEL/DAC registers
-            vga_enabled: true,       // VGA enabled by default
-            pel_mask: 0xFF,          // All palette entries visible
-            dac_state: 0x01,         // Initial state
+            vga_enabled: true, // VGA enabled by default
+            pel_mask: 0xFF,    // All palette entries visible
+            dac_state: 0x01,   // Initial state
             pel_write_addr: 0,
             pel_read_addr: 0,
             pel_write_cycle: 0,
             pel_read_cycle: 0,
             pel_data: [[0; 3]; 256], // Will be initialized by BIOS
 
-            // Misc output parsed fields (matching misc_output = 0x67)
-            misc_color_emulation: true,   // Bit 0: color mode (use 0x3D4/0x3D5)
-            misc_enable_ram: true,        // Bit 1: RAM enabled
-            misc_clock_select: 1,         // Bits 2-3: clock select = 1
-            misc_select_high_bank: true,  // Bit 5: high bank
-            misc_horiz_sync_pol: true,    // Bit 6
-            misc_vert_sync_pol: false,    // Bit 7
+            // Misc output parsed fields (matching misc_output = 0xC3)
+            // Bochs init_standard_vga(): color_emulation=1, enable_ram=1,
+            // clock_select=0, select_high_bank=0, horiz_sync_pol=1, vert_sync_pol=1
+            misc_color_emulation: true, // Bit 0: color mode (use 0x3D4/0x3D5)
+            misc_enable_ram: true,      // Bit 1: RAM enabled
+            misc_clock_select: 0,       // Bits 2-3: Bochs default = 0
+            misc_select_high_bank: false, // Bit 5: Bochs default = 0
+            misc_horiz_sync_pol: true,  // Bit 6: Bochs = 1
+            misc_vert_sync_pol: true,   // Bit 7: Bochs = 1
 
             last_xres: 0,
             last_yres: 0,
             last_fw: 0,
             last_fh: 0,
-            last_bpp: 0,
+            last_bpp: 8, // Bochs: s.last_bpp = 8
         };
 
-        // Initialize CRTC registers for 80x25 text mode
-        vga.crtc_regs[0] = 0x5F; // Horizontal total
-        vga.crtc_regs[1] = 0x4F; // Horizontal display end
-        vga.crtc_regs[2] = 0x50; // Start horizontal blanking
-        vga.crtc_regs[3] = 0x82; // End horizontal blanking
-        vga.crtc_regs[4] = 0x55; // Start horizontal retrace
-        vga.crtc_regs[5] = 0x81; // End horizontal retrace
-        vga.crtc_regs[6] = 0xBF; // Vertical total
-        vga.crtc_regs[7] = 0x1F; // Overflow
-        vga.crtc_regs[8] = 0x00; // Preset row scan
-        vga.crtc_regs[9] = 0x4F; // Maximum scan line
-        vga.crtc_regs[10] = 0x0D; // Cursor start (scan line)
-        vga.crtc_regs[11] = 0x0E; // Cursor end (scan line)
-        vga.crtc_regs[12] = 0x00; // Start address high
-        vga.crtc_regs[13] = 0x00; // Start address low
-        vga.crtc_regs[14] = 0x00; // Cursor location high
-        vga.crtc_regs[15] = 0x00; // Cursor location low
-        vga.crtc_regs[16] = 0x9C; // Vertical retrace start
-        vga.crtc_regs[17] = 0x8E; // Vertical retrace end
-        vga.crtc_regs[18] = 0x8F; // Vertical display end
-        vga.crtc_regs[19] = 0x28; // Offset
-        vga.crtc_regs[20] = 0x1F; // Underline location
-        vga.crtc_regs[21] = 0x96; // Vertical blank start
-        vga.crtc_regs[22] = 0xB9; // Vertical blank end
-        vga.crtc_regs[23] = 0xA3; // Mode control
-        vga.crtc_regs[24] = 0xFF; // Line compare
+        // CRTC registers: Bochs zeroes them via memset; the VGA BIOS programs them.
+        // No explicit initialization needed — array is already zeroed above.
 
-        // Initialize sequencer
-        vga.seq_regs[0] = 0x03; // Reset
-        vga.seq_regs[1] = 0x00; // Clocking mode
-        vga.seq_regs[2] = 0x03; // Map mask
-        vga.seq_regs[3] = 0x00; // Character map select
-        vga.seq_regs[4] = 0x02; // Memory mode
+        // Initialize sequencer — only fields explicitly set by Bochs init_standard_vga()
+        vga.seq_regs[SEQ_REG_RESET] = 0x03; // reset1=1, reset2=1
+                                            // seq_regs[1..3] stay 0 from array init (Bochs: zeroed by memset)
+                                            // Bochs: extended_mem=1 (bit 1) + odd_even_dis=1 (bit 2) = 0x06
+        vga.seq_regs[SEQ_REG_MEMORY_MODE] = 0x06;
 
-        // Initialize graphics controller
-        vga.graphics_regs[0] = 0x00; // Set/Reset
-        vga.graphics_regs[1] = 0x00; // Enable Set/Reset
-        vga.graphics_regs[2] = 0x00; // Color Compare
-        vga.graphics_regs[3] = 0x00; // Data Rotate
-        vga.graphics_regs[4] = 0x00; // Read Map Select
-        vga.graphics_regs[5] = 0x10; // Graphics Mode (text mode)
-        // Match Bochs `vgacore.cc:init_standard_vga()` default:
-        // graphics_alpha=0 (text), memory_mapping=2 (monochrome text window B0000-B7FFF)
-        vga.graphics_regs[6] = 0x08;
-        vga.graphics_regs[7] = 0x00; // Color Don't Care
-        vga.graphics_regs[8] = 0xFF; // Bit Mask
+        // Initialize graphics controller — only fields explicitly set by Bochs
+        // All regs 0 from array init except memory_mapping=2 in GFX_REG_MISC
+        // Bochs init_standard_vga(): graphics_ctrl.memory_mapping = 2
+        vga.graphics_regs[GFX_REG_MISC] = 0x08; // memory_mapping=2 (bits 2-3)
+                                                // graphics_regs[0..5,7,8] stay 0 from array init (Bochs: zeroed by memset)
 
         // Initialize attribute controller
-        vga.attr_regs[0] = 0x00; // Palette 0-15
-        for i in 1..16 {
-            vga.attr_regs[i] = i as u8;
-        }
-        vga.attr_regs[16] = 0x0F; // Attribute mode control
-        vga.attr_regs[17] = 0x00; // Overscan color
-        vga.attr_regs[18] = 0x0F; // Color plane enable
-        vga.attr_regs[19] = 0x08; // Horizontal pixel panning
-        vga.attr_regs[20] = 0x00; // Color select
+        // Bochs: palette regs 0-15 are zeroed by memset (not explicitly set)
+        // They get programmed by the BIOS during VGA init
+        // Bochs init_standard_vga() attribute_ctrl fields:
+        //   mode_ctrl.enable_line_graphics = 1 (bit 2 of reg 0x10)
+        //   color_plane_enable = 0x0f (reg 0x12)
+        //   All others stay 0 from memset
+        vga.attr_regs[ATTR_REG_MODE_CONTROL] = 0x04;
+        vga.attr_regs[ATTR_REG_COLOR_PLANE_EN] = 0x0F;
+        // attr_regs[0x11, 0x13, 0x14] stay 0 from array init
 
         vga
     }
@@ -334,12 +465,20 @@ impl BxVgaC {
             self.probe_handler_calls, self.probe_mapped_writes, self.probe_unmapped_writes
         );
         if let Some((addr, val, mm)) = self.probe_first_mapped {
-            let _ = writeln!(s, "first_mapped: addr={:#x} val={:#02x} memory_mapping={}", addr, val, mm);
+            let _ = writeln!(
+                s,
+                "first_mapped: addr={:#x} val={:#02x} memory_mapping={:?}",
+                addr, val, mm
+            );
         } else {
             let _ = writeln!(s, "first_mapped: <none>");
         }
         if let Some((addr, val, mm)) = self.probe_first_unmapped {
-            let _ = writeln!(s, "first_unmapped: addr={:#x} val={:#02x} memory_mapping={}", addr, val, mm);
+            let _ = writeln!(
+                s,
+                "first_unmapped: addr={:#x} val={:#02x} memory_mapping={:?}",
+                addr, val, mm
+            );
         } else {
             let _ = writeln!(s, "first_unmapped: <none>");
         }
@@ -357,78 +496,210 @@ impl BxVgaC {
         // Word writes are split into two byte writes in write_port().
 
         // CRTC registers (mono) (0x3B4-0x3B5)
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            VGA_CRTC_INDEX_MONO, "VGA CRTC Index (mono)", 0x3);
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            VGA_CRTC_DATA_MONO, "VGA CRTC Data (mono)", 0x3);
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_CRTC_INDEX_MONO,
+            "VGA CRTC Index (mono)",
+            0x3,
+        );
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_CRTC_DATA_MONO,
+            "VGA CRTC Data (mono)",
+            0x3,
+        );
 
         // CRTC registers (0x3D4-0x3D5)
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            VGA_CRTC_INDEX, "VGA CRTC Index", 0x3);
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            VGA_CRTC_DATA, "VGA CRTC Data", 0x3);
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_CRTC_INDEX,
+            "VGA CRTC Index",
+            0x3,
+        );
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_CRTC_DATA,
+            "VGA CRTC Data",
+            0x3,
+        );
 
         // Status register (0x3DA)
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            VGA_STATUS, "VGA Status", 0x3);
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_STATUS,
+            "VGA Status",
+            0x3,
+        );
 
         // Status register (mono) (0x3BA)
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            VGA_STATUS_MONO, "VGA Status (mono)", 0x3);
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_STATUS_MONO,
+            "VGA Status (mono)",
+            0x3,
+        );
 
         // Attribute controller (0x3C0-0x3C1)
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            VGA_ATTRIB_ADDR, "VGA Attribute Address", 0x3);
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            VGA_ATTRIB_DATA, "VGA Attribute Data", 0x3);
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_ATTRIB_ADDR,
+            "VGA Attribute Address",
+            0x3,
+        );
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_ATTRIB_DATA,
+            "VGA Attribute Data",
+            0x3,
+        );
 
         // Sequencer (0x3C4-0x3C5)
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            VGA_SEQ_INDEX, "VGA Sequencer Index", 0x3);
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            VGA_SEQ_DATA, "VGA Sequencer Data", 0x3);
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_SEQ_INDEX,
+            "VGA Sequencer Index",
+            0x3,
+        );
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_SEQ_DATA,
+            "VGA Sequencer Data",
+            0x3,
+        );
 
         // Graphics controller (0x3CE-0x3CF)
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            VGA_GRAPHICS_INDEX, "VGA Graphics Index", 0x3);
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            VGA_GRAPHICS_DATA, "VGA Graphics Data", 0x3);
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_GRAPHICS_INDEX,
+            "VGA Graphics Index",
+            0x3,
+        );
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_GRAPHICS_DATA,
+            "VGA Graphics Data",
+            0x3,
+        );
 
         // Misc output READ (0x3CC) - reads the misc output register
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            VGA_MISC_OUTPUT, "VGA Misc Output Read", 0x3);
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_MISC_OUTPUT,
+            "VGA Misc Output Read",
+            0x3,
+        );
 
-        // Misc output WRITE (0x3C2) - CRITICAL for BIOS to set color mode
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            0x3C2, "VGA Misc Output Write", 0x3);
+        // Misc output WRITE - CRITICAL for BIOS to set color mode
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_MISC_OUTPUT_WRITE,
+            "VGA Misc Output Write",
+            0x3,
+        );
 
-        // VGA Enable (0x3C3)
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            0x3C3, "VGA Enable", 0x3);
+        // VGA Enable
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_ENABLE,
+            "VGA Enable",
+            0x3,
+        );
 
-        // PEL Mask (0x3C6)
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            0x3C6, "VGA PEL Mask", 0x3);
+        // PEL Mask
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_PEL_MASK,
+            "VGA PEL Mask",
+            0x3,
+        );
 
-        // DAC State Read / PEL Address Read Mode Write (0x3C7)
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            0x3C7, "VGA DAC State", 0x3);
+        // DAC State Read / PEL Address Read Mode Write
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_DAC_STATE,
+            "VGA DAC State",
+            0x3,
+        );
 
-        // PEL Address Write Mode (0x3C8)
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            0x3C8, "VGA PEL Address Write", 0x3);
+        // PEL Address Write Mode
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_PEL_ADDR_WRITE,
+            "VGA PEL Address Write",
+            0x3,
+        );
 
-        // PEL Data Register (0x3C9)
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            0x3C9, "VGA PEL Data", 0x3);
+        // PEL Data Register
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            VGA_PEL_DATA,
+            "VGA PEL Data",
+            0x3,
+        );
 
         // EGA compatibility ports (0x3CA, 0x3CB, 0x3CD)
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            0x3CA, "VGA EGA Compat", 0x3);
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            0x3CB, "VGA EGA Compat", 0x3);
-        io.register_io_handler(vga_ptr, vga_read_handler, vga_write_handler,
-            0x3CD, "VGA EGA Compat", 0x3);
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            0x3CA,
+            "VGA EGA Compat",
+            0x3,
+        );
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            0x3CB,
+            "VGA EGA Compat",
+            0x3,
+        );
+        io.register_io_handler(
+            vga_ptr,
+            vga_read_handler,
+            vga_write_handler,
+            0x3CD,
+            "VGA EGA Compat",
+            0x3,
+        );
 
         // Register memory handlers for VGA memory range (0xA0000-0xBFFFF)
         // This matches DEV_register_memory_handlers in vgacore.cc line 177
@@ -437,8 +708,8 @@ impl BxVgaC {
             vga_ptr_const,
             vga_mem_read_handler,
             vga_mem_write_handler,
-            0xA0000,  // Start of VGA memory range
-            0xBFFFF,  // End of VGA memory range
+            VGA_WINDOW_GRAPHICS_BASE,
+            VGA_WINDOW_GRAPHICS_END,
         )?;
 
         tracing::info!("VGA initialized (80x25 text mode)");
@@ -469,8 +740,8 @@ impl BxVgaC {
                 // Toggle both bits to simulate display cycling through
                 // active → hblank → vblank → vretrace phases.
                 // VGA BIOS waits for bit 3 transitions (0→1 and 1→0).
-                self.status_reg ^= 0x09; // toggle bits 0 and 3
-                // Reading this port resets the attribute flip-flop (Bochs line 529)
+                self.status_reg ^= VGA_STATUS_TOGGLE_MASK; // toggle Display Enable and Vert Retrace
+                                                           // Reading this port resets the attribute flip-flop (Bochs line 529)
                 self.attr_flip_flop = false;
                 self.status_reg as u32
             }
@@ -507,29 +778,28 @@ impl BxVgaC {
             }
             VGA_MISC_OUTPUT => self.misc_output as u32,
 
-            // Misc Output Write port (0x3C2) - write-only, return 0xFF on read
-            0x3C2 => 0xFF,
+            // Misc Output Write port - write-only, return 0xFF on read
+            VGA_MISC_OUTPUT_WRITE => 0xFF,
 
-            // VGA Enable (0x3C3)
-            0x3C3 => self.vga_enabled as u32,
+            // VGA Enable
+            VGA_ENABLE => self.vga_enabled as u32,
 
-            // PEL Mask (0x3C6)
-            0x3C6 => self.pel_mask as u32,
+            // PEL Mask
+            VGA_PEL_MASK => self.pel_mask as u32,
 
-            // DAC State (0x3C7) - returns 0x00 for write mode, 0x03 for read mode
-            0x3C7 => self.dac_state as u32,
+            // DAC State
+            VGA_DAC_STATE => self.dac_state as u32,
 
-            // PEL Address Write (0x3C8)
-            0x3C8 => self.pel_write_addr as u32,
+            // PEL Address Write
+            VGA_PEL_ADDR_WRITE => self.pel_write_addr as u32,
 
-            // PEL Data (0x3C9) - read palette data
-            0x3C9 => {
-                // Only read if in read mode (dac_state == 0x03)
-                if self.dac_state == 0x03 {
+            // PEL Data - read palette data
+            VGA_PEL_DATA => {
+                if self.dac_state == DAC_STATE_READ_MODE {
                     let color = self.pel_data[self.pel_read_addr as usize];
                     let val = color[self.pel_read_cycle as usize];
                     self.pel_read_cycle += 1;
-                    if self.pel_read_cycle >= 3 {
+                    if self.pel_read_cycle >= PEL_CYCLES_PER_COLOR {
                         self.pel_read_cycle = 0;
                         self.pel_read_addr = self.pel_read_addr.wrapping_add(1);
                     }
@@ -560,19 +830,27 @@ impl BxVgaC {
         let value = value as u8;
         match port {
             VGA_CRTC_INDEX | VGA_CRTC_INDEX_MONO => {
-                self.crtc_index = value & 0x1F; // Only 5 bits
+                self.crtc_index = value & CRTC_INDEX_MASK;
             }
             VGA_CRTC_DATA | VGA_CRTC_DATA_MONO => {
                 if self.crtc_index < 25 {
                     self.crtc_regs[self.crtc_index as usize] = value;
-                    
+
                     // Update cursor position if cursor location registers changed
-                    if self.crtc_index == CRTC_CURSOR_LOC_HIGH {
-                        let cursor_addr = ((value as u16) << 8) | (self.crtc_regs[CRTC_CURSOR_LOC_LOW as usize] as u16);
-                        self.cursor_pos = ((cursor_addr as usize / BYTES_PER_ROW), (cursor_addr as usize % BYTES_PER_ROW) / BYTES_PER_CHAR);
-                    } else if self.crtc_index == CRTC_CURSOR_LOC_LOW {
-                        let cursor_addr = ((self.crtc_regs[CRTC_CURSOR_LOC_HIGH as usize] as u16) << 8) | (value as u16);
-                        self.cursor_pos = ((cursor_addr as usize / BYTES_PER_ROW), (cursor_addr as usize % BYTES_PER_ROW) / BYTES_PER_CHAR);
+                    if self.crtc_index as usize == CRTC_CURSOR_LOC_HIGH {
+                        let cursor_addr =
+                            ((value as u16) << 8) | (self.crtc_regs[CRTC_CURSOR_LOC_LOW] as u16);
+                        self.cursor_pos = (
+                            (cursor_addr as usize / BYTES_PER_ROW),
+                            (cursor_addr as usize % BYTES_PER_ROW) / BYTES_PER_CHAR,
+                        );
+                    } else if self.crtc_index as usize == CRTC_CURSOR_LOC_LOW {
+                        let cursor_addr =
+                            ((self.crtc_regs[CRTC_CURSOR_LOC_HIGH] as u16) << 8) | (value as u16);
+                        self.cursor_pos = (
+                            (cursor_addr as usize / BYTES_PER_ROW),
+                            (cursor_addr as usize % BYTES_PER_ROW) / BYTES_PER_CHAR,
+                        );
                     }
                 }
             }
@@ -585,7 +863,7 @@ impl BxVgaC {
                     }
                 } else {
                     // Writing index
-                    self.attr_index = value & 0x1F;
+                    self.attr_index = value & ATTR_INDEX_MASK;
                 }
                 self.attr_flip_flop = !self.attr_flip_flop;
             }
@@ -596,7 +874,7 @@ impl BxVgaC {
                 }
             }
             VGA_SEQ_INDEX => {
-                self.seq_index = value & 0x07; // Only 3 bits
+                self.seq_index = value & SEQ_INDEX_MASK;
             }
             VGA_SEQ_DATA => {
                 if self.seq_index < 5 {
@@ -604,22 +882,27 @@ impl BxVgaC {
                 }
             }
             VGA_GRAPHICS_INDEX => {
-                self.graphics_index = value & 0x0F; // Only 4 bits
+                self.graphics_index = value & GFX_INDEX_MASK;
             }
             VGA_GRAPHICS_DATA => {
                 if self.graphics_index < 9 {
                     let old_value = self.graphics_regs[self.graphics_index as usize];
                     self.graphics_regs[self.graphics_index as usize] = value;
 
-                    // Special handling for register 6 (Miscellaneous Graphics)
+                    // Special handling for Miscellaneous Graphics register
                     // This controls memory_mapping which affects which address range is active
-                    if self.graphics_index == 6 {
-                        let old_mapping = (old_value >> 2) & 0x03;
-                        let new_mapping = (value >> 2) & 0x03;
+                    if self.graphics_index as usize == GFX_REG_MISC {
+                        let old_mapping =
+                            (old_value >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
+                        let new_mapping =
+                            (value >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
                         if old_mapping != new_mapping {
                             tracing::info!(
-                                "VGA memory_mapping changed: {} -> {} (value: {:#04x} -> {:#04x})",
-                                old_mapping, new_mapping, old_value, value
+                                "VGA memory_mapping changed: {:?} -> {:?} (value: {:#04x} -> {:#04x})",
+                                VgaMemoryMapping::from_u8(old_mapping),
+                                VgaMemoryMapping::from_u8(new_mapping),
+                                old_value,
+                                value
                             );
                             self.text_buffer_update = true;
                         }
@@ -630,60 +913,64 @@ impl BxVgaC {
             // Misc Output Read port (0x3CC) - also accept writes for compatibility
             VGA_MISC_OUTPUT => {
                 self.misc_output = value;
-                self.misc_color_emulation = (value & 0x01) != 0;
-                self.misc_enable_ram = (value & 0x02) != 0;
-                self.misc_clock_select = (value >> 2) & 0x03;
-                self.misc_select_high_bank = (value & 0x20) != 0;
-                self.misc_horiz_sync_pol = (value & 0x40) != 0;
-                self.misc_vert_sync_pol = (value & 0x80) != 0;
+                self.misc_color_emulation = (value & MISC_OUT_COLOR_EMULATION) != 0;
+                self.misc_enable_ram = (value & MISC_OUT_ENABLE_RAM) != 0;
+                self.misc_clock_select =
+                    (value >> MISC_OUT_CLOCK_SEL_SHIFT) & MISC_OUT_CLOCK_SEL_MASK;
+                self.misc_select_high_bank = (value & MISC_OUT_HIGH_BANK) != 0;
+                self.misc_horiz_sync_pol = (value & MISC_OUT_HORIZ_POL) != 0;
+                self.misc_vert_sync_pol = (value & MISC_OUT_VERT_POL) != 0;
             }
 
-            // Misc Output Write port (0x3C2) - CRITICAL for BIOS color mode setup
-            0x3C2 => {
-                self.misc_color_emulation = (value & 0x01) != 0;
-                self.misc_enable_ram = (value & 0x02) != 0;
-                self.misc_clock_select = (value >> 2) & 0x03;
-                self.misc_select_high_bank = (value & 0x20) != 0;
-                self.misc_horiz_sync_pol = (value & 0x40) != 0;
-                self.misc_vert_sync_pol = (value & 0x80) != 0;
+            // Misc Output Write port - CRITICAL for BIOS color mode setup
+            VGA_MISC_OUTPUT_WRITE => {
+                self.misc_color_emulation = (value & MISC_OUT_COLOR_EMULATION) != 0;
+                self.misc_enable_ram = (value & MISC_OUT_ENABLE_RAM) != 0;
+                self.misc_clock_select =
+                    (value >> MISC_OUT_CLOCK_SEL_SHIFT) & MISC_OUT_CLOCK_SEL_MASK;
+                self.misc_select_high_bank = (value & MISC_OUT_HIGH_BANK) != 0;
+                self.misc_horiz_sync_pol = (value & MISC_OUT_HORIZ_POL) != 0;
+                self.misc_vert_sync_pol = (value & MISC_OUT_VERT_POL) != 0;
                 // Update combined misc_output for reads at 0x3CC
                 self.misc_output = value;
                 tracing::info!(
                     "VGA Misc Output Write: {:#04x} (color_emulation={}, enable_ram={})",
-                    value, self.misc_color_emulation, self.misc_enable_ram
+                    value,
+                    self.misc_color_emulation,
+                    self.misc_enable_ram
                 );
             }
 
-            // VGA Enable (0x3C3)
-            0x3C3 => {
+            // VGA Enable
+            VGA_ENABLE => {
                 self.vga_enabled = (value & 0x01) != 0;
                 tracing::debug!("VGA Enable: {}", self.vga_enabled);
             }
 
-            // PEL Mask (0x3C6)
-            0x3C6 => {
+            // PEL Mask
+            VGA_PEL_MASK => {
                 self.pel_mask = value;
             }
 
-            // PEL Address Read Mode (0x3C7)
-            0x3C7 => {
+            // PEL Address Read Mode
+            VGA_DAC_STATE => {
                 self.pel_read_addr = value;
                 self.pel_read_cycle = 0;
-                self.dac_state = 0x03; // Set to read mode
+                self.dac_state = DAC_STATE_READ_MODE;
             }
 
-            // PEL Address Write Mode (0x3C8)
-            0x3C8 => {
+            // PEL Address Write Mode
+            VGA_PEL_ADDR_WRITE => {
                 self.pel_write_addr = value;
                 self.pel_write_cycle = 0;
-                self.dac_state = 0x00; // Set to write mode
+                self.dac_state = DAC_STATE_WRITE_MODE;
             }
 
-            // PEL Data (0x3C9) - write palette data
-            0x3C9 => {
+            // PEL Data - write palette data
+            VGA_PEL_DATA => {
                 self.pel_data[self.pel_write_addr as usize][self.pel_write_cycle as usize] = value;
                 self.pel_write_cycle += 1;
-                if self.pel_write_cycle >= 3 {
+                if self.pel_write_cycle >= PEL_CYCLES_PER_COLOR {
                     self.pel_write_cycle = 0;
                     self.pel_write_addr = self.pel_write_addr.wrapping_add(1);
                 }
@@ -731,9 +1018,9 @@ impl BxVgaC {
 
         // Our text_memory is flat: [char0, attr0, char1, attr1, ...] at offsets
         // (physical_addr & 0x7FFF). For 80x25 mode, each row is 160 bytes.
-        // CRTC start address (regs 12-13) is in character cells (words).
-        let start_addr_words =
-            ((self.crtc_regs[12] as u16) << 8) | (self.crtc_regs[13] as u16);
+        // CRTC start address is in character cells (words).
+        let start_addr_words = ((self.crtc_regs[CRTC_START_ADDR_HIGH] as u16) << 8)
+            | (self.crtc_regs[CRTC_START_ADDR_LOW] as u16);
         let start_address = (start_addr_words as usize) * BYTES_PER_CHAR;
 
         let mem_mask = VGA_TEXT_MEM_SIZE - 1; // 0x7fff
@@ -805,10 +1092,15 @@ impl BxVgaC {
         //
         // Text mode when `graphics_alpha == 0`. Memory mapping selects which aperture
         // is active (B0000 vs B8000 for mono/color text).
-        let graphics_alpha = (self.graphics_regs[6] & 0x01) != 0;
-        let memory_mapping = (self.graphics_regs[6] >> 2) & 0x03;
-        let is_text_mode = (!graphics_alpha) && (memory_mapping == 2 || memory_mapping == 3);
-        
+        let graphics_alpha = (self.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0;
+        let memory_mapping = VgaMemoryMapping::from_u8(
+            (self.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT)
+                & GFX_MISC_MEMORY_MAP_MASK,
+        );
+        let is_text_mode = (!graphics_alpha)
+            && (memory_mapping == VgaMemoryMapping::MonoText32k
+                || memory_mapping == VgaMemoryMapping::ColorText32k);
+
         if !is_text_mode {
             return None;
         }
@@ -818,39 +1110,41 @@ impl BxVgaC {
         let old_snapshot = self.text_snapshot.clone();
 
         // Calculate text mode parameters (matching vgacore.cc:1601-1632)
-        let start_addr = ((self.crtc_regs[12] as u16) << 8) | (self.crtc_regs[13] as u16);
+        let start_addr = ((self.crtc_regs[CRTC_START_ADDR_HIGH] as u16) << 8)
+            | (self.crtc_regs[CRTC_START_ADDR_LOW] as u16);
         let start_address = (start_addr << 1) as u16;
-        
-        let cs_start = self.crtc_regs[10] & 0x3f;
-        let cs_end = self.crtc_regs[11] & 0x1f;
-        
-        // Line offset: CRTC reg[19] is offset register
-        let mut line_offset = (self.crtc_regs[19] as u16) * 2; // Convert to bytes
+
+        let cs_start = self.crtc_regs[CRTC_CURSOR_START] & CRTC_CURSOR_START_MASK;
+        let cs_end = self.crtc_regs[CRTC_CURSOR_END] & CRTC_CURSOR_END_MASK;
+
+        // Line offset: CRTC offset register
+        let mut line_offset = (self.crtc_regs[CRTC_OFFSET] as u16) * 2; // Convert to bytes
         if line_offset == 0 {
             // Default to 80 columns * 2 bytes
             line_offset = (TEXT_COLS * BYTES_PER_CHAR) as u16;
         }
-        
+
         let line_compare = 0; // TODO: Calculate from CRTC registers if needed
-        let h_panning = self.attr_regs[19] & 0x0f;
-        let v_panning = self.crtc_regs[8] & 0x1f;
-        let line_graphics = (self.attr_regs[16] & 0x04) != 0;
-        let split_hpanning = (self.attr_regs[16] & 0x20) != 0;
+        let h_panning = self.attr_regs[ATTR_REG_HORIZ_PIXEL_PAN] & ATTR_HPANNING_MASK;
+        let v_panning = self.crtc_regs[CRTC_PRESET_ROW_SCAN] & CRTC_PRESET_ROW_MASK;
+        let line_graphics = (self.attr_regs[ATTR_REG_MODE_CONTROL] & ATTR_MODE_LINE_GRAPHICS) != 0;
+        let split_hpanning =
+            (self.attr_regs[ATTR_REG_MODE_CONTROL] & ATTR_MODE_SPLIT_HPANNING) != 0;
         let blink_flags = 0u8; // TODO: Calculate from attribute controller
-        
+
         // Build palette (matching vgacore.cc:1629-1632)
         let mut actl_palette = [0u8; 16];
         for i in 0..16 {
             actl_palette[i] = self.attr_regs[i] & 0x0f; // Simplified - no pel.mask for now
         }
-        
+
         // Calculate rows and cols (matching vgacore.cc:1634-1648)
-        let mut cols = (self.crtc_regs[1] + 1) as usize;
-        let mut msl = (self.crtc_regs[9] & 0x1f) as usize;
-        let vde = (self.crtc_regs[18] as usize) + 
-                  (((self.crtc_regs[7] & 0x02) as usize) << 7) +
-                  (((self.crtc_regs[7] & 0x40) as usize) << 3);
-        
+        let mut cols = (self.crtc_regs[CRTC_HORIZ_DISPLAY_END] + 1) as usize;
+        let mut msl = (self.crtc_regs[CRTC_MAX_SCAN_LINE] & CRTC_MSL_MASK) as usize;
+        let vde = (self.crtc_regs[CRTC_VERT_DISPLAY_END] as usize)
+            + (((self.crtc_regs[CRTC_OVERFLOW] & CRTC_OVERFLOW_VDE_BIT8) as usize) << 7)
+            + (((self.crtc_regs[CRTC_OVERFLOW] & CRTC_OVERFLOW_VDE_BIT9) as usize) << 3);
+
         // Workaround for update() calls before VGABIOS init (matching vgacore.cc:1639-1643)
         if cols == 1 || msl == 0 {
             cols = TEXT_COLS;
@@ -858,14 +1152,19 @@ impl BxVgaC {
         if msl == 0 {
             msl = 15;
         }
-        
-        let rows = if msl > 0 { (vde + 1) / (msl + 1) } else { TEXT_ROWS };
+
+        let rows = if msl > 0 {
+            (vde + 1) / (msl + 1)
+        } else {
+            TEXT_ROWS
+        };
         let rows = rows.min(TEXT_ROWS); // Cap at 25 rows
-        
+
         // Calculate cursor address (matching vgacore.cc:1671-1676)
-        let cursor_addr = ((self.crtc_regs[14] as u16) << 8) | (self.crtc_regs[15] as u16);
+        let cursor_addr = ((self.crtc_regs[CRTC_CURSOR_LOC_HIGH] as u16) << 8)
+            | (self.crtc_regs[CRTC_CURSOR_LOC_LOW] as u16);
         let cursor_address = cursor_addr * 2; // Convert to byte offset
-        
+
         // Validate cursor address
         let max_addr = start_address + (line_offset * rows as u16);
         let cursor_address = if cursor_address < start_address || cursor_address > max_addr {
@@ -873,7 +1172,7 @@ impl BxVgaC {
         } else {
             cursor_address
         };
-        
+
         // Copy from VGA memory to text_buffer if needed.
         // We update the visible page whenever memory changed since the last update,
         // or when parameters request a full refresh.
@@ -886,7 +1185,7 @@ impl BxVgaC {
             self.text_buffer[..visible_size].copy_from_slice(&self.text_memory[..visible_size]);
             self.text_buffer_update = false;
         }
-        
+
         // Create text mode info
         let tm_info = crate::gui::VgaTextModeInfo {
             start_address,
@@ -901,7 +1200,7 @@ impl BxVgaC {
             blink_flags,
             actl_palette,
         };
-        
+
         // Always return update result if in text mode (original always calls text_update_common).
         // The GUI will compare old/new to determine what actually changed.
         let needs_update = self.vga_mem_updated > 0;
@@ -915,12 +1214,21 @@ impl BxVgaC {
             self.vga_mem_updated = 0;
             self.text_dirty = false;
         }
-        
+
         // Compute dimension_update parameters (matching vgacore.cc:1653-1666)
-        let c_width = if (self.seq_regs[1] & 0x01) == 1 { 8u32 } else { 9u32 };
+        let c_width = if (self.seq_regs[SEQ_REG_CLOCKING_MODE] & SEQ_CLOCKING_8DOT_CHAR) != 0 {
+            8u32
+        } else {
+            9u32
+        };
         // x_dotclockdiv2 = sequencer.reg1 bit 3 (vgacore.cc:938)
-        let x_dotclockdiv2 = (self.seq_regs[1] & 0x08) != 0;
-        let c_width = if x_dotclockdiv2 { c_width << 1 } else { c_width };
+        let x_dotclockdiv2 =
+            (self.seq_regs[SEQ_REG_CLOCKING_MODE] & SEQ_CLOCKING_DOTCLOCKDIV2) != 0;
+        let c_width = if x_dotclockdiv2 {
+            c_width << 1
+        } else {
+            c_width
+        };
         let i_width = c_width * cols as u32;
         let i_height = (vde + 1) as u32;
         let fh = (msl + 1) as u32;
@@ -978,31 +1286,20 @@ pub(super) fn vga_mem_read_handler(
     if param.is_null() || data.is_null() {
         return false;
     }
-    
+
     let vga = unsafe { &*(param as *const BxVgaC) };
 
     // Match Bochs window gating (vgacore.cc:1723..1738):
     // only the selected window maps to VGA memory; others read as 0xff.
-    let memory_mapping = (vga.graphics_regs[6] >> 2) & 0x03;
+    let memory_mapping = VgaMemoryMapping::from_u8(
+        (vga.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK,
+    );
     let mut current_addr = addr;
     let mut data_ptr = data as *mut u8;
 
     for _ in 0..len {
-        let mapped = match memory_mapping {
-            2 => current_addr >= 0xB0000 && current_addr <= 0xB7FFF,
-            3 => current_addr >= 0xB8000 && current_addr <= 0xBFFFF,
-            1 => current_addr >= 0xA0000 && current_addr <= 0xAFFFF,
-            _ => current_addr >= 0xA0000 && current_addr <= 0xBFFFF,
-        };
-
-        let val = if mapped {
-            let window_base: u64 = match memory_mapping {
-                2 => 0xB0000,
-                3 => 0xB8000,
-                1 => 0xA0000,
-                _ => 0xA0000,
-            };
-            let offset = (current_addr - window_base) as usize;
+        let val = if memory_mapping.contains_addr(current_addr) {
+            let offset = (current_addr - memory_mapping.window_base()) as usize;
             vga.text_memory.get(offset).copied().unwrap_or(0xff)
         } else {
             0xff
@@ -1030,38 +1327,30 @@ pub(super) fn vga_mem_write_handler(
     if param.is_null() || data.is_null() {
         return false;
     }
-    
+
     let vga = unsafe { &mut *(param as *mut BxVgaC) };
     vga.probe_handler_calls = vga.probe_handler_calls.wrapping_add(1);
 
     // Match Bochs window gating (vgacore.cc:1826..1842):
     // only the selected window maps to VGA memory; writes outside the window are ignored.
-    let memory_mapping = (vga.graphics_regs[6] >> 2) & 0x03;
+    let memory_mapping = VgaMemoryMapping::from_u8(
+        (vga.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK,
+    );
     // Sequencer map mask (reg 2): bits 0-3 select which planes to write.
     // In text mode: plane 0 = characters, plane 1 = attributes, plane 2 = fonts.
-    // Only update text_memory when planes 0/1 are being written (mask & 0x03).
-    let map_mask = vga.seq_regs[2] & 0x0F;
-    let is_text_plane_write = (map_mask & 0x03) != 0;
+    // Only update text_memory when planes 0/1 are being written.
+    let map_mask = vga.seq_regs[SEQ_REG_MAP_MASK] & SEQ_MAP_MASK_PLANES;
+    let is_text_plane_write = (map_mask & SEQ_MAP_MASK_TEXT_PLANES) != 0;
 
     let mut current_addr = addr;
     let mut data_ptr = data as *const u8;
 
     for _ in 0..len {
-        let mapped = match memory_mapping {
-            2 => current_addr >= 0xB0000 && current_addr <= 0xB7FFF,
-            3 => current_addr >= 0xB8000 && current_addr <= 0xBFFFF,
-            1 => current_addr >= 0xA0000 && current_addr <= 0xAFFFF,
-            _ => current_addr >= 0xA0000 && current_addr <= 0xBFFFF,
-        };
+        let mapped = memory_mapping.contains_addr(current_addr);
 
         if mapped && is_text_plane_write {
             // Calculate offset relative to the window base.
-            let window_base: u64 = match memory_mapping {
-                2 => 0xB0000,
-                3 => 0xB8000,
-                1 => 0xA0000,
-                _ => 0xA0000,
-            };
+            let window_base = memory_mapping.window_base();
             let offset = (current_addr - window_base) as usize;
             if offset < vga.text_memory.len() {
                 unsafe {

@@ -98,14 +98,7 @@ mod bridge_impl {
             true
         }
 
-        fn dimension_update(
-            &mut self,
-            x: u32,
-            y: u32,
-            fheight: u32,
-            fwidth: u32,
-            _bpp: u32,
-        ) {
+        fn dimension_update(&mut self, x: u32, y: u32, fheight: u32, fwidth: u32, _bpp: u32) {
             if let Ok(mut display) = self.shared.lock() {
                 let cols = if fwidth > 0 { x / fwidth } else { x };
                 let rows = if fheight > 0 { y / fheight } else { y };
@@ -181,7 +174,9 @@ impl EguiGui {
     }
 
     pub fn run(self) -> Result<(), alloc::string::String> {
-        Err(alloc::string::String::from("egui GUI requires 'gui-egui' feature to be enabled"))
+        Err(alloc::string::String::from(
+            "egui GUI requires 'gui-egui' feature to be enabled",
+        ))
     }
 }
 

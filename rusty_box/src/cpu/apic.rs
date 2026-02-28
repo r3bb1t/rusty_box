@@ -314,11 +314,11 @@ impl BxLocalApic {
     pub(super) fn set_base(&mut self, mut newbase: BxPhyAddress) {
         let mode_raw = (newbase >> 10) & 3;
         self.mode = ApicMode::from_raw(mode_raw);
-        
+
         // Clear lower 8 bits to align base address
         newbase &= !(0xff as BxPhyAddress);
         self.base_addr = newbase;
-        
+
         info!(
             "allocate APIC id={} (MMIO {}) to {newbase:x}",
             if self.mode == ApicMode::XapicMode {
@@ -350,7 +350,7 @@ impl BxLocalApic {
     pub(super) fn reset(&mut self, _reset_type: u8) {
         // Initialize APIC registers to their reset values
         // base_addr remains unchanged (set by set_base)
-        
+
         self.error_status = 0;
         self.shadow_error_status = 0;
         self.ldr = 0;

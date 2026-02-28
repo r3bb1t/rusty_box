@@ -68,34 +68,34 @@ struct Taskgate {
 
 #[derive(Clone, Copy)]
 pub(super) union Descriptor {
-    pub segment: DescriptorSegment,
-    pub gate: DescriptorGate,
-    pub task_gate: DescriptorTaskGate,
+    pub(crate) segment: DescriptorSegment,
+    pub(crate) gate: DescriptorGate,
+    pub(crate) task_gate: DescriptorTaskGate,
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct DescriptorSegment {
     /// base address: 286=24bits, 386=32bits, long=64
-    pub base: BxAddress,
+    pub(crate) base: BxAddress,
     /// for efficiency, this contrived field is set to
     ///  limit for byte granular, and
     ///  `(limit << 12) | 0xfff` for page granular seg's
-    pub limit_scaled: u32,
+    pub(crate) limit_scaled: u32,
     /// granularity: 0=byte, 1=4K (page)
-    pub g: bool,
+    pub(crate) g: bool,
     /// default size: 0=16bit, 1=32bit
-    pub d_b: bool,
+    pub(crate) d_b: bool,
     /// long mode: 0=compat, 1=64 bit
-    pub l: bool,
+    pub(crate) l: bool,
     ///  available for use by system
-    pub avl: bool, // available for use by system
+    pub(crate) avl: bool, // available for use by system
 }
 
 #[derive(Clone, Copy)]
 pub(super) struct DescriptorGate {
-    pub param_count: u8, // 5 bits (0..31) #words/dword to copy
-    pub dest_selector: u16,
-    pub dest_offset: u32,
+    pub(crate) param_count: u8, // 5 bits (0..31) #words/dword to copy
+    pub(crate) dest_selector: u16,
+    pub(crate) dest_offset: u32,
 }
 
 #[derive(Clone, Copy, Default)]
@@ -119,29 +119,29 @@ pub(super) const SEG_ACCESS_WOK4_G: u32 = 0x10;
 
 #[derive(Default, Clone)]
 pub(crate) struct BxDescriptor {
-    pub valid: u32, // Holds above values, Or'd together. Used to
+    pub(crate) valid: u32, // Holds above values, Or'd together. Used to
     // hold only 0 or 1 once.
-    pub p: bool,       /* present */
-    pub dpl: u8,       /* descriptor privilege level 0..3 */
-    pub segment: bool, /* 0 = system/gate, 1 = data/code segment */
-    pub r#type: u8,    /* For system & gate descriptors:
-                        *  0 = invalid descriptor (reserved)
-                        *  1 = 286 available Task State Segment (TSS)
-                        *  2 = LDT descriptor
-                        *  3 = 286 busy Task State Segment (TSS)
-                        *  4 = 286 call gate
-                        *  5 = task gate
-                        *  6 = 286 interrupt gate
-                        *  7 = 286 trap gate
-                        *  8 = (reserved)
-                        *  9 = 386 available TSS
-                        * 10 = (reserved)
-                        * 11 = 386 busy TSS
-                        * 12 = 386 call gate
-                        * 13 = (reserved)
-                        * 14 = 386 interrupt gate
-                        * 15 = 386 trap gate */
-    pub u: Descriptor,
+    pub(crate) p: bool,       /* present */
+    pub(crate) dpl: u8,       /* descriptor privilege level 0..3 */
+    pub(crate) segment: bool, /* 0 = system/gate, 1 = data/code segment */
+    pub r#type: u8,           /* For system & gate descriptors:
+                               *  0 = invalid descriptor (reserved)
+                               *  1 = 286 available Task State Segment (TSS)
+                               *  2 = LDT descriptor
+                               *  3 = 286 busy Task State Segment (TSS)
+                               *  4 = 286 call gate
+                               *  5 = task gate
+                               *  6 = 286 interrupt gate
+                               *  7 = 286 trap gate
+                               *  8 = (reserved)
+                               *  9 = 386 available TSS
+                               * 10 = (reserved)
+                               * 11 = 386 busy TSS
+                               * 12 = 386 call gate
+                               * 13 = (reserved)
+                               * 14 = 386 interrupt gate
+                               * 15 = 386 trap gate */
+    pub(crate) u: Descriptor,
 }
 
 impl BxDescriptor {
@@ -158,9 +158,13 @@ impl BxDescriptor {
     /// Based on get_ar_byte in segment_ctrl_pro.cc:380
     pub(super) fn get_ar_byte(&self) -> u8 {
         let mut ar_byte = 0;
-        if self.p { ar_byte |= 0x80; }
+        if self.p {
+            ar_byte |= 0x80;
+        }
         ar_byte |= (self.dpl & 0x03) << 5;
-        if self.segment { ar_byte |= 0x10; }
+        if self.segment {
+            ar_byte |= 0x10;
+        }
         ar_byte |= self.r#type & 0x0f;
         ar_byte
     }

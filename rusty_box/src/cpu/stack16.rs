@@ -3,12 +3,7 @@
 //! Based on Bochs stack16.cc
 //! Copyright (C) 2001-2018 The Bochs Project
 
-use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
-    decoder::Instruction,
-    eflags::EFlags,
-};
+use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, eflags::EFlags};
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
@@ -156,8 +151,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_sp(temp_sp.wrapping_sub(16));
         }
 
-        tracing::trace!("PUSHA16: AX={:04x} CX={:04x} DX={:04x} BX={:04x} BP={:04x} SI={:04x} DI={:04x}",
-            ax, cx, dx, bx, bp, si, di);
+        tracing::trace!(
+            "PUSHA16: AX={:04x} CX={:04x} DX={:04x} BX={:04x} BP={:04x} SI={:04x} DI={:04x}",
+            ax,
+            cx,
+            dx,
+            bx,
+            bp,
+            si,
+            di
+        );
         Ok(())
     }
 
@@ -208,8 +211,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_cx(cx);
         self.set_ax(ax);
 
-        tracing::trace!("POPA16: DI={:04x} SI={:04x} BP={:04x} BX={:04x} DX={:04x} CX={:04x} AX={:04x}",
-            di, si, bp, bx, dx, cx, ax);
+        tracing::trace!(
+            "POPA16: DI={:04x} SI={:04x} BP={:04x} BX={:04x} DX={:04x} CX={:04x} AX={:04x}",
+            di,
+            si,
+            bp,
+            bx,
+            dx,
+            cx,
+            ax
+        );
         Ok(())
     }
 
@@ -234,7 +245,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Changeable: CF, PF, AF, ZF, SF, TF, DF, OF, NT
         const CHANGE_MASK: u32 = 0x0FD5; // bits 0,2,4,6,7,8,9,10,14
 
-        self.eflags = EFlags::from_bits_retain((self.eflags.bits() & !CHANGE_MASK) | ((flags as u32) & CHANGE_MASK));
+        self.eflags = EFlags::from_bits_retain(
+            (self.eflags.bits() & !CHANGE_MASK) | ((flags as u32) & CHANGE_MASK),
+        );
         tracing::trace!("POPF: {:#06x}", flags);
         Ok(())
     }
@@ -275,12 +288,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// PUSH r/m16 - Unified dispatch based on mod_c0()
     pub fn push_ew(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.push_ew_r(instr) } else { self.push_ew_m(instr) }
+        if instr.mod_c0() {
+            self.push_ew_r(instr)
+        } else {
+            self.push_ew_m(instr)
+        }
     }
 
     /// POP r/m16 - Unified dispatch based on mod_c0()
     pub fn pop_ew(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.pop_ew_r(instr) } else { self.pop_ew_m(instr) }
+        if instr.mod_c0() {
+            self.pop_ew_r(instr)
+        } else {
+            self.pop_ew_m(instr)
+        }
     }
 
     // =========================================================================
@@ -299,8 +320,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let new_bp = self.pop_16()?;
         self.set_bp(new_bp);
 
-        tracing::trace!("LEAVE16: BP restored to {:#06x}, SP = {:#06x}",
-            new_bp, self.sp());
+        tracing::trace!(
+            "LEAVE16: BP restored to {:#06x}, SP = {:#06x}",
+            new_bp,
+            self.sp()
+        );
         Ok(())
     }
 }

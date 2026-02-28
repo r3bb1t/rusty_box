@@ -1,1 +1,1 @@
-trait BxSimulatorInterfaceC {}
+trait BxSimulatorInterfaceC {}

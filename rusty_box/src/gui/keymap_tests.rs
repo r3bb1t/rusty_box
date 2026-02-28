@@ -114,7 +114,10 @@ mod tests {
     fn test_scancode_sequence_format() {
         // A lowercase letter should produce: [make, 0xF0, make]
         let seq = char_to_scancode_sequence('a');
-        assert!(seq.len() >= 3, "Lowercase should produce at least 3 scancodes");
+        assert!(
+            seq.len() >= 3,
+            "Lowercase should produce at least 3 scancodes"
+        );
         assert_eq!(seq[1], 0xF0, "Second should be break prefix");
     }
 }

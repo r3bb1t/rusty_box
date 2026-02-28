@@ -1,4 +1,4 @@
-use super::{cpuid::BxCpuIdTrait, cpu::CpuActivityState, BxCpuC};
+use super::{cpu::CpuActivityState, cpuid::BxCpuIdTrait, BxCpuC};
 
 impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Handle async events - matches Bochs event.cc:205-436 handleAsyncEvent()
@@ -34,7 +34,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Called when CPU is halted (HLT) or waiting (MWAIT)
     /// Returns true if should return from cpu_loop
     fn handle_wait_for_event(&mut self) -> bool {
-        
         // For WAIT_FOR_SIPI, just return (matches Bochs event.cc:42-48)
         if matches!(self.activity_state, CpuActivityState::WaitForSipi) {
             tracing::debug!("CPU in WAIT_FOR_SIPI state, returning from cpu_loop");
@@ -49,7 +48,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // In real Bochs, it checks:
             // - BX_EVENT_PENDING_INTR | BX_EVENT_PENDING_LAPIC_INTR (if IF=1)
             // - BX_EVENT_NMI | BX_EVENT_SMI | BX_EVENT_INIT
-            
+
             // For now, if activity_state became ACTIVE (e.g., from reset), wake up
             if matches!(self.activity_state, CpuActivityState::Active) {
                 tracing::debug!("CPU activity_state became ACTIVE, waking up");
@@ -69,7 +68,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // TODO: Call BX_TICKN(10) to advance time
             // For now, we'll just return to let the emulator loop handle timing
             // This prevents infinite busy-wait loop
-            
+
             // Return from cpu_loop to allow other processing (matches single-CPU behavior)
             // In Bochs, BX_TICKN(10) advances time, then loops again
             // For single CPU, this would loop forever until interrupt

@@ -2,10 +2,10 @@
 //! Float64 to extFloat80 conversion.
 //! Ported from Berkeley SoftFloat 3e: f64_to_extF80.c
 
-use super::softfloat_types::*;
-use super::softfloat::*;
-use super::specialize::*;
 use super::internals::*;
+use super::softfloat::*;
+use super::softfloat_types::*;
+use super::specialize::*;
 
 pub fn f64_to_extf80(a: float64, status: &mut SoftFloatStatus) -> floatx80 {
     let sign = sign_f64(a);

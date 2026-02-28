@@ -2,11 +2,11 @@
 //! FPREM/FPREM1 partial remainder implementation.
 //! Ported from Bochs cpu/fpu/fprem.cc.
 
+use super::super::softfloat3e::internals::*;
+use super::super::softfloat3e::primitives::*;
 use super::super::softfloat3e::softfloat::*;
 use super::super::softfloat3e::softfloat_types::floatx80;
 use super::super::softfloat3e::specialize::*;
-use super::super::softfloat3e::internals::*;
-use super::super::softfloat3e::primitives::*;
 
 /// Estimate 128/64 division: returns an approximate quotient q such that
 /// (a_hi:a_lo) / b is approximately q.  Used by remainder_kernel.
@@ -27,7 +27,13 @@ fn fprem_estimate_div_128_to_64(a_hi: u64, a_lo: u64, b: u64) -> u64 {
 
 /// Executes single exponent reduction cycle for FPREM/FPREM1.
 /// Ported from Bochs fprem.cc remainder_kernel().
-pub(crate) fn remainder_kernel(a_sig0: u64, b_sig: u64, exp_diff: u8, z_sig0: &mut u64, z_sig1: &mut u64) -> u64 {
+pub(crate) fn remainder_kernel(
+    a_sig0: u64,
+    b_sig: u64,
+    exp_diff: u8,
+    z_sig0: &mut u64,
+    z_sig1: &mut u64,
+) -> u64 {
     let mut a_sig1: u64 = 0;
     let mut a_sig0 = a_sig0;
 
@@ -171,7 +177,13 @@ pub(crate) fn do_fprem(
             a_sig0 >>= 1;
             // exp_diff is now effectively 0 for the algorithm
         } else if exp_diff > 0 {
-            *q = remainder_kernel(a_sig0, b_sig as u64, exp_diff as u8, &mut a_sig0, &mut a_sig1);
+            *q = remainder_kernel(
+                a_sig0,
+                b_sig as u64,
+                exp_diff as u8,
+                &mut a_sig0,
+                &mut a_sig1,
+            );
         } else {
             // exp_diff == 0
             if b_sig as u64 <= a_sig0 {

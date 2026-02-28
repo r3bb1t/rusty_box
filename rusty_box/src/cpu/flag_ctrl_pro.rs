@@ -4,8 +4,8 @@
 //!
 //! Note: handle_interrupt_mask_change is defined in init.rs
 
-use crate::cpu::{BxCpuC, BxCpuIdTrait};
 use super::eflags::EFlags;
+use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Check if interrupts are enabled (EFLAGS.IF = 1)

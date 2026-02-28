@@ -2,13 +2,13 @@
 //! Specialization constants and NaN propagation for x86 FPU.
 //! Ported from Bochs softfloat-specialize.h and softfloat3e/include/specialize.h.
 
-use super::softfloat_types::*;
 use super::softfloat::*;
+use super::softfloat_types::*;
 
 // --- Indefinite values for integer conversions ---
-pub const INT16_INDEFINITE: i16 = -0x7FFFi16 - 1;  // 0x8000
-pub const INT32_INDEFINITE: i32 = -0x7FFFFFFFi32 - 1;  // 0x80000000
-pub const INT64_INDEFINITE: i64 = -0x7FFFFFFFFFFFFFFFi64 - 1;  // 0x8000000000000000
+pub const INT16_INDEFINITE: i16 = -0x7FFFi16 - 1; // 0x8000
+pub const INT32_INDEFINITE: i32 = -0x7FFFFFFFi32 - 1; // 0x80000000
+pub const INT64_INDEFINITE: i64 = -0x7FFFFFFFFFFFFFFFi64 - 1; // 0x8000000000000000
 
 pub const UINT16_INDEFINITE: u16 = 0xFFFF;
 pub const UINT32_INDEFINITE: u32 = 0xFFFFFFFF;
@@ -98,8 +98,10 @@ pub fn pack_to_extf80(sign_exp: u16, signif: u64) -> floatx80 {
 
 // --- NaN propagation for extFloat80 ---
 pub fn softfloat_propagate_nan_extf80(
-    a_sign_exp: u16, a_signif: u64,
-    b_sign_exp: u16, b_signif: u64,
+    a_sign_exp: u16,
+    a_signif: u64,
+    b_sign_exp: u16,
+    b_signif: u64,
     status: &mut SoftFloatStatus,
 ) -> floatx80 {
     let a_is_snan = is_sig_nan_extf80(a_sign_exp, a_signif);
@@ -120,38 +122,66 @@ pub fn softfloat_propagate_nan_extf80(
         if b_is_snan {
             // Both signaling: return the one with larger significand
             if a_signif_q < b_signif_q {
-                return floatx80 { signif: b_signif_q, sign_exp: b_sign_exp };
+                return floatx80 {
+                    signif: b_signif_q,
+                    sign_exp: b_sign_exp,
+                };
             }
         }
-        return floatx80 { signif: a_signif_q, sign_exp: a_sign_exp };
+        return floatx80 {
+            signif: a_signif_q,
+            sign_exp: a_sign_exp,
+        };
     }
 
     if a_is_nan {
         if b_is_snan {
-            return floatx80 { signif: a_signif_q, sign_exp: a_sign_exp };
+            return floatx80 {
+                signif: a_signif_q,
+                sign_exp: a_sign_exp,
+            };
         }
         if b_is_nan {
             // Both quiet NaN: return the one with larger significand
             if a_signif_q < b_signif_q {
-                return floatx80 { signif: b_signif_q, sign_exp: b_sign_exp };
+                return floatx80 {
+                    signif: b_signif_q,
+                    sign_exp: b_sign_exp,
+                };
             }
             if b_signif_q < a_signif_q {
-                return floatx80 { signif: a_signif_q, sign_exp: a_sign_exp };
+                return floatx80 {
+                    signif: a_signif_q,
+                    sign_exp: a_sign_exp,
+                };
             }
             // Equal significands: return smaller sign_exp
             if a_sign_exp < b_sign_exp {
-                return floatx80 { signif: a_signif_q, sign_exp: a_sign_exp };
+                return floatx80 {
+                    signif: a_signif_q,
+                    sign_exp: a_sign_exp,
+                };
             }
         }
-        return floatx80 { signif: a_signif_q, sign_exp: a_sign_exp };
+        return floatx80 {
+            signif: a_signif_q,
+            sign_exp: a_sign_exp,
+        };
     }
 
     // Only b is NaN
-    floatx80 { signif: b_signif_q, sign_exp: b_sign_exp }
+    floatx80 {
+        signif: b_signif_q,
+        sign_exp: b_sign_exp,
+    }
 }
 
 /// Propagate NaN for f32
-pub fn softfloat_propagate_nan_f32(a: float32, b: float32, status: &mut SoftFloatStatus) -> float32 {
+pub fn softfloat_propagate_nan_f32(
+    a: float32,
+    b: float32,
+    status: &mut SoftFloatStatus,
+) -> float32 {
     let a_is_snan = f32_is_signaling_nan(a);
     let b_is_snan = f32_is_signaling_nan(b);
 
@@ -164,19 +194,29 @@ pub fn softfloat_propagate_nan_f32(a: float32, b: float32, status: &mut SoftFloa
     }
 
     if a_is_snan {
-        if b_is_snan { return if a_q < b_q { b_q } else { a_q }; }
+        if b_is_snan {
+            return if a_q < b_q { b_q } else { a_q };
+        }
         return if f32_is_nan(b) { b_q } else { a_q };
     }
     if f32_is_nan(a) {
-        if b_is_snan { return a_q; }
-        if f32_is_nan(b) { return if a_q < b_q { b_q } else { a_q }; }
+        if b_is_snan {
+            return a_q;
+        }
+        if f32_is_nan(b) {
+            return if a_q < b_q { b_q } else { a_q };
+        }
         return a_q;
     }
     b_q
 }
 
 /// Propagate NaN for f64
-pub fn softfloat_propagate_nan_f64(a: float64, b: float64, status: &mut SoftFloatStatus) -> float64 {
+pub fn softfloat_propagate_nan_f64(
+    a: float64,
+    b: float64,
+    status: &mut SoftFloatStatus,
+) -> float64 {
     let a_is_snan = f64_is_signaling_nan(a);
     let b_is_snan = f64_is_signaling_nan(b);
 
@@ -188,12 +228,18 @@ pub fn softfloat_propagate_nan_f64(a: float64, b: float64, status: &mut SoftFloa
     }
 
     if a_is_snan {
-        if b_is_snan { return if a_q < b_q { b_q } else { a_q }; }
+        if b_is_snan {
+            return if a_q < b_q { b_q } else { a_q };
+        }
         return if f64_is_nan(b) { b_q } else { a_q };
     }
     if f64_is_nan(a) {
-        if b_is_snan { return a_q; }
-        if f64_is_nan(b) { return if a_q < b_q { b_q } else { a_q }; }
+        if b_is_snan {
+            return a_q;
+        }
+        if f64_is_nan(b) {
+            return if a_q < b_q { b_q } else { a_q };
+        }
         return a_q;
     }
     b_q
@@ -208,7 +254,5 @@ fn is_nan_extf80(a64: u16, a0: u64) -> bool {
 
 #[inline]
 fn is_sig_nan_extf80(a64: u16, a0: u64) -> bool {
-    ((a64 & 0x7FFF) == 0x7FFF)
-        && (a0 & 0x4000000000000000 == 0)
-        && (a0 & 0x3FFFFFFFFFFFFFFF != 0)
+    ((a64 & 0x7FFF) == 0x7FFF) && (a0 & 0x4000000000000000 == 0) && (a0 & 0x3FFFFFFFFFFFFFFF != 0)
 }

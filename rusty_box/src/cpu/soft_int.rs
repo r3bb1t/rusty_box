@@ -25,9 +25,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Dispatches to real_mode_int or protected_mode_int based on current CPU mode.
     /// After delivery, invalidates prefetch and returns CpuLoopRestart to
     /// restart the trace (matching Bochs BX_NEXT_TRACE).
-    fn interrupt(&mut self, vector: u8, soft_int: bool, push_error: bool, error_code: u16) -> super::Result<()> {
-        tracing::debug!("interrupt(): vector={:#04x} soft_int={} mode={}",
-            vector, soft_int, if self.real_mode() { "real" } else { "protected" });
+    fn interrupt(
+        &mut self,
+        vector: u8,
+        soft_int: bool,
+        push_error: bool,
+        error_code: u16,
+    ) -> super::Result<()> {
+        tracing::debug!(
+            "interrupt(): vector={:#04x} soft_int={} mode={}",
+            vector,
+            soft_int,
+            if self.real_mode() {
+                "real"
+            } else {
+                "protected"
+            }
+        );
 
         // Discard any traps and inhibits for new context (matches Bochs line 800-801)
         self.inhibit_mask = 0;
@@ -52,7 +66,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     // Delivery failed — raise the indicated exception.
                     tracing::warn!(
                         "interrupt({:#04x}) PM delivery failed, raising {:?}; icount={}",
-                        vector, new_vector, self.icount
+                        vector,
+                        new_vector,
+                        self.icount
                     );
                     return self.exception(new_vector, 0);
                 }

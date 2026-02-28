@@ -3,11 +3,7 @@
 //! Based on Bochs logical64.cc
 //! Copyright (C) 2001-2019 The Bochs Project
 
-use super::{
-    cpu::BxCpuC,
-    cpuid::BxCpuIdTrait,
-    eflags::EFlags,
-};
+use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, eflags::EFlags};
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
@@ -22,9 +18,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.eflags.remove(EFlags::LOGIC_MASK);
 
-        if pf { self.eflags.insert(EFlags::PF); }
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if sf { self.eflags.insert(EFlags::SF); }
+        if pf {
+            self.eflags.insert(EFlags::PF);
+        }
+        if zf {
+            self.eflags.insert(EFlags::ZF);
+        }
+        if sf {
+            self.eflags.insert(EFlags::SF);
+        }
     }
 
     // Note: 64-bit logical instructions are not yet implemented.

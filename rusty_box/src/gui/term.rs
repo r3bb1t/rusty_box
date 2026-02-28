@@ -47,7 +47,6 @@ impl TermGui {
         }
     }
 
-
     /// Setup terminal for raw input mode
     fn setup_raw_mode(&mut self) {
         #[cfg(unix)]
@@ -134,7 +133,7 @@ impl BxGui for TermGui {
         tracing::info!("TermGUI: Initialized (terminal text mode)");
         // Clear terminal and set up for text mode
         print!("\x1b[2J\x1b[H"); // Clear screen and move cursor to home
-        // Setup raw mode for keyboard input
+                                 // Setup raw mode for keyboard input
         self.setup_raw_mode();
     }
 
@@ -169,17 +168,17 @@ impl BxGui for TermGui {
 
     fn handle_events(&mut self) {
         // Read keyboard input non-blocking and queue scancodes
-        use std::io::{Read, stdin};
-        
+        use std::io::{stdin, Read};
+
         let mut stdin = stdin();
         let mut buffer = [0u8; 16];
-        
+
         // Try to read available input (non-blocking)
         loop {
             #[cfg(unix)]
             {
                 use std::os::unix::io::AsRawFd;
-                
+
                 // Use poll/select for non-blocking read on Unix
                 let fd = stdin.as_raw_fd();
                 let mut readfds: libc::fd_set = unsafe { std::mem::zeroed() };
@@ -202,13 +201,13 @@ impl BxGui for TermGui {
                     }
                 }
             }
-            
+
             #[cfg(windows)]
             {
                 use winapi::um::consoleapi::GetNumberOfConsoleInputEvents;
                 use winapi::um::processenv::GetStdHandle;
                 use winapi::um::winbase::STD_INPUT_HANDLE;
-                
+
                 unsafe {
                     let handle = GetStdHandle(STD_INPUT_HANDLE);
                     if handle != winapi::um::handleapi::INVALID_HANDLE_VALUE {
@@ -223,7 +222,7 @@ impl BxGui for TermGui {
                     }
                 }
             }
-            
+
             // Read available input
             match stdin.read(&mut buffer) {
                 Ok(0) => break, // EOF
@@ -260,14 +259,7 @@ impl BxGui for TermGui {
         true
     }
 
-    fn dimension_update(
-        &mut self,
-        x: u32,
-        y: u32,
-        fheight: u32,
-        fwidth: u32,
-        _bpp: u32,
-    ) {
+    fn dimension_update(&mut self, x: u32, y: u32, fheight: u32, fwidth: u32, _bpp: u32) {
         // Matching Bochs term.cc dimension_update():
         // text_cols = x / fwidth;  text_rows = y / fheight;
         if fheight > 0 && fwidth > 0 {
@@ -282,7 +274,12 @@ impl BxGui for TermGui {
         self.text_buffer.resize(buf_size, 0);
         tracing::debug!(
             "TermGUI: Dimensions updated to {}x{} ({}x{} pixels, font {}x{})",
-            self.screen_width, self.screen_height, x, y, fwidth, fheight
+            self.screen_width,
+            self.screen_height,
+            x,
+            y,
+            fwidth,
+            fheight
         );
     }
 
@@ -353,7 +350,7 @@ impl TermGui {
     /// Matching term.cc:551-608 - byte-by-byte comparison and rendering
     fn render_text_mode(&mut self) {
         use std::io::Write;
-        
+
         // Move cursor to top-left to start drawing (similar to curses move(0,0))
         print!("\x1b[H");
 
@@ -429,7 +426,7 @@ impl TermGui {
                         7 => 37, // White
                         _ => 37,
                     };
-                    
+
                     let ansi_bg = match bg_color {
                         0 => 40, // Black
                         1 => 44, // Blue
@@ -466,7 +463,7 @@ impl TermGui {
                         // Non-printable or extended - show as space
                         ' '
                     };
-                    
+
                     print!("{}", ch_to_print);
                 }
             }

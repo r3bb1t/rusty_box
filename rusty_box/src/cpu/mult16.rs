@@ -38,7 +38,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
-        tracing::trace!("MUL16: AX ({:#06x}) * reg{} ({:#06x}) = DX:AX ({:#06x}:{:#06x})", op1, src_reg, op2, product_16h, product_16l);
+        tracing::trace!(
+            "MUL16: AX ({:#06x}) * reg{} ({:#06x}) = DX:AX ({:#06x}:{:#06x})",
+            op1,
+            src_reg,
+            op2,
+            product_16h,
+            product_16l
+        );
         Ok(())
     }
 
@@ -65,7 +72,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
-        tracing::trace!("MUL16 mem: AX ({:#06x}) * [{:?}:{:#x}] ({:#06x}) = DX:AX ({:#06x}:{:#06x})", op1, seg, eaddr, op2, product_16h, product_16l);
+        tracing::trace!(
+            "MUL16 mem: AX ({:#06x}) * [{:?}:{:#x}] ({:#06x}) = DX:AX ({:#06x}:{:#06x})",
+            op1,
+            seg,
+            eaddr,
+            op2,
+            product_16h,
+            product_16l
+        );
         Ok(())
     }
 
@@ -93,7 +108,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
-        tracing::trace!("IMUL16: AX ({:#06x}) * reg{} ({:#06x}) = DX:AX ({:#06x}:{:#06x})", op1 as u16, src_reg, op2 as u16, product_16h, product_16l);
+        tracing::trace!(
+            "IMUL16: AX ({:#06x}) * reg{} ({:#06x}) = DX:AX ({:#06x}:{:#06x})",
+            op1 as u16,
+            src_reg,
+            op2 as u16,
+            product_16h,
+            product_16l
+        );
         Ok(())
     }
 
@@ -122,7 +144,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
-        tracing::trace!("IMUL16 mem: AX ({:#06x}) * [{:?}:{:#x}] ({:#06x}) = DX:AX ({:#06x}:{:#06x})", op1 as u16, seg, eaddr, op2 as u16, product_16h, product_16l);
+        tracing::trace!(
+            "IMUL16 mem: AX ({:#06x}) * [{:?}:{:#x}] ({:#06x}) = DX:AX ({:#06x}:{:#06x})",
+            op1 as u16,
+            seg,
+            eaddr,
+            op2 as u16,
+            product_16h,
+            product_16l
+        );
         Ok(())
     }
 
@@ -152,7 +182,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr16(0, quotient_16l); // AX
         self.set_gpr16(2, remainder_16); // DX
 
-        tracing::trace!("DIV16: DX:AX ({:#06x}:{:#06x}) / reg{} ({:#06x}) = AX ({:#06x}), DX ({:#06x})", dx, ax, src_reg, op2, quotient_16l, remainder_16);
+        tracing::trace!(
+            "DIV16: DX:AX ({:#06x}:{:#06x}) / reg{} ({:#06x}) = AX ({:#06x}), DX ({:#06x})",
+            dx,
+            ax,
+            src_reg,
+            op2,
+            quotient_16l,
+            remainder_16
+        );
         Ok(())
     }
 
@@ -192,8 +230,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn idiv_ax_ew_r(&mut self, instr: &Instruction) -> Result<()> {
         let dx = self.get_gpr16(2); // DX
         let ax = self.get_gpr16(0); // AX
-        // Matching C++: Bit32s op1_32 = ((((Bit32u) DX) << 16) | ((Bit32u) AX));
-        // Construct as unsigned first, then cast to signed
+                                    // Matching C++: Bit32s op1_32 = ((((Bit32u) DX) << 16) | ((Bit32u) AX));
+                                    // Construct as unsigned first, then cast to signed
         let op1 = (((dx as u32) << 16) | (ax as u32)) as i32;
 
         // Check MIN_INT case
@@ -220,7 +258,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr16(0, quotient_16l as u16); // AX
         self.set_gpr16(2, remainder_16 as u16); // DX
 
-        tracing::trace!("IDIV16: DX:AX ({:#06x}:{:#06x}) / reg{} ({:#06x}) = AX ({:#06x}), DX ({:#06x})", dx as u16, ax as u16, src_reg, op2 as u16, quotient_16l as u16, remainder_16 as u16);
+        tracing::trace!(
+            "IDIV16: DX:AX ({:#06x}:{:#06x}) / reg{} ({:#06x}) = AX ({:#06x}), DX ({:#06x})",
+            dx as u16,
+            ax as u16,
+            src_reg,
+            op2 as u16,
+            quotient_16l as u16,
+            remainder_16 as u16
+        );
         Ok(())
     }
 
@@ -229,8 +275,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn idiv_ax_ew_m(&mut self, instr: &Instruction) -> Result<()> {
         let dx = self.get_gpr16(2); // DX
         let ax = self.get_gpr16(0); // AX
-        // Matching C++: Bit32s op1_32 = ((((Bit32u) DX) << 16) | ((Bit32u) AX));
-        // Construct as unsigned first, then cast to signed
+                                    // Matching C++: Bit32s op1_32 = ((((Bit32u) DX) << 16) | ((Bit32u) AX));
+                                    // Construct as unsigned first, then cast to signed
         let op1 = (((dx as u32) << 16) | (ax as u32)) as i32;
 
         // Check MIN_INT case
@@ -283,8 +329,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.remove(EFlags::CF.union(EFlags::OF)); // CF=0, OF=0
         }
 
-        tracing::trace!("IMUL Gw,Ew: reg{} ({:#06x}) * reg{} ({:#06x}) = {:#06x}",
-            dst_reg, op1 as u16, src_reg, op2 as u16, result_16 as u16);
+        tracing::trace!(
+            "IMUL Gw,Ew: reg{} ({:#06x}) * reg{} ({:#06x}) = {:#06x}",
+            dst_reg,
+            op1 as u16,
+            src_reg,
+            op2 as u16,
+            result_16 as u16
+        );
         Ok(())
     }
 
@@ -308,8 +360,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.remove(EFlags::CF.union(EFlags::OF)); // CF=0, OF=0
         }
 
-        tracing::trace!("IMUL Gw,Ew mem: reg{} ({:#06x}) * [{:?}:{:#x}] ({:#06x}) = {:#06x}",
-            dst_reg, op1 as u16, seg, eaddr, op2 as u16, result_16 as u16);
+        tracing::trace!(
+            "IMUL Gw,Ew mem: reg{} ({:#06x}) * [{:?}:{:#x}] ({:#06x}) = {:#06x}",
+            dst_reg,
+            op1 as u16,
+            seg,
+            eaddr,
+            op2 as u16,
+            result_16 as u16
+        );
         Ok(())
     }
 
@@ -333,8 +392,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.remove(EFlags::CF.union(EFlags::OF));
         }
 
-        tracing::trace!("IMUL Gw,Ew,Iw: reg{} ({:#06x}) * imm16 ({:#06x}) = reg{} ({:#06x})",
-            src_reg, op1 as u16, op2 as u16, dst_reg, result_16 as u16);
+        tracing::trace!(
+            "IMUL Gw,Ew,Iw: reg{} ({:#06x}) * imm16 ({:#06x}) = reg{} ({:#06x})",
+            src_reg,
+            op1 as u16,
+            op2 as u16,
+            dst_reg,
+            result_16 as u16
+        );
         Ok(())
     }
 
@@ -358,8 +423,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.remove(EFlags::CF.union(EFlags::OF));
         }
 
-        tracing::trace!("IMUL Gw,Ew,Iw mem: [{:?}:{:#x}] ({:#06x}) * imm16 ({:#06x}) = reg{} ({:#06x})",
-            seg, eaddr, op1 as u16, op2 as u16, dst_reg, result_16 as u16);
+        tracing::trace!(
+            "IMUL Gw,Ew,Iw mem: [{:?}:{:#x}] ({:#06x}) * imm16 ({:#06x}) = reg{} ({:#06x})",
+            seg,
+            eaddr,
+            op1 as u16,
+            op2 as u16,
+            dst_reg,
+            result_16 as u16
+        );
         Ok(())
     }
 
@@ -382,8 +454,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.remove(EFlags::CF.union(EFlags::OF));
         }
 
-        tracing::trace!("IMUL Gw,Ew,sIb: reg{} ({:#06x}) * imm8s ({:#04x}) = reg{} ({:#06x})",
-            src_reg, op1 as u16, op2 as u16, dst_reg, result_16 as u16);
+        tracing::trace!(
+            "IMUL Gw,Ew,sIb: reg{} ({:#06x}) * imm8s ({:#04x}) = reg{} ({:#06x})",
+            src_reg,
+            op1 as u16,
+            op2 as u16,
+            dst_reg,
+            result_16 as u16
+        );
         Ok(())
     }
 
@@ -407,8 +485,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.remove(EFlags::CF.union(EFlags::OF));
         }
 
-        tracing::trace!("IMUL Gw,Ew,sIb mem: [{:?}:{:#x}] ({:#06x}) * imm8s ({:#04x}) = reg{} ({:#06x})",
-            seg, eaddr, op1 as u16, op2 as u16, dst_reg, result_16 as u16);
+        tracing::trace!(
+            "IMUL Gw,Ew,sIb mem: [{:?}:{:#x}] ({:#06x}) * imm8s ({:#04x}) = reg{} ({:#06x})",
+            seg,
+            eaddr,
+            op1 as u16,
+            op2 as u16,
+            dst_reg,
+            result_16 as u16
+        );
         Ok(())
     }
 
@@ -418,37 +503,65 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MUL AX, r/m16 - Unified wrapper
     pub fn mul_ax_ew(&mut self, instr: &Instruction) -> Result<()> {
-        if instr.mod_c0() { self.mul_ax_ew_r(instr) } else { self.mul_ax_ew_m(instr) }
+        if instr.mod_c0() {
+            self.mul_ax_ew_r(instr)
+        } else {
+            self.mul_ax_ew_m(instr)
+        }
     }
 
     /// IMUL AX, r/m16 - Unified wrapper
     pub fn imul_ax_ew(&mut self, instr: &Instruction) -> Result<()> {
-        if instr.mod_c0() { self.imul_ax_ew_r(instr) } else { self.imul_ax_ew_m(instr) }
+        if instr.mod_c0() {
+            self.imul_ax_ew_r(instr)
+        } else {
+            self.imul_ax_ew_m(instr)
+        }
     }
 
     /// DIV AX, r/m16 - Unified wrapper
     pub fn div_ax_ew(&mut self, instr: &Instruction) -> Result<()> {
-        if instr.mod_c0() { self.div_ax_ew_r(instr) } else { self.div_ax_ew_m(instr) }
+        if instr.mod_c0() {
+            self.div_ax_ew_r(instr)
+        } else {
+            self.div_ax_ew_m(instr)
+        }
     }
 
     /// IDIV AX, r/m16 - Unified wrapper
     pub fn idiv_ax_ew(&mut self, instr: &Instruction) -> Result<()> {
-        if instr.mod_c0() { self.idiv_ax_ew_r(instr) } else { self.idiv_ax_ew_m(instr) }
+        if instr.mod_c0() {
+            self.idiv_ax_ew_r(instr)
+        } else {
+            self.idiv_ax_ew_m(instr)
+        }
     }
 
     /// IMUL Gw, Ew - Two-operand signed multiply 16-bit - Unified wrapper
     pub fn imul_gw_ew(&mut self, instr: &Instruction) -> Result<()> {
-        if instr.mod_c0() { self.imul_gw_ew_r(instr) } else { self.imul_gw_ew_m(instr) }
+        if instr.mod_c0() {
+            self.imul_gw_ew_r(instr)
+        } else {
+            self.imul_gw_ew_m(instr)
+        }
     }
 
     /// IMUL Gw, Ew, Iw - Three-operand with 16-bit immediate - Unified wrapper
     pub fn imul_gw_ew_iw(&mut self, instr: &Instruction) -> Result<()> {
-        if instr.mod_c0() { self.imul_gw_ew_iw_r(instr) } else { self.imul_gw_ew_iw_m(instr) }
+        if instr.mod_c0() {
+            self.imul_gw_ew_iw_r(instr)
+        } else {
+            self.imul_gw_ew_iw_m(instr)
+        }
     }
 
     /// IMUL Gw, Ew, sIb - Three-operand with sign-extended 8-bit immediate - Unified wrapper
     pub fn imul_gw_ew_sib(&mut self, instr: &Instruction) -> Result<()> {
-        if instr.mod_c0() { self.imul_gw_ew_sib_r(instr) } else { self.imul_gw_ew_sib_m(instr) }
+        if instr.mod_c0() {
+            self.imul_gw_ew_sib_r(instr)
+        } else {
+            self.imul_gw_ew_sib_m(instr)
+        }
     }
 
     // =========================================================================

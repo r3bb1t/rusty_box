@@ -12,11 +12,11 @@
 //!   - Exponent: bits 126:112 (15 bits, bias = 16383 = 0x3FFF)
 //!   - Fraction: bits 111:0 (112 bits = 48 bits in v64 + 64 bits in v0)
 
-use super::softfloat_types::*;
-use super::softfloat::*;
 use super::internals::*;
-use super::specialize::*;
 use super::primitives::*;
+use super::softfloat::*;
+use super::softfloat_types::*;
+use super::specialize::*;
 
 // ============================================================
 // Float128 type
@@ -27,8 +27,8 @@ use super::primitives::*;
 /// v0  = low 64 bits (lower 64 bits of fraction)
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
 pub struct Float128 {
-    pub v64: u64,
-    pub v0: u64,
+    pub(crate) v64: u64,
+    pub(crate) v0: u64,
 }
 
 impl Float128 {
@@ -174,9 +174,9 @@ pub(crate) fn softfloat_propagate_nan_f128_ui(
 // ============================================================
 
 pub(crate) struct ExpSig128 {
-    pub exp: i32,
-    pub sig_v64: u64,
-    pub sig_v0: u64,
+    pub(crate) exp: i32,
+    pub(crate) sig_v64: u64,
+    pub(crate) sig_v0: u64,
 }
 
 pub(crate) fn norm_subnormal_f128_sig(sig64: u64, sig0: u64) -> ExpSig128 {
@@ -252,11 +252,7 @@ pub(crate) fn shift_right_jam128_extra(
             let z_extra = a64 << (u8_neg_dist & 63);
             (0, z_v0, z_extra | ((extra != 0) as u64))
         } else {
-            let z_extra = if dist == 128 {
-                a64
-            } else {
-                (a64 != 0) as u64
-            };
+            let z_extra = if dist == 128 { a64 } else { (a64 != 0) as u64 };
             (0, 0, z_extra | ((extra != 0) as u64))
         }
     }
@@ -267,8 +263,7 @@ pub(crate) fn shift_right_jam128_extra(
 pub(crate) fn short_shift_right_jam128(a64: u64, a0: u64, dist: u8) -> (u64, u64) {
     let neg_dist = (-(dist as i8)) as u8;
     let z_v64 = a64 >> dist;
-    let z_v0 = (a64 << (neg_dist & 63)) | (a0 >> dist)
-        | (((a0 << (neg_dist & 63)) != 0) as u64);
+    let z_v0 = (a64 << (neg_dist & 63)) | (a0 >> dist) | (((a0 << (neg_dist & 63)) != 0) as u64);
     (z_v64, z_v0)
 }
 
@@ -282,7 +277,9 @@ pub(crate) fn mul128_by_32(a64: u64, a0: u64, b: u32) -> (u64, u64) {
     let z_v0 = a0.wrapping_mul(b);
     let mid = ((a0 >> 32) as u32 as u64).wrapping_mul(b);
     let carry = ((z_v0 >> 32) as u32).wrapping_sub(mid as u32);
-    let z_v64 = a64.wrapping_mul(b).wrapping_add((mid.wrapping_add(carry as u64)) >> 32);
+    let z_v64 = a64
+        .wrapping_mul(b)
+        .wrapping_add((mid.wrapping_add(carry as u64)) >> 32);
     (z_v64, z_v0)
 }
 
@@ -328,10 +325,7 @@ pub(crate) fn mul128_by_64_to_192(a_hi: u64, a_lo: u64, b: u64) -> (u64, u64, u6
 /// Add two 192-bit values.
 /// (a0, a1, a2) + (b0, b1, b2) = (z0, z1, z2)
 /// where a0/b0/z0 are the highest words and a2/b2/z2 are the lowest.
-pub(crate) fn add192(
-    a0: u64, a1: u64, a2: u64,
-    b0: u64, b1: u64, b2: u64,
-) -> (u64, u64, u64) {
+pub(crate) fn add192(a0: u64, a1: u64, a2: u64, b0: u64, b1: u64, b2: u64) -> (u64, u64, u64) {
     let z2 = a2.wrapping_add(b2);
     let carry1 = (z2 < a2) as u64;
     let mut z1 = a1.wrapping_add(b1);
@@ -345,10 +339,7 @@ pub(crate) fn add192(
 
 /// Subtract two 192-bit values.
 /// (a0, a1, a2) - (b0, b1, b2) = (z0, z1, z2)
-pub(crate) fn sub192(
-    a0: u64, a1: u64, a2: u64,
-    b0: u64, b1: u64, b2: u64,
-) -> (u64, u64, u64) {
+pub(crate) fn sub192(a0: u64, a1: u64, a2: u64, b0: u64, b1: u64, b2: u64) -> (u64, u64, u64) {
     let z2 = a2.wrapping_sub(b2);
     let borrow1 = (a2 < b2) as u64;
     let mut z1 = a1.wrapping_sub(b1);
@@ -422,12 +413,7 @@ pub(crate) fn round_pack_to_f128(
         if exp < 0 {
             let is_tiny = (exp < -1)
                 || !do_increment
-                || lt128(
-                    sig64,
-                    sig0,
-                    0x0001FFFFFFFFFFFF,
-                    0xFFFFFFFFFFFFFFFF,
-                );
+                || lt128(sig64, sig0, 0x0001FFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF);
             let (new_v64, new_v0, new_extra) =
                 shift_right_jam128_extra(sig64, sig0, sig_extra, (-exp) as u32);
             sig64 = new_v64;
@@ -444,7 +430,7 @@ pub(crate) fn round_pack_to_f128(
             if do_increment {
                 let (new64, new0) = add128(sig64, sig0, 0, 1);
                 sig64 = new64;
-                sig0 = new0 & !((((sig_extra & 0x7FFFFFFFFFFFFFFF) == 0)) as u64);
+                sig0 = new0 & !(((sig_extra & 0x7FFFFFFFFFFFFFFF) == 0) as u64);
             } else {
                 if (sig64 | sig0) == 0 {
                     exp = 0;
@@ -456,12 +442,7 @@ pub(crate) fn round_pack_to_f128(
             };
         } else if (0x7FFD < exp)
             || ((exp == 0x7FFD)
-                && eq128(
-                    sig64,
-                    sig0,
-                    0x0001FFFFFFFFFFFF,
-                    0xFFFFFFFFFFFFFFFF,
-                )
+                && eq128(sig64, sig0, 0x0001FFFFFFFFFFFF, 0xFFFFFFFFFFFFFFFF)
                 && do_increment)
         {
             softfloat_raiseFlags(status, FLAG_OVERFLOW | FLAG_INEXACT);
@@ -478,7 +459,7 @@ pub(crate) fn round_pack_to_f128(
     if do_increment {
         let (new64, new0) = add128(sig64, sig0, 0, 1);
         sig64 = new64;
-        sig0 = new0 & !((((sig_extra & 0x7FFFFFFFFFFFFFFF) == 0)) as u64);
+        sig0 = new0 & !(((sig_extra & 0x7FFFFFFFFFFFFFFF) == 0) as u64);
     } else {
         if (sig64 | sig0) == 0 {
             exp = 0;
@@ -522,8 +503,7 @@ pub(crate) fn norm_round_pack_to_f128(
         sig_extra = 0;
     } else {
         let neg_shift = (-shift_dist) as u8;
-        let (new64, new0, new_extra) =
-            short_shift_right_jam128_extra(sig64, sig0, 0, neg_shift);
+        let (new64, new0, new_extra) = short_shift_right_jam128_extra(sig64, sig0, 0, neg_shift);
         sig64 = new64;
         sig0 = new0;
         sig_extra = new_extra;
@@ -554,7 +534,10 @@ fn add_mags_f128(
             if (sig_a.0 | sig_a.1 | sig_b.0 | sig_b.1) != 0 {
                 return softfloat_propagate_nan_f128_ui(ui_a64, ui_a0, ui_b64, ui_b0, status);
             }
-            return Float128 { v64: ui_a64, v0: ui_a0 };
+            return Float128 {
+                v64: ui_a64,
+                v0: ui_a0,
+            };
         }
         let (sig_z64, sig_z0) = add128(sig_a.0, sig_a.1, sig_b.0, sig_b.1);
         if exp_a == 0 {
@@ -591,12 +574,8 @@ fn add_mags_f128(
             let new_diff = exp_diff + 1;
             if new_diff == 0 {
                 // newlyAligned
-                let (sig_z64, sig_z0) = add128(
-                    sig_a.0 | 0x0001000000000000,
-                    sig_a.1,
-                    sig_b.0,
-                    sig_b.1,
-                );
+                let (sig_z64, sig_z0) =
+                    add128(sig_a.0 | 0x0001000000000000, sig_a.1, sig_b.0, sig_b.1);
                 exp_z -= 1;
                 if sig_z64 < 0x0002000000000000 {
                     return round_pack_to_f128(sign_z, exp_z, sig_z64, sig_z0, 0, status);
@@ -615,7 +594,10 @@ fn add_mags_f128(
             if (sig_a.0 | sig_a.1) != 0 {
                 return softfloat_propagate_nan_f128_ui(ui_a64, ui_a0, ui_b64, ui_b0, status);
             }
-            return Float128 { v64: ui_a64, v0: ui_a0 };
+            return Float128 {
+                v64: ui_a64,
+                v0: ui_a0,
+            };
         }
         exp_z = exp_a;
         if exp_b != 0 {
@@ -624,12 +606,8 @@ fn add_mags_f128(
             let new_diff = exp_diff - 1;
             if new_diff == 0 {
                 // newlyAligned
-                let (sig_z64, sig_z0) = add128(
-                    sig_a.0 | 0x0001000000000000,
-                    sig_a.1,
-                    sig_b.0,
-                    sig_b.1,
-                );
+                let (sig_z64, sig_z0) =
+                    add128(sig_a.0 | 0x0001000000000000, sig_a.1, sig_b.0, sig_b.1);
                 exp_z -= 1;
                 if sig_z64 < 0x0002000000000000 {
                     return round_pack_to_f128(sign_z, exp_z, sig_z64, sig_z0, 0, status);
@@ -646,12 +624,7 @@ fn add_mags_f128(
     }
 
     // newlyAligned (common path)
-    let (sig_z64, sig_z0) = add128(
-        sig_a.0 | 0x0001000000000000,
-        sig_a.1,
-        sig_b.0,
-        sig_b.1,
-    );
+    let (sig_z64, sig_z0) = add128(sig_a.0 | 0x0001000000000000, sig_a.1, sig_b.0, sig_b.1);
     exp_z -= 1;
     if sig_z64 < 0x0002000000000000 {
         return round_pack_to_f128(sign_z, exp_z, sig_z64, sig_z0, sig_z_extra, status);
@@ -682,7 +655,10 @@ fn sub_mags_f128(
             if (sig_a.0 | sig_a.1) != 0 {
                 return softfloat_propagate_nan_f128_ui(ui_a64, ui_a0, ui_b64, ui_b0, status);
             }
-            return Float128 { v64: ui_a64, v0: ui_a0 };
+            return Float128 {
+                v64: ui_a64,
+                v0: ui_a0,
+            };
         }
         if exp_b != 0 {
             sig_b.0 |= 0x0010000000000000;
@@ -771,11 +747,7 @@ fn sub_mags_f128(
     }
     // exact zero
     Float128 {
-        v64: pack_to_f128_ui64(
-            softfloat_getRoundingMode(status) == ROUND_MIN,
-            0,
-            0,
-        ),
+        v64: pack_to_f128_ui64(softfloat_getRoundingMode(status) == ROUND_MIN, 0, 0),
         v0: 0,
     }
 }
@@ -1049,8 +1021,8 @@ pub(crate) fn f128_div(a: Float128, b: Float128, status: &mut SoftFloatStatus) -
 // ============================================================
 
 /// Fused multiply-add operation flags (matches Bochs enum).
-pub const SOFTFLOAT_MULADD_SUB_C: u8 = 1;       // negate addend
-pub const SOFTFLOAT_MULADD_SUB_PROD: u8 = 2;     // negate product
+pub const SOFTFLOAT_MULADD_SUB_C: u8 = 1; // negate addend
+pub const SOFTFLOAT_MULADD_SUB_PROD: u8 = 2; // negate product
 
 /// Float128 fused multiply-add: a*b + c (with operation modifier).
 /// op=0: a*b+c, op=1: a*b-c, op=2: -(a*b)+c, op=3: -(a*b)-c
@@ -1142,21 +1114,23 @@ pub(crate) fn f128_mul_add(
             let uiz = Float128 { v64: 0, v0: 0 };
             return softfloat_propagate_nan_f128_ui(uiz.v64, uiz.v0, ui_c64, ui_c0, status);
         }
-        return Float128 { v64: ui_c64, v0: ui_c0 };
+        return Float128 {
+            v64: ui_c64,
+            v0: ui_c0,
+        };
     }
 
     // Handle subnormals for A and B
     if exp_a == 0 {
         if (sig_a.0 | sig_a.1) == 0 {
             // zeroProd
-            let uiz = Float128 { v64: ui_c64, v0: ui_c0 };
+            let uiz = Float128 {
+                v64: ui_c64,
+                v0: ui_c0,
+            };
             if (exp_c as u64 | sig_c.0 | sig_c.1) == 0 && sign_z != sign_c {
                 return Float128 {
-                    v64: pack_to_f128_ui64(
-                        softfloat_getRoundingMode(status) == ROUND_MIN,
-                        0,
-                        0,
-                    ),
+                    v64: pack_to_f128_ui64(softfloat_getRoundingMode(status) == ROUND_MIN, 0, 0),
                     v0: 0,
                 };
             }
@@ -1170,14 +1144,13 @@ pub(crate) fn f128_mul_add(
     if exp_b == 0 {
         if (sig_b.0 | sig_b.1) == 0 {
             // zeroProd
-            let uiz = Float128 { v64: ui_c64, v0: ui_c0 };
+            let uiz = Float128 {
+                v64: ui_c64,
+                v0: ui_c0,
+            };
             if (exp_c as u64 | sig_c.0 | sig_c.1) == 0 && sign_z != sign_c {
                 return Float128 {
-                    v64: pack_to_f128_ui64(
-                        softfloat_getRoundingMode(status) == ROUND_MIN,
-                        0,
-                        0,
-                    ),
+                    v64: pack_to_f128_ui64(softfloat_getRoundingMode(status) == ROUND_MIN, 0, 0),
                     v0: 0,
                 };
             }
@@ -1263,8 +1236,7 @@ pub(crate) fn f128_mul_add(
                 sd = 9;
             }
             let sig_z_extra = sig256z[1] | sig256z[0];
-            let extra_jammed =
-                (zz0 << (64 - sd as u32)) | ((sig_z_extra != 0) as u64);
+            let extra_jammed = (zz0 << (64 - sd as u32)) | ((sig_z_extra != 0) as u64);
             let (z64, z0) = short_shift_right128(zz64, zz0, sd as u8);
             return round_pack_to_f128(sign_z, exp_z - 1, z64, z0, extra_jammed, status);
         } else {
@@ -1298,8 +1270,7 @@ pub(crate) fn f128_mul_add(
                 sd = 9;
             }
             let sig_z_extra = sig256z[1] | sig256z[0];
-            let extra_jammed =
-                (zz0 << (64 - sd as u32)) | ((sig_z_extra != 0) as u64);
+            let extra_jammed = (zz0 << (64 - sd as u32)) | ((sig_z_extra != 0) as u64);
             let (z64, z0) = short_shift_right128(zz64, zz0, sd as u8);
             return round_pack_to_f128(sign_z, exp_z - 1, z64, z0, extra_jammed, status);
         }
@@ -1339,11 +1310,7 @@ pub(crate) fn f128_mul_add(
             if (zz64 | zz0) == 0 && sig256z[1] == 0 && sig256z[0] == 0 {
                 // Complete cancellation
                 return Float128 {
-                    v64: pack_to_f128_ui64(
-                        softfloat_getRoundingMode(status) == ROUND_MIN,
-                        0,
-                        0,
-                    ),
+                    v64: pack_to_f128_ui64(softfloat_getRoundingMode(status) == ROUND_MIN, 0, 0),
                     v0: 0,
                 };
             }
@@ -1379,8 +1346,7 @@ pub(crate) fn f128_mul_add(
                 exp_z -= 1;
             }
             let sig_z_extra = sig256z[1] | sig256z[0];
-            let extra_jammed =
-                (zz0 << (64 - sd as u32)) | ((sig_z_extra != 0) as u64);
+            let extra_jammed = (zz0 << (64 - sd as u32)) | ((sig_z_extra != 0) as u64);
             let (z64, z0) = short_shift_right128(zz64, zz0, sd as u8);
             return round_pack_to_f128(sign_z, exp_z - 1, z64, z0, extra_jammed, status);
         }
@@ -1473,7 +1439,11 @@ pub(crate) fn i32_to_f128(a: i32) -> Float128 {
     let sign = a < 0;
     let abs_a = if sign { (-(a as i64)) as u32 } else { a as u32 };
     let shift_dist = count_leading_zeros32(abs_a) + 17;
-    let v64 = pack_to_f128_ui64(sign, 0x402E - shift_dist as i32, (abs_a as u64) << shift_dist);
+    let v64 = pack_to_f128_ui64(
+        sign,
+        0x402E - shift_dist as i32,
+        (abs_a as u64) << shift_dist,
+    );
     Float128 { v64, v0: 0 }
 }
 
@@ -1602,9 +1572,15 @@ pub(crate) fn sub_256m(a: &[u64; 4], b: &[u64; 4]) -> [u64; 4] {
     let mut result = [0u64; 4];
     let mut borrow = 0u64;
     for i in 0..4 {
-        let diff = (a[i] as u128).wrapping_sub(b[i] as u128).wrapping_sub(borrow as u128);
+        let diff = (a[i] as u128)
+            .wrapping_sub(b[i] as u128)
+            .wrapping_sub(borrow as u128);
         result[i] = diff as u64;
-        borrow = if (a[i] as u128) < (b[i] as u128) + (borrow as u128) { 1 } else { 0 };
+        borrow = if (a[i] as u128) < (b[i] as u128) + (borrow as u128) {
+            1
+        } else {
+            0
+        };
     }
     result
 }

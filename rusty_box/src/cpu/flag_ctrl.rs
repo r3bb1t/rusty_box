@@ -1,8 +1,8 @@
 //! Flag control instructions
 //! Matching Bochs flag_ctrl.cc -- CLC, STC, CMC, CLD, STD, CLI, STI
 
-use crate::cpu::{BxCpuC, BxCpuIdTrait};
 use super::eflags::EFlags;
+use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn clc(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {

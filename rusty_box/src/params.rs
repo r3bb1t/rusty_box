@@ -3,13 +3,13 @@ use alloc::vec::Vec;
 
 #[derive(Debug, Clone)]
 pub struct BxParams {
-    pub cpu_nthreads: u32,
-    pub cpu_ncores: u32,
-    pub cpu_nprocessors: u32,
+    pub(crate) cpu_nthreads: u32,
+    pub(crate) cpu_ncores: u32,
+    pub(crate) cpu_nprocessors: u32,
 
     // TODO: use bitflags
-    pub cpu_include_features: Vec<X86FeatureName>,
-    pub cpu_exclude_features: Vec<X86FeatureName>,
+    pub(crate) cpu_include_features: Vec<X86FeatureName>,
+    pub(crate) cpu_exclude_features: Vec<X86FeatureName>,
 }
 
 impl Default for BxParams {

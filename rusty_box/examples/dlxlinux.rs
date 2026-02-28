@@ -505,9 +505,14 @@ fn run_dlxlinux() -> Result<()> {
         let cr3 = emu.cpu.get_cr3_val();
         println!();
         println!("===== GDT DIAGNOSTIC =====");
-        println!("GDTR: base={:#010x} limit={:#06x}  CR3={:#010x}", gdtr_base, gdtr_limit, cr3);
-        println!("CS={:#06x} base={:#010x}  DS={:#06x} base={:#010x}  SS={:#06x} base={:#010x}",
-            cs_sel, cs_base, ds_sel, ds_base, ss_sel, ss_base);
+        println!(
+            "GDTR: base={:#010x} limit={:#06x}  CR3={:#010x}",
+            gdtr_base, gdtr_limit, cr3
+        );
+        println!(
+            "CS={:#06x} base={:#010x}  DS={:#06x} base={:#010x}  SS={:#06x} base={:#010x}",
+            cs_sel, cs_base, ds_sel, ds_base, ss_sel, ss_base
+        );
 
         // If GDTR.base looks like a high virtual address (e.g. 0xC0xxxxxx),
         // compute the expected physical address
@@ -528,7 +533,9 @@ fn run_dlxlinux() -> Result<()> {
                 let dword2 = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
                 // Decode base and limit
                 let limit = (dword1 & 0xFFFF) | ((dword2 & 0x000F0000) as u32);
-                let base = ((dword1 >> 16) as u64) | (((dword2 & 0xFF) as u64) << 16) | ((dword2 & 0xFF000000) as u64);
+                let base = ((dword1 >> 16) as u64)
+                    | (((dword2 & 0xFF) as u64) << 16)
+                    | ((dword2 & 0xFF000000) as u64);
                 let g = (dword2 & 0x00800000) != 0;
                 let d_b = (dword2 & 0x00400000) != 0;
                 let p = (dword2 >> 15) & 1;
@@ -551,6 +558,98 @@ fn run_dlxlinux() -> Result<()> {
     // In headless mode, dump the current VGA text screen once at the end.
     // This avoids terminal repaint while still letting you see BIOS/VGABIOS output.
     if headless {
+        // ATA diagnostic
+        let (ata_reads, ata_writes) = emu.device_manager.ata_io_counts();
+        println!("\n===== ATA DIAGNOSTIC =====");
+        println!("ATA read_count={}, write_count={}", ata_reads, ata_writes);
+
+        // IRQ delivery chain diagnostic
+        println!("\n===== IRQ DELIVERY CHAIN =====");
+        println!("tick() calls:          {}", emu.device_manager.diag_tick_count);
+        println!("PIT fires (check_irq0): {}", emu.device_manager.diag_pit_fires);
+        println!("IRQ0 latched (raise):   {}", emu.device_manager.diag_irq0_latched);
+        println!("IRQ0 was already high:  {}", emu.device_manager.diag_irq0_already_high);
+        println!("iac() calls:            {}", emu.device_manager.diag_iac_count);
+        let pic_diag = emu.device_manager.pic_diag();
+        println!("total usec:             {} ({:.2}s virtual)", emu.device_manager.diag_total_usec, emu.device_manager.diag_total_usec as f64 / 1_000_000.0);
+        println!("avg usec/tick:          {:.1}", emu.device_manager.diag_total_usec as f64 / emu.device_manager.diag_tick_count as f64);
+        println!("PIC state:              {}", pic_diag);
+        // Print non-zero vector histogram entries
+        print!("iac vectors:            ");
+        for (v, &count) in emu.device_manager.diag_vector_hist.iter().enumerate() {
+            if count > 0 {
+                print!("0x{:02x}={} ", v, count);
+            }
+        }
+        println!();
+        println!("CPU state:              {}", emu.cpu.cpu_diag_string());
+        println!("CPU RIP:                {:#x}", emu.cpu.rip());
+        println!("CPU CS:                 {:#06x}", emu.cpu.get_cs_selector());
+        println!("CPU ESP:                {:#x}", emu.cpu.esp());
+
+        // Dump code at idle loop RIP
+        let rip = emu.cpu.rip() as usize;
+        let ram = emu.memory.peek_ram(0, 0); // Get empty slice to check if method works
+        println!("\n===== IDLE LOOP CODE (RIP={:#x}) =====", rip);
+        // Dump 128 bytes before and 64 bytes at RIP
+        for off in (rip.saturating_sub(128)..rip + 64).step_by(16) {
+            let bytes = emu.memory.peek_ram(off, 16);
+            let hex: Vec<String> = bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            let marker = if off == rip { " <-- RIP" } else { "" };
+            println!("  {:#010x}: {}{}", off, hex.join(" "), marker);
+        }
+        // Also show CPU state
+        println!("  EAX={:#010x} EBX={:#010x} ECX={:#010x} EDX={:#010x}",
+            emu.cpu.eax(), emu.cpu.ebx(), emu.cpu.ecx(), emu.cpu.edx());
+        println!("  ESI={:#010x} EDI={:#010x} ESP={:#010x} EBP={:#010x}",
+            emu.cpu.esi(), emu.cpu.edi(), emu.cpu.esp(), emu.cpu.ebp());
+        println!("  CR0={:#010x} CS={:#06x}",
+            emu.cpu.get_cr0_val(), emu.cpu.get_cs_selector());
+
+        // Read IDT entry for vector 0x20 (timer interrupt)
+        println!("\n===== IDT ENTRY FOR VECTOR 0x20 =====");
+        let idtr_base = emu.cpu.get_idtr_base();
+        let idtr_limit = emu.cpu.get_idtr_limit();
+        println!("  IDTR.base={:#010x} IDTR.limit={:#06x}", idtr_base, idtr_limit);
+        // IDT entry is at IDTR.base + 0x20*8
+        // But IDTR.base is a linear address, we need physical.
+        // For kernel, linear = physical + 0xC0000000, so physical = linear - 0xC0000000
+        let idt_entry_laddr = idtr_base + 0x20 * 8;
+        let idt_entry_paddr = (idt_entry_laddr as u32).wrapping_sub(0xC0000000) as usize;
+        let idt_bytes = emu.memory.peek_ram(idt_entry_paddr, 8);
+        let dword1 = u32::from_le_bytes([idt_bytes[0], idt_bytes[1], idt_bytes[2], idt_bytes[3]]);
+        let dword2 = u32::from_le_bytes([idt_bytes[4], idt_bytes[5], idt_bytes[6], idt_bytes[7]]);
+        let handler_offset = (dword1 & 0xFFFF) | ((dword2 & 0xFFFF0000));
+        let handler_selector = (dword1 >> 16) & 0xFFFF;
+        let gate_type = (dword2 >> 8) & 0x1F;
+        let gate_dpl = (dword2 >> 13) & 0x3;
+        let gate_p = (dword2 >> 15) & 0x1;
+        println!("  IDT[0x20] @ laddr={:#010x} paddr={:#010x}", idt_entry_laddr, idt_entry_paddr);
+        println!("  dword1={:#010x} dword2={:#010x}", dword1, dword2);
+        println!("  handler={:#010x} selector={:#06x} type={:#x} DPL={} P={}", handler_offset, handler_selector, gate_type, gate_dpl, gate_p);
+        // Dump handler code
+        let handler_phys = (handler_offset as u32).wrapping_sub(0xC0000000) as usize;
+        if handler_phys < 0x2000000 {
+            let handler_bytes = emu.memory.peek_ram(handler_phys, 32);
+            let hex: Vec<String> = handler_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+            println!("  handler code @ phys {:#010x}: {}", handler_phys, hex.join(" "));
+        }
+
+        // Search for jiffies — look for a u32 that's a reasonable timer count
+        // With IPS=4M, 220M instructions, PIT at 100Hz ≈ 5500 ticks expected
+        for addr in (0x106000..0x10c000).step_by(4) {
+            let b = emu.memory.peek_ram(addr, 4);
+            let val = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+            if val > 100 && val < 100000 {
+                // Also check if addr+4 could be need_resched (typically 0 or 1)
+                let b2 = emu.memory.peek_ram(addr + 4, 4);
+                let next = u32::from_le_bytes([b2[0], b2[1], b2[2], b2[3]]);
+                if next <= 1 {
+                    println!("  Possible jiffies at {:#x} = {}, next_word={}", addr, val, next);
+                }
+            }
+        }
+
         println!();
         println!("===== VGA TEXT DUMP (headless) =====");
         println!("{}", emu.vga_text_dump());

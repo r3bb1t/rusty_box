@@ -18,15 +18,10 @@ use super::fetchdecode_opmap::*;
 use super::fetchdecode_opmap_0f38::BxOpcodeTable0F38;
 use super::fetchdecode_opmap_0f3a::BxOpcodeTable0F3A;
 use super::fetchdecode_x87::{
-    BX3_DNOW_OPCODE,
-    BX_OPCODE_INFO_FLOATING_POINT_D8,
-    BX_OPCODE_INFO_FLOATING_POINT_D9,
-    BX_OPCODE_INFO_FLOATING_POINT_DA,
-    BX_OPCODE_INFO_FLOATING_POINT_DB,
-    BX_OPCODE_INFO_FLOATING_POINT_DC,
-    BX_OPCODE_INFO_FLOATING_POINT_DD,
-    BX_OPCODE_INFO_FLOATING_POINT_DE,
-    BX_OPCODE_INFO_FLOATING_POINT_DF,
+    BX3_DNOW_OPCODE, BX_OPCODE_INFO_FLOATING_POINT_D8, BX_OPCODE_INFO_FLOATING_POINT_D9,
+    BX_OPCODE_INFO_FLOATING_POINT_DA, BX_OPCODE_INFO_FLOATING_POINT_DB,
+    BX_OPCODE_INFO_FLOATING_POINT_DC, BX_OPCODE_INFO_FLOATING_POINT_DD,
+    BX_OPCODE_INFO_FLOATING_POINT_DE, BX_OPCODE_INFO_FLOATING_POINT_DF,
 };
 
 // Decoding mask bit offsets (from fetchdecode_generated.rs)
@@ -524,7 +519,21 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
 
         // Group opcodes: 80, 81, 83, C0, C1, D0-D3, F6, F7, FE, FF
         // For these, nnn field is the opcode extension (which operation), rm is the operand
-        let is_group_opcode = matches!(b1, 0x80 | 0x81 | 0x83 | 0xC0 | 0xC1 | 0xD0 | 0xD1 | 0xD2 | 0xD3 | 0xF6 | 0xF7 | 0xFE | 0xFF);
+        let is_group_opcode = matches!(
+            b1,
+            0x80 | 0x81
+                | 0x83
+                | 0xC0
+                | 0xC1
+                | 0xD0
+                | 0xD1
+                | 0xD2
+                | 0xD3
+                | 0xF6
+                | 0xF7
+                | 0xFE
+                | 0xFF
+        );
 
         // Segment register move instructions: 8C (MOV Ew,Sw) and 8E (MOV Sw,Ew)
         // For 0x8C: nnn=segment (source), rm=gpr (destination) -> DST=rm, SRC1=nnn
@@ -600,7 +609,8 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
                 // - Branch opcodes (0x70-0x7F, 0xE0-0xE3, 0xEB): relative displacements
                 // - 0x83 (Group 1 EdsIb): sign-extended imm8 to operand-size per Intel spec;
                 //   dispatchers route *EdsIb opcodes to *EdId handlers that read id()
-                let needs_sign_ext = opcode_map == 0 && matches!(b1 as u8, 0x70..=0x7F | 0xE0..=0xE3 | 0xEB | 0x83);
+                let needs_sign_ext =
+                    opcode_map == 0 && matches!(b1 as u8, 0x70..=0x7F | 0xE0..=0xE3 | 0xEB | 0x83);
                 instr.modrm_form.operand_data.id = if needs_sign_ext {
                     byte_val as i8 as i32 as u32
                 } else {
@@ -828,7 +838,7 @@ const fn get_opcode_table_32(b1: u8) -> &'static [u64] {
         0x58..=0x5F => &BxOpcodeTable58x5F,
         0x60 => &BxOpcodeTable60,
         0x61 => &BxOpcodeTable61,
-        0x62 => &BxOpcodeTable62,  // BOUND instruction
+        0x62 => &BxOpcodeTable62, // BOUND instruction
         0x63 => &BxOpcodeTable63_32,
         0x68 => &BxOpcodeTable68,
         0x69 => &BxOpcodeTable69,
@@ -1499,19 +1509,31 @@ mod tests {
         // 83 C3 FD = ADD EBX, -3 (sign-extended 0xFD to 0xFFFFFFFD)
         let bytes = vec![0x83, 0xC3, 0xFD];
         let instr = fetch_decode32(&bytes, true).unwrap();
-        assert_eq!(instr.id(), 0xFFFFFFFD,
-            "0x83 imm8 0xFD should be sign-extended to 0xFFFFFFFD, got {:#x}", instr.id());
+        assert_eq!(
+            instr.id(),
+            0xFFFFFFFD,
+            "0x83 imm8 0xFD should be sign-extended to 0xFFFFFFFD, got {:#x}",
+            instr.id()
+        );
 
         // 83 C3 08 = ADD EBX, 8 (positive stays same)
         let bytes = vec![0x83, 0xC3, 0x08];
         let instr = fetch_decode32(&bytes, true).unwrap();
-        assert_eq!(instr.id(), 0x00000008,
-            "0x83 imm8 0x08 should stay 0x00000008, got {:#x}", instr.id());
+        assert_eq!(
+            instr.id(),
+            0x00000008,
+            "0x83 imm8 0x08 should stay 0x00000008, got {:#x}",
+            instr.id()
+        );
 
         // 83 FB FF = CMP EBX, -1 (sign-extended)
         let bytes = vec![0x83, 0xFB, 0xFF];
         let instr = fetch_decode32(&bytes, true).unwrap();
-        assert_eq!(instr.id(), 0xFFFFFFFF,
-            "0x83 imm8 0xFF should be sign-extended to 0xFFFFFFFF, got {:#x}", instr.id());
+        assert_eq!(
+            instr.id(),
+            0xFFFFFFFF,
+            "0x83 imm8 0xFF should be sign-extended to 0xFFFFFFFF, got {:#x}",
+            instr.id()
+        );
     }
 }

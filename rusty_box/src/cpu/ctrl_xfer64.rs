@@ -7,7 +7,7 @@ use alloc::string::ToString;
 use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
-    decoder::{Instruction, BxSegregs},
+    decoder::{BxSegregs, Instruction},
     error::{CpuError, Result},
 };
 
@@ -55,7 +55,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Check canonical address (matching C++ line 121-124)
         if !self.is_canonical(new_rip) {
             tracing::error!("call_jq: canonical RIP violation");
-            return Err(CpuError::BadVector { vector: Exception::Gp });
+            return Err(CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         // Push 64 bit EA of next instruction (matching C++ line 115)
@@ -73,7 +75,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Check canonical address (matching C++ line 152-156)
         if !self.is_canonical(new_rip) {
             tracing::error!("call_eq_r: canonical RIP violation");
-            return Err(CpuError::BadVector { vector: Exception::Gp });
+            return Err(CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         // Push 64 bit EA of next instruction (matching C++ line 146)
@@ -99,8 +103,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let _op1_64 = self.read_linear_qword(seg, laddr);
-        let asize_mask = if instr.as64_l() != 0 { 0xFFFFFFFFFFFFFFFF } else { 0xFFFFFFFF };
-        let _cs_raw = self.read_linear_word(seg, self.get_laddr64(seg_idx, (eaddr.wrapping_add(8)) & asize_mask));
+        let asize_mask = if instr.as64_l() != 0 {
+            0xFFFFFFFFFFFFFFFF
+        } else {
+            0xFFFFFFFF
+        };
+        let _cs_raw = self.read_linear_word(
+            seg,
+            self.get_laddr64(seg_idx, (eaddr.wrapping_add(8)) & asize_mask),
+        );
 
         // TODO: Implement call_protected for protected mode (matching C++ line 191)
         // For now, return error if not in real mode
@@ -127,7 +138,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Check canonical address (matching C++ line 206-209)
         if !self.is_canonical(new_rip) {
             tracing::error!("jmp_jq: canonical RIP violation");
-            return Err(CpuError::BadVector { vector: Exception::Gp });
+            return Err(CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         self.set_rip(new_rip);
@@ -142,7 +155,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Check canonical address (matching C++ line 414-417)
         if !self.is_canonical(new_rip) {
             tracing::error!("jmp_eq_r: canonical RIP violation");
-            return Err(CpuError::BadVector { vector: Exception::Gp });
+            return Err(CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         self.set_rip(new_rip);
@@ -164,8 +179,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let _op1_64 = self.read_linear_qword(seg, laddr);
-        let asize_mask = if instr.as64_l() != 0 { 0xFFFFFFFFFFFFFFFF } else { 0xFFFFFFFF };
-        let _cs_raw = self.read_linear_word(seg, self.get_laddr64(seg_idx, (eaddr.wrapping_add(8)) & asize_mask));
+        let asize_mask = if instr.as64_l() != 0 {
+            0xFFFFFFFFFFFFFFFF
+        } else {
+            0xFFFFFFFF
+        };
+        let _cs_raw = self.read_linear_word(
+            seg,
+            self.get_laddr64(seg_idx, (eaddr.wrapping_add(8)) & asize_mask),
+        );
 
         // TODO: Implement jump_protected for protected mode (matching C++ line 443)
         // For now, return error if not in real mode
@@ -192,7 +214,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Check canonical address (matching C++ line 63-66)
         if !self.is_canonical(return_rip) {
             tracing::error!("retnear64_iw: canonical RIP violation");
-            return Err(CpuError::BadVector { vector: Exception::Gp });
+            return Err(CpuError::BadVector {
+                vector: Exception::Gp,
+            });
         }
 
         self.set_rip(return_rip);
@@ -506,7 +530,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn read_linear_word(&self, _seg: BxSegregs, laddr: u64) -> u16 {
         self.mem_read_word(laddr)
     }
-    
+
     /// Write 16-bit word to linear address (matches write_linear_word)
     pub(super) fn write_linear_word(&mut self, _seg: BxSegregs, laddr: u64, value: u16) {
         self.mem_write_word(laddr, value)

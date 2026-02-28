@@ -3,7 +3,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{Instruction, BxSegregs},
+    decoder::{BxSegregs, Instruction},
     eflags::EFlags,
 };
 
@@ -53,5 +53,4 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         Ok(())
     }
-
 }

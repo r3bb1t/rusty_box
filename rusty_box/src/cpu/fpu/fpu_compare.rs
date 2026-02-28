@@ -17,14 +17,14 @@
 use super::super::cpu::BxCpuC;
 use super::super::cpuid::BxCpuIdTrait;
 use super::super::decoder::{BxSegregs, Instruction, Opcode};
-use super::super::softfloat3e::softfloat::*;
-use super::super::softfloat3e::specialize::*;
-use super::super::softfloat3e::extf80_compare::extf80_compare;
+use super::super::i387::*;
 use super::super::softfloat3e::extf80_class::extf80_class;
+use super::super::softfloat3e::extf80_compare::extf80_compare;
 use super::super::softfloat3e::f32_to_extf80::f32_to_extf80;
 use super::super::softfloat3e::f64_to_extf80::f64_to_extf80;
 use super::super::softfloat3e::i32_to_extf80::i32_to_extf80;
-use super::super::i387::*;
+use super::super::softfloat3e::softfloat::*;
+use super::super::softfloat3e::specialize::*;
 use super::ferr::i387cw_to_softfloat_status_word;
 
 // ---------------------------------------------------------------------------
@@ -80,8 +80,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status =
-            i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+        let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
         let rc = extf80_compare(
             self.read_fpu_reg(0),
@@ -133,8 +132,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status =
-            i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+        let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
         let rc = extf80_compare(
             self.read_fpu_reg(0),
@@ -190,8 +188,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status =
-            i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+        let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
         let a = self.read_fpu_reg(0);
 
@@ -253,8 +250,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status =
-            i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+        let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
         let a = self.read_fpu_reg(0);
 
@@ -313,8 +309,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status =
-            i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+        let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
         let rc = extf80_compare(
             self.read_fpu_reg(0),
@@ -370,8 +365,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status =
-            i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+        let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
         let rc = extf80_compare(
             self.read_fpu_reg(0),
@@ -421,8 +415,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let quiet = instr.get_ia_opcode() == Opcode::Fucompp;
 
-        let mut status =
-            i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+        let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
         let rc = extf80_compare(
             self.read_fpu_reg(0),
@@ -468,8 +461,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status =
-            i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+        let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
         let rc = extf80_compare(
             self.read_fpu_reg(0),
@@ -522,8 +514,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let mut status =
-            i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+        let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
         let rc = extf80_compare(
             self.read_fpu_reg(0),
@@ -565,8 +556,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             let const_z = pack_floatx80(false, 0, 0);
 
-            let mut status =
-                i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+            let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
             let rc = extf80_compare(self.read_fpu_reg(0), const_z, false, &mut status);
             self.setcc(status_word_flags_fpu_compare(rc));

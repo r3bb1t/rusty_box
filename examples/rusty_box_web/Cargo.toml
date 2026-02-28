@@ -5,7 +5,7 @@ edition = "2021"
 description = "Rusty Box x86 emulator — web frontend"
 
 [dependencies]
-rusty_box = { path = "../rusty_box", default-features = false, features = ["bx_full"] }
+rusty_box = { path = "../../rusty_box", default-features = false, features = ["bx_full"] }
 eframe = { version = "0.31", default-features = false, features = ["glow", "default_fonts"] }
 egui = "0.31"
 log = "0.4"

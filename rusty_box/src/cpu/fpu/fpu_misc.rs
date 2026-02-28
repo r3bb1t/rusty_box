@@ -5,9 +5,9 @@
 use super::super::cpu::BxCpuC;
 use super::super::cpuid::BxCpuIdTrait;
 use super::super::decoder::Instruction;
-use super::super::softfloat3e::softfloat::{floatx80_chs, floatx80_abs};
+use super::super::i387::{FPU_EX_STACK_UNDERFLOW, FPU_TAG_EMPTY};
+use super::super::softfloat3e::softfloat::{floatx80_abs, floatx80_chs};
 use super::super::softfloat3e::specialize::FLOATX80_DEFAULT_NAN;
-use super::super::i387::{FPU_TAG_EMPTY, FPU_EX_STACK_UNDERFLOW};
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FXCH ST(i) — Exchange ST(0) and ST(i)
@@ -104,7 +104,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
-        self.the_i387.fpu_settagi(FPU_TAG_EMPTY as i32, instr.dst() as i32);
+        self.the_i387
+            .fpu_settagi(FPU_TAG_EMPTY as i32, instr.dst() as i32);
 
         Ok(())
     }
@@ -115,7 +116,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
-        self.the_i387.fpu_settagi(FPU_TAG_EMPTY as i32, instr.dst() as i32);
+        self.the_i387
+            .fpu_settagi(FPU_TAG_EMPTY as i32, instr.dst() as i32);
         self.the_i387.fpu_pop();
 
         Ok(())

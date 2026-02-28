@@ -7,7 +7,7 @@
 //! emulator instances to run concurrently without conflicts.
 //!
 //! ## Device Modules
-//! 
+//!
 //! The following hardware devices are emulated:
 //! - **PIC (8259)**: Programmable Interrupt Controller - handles hardware interrupts
 //! - **PIT (8254)**: Programmable Interval Timer - system timer, speaker control
@@ -19,40 +19,40 @@
 use alloc::{collections::VecDeque, string::String, vec::Vec};
 use core::ffi::c_void;
 
+pub mod cmos;
 pub mod devices;
+pub mod dma;
+pub mod harddrv;
+pub mod keyboard;
 pub mod pic;
 pub mod pit;
-pub mod cmos;
-pub mod dma;
-pub mod keyboard;
-pub mod harddrv;
 pub mod vga;
 
 // Re-export device types for convenience
-pub use pic::BxPicC;
-pub use pit::BxPitC;
 pub use cmos::BxCmosC;
 pub use dma::BxDmaC;
-pub use keyboard::BxKeyboardC;
 pub use harddrv::BxHardDriveC;
+pub use keyboard::BxKeyboardC;
+pub use pic::BxPicC;
+pub use pit::BxPitC;
 // BxVgaC is pub(crate) - not exported outside the crate
 
 /// Number of I/O ports (0x0000 - 0xFFFF)
 pub const IO_PORTS: usize = 0x10000;
 
 /// I/O read handler function type
-/// 
+///
 /// # Arguments
 /// * `this_ptr` - Pointer to device instance
 /// * `address` - I/O port address
 /// * `io_len` - Length of I/O operation (1, 2, or 4 bytes)
-/// 
+///
 /// # Returns
 /// The value read from the port
 pub type IoReadHandlerT = fn(this_ptr: *mut c_void, address: u16, io_len: u8) -> u32;
 
 /// I/O write handler function type
-/// 
+///
 /// # Arguments
 /// * `this_ptr` - Pointer to device instance
 /// * `address` - I/O port address
@@ -64,15 +64,15 @@ pub type IoWriteHandlerT = fn(this_ptr: *mut c_void, address: u16, value: u32, i
 #[derive(Clone)]
 pub struct IoHandlerEntry {
     /// Handler function
-    pub handler: Option<IoReadHandlerT>,
+    pub(crate) handler: Option<IoReadHandlerT>,
     /// Write handler function
-    pub write_handler: Option<IoWriteHandlerT>,
+    pub(crate) write_handler: Option<IoWriteHandlerT>,
     /// Device instance pointer
-    pub this_ptr: *mut c_void,
+    pub(crate) this_ptr: *mut c_void,
     /// Handler name for debugging
-    pub name: String,
+    pub(crate) name: String,
     /// I/O length mask (bit 0 = 1 byte, bit 1 = 2 bytes, bit 2 = 4 bytes)
-    pub mask: u8,
+    pub(crate) mask: u8,
 }
 
 impl Default for IoHandlerEntry {
@@ -92,7 +92,7 @@ unsafe impl Send for IoHandlerEntry {}
 unsafe impl Sync for IoHandlerEntry {}
 
 /// Device controller - manages all I/O devices and port handlers
-/// 
+///
 /// This struct is fully instance-based with no global state, allowing multiple
 /// independent emulator instances to run concurrently.
 pub struct BxDevicesC {
@@ -123,8 +123,8 @@ pub struct BxDevicesC {
     port80_output: VecDeque<u8>,
 
     /// Last I/O read port and value (for stuck-loop diagnostics)
-    pub last_io_read_port: u16,
-    pub last_io_read_value: u32,
+    pub(crate) last_io_read_port: u16,
+    pub(crate) last_io_read_value: u32,
 }
 
 impl Default for BxDevicesC {
@@ -139,7 +139,7 @@ impl BxDevicesC {
         // Create handler arrays with default entries
         let mut read_handlers = Vec::with_capacity(IO_PORTS);
         let mut write_handlers = Vec::with_capacity(IO_PORTS);
-        
+
         for _ in 0..IO_PORTS {
             read_handlers.push(IoHandlerEntry::default());
             write_handlers.push(IoHandlerEntry::default());
@@ -159,7 +159,7 @@ impl BxDevicesC {
     }
 
     /// Register a read handler for a specific I/O port
-    /// 
+    ///
     /// # Arguments
     /// * `this_ptr` - Pointer to device instance
     /// * `handler` - Handler function
@@ -179,7 +179,11 @@ impl BxDevicesC {
         entry.this_ptr = this_ptr;
         entry.name = String::from(name);
         entry.mask = mask;
-        tracing::debug!("Registered I/O read handler for port {:#06x}: {}", port, name);
+        tracing::debug!(
+            "Registered I/O read handler for port {:#06x}: {}",
+            port,
+            name
+        );
     }
 
     /// Register a write handler for a specific I/O port
@@ -196,7 +200,11 @@ impl BxDevicesC {
         entry.this_ptr = this_ptr;
         entry.name = String::from(name);
         entry.mask = mask;
-        tracing::debug!("Registered I/O write handler for port {:#06x}: {}", port, name);
+        tracing::debug!(
+            "Registered I/O write handler for port {:#06x}: {}",
+            port,
+            name
+        );
     }
 
     /// Register both read and write handlers for a port
@@ -214,11 +222,11 @@ impl BxDevicesC {
     }
 
     /// Read from an I/O port
-    /// 
+    ///
     /// # Arguments
     /// * `port` - I/O port address
     /// * `io_len` - Length of I/O operation (1, 2, or 4 bytes)
-    /// 
+    ///
     /// # Returns
     /// The value read from the port
     pub fn inp(&mut self, port: u16, io_len: u8) -> u32 {
@@ -246,14 +254,14 @@ impl BxDevicesC {
     }
 
     /// Write to an I/O port
-    /// 
+    ///
     /// # Arguments
     /// * `port` - I/O port address
     /// * `value` - Value to write
     /// * `io_len` - Length of I/O operation (1, 2, or 4 bytes)
     pub fn outp(&mut self, port: u16, value: u32, io_len: u8) {
         let entry = &self.write_handlers[port as usize];
-        
+
         if let Some(handler) = entry.write_handler {
             // Check if the requested I/O length is supported
             let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
@@ -262,7 +270,7 @@ impl BxDevicesC {
                 return;
             }
         }
-        
+
         // Default: ignore unhandled writes
         self.default_write_handler(port, value, io_len);
     }
@@ -275,7 +283,11 @@ impl BxDevicesC {
         if address == 0x00E9 {
             retval = 0xE9;
         } else {
-            tracing::trace!("Unhandled I/O read: port={:#06x}, len={} -> 0xFF..F", address, io_len);
+            tracing::trace!(
+                "Unhandled I/O read: port={:#06x}, len={} -> 0xFF..F",
+                address,
+                io_len
+            );
         }
 
         match io_len {
@@ -304,9 +316,7 @@ impl BxDevicesC {
         // - 0xE9: Bochs debug console (optional in upstream; always-on here)
         // - 0x402/0x403: Bochs rombios INFO/DEBUG ports (cpp_orig/bochs/bios/rombios.h)
         // - 0x500: VGABIOS info port (cpp_orig/bochs/bios/VGABIOS-lgpl-README)
-        if io_len == 1
-            && matches!(address, 0x00E9 | 0x0402 | 0x0403 | 0x0500)
-        {
+        if io_len == 1 && matches!(address, 0x00E9 | 0x0402 | 0x0403 | 0x0500) {
             tracing::debug!(
                 "BIOS output port {:#06x}: {:?}",
                 address,
@@ -376,13 +386,7 @@ mod tests {
         }
 
         // Register handler only on dev1
-        dev1.register_io_read_handler(
-            core::ptr::null_mut(),
-            custom_read,
-            0x100,
-            "test",
-            0x1,
-        );
+        dev1.register_io_read_handler(core::ptr::null_mut(), custom_read, 0x100, "test", 0x1);
 
         // dev1 should return custom value, dev2 should return default
         assert_eq!(dev1.inp(0x100, 1), 0x200);

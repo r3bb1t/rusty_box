@@ -11,8 +11,8 @@ pub struct SoftFloatStatus {
     pub softfloat_exceptionFlags: i32,
     pub softfloat_exceptionMasks: i32,
     pub softfloat_suppressException: i32,
-    pub softfloat_denormals_are_zeros: bool,
-    pub softfloat_flush_underflow_to_zero: bool,
+    pub(crate) softfloat_denormals_are_zeros: bool,
+    pub(crate) softfloat_flush_underflow_to_zero: bool,
     /// Rounding precision for 80-bit extended double-precision.
     /// Valid values are 32, 64, and 80.
     pub extF80_roundingPrecision: u8,
@@ -163,12 +163,18 @@ pub fn extf80_is_signaling_nan(a: floatx80) -> bool {
 
 #[inline]
 pub fn floatx80_chs(a: floatx80) -> floatx80 {
-    floatx80 { signif: a.signif, sign_exp: a.sign_exp ^ 0x8000 }
+    floatx80 {
+        signif: a.signif,
+        sign_exp: a.sign_exp ^ 0x8000,
+    }
 }
 
 #[inline]
 pub fn floatx80_abs(a: floatx80) -> floatx80 {
-    floatx80 { signif: a.signif, sign_exp: a.sign_exp & 0x7FFF }
+    floatx80 {
+        signif: a.signif,
+        sign_exp: a.sign_exp & 0x7FFF,
+    }
 }
 
 // f32 helpers
@@ -220,6 +226,5 @@ pub fn f64_is_nan(a: u64) -> bool {
 
 #[inline]
 pub fn f64_is_signaling_nan(a: u64) -> bool {
-    ((a & 0x7FF8000000000000) == 0x7FF0000000000000)
-        && ((a & 0x0007FFFFFFFFFFFF) != 0)
+    ((a & 0x7FF8000000000000) == 0x7FF0000000000000) && ((a & 0x0007FFFFFFFFFFFF) != 0)
 }

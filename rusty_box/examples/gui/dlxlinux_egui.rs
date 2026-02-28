@@ -13,7 +13,7 @@
 use rusty_box::{
     cpu::{core_i7_skylake::Corei7SkylakeX, ResetReason},
     emulator::{Emulator, EmulatorConfig},
-    gui::{BridgeGui, RustyBoxApp, shared_display::SharedDisplay},
+    gui::{shared_display::SharedDisplay, BridgeGui, RustyBoxApp},
     Result,
 };
 use std::sync::{Arc, Mutex};
@@ -70,10 +70,7 @@ fn main() {
 
     let disk_path = find_path(
         &workspace_root,
-        &[
-            "dlxlinux/hd10meg.img",
-            "../dlxlinux/hd10meg.img",
-        ],
+        &["dlxlinux/hd10meg.img", "../dlxlinux/hd10meg.img"],
     )
     .expect("Could not find DLX Linux disk image (hd10meg.img)");
     println!("Disk image: {}", disk_path.display());

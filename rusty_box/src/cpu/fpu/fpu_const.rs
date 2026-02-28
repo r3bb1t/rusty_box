@@ -5,17 +5,38 @@
 use super::super::cpu::BxCpuC;
 use super::super::cpuid::BxCpuIdTrait;
 use super::super::decoder::Instruction;
-use super::super::softfloat3e::softfloat_types::floatx80;
 use super::super::i387::{FPU_CW_RC, FPU_RC_DOWN, FPU_RC_UP};
+use super::super::softfloat3e::softfloat_types::floatx80;
 
 // Exact 80-bit constants from Bochs fpu_const.cc
-const CONST_Z:   floatx80 = floatx80 { signif: 0x0000000000000000, sign_exp: 0x0000 };
-const CONST_1:   floatx80 = floatx80 { signif: 0x8000000000000000, sign_exp: 0x3FFF };
-const CONST_L2T: floatx80 = floatx80 { signif: 0xD49A784BCD1B8AFE, sign_exp: 0x4000 };
-const CONST_L2E: floatx80 = floatx80 { signif: 0xB8AA3B295C17F0BC, sign_exp: 0x3FFF };
-const CONST_PI:  floatx80 = floatx80 { signif: 0xC90FDAA22168C235, sign_exp: 0x4000 };
-const CONST_LG2: floatx80 = floatx80 { signif: 0x9A209A84FBCFF799, sign_exp: 0x3FFD };
-const CONST_LN2: floatx80 = floatx80 { signif: 0xB17217F7D1CF79AC, sign_exp: 0x3FFE };
+const CONST_Z: floatx80 = floatx80 {
+    signif: 0x0000000000000000,
+    sign_exp: 0x0000,
+};
+const CONST_1: floatx80 = floatx80 {
+    signif: 0x8000000000000000,
+    sign_exp: 0x3FFF,
+};
+const CONST_L2T: floatx80 = floatx80 {
+    signif: 0xD49A784BCD1B8AFE,
+    sign_exp: 0x4000,
+};
+const CONST_L2E: floatx80 = floatx80 {
+    signif: 0xB8AA3B295C17F0BC,
+    sign_exp: 0x3FFF,
+};
+const CONST_PI: floatx80 = floatx80 {
+    signif: 0xC90FDAA22168C235,
+    sign_exp: 0x4000,
+};
+const CONST_LG2: floatx80 = floatx80 {
+    signif: 0x9A209A84FBCFF799,
+    sign_exp: 0x3FFD,
+};
+const CONST_LN2: floatx80 = floatx80 {
+    signif: 0xB17217F7D1CF79AC,
+    sign_exp: 0x3FFE,
+};
 
 /// Adjust constant for rounding: add `adj` to significand.
 /// Used for transcendental constants that are not exactly representable.
@@ -43,7 +64,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !self.is_tag_empty(-1) {
             self.fpu_stack_overflow(instr);
         } else {
-            let adj = if (self.the_i387.get_control_word() & FPU_CW_RC) == FPU_RC_UP { 1 } else { 0 };
+            let adj = if (self.the_i387.get_control_word() & FPU_CW_RC) == FPU_RC_UP {
+                1
+            } else {
+                0
+            };
             self.the_i387.fpu_push();
             self.write_fpu_reg(fpu_round_const(CONST_L2T, adj), 0);
         }
@@ -59,7 +84,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !self.is_tag_empty(-1) {
             self.fpu_stack_overflow(instr);
         } else {
-            let adj = if down_or_chop(self.the_i387.get_control_word()) { -1 } else { 0 };
+            let adj = if down_or_chop(self.the_i387.get_control_word()) {
+                -1
+            } else {
+                0
+            };
             self.the_i387.fpu_push();
             self.write_fpu_reg(fpu_round_const(CONST_L2E, adj), 0);
         }
@@ -75,7 +104,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !self.is_tag_empty(-1) {
             self.fpu_stack_overflow(instr);
         } else {
-            let adj = if down_or_chop(self.the_i387.get_control_word()) { -1 } else { 0 };
+            let adj = if down_or_chop(self.the_i387.get_control_word()) {
+                -1
+            } else {
+                0
+            };
             self.the_i387.fpu_push();
             self.write_fpu_reg(fpu_round_const(CONST_PI, adj), 0);
         }
@@ -91,7 +124,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !self.is_tag_empty(-1) {
             self.fpu_stack_overflow(instr);
         } else {
-            let adj = if down_or_chop(self.the_i387.get_control_word()) { -1 } else { 0 };
+            let adj = if down_or_chop(self.the_i387.get_control_word()) {
+                -1
+            } else {
+                0
+            };
             self.the_i387.fpu_push();
             self.write_fpu_reg(fpu_round_const(CONST_LG2, adj), 0);
         }
@@ -107,7 +144,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !self.is_tag_empty(-1) {
             self.fpu_stack_overflow(instr);
         } else {
-            let adj = if down_or_chop(self.the_i387.get_control_word()) { -1 } else { 0 };
+            let adj = if down_or_chop(self.the_i387.get_control_word()) {
+                -1
+            } else {
+                0
+            };
             self.the_i387.fpu_push();
             self.write_fpu_reg(fpu_round_const(CONST_LN2, adj), 0);
         }

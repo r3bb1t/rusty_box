@@ -1068,12 +1068,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Note: callers must ensure the memory bus is wired (`mem_bus` set) so that
     /// stack pushes and IVT/IDT reads work correctly.
     pub(crate) fn inject_external_interrupt(&mut self, vector: u8) -> Result<()> {
+        let rip_before = self.rip();
+        let cs_before = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
+
         // Wake from halt/wait state.
         self.activity_state = CpuActivityState::Active;
         // Clear stop-trace so execution can resume.
         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
 
-        if self.real_mode() {
+        let result = if self.real_mode() {
             // Real-mode external interrupts use the IVT at 0000:0000.
             self.interrupt_real_mode(vector)?;
             Ok(())
@@ -1081,7 +1084,35 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // Protected-mode external interrupts go through the IDT gate.
             // `soft_int=false`, no error code pushed for external IRQs.
             self.protected_mode_int(vector, false, false, 0)
+        };
+
+        // One-shot diagnostic: capture first few timer interrupts after 200M
+        if vector == 0x20 && self.icount > 200_000_000 {
+            // Use diag_timer_int_logged counter (bits of async_event are cleared by now)
+            static mut TIMER_DIAG_COUNT: u32 = 0;
+            let count = unsafe {
+                TIMER_DIAG_COUNT += 1;
+                TIMER_DIAG_COUNT
+            };
+            if count <= 5 || count % 1000 == 0 {
+                let rip_after = self.rip();
+                let cs_after = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
+                eprintln!(
+                    "DIAG-TIMER #{}: ok={} RIP {:#x}->{:#x} CS {:#06x}->{:#06x} ESP={:#x} IF={} icount={}",
+                    count,
+                    result.is_ok(),
+                    rip_before,
+                    rip_after,
+                    cs_before,
+                    cs_after,
+                    self.esp(),
+                    self.get_b_if(),
+                    self.icount,
+                );
+            }
         }
+
+        result
     }
 
     /// True if the CPU is halted or waiting for an event.
