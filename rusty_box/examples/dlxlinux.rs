@@ -492,6 +492,57 @@ fn run_dlxlinux() -> Result<()> {
     );
     println!("╚════════════════════════════════════════════════════════════╝");
 
+    // GDT diagnostic dump: show GDTR, segment bases, and raw GDT entries
+    {
+        let gdtr_base = emu.cpu.get_gdtr_base();
+        let gdtr_limit = emu.cpu.get_gdtr_limit();
+        let cs_base = emu.cpu.get_cs_base();
+        let ds_base = emu.cpu.get_ds_base();
+        let ss_base = emu.cpu.get_ss_base();
+        let cs_sel = emu.cpu.get_cs_selector();
+        let ds_sel = emu.cpu.get_ds_selector();
+        let ss_sel = emu.cpu.get_ss_selector();
+        let cr3 = emu.cpu.get_cr3_val();
+        println!();
+        println!("===== GDT DIAGNOSTIC =====");
+        println!("GDTR: base={:#010x} limit={:#06x}  CR3={:#010x}", gdtr_base, gdtr_limit, cr3);
+        println!("CS={:#06x} base={:#010x}  DS={:#06x} base={:#010x}  SS={:#06x} base={:#010x}",
+            cs_sel, cs_base, ds_sel, ds_base, ss_sel, ss_base);
+
+        // If GDTR.base looks like a high virtual address (e.g. 0xC0xxxxxx),
+        // compute the expected physical address
+        let gdt_phys_base = if gdtr_base >= 0xC0000000 {
+            (gdtr_base - 0xC0000000) as usize
+        } else {
+            gdtr_base as usize
+        };
+
+        // Dump first 8 GDT entries (64 bytes) from physical RAM
+        println!("GDT entries at physical {:#010x}:", gdt_phys_base);
+        let num_entries = std::cmp::min((gdtr_limit as usize + 1) / 8, 32);
+        for i in 0..num_entries {
+            let entry_addr = gdt_phys_base + i * 8;
+            let bytes = emu.peek_ram_at(entry_addr, 8);
+            if bytes.len() == 8 {
+                let dword1 = u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]);
+                let dword2 = u32::from_le_bytes([bytes[4], bytes[5], bytes[6], bytes[7]]);
+                // Decode base and limit
+                let limit = (dword1 & 0xFFFF) | ((dword2 & 0x000F0000) as u32);
+                let base = ((dword1 >> 16) as u64) | (((dword2 & 0xFF) as u64) << 16) | ((dword2 & 0xFF000000) as u64);
+                let g = (dword2 & 0x00800000) != 0;
+                let d_b = (dword2 & 0x00400000) != 0;
+                let p = (dword2 >> 15) & 1;
+                let dpl = (dword2 >> 13) & 3;
+                let s = (dword2 >> 12) & 1;
+                let ty = (dword2 >> 8) & 0xF;
+                let limit_scaled = if g { (limit << 12) | 0xFFF } else { limit };
+                println!("  GDT[{}] raw={:#010x}_{:#010x}  base={:#010x} limit={:#010x} P={} DPL={} S={} type={:#x} G={} D/B={}",
+                    i, dword2, dword1, base, limit_scaled, p, dpl, s, ty, g as u8, d_b as u8);
+            }
+        }
+        println!("===== END GDT DIAGNOSTIC =====");
+    }
+
     // Cleanup: restore terminal if GUI was used
     if let Some(ref mut gui) = emu.gui_mut() {
         gui.exit();
@@ -507,7 +558,10 @@ fn run_dlxlinux() -> Result<()> {
         // BIOS POST codes: show count and last 32 bytes only
         let post = emu.devices.take_port80_output();
         if !post.is_empty() {
-            print!("===== BIOS POST CODES (port 0x80/0x84): {} total =====\n", post.len());
+            print!(
+                "===== BIOS POST CODES (port 0x80/0x84): {} total =====\n",
+                post.len()
+            );
             let start = post.len().saturating_sub(32);
             for (i, b) in post[start..].iter().enumerate() {
                 if i != 0 && (i % 16) == 0 {

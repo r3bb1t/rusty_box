@@ -31,29 +31,7 @@ use super::super::softfloat3e::specialize::*;
 use super::ferr::i387cw_to_softfloat_status_word;
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
-    // =========================================================================
-    // Virtual memory helpers for 64-bit (qword) access
-    // =========================================================================
-
-    /// Read a qword (u64) from virtual memory.
-    pub(crate) fn read_virtual_qword(&mut self, seg: BxSegregs, eaddr: u32) -> super::super::Result<u64> {
-        let laddr = self.get_laddr32_seg_checked(seg, eaddr, 8)? as u64;
-        let paddr = self.translate_data_read(laddr)?;
-        Ok(self.mem_read_qword(paddr))
-    }
-
-    /// Write a qword (u64) to virtual memory.
-    pub(crate) fn write_virtual_qword(
-        &mut self,
-        seg: BxSegregs,
-        eaddr: u32,
-        val: u64,
-    ) -> super::super::Result<()> {
-        let laddr = self.get_laddr32_seg_checked(seg, eaddr, 8)? as u64;
-        let paddr = self.translate_data_write(laddr)?;
-        self.mem_write_qword(paddr, val);
-        Ok(())
-    }
+    // read_virtual_qword and write_virtual_qword are defined in access.rs
 
     // =========================================================================
     // FLD — Load to FPU stack
@@ -114,8 +92,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let result = f32_to_extf80(load_reg, &mut status);
 
-        let unmasked =
-            self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false);
+        let unmasked = self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false);
         if (unmasked & (FPU_CW_INVALID as u32)) == 0 {
             self.the_i387.fpu_push();
             self.write_fpu_reg(result, 0);
@@ -146,8 +123,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let result = f64_to_extf80(load_reg, &mut status);
 
-        let unmasked =
-            self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false);
+        let unmasked = self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false);
         if (unmasked & (FPU_CW_INVALID as u32)) == 0 {
             self.the_i387.fpu_push();
             self.write_fpu_reg(result, 0);
@@ -167,10 +143,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let sign_exp_addr = eaddr.wrapping_add(8);
         let sign_exp = self.read_virtual_word(seg, sign_exp_addr)?;
 
-        let result = floatx80 {
-            signif,
-            sign_exp,
-        };
+        let result = floatx80 { signif, sign_exp };
 
         self.fpu_update_last_instruction(instr);
 
@@ -381,8 +354,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return Ok(());
             }
         } else {
-            let mut status =
-                i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+            let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
             save_reg = extf80_to_f32(self.read_fpu_reg(0), &mut status);
 
@@ -440,8 +412,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return Ok(());
             }
         } else {
-            let mut status =
-                i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+            let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
             save_reg = extf80_to_f64(self.read_fpu_reg(0), &mut status);
 
@@ -534,8 +505,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return Ok(());
             }
         } else {
-            let mut status =
-                i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+            let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
             save_reg = extf80_to_i16(self.read_fpu_reg(0), &mut status);
 
@@ -592,8 +562,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return Ok(());
             }
         } else {
-            let mut status =
-                i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+            let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
             save_reg = extf80_to_i32(
                 self.read_fpu_reg(0),
@@ -653,8 +622,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return Ok(());
             }
         } else {
-            let mut status =
-                i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+            let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
             save_reg = extf80_to_i64(
                 self.read_fpu_reg(0),
@@ -714,16 +682,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return Ok(());
             }
         } else {
-            let mut status =
-                i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+            let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
             let reg = self.read_fpu_reg(0);
-            let mut save_val = extf80_to_i64(
-                reg,
-                status.softfloat_roundingMode,
-                true,
-                &mut status,
-            );
+            let mut save_val = extf80_to_i64(reg, status.softfloat_roundingMode, true, &mut status);
 
             let sign = extf80_sign(reg);
             if sign {
@@ -803,8 +765,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return Ok(());
             }
         } else {
-            let mut status =
-                i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+            let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
             save_reg = extf80_to_i16_round_to_zero(self.read_fpu_reg(0), &mut status);
 
@@ -849,8 +810,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return Ok(());
             }
         } else {
-            let mut status =
-                i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+            let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
             save_reg = extf80_to_i32_round_to_zero(self.read_fpu_reg(0), true, &mut status);
 
@@ -895,8 +855,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return Ok(());
             }
         } else {
-            let mut status =
-                i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
+            let mut status = i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
             save_reg = extf80_to_i64_round_to_zero(self.read_fpu_reg(0), true, &mut status);
 

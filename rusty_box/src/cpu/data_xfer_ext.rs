@@ -10,7 +10,7 @@ use alloc::string::ToString;
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{Instruction, BxSegregs},
+    decoder::{BxSegregs, Instruction},
     eflags::EFlags,
     error::Result,
 };
@@ -115,14 +115,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XCHG r/m8, r8 - Unified dispatch based on mod_c0()
     pub fn xchg_eb_gb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.xchg_eb_gb(instr); Ok(()) }
-        else { self.xchg_eb_gb_m(instr) }
+        if instr.mod_c0() {
+            self.xchg_eb_gb(instr);
+            Ok(())
+        } else {
+            self.xchg_eb_gb_m(instr)
+        }
     }
 
     /// XCHG r/m16, r16 - Unified dispatch based on mod_c0()
     pub fn xchg_ew_gw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.xchg_ew_gw(instr); Ok(()) }
-        else { self.xchg_ew_gw_m(instr) }
+        if instr.mod_c0() {
+            self.xchg_ew_gw(instr);
+            Ok(())
+        } else {
+            self.xchg_ew_gw_m(instr)
+        }
     }
 
     // =========================================================================
@@ -260,14 +268,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XLAT - Translate byte (AL = [BX+AL])
     pub fn xlat(&mut self, _instr: &Instruction) {
-        let bx = self.bx() as u64;
-        let al = self.al() as u64;
-        let ds_base = self.get_segment_base(BxSegregs::Ds);
-        let addr = ds_base.wrapping_add(bx).wrapping_add(al);
+        let bx = self.ebx();
+        let al = self.al() as u32;
+        let eaddr = bx.wrapping_add(al);
 
-        let new_al = self.mem_read_byte(addr);
-        self.set_al(new_al);
-        tracing::trace!("XLAT: [BX+AL] = [{}+{}] = {:#04x}", bx, al, new_al);
+        if let Ok(new_al) = self.read_virtual_byte(BxSegregs::Ds, eaddr) {
+            self.set_al(new_al);
+            tracing::trace!("XLAT: [BX+AL] = [{:#x}+{:#x}] = {:#04x}", bx, al, new_al);
+        }
     }
 
     // =========================================================================
@@ -325,8 +333,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Opcode 0x89 (16-bit): decoder swaps: meta_data[0] = rm (DEST), meta_data[1] = nnn (SOURCE)
     pub fn mov_ew_gw_r(&mut self, instr: &Instruction) {
         let val = self.get_gpr16(instr.meta_data[1] as usize); // nnn = source
-        self.set_gpr16(instr.meta_data[0] as usize, val);      // rm = destination
-        tracing::trace!("MOV16: reg{} = reg{} ({:#06x})", instr.meta_data[0], instr.meta_data[1], val);
+        self.set_gpr16(instr.meta_data[0] as usize, val); // rm = destination
+        tracing::trace!(
+            "MOV16: reg{} = reg{} ({:#06x})",
+            instr.meta_data[0],
+            instr.meta_data[1],
+            val
+        );
     }
 
     /// MOV r8, r/m8 (register to register)
@@ -342,8 +355,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Opcode 0x88: 8-bit does NOT match decoder swap — meta_data[0]=nnn=source, meta_data[1]=rm=dest
     pub fn mov_eb_gb_r(&mut self, instr: &Instruction) {
         let val = self.get_gpr8(instr.meta_data[0] as usize); // nnn = source
-        self.set_gpr8(instr.meta_data[1] as usize, val);      // rm = destination
-        tracing::trace!("MOV8: reg{} = reg{} ({:#04x})", instr.meta_data[1], instr.meta_data[0], val);
+        self.set_gpr8(instr.meta_data[1] as usize, val); // rm = destination
+        tracing::trace!(
+            "MOV8: reg{} = reg{} ({:#04x})",
+            instr.meta_data[1],
+            instr.meta_data[0],
+            val
+        );
     }
 
     // =========================================================================
@@ -430,13 +448,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Helper functions for 8-bit memory operations
     // =========================================================================
 
-    /// Write byte to virtual address (translates through page tables when paging is enabled).
-    pub fn write_virtual_byte(&mut self, seg: BxSegregs, eaddr: u32, val: u8) -> super::Result<()> {
-        let laddr = self.get_laddr32_seg_checked(seg, eaddr, 1)? as u64;
-        let paddr = self.translate_data_write(laddr)?;
-        self.mem_write_byte(paddr, val);
-        Ok(())
-    }
+    // write_virtual_byte is defined in access.rs
 
     // write_8bit_regx is defined in logical8.rs to avoid duplicate definitions
 
@@ -449,7 +461,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOVZX r16, r/m8 — unified dispatch (register or memory form)
     pub fn movzx_gw_eb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.movzx_gw_eb_r(instr); Ok(()) } else { self.movzx_gw_eb_m(instr) }
+        if instr.mod_c0() {
+            self.movzx_gw_eb_r(instr);
+            Ok(())
+        } else {
+            self.movzx_gw_eb_m(instr)
+        }
     }
 
     /// MOVZX r32, r/m8 - Move with zero-extend
@@ -470,7 +487,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOVSX r16, r/m8 — unified dispatch (register or memory form)
     pub fn movsx_gw_eb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.movsx_gw_eb_r(instr); Ok(()) } else { self.movsx_gw_eb_m(instr) }
+        if instr.mod_c0() {
+            self.movsx_gw_eb_r(instr);
+            Ok(())
+        } else {
+            self.movsx_gw_eb_m(instr)
+        }
     }
 
     /// MOVSX r32, r/m8 - Move with sign-extend (legacy meta_data form, superseded by _r/_m variants)
@@ -537,7 +559,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr16(dst_reg, val16);
         tracing::trace!(
             "MOV16 mem: reg{} = [{:?}:{:#x}] ({:#06x})",
-            dst_reg, seg, eaddr, val16
+            dst_reg,
+            seg,
+            eaddr,
+            val16
         );
         Ok(())
     }
@@ -814,16 +839,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Helper functions for 16-bit memory operations
     // =========================================================================
 
-    /// Write word to virtual address (translates through page tables when paging is enabled).
-    pub(super) fn write_virtual_word(&mut self, seg: BxSegregs, eaddr: u32, val: u16) -> super::Result<()> {
-        let laddr = self.get_laddr32_seg_checked(seg, eaddr, 2)? as u64;
-        let paddr = self.translate_data_write(laddr)?;
-        self.mem_write_word(paddr, val);
-        Ok(())
-    }
+    // write_virtual_word is defined in access.rs
 
-    /// Read word from virtual address (matches read_virtual_word)
-    // read_virtual_word is defined in logical16.rs to avoid duplicate definitions
+    // read_virtual_word is defined in access.rs
 
     // read_rmw_virtual_word is defined in logical16.rs to avoid duplicate definitions
 
@@ -1333,15 +1351,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Helper functions for 32-bit memory operations
     // =========================================================================
 
-    /// Write dword to virtual address (translates through page tables when paging is enabled).
-    pub(super) fn write_virtual_dword(&mut self, seg: BxSegregs, eaddr: u32, val: u32) -> super::Result<()> {
-        let laddr = self.get_laddr32_seg_checked(seg, eaddr, 4)? as u64;
-        let paddr = self.translate_data_write(laddr)?;
-        self.mem_write_dword(paddr, val);
-        Ok(())
-    }
+    // write_virtual_dword is defined in access.rs
 
-    // read_virtual_dword is defined in logical32.rs to avoid duplicate definitions
+    // read_virtual_dword is defined in access.rs
 
     // Helper methods (read_rmw_virtual_dword, write_rmw_linear_dword) are defined in logical32.rs to avoid duplicate definitions
 
@@ -1353,44 +1365,84 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r8, r/m8 - unified dispatch
     pub fn mov_gb_eb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.mov_gb_eb_r(instr); Ok(()) } else { self.mov_gb_eb_m(instr) }
+        if instr.mod_c0() {
+            self.mov_gb_eb_r(instr);
+            Ok(())
+        } else {
+            self.mov_gb_eb_m(instr)
+        }
     }
 
     /// MOV r/m8, r8 - unified dispatch
     pub fn mov_eb_gb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.mov_eb_gb_r(instr); Ok(()) } else { self.mov_eb_gb_m(instr) }
+        if instr.mod_c0() {
+            self.mov_eb_gb_r(instr);
+            Ok(())
+        } else {
+            self.mov_eb_gb_m(instr)
+        }
     }
 
     /// MOV r/m8, imm8 - unified dispatch
     /// Note: R form is mov_rb_ib (different naming convention)
     pub fn mov_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.mov_rb_ib(instr); Ok(()) } else { self.mov_eb_ib_m(instr) }
+        if instr.mod_c0() {
+            self.mov_rb_ib(instr);
+            Ok(())
+        } else {
+            self.mov_eb_ib_m(instr)
+        }
     }
 
     /// MOV r16, r/m16 - unified dispatch
     pub fn mov_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.mov_gw_ew_r(instr); Ok(()) } else { self.mov_gw_ew_m(instr) }
+        if instr.mod_c0() {
+            self.mov_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.mov_gw_ew_m(instr)
+        }
     }
 
     /// MOV r/m16, r16 - unified dispatch
     pub fn mov_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.mov_ew_gw_r(instr); Ok(()) } else { self.mov_ew_gw_m(instr) }
+        if instr.mod_c0() {
+            self.mov_ew_gw_r(instr);
+            Ok(())
+        } else {
+            self.mov_ew_gw_m(instr)
+        }
     }
 
     /// MOV r/m16, imm16 - unified dispatch
     /// Note: R form is mov_rw_iw (different naming convention)
     pub fn mov_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.mov_rw_iw(instr); Ok(()) } else { self.mov_ew_iw_m(instr) }
+        if instr.mod_c0() {
+            self.mov_rw_iw(instr);
+            Ok(())
+        } else {
+            self.mov_ew_iw_m(instr)
+        }
     }
 
     /// MOVSX r32, r/m8 - unified dispatch
     pub fn movsx_gd_eb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.movsx_gd_eb_r(instr); Ok(()) } else { self.movsx_gd_eb_m(instr) }
+        if instr.mod_c0() {
+            self.movsx_gd_eb_r(instr);
+            Ok(())
+        } else {
+            self.movsx_gd_eb_m(instr)
+        }
     }
 
     /// MOVSX r32, r/m16 - unified dispatch
     pub fn movsx_gd_ew(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.movsx_gd_ew_r(instr); Ok(()) } else { self.movsx_gd_ew_m(instr) }
+        if instr.mod_c0() {
+            self.movsx_gd_ew_r(instr);
+            Ok(())
+        } else {
+            self.movsx_gd_ew_m(instr)
+        }
     }
 
     // =========================================================================

@@ -5,7 +5,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{Instruction, BxSegregs},
+    decoder::{BxSegregs, Instruction},
     eflags::EFlags,
 };
 
@@ -73,7 +73,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let pf = (result as u8).count_ones() % 2 == 0;
 
         // CF is not affected by INC
-        const OSZAP: EFlags = EFlags::PF.union(EFlags::AF).union(EFlags::ZF).union(EFlags::SF).union(EFlags::OF);
+        const OSZAP: EFlags = EFlags::PF
+            .union(EFlags::AF)
+            .union(EFlags::ZF)
+            .union(EFlags::SF)
+            .union(EFlags::OF);
         self.eflags.remove(OSZAP);
 
         if pf {
@@ -101,7 +105,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
         let pf = (result as u8).count_ones() % 2 == 0;
 
-        const OSZAP: EFlags = EFlags::PF.union(EFlags::AF).union(EFlags::ZF).union(EFlags::SF).union(EFlags::OF);
+        const OSZAP: EFlags = EFlags::PF
+            .union(EFlags::AF)
+            .union(EFlags::ZF)
+            .union(EFlags::SF)
+            .union(EFlags::OF);
         self.eflags.remove(OSZAP);
 
         if pf {
@@ -252,8 +260,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// AND_EwGwR: AND r/m16, r16 (register form, store-direction)
     /// Opcode 0x21: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
     pub fn and_ew_gw_r(&mut self, instr: &Instruction) {
-        let op1 = self.get_gpr16(instr.meta_data[0] as usize);  // rm = destination
-        let op2 = self.get_gpr16(instr.meta_data[1] as usize);  // nnn = source
+        let op1 = self.get_gpr16(instr.meta_data[0] as usize); // rm = destination
+        let op2 = self.get_gpr16(instr.meta_data[1] as usize); // nnn = source
         let result = op1 & op2;
         self.set_gpr16(instr.meta_data[0] as usize, result);
         self.set_flags_oszapc_logic_16(result);
@@ -297,8 +305,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// XOR_EwGwR: XOR r/m16, r16 (register form, store-direction)
     /// Opcode 0x31: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
     pub fn xor_ew_gw_r(&mut self, instr: &Instruction) {
-        let op1 = self.get_gpr16(instr.meta_data[0] as usize);  // rm = destination
-        let op2 = self.get_gpr16(instr.meta_data[1] as usize);  // nnn = source
+        let op1 = self.get_gpr16(instr.meta_data[0] as usize); // rm = destination
+        let op2 = self.get_gpr16(instr.meta_data[1] as usize); // nnn = source
         let result = op1 ^ op2;
         self.set_gpr16(instr.meta_data[0] as usize, result);
         self.set_flags_oszapc_logic_16(result);
@@ -333,8 +341,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// OR_EwGwR: OR r/m16, r16 (register form, store-direction)
     /// Opcode 0x09: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
     pub fn or_ew_gw_r(&mut self, instr: &Instruction) {
-        let op1 = self.get_gpr16(instr.meta_data[0] as usize);  // rm = destination
-        let op2 = self.get_gpr16(instr.meta_data[1] as usize);  // nnn = source
+        let op1 = self.get_gpr16(instr.meta_data[0] as usize); // rm = destination
+        let op2 = self.get_gpr16(instr.meta_data[1] as usize); // nnn = source
         let result = op1 | op2;
         self.set_gpr16(instr.meta_data[0] as usize, result);
         self.set_flags_oszapc_logic_16(result);
@@ -378,21 +386,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // resolve_addr32 is defined in logical8.rs to avoid duplicate definitions
 
     // get_laddr32_seg is defined in logical8.rs to avoid duplicate definitions
-
-    /// Read word from virtual address (translates through page tables when paging is enabled).
-    pub fn read_virtual_word(&mut self, seg: BxSegregs, eaddr: u32) -> super::Result<u16> {
-        let laddr = self.get_laddr32_seg_checked(seg, eaddr, 2)? as u64;
-        let paddr = self.translate_data_read(laddr)?;
-        Ok(self.mem_read_word(paddr))
-    }
-
-    /// Read-Modify-Write: Read word, return value and physical address for write back.
-    pub fn read_rmw_virtual_word(&mut self, seg: BxSegregs, eaddr: u32) -> super::Result<(u16, u64)> {
-        let laddr = self.get_laddr32_seg_checked(seg, eaddr, 2)? as u64;
-        let paddr = self.translate_data_write(laddr)?;
-        let val = self.mem_read_word(paddr);
-        Ok((val, paddr))
-    }
 
     /// Write word to a previously-translated physical address (RMW write-back).
     pub fn write_rmw_linear_word(&mut self, paddr: u64, val: u16) {
@@ -673,45 +666,115 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     pub fn xor_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.xor_ew_gw_r(instr); Ok(()) } else { self.xor_ew_gw_m(instr) }
+        if instr.mod_c0() {
+            self.xor_ew_gw_r(instr);
+            Ok(())
+        } else {
+            self.xor_ew_gw_m(instr)
+        }
     }
     pub fn xor_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.xor_gw_ew_r(instr); Ok(()) } else { self.xor_gw_ew_m(instr) }
+        if instr.mod_c0() {
+            self.xor_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.xor_gw_ew_m(instr)
+        }
     }
     pub fn xor_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.xor_ew_iw_r(instr); Ok(()) } else { self.xor_ew_iw_m(instr) }
+        if instr.mod_c0() {
+            self.xor_ew_iw_r(instr);
+            Ok(())
+        } else {
+            self.xor_ew_iw_m(instr)
+        }
     }
     pub fn and_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.and_ew_gw_r(instr); Ok(()) } else { self.and_ew_gw_m(instr) }
+        if instr.mod_c0() {
+            self.and_ew_gw_r(instr);
+            Ok(())
+        } else {
+            self.and_ew_gw_m(instr)
+        }
     }
     pub fn and_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.and_gw_ew_r(instr); Ok(()) } else { self.and_gw_ew_m(instr) }
+        if instr.mod_c0() {
+            self.and_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.and_gw_ew_m(instr)
+        }
     }
     pub fn and_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.and_ew_iw_r(instr); Ok(()) } else { self.and_ew_iw_m(instr) }
+        if instr.mod_c0() {
+            self.and_ew_iw_r(instr);
+            Ok(())
+        } else {
+            self.and_ew_iw_m(instr)
+        }
     }
     pub fn or_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.or_ew_gw_r(instr); Ok(()) } else { self.or_ew_gw_m(instr) }
+        if instr.mod_c0() {
+            self.or_ew_gw_r(instr);
+            Ok(())
+        } else {
+            self.or_ew_gw_m(instr)
+        }
     }
     pub fn or_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.or_gw_ew_r(instr); Ok(()) } else { self.or_gw_ew_m(instr) }
+        if instr.mod_c0() {
+            self.or_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.or_gw_ew_m(instr)
+        }
     }
     pub fn or_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.or_ew_iw_r(instr); Ok(()) } else { self.or_ew_iw_m(instr) }
+        if instr.mod_c0() {
+            self.or_ew_iw_r(instr);
+            Ok(())
+        } else {
+            self.or_ew_iw_m(instr)
+        }
     }
     pub fn not_ew(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.not_ew_r(instr); Ok(()) } else { self.not_ew_m(instr) }
+        if instr.mod_c0() {
+            self.not_ew_r(instr);
+            Ok(())
+        } else {
+            self.not_ew_m(instr)
+        }
     }
     pub fn test_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.test_ew_gw_r(instr); Ok(()) } else { self.test_ew_gw_m(instr) }
+        if instr.mod_c0() {
+            self.test_ew_gw_r(instr);
+            Ok(())
+        } else {
+            self.test_ew_gw_m(instr)
+        }
     }
     pub fn test_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.test_ew_iw_r(instr); Ok(()) } else { self.test_ew_iw_m(instr) }
+        if instr.mod_c0() {
+            self.test_ew_iw_r(instr);
+            Ok(())
+        } else {
+            self.test_ew_iw_m(instr)
+        }
     }
     pub fn cmp_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.cmp_gw_ew_r(instr); Ok(()) } else { self.cmp_gw_ew_m(instr) }
+        if instr.mod_c0() {
+            self.cmp_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmp_gw_ew_m(instr)
+        }
     }
     pub fn cmp_ew_iw(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.cmp_ew_iw_r(instr); Ok(()) } else { self.cmp_ew_iw_m(instr) }
+        if instr.mod_c0() {
+            self.cmp_ew_iw_r(instr);
+            Ok(())
+        } else {
+            self.cmp_ew_iw_m(instr)
+        }
     }
 }

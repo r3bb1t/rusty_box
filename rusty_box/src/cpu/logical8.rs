@@ -5,7 +5,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::{Instruction, BxSegregs},
+    decoder::{BxSegregs, Instruction},
     eflags::EFlags,
 };
 
@@ -25,9 +25,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.eflags.remove(EFlags::LOGIC_MASK);
 
-        if pf { self.eflags.insert(EFlags::PF); }
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if sf { self.eflags.insert(EFlags::SF); }
+        if pf {
+            self.eflags.insert(EFlags::PF);
+        }
+        if zf {
+            self.eflags.insert(EFlags::ZF);
+        }
+        if sf {
+            self.eflags.insert(EFlags::SF);
+        }
         // OF=0, CF=0 are already cleared
     }
 
@@ -42,12 +48,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.eflags.remove(EFlags::OSZAPC);
 
-        if cf { self.eflags.insert(EFlags::CF); }
-        if pf { self.eflags.insert(EFlags::PF); }
-        if af { self.eflags.insert(EFlags::AF); }
-        if zf { self.eflags.insert(EFlags::ZF); }
-        if sf { self.eflags.insert(EFlags::SF); }
-        if of { self.eflags.insert(EFlags::OF); }
+        if cf {
+            self.eflags.insert(EFlags::CF);
+        }
+        if pf {
+            self.eflags.insert(EFlags::PF);
+        }
+        if af {
+            self.eflags.insert(EFlags::AF);
+        }
+        if zf {
+            self.eflags.insert(EFlags::ZF);
+        }
+        if sf {
+            self.eflags.insert(EFlags::SF);
+        }
+        if of {
+            self.eflags.insert(EFlags::OF);
+        }
     }
 
     // =========================================================================
@@ -68,6 +86,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_flags_oszapc_logic_8(result);
     }
 
+    /// XOR_ALIb: XOR AL, imm8
+    /// Dedicated handler for opcode 0x34 - accumulator-immediate form
+    /// Must hardcode AL (register 0) because the decoder sets dst from opcode
+    /// low bits (b1 & 7 = 4 for opcode 0x34), which would be AH, not AL.
+    pub fn xor_al_ib(&mut self, instr: &Instruction) {
+        let op1 = self.get_gpr8(0); // AL
+        let op2 = instr.ib();
+        let result = op1 ^ op2;
+
+        self.set_gpr8(0, result); // AL
+        self.set_flags_oszapc_logic_8(result);
+    }
+
     /// XOR_GbEbR: XOR r8, r/m8 (register form)
     /// Matches BX_CPU_C::XOR_GbEbR
     pub fn xor_gb_eb_r(&mut self, instr: &Instruction) {
@@ -77,7 +108,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_8bit_regx(dst, extend8bit_l);
         let op2 = self.read_8bit_regx(src, extend8bit_l);
         let result = op1 ^ op2;
-        
+
         self.write_8bit_regx(dst, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
     }
@@ -86,8 +117,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Opcode 0x30: reg (meta_data[0]) = SOURCE, rm (meta_data[1]) = DESTINATION
     pub fn xor_eb_gb_r(&mut self, instr: &Instruction) {
         let extend8bit_l = instr.extend8bit_l();
-        let op1 = self.read_8bit_regx(instr.meta_data[1] as usize, extend8bit_l);  // rm = destination
-        let op2 = self.read_8bit_regx(instr.meta_data[0] as usize, extend8bit_l);  // reg = source
+        let op1 = self.read_8bit_regx(instr.meta_data[1] as usize, extend8bit_l); // rm = destination
+        let op2 = self.read_8bit_regx(instr.meta_data[0] as usize, extend8bit_l); // reg = source
         let result = op1 ^ op2;
         self.write_8bit_regx(instr.meta_data[1] as usize, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
@@ -148,48 +179,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
-    /// Get linear address from segment and offset
-    pub fn get_laddr32_seg(&self, seg: BxSegregs, offset: u32) -> u32 {
-        let seg_base = self.get_segment_base(seg);
-        (seg_base.wrapping_add(offset as u64)) as u32
-    }
-
-    /// Get linear address with segment limit check.
-    /// In protected mode with non-flat segments, offset must be <= limit_scaled.
-    /// For flat segments (limit_scaled == 0xFFFFFFFF), the check always passes.
-    /// Matching Bochs access32.cc agen_read32/agen_write32 segment limit checks.
-    pub fn get_laddr32_seg_checked(&mut self, seg: BxSegregs, offset: u32, len: u32) -> super::Result<u32> {
-        let limit = self.get_segment_limit(seg);
-        // Fast path: flat segment (limit_scaled == 0xFFFFFFFF) — all offsets pass
-        if limit != 0xFFFFFFFF && !self.real_mode() {
-            // Check if access extends beyond segment limit
-            let end_offset = offset.wrapping_add(len.wrapping_sub(1));
-            if offset > limit || end_offset > limit {
-                self.exception(super::cpu::Exception::Gp, 0)?;
-            }
-        }
-        let seg_base = self.get_segment_base(seg);
-        Ok((seg_base.wrapping_add(offset as u64)) as u32)
-    }
-
-    /// Read-Modify-Write: Read byte, return value and physical address for write back.
-    pub fn read_rmw_virtual_byte(&mut self, seg: BxSegregs, eaddr: u32) -> super::Result<(u8, u64)> {
-        let laddr = self.get_laddr32_seg_checked(seg, eaddr, 1)? as u64;
-        let paddr = self.translate_data_write(laddr)?;
-        let val = self.mem_read_byte(paddr);
-        Ok((val, paddr))
-    }
-
     /// Write byte to a previously-translated physical address (RMW write-back).
     pub fn write_rmw_linear_byte(&mut self, paddr: u64, val: u8) {
         self.mem_write_byte(paddr, val);
-    }
-
-    /// Read byte from virtual address (translates through page tables when paging is enabled).
-    pub fn read_virtual_byte(&mut self, seg: BxSegregs, eaddr: u32) -> super::Result<u8> {
-        let laddr = self.get_laddr32_seg_checked(seg, eaddr, 1)? as u64;
-        let paddr = self.translate_data_read(laddr)?;
-        Ok(self.mem_read_byte(paddr))
     }
 
     // =========================================================================
@@ -213,12 +205,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = instr.ib();
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_8(op1, op2, result);
-        // Trace '%' comparisons in kernel space to debug vsprintf
-        if op2 == 0x25 && op1 == 0x25 && self.rip() > 0xC0000000 {
-            let zf = (self.eflags.bits() >> 6) & 1;
-            tracing::warn!("CMP AL=0x25, 0x25 at RIP={:#x} → ZF={} eflags={:#x} icount={}",
-                self.rip(), zf, self.eflags.bits(), self.icount);
-        }
+        // vsprintf trace removed (using printk breakpoint instead)
         tracing::trace!("CMP AL, imm8: {:#04x} - {:#04x}", op1, op2);
     }
 
@@ -255,8 +242,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Trace '%' comparisons in kernel space to debug vsprintf
         if op2 == 0x25 && op1 == 0x25 && self.rip() > 0xC0000000 {
             let zf = (self.eflags.bits() >> 6) & 1;
-            tracing::warn!("CMP [mem]=0x25, Ib=0x25 at RIP={:#x} eaddr={:#x} ZF={} eflags={:#x} icount={}",
-                self.rip(), eaddr, zf, self.eflags.bits(), self.icount);
+            tracing::warn!(
+                "CMP [mem]=0x25, Ib=0x25 at RIP={:#x} eaddr={:#x} ZF={} eflags={:#x} icount={}",
+                self.rip(),
+                eaddr,
+                zf,
+                self.eflags.bits(),
+                self.icount
+            );
         }
         Ok(())
     }
@@ -317,8 +310,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Opcode 0x20: reg (meta_data[0]) = SOURCE, rm (meta_data[1]) = DESTINATION
     pub fn and_eb_gb_r(&mut self, instr: &Instruction) {
         let extend8bit_l = instr.extend8bit_l();
-        let op1 = self.read_8bit_regx(instr.meta_data[1] as usize, extend8bit_l);  // rm = destination
-        let op2 = self.read_8bit_regx(instr.meta_data[0] as usize, extend8bit_l);  // reg = source
+        let op1 = self.read_8bit_regx(instr.meta_data[1] as usize, extend8bit_l); // rm = destination
+        let op2 = self.read_8bit_regx(instr.meta_data[0] as usize, extend8bit_l); // reg = source
         let result = op1 & op2;
         self.write_8bit_regx(instr.meta_data[1] as usize, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
@@ -354,8 +347,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Opcode 0x08: reg (meta_data[0]) = SOURCE, rm (meta_data[1]) = DESTINATION
     pub fn or_eb_gb_r(&mut self, instr: &Instruction) {
         let extend8bit_l = instr.extend8bit_l();
-        let op1 = self.read_8bit_regx(instr.meta_data[1] as usize, extend8bit_l);  // rm = destination
-        let op2 = self.read_8bit_regx(instr.meta_data[0] as usize, extend8bit_l);  // reg = source
+        let op1 = self.read_8bit_regx(instr.meta_data[1] as usize, extend8bit_l); // rm = destination
+        let op2 = self.read_8bit_regx(instr.meta_data[0] as usize, extend8bit_l); // reg = source
         let result = op1 | op2;
         self.write_8bit_regx(instr.meta_data[1] as usize, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
@@ -415,7 +408,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = !op1_8;
 
         self.write_rmw_linear_byte(laddr, result);
-        tracing::trace!("NOT8 mem: [{:?}:{:#x}] = !{:#04x} = {:#04x}", seg, eaddr, op1_8, result);
+        tracing::trace!(
+            "NOT8 mem: [{:?}:{:#x}] = !{:#04x} = {:#04x}",
+            seg,
+            eaddr,
+            op1_8,
+            result
+        );
         Ok(())
     }
 
@@ -436,7 +435,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_byte(laddr, result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!("XOR8 mem: [{:?}:{:#x}] = {:#04x} ^ {:#04x} = {:#04x}", seg, eaddr, op1, op2, result);
+        tracing::trace!(
+            "XOR8 mem: [{:?}:{:#x}] = {:#04x} ^ {:#04x} = {:#04x}",
+            seg,
+            eaddr,
+            op1,
+            op2,
+            result
+        );
         Ok(())
     }
 
@@ -453,7 +459,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_8bit_regx(dst_reg, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!("XOR8 mem: reg{} = {:#04x} ^ {:#04x} = {:#04x}", dst_reg, op1, op2, result);
+        tracing::trace!(
+            "XOR8 mem: reg{} = {:#04x} ^ {:#04x} = {:#04x}",
+            dst_reg,
+            op1,
+            op2,
+            result
+        );
         Ok(())
     }
 
@@ -468,7 +480,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_byte(laddr, result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!("XOR8 mem: [{:?}:{:#x}] = {:#04x} ^ {:#04x} = {:#04x}", seg, eaddr, op1, op2, result);
+        tracing::trace!(
+            "XOR8 mem: [{:?}:{:#x}] = {:#04x} ^ {:#04x} = {:#04x}",
+            seg,
+            eaddr,
+            op1,
+            op2,
+            result
+        );
         Ok(())
     }
 
@@ -485,7 +504,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_byte(laddr, result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!("OR8 mem: [{:?}:{:#x}] = {:#04x} | {:#04x} = {:#04x}", seg, eaddr, op1, op2, result);
+        tracing::trace!(
+            "OR8 mem: [{:?}:{:#x}] = {:#04x} | {:#04x} = {:#04x}",
+            seg,
+            eaddr,
+            op1,
+            op2,
+            result
+        );
         Ok(())
     }
 
@@ -502,7 +528,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_8bit_regx(dst_reg, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!("OR8 mem: reg{} = {:#04x} | {:#04x} = {:#04x}", dst_reg, op1, op2, result);
+        tracing::trace!(
+            "OR8 mem: reg{} = {:#04x} | {:#04x} = {:#04x}",
+            dst_reg,
+            op1,
+            op2,
+            result
+        );
         Ok(())
     }
 
@@ -517,7 +549,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_byte(laddr, result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!("OR8 mem: [{:?}:{:#x}] = {:#04x} | {:#04x} = {:#04x}", seg, eaddr, op1, op2, result);
+        tracing::trace!(
+            "OR8 mem: [{:?}:{:#x}] = {:#04x} | {:#04x} = {:#04x}",
+            seg,
+            eaddr,
+            op1,
+            op2,
+            result
+        );
         Ok(())
     }
 
@@ -534,7 +573,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_byte(laddr, result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!("AND8 mem: [{:?}:{:#x}] = {:#04x} & {:#04x} = {:#04x}", seg, eaddr, op1, op2, result);
+        tracing::trace!(
+            "AND8 mem: [{:?}:{:#x}] = {:#04x} & {:#04x} = {:#04x}",
+            seg,
+            eaddr,
+            op1,
+            op2,
+            result
+        );
         Ok(())
     }
 
@@ -551,7 +597,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_8bit_regx(dst_reg, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!("AND8 mem: reg{} = {:#04x} & {:#04x} = {:#04x}", dst_reg, op1, op2, result);
+        tracing::trace!(
+            "AND8 mem: reg{} = {:#04x} & {:#04x} = {:#04x}",
+            dst_reg,
+            op1,
+            op2,
+            result
+        );
         Ok(())
     }
 
@@ -566,7 +618,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_byte(laddr, result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!("AND8 mem: [{:?}:{:#x}] = {:#04x} & {:#04x} = {:#04x}", seg, eaddr, op1, op2, result);
+        tracing::trace!(
+            "AND8 mem: [{:?}:{:#x}] = {:#04x} & {:#04x} = {:#04x}",
+            seg,
+            eaddr,
+            op1,
+            op2,
+            result
+        );
         Ok(())
     }
 
@@ -582,7 +641,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op1 & op2;
 
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!("TEST8 mem: [{:?}:{:#x}] & reg{} = {:#04x} & {:#04x} = {:#04x}", seg, eaddr, src_reg, op1, op2, result);
+        tracing::trace!(
+            "TEST8 mem: [{:?}:{:#x}] & reg{} = {:#04x} & {:#04x} = {:#04x}",
+            seg,
+            eaddr,
+            src_reg,
+            op1,
+            op2,
+            result
+        );
         Ok(())
     }
 
@@ -596,7 +663,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op1 & op2;
 
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!("TEST8 mem: [{:?}:{:#x}] & {:#04x} = {:#04x} & {:#04x} = {:#04x}", seg, eaddr, op2, op1, op2, result);
+        tracing::trace!(
+            "TEST8 mem: [{:?}:{:#x}] & {:#04x} = {:#04x} & {:#04x} = {:#04x}",
+            seg,
+            eaddr,
+            op2,
+            op1,
+            op2,
+            result
+        );
         Ok(())
     }
 
@@ -607,8 +682,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// CMP_EbGbR: CMP r/m8, r8 (register form)
     /// Opcode 0x38: reg (dst()) = second operand, rm (src()) = first operand
     pub fn cmp_eb_gb_r(&mut self, instr: &Instruction) {
-        let op1 = self.get_gpr8(instr.src() as usize);  // rm = first operand
-        let op2 = self.get_gpr8(instr.dst() as usize);  // reg = second operand
+        let op1 = self.get_gpr8(instr.src() as usize); // rm = first operand
+        let op2 = self.get_gpr8(instr.dst() as usize); // reg = second operand
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_8(op1, op2, result);
     }
@@ -620,12 +695,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = instr.ib();
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_8(op1, op2, result);
-        // Trace '%' comparisons in kernel space to debug vsprintf
-        if op2 == 0x25 && op1 == 0x25 && self.rip() > 0xC0000000 {
-            let zf = (self.eflags.bits() >> 6) & 1;
-            tracing::warn!("CMP Eb=0x25, Ib=0x25 at RIP={:#x} → ZF={} eflags={:#x} icount={} dst={}",
-                self.rip(), zf, self.eflags.bits(), self.icount, instr.dst());
-        }
+        // vsprintf trace removed (using printk breakpoint instead)
     }
 
     // =========================================================================
@@ -633,48 +703,123 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     pub fn and_eb_gb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.and_eb_gb_r(instr); Ok(()) } else { self.and_eb_gb_m(instr) }
+        if instr.mod_c0() {
+            self.and_eb_gb_r(instr);
+            Ok(())
+        } else {
+            self.and_eb_gb_m(instr)
+        }
     }
     pub fn and_gb_eb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.and_gb_eb_r(instr); Ok(()) } else { self.and_gb_eb_m(instr) }
+        if instr.mod_c0() {
+            self.and_gb_eb_r(instr);
+            Ok(())
+        } else {
+            self.and_gb_eb_m(instr)
+        }
     }
     pub fn and_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.and_eb_ib_r(instr); Ok(()) } else { self.and_eb_ib_m(instr) }
+        if instr.mod_c0() {
+            self.and_eb_ib_r(instr);
+            Ok(())
+        } else {
+            self.and_eb_ib_m(instr)
+        }
     }
     pub fn or_eb_gb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.or_eb_gb_r(instr); Ok(()) } else { self.or_eb_gb_m(instr) }
+        if instr.mod_c0() {
+            self.or_eb_gb_r(instr);
+            Ok(())
+        } else {
+            self.or_eb_gb_m(instr)
+        }
     }
     pub fn or_gb_eb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.or_gb_eb_r(instr); Ok(()) } else { self.or_gb_eb_m(instr) }
+        if instr.mod_c0() {
+            self.or_gb_eb_r(instr);
+            Ok(())
+        } else {
+            self.or_gb_eb_m(instr)
+        }
     }
     pub fn or_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.or_eb_ib_r(instr); Ok(()) } else { self.or_eb_ib_m(instr) }
+        if instr.mod_c0() {
+            self.or_eb_ib_r(instr);
+            Ok(())
+        } else {
+            self.or_eb_ib_m(instr)
+        }
     }
     pub fn xor_eb_gb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.xor_eb_gb_r(instr); Ok(()) } else { self.xor_eb_gb_m(instr) }
+        if instr.mod_c0() {
+            self.xor_eb_gb_r(instr);
+            Ok(())
+        } else {
+            self.xor_eb_gb_m(instr)
+        }
     }
     pub fn xor_gb_eb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.xor_gb_eb_r(instr); Ok(()) } else { self.xor_gb_eb_m(instr) }
+        if instr.mod_c0() {
+            self.xor_gb_eb_r(instr);
+            Ok(())
+        } else {
+            self.xor_gb_eb_m(instr)
+        }
     }
     pub fn xor_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.xor_eb_ib_r(instr); Ok(()) } else { self.xor_eb_ib_m(instr) }
+        if instr.mod_c0() {
+            self.xor_eb_ib_r(instr);
+            Ok(())
+        } else {
+            self.xor_eb_ib_m(instr)
+        }
     }
     pub fn not_eb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.not_eb_r(instr); Ok(()) } else { self.not_eb_m(instr) }
+        if instr.mod_c0() {
+            self.not_eb_r(instr);
+            Ok(())
+        } else {
+            self.not_eb_m(instr)
+        }
     }
     pub fn test_eb_gb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.test_eb_gb_r(instr); Ok(()) } else { self.test_eb_gb_m(instr) }
+        if instr.mod_c0() {
+            self.test_eb_gb_r(instr);
+            Ok(())
+        } else {
+            self.test_eb_gb_m(instr)
+        }
     }
     pub fn test_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.test_eb_ib_r(instr); Ok(()) } else { self.test_eb_ib_m(instr) }
+        if instr.mod_c0() {
+            self.test_eb_ib_r(instr);
+            Ok(())
+        } else {
+            self.test_eb_ib_m(instr)
+        }
     }
     pub fn cmp_gb_eb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.cmp_gb_eb_r(instr); Ok(()) } else { self.cmp_gb_eb_m(instr) }
+        if instr.mod_c0() {
+            self.cmp_gb_eb_r(instr);
+            Ok(())
+        } else {
+            self.cmp_gb_eb_m(instr)
+        }
     }
     pub fn cmp_eb_gb(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.cmp_eb_gb_r(instr); Ok(()) } else { self.cmp_eb_gb_m(instr) }
+        if instr.mod_c0() {
+            self.cmp_eb_gb_r(instr);
+            Ok(())
+        } else {
+            self.cmp_eb_gb_m(instr)
+        }
     }
     pub fn cmp_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.mod_c0() { self.cmp_eb_ib_r(instr); Ok(()) } else { self.cmp_eb_ib_m(instr) }
+        if instr.mod_c0() {
+            self.cmp_eb_ib_r(instr);
+            Ok(())
+        } else {
+            self.cmp_eb_ib_m(instr)
+        }
     }
 }
