@@ -1202,7 +1202,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return unsafe { *host_base.add(a20_addr) };
         }
 
-        // Slow path: MMIO/VGA/ROM — go through the memory system handlers.
+        self.mem_read_byte_slow(addr)
+    }
+
+    /// Slow path for mem_read_byte: MMIO/VGA/ROM through memory system handlers.
+    /// Separated to keep the inlined fast path small for better icache utilization.
+    #[cold]
+    #[inline(never)]
+    fn mem_read_byte_slow(&self, addr: u64) -> u8 {
         if let Some(mem_bus) = self.mem_bus {
             let mem = unsafe { &mut *mem_bus.as_ptr() };
             let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
@@ -1251,7 +1258,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return;
         }
 
-        // Slow path: MMIO/VGA/ROM — go through the memory system handlers.
+        self.mem_write_byte_slow(addr, value);
+    }
+
+    /// Slow path for mem_write_byte: MMIO/VGA/ROM through memory system handlers.
+    /// Separated to keep the inlined fast path small for better icache utilization.
+    #[cold]
+    #[inline(never)]
+    fn mem_write_byte_slow(&mut self, addr: u64, value: u8) {
         if let Some(mem_bus) = self.mem_bus {
             let mem = unsafe { &mut *mem_bus.as_ptr() };
             let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;

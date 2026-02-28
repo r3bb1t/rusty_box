@@ -820,6 +820,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Simple linear address without any checks (used internally).
+    #[inline]
     pub fn get_laddr32_seg(&self, seg: BxSegregs, offset: u32) -> u32 {
         let seg_base = self.get_segment_base(seg);
         (seg_base.wrapping_add(offset as u64)) as u32

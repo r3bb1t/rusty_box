@@ -25,7 +25,7 @@ use super::{
     descriptor::{BxGlobalSegmentReg, BxSegmentReg},
     eflags::EFlags,
     i387::{BxPackedRegister, I387},
-    icache::{BxICache, BxICacheEntry as BxIcacheEntry},
+    icache::BxICache,
     lazy_flags::BxLazyflagsEntry,
     svm::VmcbCache,
     tlb::BxHostpageaddr,
@@ -1218,8 +1218,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // and ones which are asynchronous to the CPU (hardware interrupts)
             // Matches Bochs cpu.cc:170-175
             if self.async_event != 0 {
-                if self.handle_async_event() {
-                    // If request to return to caller ASAP (e.g., CPU halted).
+                // Fast path: if only STOP_TRACE is set and CPU is still active,
+                // just clear it without calling handle_async_event(). This is the
+                // common case after a taken branch — no real events to process.
+                if self.async_event == BX_ASYNC_EVENT_STOP_TRACE
+                    && matches!(self.activity_state, CpuActivityState::Active)
+                {
+                    self.async_event = 0;
+                } else if self.handle_async_event() {
+                    // Slow path: real async event (interrupt, HLT, shutdown, etc.)
                     break Ok(iteration);
                 }
             }
@@ -1232,10 +1239,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // The borrow is released at the end of the expression.
             #[cfg(feature = "profiling")]
             let _t0 = std::time::Instant::now();
-            let mut entry = unsafe {
+            let (mut instr_idx, mut trace_end) = unsafe {
                 let mem_extended: &'c mut BxMemC<'c> = &mut *mem_ptr;
                 match self.get_icache_entry(mem_extended, cpus) {
-                    Ok(e) => e,
+                    Ok((start, tlen)) => (start, start + tlen),
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
                         // Exception delivery during prefetch/fetch: restart decode (Bochs longjmp).
                         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
@@ -1248,14 +1255,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             {
                 prof_icache_ns += _t0.elapsed().as_nanos() as u64;
             }
-            // Trace-level logging removed from hot path for performance.
-            // Uncomment for debugging: tracing::trace!("get_icache_entry: RIP={:#x}, tlen={}", self.rip(), entry.tlen);
-
-            // Get trace start index and end from entry.
-            // Matching C++ cpu.cc:196: bxInstruction_c *i = entry->i;
-            //                          bxInstruction_c *last = i + entry->tlen;
-            let mut instr_idx = entry.mpool_start_idx;
-            let mut trace_end = instr_idx + entry.tlen;
             let is_real = self.real_mode();
 
             'trace: loop {
@@ -1290,7 +1289,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.icount += 1;
                 iteration += 1;
 
-                // Matching C++ line 215: if (async_event) break;
+                // Check async events (matching C++ line 215: if (async_event) break;)
+                // When async_event is set (branch taken, exception, HLT, etc.), we MUST
+                // break out of the trace because RIP has changed and the next sequential
+                // instruction in the trace is wrong. The outer loop will handle the event
+                // and fetch a new trace for the updated RIP.
                 if self.async_event != 0 {
                     break 'trace;
                 }
@@ -1304,10 +1307,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     }
                     // Chain to new trace without breaking to outer loop
                     // (matching C++ line 218-220: entry=getICacheEntry; i=entry->i; last=...)
-                    entry = unsafe {
+                    let (start, tlen) = unsafe {
                         let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
                         match self.get_icache_entry(mem_reborrowed, cpus) {
-                            Ok(e) => e,
+                            Ok(v) => v,
                             Err(crate::cpu::CpuError::CpuLoopRestart) => {
                                 self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
                                 continue 'cpu_loop;
@@ -1315,23 +1318,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                             Err(e) => break 'cpu_loop Err(e),
                         }
                     };
-                    instr_idx = entry.mpool_start_idx;
-                    trace_end = instr_idx + entry.tlen;
+                    instr_idx = start;
+                    trace_end = start + tlen;
                 }
             }
 
             // Clear stop trace magic indication (matching C++ line 226)
-            // BUT: Don't clear if CPU is halted - we need the flag to be checked by handle_async_event()
-            // in the outer loop (line 1176) so it can detect the halt state and return from cpu_loop.
-            // Only clear STOP_TRACE if activity_state is Active (normal execution).
+            // Don't clear if CPU is halted — handle_async_event needs the flag.
             if matches!(self.activity_state, CpuActivityState::Active) {
-                self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
-            }
-
-            // TODO: And syncing of time
-            // clear stop trace magic indication that probably was set by repeat or branch32/64
-            // BUT: Don't clear if CPU is halted - we need the flag for handle_async_event()
-            if self.async_event > 0 && matches!(self.activity_state, CpuActivityState::Active) {
                 self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
             }
         };
@@ -1408,54 +1402,42 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         mem: &'c mut BxMemC<'c>,
         cpus: &[&Self],
     ) -> Result<Instruction> {
-        // Get raw pointer to work around borrow checker if needed
         let mem_ptr: *mut BxMemC<'c> = mem;
-        let entry = unsafe {
+        let (mpool_start_idx, _tlen) = unsafe {
             let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
             self.get_icache_entry(mem_reborrowed, cpus)?
         };
-        Ok(entry.i)
+        Ok(self.i_cache.mpool[mpool_start_idx])
     }
 
+    /// Look up the instruction cache for the current RIP.
+    /// Returns (mpool_start_idx, tlen) to avoid cloning BxICacheEntry on the hot path.
+    /// Matching Bochs cpu.cc getICacheEntry().
+    #[inline]
     fn get_icache_entry(
         &mut self,
         mem: &'c mut BxMemC<'c>,
         cpus: &[&Self],
-    ) -> Result<BxIcacheEntry> {
+    ) -> Result<(usize, usize)> {
         // Check if we need to prefetch a new page (matching C++ lines 289-292)
-        // If eip_page_window_size is 0, we haven't prefetched yet, so do it now
         let needs_prefetch = self.eip_page_window_size == 0 || {
-            // Calculate eip_biased = RIP + eip_page_bias (matching C++ line 287)
             let eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
             eip_biased >= self.eip_page_window_size
         };
 
         // Get raw pointer to mem before calling prefetch() to work around borrow checker
-        // SAFETY: We're getting a raw pointer, which doesn't create a new borrow
         let mem_ptr: *mut BxMemC<'c> = unsafe { core::ptr::addr_of_mut!(*mem) };
 
-        // Matching C++ cpu.cc:287-292
         let mut eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
 
         if needs_prefetch {
             self.perf_prefetch += 1;
-            // Matching C++ cpu.cc:289-291 - call prefetch() and recalculate eip_biased after
-            // Retry loop: if prefetch raises an exception, the handler invalidates the queue
-            // and we need to retry prefetch with the new CPU state
-            // Get raw pointer before loop to work around borrow checker
-            let mem_ptr: *mut BxMemC<'c> = unsafe { core::ptr::addr_of_mut!(*mem) };
             let mut retry_count = 0;
             loop {
-                // SAFETY: We're reborrowing mem in each loop iteration, but prefetch() releases the borrow
                 let mem_reborrowed: &'c mut BxMemC<'c> = unsafe { &mut *mem_ptr };
                 self.prefetch(mem_reborrowed, cpus)?;
 
-                // After prefetch, check if it completed successfully
-                // In C++, exception() uses longjmp so if it fails, we never return here
-                // In Rust, exception() returns Ok(()) but invalidates the prefetch queue
                 if self.eip_page_window_size == 0 || self.eip_fetch_ptr.is_none() {
-                    // Prefetch queue was invalidated (likely due to exception handler)
-                    // Retry prefetch with new CPU state (exception handler may have changed RIP/CS)
                     retry_count += 1;
                     if retry_count > 10 {
                         tracing::error!("prefetch retry limit exceeded, RIP={:#x}", self.rip());
@@ -1465,18 +1447,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         "prefetch queue invalidated after exception, retrying (attempt {})",
                         retry_count
                     );
-                    continue; // Retry prefetch
+                    continue;
                 }
 
-                // Recalculate eip_biased after prefetch (matching C++ line 291)
                 eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
 
-                // If RIP changed, eip_page_bias should still be valid (it's recalculated in prefetch)
-                // But verify it's within bounds
                 if eip_biased >= self.eip_page_window_size {
-                    tracing::debug!("eip_biased ({}) >= eip_page_window_size ({}) after prefetch, RIP={:#x}, retrying", 
+                    tracing::debug!("eip_biased ({}) >= eip_page_window_size ({}) after prefetch, RIP={:#x}, retrying",
                         eip_biased, self.eip_page_window_size, self.rip());
-                    // eip_page_bias might be wrong - invalidate and retry
                     self.eip_fetch_ptr = None;
                     self.eip_page_window_size = 0;
                     retry_count += 1;
@@ -1484,10 +1462,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         tracing::error!("prefetch eip_biased retry limit exceeded");
                         return Err(crate::cpu::CpuError::CpuNotInitialized);
                     }
-                    continue; // Retry prefetch
+                    continue;
                 }
 
-                // Prefetch successful
                 break;
             }
         }
@@ -1495,81 +1472,60 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Physical address for this instruction
         let p_addr: BxPhyAddress = self.p_addr_fetch_page | (eip_biased as u64);
 
-        // Find entry in cache
-        let mut entry_option = self.i_cache.find_entry(p_addr, self.fetch_mode_mask.into());
+        // Direct icache lookup without cloning BxICacheEntry.
+        // We only need mpool_start_idx and tlen from the entry.
+        let hash_idx = BxICache::hash(p_addr, self.fetch_mode_mask.into()) as usize;
+        let entry = &self.i_cache.entry[hash_idx];
 
-        // Validate cached entry against current memory (SMC detection).
-        // Bochs uses per-page write stamps; we compare the first 8 bytes of the
-        // instruction stream stored during serve_icache_miss against current memory.
-        // Checking just 1 byte is insufficient: padding byte 0x00 before a loop entry
-        // can match even when subsequent code bytes have been overwritten.
-        if let Some(ref entry) = entry_option {
+        // Check if entry matches and has valid instruction (matching C++ line 299)
+        let cache_hit = matches!(entry.p_addr, crate::cpu::icache::IcacheAddress::Address(addr) if addr == p_addr)
+            && entry.i.meta_info.ilen != 0;
+
+        if cache_hit {
+            // SMC detection: compare first 8 bytes against current memory
+            let mut smc_invalid = false;
             if let Some(fetch_slice) = self.eip_fetch_ptr {
                 let offset = eip_biased as usize;
                 let avail = fetch_slice.len().saturating_sub(offset).min(8);
                 if avail > 0 && fetch_slice[offset..offset + avail] != entry.first_bytes[..avail] {
-                    // Memory has changed since this entry was cached — force re-decode
-                    entry_option = None;
+                    smc_invalid = true;
                 }
             }
-        }
 
-        // Check if cache miss or entry has invalid instruction (matching C++ line 299)
-        if entry_option.is_none() || entry_option.as_ref().unwrap().i.meta_info.ilen == 0 {
-            self.perf_icache_miss += 1;
-            // Log first few misses at VGA ROM addresses for debugging
-            if p_addr >= 0xC0000 && p_addr < 0xD0000 && self.perf_icache_miss <= 5 {
-                let hash_idx = BxICache::hash(p_addr, self.fetch_mode_mask.into());
-                let existing = &self.i_cache.entry[hash_idx as usize];
-                let existing_paddr_val = match existing.p_addr {
-                    crate::cpu::icache::IcacheAddress::Address(a) => a as i64,
-                    _ => -1i64,
-                };
-                tracing::trace!(
-                    "ICACHE-MISS: p_addr={:#x}, hash={}, existing_paddr={}, ilen={}",
-                    p_addr,
-                    hash_idx,
-                    existing_paddr_val,
-                    existing.i.meta_info.ilen
-                );
+            if !smc_invalid {
+                // Cache hit — return indices without cloning
+                return Ok((entry.mpool_start_idx, entry.tlen));
             }
-            // iCache miss. Call serve_icache_miss
-            // Create a dummy page_write_stamp_table for now (matches prefetch approach)
-            let mut dummy_mapping: [u32; 0] = [];
-            let mut dummy_stamp_table = crate::cpu::icache::BxPageWriteStampTable {
-                fine_granularity_mapping: &mut dummy_mapping,
-            };
-
-            // Work around borrow checker: prefetch() borrows mem, but that borrow is released when it returns.
-            // However, Rust's borrow checker is conservative and doesn't allow us to borrow mem again immediately.
-            // We use unsafe to work around this limitation.
-            // SAFETY:
-            // 1. prefetch() returns before we call serve_icache_miss, so the borrows don't overlap at runtime
-            // 2. serve_icache_miss only uses mem for boundary_fetch (error case), not in the common path
-            // 3. We're not actually creating overlapping borrows - the borrow from prefetch is released
-            // 4. We use the raw pointer we got before prefetch() to create a new reference
-            // The borrow checker sees that `mem` is borrowed in the function signature and also used in prefetch(),
-            // but it can't prove that the borrow from prefetch() is released before we call serve_icache_miss.
-            // We know this is safe because prefetch() returns before serve_icache_miss is called.
-            // SAFETY: The borrow from prefetch() is released when it returns, so we can safely create a new reference.
-            let entry = unsafe {
-                // Create a new mutable reference from the raw pointer we got before prefetch()
-                // This is safe because prefetch() has already returned, releasing its borrow
-                // We're not actually creating overlapping borrows - the borrow from prefetch is released
-                let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
-                self.serve_icache_miss(
-                    eip_biased,
-                    p_addr,
-                    mem_reborrowed,
-                    cpus,
-                    &mut dummy_stamp_table,
-                )?
-            };
-            return Ok(entry);
         }
 
-        // Return cached entry
-        Ok(entry_option.unwrap())
+        // Cache miss path
+        self.perf_icache_miss += 1;
+        if p_addr >= 0xC0000 && p_addr < 0xD0000 && self.perf_icache_miss <= 5 {
+            tracing::trace!(
+                "ICACHE-MISS: p_addr={:#x}, hash={}, ilen={}",
+                p_addr,
+                hash_idx,
+                self.i_cache.entry[hash_idx].i.meta_info.ilen
+            );
+        }
+
+        let mut dummy_mapping: [u32; 0] = [];
+        let mut dummy_stamp_table = crate::cpu::icache::BxPageWriteStampTable {
+            fine_granularity_mapping: &mut dummy_mapping,
+        };
+
+        // SAFETY: prefetch() borrow is released before serve_icache_miss is called
+        let miss_entry = unsafe {
+            let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
+            self.serve_icache_miss(
+                eip_biased,
+                p_addr,
+                mem_reborrowed,
+                cpus,
+                &mut dummy_stamp_table,
+            )?
+        };
+        Ok((miss_entry.mpool_start_idx, miss_entry.tlen))
     }
 
     pub(super) fn get_gpr32(&self, idx: usize) -> u32 {
