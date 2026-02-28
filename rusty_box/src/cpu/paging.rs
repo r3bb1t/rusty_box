@@ -6,7 +6,7 @@
 use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, Result};
 use crate::{
     config::{BxAddress, BxPhyAddress},
-    cpu::{rusty_box::MemoryAccessType, tlb::TLBEntry},
+    cpu::{rusty_box::MemoryAccessType, tlb::{BxHostpageaddr, TLBEntry}},
     memory::BxMemC,
 };
 
@@ -599,13 +599,33 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         let ppf = paddr & 0xFFFF_F000;
+
+        // Pre-compute host page address before borrowing the TLB entry mutably.
+        // Cache host pointer for direct memory access on future TLB hits.
+        // Bochs stores hostPageAddr in each TLB entry so that subsequent accesses
+        // to the same page bypass get_host_mem_addr() entirely.
+        // Pages with MMIO handlers (VGA 0xA0000-0xBFFFF) or ROM get host_page_addr=0
+        // and fall through to the slow handler-based path.
+        let host_page_addr = {
+            let a20_ppf = self.apply_a20(ppf) as usize;
+            let host_base = self.mem_host_base;
+            let host_len = self.mem_host_len;
+            if !host_base.is_null()
+                && (a20_ppf < 0xA0000 || (a20_ppf >= 0x100000 && a20_ppf < host_len))
+            {
+                (unsafe { host_base.add(a20_ppf) }) as BxHostpageaddr
+            } else {
+                0
+            }
+        };
+
         {
             let tlb_entry = self.dtlb.get_entry_of(laddr, 0);
             tlb_entry.lpf = lpf;
             tlb_entry.ppf = ppf;
             tlb_entry.access_bits = access_bits;
             tlb_entry.lpf_mask = if is_large_page { 0x3F_FFFF } else { 0xFFF };
-            tlb_entry.host_page_addr = 0; // Not used for data access
+            tlb_entry.host_page_addr = host_page_addr;
         }
 
         if is_large_page {

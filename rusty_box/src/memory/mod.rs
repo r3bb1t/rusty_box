@@ -11,10 +11,7 @@ use crate::{
     config::BxPhyAddress,
     cpu::{rusty_box::MemoryAccessType, BxCpuC, BxCpuIdTrait},
 };
-use alloc::{
-    boxed::Box,
-    vec::Vec,
-};
+use alloc::{boxed::Box, vec::Vec};
 pub use error::*;
 
 use core::cell::{Cell, UnsafeCell};
@@ -65,14 +62,15 @@ type Unsigned = u32;
 // Memory handler signature: (addr, len, data, param) -> bool
 // data is mutable for reads (handler writes to it) and const for writes (handler reads from it)
 // Using *mut for both to match C void* semantics
-pub(super) type MemoryHandlerT = fn(BxPhyAddress, u32, *mut core::ffi::c_void, *const core::ffi::c_void) -> bool;
+pub(super) type MemoryHandlerT =
+    fn(BxPhyAddress, u32, *mut core::ffi::c_void, *const core::ffi::c_void) -> bool;
 pub(super) type MemoryDirectAccessHandlerT<'a> =
     fn(&dyn core::any::Any, BxPhyAddress, MemoryAccessType, &dyn core::any::Any) -> &'a mut [u8];
 
 #[derive(Debug)]
 pub(super) struct MemoryHandlerStruct<'a> {
     next: Option<Box<MemoryHandlerStruct<'a>>>, // Correctly represent the linked list
-    param: *const core::ffi::c_void, // Pointer to device instance (like I/O handlers)
+    param: *const core::ffi::c_void,            // Pointer to device instance (like I/O handlers)
     begin: BxPhyAddress,
     end: BxPhyAddress,
     bitmap: u16,
@@ -145,7 +143,7 @@ impl BxMemC<'_> {
     }
 
     /// Disable SMRAM (System Management RAM)
-    /// 
+    ///
     /// Matches BX_MEM_C::disable_smram() from cpp_orig/bochs/memory/misc_mem.cc:888-893
     pub fn disable_smram(&mut self) {
         self.smram_available = false;
@@ -196,7 +194,8 @@ impl BxMemoryStubC {
             let _end = start + self.block_size;
             // SAFETY: We're accessing within bounds of actual_vector via interior mutability pattern
             let vec_ptr = self.actual_vector.as_ptr() as *mut u8;
-            let slice = unsafe { core::slice::from_raw_parts_mut(vec_ptr.add(start), self.block_size) };
+            let slice =
+                unsafe { core::slice::from_raw_parts_mut(vec_ptr.add(start), self.block_size) };
             Some(slice)
         } else {
             None
@@ -243,6 +242,19 @@ impl<'m> BxMemC<'m> {
     pub fn get_raw_memory_ptr(&mut self) -> (*mut u8, usize) {
         let ptr = self.inherited_memory_stub.actual_vector.as_mut_ptr();
         let len = self.inherited_memory_stub.actual_vector.len();
+        (ptr, len)
+    }
+
+    /// Get a raw pointer to physical address 0 in host memory, plus the usable RAM length.
+    ///
+    /// This accounts for `vector_offset` alignment padding, so
+    /// `returned_ptr.add(phys_addr)` gives the byte at physical address `phys_addr`.
+    ///
+    /// SAFETY: Caller must ensure the pointer is only used while memory is valid.
+    pub fn get_ram_base_ptr(&mut self) -> (*mut u8, usize) {
+        let vo = self.inherited_memory_stub.vector_offset;
+        let ptr = unsafe { self.inherited_memory_stub.actual_vector.as_mut_ptr().add(vo) };
+        let len = self.inherited_memory_stub.len; // guest RAM size
         (ptr, len)
     }
 

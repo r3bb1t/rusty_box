@@ -1189,14 +1189,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     #[inline(always)]
     pub(super) fn mem_read_byte(&self, addr: u64) -> u8 {
-        // Prefer Bochs-style host access through the memory system when available:
-        // - If direct host access is allowed, get_host_mem_addr returns Some(&mut [u8])
-        // - If access is vetoed (MMIO/VGA/ROM handler), fall back to read_physical_page
+        // Fast path: direct host pointer for plain RAM (bypass get_host_mem_addr).
+        // This matches what Bochs does via hostPageAddr in TLB entries — the vast
+        // majority of physical accesses hit RAM and can be served with a single
+        // pointer dereference.  We apply A20 masking and check the address is in
+        // the plain-RAM range (below VGA at 0xA0000, or above BIOS shadow at 0x100000).
+        let a20_addr = (addr & self.a20_mask) as usize;
+        let host_base = self.mem_host_base;
+        if !host_base.is_null()
+            && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr < self.mem_host_len))
+        {
+            return unsafe { *host_base.add(a20_addr) };
+        }
+
+        // Slow path: MMIO/VGA/ROM — go through the memory system handlers.
         if let Some(mem_bus) = self.mem_bus {
-            // SAFETY:
-            // - `mem_bus` is only set for the duration of a CPU execution call.
-            // - We only run one CPU today, so we rely on execution-time exclusivity.
-            // - This intentionally uses interior mutability via raw pointer to avoid borrow overhead.
             let mem = unsafe { &mut *mem_bus.as_ptr() };
             let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
             let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
@@ -1233,9 +1240,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     #[inline(always)]
     pub(super) fn mem_write_byte(&mut self, addr: u64, value: u8) {
-        // Prefer Bochs-style host access through the memory system when available.
+        // Fast path: direct host pointer for plain RAM (bypass get_host_mem_addr).
+        let a20_addr = (addr & self.a20_mask) as usize;
+        let host_base = self.mem_host_base;
+        if !host_base.is_null()
+            && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr < self.mem_host_len))
+        {
+            unsafe { *host_base.add(a20_addr) = value };
+            self.i_cache.smc_write_check(a20_addr as BxPhyAddress, 1);
+            return;
+        }
+
+        // Slow path: MMIO/VGA/ROM — go through the memory system handlers.
         if let Some(mem_bus) = self.mem_bus {
-            // SAFETY: see mem_read_byte.
             let mem = unsafe { &mut *mem_bus.as_ptr() };
             let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
             let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
@@ -1247,7 +1264,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 if let Some(b) = slice.get_mut(0) {
                     *b = value;
                 }
-                // SMC detection: check if write overlaps cached instruction pages
                 self.i_cache.smc_write_check(paddr, 1);
                 return;
             }
@@ -1257,7 +1273,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let mut stamp = BxPageWriteStampTable::new(&mut dummy_mapping);
             let mut data = [value];
             let _ = mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 1, &mut data);
-            // SMC detection: check if write overlaps cached instruction pages
             self.i_cache.smc_write_check(paddr, 1);
             return;
         }
@@ -1269,7 +1284,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 unsafe {
                     *ptr.add(addr_usize) = value;
                 }
-                // SMC detection: check if write overlaps cached instruction pages
                 self.i_cache.smc_write_check(addr as BxPhyAddress, 1);
             }
         }
@@ -1277,22 +1291,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     #[inline(always)]
     pub(super) fn mem_read_word(&self, addr: u64) -> u16 {
-        // Fast path: single get_host_mem_addr call for 2 bytes
-        if let Some(mem_bus) = self.mem_bus {
-            let mem = unsafe { &mut *mem_bus.as_ptr() };
-            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
-            let paddr: BxPhyAddress = addr as BxPhyAddress;
-
-            if let Ok(Some(slice)) =
-                mem.get_host_mem_addr(paddr, MemoryAccessType::Read, &[cpu_ref])
-            {
-                if slice.len() >= 2 {
-                    return u16::from_le_bytes([slice[0], slice[1]]);
-                }
-            }
+        // Fast path: direct host pointer for plain RAM
+        let a20_addr = (addr & self.a20_mask) as usize;
+        let host_base = self.mem_host_base;
+        if !host_base.is_null()
+            && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr + 1 < self.mem_host_len))
+        {
+            return unsafe { (host_base.add(a20_addr) as *const u16).read_unaligned() };
         }
-        // Slow path: fall through to per-byte reads
+        // Slow path: per-byte reads (handles MMIO/VGA/ROM)
         let lo = self.mem_read_byte(addr) as u16;
         let hi = self.mem_read_byte(addr + 1) as u16;
         lo | (hi << 8)
@@ -1300,48 +1307,32 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     #[inline(always)]
     pub(super) fn mem_write_word(&mut self, addr: u64, value: u16) {
-        // Fast path: single get_host_mem_addr call for 2 bytes
-        if let Some(mem_bus) = self.mem_bus {
-            let mem = unsafe { &mut *mem_bus.as_ptr() };
-            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
-            let paddr: BxPhyAddress = addr as BxPhyAddress;
-
-            if let Ok(Some(slice)) =
-                mem.get_host_mem_addr(paddr, MemoryAccessType::Write, &[cpu_ref])
-            {
-                if slice.len() >= 2 {
-                    let bytes = value.to_le_bytes();
-                    slice[0] = bytes[0];
-                    slice[1] = bytes[1];
-                    self.i_cache.smc_write_check(paddr, 2);
-                    return;
-                }
-            }
+        // Fast path: direct host pointer for plain RAM
+        let a20_addr = (addr & self.a20_mask) as usize;
+        let host_base = self.mem_host_base;
+        if !host_base.is_null()
+            && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr + 1 < self.mem_host_len))
+        {
+            unsafe { (host_base.add(a20_addr) as *mut u16).write_unaligned(value) };
+            self.i_cache.smc_write_check(a20_addr as BxPhyAddress, 2);
+            return;
         }
-        // Slow path: fall through to per-byte writes
+        // Slow path: per-byte writes (handles MMIO/VGA/ROM)
         self.mem_write_byte(addr, value as u8);
         self.mem_write_byte(addr + 1, (value >> 8) as u8);
     }
 
     #[inline(always)]
     pub(super) fn mem_read_dword(&self, addr: u64) -> u32 {
-        // Fast path: single get_host_mem_addr call for 4 bytes
-        if let Some(mem_bus) = self.mem_bus {
-            let mem = unsafe { &mut *mem_bus.as_ptr() };
-            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
-            let paddr: BxPhyAddress = addr as BxPhyAddress;
-
-            if let Ok(Some(slice)) =
-                mem.get_host_mem_addr(paddr, MemoryAccessType::Read, &[cpu_ref])
-            {
-                if slice.len() >= 4 {
-                    return u32::from_le_bytes([slice[0], slice[1], slice[2], slice[3]]);
-                }
-            }
+        // Fast path: direct host pointer for plain RAM
+        let a20_addr = (addr & self.a20_mask) as usize;
+        let host_base = self.mem_host_base;
+        if !host_base.is_null()
+            && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr + 3 < self.mem_host_len))
+        {
+            return unsafe { (host_base.add(a20_addr) as *const u32).read_unaligned() };
         }
-        // Slow path: fall through to per-byte reads
+        // Slow path: per-word reads (handles MMIO/VGA/ROM)
         let lo = self.mem_read_word(addr) as u32;
         let hi = self.mem_read_word(addr + 2) as u32;
         lo | (hi << 16)
@@ -1349,28 +1340,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     #[inline(always)]
     pub(super) fn mem_write_dword(&mut self, addr: u64, value: u32) {
-        // Fast path: single get_host_mem_addr call for 4 bytes
-        if let Some(mem_bus) = self.mem_bus {
-            let mem = unsafe { &mut *mem_bus.as_ptr() };
-            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
-            let paddr: BxPhyAddress = addr as BxPhyAddress;
-
-            if let Ok(Some(slice)) =
-                mem.get_host_mem_addr(paddr, MemoryAccessType::Write, &[cpu_ref])
-            {
-                if slice.len() >= 4 {
-                    let bytes = value.to_le_bytes();
-                    slice[0] = bytes[0];
-                    slice[1] = bytes[1];
-                    slice[2] = bytes[2];
-                    slice[3] = bytes[3];
-                    self.i_cache.smc_write_check(paddr, 4);
-                    return;
-                }
-            }
+        // Fast path: direct host pointer for plain RAM
+        let a20_addr = (addr & self.a20_mask) as usize;
+        let host_base = self.mem_host_base;
+        if !host_base.is_null()
+            && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr + 3 < self.mem_host_len))
+        {
+            unsafe { (host_base.add(a20_addr) as *mut u32).write_unaligned(value) };
+            self.i_cache.smc_write_check(a20_addr as BxPhyAddress, 4);
+            return;
         }
-        // Slow path: fall through to per-byte writes
+        // Slow path: per-word writes (handles MMIO/VGA/ROM)
         self.mem_write_word(addr, value as u16);
         self.mem_write_word(addr + 2, (value >> 16) as u16);
     }

@@ -629,6 +629,14 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) mem_ptr: Option<*mut u8>,
     pub(super) mem_len: usize,
 
+    /// Host memory base pointer, pointing to physical address 0 (accounts for vector_offset).
+    /// Used for direct memory access on TLB hits, bypassing get_host_mem_addr().
+    /// SAFETY: Only valid during cpu_loop when memory is valid.
+    pub(super) mem_host_base: *mut u8,
+    /// Usable guest RAM length (not including ROM/bogus).  Physical addresses below this
+    /// (and outside VGA/MMIO ranges) can be accessed directly via mem_host_base.
+    pub(super) mem_host_len: usize,
+
     /// Optional memory system pointer (MMIO/ROM handler access), wired during execution.
     ///
     /// This mirrors Bochs' v2h/getHostMemAddr model: the CPU can attempt direct host access
@@ -1164,6 +1172,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.mem_ptr = Some(mem_vector);
         self.mem_len = mem_len;
 
+        // Host base pointer: points to physical address 0 (vector_offset-adjusted).
+        // Used for direct TLB-hit memory access bypassing get_host_mem_addr().
+        let (host_base, host_len) = mem.get_ram_base_ptr();
+        self.mem_host_base = host_base;
+        self.mem_host_len = host_len;
+
         let mut iteration = 0u64;
         let mut trace_break_count = 0u64;
         let mut get_icache_count = 0u64;
@@ -1241,11 +1255,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             {
                 prof_icache_ns += _t0.elapsed().as_nanos() as u64;
             }
-            tracing::trace!(
-                "get_icache_entry: RIP={:#x}, entry.tlen={}",
-                self.rip(),
-                entry.tlen
-            );
+            // Trace-level logging removed from hot path for performance.
+            // Uncomment for debugging: tracing::trace!("get_icache_entry: RIP={:#x}, tlen={}", self.rip(), entry.tlen);
 
             // Get trace start index from entry (stored when trace was created).
             // In C++, entry->i is a pointer directly into mpool; in Rust we store the index.
@@ -1262,44 +1273,21 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 trace_start_idx = 0;
             }
 
-            tracing::trace!(
-                "Initial trace: RIP={:#x}, trace_start_idx={}, tlen={}, mpool_start_idx={}",
-                self.rip(),
-                trace_start_idx,
-                entry.tlen,
-                entry.mpool_start_idx
-            );
+            // Trace logging removed from hot path for performance.
 
             // Loop through all instructions in the trace (matching C++ cpu.cc:196-222)
             let mut instr_idx = 0usize;
             let mut restart_decode = false;
             loop {
                 // Bounds check before accessing mpool
-                if trace_start_idx + instr_idx >= BX_ICACHE_MEM_POOL {
-                    tracing::debug!(
-                        "trace_start_idx + instr_idx ({}) >= BX_ICACHE_MEM_POOL, breaking",
-                        trace_start_idx + instr_idx
-                    );
-                    break;
-                }
-
-                // Get instruction from trace
                 let mpool_idx = trace_start_idx + instr_idx;
                 if mpool_idx >= BX_ICACHE_MEM_POOL {
-                    tracing::error!(
-                        "mpool_idx ({}) >= BX_ICACHE_MEM_POOL ({})",
-                        mpool_idx,
-                        BX_ICACHE_MEM_POOL
-                    );
                     break;
                 }
                 let mut i = self.i_cache.mpool[mpool_idx];
-                tracing::trace!("Fetching instruction: trace_start_idx={}, instr_idx={}, mpool_idx={}, opcode={:?}, RIP={:#x}",
-                    trace_start_idx, instr_idx, mpool_idx, i.get_ia_opcode(), self.rip());
 
-                // want to allow changing of the instruction inside instrumentation callback
                 // Matching C++ line 201: BX_INSTR_BEFORE_EXECUTION(BX_CPU_ID, i);
-                self.before_execution(self.bx_cpuid);
+                // (no-op — instrumentation callbacks not implemented)
 
                 // Check for end-of-trace opcode (InsertedOpcode) before executing
                 // InsertedOpcode has length 0 and is used to mark the end of a trace
@@ -1365,19 +1353,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
                 self.set_rip(next_rip);
 
-                tracing::trace!(
-                    "Executing {:?} at RIP={:#x}, ilen={}, next_rip={:#x}",
-                    i.get_ia_opcode(),
-                    current_rip,
-                    ilen,
-                    next_rip
-                );
-
-                // Diagnostic trace block (currently disabled)
-                // To trace at a specific icount range, uncomment and set the range:
-                // if self.icount >= START && self.icount <= END {
-                //     eprintln!("TRACE: ic={} RIP={:#x} {:?} ...", self.icount, current_rip, i.get_ia_opcode());
-                // }
+                // Trace logging removed from hot path for performance.
+                // Uncomment for debugging:
+                // tracing::trace!("Exec {:?} at RIP={:#x} ilen={}", i.get_ia_opcode(), current_rip, ilen);
 
                 // Execute instruction directly
                 {
@@ -1488,13 +1466,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // Matching C++ line 215: if (BX_CPU_THIS_PTR async_event) break;
                 if self.async_event != 0 {
                     trace_break_count += 1;
-                    tracing::trace!(
-                        "TRACE-BREAK: async_event={:#x} at iter={}, RIP={:#x}, opcode={:?}",
-                        self.async_event,
-                        iteration,
-                        self.rip(),
-                        i.get_ia_opcode()
-                    );
                     break;
                 }
 
@@ -1505,23 +1476,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 }
 
                 // Matching C++ line 217: if (++i == last)
-                // Move to next instruction in trace (increment pointer/index)
                 instr_idx += 1;
-                tracing::trace!(
-                    "Moved to next instruction: instr_idx={}, tlen={}",
-                    instr_idx,
-                    entry.tlen
-                );
 
                 // If we've executed all instructions in the trace, get a new entry
                 // Matching C++ lines 217-221: if (++i == last) { entry = getICacheEntry(); i = entry->i; last = i + (entry->tlen); }
                 if instr_idx >= entry.tlen {
-                    tracing::trace!(
-                        "Trace complete: instr_idx={} >= tlen={}, getting new entry at RIP={:#x}",
-                        instr_idx,
-                        entry.tlen,
-                        self.rip()
-                    );
                     // Get new entry (matching C++ line 218-220)
                     // SAFETY: We use the raw pointer we got earlier to work around borrow checker
                     // The borrow from the previous get_icache_entry is released, so we can safely create a new reference
@@ -1537,15 +1496,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         }
                     };
 
-                    // Get trace start index from entry (stored when trace was created)
                     trace_start_idx = entry.mpool_start_idx;
-                    tracing::trace!(
-                        "New trace: RIP={:#x}, trace_start_idx={}, tlen={}, mpool_start_idx={}",
-                        self.rip(),
-                        trace_start_idx,
-                        entry.tlen,
-                        entry.mpool_start_idx
-                    );
 
                     // Reset for new trace
                     instr_idx = 0;
@@ -1570,6 +1521,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Clear memory pointer when done
         self.mem_ptr = None;
+        self.mem_host_base = core::ptr::null_mut();
+        self.mem_host_len = 0;
         self.clear_mem_bus();
         result
     }

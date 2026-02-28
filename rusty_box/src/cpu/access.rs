@@ -269,21 +269,40 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // ===== Virtual read functions (Bochs access.h + access2.cc) =====
+    //
+    // Performance-critical: these are called on every memory-accessing instruction.
+    // Inline TLB lookup with host pointer avoids calling translate_data_read() +
+    // mem_read_byte() (which goes through get_host_mem_addr()) on TLB hits.
 
     /// Read a byte from virtual memory.
     /// Bochs: read_virtual_byte_32 -> agen_read32 + read_linear_byte
+    #[inline]
     pub fn read_virtual_byte(
         &mut self,
         seg: BxSegregs,
         offset: u32,
     ) -> Result<u8> {
         let laddr = self.agen_read32(seg, offset, 1)? as u64;
+
+        // ---- Inline TLB fast path (Bochs access2.cc pattern) ----
+        if self.cr0.pg() {
+            let lpf = laddr & 0xFFFF_F000;
+            let needed_bit = 1u32 << (self.user_pl as u32); // TLB_SYS_READ_OK or TLB_USER_READ_OK
+            let tlb = self.dtlb.get_entry_of(laddr, 0);
+            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                let host = tlb.host_page_addr as *const u8;
+                return Ok(unsafe { *host.add((laddr & 0xFFF) as usize) });
+            }
+        }
+
+        // ---- Slow path ----
         let paddr = self.translate_data_read(laddr)?;
         Ok(self.mem_read_byte(paddr))
     }
 
     /// Read a word from virtual memory with cross-page handling.
     /// Bochs: read_virtual_word_32 -> agen_read32 + read_linear_word
+    #[inline]
     pub fn read_virtual_word(
         &mut self,
         seg: BxSegregs,
@@ -293,26 +312,32 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let page_offset = laddr & 0xFFF;
 
         if page_offset + 2 <= 0x1000 {
-            // Single page — fast path
+            // ---- Inline TLB fast path ----
+            if self.cr0.pg() {
+                let lpf = laddr & 0xFFFF_F000;
+                let needed_bit = 1u32 << (self.user_pl as u32);
+                let tlb = self.dtlb.get_entry_of(laddr, 0);
+                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                    let host = tlb.host_page_addr as *const u8;
+                    let ptr = unsafe { host.add(page_offset as usize) };
+                    return Ok(unsafe { (ptr as *const u16).read_unaligned() });
+                }
+            }
             let paddr = self.translate_data_read(laddr)?;
             Ok(self.mem_read_word(paddr))
         } else {
             // Cross-page: split into two single-byte reads
-            let b0 = {
-                let p = self.translate_data_read(laddr)?;
-                self.mem_read_byte(p)
-            };
-            let b1 = {
-                let laddr2 = (laddr & 0xFFFF_F000).wrapping_add(0x1000) & 0xFFFF_FFFF;
-                let p = self.translate_data_read(laddr2)?;
-                self.mem_read_byte(p)
-            };
+            let b0 = self.read_virtual_byte_at_laddr(laddr)?;
+            let b1 = self.read_virtual_byte_at_laddr(
+                (laddr & 0xFFFF_F000).wrapping_add(0x1000) & 0xFFFF_FFFF,
+            )?;
             Ok(u16::from_le_bytes([b0, b1]))
         }
     }
 
     /// Read a dword from virtual memory with cross-page handling.
     /// Bochs: read_virtual_dword_32 -> agen_read32 + read_linear_dword
+    #[inline]
     pub fn read_virtual_dword(
         &mut self,
         seg: BxSegregs,
@@ -322,15 +347,26 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let page_offset = laddr & 0xFFF;
 
         if page_offset + 4 <= 0x1000 {
+            // ---- Inline TLB fast path ----
+            if self.cr0.pg() {
+                let lpf = laddr & 0xFFFF_F000;
+                let needed_bit = 1u32 << (self.user_pl as u32);
+                let tlb = self.dtlb.get_entry_of(laddr, 0);
+                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                    let host = tlb.host_page_addr as *const u8;
+                    let ptr = unsafe { host.add(page_offset as usize) };
+                    return Ok(unsafe { (ptr as *const u32).read_unaligned() });
+                }
+            }
             let paddr = self.translate_data_read(laddr)?;
             Ok(self.mem_read_dword(paddr))
         } else {
             // Cross-page: read byte-by-byte with individual translations
             let mut buf = [0u8; 4];
             for i in 0..4u64 {
-                let la = (laddr.wrapping_add(i)) & 0xFFFF_FFFF;
-                let pa = self.translate_data_read(la)?;
-                buf[i as usize] = self.mem_read_byte(pa);
+                buf[i as usize] = self.read_virtual_byte_at_laddr(
+                    (laddr.wrapping_add(i)) & 0xFFFF_FFFF,
+                )?;
             }
             Ok(u32::from_le_bytes(buf))
         }
@@ -338,6 +374,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Read a qword from virtual memory with cross-page handling.
     /// Bochs: read_virtual_qword_32 -> agen_read32 + read_linear_qword
+    #[inline]
     pub(crate) fn read_virtual_qword(
         &mut self,
         seg: BxSegregs,
@@ -347,23 +384,52 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let page_offset = laddr & 0xFFF;
 
         if page_offset + 8 <= 0x1000 {
+            // ---- Inline TLB fast path ----
+            if self.cr0.pg() {
+                let lpf = laddr & 0xFFFF_F000;
+                let needed_bit = 1u32 << (self.user_pl as u32);
+                let tlb = self.dtlb.get_entry_of(laddr, 0);
+                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                    let host = tlb.host_page_addr as *const u8;
+                    let ptr = unsafe { host.add(page_offset as usize) };
+                    return Ok(unsafe { (ptr as *const u64).read_unaligned() });
+                }
+            }
             let paddr = self.translate_data_read(laddr)?;
             Ok(self.mem_read_qword(paddr))
         } else {
             let mut buf = [0u8; 8];
             for i in 0..8u64 {
-                let la = (laddr.wrapping_add(i)) & 0xFFFF_FFFF;
-                let pa = self.translate_data_read(la)?;
-                buf[i as usize] = self.mem_read_byte(pa);
+                buf[i as usize] = self.read_virtual_byte_at_laddr(
+                    (laddr.wrapping_add(i)) & 0xFFFF_FFFF,
+                )?;
             }
             Ok(u64::from_le_bytes(buf))
         }
+    }
+
+    /// Internal helper: read a single byte at a given linear address.
+    /// Used by cross-page paths to avoid duplicating TLB fast-path code.
+    #[inline]
+    fn read_virtual_byte_at_laddr(&mut self, laddr: u64) -> Result<u8> {
+        if self.cr0.pg() {
+            let lpf = laddr & 0xFFFF_F000;
+            let needed_bit = 1u32 << (self.user_pl as u32);
+            let tlb = self.dtlb.get_entry_of(laddr, 0);
+            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                let host = tlb.host_page_addr as *const u8;
+                return Ok(unsafe { *host.add((laddr & 0xFFF) as usize) });
+            }
+        }
+        let paddr = self.translate_data_read(laddr)?;
+        Ok(self.mem_read_byte(paddr))
     }
 
     // ===== Virtual write functions (Bochs access.h + access2.cc) =====
 
     /// Write a byte to virtual memory.
     /// Bochs: write_virtual_byte_32 -> agen_write32 + write_linear_byte
+    #[inline]
     pub fn write_virtual_byte(
         &mut self,
         seg: BxSegregs,
@@ -371,6 +437,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         val: u8,
     ) -> Result<()> {
         let laddr = self.agen_write32(seg, offset, 1)? as u64;
+
+        // ---- Inline TLB fast path ----
+        if self.cr0.pg() {
+            let lpf = laddr & 0xFFFF_F000;
+            // write + user/sys: bit 2 (TLB_SYS_WRITE_OK) or bit 3 (TLB_USER_WRITE_OK)
+            let needed_bit = 1u32 << (2 + self.user_pl as u32);
+            let tlb = self.dtlb.get_entry_of(laddr, 0);
+            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                let host = tlb.host_page_addr as *mut u8;
+                unsafe { *host.add((laddr & 0xFFF) as usize) = val };
+                return Ok(());
+            }
+        }
+
         let paddr = self.translate_data_write(laddr)?;
         self.mem_write_byte(paddr, val);
         Ok(())
@@ -378,6 +458,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Write a word to virtual memory with cross-page handling.
     /// Bochs: write_virtual_word_32 -> agen_write32 + write_linear_word
+    #[inline]
     pub(super) fn write_virtual_word(
         &mut self,
         seg: BxSegregs,
@@ -388,21 +469,32 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let page_offset = laddr & 0xFFF;
 
         if page_offset + 2 <= 0x1000 {
+            // ---- Inline TLB fast path ----
+            if self.cr0.pg() {
+                let lpf = laddr & 0xFFFF_F000;
+                let needed_bit = 1u32 << (2 + self.user_pl as u32);
+                let tlb = self.dtlb.get_entry_of(laddr, 0);
+                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                    let host = tlb.host_page_addr as *mut u8;
+                    let ptr = unsafe { host.add(page_offset as usize) };
+                    unsafe { (ptr as *mut u16).write_unaligned(val) };
+                    return Ok(());
+                }
+            }
             let paddr = self.translate_data_write(laddr)?;
             self.mem_write_word(paddr, val);
         } else {
             let bytes = val.to_le_bytes();
-            let p0 = self.translate_data_write(laddr)?;
-            self.mem_write_byte(p0, bytes[0]);
+            self.write_virtual_byte_at_laddr(laddr, bytes[0])?;
             let laddr2 = (laddr & 0xFFFF_F000).wrapping_add(0x1000) & 0xFFFF_FFFF;
-            let p1 = self.translate_data_write(laddr2)?;
-            self.mem_write_byte(p1, bytes[1]);
+            self.write_virtual_byte_at_laddr(laddr2, bytes[1])?;
         }
         Ok(())
     }
 
     /// Write a dword to virtual memory with cross-page handling.
     /// Bochs: write_virtual_dword_32 -> agen_write32 + write_linear_dword
+    #[inline]
     pub(super) fn write_virtual_dword(
         &mut self,
         seg: BxSegregs,
@@ -413,14 +505,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let page_offset = laddr & 0xFFF;
 
         if page_offset + 4 <= 0x1000 {
+            // ---- Inline TLB fast path ----
+            if self.cr0.pg() {
+                let lpf = laddr & 0xFFFF_F000;
+                let needed_bit = 1u32 << (2 + self.user_pl as u32);
+                let tlb = self.dtlb.get_entry_of(laddr, 0);
+                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                    let host = tlb.host_page_addr as *mut u8;
+                    let ptr = unsafe { host.add(page_offset as usize) };
+                    unsafe { (ptr as *mut u32).write_unaligned(val) };
+                    return Ok(());
+                }
+            }
             let paddr = self.translate_data_write(laddr)?;
             self.mem_write_dword(paddr, val);
         } else {
             let bytes = val.to_le_bytes();
             for i in 0..4u64 {
                 let la = (laddr.wrapping_add(i)) & 0xFFFF_FFFF;
-                let pa = self.translate_data_write(la)?;
-                self.mem_write_byte(pa, bytes[i as usize]);
+                self.write_virtual_byte_at_laddr(la, bytes[i as usize])?;
             }
         }
         Ok(())
@@ -428,6 +531,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Write a qword to virtual memory with cross-page handling.
     /// Bochs: write_virtual_qword_32 -> agen_write32 + write_linear_qword
+    #[inline]
     pub(crate) fn write_virtual_qword(
         &mut self,
         seg: BxSegregs,
@@ -438,16 +542,46 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let page_offset = laddr & 0xFFF;
 
         if page_offset + 8 <= 0x1000 {
+            // ---- Inline TLB fast path ----
+            if self.cr0.pg() {
+                let lpf = laddr & 0xFFFF_F000;
+                let needed_bit = 1u32 << (2 + self.user_pl as u32);
+                let tlb = self.dtlb.get_entry_of(laddr, 0);
+                if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                    let host = tlb.host_page_addr as *mut u8;
+                    let ptr = unsafe { host.add(page_offset as usize) };
+                    unsafe { (ptr as *mut u64).write_unaligned(val) };
+                    return Ok(());
+                }
+            }
             let paddr = self.translate_data_write(laddr)?;
             self.mem_write_qword(paddr, val);
         } else {
             let bytes = val.to_le_bytes();
             for i in 0..8u64 {
                 let la = (laddr.wrapping_add(i)) & 0xFFFF_FFFF;
-                let pa = self.translate_data_write(la)?;
-                self.mem_write_byte(pa, bytes[i as usize]);
+                self.write_virtual_byte_at_laddr(la, bytes[i as usize])?;
             }
         }
+        Ok(())
+    }
+
+    /// Internal helper: write a single byte at a given linear address.
+    /// Used by cross-page paths to avoid duplicating TLB fast-path code.
+    #[inline]
+    fn write_virtual_byte_at_laddr(&mut self, laddr: u64, val: u8) -> Result<()> {
+        if self.cr0.pg() {
+            let lpf = laddr & 0xFFFF_F000;
+            let needed_bit = 1u32 << (2 + self.user_pl as u32);
+            let tlb = self.dtlb.get_entry_of(laddr, 0);
+            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+                let host = tlb.host_page_addr as *mut u8;
+                unsafe { *host.add((laddr & 0xFFF) as usize) = val };
+                return Ok(());
+            }
+        }
+        let paddr = self.translate_data_write(laddr)?;
+        self.mem_write_byte(paddr, val);
         Ok(())
     }
 
