@@ -348,6 +348,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Call interrupt handler based on CPU mode
         let vector_u8 = vector as u8;
 
+        // Bochs interrupt() wrapper (exception.cc:800-801):
+        // Clear debug trap and interrupt inhibition before delivery.
+        self.debug_trap = 0;
+        self.inhibit_mask = 0;
+
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
@@ -388,6 +393,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 Err(e) => return Err(e),
             }
         }
+
+        // Bochs interrupt() wrapper (exception.cc:838): clear EXT after delivery
+        self.ext = false;
 
         // error resolved
         self.last_exception_type = 0;

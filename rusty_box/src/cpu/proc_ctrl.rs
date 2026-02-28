@@ -37,7 +37,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     fn handle_alignment_check(&mut self) {
-        if self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl == 3 && self.cr0.am() && self.get_ac() != 0 {
+        if self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl
+            == 3
+            && self.cr0.am()
+            && self.get_ac() != 0
+        {
             self.alignment_check_mask = 0xf;
         } else {
             self.alignment_check_mask = 0;
@@ -58,12 +64,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // System control instructions
     // =========================================================================
 
-    pub(super) fn wbinvd(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
+    pub(super) fn wbinvd(
+        &mut self,
+        _instr: &super::decoder::Instruction,
+    ) -> crate::cpu::Result<()> {
         tracing::trace!("WBINVD: no-op (no cache)");
         Ok(())
     }
 
     pub(super) fn invlpg(&mut self, instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
+        // INVLPG is a privileged instruction (CPL=0 only)
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        if cpl != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr32(instr);
         let laddr = self.get_laddr32(seg as usize, eaddr);
@@ -119,7 +133,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             0x174 => self.msr.sysenter_cs_msr = val as u32,
             0x175 => self.msr.sysenter_esp_msr = val,
             0x176 => self.msr.sysenter_eip_msr = val,
-            0x277 => { self.msr.pat.U64 = val; }
+            0x277 => {
+                self.msr.pat.U64 = val;
+            }
             0x2FF => self.msr.mtrr_deftype = val as u32,
             n @ 0x200..=0x20F => self.msr.mtrrphys[(n - 0x200) as usize] = val,
             _ => {
@@ -134,7 +150,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // MOV Rd, DRn / MOV DRn, Rd -- Debug Register Operations
     // =========================================================================
 
-    pub(super) fn mov_rd_dd(&mut self, instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
+    pub(super) fn mov_rd_dd(
+        &mut self,
+        instr: &super::decoder::Instruction,
+    ) -> crate::cpu::Result<()> {
         let dr_idx = instr.src1() as usize;
         let dst_gpr = instr.dst() as usize;
         let val: u32 = match dr_idx {
@@ -144,21 +163,42 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             _ => 0,
         };
         self.set_gpr32(dst_gpr, val);
-        tracing::trace!("MOV r32, DR{}: DR{}={:#010x} -> reg{}", dr_idx, dr_idx, val, dst_gpr);
+        tracing::trace!(
+            "MOV r32, DR{}: DR{}={:#010x} -> reg{}",
+            dr_idx,
+            dr_idx,
+            val,
+            dst_gpr
+        );
         Ok(())
     }
 
-    pub(super) fn mov_dd_rd(&mut self, instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
+    pub(super) fn mov_dd_rd(
+        &mut self,
+        instr: &super::decoder::Instruction,
+    ) -> crate::cpu::Result<()> {
         let dr_idx = instr.dst() as usize;
         let src_gpr = instr.src1() as usize;
         let val = self.get_gpr32(src_gpr);
         match dr_idx {
-            0..=3 => { self.dr[dr_idx] = val as u64; }
-            4 | 6 => { self.dr6.val32 = val; }
-            5 | 7 => { self.dr7.val32 = val; }
+            0..=3 => {
+                self.dr[dr_idx] = val as u64;
+            }
+            4 | 6 => {
+                self.dr6.val32 = val;
+            }
+            5 | 7 => {
+                self.dr7.val32 = val;
+            }
             _ => {}
         }
-        tracing::trace!("MOV DR{}, r32: reg{}={:#010x} -> DR{}", dr_idx, src_gpr, val, dr_idx);
+        tracing::trace!(
+            "MOV DR{}, r32: reg{}={:#010x} -> DR{}",
+            dr_idx,
+            src_gpr,
+            val,
+            dr_idx
+        );
         Ok(())
     }
 }
