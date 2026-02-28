@@ -10,25 +10,22 @@
 //! - Standard devices (HardDrive, Floppy, VGA) are configurable
 //! - Each device registers its own I/O port handlers
 
+use alloc::format;
+use alloc::string::String;
 use core::ffi::c_void;
 
-use crate::{
-    cpu::ResetReason,
-    memory::BxMemC,
-    pc_system::BxPcSystemC,
-    Result,
-};
+use crate::{cpu::ResetReason, memory::BxMemC, pc_system::BxPcSystemC, Result};
 
-use super::BxDevicesC;
+use super::cmos::{BxCmosC, CMOS_ADDR, CMOS_DATA};
+use super::dma::BxDmaC;
+use super::harddrv::BxHardDriveC;
+use super::keyboard::{BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT, SYSTEM_CONTROL_B};
 use super::pic::{
     BxPicC, PIC_ELCR1, PIC_ELCR2, PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA,
 };
-use super::pit::{BxPitC, PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2, PIT_CONTROL};
-use super::cmos::{BxCmosC, CMOS_ADDR, CMOS_DATA};
-use super::dma::BxDmaC;
-use super::keyboard::{BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT, SYSTEM_CONTROL_B};
-use super::harddrv::BxHardDriveC;
+use super::pit::{BxPitC, PIT_CONTROL, PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2};
 use super::vga::BxVgaC;
+use super::BxDevicesC;
 
 /// Port 0x92 - System Control Port
 /// Bit 0: Fast A20 gate control (1 = A20 enabled)
@@ -39,29 +36,43 @@ const PORT_92H: u16 = 0x0092;
 #[derive(Debug, Default, Clone)]
 pub struct Port92State {
     /// Current value of port 92h
-    pub value: u8,
+    pub(crate) value: u8,
 }
 
 /// Unified Device Manager
-/// 
+///
 /// Holds all hardware devices and manages their initialization,
 /// reset, and I/O port registration. This mirrors Bochs' `bx_devices_c`.
 #[derive(Debug)]
 pub struct DeviceManager {
     /// 8259 PIC (Programmable Interrupt Controller)
-    pub pic: BxPicC,
+    pub(crate) pic: BxPicC,
     /// 8254 PIT (Programmable Interval Timer)
-    pub pit: BxPitC,
+    pub(crate) pit: BxPitC,
     /// CMOS/RTC
-    pub cmos: BxCmosC,
+    pub(crate) cmos: BxCmosC,
     /// 8237 DMA Controller
-    pub dma: BxDmaC,
+    pub(crate) dma: BxDmaC,
     /// 8042 Keyboard Controller
-    pub keyboard: BxKeyboardC,
+    pub(crate) keyboard: BxKeyboardC,
     /// ATA/IDE Hard Drive Controller
-    pub harddrv: BxHardDriveC,
+    pub(crate) harddrv: BxHardDriveC,
     /// VGA Display Controller
-    pub vga: BxVgaC,
+    pub(crate) vga: BxVgaC,
+    /// Diagnostic: PIT fire count (check_irq0 returned true)
+    pub diag_pit_fires: u64,
+    /// Diagnostic: raise_irq(0) latched (irq_in was 0)
+    pub diag_irq0_latched: u64,
+    /// Diagnostic: raise_irq(0) skipped (irq_in was already 1)
+    pub diag_irq0_already_high: u64,
+    /// Diagnostic: iac() calls
+    pub diag_iac_count: u64,
+    /// Diagnostic: total tick() calls
+    pub diag_tick_count: u64,
+    /// Diagnostic: total usec passed to tick()
+    pub diag_total_usec: u64,
+    /// Diagnostic: iac vector histogram [0..256]
+    pub diag_vector_hist: [u32; 256],
 }
 
 impl Default for DeviceManager {
@@ -81,11 +92,18 @@ impl DeviceManager {
             keyboard: BxKeyboardC::new(),
             harddrv: BxHardDriveC::new(),
             vga: BxVgaC::new(),
+            diag_pit_fires: 0,
+            diag_irq0_latched: 0,
+            diag_irq0_already_high: 0,
+            diag_iac_count: 0,
+            diag_tick_count: 0,
+            diag_total_usec: 0,
+            diag_vector_hist: [0; 256],
         }
     }
 
     /// Initialize all devices and register I/O handlers
-    /// 
+    ///
     /// Matches device loading order from cpp_orig/bochs/iodev/devices.cc:250-277:
     /// 1. CMOS (line 250)
     /// 2. DMA (line 251)
@@ -128,7 +146,7 @@ impl DeviceManager {
     /// Reset all devices
     pub fn reset(&mut self, reset_type: ResetReason) -> Result<()> {
         tracing::info!("Device manager reset: {:?}", reset_type);
-        
+
         self.pic.reset();
         self.pit.reset();
         self.cmos.reset();
@@ -143,8 +161,15 @@ impl DeviceManager {
     /// Register PIC I/O handlers
     fn register_pic_handlers(&mut self, io: &mut BxDevicesC) {
         let pic_ptr = &mut self.pic as *mut BxPicC as *mut c_void;
-        
-        for port in [PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA, PIC_ELCR1, PIC_ELCR2] {
+
+        for port in [
+            PIC_MASTER_CMD,
+            PIC_MASTER_DATA,
+            PIC_SLAVE_CMD,
+            PIC_SLAVE_DATA,
+            PIC_ELCR1,
+            PIC_ELCR2,
+        ] {
             io.register_io_handler(
                 pic_ptr,
                 super::pic::pic_read_handler,
@@ -159,7 +184,7 @@ impl DeviceManager {
     /// Register PIT I/O handlers
     fn register_pit_handlers(&mut self, io: &mut BxDevicesC) {
         let pit_ptr = &mut self.pit as *mut BxPitC as *mut c_void;
-        
+
         for port in [PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2, PIT_CONTROL] {
             io.register_io_handler(
                 pit_ptr,
@@ -175,7 +200,7 @@ impl DeviceManager {
     /// Register CMOS I/O handlers
     fn register_cmos_handlers(&mut self, io: &mut BxDevicesC) {
         let cmos_ptr = &mut self.cmos as *mut BxCmosC as *mut c_void;
-        
+
         io.register_io_handler(
             cmos_ptr,
             super::cmos::cmos_read_handler,
@@ -197,7 +222,7 @@ impl DeviceManager {
     /// Register DMA I/O handlers
     fn register_dma_handlers(&mut self, io: &mut BxDevicesC) {
         let dma_ptr = &mut self.dma as *mut BxDmaC as *mut c_void;
-        
+
         // DMA1 ports (0x00-0x0F)
         for port in 0x00..=0x0F_u16 {
             io.register_io_handler(
@@ -209,7 +234,7 @@ impl DeviceManager {
                 0x1,
             );
         }
-        
+
         // DMA2 ports (0xC0-0xDF)
         for port in 0xC0..=0xDF_u16 {
             io.register_io_handler(
@@ -221,7 +246,7 @@ impl DeviceManager {
                 0x1,
             );
         }
-        
+
         // DMA page registers
         for port in [0x81_u16, 0x82, 0x83, 0x87, 0x89, 0x8A, 0x8B, 0x8F] {
             io.register_io_handler(
@@ -238,7 +263,7 @@ impl DeviceManager {
     /// Register Keyboard I/O handlers
     fn register_keyboard_handlers(&mut self, io: &mut BxDevicesC) {
         let kbd_ptr = &mut self.keyboard as *mut BxKeyboardC as *mut c_void;
-        
+
         io.register_io_handler(
             kbd_ptr,
             super::keyboard::keyboard_read_handler,
@@ -268,7 +293,7 @@ impl DeviceManager {
     /// Register Hard Drive I/O handlers
     fn register_harddrv_handlers(&mut self, io: &mut BxDevicesC) {
         let hd_ptr = &mut self.harddrv as *mut BxHardDriveC as *mut c_void;
-        
+
         // Primary ATA (0x1F0-0x1F7, 0x3F6)
         for port in 0x1F0..=0x1F7_u16 {
             io.register_io_handler(
@@ -288,7 +313,7 @@ impl DeviceManager {
             "ATA Primary Control",
             0x1,
         );
-        
+
         // Secondary ATA (0x170-0x177, 0x376)
         for port in 0x170..=0x177_u16 {
             io.register_io_handler(
@@ -313,15 +338,26 @@ impl DeviceManager {
     /// Simulate time passing for timer-based devices
     /// Returns true if any interrupt is pending
     pub fn tick(&mut self, usec: u64) -> bool {
+        self.diag_tick_count += 1;
+        self.diag_total_usec += usec;
         // Tick PIT/RTC first to generate periodic interrupts (Bochs-like behavior).
         // PIT drives IRQ0, CMOS/RTC drives IRQ8 when enabled.
         let _pit_fired = self.pit.tick(usec);
         if self.pit.check_irq0() {
-            tracing::trace!("PIT-IRQ0: fired! PIC int_pin={}, master.imr={:#04x}, master.irr={:#04x}",
-                self.pic.master.int_pin, self.pic.master.imr, self.pic.master.irr);
+            self.diag_pit_fires += 1;
+            // Track whether raise_irq will actually latch
+            let was_high = self.pic.master.irq_in[0] != 0;
+            if was_high {
+                self.diag_irq0_already_high += 1;
+            }
+            // PIT pulses the IRQ line: lower first to reset edge-detect state,
+            // then raise.  Without this, raise_irq(0) is a no-op when irq_in[0]
+            // is still high from a previous fire that the CPU hasn't yet
+            // acknowledged via INTA (common when our coarse batching delays
+            // interrupt delivery).
+            self.pic.lower_irq(0);
             self.pic.raise_irq(0);
-            tracing::trace!("PIT-IRQ0: after raise_irq(0): int_pin={}, irr={:#04x}",
-                self.pic.master.int_pin, self.pic.master.irr);
+            self.diag_irq0_latched += 1;
         }
 
         let _ = self.cmos.tick(usec);
@@ -357,25 +393,51 @@ impl DeviceManager {
 
     /// Acknowledge interrupt and get vector
     pub fn iac(&mut self) -> u8 {
-        self.pic.iac()
+        self.diag_iac_count += 1;
+        let vector = self.pic.iac();
+        self.diag_vector_hist[vector as usize] += 1;
+        vector
     }
 
     /// Get A20 state from keyboard controller
     pub fn get_a20_from_keyboard(&self) -> bool {
         self.keyboard.get_a20_enabled()
     }
+
+    /// Get ATA I/O counts for diagnostics
+    pub fn ata_io_counts(&self) -> (u64, u64) {
+        (self.harddrv.read_count, self.harddrv.write_count)
+    }
+
+    /// Get PIC diagnostic string
+    pub fn pic_diag(&self) -> String {
+        format!(
+            "ISR={:#04x} IRR={:#04x} IMR={:#04x} int_pin={} irq_in[0]={} master_offset={:#04x} slave_offset={:#04x}",
+            self.pic.master.isr,
+            self.pic.master.irr,
+            self.pic.master.imr,
+            self.pic.master.int_pin,
+            self.pic.master.irq_in[0],
+            self.pic.master.interrupt_offset,
+            self.pic.slave.interrupt_offset,
+        )
+    }
 }
 
 impl BxDevicesC {
     /// Initialize all devices
-    /// 
+    ///
     /// This is the main device initialization function corresponding to
     /// `DEV_init_devices()` / `bx_devices_c::init()` in Bochs.
-    /// 
+    ///
     /// # Arguments
     /// * `mem` - Memory subsystem reference
     /// * `port92_state` - Optional pointer to SystemControlPort for Port 92h handling
-    pub fn init(&mut self, _mem: &mut BxMemC, port92_state: Option<*mut SystemControlPort>) -> Result<()> {
+    pub fn init(
+        &mut self,
+        _mem: &mut BxMemC,
+        port92_state: Option<*mut SystemControlPort>,
+    ) -> Result<()> {
         tracing::info!("Initializing device subsystem");
 
         // Register Port 92h - System Control Port (A20 gate, fast reset)
@@ -405,7 +467,7 @@ impl BxDevicesC {
     }
 
     /// Initialize devices with PC system reference for A20 control
-    /// 
+    ///
     /// This variant allows devices to control the A20 line during operation.
     pub fn init_with_pc_system(
         &mut self,
@@ -417,9 +479,9 @@ impl BxDevicesC {
     }
 
     /// Reset all devices
-    /// 
+    ///
     /// Matches bx_devices_c::reset() from cpp_orig/bochs/iodev/devices.cc:398-411
-    /// 
+    ///
     /// # Arguments
     /// * `reset_type` - Type of reset (Hardware or Software)
     pub fn reset(&mut self, reset_type: ResetReason) -> Result<()> {
@@ -451,7 +513,7 @@ impl BxDevicesC {
 }
 
 /// Port 92h read handler
-/// 
+///
 /// Returns the current state of the System Control Port
 fn port92_read_handler(this_ptr: *mut c_void, _port: u16, _io_len: u8) -> u32 {
     if this_ptr.is_null() {
@@ -459,26 +521,30 @@ fn port92_read_handler(this_ptr: *mut c_void, _port: u16, _io_len: u8) -> u32 {
         tracing::trace!("Port 92h read (no state)");
         return 0x01; // A20 enabled
     }
-    
+
     let port92 = unsafe { &*(this_ptr as *const SystemControlPort) };
     port92.read() as u32
 }
 
 /// Port 92h write handler
-/// 
+///
 /// Handles A20 gate control and fast reset
 fn port92_write_handler(this_ptr: *mut c_void, _port: u16, value: u32, _io_len: u8) {
     let value = value as u8;
-    
+
     if this_ptr.is_null() {
         tracing::debug!("Port 92h write: value={:#04x} (no state handler)", value);
         return;
     }
-    
+
     let port92 = unsafe { &mut *(this_ptr as *mut SystemControlPort) };
     port92.write(value);
-    tracing::debug!("Port 92h write: value={:#04x}, a20={}, reset={}", 
-                    value, port92.a20_gate, port92.reset_request);
+    tracing::debug!(
+        "Port 92h write: value={:#04x}, a20={}, reset={}",
+        value,
+        port92.a20_gate,
+        port92.reset_request
+    );
 }
 
 /// Helper structure for managing Port 92h state
@@ -506,7 +572,7 @@ impl SystemControlPort {
     /// Process a write to port 92h
     pub fn write(&mut self, value: u8) -> bool {
         let old_a20 = self.a20_gate;
-        
+
         self.value = value;
         self.a20_gate = (value & 0x01) != 0;
         self.reset_request = (value & 0x02) != 0;
@@ -533,7 +599,7 @@ mod tests {
     #[test]
     fn test_system_control_port() {
         let mut port = SystemControlPort::new();
-        
+
         // Initially A20 is enabled
         assert!(port.a20_gate);
         assert!(!port.reset_request);

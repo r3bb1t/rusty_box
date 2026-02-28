@@ -1,5 +1,8 @@
 use alloc::{format, string::String, vec, vec::Vec};
 
+#[cfg(feature = "data_parallelism")]
+use rayon::prelude::*;
+
 use crate::{
     config::BxPhyAddress,
     cpu::{
@@ -14,7 +17,7 @@ use crate::{
 // Slice-based BxPageWriteStampTable for use with memory system
 #[derive(Debug)]
 pub struct BxPageWriteStampTable<'a> {
-    pub fine_granularity_mapping: &'a mut [u32],
+    pub(crate) fine_granularity_mapping: &'a mut [u32],
 }
 
 impl<'a> BxPageWriteStampTable<'a> {
@@ -308,10 +311,22 @@ impl BxICache {
         }
 
         // Check page split entries
-        for i in 0..BX_ICACHE_ENTRIES {
-            if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-                if ppf_of(self.page_split_index[i].ppf) == ppf_of(p_addr) {
-                    flush_smc(&mut self.page_split_index[i].e); // Assuming flush_smc is defined elsewhere
+        let ppf = ppf_of(p_addr);
+        #[cfg(feature = "data_parallelism")]
+        {
+            self.page_split_index.par_iter_mut().for_each(|pse| {
+                if pse.ppf != BX_ICACHE_INVALID_PHY_ADDRESS && ppf_of(pse.ppf) == ppf {
+                    flush_smc(&mut pse.e);
+                }
+            });
+        }
+        #[cfg(not(feature = "data_parallelism"))]
+        {
+            for i in 0..BX_ICACHE_ENTRIES {
+                if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
+                    if ppf_of(self.page_split_index[i].ppf) == ppf {
+                        flush_smc(&mut self.page_split_index[i].e);
+                    }
                 }
             }
         }
@@ -328,25 +343,47 @@ impl BxICache {
         }
 
         // Flush page split entries
-        for i in 0..BX_ICACHE_ENTRIES {
-            if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-                if ppf_of(self.page_split_index[i].ppf) == ppf {
-                    flush_smc(&mut self.page_split_index[i].e);
+        #[cfg(feature = "data_parallelism")]
+        {
+            self.page_split_index.par_iter_mut().for_each(|pse| {
+                if pse.ppf != BX_ICACHE_INVALID_PHY_ADDRESS && ppf_of(pse.ppf) == ppf {
+                    flush_smc(&mut pse.e);
+                }
+            });
+        }
+        #[cfg(not(feature = "data_parallelism"))]
+        {
+            for i in 0..BX_ICACHE_ENTRIES {
+                if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
+                    if ppf_of(self.page_split_index[i].ppf) == ppf {
+                        flush_smc(&mut self.page_split_index[i].e);
+                    }
                 }
             }
         }
     }
 
     pub fn flush_all(&mut self) {
-        for entry in &mut self.entry {
-            flush_smc(entry);
+        #[cfg(feature = "data_parallelism")]
+        {
+            self.entry.par_iter_mut().for_each(|entry| flush_smc(entry));
+            self.page_split_index.par_iter_mut().for_each(|entry| {
+                if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
+                    entry.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
+                    flush_smc(&mut entry.e);
+                }
+            });
         }
-
-        // Clear page split index
-        for entry in &mut self.page_split_index {
-            if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-                entry.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                flush_smc(&mut entry.e);
+        #[cfg(not(feature = "data_parallelism"))]
+        {
+            for entry in &mut self.entry {
+                flush_smc(entry);
+            }
+            for entry in &mut self.page_split_index {
+                if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
+                    entry.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
+                    flush_smc(&mut entry.e);
+                }
             }
         }
 
@@ -368,29 +405,51 @@ impl BxICache {
         }
 
         // Invalidate page split entries
-        for i in 0..BX_ICACHE_ENTRIES {
-            if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-                if ppf_of(self.page_split_index[i].ppf) == ppf {
-                    self.page_split_index[i].ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                    flush_smc(&mut self.page_split_index[i].e);
+        #[cfg(feature = "data_parallelism")]
+        {
+            self.page_split_index.par_iter_mut().for_each(|pse| {
+                if pse.ppf != BX_ICACHE_INVALID_PHY_ADDRESS && ppf_of(pse.ppf) == ppf {
+                    pse.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
+                    flush_smc(&mut pse.e);
+                }
+            });
+        }
+        #[cfg(not(feature = "data_parallelism"))]
+        {
+            for i in 0..BX_ICACHE_ENTRIES {
+                if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
+                    if ppf_of(self.page_split_index[i].ppf) == ppf {
+                        self.page_split_index[i].ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
+                        flush_smc(&mut self.page_split_index[i].e);
+                    }
                 }
             }
         }
-        //     if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-        //         self.page_split_index[i].ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
     }
 
     pub fn invalidate_all(&mut self) {
-        for entry in &mut self.entry {
-            entry.p_addr = IcacheAddress::Invalid;
+        #[cfg(feature = "data_parallelism")]
+        {
+            self.entry
+                .par_iter_mut()
+                .for_each(|entry| entry.p_addr = IcacheAddress::Invalid);
+            self.page_split_index.par_iter_mut().for_each(|entry| {
+                if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
+                    entry.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
+                    flush_smc(&mut entry.e);
+                }
+            });
         }
-
-        // Clear page split index
-        for entry in &mut self.page_split_index {
-            // TODO: Use algebraic types for clarity?
-            if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-                entry.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                flush_smc(&mut entry.e);
+        #[cfg(not(feature = "data_parallelism"))]
+        {
+            for entry in &mut self.entry {
+                entry.p_addr = IcacheAddress::Invalid;
+            }
+            for entry in &mut self.page_split_index {
+                if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
+                    entry.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
+                    flush_smc(&mut entry.e);
+                }
             }
         }
     }
@@ -471,17 +530,34 @@ impl BxICache {
 
         tracing::debug!(
             "SMC detected: p_addr={:#x}, page_index={:#x}, mask={:#010b}",
-            p_addr, target_page_index, mask
+            p_addr,
+            target_page_index,
+            mask
         );
 
         // Scan all icache entries for ones that belong to the affected page
         // and have overlapping trace_mask bits.
-        for entry in &mut self.entry {
-            if let IcacheAddress::Address(entry_addr) = entry.p_addr {
-                if Self::stamp_hash(entry_addr) == target_page_index
-                    && (entry.trace_mask & mask) != 0
-                {
-                    flush_smc(entry);
+        #[cfg(feature = "data_parallelism")]
+        {
+            self.entry.par_iter_mut().for_each(|entry| {
+                if let IcacheAddress::Address(entry_addr) = entry.p_addr {
+                    if Self::stamp_hash(entry_addr) == target_page_index
+                        && (entry.trace_mask & mask) != 0
+                    {
+                        flush_smc(entry);
+                    }
+                }
+            });
+        }
+        #[cfg(not(feature = "data_parallelism"))]
+        {
+            for entry in &mut self.entry {
+                if let IcacheAddress::Address(entry_addr) = entry.p_addr {
+                    if Self::stamp_hash(entry_addr) == target_page_index
+                        && (entry.trace_mask & mask) != 0
+                    {
+                        flush_smc(entry);
+                    }
                 }
             }
         }
@@ -489,12 +565,26 @@ impl BxICache {
         // Also check page split entries — a write to the first cache line could
         // affect traces that start on the previous page and spill into this one.
         if mask & 0x1 != 0 {
-            for pse in &mut self.page_split_index {
-                if pse.ppf != BX_ICACHE_INVALID_PHY_ADDRESS
-                    && Self::stamp_hash(pse.ppf) == target_page_index
-                {
-                    pse.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
-                    flush_smc(&mut pse.e);
+            #[cfg(feature = "data_parallelism")]
+            {
+                self.page_split_index.par_iter_mut().for_each(|pse| {
+                    if pse.ppf != BX_ICACHE_INVALID_PHY_ADDRESS
+                        && Self::stamp_hash(pse.ppf) == target_page_index
+                    {
+                        pse.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
+                        flush_smc(&mut pse.e);
+                    }
+                });
+            }
+            #[cfg(not(feature = "data_parallelism"))]
+            {
+                for pse in &mut self.page_split_index {
+                    if pse.ppf != BX_ICACHE_INVALID_PHY_ADDRESS
+                        && Self::stamp_hash(pse.ppf) == target_page_index
+                    {
+                        pse.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
+                        flush_smc(&mut pse.e);
+                    }
                 }
             }
         }
@@ -502,7 +592,16 @@ impl BxICache {
 
     /// Reset all page write stamps (e.g., on full icache flush).
     pub fn reset_write_stamps(&mut self) {
-        self.page_write_stamps.fill(0);
+        #[cfg(feature = "data_parallelism")]
+        {
+            self.page_write_stamps
+                .par_iter_mut()
+                .for_each(|stamp| *stamp = 0);
+        }
+        #[cfg(not(feature = "data_parallelism"))]
+        {
+            self.page_write_stamps.fill(0);
+        }
     }
 }
 
@@ -763,9 +862,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     // returns, loops, interrupts) must end the trace so that the next
                     // get_icache_entry call looks up the branch TARGET address, not the
                     // next sequential address.
-                    let stop_trace_indication = is_trace_end_opcode(
-                        self.i_cache.mpool[current_mpindex].get_ia_opcode()
-                    );
+                    let stop_trace_indication =
+                        is_trace_end_opcode(self.i_cache.mpool[current_mpindex].get_ia_opcode());
 
                     // TODO: Implement BX_INSTR_STORE_OPCODE_BYTES if needed (matching C++ line 175-177)
                     // TODO: Implement BX_INSTR_OPCODE if needed (matching C++ line 178-179)
@@ -858,12 +956,21 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                             "DECODE-FAIL: remaining={} RIP={:#x} CS.base={:#x} EIP={:#x} icount={}",
                             current_remaining,
                             self.rip(),
-                            unsafe { self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize].cache.u.segment.base },
+                            unsafe {
+                                self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
+                                    .cache
+                                    .u
+                                    .segment
+                                    .base
+                            },
                             self.eip(),
                             self.icount,
                         );
                         tracing::error!("DECODE-FAIL: decode_err={:?}", decode_err);
-                        tracing::error!("DECODE-FAIL: first 32 bytes @ fetch_ptr: {:02x?}", &current_fetch_ptr[..core::cmp::min(32, current_fetch_ptr.len())]);
+                        tracing::error!(
+                            "DECODE-FAIL: first 32 bytes @ fetch_ptr: {:02x?}",
+                            &current_fetch_ptr[..core::cmp::min(32, current_fetch_ptr.len())]
+                        );
 
                         // Check if this is an illegal opcode - if so, generate #UD exception
                         // Based on Bochs exception.cc:937 and cpu.h:248 (Exception::Ud = 6)
@@ -871,10 +978,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         use rusty_box_decoder::fetchdecode_generated::BxDecodeError;
                         match &decode_err {
                             DecodeError::Decoder(BxDecodeError::BxIllegalOpcode) => {
-                                tracing::debug!("Illegal opcode detected, generating #UD exception (vector 6)");
+                                tracing::debug!(
+                                    "Illegal opcode detected, generating #UD exception (vector 6)"
+                                );
                                 // Generate #UD exception which will vector through IVT in real mode
                                 // The exception() method will save CS:IP and jump to the #UD handler
-                                let exception_result = self.exception(crate::cpu::cpu::Exception::Ud, 0);
+                                let exception_result =
+                                    self.exception(crate::cpu::cpu::Exception::Ud, 0);
 
                                 // If the exception handler returns an error, propagate it
                                 if let Err(e) = exception_result {
@@ -929,8 +1039,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         entry.p_addr = IcacheAddress::Address(p_addr); // Restore pAddr (~entry->pAddr in C++)
                         entry.trace_mask = 0x80000000; /* last line in page */
                         entry.i = boundary_instr; // Set first instruction for ilen cache hit check
-                        // Note: tlen is already set to 1 above, no need to set it again
-                        // mpool_start_idx was already set above
+                                                  // Note: tlen is already set to 1 above, no need to set it again
+                                                  // mpool_start_idx was already set above
                     }
 
                     page_write_stamp_table.mark_icache_mask(p_addr, 0x80000000);
@@ -1016,7 +1126,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                  or boundary_fetch was called with an incorrect remaining_in_page value.",
                 remaining_in_page,
                 self.rip(),
-                unsafe { self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize].cache.u.segment.base },
+                unsafe {
+                    self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
+                        .cache
+                        .u
+                        .segment
+                        .base
+                },
                 self.eip()
             );
             self.exception(crate::cpu::cpu::Exception::Gp, 0)?;

@@ -5,9 +5,12 @@
 //! `render_text_to_framebuffer()`, and the GUI thread reads the framebuffer
 //! for texture upload and pushes scancodes for keyboard input.
 
+use super::vga_font::{VGA_DEFAULT_PALETTE_16, VGA_FONT_8X16};
 use alloc::vec;
 use alloc::vec::Vec;
-use super::vga_font::{VGA_DEFAULT_PALETTE_16, VGA_FONT_8X16};
+
+#[cfg(feature = "data_parallelism")]
+use rayon::prelude::*;
 
 /// Shared state between the emulator and GUI threads.
 ///
@@ -100,84 +103,185 @@ impl SharedDisplay {
         let fw = self.font_width;
         let fh = self.font_height;
         let stride = self.fb_width * 4;
+        let palette = self.palette; // Copy for parallel access
 
-        for row in 0..rows {
-            for col in 0..cols {
-                let text_idx = ((row * cols + col) * 2) as usize;
-                if text_idx + 1 >= text.len() {
-                    continue;
-                }
-                let ch = text[text_idx] as usize;
-                let attr = text[text_idx + 1];
-
+        // Helper closure: render a single character cell into framebuffer slice
+        let render_cell =
+            |fb: &mut [u8], row: u32, col: u32, ch: usize, attr: u8, is_cursor: bool| {
                 let fg_idx = (attr & 0x0F) as usize;
                 let bg_idx = ((attr >> 4) & 0x07) as usize;
+                let fg = if fg_idx < 16 {
+                    palette[fg_idx]
+                } else {
+                    [0xFF, 0xFF, 0xFF]
+                };
+                let bg = if bg_idx < 16 {
+                    palette[bg_idx]
+                } else {
+                    [0x00, 0x00, 0x00]
+                };
 
-                // Clamp palette indices
-                let fg = if fg_idx < 16 { self.palette[fg_idx] } else { [0xFF, 0xFF, 0xFF] };
-                let bg = if bg_idx < 16 { self.palette[bg_idx] } else { [0x00, 0x00, 0x00] };
-
-                let is_cursor = col == cursor_x && row == cursor_y;
-
-                // Pixel position of top-left of this character cell
                 let px = col * fw;
                 let py = row * fh;
 
                 for scanline in 0..fh {
-                    // Get font byte for this scanline
                     let font_byte = if (scanline as usize) < 16 {
                         VGA_FONT_8X16[ch][scanline as usize]
                     } else {
                         0
                     };
-
-                    // Determine if cursor should invert this scanline
                     let cursor_invert = is_cursor
                         && cs_start <= cs_end
                         && scanline as u8 >= cs_start
                         && scanline as u8 <= cs_end;
 
-                    // Render 8 pixels from the font byte (LSB-first: bit 0 = leftmost)
                     for bit in 0..8u32 {
                         let pixel_on = (font_byte >> bit) & 1 != 0;
-                        let mut color = if pixel_on { fg } else { bg };
-                        if cursor_invert {
-                            // Invert: swap fg/bg
-                            color = if pixel_on { bg } else { fg };
-                        }
+                        let color = if cursor_invert {
+                            if pixel_on { bg } else { fg }
+                        } else {
+                            if pixel_on { fg } else { bg }
+                        };
                         let fb_x = px + bit;
                         let fb_y = py + scanline;
                         let offset = (fb_y * stride + fb_x * 4) as usize;
-                        if offset + 3 < self.framebuffer.len() {
-                            self.framebuffer[offset] = color[0];     // R
-                            self.framebuffer[offset + 1] = color[1]; // G
-                            self.framebuffer[offset + 2] = color[2]; // B
-                            self.framebuffer[offset + 3] = 0xFF;     // A
+                        if offset + 3 < fb.len() {
+                            fb[offset] = color[0];
+                            fb[offset + 1] = color[1];
+                            fb[offset + 2] = color[2];
+                            fb[offset + 3] = 0xFF;
                         }
                     }
 
-                    // 9th pixel column (if font_width == 9)
                     if fw >= 9 {
-                        // Line graphics chars 0xC0-0xDF: duplicate rightmost pixel (bit 7 in LSB-first)
                         let ninth_on = if line_graphics && (0xC0..=0xDF).contains(&ch) {
                             (font_byte >> 7) & 1 != 0
                         } else {
                             false
                         };
-                        let mut color = if ninth_on { fg } else { bg };
-                        if cursor_invert {
-                            color = if ninth_on { bg } else { fg };
-                        }
+                        let color = if cursor_invert {
+                            if ninth_on { bg } else { fg }
+                        } else {
+                            if ninth_on { fg } else { bg }
+                        };
                         let fb_x = px + 8;
                         let fb_y = py + scanline;
                         let offset = (fb_y * stride + fb_x * 4) as usize;
-                        if offset + 3 < self.framebuffer.len() {
-                            self.framebuffer[offset] = color[0];
-                            self.framebuffer[offset + 1] = color[1];
-                            self.framebuffer[offset + 2] = color[2];
-                            self.framebuffer[offset + 3] = 0xFF;
+                        if offset + 3 < fb.len() {
+                            fb[offset] = color[0];
+                            fb[offset + 1] = color[1];
+                            fb[offset + 2] = color[2];
+                            fb[offset + 3] = 0xFF;
                         }
                     }
+                }
+            };
+
+        #[cfg(feature = "data_parallelism")]
+        {
+            // Parallelize over rows: each row writes to disjoint framebuffer region
+            let row_bytes = (fh * stride) as usize;
+            let fb = &mut self.framebuffer;
+            // Use par_chunks_mut to give each thread its own row slice
+            fb.par_chunks_mut(row_bytes)
+                .enumerate()
+                .for_each(|(row, row_fb)| {
+                    let row = row as u32;
+                    if row >= rows {
+                        return;
+                    }
+                    for col in 0..cols {
+                        let text_idx = ((row * cols + col) * 2) as usize;
+                        if text_idx + 1 >= text.len() {
+                            continue;
+                        }
+                        let ch = text[text_idx] as usize;
+                        let attr = text[text_idx + 1];
+                        let is_cursor = col == cursor_x && row == cursor_y;
+
+                        // Render into the full framebuffer (row_fb starts at row * row_bytes)
+                        // We need to adjust offsets since row_fb is a sub-slice
+                        let fg_idx = (attr & 0x0F) as usize;
+                        let bg_idx = ((attr >> 4) & 0x07) as usize;
+                        let fg = if fg_idx < 16 {
+                            palette[fg_idx]
+                        } else {
+                            [0xFF, 0xFF, 0xFF]
+                        };
+                        let bg = if bg_idx < 16 {
+                            palette[bg_idx]
+                        } else {
+                            [0x00, 0x00, 0x00]
+                        };
+                        let px = col * fw;
+
+                        for scanline in 0..fh {
+                            let font_byte = if (scanline as usize) < 16 {
+                                VGA_FONT_8X16[ch][scanline as usize]
+                            } else {
+                                0
+                            };
+                            let cursor_invert = is_cursor
+                                && cs_start <= cs_end
+                                && scanline as u8 >= cs_start
+                                && scanline as u8 <= cs_end;
+
+                            for bit in 0..8u32 {
+                                let pixel_on = (font_byte >> bit) & 1 != 0;
+                                let color = if cursor_invert {
+                                    if pixel_on { bg } else { fg }
+                                } else {
+                                    if pixel_on { fg } else { bg }
+                                };
+                                let fb_x = px + bit;
+                                // Offset within row_fb (scanline * stride + fb_x * 4)
+                                let offset = (scanline * stride + fb_x * 4) as usize;
+                                if offset + 3 < row_fb.len() {
+                                    row_fb[offset] = color[0];
+                                    row_fb[offset + 1] = color[1];
+                                    row_fb[offset + 2] = color[2];
+                                    row_fb[offset + 3] = 0xFF;
+                                }
+                            }
+
+                            if fw >= 9 {
+                                let ninth_on =
+                                    if line_graphics && (0xC0..=0xDF).contains(&ch) {
+                                        (font_byte >> 7) & 1 != 0
+                                    } else {
+                                        false
+                                    };
+                                let color = if cursor_invert {
+                                    if ninth_on { bg } else { fg }
+                                } else {
+                                    if ninth_on { fg } else { bg }
+                                };
+                                let fb_x = px + 8;
+                                let offset = (scanline * stride + fb_x * 4) as usize;
+                                if offset + 3 < row_fb.len() {
+                                    row_fb[offset] = color[0];
+                                    row_fb[offset + 1] = color[1];
+                                    row_fb[offset + 2] = color[2];
+                                    row_fb[offset + 3] = 0xFF;
+                                }
+                            }
+                        }
+                    }
+                });
+        }
+        #[cfg(not(feature = "data_parallelism"))]
+        {
+            let fb = &mut self.framebuffer;
+            for row in 0..rows {
+                for col in 0..cols {
+                    let text_idx = ((row * cols + col) * 2) as usize;
+                    if text_idx + 1 >= text.len() {
+                        continue;
+                    }
+                    let ch = text[text_idx] as usize;
+                    let attr = text[text_idx + 1];
+                    let is_cursor = col == cursor_x && row == cursor_y;
+                    render_cell(fb, row, col, ch, attr, is_cursor);
                 }
             }
         }

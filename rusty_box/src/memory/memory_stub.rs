@@ -1,5 +1,7 @@
 use alloc::{vec, vec::Vec};
 use byteorder::{ByteOrder, LittleEndian};
+#[cfg(feature = "data_parallelism")]
+use rayon::prelude::*;
 #[cfg(feature = "std")]
 use tempfile::tempfile;
 
@@ -7,6 +9,7 @@ use super::{Block, BxMemoryStubC, MemoryError, Result};
 use crate::cpu::cpuid::BxCpuIdTrait;
 
 use crate::config::BxPhyAddress;
+use crate::config::BxPhyAddress as A20Mask;
 use crate::cpu::cpu::BxCpuC;
 use crate::cpu::icache::BxPageWriteStampTable;
 use crate::memory::memory_rusty_box::{BIOSROMSZ, EXROMSIZE};
@@ -15,7 +18,6 @@ use crate::misc::bswap::{
     read_host_word_to_little_endian, write_host_dword_to_little_endian,
     write_host_qword_to_little_endian, write_host_word_to_little_endian,
 };
-use crate::config::BxPhyAddress as A20Mask;
 
 use core::cell::{Cell, UnsafeCell};
 
@@ -84,7 +86,16 @@ impl BxMemoryStubC {
         let rom_start = vector_offset + rom_offset;
         let rom_end = rom_start + BIOSROMSZ + EXROMSIZE + 4096;
         if rom_end <= actual_vector.len() {
-            actual_vector[rom_start..rom_end].fill(0xFF);
+            #[cfg(feature = "data_parallelism")]
+            {
+                actual_vector[rom_start..rom_end]
+                    .par_iter_mut()
+                    .for_each(|b| *b = 0xFF);
+            }
+            #[cfg(not(feature = "data_parallelism"))]
+            {
+                actual_vector[rom_start..rom_end].fill(0xFF);
+            }
         }
 
         // block must be large enough to fit num_blocks in 32-bit
@@ -226,9 +237,7 @@ impl BxMemoryStubC {
                 let overflow_file = &mut self.overflow_file_mut();
                 overflow_file
                     // FIXME: don't unwrap
-                    .seek(SeekFrom::Start(
-                        address as u64
-                    ))
+                    .seek(SeekFrom::Start(address as u64))
                     .map_err(|e| MemoryError::CantSeekToAddressOverflowFile(address, e))?;
 
                 // TODO: Don't unwrap
@@ -506,39 +515,38 @@ impl BxMemoryStubC {
             // len == other, just fall thru to special cases handling
             // Handle non-standard lengths by copying byte-by-byte or in chunks
             let mem_vector = self.get_vector(a20_addr, cpus)?;
-            
+
             #[cfg(feature = "bx_little_endian")]
             {
                 // For little endian, copy directly
                 let mut remaining = len;
                 let mut offset = 0;
                 let mut addr_offset = 0;
-                
+
                 // Read in chunks of 8 bytes if possible
                 while remaining >= 8 {
-                    let val = read_host_qword_to_little_endian(
-                        &mem_vector[addr_offset..addr_offset + 8]
-                    );
+                    let val =
+                        read_host_qword_to_little_endian(&mem_vector[addr_offset..addr_offset + 8]);
                     LittleEndian::write_u64(&mut data[offset..offset + 8], val);
                     remaining -= 8;
                     offset += 8;
                     addr_offset += 8;
                 }
-                
+
                 // Handle remaining bytes
                 if remaining > 0 {
                     data[offset..offset + remaining]
                         .copy_from_slice(&mem_vector[addr_offset..addr_offset + remaining]);
                 }
             }
-            
+
             #[cfg(not(feature = "bx_little_endian"))]
             {
                 // For big endian, copy in reverse order
                 let mut remaining = len;
                 let mut data_ptr_offset = len - 1;
                 let mut addr_offset = 0;
-                
+
                 while remaining > 0 {
                     data[data_ptr_offset] = mem_vector[addr_offset];
                     remaining -= 1;
@@ -548,7 +556,7 @@ impl BxMemoryStubC {
                     }
                 }
             }
-            
+
             Ok(())
         } else {
             // access outside limits of physical memory
