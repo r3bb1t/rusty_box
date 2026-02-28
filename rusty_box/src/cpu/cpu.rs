@@ -25,7 +25,7 @@ use super::{
     descriptor::{BxGlobalSegmentReg, BxSegmentReg},
     eflags::EFlags,
     i387::{BxPackedRegister, I387},
-    icache::{BxICache, BxICacheEntry as BxIcacheEntry, BX_ICACHE_MEM_POOL},
+    icache::{BxICache, BxICacheEntry as BxIcacheEntry},
     lazy_flags::BxLazyflagsEntry,
     svm::VmcbCache,
     tlb::BxHostpageaddr,
@@ -1179,10 +1179,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.mem_host_len = host_len;
 
         let mut iteration = 0u64;
-        let mut trace_break_count = 0u64;
-        let mut get_icache_count = 0u64;
-        let _icache_miss_count = 0u64;
-        let _prefetch_count = 0u64;
         #[cfg(feature = "profiling")]
         let mut prof_assign_ns = 0u64;
         #[cfg(feature = "profiling")]
@@ -1197,15 +1193,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         );
 
         let result = 'cpu_loop: loop {
-            iteration += 1;
-            get_icache_count += 1;
-
             // Safety limit - pause when instruction limit is reached
             if iteration > max_instructions {
                 #[cfg(feature = "profiling")]
                 tracing::warn!(
                     "CPU-LOOP-STATS: {} instr, icache={}ms assign={}ms exec={}ms",
-                    iteration - 1,
+                    iteration,
                     prof_icache_ns / 1_000_000,
                     prof_assign_ns / 1_000_000,
                     prof_exec_ns / 1_000_000
@@ -1218,7 +1211,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 }
                 self.perf_icache_miss = 0;
                 self.perf_prefetch = 0;
-                break Ok(iteration - 1);
+                break Ok(iteration);
             }
 
             // check on events which occurred for previous instructions (traps)
@@ -1258,232 +1251,59 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // Trace-level logging removed from hot path for performance.
             // Uncomment for debugging: tracing::trace!("get_icache_entry: RIP={:#x}, tlen={}", self.rip(), entry.tlen);
 
-            // Get trace start index from entry (stored when trace was created).
-            // In C++, entry->i is a pointer directly into mpool; in Rust we store the index.
-            // Note: index 0 is VALID for the first cached trace, so mpool_start_idx==0 is not an error.
-            let mut trace_start_idx = entry.mpool_start_idx;
+            // Get trace start index and end from entry.
+            // Matching C++ cpu.cc:196: bxInstruction_c *i = entry->i;
+            //                          bxInstruction_c *last = i + entry->tlen;
+            let mut instr_idx = entry.mpool_start_idx;
+            let mut trace_end = instr_idx + entry.tlen;
+            let is_real = self.real_mode();
 
-            // Bounds check: ensure trace_start_idx is within the pool
-            if trace_start_idx >= BX_ICACHE_MEM_POOL {
-                tracing::debug!(
-                    "trace_start_idx ({}) >= BX_ICACHE_MEM_POOL ({}), resetting",
-                    trace_start_idx,
-                    BX_ICACHE_MEM_POOL
-                );
-                trace_start_idx = 0;
-            }
-
-            // Trace logging removed from hot path for performance.
-
-            // Loop through all instructions in the trace (matching C++ cpu.cc:196-222)
-            let mut instr_idx = 0usize;
-            let mut restart_decode = false;
-            loop {
-                // Bounds check before accessing mpool
-                let mpool_idx = trace_start_idx + instr_idx;
-                if mpool_idx >= BX_ICACHE_MEM_POOL {
-                    break;
-                }
-                let mut i = self.i_cache.mpool[mpool_idx];
-
-                // Matching C++ line 201: BX_INSTR_BEFORE_EXECUTION(BX_CPU_ID, i);
-                // (no-op — instrumentation callbacks not implemented)
-
-                // Check for end-of-trace opcode (InsertedOpcode) before executing
-                // InsertedOpcode has length 0 and is used to mark the end of a trace
-                use crate::cpu::decoder::Opcode;
-                if i.get_ia_opcode() == Opcode::InsertedOpcode {
-                    // This is an end-of-trace opcode inserted by gen_dummy_icache_entry
-                    // Call bx_end_trace to set the stop trace flag (matching C++ BxEndTrace)
-                    self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
-                    // For InsertedOpcode, we still need to set prev_rip and increment icount
-                    self.prev_rip = self.rip();
-                    self.icount += 1;
-                    iteration += 1;
-                    instr_idx += 1;
-                    if instr_idx >= entry.tlen {
-                        // Get new entry (matching C++ line 218-220)
-                        entry = unsafe {
-                            let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
-                            match self.get_icache_entry(mem_reborrowed, cpus) {
-                                Ok(e) => e,
-                                Err(crate::cpu::CpuError::CpuLoopRestart) => {
-                                    self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
-                                    continue 'cpu_loop;
-                                }
-                                Err(e) => break 'cpu_loop Err(e),
-                            }
-                        };
-                        trace_start_idx = entry.mpool_start_idx;
-                        instr_idx = 0;
-                    }
-                    continue;
-                }
-
-                // For normal instructions, check instruction length
-                let ilen = i.ilen();
-                if ilen == 0 {
-                    tracing::error!(
-                        "Instruction length is 0 for opcode {:?} at RIP={:#x}!",
-                        i.get_ia_opcode(),
-                        self.rip()
-                    );
-                    return Err(crate::cpu::CpuError::UnimplementedOpcode {
-                        opcode: format!("{:?}", i.get_ia_opcode()),
-                    });
-                }
+            'trace: loop {
+                // Fetch instruction from icache pool
+                let mut i = self.i_cache.mpool[instr_idx];
 
                 // Matching C++ line 202: RIP += i->ilen();
-                // Advance RIP BEFORE execution (instruction handlers may read RIP and expect it to be advanced)
-                // In C++, RIP is a 64-bit register accessed directly: RIP += i->ilen()
-                let current_rip = self.rip();
-                let mut next_rip = current_rip + u64::from(ilen);
-
-                // In real mode, EIP is 16-bit and should wrap at 0xFFFF
-                // Matching C++ vm8086.cc:109: EIP = new_eip & 0xffff
-                // We need to mask EIP immediately to prevent incorrect values from being used
-                // The high 32 bits will be cleared in prefetch() via BX_CLEAR_64BIT_HIGH
-                if self.real_mode() {
-                    // Extract low 32 bits (EIP) and mask to 16 bits, then combine with high 32 bits
-                    let eip_32bit = (next_rip & 0xFFFFFFFF) as u32;
-                    let eip_16bit = eip_32bit & 0xFFFF;
-                    // Preserve high 32 bits (will be cleared in prefetch), set low 32 bits to masked EIP
-                    next_rip = (next_rip & 0xFFFFFFFF00000000) | u64::from(eip_16bit);
+                // Advance RIP before execution (handlers may read RIP and expect it advanced)
+                // SAFETY: gen_reg is initialized during CPU init; BX_64BIT_REG_RIP is always valid.
+                unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx += i.ilen() as u64 };
+                if is_real {
+                    unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx &= 0xFFFF };
                 }
 
-                self.set_rip(next_rip);
-
-                // Trace logging removed from hot path for performance.
-                // Uncomment for debugging:
-                // tracing::trace!("Exec {:?} at RIP={:#x} ilen={}", i.get_ia_opcode(), current_rip, ilen);
-
-                // Execute instruction directly
-                {
-                    match self.execute_instruction(&mut i) {
-                        Ok(()) => {}
-                        Err(crate::cpu::CpuError::CpuNotInitialized) => {
-                            break;
-                        }
-                        Err(crate::cpu::CpuError::CpuLoopRestart) => {
-                            restart_decode = true;
-                            break;
-                        }
-                        Err(crate::cpu::CpuError::UnimplementedOpcode { opcode }) => {
-                            let rip = current_rip;
-                            let cs_base =
-                                unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-                            let laddr = cs_base + rip;
-                            let cs_value =
-                                unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
-                            let instr_bytes = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
-                                let page_base = cs_base + (self.eip_page_bias as u64);
-                                let offset = (rip.wrapping_sub(page_base)) as usize;
-                                if offset < fetch_ptr.len()
-                                    && offset + ilen as usize <= fetch_ptr.len()
-                                {
-                                    fetch_ptr[offset..offset + ilen as usize].to_vec()
-                                } else {
-                                    vec![]
-                                }
-                            } else {
-                                vec![]
-                            };
-                            panic!("UNIMPLEMENTED OPCODE: {} at RIP={:#x} CS:IP={:#x}:{:#x} laddr={:#x} bytes={:02x?}",
-                                opcode, rip, cs_value, rip, laddr, instr_bytes);
-                        }
-                        Err(e) => {
-                            let rip = current_rip;
-                            let cs_value =
-                                unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
-                            let opcode = i.get_ia_opcode();
-                            tracing::error!("CPU ERROR at icount={} (iter={}) RIP={:#x} CS={:#x} opcode={:?}: {}",
-                                self.icount, iteration, rip, cs_value, opcode, e);
-                            tracing::error!(
-                                "  EAX={:#x} ECX={:#x} EDX={:#x} EBX={:#x}",
-                                self.get_gpr32(0),
-                                self.get_gpr32(1),
-                                self.get_gpr32(2),
-                                self.get_gpr32(3)
-                            );
-                            tracing::error!(
-                                "  ESP={:#x} EBP={:#x} ESI={:#x} EDI={:#x}",
-                                self.get_gpr32(4),
-                                self.get_gpr32(5),
-                                self.get_gpr32(6),
-                                self.get_gpr32(7)
-                            );
-                            tracing::error!("  CR0={:#x} EFLAGS={:#x} CPL={} GDTR.base={:#x} GDTR.limit={:#x} IDTR.base={:#x} IDTR.limit={:#x}",
-                                self.cr0.get32(), self.eflags.bits(), cs_value & 3,
-                                self.gdtr.base, self.gdtr.limit, self.idtr.base, self.idtr.limit);
-                            // Show segment registers
-                            for (idx, name) in [
-                                (0, "ES"),
-                                (1, "CS"),
-                                (2, "SS"),
-                                (3, "DS"),
-                                (4, "FS"),
-                                (5, "GS"),
-                            ] {
-                                let sel = unsafe { self.sregs[idx].selector.value };
-                                let base = unsafe { self.sregs[idx].cache.u.segment.base };
-                                let limit = unsafe { self.sregs[idx].cache.u.segment.limit_scaled };
-                                tracing::error!(
-                                    "  {}={:#06x} base={:#x} limit={:#x}",
-                                    name,
-                                    sel,
-                                    base,
-                                    limit
-                                );
-                            }
-                            break 'cpu_loop Err(e);
-                        }
+                // Execute instruction (matching C++ BX_CPU_CALL_METHOD)
+                match self.execute_instruction(&mut i) {
+                    Ok(()) => {}
+                    Err(crate::cpu::CpuError::CpuLoopRestart) => {
+                        // Exception delivery during execution: restart decode (Bochs longjmp)
+                        self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+                        continue 'cpu_loop;
+                    }
+                    Err(e) => {
+                        // Cold path: handle fatal/unimplemented errors
+                        self.handle_execution_error(e, &i)?;
+                        break 'cpu_loop Err(crate::cpu::CpuError::CpuNotInitialized);
                     }
                 }
 
-                if restart_decode {
-                    // Clear STOP_TRACE marker; we're explicitly restarting decode now.
-                    self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
-                    continue 'cpu_loop;
-                }
-
-                // Matching C++ line 204: BX_CPU_THIS_PTR prev_rip = RIP; // commit new RIP
-                self.prev_rip = self.rip();
-
-                // Matching C++ line 205: BX_INSTR_AFTER_EXECUTION(BX_CPU_ID, i);
-                // TODO: Implement BX_INSTR_AFTER_EXECUTION if needed
-
-                // Matching C++ line 206: BX_CPU_THIS_PTR icount++;
+                // Matching C++ line 204-206: prev_rip = RIP; icount++;
+                self.prev_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
                 self.icount += 1;
                 iteration += 1;
 
-                // Matching C++ line 208: BX_SYNC_TIME_IF_SINGLE_PROCESSOR(0);
-                // TODO: Implement BX_SYNC_TIME_IF_SINGLE_PROCESSOR if needed
-
-                // note instructions generating exceptions never reach this point
-                // Matching C++ line 211-213: gdbstub_instruction_epilog check
-                // TODO: Implement gdbstub_instruction_epilog if needed
-
-                // Matching C++ line 215: if (BX_CPU_THIS_PTR async_event) break;
+                // Matching C++ line 215: if (async_event) break;
                 if self.async_event != 0 {
-                    trace_break_count += 1;
-                    break;
+                    break 'trace;
                 }
 
-                // Check instruction limit inside inner loop to prevent infinite hangs
-                // when the BIOS runs tight loops within a single trace
-                if iteration > max_instructions {
-                    break 'cpu_loop Ok(iteration - 1);
-                }
-
-                // Matching C++ line 217: if (++i == last)
+                // Matching C++ line 217: if (++i == last) { get new trace }
                 instr_idx += 1;
-
-                // If we've executed all instructions in the trace, get a new entry
-                // Matching C++ lines 217-221: if (++i == last) { entry = getICacheEntry(); i = entry->i; last = i + (entry->tlen); }
-                if instr_idx >= entry.tlen {
-                    // Get new entry (matching C++ line 218-220)
-                    // SAFETY: We use the raw pointer we got earlier to work around borrow checker
-                    // The borrow from the previous get_icache_entry is released, so we can safely create a new reference
+                if instr_idx >= trace_end {
+                    // Check instruction limit at trace boundary (not per-instruction)
+                    if iteration > max_instructions {
+                        break 'cpu_loop Ok(iteration);
+                    }
+                    // Chain to new trace without breaking to outer loop
+                    // (matching C++ line 218-220: entry=getICacheEntry; i=entry->i; last=...)
                     entry = unsafe {
                         let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
                         match self.get_icache_entry(mem_reborrowed, cpus) {
@@ -1495,11 +1315,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                             Err(e) => break 'cpu_loop Err(e),
                         }
                     };
-
-                    trace_start_idx = entry.mpool_start_idx;
-
-                    // Reset for new trace
-                    instr_idx = 0;
+                    instr_idx = entry.mpool_start_idx;
+                    trace_end = instr_idx + entry.tlen;
                 }
             }
 
@@ -1525,6 +1342,64 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.mem_host_len = 0;
         self.clear_mem_bus();
         result
+    }
+
+    /// Cold path: handle fatal errors from instruction execution.
+    /// Separated from the hot inner loop to keep the hot path small for better
+    /// instruction cache utilization.
+    #[cold]
+    #[inline(never)]
+    fn handle_execution_error(
+        &self,
+        e: crate::cpu::CpuError,
+        instr: &Instruction,
+    ) -> super::Result<()> {
+        use crate::cpu::CpuError;
+        match e {
+            CpuError::CpuNotInitialized => {
+                // Silent — CPU shutting down
+            }
+            CpuError::UnimplementedOpcode { ref opcode } => {
+                let rip = self.prev_rip; // prev_rip was the RIP before advancement
+                let cs_base =
+                    unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+                let laddr = cs_base + rip;
+                let cs_value =
+                    unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
+                let instr_bytes = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
+                    let page_base = cs_base + (self.eip_page_bias as u64);
+                    let offset = (rip.wrapping_sub(page_base)) as usize;
+                    let ilen = instr.ilen() as usize;
+                    if offset < fetch_ptr.len() && offset + ilen <= fetch_ptr.len() {
+                        fetch_ptr[offset..offset + ilen].to_vec()
+                    } else {
+                        vec![]
+                    }
+                } else {
+                    vec![]
+                };
+                panic!(
+                    "UNIMPLEMENTED OPCODE: {} at RIP={:#x} CS:IP={:#x}:{:#x} laddr={:#x} bytes={:02x?}",
+                    opcode, rip, cs_value, rip, laddr, instr_bytes
+                );
+            }
+            _ => {
+                let rip = self.prev_rip;
+                let cs_value =
+                    unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
+                let opcode = instr.get_ia_opcode();
+                tracing::error!(
+                    "CPU ERROR at icount={} RIP={:#x} CS={:#x} opcode={:?}: {}",
+                    self.icount, rip, cs_value, opcode, e
+                );
+                tracing::error!(
+                    "  EAX={:#x} ECX={:#x} EDX={:#x} EBX={:#x} ESP={:#x} EBP={:#x} ESI={:#x} EDI={:#x}",
+                    self.get_gpr32(0), self.get_gpr32(1), self.get_gpr32(2), self.get_gpr32(3),
+                    self.get_gpr32(4), self.get_gpr32(5), self.get_gpr32(6), self.get_gpr32(7)
+                );
+            }
+        }
+        Err(e)
     }
 
     fn fetch_next_instruction(

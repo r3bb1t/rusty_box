@@ -1904,6 +1904,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Fcos => self.fcos(instr),
             Opcode::Fsincos => self.fsincos(instr),
 
+            // End-of-trace sentinel (matching C++ BxEndTrace).
+            // Sets STOP_TRACE so the inner loop breaks at the async_event check.
+            Opcode::InsertedOpcode => {
+                self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                Ok(())
+            }
+
             _ => {
                 tracing::error!("Unimplemented opcode: {:?}", instr.get_ia_opcode());
                 Err(crate::cpu::CpuError::UnimplementedOpcode {
