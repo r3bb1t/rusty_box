@@ -38,6 +38,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 );
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: 0,
                 });
             }
             offset = self.gdtr.base + (index as u64 * 8);
@@ -47,6 +48,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 tracing::debug!("fetch_raw_descriptor: LDTR.valid=0");
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: 0,
                 });
             }
             let ldt_limit = unsafe { self.ldtr.cache.u.segment.limit_scaled };
@@ -60,6 +62,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 );
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: 0,
                 });
             }
             offset = unsafe { self.ldtr.cache.u.segment.base } + (index as u64 * 8);
@@ -203,6 +206,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             tracing::error!("get_ss_esp_from_tss: TR.cache invalid");
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Ts,
+                error_code: 0,
             });
         }
 
@@ -216,6 +220,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 tracing::error!("get_ss_esp_from_tss(386): TSSstackaddr > TSS.LIMIT");
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Ts,
+                    error_code: 0,
                 });
             }
             let tss_base = unsafe { self.tr.cache.u.segment.base };
@@ -230,6 +235,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 tracing::error!("get_ss_esp_from_tss(286): TSSstackaddr > TSS.LIMIT");
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Ts,
+                    error_code: 0,
                 });
             }
             let tss_base = unsafe { self.tr.cache.u.segment.base };
@@ -240,6 +246,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             tracing::error!("get_ss_esp_from_tss: TR is bogus type ({:#x})", tss_type);
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Ts,
+                error_code: 0,
             });
         }
     }
@@ -358,6 +365,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             tracing::error!("check_cs({:#06x}): not a valid code segment!", cs_raw);
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: 0,
             });
         }
 
@@ -370,6 +378,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 );
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: 0,
                 });
             }
 
@@ -383,6 +392,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 );
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: 0,
                 });
             }
         } else {
@@ -396,6 +406,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 );
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: 0,
                 });
             }
         }
@@ -405,6 +416,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             tracing::error!("check_cs({:#06x}): code segment not present!", cs_raw);
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Np,
+                error_code: 0,
             });
         }
 
@@ -459,6 +471,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             tracing::error!("branch_far: RIP {:#010x} > limit {:#010x}", rip, limit);
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: 0,
             });
         }
 
@@ -481,6 +494,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             tracing::error!("jump_protected: cs == 0");
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: 0,
             });
         }
 
@@ -588,6 +602,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     tracing::error!("load_seg_reg(SS): loading null selector");
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Gp,
+                        error_code: 0,
                     });
                 }
 
@@ -600,6 +615,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     tracing::error!("load_seg_reg(SS): rpl != CPL");
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Gp,
+                        error_code: 0,
                     });
                 }
 
@@ -609,6 +625,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     tracing::error!("load_seg_reg(SS): valid bit cleared");
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Gp,
+                        error_code: 0,
                     });
                 }
 
@@ -621,6 +638,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     tracing::error!("load_seg_reg(SS): not writable data segment");
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Gp,
+                        error_code: 0,
                     });
                 }
 
@@ -629,6 +647,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     tracing::error!("load_seg_reg(SS): dpl != CPL");
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Gp,
+                        error_code: 0,
                     });
                 }
 
@@ -637,6 +656,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     tracing::error!("load_seg_reg(SS): not present");
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Ss,
+                        error_code: 0,
                     });
                 }
 
@@ -678,6 +698,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     );
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Gp,
+                        error_code: 0,
                     });
                 }
 
@@ -692,6 +713,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     );
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Gp,
+                        error_code: 0,
                     });
                 }
 
@@ -708,6 +730,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                         );
                         return Err(super::error::CpuError::BadVector {
                             vector: Exception::Gp,
+                            error_code: 0,
                         });
                     }
                 }
@@ -721,6 +744,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     );
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Np,
+                        error_code: 0,
                     });
                 }
 
@@ -789,9 +813,10 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     /// LLDT - Load Local Descriptor Table Register
     /// Based on Bochs protect_ctrl.cc:374-476
     pub(super) fn lldt_ew(&mut self, instr: &super::decoder::Instruction) -> Result<()> {
-        // Must be in protected mode
-        if self.real_mode() {
-            tracing::error!("LLDT: not recognized in real mode");
+        // Must be in protected mode (catches both real mode and v8086)
+        // Based on Bochs protect_ctrl.cc:376
+        if !self.protected_mode() {
+            tracing::debug!("LLDT: not recognized outside protected mode");
             self.exception(Exception::Ud, 0)?;
             return Ok(());
         }
@@ -868,9 +893,10 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     /// LTR - Load Task Register
     /// Based on Bochs protect_ctrl.cc:478-564
     pub(super) fn ltr_ew(&mut self, instr: &super::decoder::Instruction) -> Result<()> {
-        // Must be in protected mode
-        if self.real_mode() {
-            tracing::error!("LTR: not recognized in real mode");
+        // Must be in protected mode (catches both real mode and v8086)
+        // Based on Bochs protect_ctrl.cc:480
+        if !self.protected_mode() {
+            tracing::debug!("LTR: not recognized outside protected mode");
             self.exception(Exception::Ud, 0)?;
             return Ok(());
         }
@@ -951,9 +977,10 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         self.tr.cache.valid = SEG_VALID_CACHE;
 
         // Also mark as busy in GDT (write back dword2 with busy bit)
+        // Based on Bochs protect_ctrl.cc:558-561 — uses system_write
         let gdt_offset = self.gdtr.base + (selector_index as u64 * 8) + 4;
         let new_dword2 = dword2 | 0x0200; // Set busy bit in access byte
-        let phys_addr = self.translate_linear_system_read(gdt_offset)?;
+        let phys_addr = self.translate_linear_system_write(gdt_offset)?;
         self.mem_write_dword(phys_addr, new_dword2);
 
         tracing::trace!("LTR: loaded selector={:#06x}, marked busy", raw_selector);

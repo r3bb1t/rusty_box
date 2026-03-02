@@ -720,31 +720,37 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 break;
             }
 
-            // Decode instruction based on CPU mode
+            // Decode instruction based on CPU mode — Bochs style: write directly into mpool slot
             let long64 = self.long64_mode();
             let decode_result = if long64 {
                 fetchdecode64::fetch_decode64(current_fetch_ptr)
+                    .map(|instr| { self.i_cache.mpool[current_mpindex] = instr; })
             } else {
-                fetchdecode32::fetch_decode32(current_fetch_ptr, is_32_bit_mode)
+                // Bochs fetchDecode32(fetchPtr, &mpool[mpindex], remain) — inplace, no copy
+                fetchdecode32::fetch_decode32_inplace(
+                    current_fetch_ptr,
+                    is_32_bit_mode,
+                    &mut self.i_cache.mpool[current_mpindex],
+                )
             };
 
             match decode_result {
-                Ok(instr) => {
-                    // Debug: log first few bytes being decoded
-                    if tlen < 3 {
+                Ok(()) => {
+                    // Debug: log first few bytes being decoded (only when trace actually enabled)
+                    if tlen < 3 && tracing::enabled!(tracing::Level::TRACE) {
                         let bytes_str: String = current_fetch_ptr
                             .iter()
                             .take(8)
                             .map(|b| format!("{:02x}", b))
                             .collect::<Vec<_>>()
                             .join(" ");
-                        tracing::trace!("Decoding instruction #{}: p_addr={:#x}, page_offset={}, bytes=[{}], opcode={:?}", 
-                            tlen, current_p_addr, current_page_offset, bytes_str, instr.get_ia_opcode());
+                        tracing::trace!("Decoding instruction #{}: p_addr={:#x}, page_offset={}, bytes=[{}], opcode={:?}",
+                            tlen, current_p_addr, current_page_offset, bytes_str,
+                            self.i_cache.mpool[current_mpindex].get_ia_opcode());
                     }
 
-                    // Store instruction in mpool and get instruction length
+                    // Instruction is already in mpool[current_mpindex] — get its length
                     let i_len = {
-                        self.i_cache.mpool[current_mpindex] = instr;
                         self.i_cache.mpool[current_mpindex].meta_info.ilen as u32
                     };
 

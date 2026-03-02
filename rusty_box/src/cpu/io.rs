@@ -9,100 +9,215 @@ use super::{
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    // ========================================================================
+    // I/O Privilege Check — Bochs io.cc:866-929
+    // ========================================================================
+
+    /// Check I/O port permission based on IOPL and TSS I/O permission bitmap.
+    /// Returns true if access is allowed, false if #GP(0) should be raised.
+    /// Based on Bochs io.cc allow_io() lines 866-929.
+    fn allow_io(&mut self, port: u16, len: u32) -> super::Result<bool> {
+        // If not in protected mode, or CPL <= IOPL and not V8086, allow
+        if !self.cr0.pe() {
+            return Ok(true);
+        }
+
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        let iopl = self.eflags.iopl();
+        let vm = self.v8086_mode();
+
+        // In PM: check if we need I/O permission bitmap
+        // Bochs: if (PE && (VM || CPL > IOPL))
+        if vm || cpl > iopl as u8 {
+            // Must consult TSS I/O permission bitmap
+            // Check TR points to a valid 386 TSS
+            if self.tr.cache.valid == 0
+                || (self.tr.cache.r#type != 0x9 && self.tr.cache.r#type != 0xB)
+            {
+                // TR doesn't point to available/busy 386 TSS
+                return Ok(false);
+            }
+
+            let tr_limit = unsafe { self.tr.cache.u.segment.limit_scaled };
+            if tr_limit < 103 {
+                return Ok(false);
+            }
+
+            let tr_base = unsafe { self.tr.cache.u.segment.base };
+            let io_base = self.system_read_word(tr_base + 102)? as u32;
+
+            if (io_base + (port as u32) / 8) >= tr_limit {
+                return Ok(false);
+            }
+
+            let permission16 = self.system_read_word(
+                tr_base + io_base as u64 + (port as u64) / 8
+            )?;
+
+            let bit_index = (port & 7) as u32;
+            let mask = (1u32 << len) - 1;
+            if ((permission16 as u32) >> bit_index) & mask != 0 {
+                return Ok(false);
+            }
+        }
+
+        Ok(true)
+    }
+
     /// IN AL, imm8 - Input byte from immediate port to AL
-    pub fn in_al_ib(&mut self, instr: &Instruction) {
+    /// Bochs io.cc:54-80
+    pub fn in_al_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
+        if !self.allow_io(port, 1)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let value = self.port_in(port, 1) as u8;
         self.set_al(value);
         tracing::trace!("IN AL, {:#x} -> {:#x}", port, value);
+        Ok(())
     }
 
     /// IN AX, imm8 - Input word from immediate port to AX
-    pub fn in_ax_ib(&mut self, instr: &Instruction) {
+    /// Bochs io.cc:82-109
+    pub fn in_ax_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
+        if !self.allow_io(port, 2)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let value = self.port_in(port, 2) as u16;
         self.set_ax(value);
         tracing::trace!("IN AX, {:#x} -> {:#x}", port, value);
+        Ok(())
     }
 
     /// IN EAX, imm8 - Input dword from immediate port to EAX
-    pub fn in_eax_ib(&mut self, instr: &Instruction) {
+    /// Bochs io.cc:111-138
+    pub fn in_eax_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
+        if !self.allow_io(port, 4)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let value = self.port_in(port, 4);
         self.set_eax(value);
         tracing::trace!("IN EAX, {:#x} -> {:#x}", port, value);
+        Ok(())
     }
 
     /// OUT imm8, AL - Output byte from AL to immediate port
-    pub fn out_ib_al(&mut self, instr: &Instruction) {
+    /// Bochs io.cc:140-167
+    pub fn out_ib_al(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
+        if !self.allow_io(port, 1)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let value = self.al();
         self.port_out(port, value as u32, 1);
         tracing::trace!("OUT {:#x}, AL ({:#x})", port, value);
+        Ok(())
     }
 
     /// OUT imm8, AX - Output word from AX to immediate port
-    pub fn out_ib_ax(&mut self, instr: &Instruction) {
+    /// Bochs io.cc:169-197
+    pub fn out_ib_ax(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
+        if !self.allow_io(port, 2)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let value = self.ax();
         self.port_out(port, value as u32, 2);
         tracing::trace!("OUT {:#x}, AX ({:#x})", port, value);
+        Ok(())
     }
 
     /// OUT imm8, EAX - Output dword from EAX to immediate port
-    pub fn out_ib_eax(&mut self, instr: &Instruction) {
+    /// Bochs io.cc:199-227
+    pub fn out_ib_eax(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
+        if !self.allow_io(port, 4)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let value = self.eax();
         self.port_out(port, value, 4);
         tracing::trace!("OUT {:#x}, EAX ({:#x})", port, value);
+        Ok(())
     }
 
     /// IN AL, DX - Input byte from port DX to AL
-    pub fn in_al_dx(&mut self, _instr: &Instruction) {
+    /// Bochs io.cc:229-257
+    pub fn in_al_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        if !self.allow_io(port, 1)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let value = self.port_in(port, 1) as u8;
         self.set_al(value);
         tracing::trace!("IN AL, DX ({:#x}) -> {:#x}", port, value);
+        Ok(())
     }
 
     /// IN AX, DX - Input word from port DX to AX
-    pub fn in_ax_dx(&mut self, _instr: &Instruction) {
+    /// Bochs io.cc:259-288
+    pub fn in_ax_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        if !self.allow_io(port, 2)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let value = self.port_in(port, 2) as u16;
         self.set_ax(value);
         tracing::trace!("IN AX, DX ({:#x}) -> {:#x}", port, value);
+        Ok(())
     }
 
     /// IN EAX, DX - Input dword from port DX to EAX
-    pub fn in_eax_dx(&mut self, _instr: &Instruction) {
+    /// Bochs io.cc:290-319
+    pub fn in_eax_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        if !self.allow_io(port, 4)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let value = self.port_in(port, 4);
         self.set_eax(value);
         tracing::trace!("IN EAX, DX ({:#x}) -> {:#x}", port, value);
+        Ok(())
     }
 
     /// OUT DX, AL - Output byte from AL to port DX
-    pub fn out_dx_al(&mut self, _instr: &Instruction) {
+    /// Bochs io.cc:321-349
+    pub fn out_dx_al(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        if !self.allow_io(port, 1)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let value = self.al();
         self.port_out(port, value as u32, 1);
         tracing::trace!("OUT DX ({:#x}), AL ({:#x})", port, value);
+        Ok(())
     }
 
     /// OUT DX, AX - Output word from AX to port DX
-    pub fn out_dx_ax(&mut self, _instr: &Instruction) {
+    /// Bochs io.cc:351-380
+    pub fn out_dx_ax(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        if !self.allow_io(port, 2)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let value = self.ax();
         self.port_out(port, value as u32, 2);
         tracing::trace!("OUT DX ({:#x}), AX ({:#x})", port, value);
+        Ok(())
     }
 
     /// OUT DX, EAX - Output dword from EAX to port DX
-    pub fn out_dx_eax(&mut self, _instr: &Instruction) {
+    /// Bochs io.cc:382-411
+    pub fn out_dx_eax(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        if !self.allow_io(port, 4)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let value = self.eax();
         self.port_out(port, value, 4);
         tracing::trace!("OUT DX ({:#x}), EAX ({:#x})", port, value);
+        Ok(())
     }
 
     // ========================================================================
@@ -110,303 +225,363 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ========================================================================
 
     // ---- INS: 16-bit address mode (DI/CX, ES segment) ----
-    // Bochs INS uses write_virtual_* which translates through paging.
+    // Bochs io.cc:413-470 — INS uses ES:DI, no segment override allowed
 
     /// INSB - Input byte from port DX to ES:DI (16-bit address mode)
-    pub fn insb16(&mut self, _instr: &Instruction) {
+    fn insb16(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        if !self.allow_io(port, 1)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let di = self.di() as u32;
         let value = self.port_in(port, 1) as u8;
-        let _ = self.write_virtual_byte(BxSegregs::Es, di, value);
+        self.write_virtual_byte(BxSegregs::Es, di, value)?;
         if self.get_df() {
             self.set_di(self.di().wrapping_sub(1));
         } else {
             self.set_di(self.di().wrapping_add(1));
         }
+        Ok(())
     }
 
     /// INSW - Input word from port DX to ES:DI (16-bit address mode)
-    pub fn insw16(&mut self, _instr: &Instruction) {
+    fn insw16(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        if !self.allow_io(port, 2)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let di = self.di() as u32;
         let value = self.port_in(port, 2) as u16;
-        let _ = self.write_virtual_word(BxSegregs::Es, di, value);
+        self.write_virtual_word(BxSegregs::Es, di, value)?;
         if self.get_df() {
             self.set_di(self.di().wrapping_sub(2));
         } else {
             self.set_di(self.di().wrapping_add(2));
         }
+        Ok(())
     }
 
     /// INSD - Input dword from port DX to ES:DI (16-bit address mode)
-    pub fn insd16(&mut self, _instr: &Instruction) {
+    fn insd16(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        if !self.allow_io(port, 4)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let di = self.di() as u32;
         let value = self.port_in(port, 4);
-        let _ = self.write_virtual_dword(BxSegregs::Es, di, value);
+        self.write_virtual_dword(BxSegregs::Es, di, value)?;
         if self.get_df() {
             self.set_di(self.di().wrapping_sub(4));
         } else {
             self.set_di(self.di().wrapping_add(4));
         }
+        Ok(())
     }
 
     // ---- INS: 32-bit address mode (EDI/ECX, ES segment) ----
 
     /// INSB - Input byte from port DX to ES:EDI (32-bit address mode)
-    pub fn insb32(&mut self, _instr: &Instruction) {
+    fn insb32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        if !self.allow_io(port, 1)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let edi = self.edi();
         let value = self.port_in(port, 1) as u8;
-        let _ = self.write_virtual_byte(BxSegregs::Es, edi, value);
+        self.write_virtual_byte(BxSegregs::Es, edi, value)?;
         if self.get_df() {
             self.set_edi(self.edi().wrapping_sub(1));
         } else {
             self.set_edi(self.edi().wrapping_add(1));
         }
+        Ok(())
     }
 
     /// INSW - Input word from port DX to ES:EDI (32-bit address mode)
-    pub fn insw32(&mut self, _instr: &Instruction) {
+    fn insw32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        if !self.allow_io(port, 2)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let edi = self.edi();
         let value = self.port_in(port, 2) as u16;
-        let _ = self.write_virtual_word(BxSegregs::Es, edi, value);
+        self.write_virtual_word(BxSegregs::Es, edi, value)?;
         if self.get_df() {
             self.set_edi(self.edi().wrapping_sub(2));
         } else {
             self.set_edi(self.edi().wrapping_add(2));
         }
+        Ok(())
     }
 
     /// INSD - Input dword from port DX to ES:EDI (32-bit address mode)
-    pub fn insd32(&mut self, _instr: &Instruction) {
+    fn insd32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
+        if !self.allow_io(port, 4)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
         let edi = self.edi();
         let value = self.port_in(port, 4);
-        let _ = self.write_virtual_dword(BxSegregs::Es, edi, value);
+        self.write_virtual_dword(BxSegregs::Es, edi, value)?;
         if self.get_df() {
             self.set_edi(self.edi().wrapping_sub(4));
         } else {
             self.set_edi(self.edi().wrapping_add(4));
         }
+        Ok(())
     }
 
-    // ---- OUTS: 16-bit address mode (SI/CX, DS segment) ----
-    // Bochs OUTS uses read_virtual_* which translates through paging.
+    // ---- OUTS: 16-bit address mode (SI/CX, segment-overridable) ----
+    // Bochs io.cc:565-631 — OUTS uses seg:SI, segment override IS allowed
 
-    /// OUTSB - Output byte from DS:SI to port DX (16-bit address mode)
-    pub fn outsb16(&mut self, _instr: &Instruction) {
+    /// OUTSB - Output byte from seg:SI to port DX (16-bit address mode)
+    fn outsb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
-        let si = self.si() as u32;
-        if let Ok(value) = self.read_virtual_byte(BxSegregs::Ds, si) {
-            self.port_out(port, value as u32, 1);
+        if !self.allow_io(port, 1)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
         }
+        let seg = BxSegregs::from(instr.seg());
+        let si = self.si() as u32;
+        let value = self.read_virtual_byte(seg, si)?;
+        self.port_out(port, value as u32, 1);
         if self.get_df() {
             self.set_si(self.si().wrapping_sub(1));
         } else {
             self.set_si(self.si().wrapping_add(1));
         }
+        Ok(())
     }
 
-    /// OUTSW - Output word from DS:SI to port DX (16-bit address mode)
-    pub fn outsw16(&mut self, _instr: &Instruction) {
+    /// OUTSW - Output word from seg:SI to port DX (16-bit address mode)
+    fn outsw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
-        let si = self.si() as u32;
-        if let Ok(value) = self.read_virtual_word(BxSegregs::Ds, si) {
-            self.port_out(port, value as u32, 2);
+        if !self.allow_io(port, 2)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
         }
+        let seg = BxSegregs::from(instr.seg());
+        let si = self.si() as u32;
+        let value = self.read_virtual_word(seg, si)?;
+        self.port_out(port, value as u32, 2);
         if self.get_df() {
             self.set_si(self.si().wrapping_sub(2));
         } else {
             self.set_si(self.si().wrapping_add(2));
         }
+        Ok(())
     }
 
-    /// OUTSD - Output dword from DS:SI to port DX (16-bit address mode)
-    pub fn outsd16(&mut self, _instr: &Instruction) {
+    /// OUTSD - Output dword from seg:SI to port DX (16-bit address mode)
+    fn outsd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
-        let si = self.si() as u32;
-        if let Ok(value) = self.read_virtual_dword(BxSegregs::Ds, si) {
-            self.port_out(port, value, 4);
+        if !self.allow_io(port, 4)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
         }
+        let seg = BxSegregs::from(instr.seg());
+        let si = self.si() as u32;
+        let value = self.read_virtual_dword(seg, si)?;
+        self.port_out(port, value, 4);
         if self.get_df() {
             self.set_si(self.si().wrapping_sub(4));
         } else {
             self.set_si(self.si().wrapping_add(4));
         }
+        Ok(())
     }
 
-    // ---- OUTS: 32-bit address mode (ESI/ECX, DS segment) ----
+    // ---- OUTS: 32-bit address mode (ESI/ECX, segment-overridable) ----
 
-    /// OUTSB - Output byte from DS:ESI to port DX (32-bit address mode)
-    pub fn outsb32(&mut self, _instr: &Instruction) {
+    /// OUTSB - Output byte from seg:ESI to port DX (32-bit address mode)
+    fn outsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
-        let esi = self.esi();
-        if let Ok(value) = self.read_virtual_byte(BxSegregs::Ds, esi) {
-            self.port_out(port, value as u32, 1);
+        if !self.allow_io(port, 1)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
         }
+        let seg = BxSegregs::from(instr.seg());
+        let esi = self.esi();
+        let value = self.read_virtual_byte(seg, esi)?;
+        self.port_out(port, value as u32, 1);
         if self.get_df() {
             self.set_esi(self.esi().wrapping_sub(1));
         } else {
             self.set_esi(self.esi().wrapping_add(1));
         }
+        Ok(())
     }
 
-    /// OUTSW - Output word from DS:ESI to port DX (32-bit address mode)
-    pub fn outsw32(&mut self, _instr: &Instruction) {
+    /// OUTSW - Output word from seg:ESI to port DX (32-bit address mode)
+    fn outsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
-        let esi = self.esi();
-        if let Ok(value) = self.read_virtual_word(BxSegregs::Ds, esi) {
-            self.port_out(port, value as u32, 2);
+        if !self.allow_io(port, 2)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
         }
+        let seg = BxSegregs::from(instr.seg());
+        let esi = self.esi();
+        let value = self.read_virtual_word(seg, esi)?;
+        self.port_out(port, value as u32, 2);
         if self.get_df() {
             self.set_esi(self.esi().wrapping_sub(2));
         } else {
             self.set_esi(self.esi().wrapping_add(2));
         }
+        Ok(())
     }
 
-    /// OUTSD - Output dword from DS:ESI to port DX (32-bit address mode)
-    pub fn outsd32(&mut self, _instr: &Instruction) {
+    /// OUTSD - Output dword from seg:ESI to port DX (32-bit address mode)
+    fn outsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
-        let esi = self.esi();
-        if let Ok(value) = self.read_virtual_dword(BxSegregs::Ds, esi) {
-            self.port_out(port, value, 4);
+        if !self.allow_io(port, 4)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
         }
+        let seg = BxSegregs::from(instr.seg());
+        let esi = self.esi();
+        let value = self.read_virtual_dword(seg, esi)?;
+        self.port_out(port, value, 4);
         if self.get_df() {
             self.set_esi(self.esi().wrapping_sub(4));
         } else {
             self.set_esi(self.esi().wrapping_add(4));
         }
+        Ok(())
     }
 
     // ---- REP INS: 16-bit address mode ----
 
-    /// REP INSB - Repeat input byte from port DX CX times (16-bit addr)
-    pub fn rep_insb16(&mut self, instr: &Instruction) {
+    fn rep_insb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.insb16(instr);
+            self.insb16(instr)?;
             cx -= 1;
             self.set_cx(cx);
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
-    /// REP INSW - Repeat input word from port DX CX times (16-bit addr)
-    pub fn rep_insw16(&mut self, instr: &Instruction) {
+    fn rep_insw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.insw16(instr);
+            self.insw16(instr)?;
             cx -= 1;
             self.set_cx(cx);
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
-    /// REP INSD - Repeat input dword from port DX CX times (16-bit addr)
-    pub fn rep_insd16(&mut self, instr: &Instruction) {
+    fn rep_insd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.insd16(instr);
+            self.insd16(instr)?;
             cx -= 1;
             self.set_cx(cx);
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     // ---- REP INS: 32-bit address mode ----
 
-    /// REP INSB - Repeat input byte from port DX ECX times (32-bit addr)
-    pub fn rep_insb32(&mut self, instr: &Instruction) {
+    fn rep_insb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
-            self.insb32(instr);
+            self.insb32(instr)?;
             ecx -= 1;
             self.set_ecx(ecx);
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
-    /// REP INSW - Repeat input word from port DX ECX times (32-bit addr)
-    pub fn rep_insw32(&mut self, instr: &Instruction) {
+    fn rep_insw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
-            self.insw32(instr);
+            self.insw32(instr)?;
             ecx -= 1;
             self.set_ecx(ecx);
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
-    /// REP INSD - Repeat input dword from port DX ECX times (32-bit addr)
-    pub fn rep_insd32(&mut self, instr: &Instruction) {
+    fn rep_insd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
-            self.insd32(instr);
+            self.insd32(instr)?;
             ecx -= 1;
             self.set_ecx(ecx);
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     // ---- REP OUTS: 16-bit address mode ----
 
-    /// REP OUTSB - Repeat output byte to port DX CX times (16-bit addr)
-    pub fn rep_outsb16(&mut self, instr: &Instruction) {
+    fn rep_outsb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.outsb16(instr);
+            self.outsb16(instr)?;
             cx -= 1;
             self.set_cx(cx);
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
-    /// REP OUTSW - Repeat output word to port DX CX times (16-bit addr)
-    pub fn rep_outsw16(&mut self, instr: &Instruction) {
+    fn rep_outsw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.outsw16(instr);
+            self.outsw16(instr)?;
             cx -= 1;
             self.set_cx(cx);
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
-    /// REP OUTSD - Repeat output dword to port DX CX times (16-bit addr)
-    pub fn rep_outsd16(&mut self, instr: &Instruction) {
+    fn rep_outsd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.outsd16(instr);
+            self.outsd16(instr)?;
             cx -= 1;
             self.set_cx(cx);
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     // ---- REP OUTS: 32-bit address mode ----
 
-    /// REP OUTSB - Repeat output byte to port DX ECX times (32-bit addr)
-    pub fn rep_outsb32(&mut self, instr: &Instruction) {
+    fn rep_outsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
-            self.outsb32(instr);
+            self.outsb32(instr)?;
             ecx -= 1;
             self.set_ecx(ecx);
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
-    /// REP OUTSW - Repeat output word to port DX ECX times (32-bit addr)
-    pub fn rep_outsw32(&mut self, instr: &Instruction) {
+    fn rep_outsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
-            self.outsw32(instr);
+            self.outsw32(instr)?;
             ecx -= 1;
             self.set_ecx(ecx);
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
-    /// REP OUTSD - Repeat output dword to port DX ECX times (32-bit addr)
-    pub fn rep_outsd32(&mut self, instr: &Instruction) {
+    fn rep_outsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
         while ecx != 0 {
-            self.outsd32(instr);
+            self.outsd32(instr)?;
             ecx -= 1;
             self.set_ecx(ecx);
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     // ========================================================================
@@ -417,16 +592,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn insb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.as32_l() != 0 {
             if instr.lock_rep_used_value() != 0 {
-                self.rep_insb32(instr);
+                self.rep_insb32(instr)?;
             } else {
-                self.insb32(instr);
+                self.insb32(instr)?;
             }
+        } else if instr.lock_rep_used_value() != 0 {
+            self.rep_insb16(instr)?;
         } else {
-            if instr.lock_rep_used_value() != 0 {
-                self.rep_insb16(instr);
-            } else {
-                self.insb16(instr);
-            }
+            self.insb16(instr)?;
         }
         Ok(())
     }
@@ -435,16 +608,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn insw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.as32_l() != 0 {
             if instr.lock_rep_used_value() != 0 {
-                self.rep_insw32(instr);
+                self.rep_insw32(instr)?;
             } else {
-                self.insw32(instr);
+                self.insw32(instr)?;
             }
+        } else if instr.lock_rep_used_value() != 0 {
+            self.rep_insw16(instr)?;
         } else {
-            if instr.lock_rep_used_value() != 0 {
-                self.rep_insw16(instr);
-            } else {
-                self.insw16(instr);
-            }
+            self.insw16(instr)?;
         }
         Ok(())
     }
@@ -453,16 +624,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn insd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.as32_l() != 0 {
             if instr.lock_rep_used_value() != 0 {
-                self.rep_insd32(instr);
+                self.rep_insd32(instr)?;
             } else {
-                self.insd32(instr);
+                self.insd32(instr)?;
             }
+        } else if instr.lock_rep_used_value() != 0 {
+            self.rep_insd16(instr)?;
         } else {
-            if instr.lock_rep_used_value() != 0 {
-                self.rep_insd16(instr);
-            } else {
-                self.insd16(instr);
-            }
+            self.insd16(instr)?;
         }
         Ok(())
     }
@@ -471,16 +640,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn outsb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.as32_l() != 0 {
             if instr.lock_rep_used_value() != 0 {
-                self.rep_outsb32(instr);
+                self.rep_outsb32(instr)?;
             } else {
-                self.outsb32(instr);
+                self.outsb32(instr)?;
             }
+        } else if instr.lock_rep_used_value() != 0 {
+            self.rep_outsb16(instr)?;
         } else {
-            if instr.lock_rep_used_value() != 0 {
-                self.rep_outsb16(instr);
-            } else {
-                self.outsb16(instr);
-            }
+            self.outsb16(instr)?;
         }
         Ok(())
     }
@@ -489,16 +656,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn outsw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.as32_l() != 0 {
             if instr.lock_rep_used_value() != 0 {
-                self.rep_outsw32(instr);
+                self.rep_outsw32(instr)?;
             } else {
-                self.outsw32(instr);
+                self.outsw32(instr)?;
             }
+        } else if instr.lock_rep_used_value() != 0 {
+            self.rep_outsw16(instr)?;
         } else {
-            if instr.lock_rep_used_value() != 0 {
-                self.rep_outsw16(instr);
-            } else {
-                self.outsw16(instr);
-            }
+            self.outsw16(instr)?;
         }
         Ok(())
     }
@@ -507,16 +672,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn outsd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.as32_l() != 0 {
             if instr.lock_rep_used_value() != 0 {
-                self.rep_outsd32(instr);
+                self.rep_outsd32(instr)?;
             } else {
-                self.outsd32(instr);
+                self.outsd32(instr)?;
             }
+        } else if instr.lock_rep_used_value() != 0 {
+            self.rep_outsd16(instr)?;
         } else {
-            if instr.lock_rep_used_value() != 0 {
-                self.rep_outsd16(instr);
-            } else {
-                self.outsd16(instr);
-            }
+            self.outsd16(instr)?;
         }
         Ok(())
     }

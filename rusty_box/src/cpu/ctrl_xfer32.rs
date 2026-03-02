@@ -8,7 +8,6 @@ use super::{
     decoder::{BxSegregs, Instruction},
     eflags::EFlags,
     error::{CpuError, Result},
-    segment_ctrl_pro::parse_selector,
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -31,6 +30,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Original: Bochs calls exception(BX_GP_EXCEPTION, 0) which doesn't return
             return Err(CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: 0,
             });
         }
 
@@ -495,12 +495,44 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Helper function for loading segment register in real mode
     // =========================================================================
 
-    /// Load segment register in real mode (matching load_seg_reg for real mode)
+    /// Load segment register in real mode
+    /// Based on Bochs segment_ctrl_pro.cc:163-209 load_seg_reg() real/v8086 path
     pub(super) fn load_seg_reg_real_mode(&mut self, seg: BxSegregs, selector: u16) {
-        parse_selector(selector, &mut self.sregs[seg as usize].selector);
-        let new_base = (selector as u64) << 4;
+        let seg_idx = seg as usize;
 
-        self.set_segment_base(seg, new_base);
+        self.sregs[seg_idx].selector.value = selector;
+        // Bochs: RPL = 0 in real mode, 3 in v8086
+        self.sregs[seg_idx].selector.rpl = if self.real_mode() { 0 } else { 3 };
+        self.sregs[seg_idx].cache.valid = super::descriptor::SEG_VALID_CACHE;
+        unsafe {
+            self.sregs[seg_idx].cache.u.segment.base = (selector as u64) << 4;
+        }
+        self.sregs[seg_idx].cache.segment = true;
+        self.sregs[seg_idx].cache.p = true;
+
+        // Bochs: "Do not modify segment limit and AR bytes when in real mode"
+        // "Support for big real mode"
+        // Only set these fields in v8086 mode
+        if !self.real_mode() {
+            // v8086 mode
+            self.sregs[seg_idx].cache.r#type = 3; // DATA_READ_WRITE_ACCESSED
+            self.sregs[seg_idx].cache.dpl = 3;
+            unsafe {
+                self.sregs[seg_idx].cache.u.segment.limit_scaled = 0xFFFF;
+                self.sregs[seg_idx].cache.u.segment.g = false;
+                self.sregs[seg_idx].cache.u.segment.d_b = false;
+                self.sregs[seg_idx].cache.u.segment.avl = false;
+            }
+        }
+
+        if seg as usize == BxSegregs::Cs as usize {
+            self.invalidate_prefetch_q();
+            self.handle_alignment_check();
+        }
+
+        if seg as usize == BxSegregs::Ss as usize {
+            self.invalidate_stack_cache();
+        }
     }
 
     // =========================================================================
@@ -533,6 +565,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 );
                 return Err(CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: 0,
                 });
             }
 
@@ -565,6 +598,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 );
                 return Err(CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: 0,
                 });
             }
 
@@ -679,6 +713,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 );
                 return Err(CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: 0,
                 });
             }
 
@@ -717,6 +752,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 );
                 return Err(CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: 0,
                 });
             }
 

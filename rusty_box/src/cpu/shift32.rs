@@ -317,6 +317,130 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
+    // RCL - Rotate through Carry Left (32-bit)
+    // Matches Bochs shift32.cc RCL_EdR / RCL_EdM
+    // =========================================================================
+
+    /// RCL r/m32, 1
+    pub fn rcl_ed_1(&mut self, instr: &Instruction) -> super::Result<()> {
+        let (op1, laddr) = self.shift_read32(instr)?;
+        let temp_cf = self.get_cf() as u32;
+        let result = (op1 << 1) | temp_cf;
+        self.shift_write32(instr, laddr, result);
+
+        let cf = (op1 >> 31) & 1;
+        let of = cf ^ (result >> 31);
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    /// RCL r/m32, CL
+    pub fn rcl_ed_cl(&mut self, instr: &Instruction) -> super::Result<()> {
+        let count = (self.cl() & 0x1F) as u32;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (op1, laddr) = self.shift_read32(instr)?;
+        let temp_cf = self.get_cf() as u32;
+        let result = if count == 1 {
+            (op1 << 1) | temp_cf
+        } else {
+            (op1 << count) | (temp_cf << (count - 1)) | (op1 >> (33 - count))
+        };
+        self.shift_write32(instr, laddr, result);
+
+        let cf = (op1 >> (32 - count)) & 1;
+        let of = cf ^ (result >> 31);
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    /// RCL r/m32, imm8
+    pub fn rcl_ed_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        let count = (instr.ib() & 0x1F) as u32;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (op1, laddr) = self.shift_read32(instr)?;
+        let temp_cf = self.get_cf() as u32;
+        let result = if count == 1 {
+            (op1 << 1) | temp_cf
+        } else {
+            (op1 << count) | (temp_cf << (count - 1)) | (op1 >> (33 - count))
+        };
+        self.shift_write32(instr, laddr, result);
+
+        let cf = (op1 >> (32 - count)) & 1;
+        let of = cf ^ (result >> 31);
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    // =========================================================================
+    // RCR - Rotate through Carry Right (32-bit)
+    // Matches Bochs shift32.cc RCR_EdR / RCR_EdM
+    // =========================================================================
+
+    /// RCR r/m32, 1
+    pub fn rcr_ed_1(&mut self, instr: &Instruction) -> super::Result<()> {
+        let (op1, laddr) = self.shift_read32(instr)?;
+        let temp_cf = self.get_cf() as u32;
+        let result = (op1 >> 1) | (temp_cf << 31);
+        self.shift_write32(instr, laddr, result);
+
+        let cf = op1 & 1;
+        let of = ((result << 1) ^ result) >> 31;
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    /// RCR r/m32, CL
+    pub fn rcr_ed_cl(&mut self, instr: &Instruction) -> super::Result<()> {
+        let count = (self.cl() & 0x1F) as u32;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (op1, laddr) = self.shift_read32(instr)?;
+        let temp_cf = self.get_cf() as u32;
+        let result = if count == 1 {
+            (op1 >> 1) | (temp_cf << 31)
+        } else {
+            (op1 >> count) | (temp_cf << (32 - count)) | (op1 << (33 - count))
+        };
+        self.shift_write32(instr, laddr, result);
+
+        let cf = (op1 >> (count - 1)) & 1;
+        let of = ((result << 1) ^ result) >> 31;
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    /// RCR r/m32, imm8
+    pub fn rcr_ed_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        let count = (instr.ib() & 0x1F) as u32;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (op1, laddr) = self.shift_read32(instr)?;
+        let temp_cf = self.get_cf() as u32;
+        let result = if count == 1 {
+            (op1 >> 1) | (temp_cf << 31)
+        } else {
+            (op1 >> count) | (temp_cf << (32 - count)) | (op1 << (33 - count))
+        };
+        self.shift_write32(instr, laddr, result);
+
+        let cf = (op1 >> (count - 1)) & 1;
+        let of = ((result << 1) ^ result) >> 31;
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    // =========================================================================
     // Flag update helpers (32-bit)
     // =========================================================================
 

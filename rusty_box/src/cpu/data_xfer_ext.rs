@@ -133,6 +133,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
+    /// XCHG r/m32, r32 - Unified dispatch based on mod_c0()
+    pub fn xchg_ed_gd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.xchg_ed_gd(instr);
+            Ok(())
+        } else {
+            self.xchg_ed_gd_m(instr)
+        }
+    }
+
     // =========================================================================
     // MOV segment register operations
     // =========================================================================

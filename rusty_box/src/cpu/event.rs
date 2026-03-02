@@ -1,4 +1,4 @@
-use super::{cpu::CpuActivityState, cpuid::BxCpuIdTrait, BxCpuC};
+use super::{cpu::CpuActivityState, cpuid::BxCpuIdTrait, eflags::EFlags, BxCpuC};
 
 impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Handle async events - matches Bochs event.cc:205-436 handleAsyncEvent()
@@ -14,18 +14,93 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
         }
 
-        // TODO: Priority 2-5 event handling (SMI, INIT, NMI, external interrupts, etc.)
-        // For now, external interrupts are handled in the emulator's outer loop.
+        // Priority 2: Trap on Task Switch (T flag in TSS)
+        // Bochs event.cc:246-248
+        if self.debug_trap & Self::BX_DEBUG_TRAP_TASK_SWITCH_BIT != 0 {
+            self.debug_trap &= !Self::BX_DEBUG_TRAP_TASK_SWITCH_BIT;
+            // Bochs: exception() calls longjmp, never returns.
+            // We must propagate CpuLoopRestart by returning false.
+            // The caller (cpu_loop_n) will restart the loop.
+            if let Err(super::error::CpuError::CpuLoopRestart) =
+                self.exception(super::cpu::Exception::Db, 0)
+            {
+                return false;
+            }
+        }
 
-        // Matches Bochs event.cc:428-433:
-        //   if (!(unmasked_events_pending || debug_trap || HRQ)) {
-        //       async_event = 0;
-        //   }
-        // Clear async_event when no events remain pending.
-        // Without this, BX_ASYNC_EVENT_STOP_TRACE stays set forever,
-        // causing the inner trace loop to break after every instruction
-        // (executed=1 per batch → usec=0 → tick_devices never called).
-        self.async_event = 0;
+        // Priority 4: Debug trap exceptions (TF single-step, data/I/O breakpoints)
+        // Bochs event.cc:312-324 — check inhibition FIRST, then debug_trap
+        if !self.interrupts_inhibited(Self::BX_INHIBIT_DEBUG) {
+            if self.debug_trap & 0xF000 != 0 {
+                // BX_DEBUG_SINGLE_STEP_BIT or BX_DEBUG_DR_ACCESS_BIT set
+                // Bochs: exception() longjmps — propagate restart
+                if let Err(super::error::CpuError::CpuLoopRestart) =
+                    self.exception(super::cpu::Exception::Db, 0)
+                {
+                    return false;
+                }
+            } else {
+                self.debug_trap = 0;
+            }
+        }
+
+        // Priority 5: External interrupts (Bochs event.cc:382-395)
+        //
+        // Matches Bochs HandleExtInterrupt(): when BX_EVENT_PENDING_INTR is set,
+        // clear the event, check IF + inhibit, then call DEV_pic_iac() and
+        // deliver via interrupt(). This is the critical path that allows the PIC
+        // to deliver interrupts at instruction boundaries — without it, IRQs
+        // could only be delivered at batch boundaries (causing starvation).
+        if self.pending_event & Self::BX_EVENT_PENDING_INTR != 0 {
+            self.pending_event &= !Self::BX_EVENT_PENDING_INTR;
+            if self.eflags.contains(EFlags::IF_)
+                && !self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS)
+            {
+                if !self.pic_ptr.is_null() {
+                    let pic = unsafe { &mut *self.pic_ptr };
+                    if pic.has_interrupt() {
+                        let vector = pic.iac();
+                        self.diag_hae_intr_delivered += 1;
+                        // Wake from halt if needed
+                        self.activity_state = CpuActivityState::Active;
+                        // Mark as external interrupt (EXT=1)
+                        self.ext = true;
+                        // Deliver interrupt (matches Bochs interrupt() call in event.cc:389)
+                        let result = self.interrupt(vector, false, false, 0);
+                        self.ext = false;
+                        match result {
+                            Ok(()) => {
+                                self.prev_rip = self.rip() as u64;
+                            }
+                            Err(super::error::CpuError::CpuLoopRestart) => {
+                                return false; // Restart cpu_loop
+                            }
+                            Err(_) => {}
+                        }
+                    } else {
+                        self.diag_hae_intr_pic_empty += 1;
+                    }
+                } else {
+                    self.diag_hae_intr_no_pic += 1;
+                }
+            } else {
+                self.diag_hae_intr_if_blocked += 1;
+            }
+        }
+
+        // End of handleAsyncEvent: schedule TF->debug_trap for next boundary
+        // Bochs event.cc:396-402
+        if self.eflags.contains(EFlags::TF) {
+            self.debug_trap |= Self::BX_DEBUG_SINGLE_STEP_BIT;
+            self.async_event = 1;
+        }
+
+        // Bochs event.cc:428-433: Conditionally clear async_event
+        // Only clear when no events remain pending (debug_trap, pending events, HRQ)
+        let has_unmasked_events = (self.pending_event & !self.event_mask) != 0;
+        if !has_unmasked_events && self.debug_trap == 0 {
+            self.async_event = 0;
+        }
 
         false // Continue execution
     }
@@ -40,45 +115,34 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             return true;
         }
 
-        // For single processor, loop until interrupt wakes up CPU
+        // For single processor, check if an external interrupt can wake us.
         // Matches Bochs event.cc:52-113
-        loop {
-            // TODO: Check for pending interrupts/NMI/SMI
-            // For now, just check if we should wake up
-            // In real Bochs, it checks:
-            // - BX_EVENT_PENDING_INTR | BX_EVENT_PENDING_LAPIC_INTR (if IF=1)
-            // - BX_EVENT_NMI | BX_EVENT_SMI | BX_EVENT_INIT
-
-            // For now, if activity_state became ACTIVE (e.g., from reset), wake up
-            if matches!(self.activity_state, CpuActivityState::Active) {
-                tracing::debug!("CPU activity_state became ACTIVE, waking up");
-                break;
+        //
+        // In Bochs, handleWaitForEvent checks BX_EVENT_PENDING_INTR (if IF=1)
+        // and NMI/SMI/INIT to decide whether to wake the CPU. For our
+        // single-processor model, we check pending_event for PENDING_INTR.
+        if self.pending_event & Self::BX_EVENT_PENDING_INTR != 0 {
+            if self.eflags.contains(EFlags::IF_) {
+                // External interrupt can wake from HLT
+                self.activity_state = CpuActivityState::Active;
+                self.inhibit_mask = 0;
+                return false; // Continue to interrupt delivery
             }
-
-            // Check if interrupts are enabled and pending
-            // TODO: Check actual interrupt pending flags
-            // For now, if IF=1, we'll assume we can wake up
-            // (in real Bochs, we'd check BX_EVENT_PENDING_INTR)
-            let if_flag = self.get_b_if();
-            if if_flag != 0 {
-                // In real Bochs, we'd check if interrupt is pending here
-                // For now, just continue waiting
-            }
-
-            // TODO: Call BX_TICKN(10) to advance time
-            // For now, we'll just return to let the emulator loop handle timing
-            // This prevents infinite busy-wait loop
-
-            // Return from cpu_loop to allow other processing (matches single-CPU behavior)
-            // In Bochs, BX_TICKN(10) advances time, then loops again
-            // For single CPU, this would loop forever until interrupt
-            // For our emulator, we return to allow GUI updates and device processing
-            tracing::debug!("CPU halted, returning from cpu_loop to allow interrupt processing");
-            return true;
         }
 
-        // Woke up from halt - clear activity state
-        self.activity_state = CpuActivityState::Active;
-        false // Continue execution
+        // For now, if activity_state became ACTIVE (e.g., from reset), wake up
+        if matches!(self.activity_state, CpuActivityState::Active) {
+            tracing::debug!("CPU activity_state became ACTIVE, waking up");
+            self.inhibit_mask = 0;
+            return false;
+        }
+
+        // Return from cpu_loop to allow other processing (matches single-CPU behavior)
+        // In Bochs, BX_TICKN(10) advances time, then loops again
+        // For our emulator, we return to allow GUI updates and device processing
+        tracing::trace!("CPU halted, returning from cpu_loop to allow interrupt processing");
+        // Bochs event.cc:68: clear inhibit_mask when waking from HLT
+        self.inhibit_mask = 0;
+        true
     }
 }

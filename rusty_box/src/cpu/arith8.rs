@@ -935,3 +935,151 @@ pub fn SUB_AL_Ib<'c, I: BxCpuIdTrait>(
 
     Ok(())
 }
+
+// =========================================================================
+// CMPXCHG — Compare and Exchange (opcode 0x0F B0, operand-size 8)
+// Matches Bochs arith8.cc CMPXCHG_EbGbR / CMPXCHG_EbGbM
+// =========================================================================
+
+/// CMPXCHG r/m8, r8 — register form
+/// Bochs arith8.cc:513-531 (CMPXCHG_EbGbR)
+pub fn CMPXCHG_EbGb_R<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) {
+    let op1_8 = cpu.get_gpr8(instr.dst() as usize) as u32;
+    let al = cpu.al() as u32;
+    let diff_8 = al.wrapping_sub(op1_8);
+    cpu.set_flags_oszapc_sub_8(al as u8, op1_8 as u8, diff_8 as u8);
+
+    if (diff_8 & 0xFF) == 0 {
+        let op2_8 = cpu.get_gpr8(instr.src() as usize);
+        cpu.set_gpr8(instr.dst() as usize, op2_8);
+    } else {
+        cpu.set_al(op1_8 as u8);
+    }
+}
+
+/// CMPXCHG r/m8, r8 — memory form
+/// Bochs arith8.cc:490-511 (CMPXCHG_EbGbM)
+pub fn CMPXCHG_EbGb_M<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1_8 = cpu.read_rmw_virtual_byte(seg, eaddr)? as u32;
+    let al = cpu.al() as u32;
+    let diff_8 = al.wrapping_sub(op1_8);
+    cpu.set_flags_oszapc_sub_8(al as u8, op1_8 as u8, diff_8 as u8);
+
+    if (diff_8 & 0xFF) == 0 {
+        let op2_8 = cpu.get_gpr8(instr.src() as usize);
+        cpu.write_rmw_linear_byte(op2_8);
+    } else {
+        cpu.write_rmw_linear_byte(op1_8 as u8);
+        cpu.set_al(op1_8 as u8);
+    }
+    Ok(())
+}
+
+// =========================================================================
+// XADD — Exchange and Add (opcode 0x0F C0, operand-size 8)
+// Matches Bochs arith8.cc XADD_EbGbR / XADD_EbGbM
+// =========================================================================
+
+/// XADD r/m8, r8 — register form
+/// Bochs arith8.cc:286-308
+pub fn XADD_EbGb_R<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) {
+    let op1 = cpu.get_gpr8(instr.dst() as usize) as u32;
+    let op2 = cpu.get_gpr8(instr.src() as usize) as u32;
+    let sum = op1.wrapping_add(op2);
+
+    cpu.set_gpr8(instr.src() as usize, op1 as u8);
+    cpu.set_gpr8(instr.dst() as usize, sum as u8);
+
+    cpu.update_flags_add8(op1 as u8, op2 as u8, sum as u8);
+}
+
+/// XADD r/m8, r8 — memory form
+/// Bochs arith8.cc:262-284
+pub fn XADD_EbGb_M<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1 = cpu.read_rmw_virtual_byte(seg, eaddr)? as u32;
+    let op2 = cpu.get_gpr8(instr.src() as usize) as u32;
+    let sum = op1.wrapping_add(op2);
+
+    cpu.write_rmw_linear_byte(sum as u8);
+    cpu.set_gpr8(instr.src() as usize, op1 as u8);
+    cpu.update_flags_add8(op1 as u8, op2 as u8, sum as u8);
+    Ok(())
+}
+
+// =========================================================================
+// CMPXCHG - unified dispatch (8-bit)
+// =========================================================================
+
+/// CMPXCHG r/m8, r8 — unified dispatch
+pub fn CMPXCHG_EbGb<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        CMPXCHG_EbGb_R(cpu, instr);
+        Ok(())
+    } else {
+        CMPXCHG_EbGb_M(cpu, instr)
+    }
+}
+
+// =========================================================================
+// XADD - unified dispatch (8-bit)
+// =========================================================================
+
+/// XADD r/m8, r8 — unified dispatch
+pub fn XADD_EbGb<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        XADD_EbGb_R(cpu, instr);
+        Ok(())
+    } else {
+        XADD_EbGb_M(cpu, instr)
+    }
+}
+
+// =========================================================================
+// NEG - Two's Complement Negation (8-bit)
+// Matching Bochs arith8.cc NEG_EbR / NEG_EbM
+// =========================================================================
+
+/// NEG r/m8 - unified dispatch
+pub fn NEG_Eb<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        let dst = instr.dst() as usize;
+        let op1 = cpu.get_gpr8(dst);
+        let result = 0u8.wrapping_sub(op1);
+        cpu.set_gpr8(dst, result);
+        cpu.update_flags_sub8(0, op1, result);
+        Ok(())
+    } else {
+        let eaddr = cpu.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let op1 = cpu.read_rmw_virtual_byte(seg, eaddr)?;
+        let result = 0u8.wrapping_sub(op1);
+        cpu.write_rmw_linear_byte(result);
+        cpu.update_flags_sub8(0, op1, result);
+        Ok(())
+    }
+}

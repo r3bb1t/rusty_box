@@ -525,10 +525,10 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     // pub(super) activity_state: u32,
     pub(crate) activity_state: CpuActivityState,
 
-    pub(super) pending_event: u32,
-    pub(super) event_mask: u32,
+    pub(crate) pending_event: u32,
+    pub(crate) event_mask: u32,
     // keep 32-bit because of BX_ASYNC_EVENT_STOP_TRACE
-    pub(super) async_event: u32,
+    pub(crate) async_event: u32,
 
     pub(super) in_smm: bool,
     pub(super) cpu_mode: CpuMode,
@@ -550,6 +550,12 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     // Perf counters (temporary, for diagnosing slowdowns)
     pub(crate) perf_icache_miss: u64,
     pub(crate) perf_prefetch: u64,
+
+    // Diagnostic counters for handle_async_event interrupt delivery
+    pub(crate) diag_hae_intr_delivered: u64,
+    pub(crate) diag_hae_intr_if_blocked: u64,
+    pub(crate) diag_hae_intr_no_pic: u64,
+    pub(crate) diag_hae_intr_pic_empty: u64,
 
     // Boundaries of current code page, based on EIP
     pub(super) eip_page_bias: BxAddress,
@@ -651,6 +657,12 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     /// It must only be set for the duration of a CPU execution call and cleared afterwards.
     pub(super) io_bus: Option<NonNull<crate::iodev::BxDevicesC>>,
 
+    /// Raw pointer to PIC for interrupt delivery inside handle_async_event().
+    ///
+    /// Matches Bochs' `DEV_pic_iac()` call in `HandleExtInterrupt()`.
+    /// Set once during emulator initialization, valid for the emulator's lifetime.
+    pub(crate) pic_ptr: *mut crate::iodev::pic::BxPicC,
+
     /// Debug flags for one-time boot diagnostics (no globals).
     ///
     /// Bit 0: reported unsupported opcode
@@ -660,6 +672,10 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
+
+    /// Event bit: external interrupt pending (PIC int_pin asserted).
+    /// Matches Bochs `BX_EVENT_PENDING_INTR`.
+    pub(crate) const BX_EVENT_PENDING_INTR: u32 = 1 << 0;
 }
 
 // Note: Memory access is done through mem_ptr/mem_len raw pointer
@@ -688,9 +704,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.cpu_mode == CpuMode::Ia32Real
     }
 
+    /// Protected mode (NOT v8086) — matches Bochs BX_CPU_C::protected_mode()
+    pub(super) fn protected_mode(&self) -> bool {
+        self.cpu_mode == CpuMode::Ia32Protected
+    }
+
     pub(super) fn bx_write_opmask(&mut self, index: usize, val_64: u64) {
         self.opmask[index].rrx = val_64;
     }
+
+    // ── Debug trap bits (DR6 bits set by CPU) ──
+    // Bochs cpu.h:950-958
+    pub(super) const BX_DEBUG_SINGLE_STEP_BIT: u32 = 1 << 14;    // BS flag in DR6 (bit 14)
+    pub(super) const BX_DEBUG_TRAP_TASK_SWITCH_BIT: u32 = 0x8000; // BT flag in DR6
+
+    // ── DR7 local breakpoint enable bits mask ──
+    // Bits L0(0), L1(2), L2(4), L3(6), LE(8) = 0x155
+    pub(super) const DR7_LOCAL_ENABLE_MASK: u32 = 0x0000_0155;
 
     // ── Interrupt inhibition (MOV SS / POP SS) ──
     // Bochs cpu.h:962-966
@@ -698,19 +728,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) const BX_INHIBIT_DEBUG: u32 = 0x02;
     pub(super) const BX_INHIBIT_INTERRUPTS_BY_MOVSS: u32 = 0x01 | 0x02;
 
-    /// Set interrupt inhibition mask for the next instruction boundary
+    /// Set interrupt inhibition mask for the next instruction boundary.
+    /// Bochs event.cc:443: prevents double MOV SS from extending the window.
     pub(super) fn inhibit_interrupts(&mut self, mask: u32) {
-        self.inhibit_mask = mask;
-        self.inhibit_icount = self.icount + 1;
+        // Bochs guard: if mask is MOVSS and we're already inhibiting by MOVSS,
+        // don't reset the window. A second MOV SS doesn't extend inhibition.
+        if mask != Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS
+            || !self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS)
+        {
+            self.inhibit_mask = mask;
+            self.inhibit_icount = self.icount + 1;
+        }
     }
 
-    /// Check if interrupts of the given type are currently inhibited
+    /// Check if interrupts of the given type are currently inhibited.
+    /// Bochs event.cc:452: `(inhibit_mask & mask) == mask` — ALL bits must match.
     pub(crate) fn interrupts_inhibited(&self, mask: u32) -> bool {
-        self.icount <= self.inhibit_icount && (self.inhibit_mask & mask) != 0
+        self.icount <= self.inhibit_icount && (self.inhibit_mask & mask) == mask
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Copy, Clone)]
 pub(crate) struct AddressXlation {
     /// The address offset after resolution
     pub(crate) rm_addr: BxPhyAddress,
@@ -1005,6 +1043,21 @@ pub(super) struct BxGuardFound {
 type InstructionHandler<I> = fn(&mut BxCpuC<'_, I>, &Instruction) -> Result<()>;
 
 impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
+    /// Bochs `signal_event()`: set event bit and force async check.
+    /// Called by PIC (via raw pointer) when master int_pin asserts.
+    #[inline]
+    pub(crate) fn signal_event(&mut self, event: u32) {
+        self.pending_event |= 1 << event;
+        self.async_event = 1;
+    }
+
+    /// Bochs `clear_event()`: clear event bit.
+    /// Called by PIC (via raw pointer) when master int_pin deasserts.
+    #[inline]
+    pub(crate) fn clear_event(&mut self, event: u32) {
+        self.pending_event &= !(1 << event);
+    }
+
     #[inline]
     pub(crate) fn set_io_bus_ptr(&mut self, io: NonNull<crate::iodev::BxDevicesC>) {
         self.io_bus = Some(io);
@@ -1067,52 +1120,40 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     ///
     /// Note: callers must ensure the memory bus is wired (`mem_bus` set) so that
     /// stack pushes and IVT/IDT reads work correctly.
+    /// Inject an external interrupt via the unified interrupt() dispatch.
+    /// Based on Bochs event.cc HandleExtInterrupt (lines 133-184).
+    ///
+    /// Sets EXT=1, uses the unified interrupt() for proper inhibit_mask clearing,
+    /// speculative_rsp, and BadVector recovery, then commits prev_rip.
     pub(crate) fn inject_external_interrupt(&mut self, vector: u8) -> Result<()> {
-        let rip_before = self.rip();
-        let cs_before = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
-
         // Wake from halt/wait state.
         self.activity_state = CpuActivityState::Active;
         // Clear stop-trace so execution can resume.
         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
 
-        let result = if self.real_mode() {
-            // Real-mode external interrupts use the IVT at 0000:0000.
-            self.interrupt_real_mode(vector)?;
-            Ok(())
-        } else {
-            // Protected-mode external interrupts go through the IDT gate.
-            // `soft_int=false`, no error code pushed for external IRQs.
-            self.protected_mode_int(vector, false, false, 0)
-        };
+        // Mark as external interrupt (EXT=1) — affects error codes pushed
+        // during any exception that occurs during interrupt delivery.
+        // Based on Bochs event.cc:162
+        self.ext = true;
 
-        // One-shot diagnostic: capture first few timer interrupts after 200M
-        if vector == 0x20 && self.icount > 200_000_000 {
-            // Use diag_timer_int_logged counter (bits of async_event are cleared by now)
-            static mut TIMER_DIAG_COUNT: u32 = 0;
-            let count = unsafe {
-                TIMER_DIAG_COUNT += 1;
-                TIMER_DIAG_COUNT
-            };
-            if count <= 5 || count % 1000 == 0 {
-                let rip_after = self.rip();
-                let cs_after = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
-                eprintln!(
-                    "DIAG-TIMER #{}: ok={} RIP {:#x}->{:#x} CS {:#06x}->{:#06x} ESP={:#x} IF={} icount={}",
-                    count,
-                    result.is_ok(),
-                    rip_before,
-                    rip_after,
-                    cs_before,
-                    cs_after,
-                    self.esp(),
-                    self.get_b_if(),
-                    self.icount,
-                );
-            }
+        // Use unified interrupt() dispatch which handles:
+        // - inhibit_mask clearing
+        // - speculative_rsp setup/commit
+        // - BadVector → exception() recovery
+        // - mode dispatch (real vs protected)
+        // soft_int=false, no error code for external IRQs
+        let result = self.interrupt(vector, false, false, 0);
+
+        // Commit prev_rip after successful delivery (Bochs event.cc:183)
+        if result.is_ok() {
+            self.prev_rip = self.rip() as u64;
         }
 
-        result
+        // CpuLoopRestart is expected from interrupt() — convert to Ok for external callers
+        match result {
+            Err(super::error::CpuError::CpuLoopRestart) => Ok(()),
+            other => other,
+        }
     }
 
     /// True if the CPU is halted or waiting for an event.
@@ -1289,28 +1330,38 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             let is_real = self.real_mode();
 
             'trace: loop {
-                // Fetch instruction from icache pool
-                let mut i = self.i_cache.mpool[instr_idx];
+                // Bochs-style: pointer to mpool slot — no 24-byte copy per instruction.
+                // SAFETY: execute_instruction never writes to i_cache.mpool (only CPU registers
+                // and memory). serve_icache_miss is only called from get_icache_entry, not during
+                // instruction execution. So the mpool slot is stable for the duration of this call.
+                let i_ptr: *const Instruction = &raw const self.i_cache.mpool[instr_idx];
 
                 // Matching C++ line 202: RIP += i->ilen();
                 // Advance RIP before execution (handlers may read RIP and expect it advanced)
                 // SAFETY: gen_reg is initialized during CPU init; BX_64BIT_REG_RIP is always valid.
-                unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx += i.ilen() as u64 };
+                unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx += (*i_ptr).ilen() as u64 };
                 if is_real {
                     unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx &= 0xFFFF };
                 }
 
                 // Execute instruction (matching C++ BX_CPU_CALL_METHOD)
-                match self.execute_instruction(&mut i) {
+                // SAFETY: i_ptr is valid for the lifetime of this loop iteration (see above).
+                match self.execute_instruction(unsafe { &*i_ptr }) {
                     Ok(()) => {}
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
-                        // Exception delivery during execution: restart decode (Bochs longjmp)
+                        // Exception delivery during execution: restart decode (Bochs longjmp).
+                        // Bochs setjmp handler (cpu.cc:141-155): icount++, prev_rip = RIP,
+                        // speculative_rsp = false, then continue outer loop.
+                        self.icount += 1;
+                        iteration += 1;
+                        self.prev_rip = self.rip() as u64;
+                        self.speculative_rsp = false;
                         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
                         continue 'cpu_loop;
                     }
                     Err(e) => {
                         // Cold path: handle fatal/unimplemented errors
-                        self.handle_execution_error(e, &i)?;
+                        self.handle_execution_error(e, unsafe { &*i_ptr })?;
                         break 'cpu_loop Err(crate::cpu::CpuError::CpuNotInitialized);
                     }
                 }
@@ -1355,8 +1406,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
 
             // Clear stop trace magic indication (matching C++ line 226)
-            // Don't clear if CPU is halted — handle_async_event needs the flag.
-            if matches!(self.activity_state, CpuActivityState::Active) {
+            // Bochs unconditionally clears STOP_TRACE after inner loop break.
+            {
                 self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
             }
         };
@@ -1588,17 +1639,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     pub(super) fn update_flags_add32(&mut self, op1: u32, op2: u32, res: u32) {
-        // CF
-        let cf = (res as u64) < (op1 as u64);
-        // ZF
+        // Bochs ADD_COUT_VEC: carry-out at each bit position
+        // Works correctly for both ADD and ADC (result includes carry-in)
+        let cout_vec = (op1 & op2) | ((op1 | op2) & !res);
+        let cf = (cout_vec >> 31) & 1 != 0;
         let zf = res == 0;
-        // SF
         let sf = (res & 0x8000_0000) != 0;
-        // OF : use signed overflow detection
-        let of = (op1 as i32).checked_add(op2 as i32).is_none();
-        // AF - auxiliary carry (bit 4)
-        let af = ((op1 ^ op2 ^ res) & 0x10) != 0;
-        // PF - parity of low byte (even parity)
+        // Bochs GET_ADD_OVERFLOW
+        let of = ((op1 ^ res) & (op2 ^ res) & 0x8000_0000) != 0;
+        let af = (cout_vec >> 3) & 1 != 0;
         let low = (res & 0xff) as u8;
         let parity = low.count_ones() % 2 == 0;
 
@@ -1626,13 +1675,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     pub(super) fn update_flags_sub32(&mut self, op1: u32, op2: u32, res: u32) {
-        // CF for subtraction: borrow occured when op1 < op2
-        let cf = op1 < op2;
+        // Bochs SUB_COUT_VEC: borrow at each bit position
+        // Works correctly for both SUB and SBB (result includes borrow-in)
+        let cout_vec = (!op1 & op2) | ((!op1 ^ op2) & res);
+        let cf = (cout_vec >> 31) & 1 != 0;
         let zf = res == 0;
         let sf = (res & 0x8000_0000) != 0;
-        // OF: signed overflow on subtraction
-        let of = (op1 as i32).checked_sub(op2 as i32).is_none();
-        let af = ((op1 ^ op2 ^ res) & 0x10) != 0;
+        // Bochs GET_SUB_OVERFLOW
+        let of = ((op1 ^ op2) & (op1 ^ res) & 0x8000_0000) != 0;
+        let af = (cout_vec >> 3) & 1 != 0;
         let low = (res & 0xff) as u8;
         let parity = low.count_ones() % 2 == 0;
 
@@ -1663,11 +1714,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
     // 8-bit flag updates
     pub(super) fn update_flags_add8(&mut self, op1: u8, op2: u8, result: u8) {
-        let cf = result < op1; // Carry occurred
+        // Bochs ADD_COUT_VEC: carry-out at each bit position
+        let cout_vec = (op1 & op2) | ((op1 | op2) & !result);
+        let cf = (cout_vec >> 7) & 1 != 0;
         let zf = result == 0;
         let sf = (result & 0x80) != 0;
-        let of = ((op1 ^ result) & (op2 ^ result) & 0x80) != 0; // Signed overflow
-        let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
+        // Bochs GET_ADD_OVERFLOW
+        let of = ((op1 ^ result) & (op2 ^ result) & 0x80) != 0;
+        let af = (cout_vec >> 3) & 1 != 0;
         let pf = (result.count_ones() % 2) == 0;
 
         self.eflags.remove(EFlags::OSZAPC);
@@ -1693,11 +1747,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     pub(super) fn update_flags_add16(&mut self, op1: u16, op2: u16, result: u16) {
-        let cf = result < op1;
+        // Bochs ADD_COUT_VEC: carry-out at each bit position
+        let cout_vec = (op1 & op2) | ((op1 | op2) & !result);
+        let cf = (cout_vec >> 15) & 1 != 0;
         let zf = result == 0;
         let sf = (result & 0x8000) != 0;
+        // Bochs GET_ADD_OVERFLOW
         let of = ((op1 ^ result) & (op2 ^ result) & 0x8000) != 0;
-        let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
+        let af = (cout_vec >> 3) & 1 != 0;
         let pf = ((result & 0xFF) as u8).count_ones() % 2 == 0;
 
         self.eflags.remove(EFlags::OSZAPC);
@@ -1723,11 +1780,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     pub(super) fn update_flags_sub8(&mut self, op1: u8, op2: u8, result: u8) {
-        let cf = op1 < op2;
+        // Bochs SUB_COUT_VEC: borrow at each bit position
+        let cout_vec = (!op1 & op2) | ((!op1 ^ op2) & result);
+        let cf = (cout_vec >> 7) & 1 != 0;
         let zf = result == 0;
         let sf = (result & 0x80) != 0;
-        let of = (op1 as i8).checked_sub(op2 as i8).is_none();
-        let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
+        // Bochs GET_SUB_OVERFLOW
+        let of = ((op1 ^ op2) & (op1 ^ result) & 0x80) != 0;
+        let af = (cout_vec >> 3) & 1 != 0;
         let pf = (result.count_ones() % 2) == 0;
 
         self.eflags.remove(EFlags::OSZAPC);
@@ -1753,11 +1813,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     pub(super) fn update_flags_sub16(&mut self, op1: u16, op2: u16, result: u16) {
-        let cf = op1 < op2;
+        // Bochs SUB_COUT_VEC: borrow at each bit position
+        let cout_vec = (!op1 & op2) | ((!op1 ^ op2) & result);
+        let cf = (cout_vec >> 15) & 1 != 0;
         let zf = result == 0;
         let sf = (result & 0x8000) != 0;
-        let of = (op1 as i16).checked_sub(op2 as i16).is_none();
-        let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
+        // Bochs GET_SUB_OVERFLOW
+        let of = ((op1 ^ op2) & (op1 ^ result) & 0x8000) != 0;
+        let af = (cout_vec >> 3) & 1 != 0;
         let pf = ((result & 0xFF) as u8).count_ones() % 2 == 0;
 
         self.eflags.remove(EFlags::OSZAPC);
@@ -1956,7 +2019,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
             self.eip_page_window_size = 4096;
 
-            if limit + self.eip_page_window_size < 4096 {
+            // Check if segment limit constrains the fetch window to less than 4096 bytes.
+            // Use u64 to avoid u32 overflow when limit is 0xFFFFFFFF (flat 4GB segment).
+            // Matches Bochs cpu.cc:656 — but Bochs relies on C unsigned wrapping which
+            // coincidentally produces the right behavior in most cases because the resulting
+            // large eipPageWindowSize still allows eip_biased (a page offset) through.
+            // We must be precise here because Rust bounds-checks the fetch buffer.
+            if (limit as u64) + (self.eip_page_window_size as u64) < 4096 {
                 self.eip_page_window_size = (u64::from(limit) + self.eip_page_bias + 1) as u32;
             }
         }

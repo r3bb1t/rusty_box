@@ -164,8 +164,13 @@ const SREG_MOD1OR2_BASE32: [u8; 8] = [
 /// # Arguments
 /// * `bytes` - The instruction bytes to decode
 /// * `is_32` - true for 32-bit mode, false for 16-bit mode
-pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instruction> {
-    let mut instr = Instruction {
+/// Bochs-style in-place decode: fills an existing Instruction slot directly.
+/// This avoids creating a temporary struct and copying it to the destination,
+/// matching Bochs `fetchDecode32(BxInstruction_c *i, ...)` behavior.
+///
+/// Use this in the icache miss handler to write directly into `mpool[mpindex]`.
+pub const fn fetch_decode32_inplace(bytes: &[u8], is_32: bool, instr: &mut Instruction) -> DecodeResult<()> {
+    *instr = Instruction {
         meta_info: BxInstructionMetaInfo {
             ia_opcode: Opcode::IaError,
             ilen: 0,
@@ -521,7 +526,7 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
         // For these, nnn field is the opcode extension (which operation), rm is the operand
         let is_group_opcode = matches!(
             b1,
-            0x80 | 0x81
+            0x80 | 0x81 | 0x82
                 | 0x83
                 | 0xC0
                 | 0xC1
@@ -551,10 +556,18 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
             // MOV Sw,Ew: nnn is destination (segment), rm is source (gpr)
             instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
             instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
-        } else if ((b1 & 0x0F) == 0x01) || ((b1 & 0x0F) == 0x09) || b1 == 0x89 {
-            // Ed,Gd format (opcodes 0x01, 0x09, 0x11, 0x19, 0x21, 0x29, 0x31, 0x89):
-            // rm (Ed) is destination, nnn (Gd) is source
-            // Examples: ADD Ed,Gd | SUB Ed,Gd | MOV Ed,Gd
+        } else if ((b1 & 0x0F) == 0x01)
+            || ((b1 & 0x0F) == 0x09)
+            || b1 == 0x89
+            // BT/BTS/BTR/BTC EdGd (0F A3/AB/B3/BB): rm=bit-field(dst), nnn=bit-index(src)
+            || matches!(b1, 0x1A3 | 0x1AB | 0x1B3 | 0x1BB)
+            // 16-bit BT/BTS/BTR/BTC EwGw: same layout
+            // (decoded with os_32=false but same b1 values)
+            // XADD EbGb (0F C0) and CMPXCHG EbGb (0F B0): rm=dst, nnn=src
+            || matches!(b1, 0x1B0 | 0x1C0)
+        {
+            // Ed,Gd format: rm (Ed) is destination, nnn (Gd) is source
+            // Examples: ADD Ed,Gd | SUB Ed,Gd | MOV Ed,Gd | BTS EdGd | XADD EbGb
             instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
             instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
         } else {
@@ -720,7 +733,32 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
         return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
     }
 
-    Ok(instr)
+    Ok(())
+}
+
+/// Original return-value API. Uses fetch_decode32_inplace internally.
+/// For runtime hot-path icache misses, prefer fetch_decode32_inplace to eliminate the copy.
+pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instruction> {
+    let mut instr = Instruction {
+        meta_info: BxInstructionMetaInfo {
+            ia_opcode: Opcode::IaError,
+            ilen: 0,
+            metainfo1: MetaInfoFlags::empty(),
+        },
+        meta_data: [0u8; 8],
+        modrm_form: ModRmForm {
+            operand_data: OperandData { id: 0 },
+            displacement: DisplacementData {
+                data32: 0,
+                data16: 0,
+            },
+        },
+    };
+    // Use match instead of ? — const_try is not yet stable
+    match fetch_decode32_inplace(bytes, is_32, &mut instr) {
+        Ok(()) => Ok(instr),
+        Err(e) => Err(e),
+    }
 }
 
 /// Get opcode table and look up opcode for 32-bit mode
@@ -866,6 +904,7 @@ const fn get_opcode_table_32(b1: u8) -> &'static [u64] {
         0x7F => &BxOpcodeTable7F_32,
         0x80 => &BxOpcodeTable80,
         0x81 => &BxOpcodeTable81,
+        0x82 => &BxOpcodeTable80, // opcode 0x82 is copy of 0x80 (Bochs fetchdecode32.cc:247)
         0x83 => &BxOpcodeTable83,
         0x84 => &BxOpcodeTable84,
         0x85 => &BxOpcodeTable85,
@@ -987,6 +1026,9 @@ const fn get_opcode_table_0f_32(b2: u8) -> &'static [u64] {
         0x16 => &BxOpcodeTable0F16,
         0x17 => &BxOpcodeTable0F17,
         0x18 => &BxOpcodeTable0F18,
+        // 0F 19..1D and 0F 1F: multi-byte NOPs (Bochs: BxOpcodeTableMultiByteNOP)
+        // These require ModRM to determine instruction length but execute as NOP
+        0x19..=0x1D | 0x1F => &BxOpcodeTableMultiByteNOP,
         0x1E => &BxOpcodeTable0F1E,
         0x20 => &BxOpcodeTable0F20_32,
         0x21 => &BxOpcodeTable0F21_32,
@@ -1109,7 +1151,7 @@ const fn opcode_needs_modrm_32(b1: u32, map: u8) -> bool {
             0x06 | 0x07 | 0x0E | 0x16 | 0x17 | 0x1E | 0x1F |
             0x27 | 0x2F | 0x37 | 0x3F |
             0x40..=0x5F |
-            0x60..=0x61 | 0x68 | 0x6A |  // 0x62 (BOUND) needs ModRM, not in this list
+            0x60..=0x61 | 0x68 | 0x6A | 0x6C..=0x6F |  // 0x62 (BOUND) needs ModRM, not in this list
             0x70..=0x7F |
             0x90..=0x9F |
             0xA0..=0xAF |

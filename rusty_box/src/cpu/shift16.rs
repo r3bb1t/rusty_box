@@ -341,6 +341,274 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
+    // RCL - Rotate through Carry Left (16-bit)
+    // Matches Bochs shift16.cc RCL_EwR / RCL_EwM
+    // =========================================================================
+
+    /// RCL r/m16, 1
+    pub fn rcl_ew_1(&mut self, instr: &Instruction) -> super::Result<()> {
+        let (op1, laddr) = self.shift_read16(instr)?;
+        let temp_cf = self.get_cf() as u16;
+        let result = (op1 << 1) | temp_cf;
+        self.shift_write16(instr, laddr, result);
+
+        let cf = (op1 >> 15) & 1;
+        let of = cf ^ (result >> 15);
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    /// RCL r/m16, CL
+    pub fn rcl_ew_cl(&mut self, instr: &Instruction) -> super::Result<()> {
+        let count = ((self.cl() & 0x1F) % 17) as u32;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (op1, laddr) = self.shift_read16(instr)?;
+        let temp_cf = self.get_cf() as u32;
+        let op1_32 = op1 as u32;
+        let result = if count == 1 {
+            ((op1_32 << 1) | temp_cf) as u16
+        } else {
+            ((op1_32 << count) | (temp_cf << (count - 1)) | (op1_32 >> (17 - count))) as u16
+        };
+        self.shift_write16(instr, laddr, result);
+
+        let cf = (op1_32 >> (16 - count)) & 1;
+        let of = cf ^ ((result >> 15) as u32);
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    /// RCL r/m16, imm8
+    pub fn rcl_ew_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        let count = ((instr.ib() & 0x1F) % 17) as u32;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (op1, laddr) = self.shift_read16(instr)?;
+        let temp_cf = self.get_cf() as u32;
+        let op1_32 = op1 as u32;
+        let result = if count == 1 {
+            ((op1_32 << 1) | temp_cf) as u16
+        } else {
+            ((op1_32 << count) | (temp_cf << (count - 1)) | (op1_32 >> (17 - count))) as u16
+        };
+        self.shift_write16(instr, laddr, result);
+
+        let cf = (op1_32 >> (16 - count)) & 1;
+        let of = cf ^ ((result >> 15) as u32);
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    // =========================================================================
+    // RCR - Rotate through Carry Right (16-bit)
+    // Matches Bochs shift16.cc RCR_EwR / RCR_EwM
+    // =========================================================================
+
+    /// RCR r/m16, 1
+    pub fn rcr_ew_1(&mut self, instr: &Instruction) -> super::Result<()> {
+        let (op1, laddr) = self.shift_read16(instr)?;
+        let temp_cf = self.get_cf() as u16;
+        let result = (op1 >> 1) | (temp_cf << 15);
+        self.shift_write16(instr, laddr, result);
+
+        let cf = op1 & 1;
+        let of = ((result << 1) ^ result) >> 15;
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    /// RCR r/m16, CL
+    pub fn rcr_ew_cl(&mut self, instr: &Instruction) -> super::Result<()> {
+        let count = ((self.cl() & 0x1F) % 17) as u32;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (op1, laddr) = self.shift_read16(instr)?;
+        let temp_cf = self.get_cf() as u32;
+        let op1_32 = op1 as u32;
+        let result = ((op1_32 >> count) | (temp_cf << (16 - count)) | (op1_32 << (17 - count))) as u16;
+        self.shift_write16(instr, laddr, result);
+
+        let cf = (op1_32 >> (count - 1)) & 1;
+        let of = ((((result as u32) << 1) ^ (result as u32)) >> 15) & 1;
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    /// RCR r/m16, imm8
+    pub fn rcr_ew_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        let count = ((instr.ib() & 0x1F) % 17) as u32;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (op1, laddr) = self.shift_read16(instr)?;
+        let temp_cf = self.get_cf() as u32;
+        let op1_32 = op1 as u32;
+        let result = ((op1_32 >> count) | (temp_cf << (16 - count)) | (op1_32 << (17 - count))) as u16;
+        self.shift_write16(instr, laddr, result);
+
+        let cf = (op1_32 >> (count - 1)) & 1;
+        let of = ((((result as u32) << 1) ^ (result as u32)) >> 15) & 1;
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    // =========================================================================
+    // SHLD - Double Precision Shift Left (16-bit)
+    // Based on Bochs shift16.cc:30-123
+    // =========================================================================
+
+    /// SHLD r/m16, r16, imm8
+    /// Opcode: 0x0F 0xA4
+    pub fn shld_ew_gw_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        let count = (instr.ib() & 0x1F) as u32;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (op1_16, laddr) = self.shift_read16(instr)?;
+        let op2_16 = self.get_gpr16(instr.src() as usize) as u32;
+        let op1_32 = op1_16 as u32;
+
+        // count < 32, since only lower 5 bits used
+        let temp_32 = (op1_32 << 16) | op2_16; // double formed by op1:op2
+        let mut result_32 = temp_32 << count;
+
+        // hack to act like x86 SHLD when count > 16
+        // P6 way: shifting op2:op1 by count-16
+        if count > 16 {
+            result_32 |= op1_32 << (count - 16);
+        }
+
+        let result_16 = (result_32 >> 16) as u16;
+
+        self.shift_write16(instr, laddr, result_16);
+
+        self.update_flags_logic16(result_16);
+        let cf = ((temp_32 >> (32 - count)) & 0x1) != 0;
+        let of = cf ^ ((result_16 >> 15) != 0); // of = cf ^ result15
+        self.set_cf_of(cf, of);
+        Ok(())
+    }
+
+    /// SHLD r/m16, r16, CL
+    /// Opcode: 0x0F 0xA5
+    pub fn shld_ew_gw_cl(&mut self, instr: &Instruction) -> super::Result<()> {
+        let count = (self.cl() & 0x1F) as u32;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (op1_16, laddr) = self.shift_read16(instr)?;
+        let op2_16 = self.get_gpr16(instr.src() as usize) as u32;
+        let op1_32 = op1_16 as u32;
+
+        // count < 32, since only lower 5 bits used
+        let temp_32 = (op1_32 << 16) | op2_16; // double formed by op1:op2
+        let mut result_32 = temp_32 << count;
+
+        // hack to act like x86 SHLD when count > 16
+        // P6 way: shifting op2:op1 by count-16
+        if count > 16 {
+            result_32 |= op1_32 << (count - 16);
+        }
+
+        let result_16 = (result_32 >> 16) as u16;
+
+        self.shift_write16(instr, laddr, result_16);
+
+        self.update_flags_logic16(result_16);
+        let cf = ((temp_32 >> (32 - count)) & 0x1) != 0;
+        let of = cf ^ ((result_16 >> 15) != 0); // of = cf ^ result15
+        self.set_cf_of(cf, of);
+        Ok(())
+    }
+
+    // =========================================================================
+    // SHRD - Double Precision Shift Right (16-bit)
+    // Based on Bochs shift16.cc:125-218
+    // =========================================================================
+
+    /// SHRD r/m16, r16, imm8
+    /// Opcode: 0x0F 0xAC
+    pub fn shrd_ew_gw_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        let count = (instr.ib() & 0x1F) as u32;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (op1_16, laddr) = self.shift_read16(instr)?;
+        let op2_16 = self.get_gpr16(instr.src() as usize) as u32;
+        let op1_32 = op1_16 as u32;
+
+        // count < 32, since only lower 5 bits used
+        let temp_32 = (op2_16 << 16) | op1_32; // double formed by op2:op1
+        let mut result_32 = temp_32 >> count;
+
+        // hack to act like x86 SHRD when count > 16
+        // P6 way: shifting op1:op2 by count-16
+        if count > 16 {
+            result_32 |= op1_32 << (32 - count);
+        }
+
+        let result_16 = result_32 as u16;
+
+        self.shift_write16(instr, laddr, result_16);
+
+        self.update_flags_logic16(result_16);
+        let mut cf = ((op1_32 >> (count - 1)) & 0x1) != 0;
+        let of = ((((result_16 as u32) << 1) ^ (result_16 as u32)) >> 15) & 0x1 != 0; // of = result14 ^ result15
+        if count > 16 {
+            cf = ((op2_16 >> (count - 17)) & 0x1) != 0; // undefined flags behavior matching real HW
+        }
+        self.set_cf_of(cf, of);
+        Ok(())
+    }
+
+    /// SHRD r/m16, r16, CL
+    /// Opcode: 0x0F 0xAD
+    pub fn shrd_ew_gw_cl(&mut self, instr: &Instruction) -> super::Result<()> {
+        let count = (self.cl() & 0x1F) as u32;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (op1_16, laddr) = self.shift_read16(instr)?;
+        let op2_16 = self.get_gpr16(instr.src() as usize) as u32;
+        let op1_32 = op1_16 as u32;
+
+        // count < 32, since only lower 5 bits used
+        let temp_32 = (op2_16 << 16) | op1_32; // double formed by op2:op1
+        let mut result_32 = temp_32 >> count;
+
+        // hack to act like x86 SHRD when count > 16
+        // P6 way: shifting op1:op2 by count-16
+        if count > 16 {
+            result_32 |= op1_32 << (32 - count);
+        }
+
+        let result_16 = result_32 as u16;
+
+        self.shift_write16(instr, laddr, result_16);
+
+        self.update_flags_logic16(result_16);
+        let mut cf = ((op1_32 >> (count - 1)) & 0x1) != 0;
+        let of = ((((result_16 as u32) << 1) ^ (result_16 as u32)) >> 15) & 0x1 != 0; // of = result14 ^ result15
+        if count > 16 {
+            cf = ((op2_16 >> (count - 17)) & 0x1) != 0; // undefined flags behavior matching real HW
+        }
+        self.set_cf_of(cf, of);
+        Ok(())
+    }
+
+    // =========================================================================
     // Flag update helpers (16-bit)
     // =========================================================================
 

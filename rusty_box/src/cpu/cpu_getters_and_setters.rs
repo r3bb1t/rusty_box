@@ -282,7 +282,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     pub fn cpu_diag_string(&self) -> alloc::string::String {
         alloc::format!(
             "IF={} activity={:?} inhibit={} async_event={:#x}",
-            self.get_b_if(),
+            self.interrupts_enabled(),
             self.activity_state,
             self.interrupts_inhibited(0x01),
             self.async_event,
@@ -625,5 +625,27 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.sregs[super::decoder::BxSegregs::Ds as usize]
             .selector
             .value
+    }
+
+    /// Get async_event (for diagnostics)
+    #[inline]
+    pub fn get_async_event(&self) -> u32 {
+        self.async_event
+    }
+
+    /// Get activity state (for diagnostics)
+    #[inline]
+    pub fn get_activity_state(&self) -> &super::cpu::CpuActivityState {
+        &self.activity_state
+    }
+
+    /// Get handle_async_event interrupt delivery diagnostics
+    pub fn get_hae_intr_diag(&self) -> (u64, u64, u64, u64) {
+        (
+            self.diag_hae_intr_delivered,
+            self.diag_hae_intr_if_blocked,
+            self.diag_hae_intr_no_pic,
+            self.diag_hae_intr_pic_empty,
+        )
     }
 }

@@ -3,14 +3,14 @@
 //! Based on Bochs cpu/exception.cc protected_mode_int
 //! Copyright (C) 2001-2019 The Bochs Project
 
-use alloc::{format, string::ToString, vec::Vec};
+use alloc::vec::Vec;
 
 use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
     decoder::BxSegregs,
     descriptor::{
-        BxDescriptor, BxSegmentReg, BxSelector, SystemAndGateDescriptorEnum, SEG_VALID_CACHE,
+        BxDescriptor, BxSegmentReg, BxSelector, SystemAndGateDescriptorEnum,
     },
     eflags::EFlags,
     segment_ctrl_pro::parse_selector,
@@ -34,6 +34,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.sregs[BxSegregs::Cs as usize].selector.rpl,
                 self.rip(), self.icount);
         }
+        // Bochs: error code for IDT descriptor errors = vector*8 + 2 + EXT
+        let idt_error_code = (vector as u16) * 8 + 2;
+
         // interrupt vector must be within IDT table limits, else #GP(vector*8 + 2 + EXT)
         if (vector as u64 * 8 + 7) > self.idtr.limit as u64 {
             tracing::error!(
@@ -42,6 +45,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             );
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: idt_error_code,
             });
         }
 
@@ -68,6 +72,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             );
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: idt_error_code,
             });
         }
 
@@ -82,6 +87,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             );
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: idt_error_code,
             });
         }
 
@@ -108,6 +114,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 );
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: idt_error_code,
                 });
             }
         }
@@ -118,6 +125,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::error!("protected_mode_int(): soft_int && (gate.dpl < CPL)");
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: idt_error_code,
             });
         }
 
@@ -126,6 +134,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::error!("protected_mode_int(): gate not present");
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Np,
+                error_code: idt_error_code,
             });
         }
 
@@ -162,6 +171,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             _ => {
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: idt_error_code,
                 });
             }
         }
@@ -191,8 +201,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         if (gate_dest_selector & 0xfffc) == 0 {
             tracing::error!("handle_interrupt_trap_gate(): selector null");
+            // Bochs exception.cc:395: #GP(0) for null selector
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: 0,
             });
         }
 
@@ -203,54 +215,36 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cs_descriptor = self.parse_descriptor(cs_dword1, cs_dword2)?;
 
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        // Bochs exception.cc:407-413: #GP(selector+EXT)
+        let cs_err_code = cs_selector.value & 0xfffc;
         if cs_descriptor.valid == 0
             || !cs_descriptor.segment
             || super::descriptor::is_data_segment(cs_descriptor.r#type)
             || cs_descriptor.dpl > cpl
         {
-            // Diagnose GDT corruption: show physical address of the GDT entry
-            let gdt_entry_vaddr = self.gdtr.base + (cs_selector.index as u64 * 8);
-            let gdt_phys = self
-                .translate_linear_system_read(gdt_entry_vaddr)
-                .map(|p| format!("{:#010x}", p))
-                .unwrap_or_else(|_| "TRANS_FAIL".to_string());
-            // Also read directly from physical (lower 4GB) using raw mem to compare
-            // raw mem read at expected kernel phys (vaddr - 0xC0000000)
-            let expected_phys = (gdt_entry_vaddr as u32).wrapping_sub(0xC0000000) as u64;
-            let raw_at_expected = self.mem_read_dword(expected_phys) as u64
-                | ((self.mem_read_dword(expected_phys + 4) as u64) << 32);
             tracing::warn!(
                 "handle_interrupt_trap_gate(): not accessible or not code segment cs={:#04x} \
-                 raw={:#010x}_{:#010x} valid={} segment={} type={:#x} dpl={} cpl={} \
-                 GDTR.base={:#010x} GDTR.limit={:#06x} CR3={:#010x} \
-                 gdt_vaddr={:#010x} gdt_phys={} expected_phys={:#010x} raw_at_expected={:#018x} \
-                 icount={}",
+                 valid={} segment={} type={:#x} dpl={} cpl={} icount={}",
                 cs_selector.value,
-                cs_dword2,
-                cs_dword1,
                 cs_descriptor.valid,
                 cs_descriptor.segment,
                 cs_descriptor.r#type,
                 cs_descriptor.dpl,
                 cpl,
-                self.gdtr.base,
-                self.gdtr.limit,
-                self.cr3,
-                gdt_entry_vaddr,
-                gdt_phys,
-                expected_phys,
-                raw_at_expected,
                 self.icount
             );
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: cs_err_code,
             });
         }
 
+        // Bochs exception.cc:416-418: #NP(selector+EXT)
         if !cs_descriptor.p {
             tracing::error!("handle_interrupt_trap_gate(): segment not present");
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Np,
+                error_code: cs_err_code,
             });
         }
 
@@ -268,7 +262,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // INTERRUPT TO SAME PRIVILEGE LEVEL
             tracing::debug!("handle_interrupt_trap_gate(): INTERRUPT TO SAME PRIVILEGE");
 
-            // v8086 mode check (matches original lines 671-675)
+            // v8086 mode check (Bochs exception.cc:671-674): #GP(cs_selector+EXT)
             if self.v8086_mode()
                 && (super::descriptor::is_code_segment_conforming(cs_descriptor.r#type)
                     || cs_descriptor.dpl != 0)
@@ -276,6 +270,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 tracing::error!("handle_interrupt_trap_gate(): code segment conforming or DPL({}) != 0 in v8086 mode", cs_descriptor.dpl);
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: cs_err_code,
                 });
             }
 
@@ -304,6 +299,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 );
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: 0,
                 });
             }
 
@@ -352,13 +348,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 tracing::debug!("PM_INT: handler bytes @ {:#010x}: {:02x?}", linear, bytes);
             }
 
-            self.sregs[BxSegregs::Cs as usize].selector = new_cs_selector;
-            self.sregs[BxSegregs::Cs as usize].cache = cs_descriptor;
-            self.sregs[BxSegregs::Cs as usize].cache.valid = SEG_VALID_CACHE;
-
-            // Invalidate prefetch queue when CS changes
-            self.eip_fetch_ptr = None;
-            self.eip_page_window_size = 0;
+            // Use load_cs() to properly update user_pl, touch accessed bit, and
+            // invalidate prefetch queue (matches Bochs exception.cc:711)
+            let mut cs_desc_mut = cs_descriptor;
+            self.load_cs(&mut new_cs_selector, &mut cs_desc_mut, cpl)?;
         } else if super::descriptor::is_code_segment_non_conforming(cs_descriptor.r#type)
             && cs_descriptor.dpl < cpl
         {
@@ -383,6 +376,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             );
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: 0,
             });
         }
 
@@ -412,6 +406,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let (ss_for_cpl_x, esp_for_cpl_x) = self.get_ss_esp_from_tss(cs_descriptor.dpl)?;
 
         let is_v8086_mode = self.v8086_mode();
+        // Bochs exception.cc:448-451: #GP(new code segment selector)
         if is_v8086_mode && cs_descriptor.dpl != 0 {
             tracing::error!(
                 "handle_interrupt_to_inner_privilege(): code segment DPL({}) != 0 in v8086 mode",
@@ -419,14 +414,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             );
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: cs_selector.value & 0xfffc,
             });
         }
 
-        // Selector must be non-null else #TS(EXT) (matches line 455)
+        // Bochs exception.cc:455-457: Selector must be non-null else #TS(0)
         if (ss_for_cpl_x & 0xfffc) == 0 {
             tracing::error!("handle_interrupt_to_inner_privilege(): SS selector null");
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Ts,
+                error_code: 0,
             });
         }
 
@@ -436,23 +433,26 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let (ss_dword1, ss_dword2) = self.fetch_raw_descriptor(&ss_selector)?;
         let ss_descriptor = self.parse_descriptor(ss_dword1, ss_dword2)?;
 
-        // selector rpl must = dpl of code segment, else #TS(SS selector + ext) (matches line 469)
+        // Bochs exception.cc:469-471: #TS(SS selector + ext)
+        let ss_err_code = ss_for_cpl_x & 0xfffc;
         if ss_selector.rpl != cs_descriptor.dpl {
             tracing::error!("handle_interrupt_to_inner_privilege(): SS.rpl != CS.dpl");
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Ts,
+                error_code: ss_err_code,
             });
         }
 
-        // stack seg DPL must = DPL of code segment, else #TS(SS selector + ext) (matches line 476)
+        // Bochs exception.cc:476-478: #TS(SS selector + ext)
         if ss_descriptor.dpl != cs_descriptor.dpl {
             tracing::error!("handle_interrupt_to_inner_privilege(): SS.dpl != CS.dpl");
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Ts,
+                error_code: ss_err_code,
             });
         }
 
-        // descriptor must indicate writable data segment, else #TS(SS selector + EXT) (matches line 483)
+        // Bochs exception.cc:483-488: #TS(SS selector + EXT)
         if ss_descriptor.valid == 0
             || !ss_descriptor.segment
             || super::descriptor::is_code_segment(ss_descriptor.r#type)
@@ -463,23 +463,26 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             );
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Ts,
+                error_code: ss_err_code,
             });
         }
 
-        // seg must be present, else #SS(SS selector + ext) (matches line 492)
+        // Bochs exception.cc:492-494: #SS(SS selector + ext)
         if !ss_descriptor.p {
             tracing::error!("handle_interrupt_to_inner_privilege(): SS not present");
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Ss,
+                error_code: ss_err_code,
             });
         }
 
-        // IP must be within CS segment boundaries, else #GP(0) (matches line 498)
+        // Bochs exception.cc:497-500: IP must be within CS segment boundaries, else #GP(0)
         let gate_dest_offset = unsafe { gate_descriptor.u.gate.dest_offset };
         if gate_dest_offset > unsafe { cs_descriptor.u.segment.limit_scaled } {
             tracing::error!("handle_interrupt_to_inner_privilege(): gate EIP > CS.limit");
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: 0,
             });
         }
 
@@ -792,15 +795,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_sp(temp_sp);
         }
 
-        // Load new CS:IP values from gate (matches line 635)
+        // Load new CS:IP values from gate (matches Bochs exception.cc:635)
+        // Must use load_cs() to properly update user_pl, touch accessed bit, and
+        // invalidate prefetch queue. Manual CS cache assignment would leave user_pl
+        // stale (e.g., still true after ring 3 → ring 0 transition), causing all
+        // paging permission checks during the interrupt handler to use user-mode access.
         let mut new_cs_selector = cs_selector.clone();
-        new_cs_selector.rpl = cs_descriptor.dpl;
-        new_cs_selector.value = (new_cs_selector.value & !0x03) | cs_descriptor.dpl as u16;
-        self.sregs[BxSegregs::Cs as usize].selector = new_cs_selector;
-        self.sregs[BxSegregs::Cs as usize].cache = cs_descriptor.clone();
-        self.sregs[BxSegregs::Cs as usize].cache.valid = SEG_VALID_CACHE;
-        self.eip_fetch_ptr = None;
-        self.eip_page_window_size = 0;
+        let mut new_cs_descriptor = cs_descriptor.clone();
+        self.load_cs(&mut new_cs_selector, &mut new_cs_descriptor, cs_descriptor.dpl)?;
 
         // Load new SS:ESP values from TSS (matches line 638)
         let mut new_ss_selector = new_stack.selector.clone();
@@ -846,6 +848,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             );
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: 0,
             });
         }
 
@@ -860,6 +863,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             );
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: 0,
             });
         }
 
@@ -870,6 +874,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::error!("handle_task_gate(): TSS selector points to bad TSS type ({:#x}) - #GP(tss_selector)", tss_type);
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: 0,
             });
         }
 
@@ -878,6 +883,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::error!("handle_task_gate(): TSS descriptor.p == 0");
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Np,
+                error_code: 0,
             });
         }
 

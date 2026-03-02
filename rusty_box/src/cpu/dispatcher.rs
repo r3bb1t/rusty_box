@@ -14,7 +14,7 @@ use super::{
 };
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
-    pub(super) fn execute_instruction(&mut self, instr: &mut Instruction) -> Result<()> {
+    pub(super) fn execute_instruction(&mut self, instr: &Instruction) -> Result<()> {
         use crate::cpu::arith16;
         use crate::cpu::arith32;
         use crate::cpu::arith8;
@@ -325,6 +325,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.ltr_ew(instr)?;
                 Ok(())
             }
+            Opcode::SgdtMs => self.sgdt_ms(instr),
+            Opcode::SidtMs => self.sidt_ms(instr),
+            Opcode::SldtEw => self.sldt_ew(instr),
+            Opcode::StrEw => self.str_ew(instr),
+            Opcode::SmswEw => self.smsw_ew(instr),
 
             // =========================================================================
             // Control Register Read Operations (MOV r32, CRx)
@@ -382,54 +387,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // =========================================================================
             // I/O port instructions
             // =========================================================================
-            Opcode::InAlib => {
-                self.in_al_ib(instr);
-                Ok(())
-            }
-            Opcode::InAxib => {
-                self.in_ax_ib(instr);
-                Ok(())
-            }
-            Opcode::InEaxib => {
-                self.in_eax_ib(instr);
-                Ok(())
-            }
-            Opcode::OutIbAl => {
-                self.out_ib_al(instr);
-                Ok(())
-            }
-            Opcode::OutIbAx => {
-                self.out_ib_ax(instr);
-                Ok(())
-            }
-            Opcode::OutIbEax => {
-                self.out_ib_eax(instr);
-                Ok(())
-            }
-            Opcode::InAlDx => {
-                self.in_al_dx(instr);
-                Ok(())
-            }
-            Opcode::InAxDx => {
-                self.in_ax_dx(instr);
-                Ok(())
-            }
-            Opcode::InEaxDx => {
-                self.in_eax_dx(instr);
-                Ok(())
-            }
-            Opcode::OutDxAl => {
-                self.out_dx_al(instr);
-                Ok(())
-            }
-            Opcode::OutDxAx => {
-                self.out_dx_ax(instr);
-                Ok(())
-            }
-            Opcode::OutDxEax => {
-                self.out_dx_eax(instr);
-                Ok(())
-            }
+            Opcode::InAlib => self.in_al_ib(instr),
+            Opcode::InAxib => self.in_ax_ib(instr),
+            Opcode::InEaxib => self.in_eax_ib(instr),
+            Opcode::OutIbAl => self.out_ib_al(instr),
+            Opcode::OutIbAx => self.out_ib_ax(instr),
+            Opcode::OutIbEax => self.out_ib_eax(instr),
+            Opcode::InAlDx => self.in_al_dx(instr),
+            Opcode::InAxDx => self.in_ax_dx(instr),
+            Opcode::InEaxDx => self.in_eax_dx(instr),
+            Opcode::OutDxAl => self.out_dx_al(instr),
+            Opcode::OutDxAx => self.out_dx_ax(instr),
+            Opcode::OutDxEax => self.out_dx_eax(instr),
 
             // INS/OUTS string I/O
             Opcode::RepInsbYbDx => self.insb_dispatch(instr),
@@ -443,77 +412,77 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Conditional jumps (8-bit displacement, 16-bit mode)
             // =========================================================================
             Opcode::JoJbw => {
-                self.jo_jb(instr);
+                self.jo_jb(instr)?;
                 Ok(())
             }
             Opcode::JnoJbw => {
-                self.jno_jb(instr);
+                self.jno_jb(instr)?;
                 Ok(())
             }
             Opcode::JbJbw => {
-                self.jb_jb(instr);
+                self.jb_jb(instr)?;
                 Ok(())
             }
             Opcode::JnbJbw => {
-                self.jnb_jb(instr);
+                self.jnb_jb(instr)?;
                 Ok(())
             }
             Opcode::JzJbw => {
-                self.jz_jb(instr);
+                self.jz_jb(instr)?;
                 Ok(())
             }
             Opcode::JnzJbw => {
-                self.jnz_jb(instr);
+                self.jnz_jb(instr)?;
                 Ok(())
             }
             Opcode::JbeJbw => {
-                self.jbe_jb(instr);
+                self.jbe_jb(instr)?;
                 Ok(())
             }
             Opcode::JnbeJbw => {
-                self.jnbe_jb(instr);
+                self.jnbe_jb(instr)?;
                 Ok(())
             }
             Opcode::JsJbw => {
-                self.js_jb(instr);
+                self.js_jb(instr)?;
                 Ok(())
             }
             Opcode::JnsJbw => {
-                self.jns_jb(instr);
+                self.jns_jb(instr)?;
                 Ok(())
             }
             Opcode::JpJbw => {
-                self.jp_jb(instr);
+                self.jp_jb(instr)?;
                 Ok(())
             }
             Opcode::JnpJbw => {
-                self.jnp_jb(instr);
+                self.jnp_jb(instr)?;
                 Ok(())
             }
             Opcode::JlJbw => {
-                self.jl_jb(instr);
+                self.jl_jb(instr)?;
                 Ok(())
             }
             Opcode::JnlJbw => {
-                self.jnl_jb(instr);
+                self.jnl_jb(instr)?;
                 Ok(())
             }
             Opcode::JleJbw => {
-                self.jle_jb(instr);
+                self.jle_jb(instr)?;
                 Ok(())
             }
             Opcode::JnleJbw => {
-                self.jnle_jb(instr);
+                self.jnle_jb(instr)?;
                 Ok(())
             }
 
             // Conditional jumps (16-bit displacement)
             Opcode::JzJw => {
-                self.jz_jw(instr);
+                self.jz_jw(instr)?;
                 Ok(())
             }
             Opcode::JnzJw => {
-                self.jnz_jw(instr);
+                self.jnz_jw(instr)?;
                 Ok(())
             }
 
@@ -521,11 +490,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // JMP instructions
             // =========================================================================
             Opcode::JmpJbw => {
-                self.jmp_jb(instr);
+                self.jmp_jb(instr)?;
                 Ok(())
             }
             Opcode::JmpJw => {
-                self.jmp_jw(instr);
+                self.jmp_jw(instr)?;
                 Ok(())
             }
             Opcode::JmpJd => {
@@ -589,23 +558,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // LOOP instructions
             // =========================================================================
             Opcode::LoopJbw => {
-                self.loop16_jb(instr);
+                self.loop16_jb(instr)?;
                 Ok(())
             }
             Opcode::LoopeJbw => {
-                self.loope16_jb(instr);
+                self.loope16_jb(instr)?;
                 Ok(())
             }
             Opcode::LoopneJbw => {
-                self.loopne16_jb(instr);
+                self.loopne16_jb(instr)?;
                 Ok(())
             }
             Opcode::JcxzJbw => {
-                self.jcxz_jb(instr);
+                self.jcxz_jb(instr)?;
                 Ok(())
             }
             Opcode::JecxzJbd => {
-                self.jecxz_jb(instr);
+                self.jecxz_jb(instr)?;
                 Ok(())
             }
 
@@ -729,59 +698,59 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Conditional jumps with 16-bit displacement (Jw variants)
             // =========================================================================
             Opcode::JoJw => {
-                self.jo_jw(instr);
+                self.jo_jw(instr)?;
                 Ok(())
             }
             Opcode::JnoJw => {
-                self.jno_jw(instr);
+                self.jno_jw(instr)?;
                 Ok(())
             }
             Opcode::JbJw => {
-                self.jb_jw(instr);
+                self.jb_jw(instr)?;
                 Ok(())
             }
             Opcode::JnbJw => {
-                self.jnb_jw(instr);
+                self.jnb_jw(instr)?;
                 Ok(())
             }
             Opcode::JbeJw => {
-                self.jbe_jw(instr);
+                self.jbe_jw(instr)?;
                 Ok(())
             }
             Opcode::JnbeJw => {
-                self.jnbe_jw(instr);
+                self.jnbe_jw(instr)?;
                 Ok(())
             }
             Opcode::JsJw => {
-                self.js_jw(instr);
+                self.js_jw(instr)?;
                 Ok(())
             }
             Opcode::JnsJw => {
-                self.jns_jw(instr);
+                self.jns_jw(instr)?;
                 Ok(())
             }
             Opcode::JpJw => {
-                self.jp_jw(instr);
+                self.jp_jw(instr)?;
                 Ok(())
             }
             Opcode::JnpJw => {
-                self.jnp_jw(instr);
+                self.jnp_jw(instr)?;
                 Ok(())
             }
             Opcode::JlJw => {
-                self.jl_jw(instr);
+                self.jl_jw(instr)?;
                 Ok(())
             }
             Opcode::JnlJw => {
-                self.jnl_jw(instr);
+                self.jnl_jw(instr)?;
                 Ok(())
             }
             Opcode::JleJw => {
-                self.jle_jw(instr);
+                self.jle_jw(instr)?;
                 Ok(())
             }
             Opcode::JnleJw => {
-                self.jnle_jw(instr);
+                self.jnle_jw(instr)?;
                 Ok(())
             }
 
@@ -958,6 +927,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.not_ed(instr)?;
                 Ok(())
             }
+            Opcode::NegEb => {
+                arith8::NEG_Eb(self, instr)?;
+                Ok(())
+            }
+            Opcode::NegEw => {
+                arith16::NEG_Ew(self, instr)?;
+                Ok(())
+            }
             Opcode::NegEd => {
                 arith32::NEG_Ed(self, instr)?;
                 Ok(())
@@ -998,6 +975,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.btc_ed_gd(instr)?;
                 Ok(())
             }
+            // 16-bit BT/BTS/BTR/BTC
+            Opcode::BtEwIb => self.bt_ew_ib(instr),
+            Opcode::BtsEwIb => self.bts_ew_ib(instr),
+            Opcode::BtrEwIb => self.btr_ew_ib(instr),
+            Opcode::BtcEwIb => self.btc_ew_ib(instr),
+            Opcode::BtEwGw => self.bt_ew_gw(instr),
+            Opcode::BtsEwGw => self.bts_ew_gw(instr),
+            Opcode::BtrEwGw => self.btr_ew_gw(instr),
+            Opcode::BtcEwGw => self.btc_ew_gw(instr),
 
             // =========================================================================
             // Bit Scan instructions (BSF, BSR)
@@ -1061,6 +1047,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.pop32_sw(instr)?;
                 Ok(())
             }
+            Opcode::EnterOp32IwIb => {
+                self.enter32_iw_ib(instr)?;
+                Ok(())
+            }
             Opcode::LeaveOp32 => {
                 self.leave_op32(instr)?;
                 Ok(())
@@ -1099,6 +1089,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
             Opcode::PopfFd => {
                 self.popf_fd(instr)?;
+                Ok(())
+            }
+            Opcode::EnterOp16IwIb => {
+                self.enter16_iw_ib(instr)?;
                 Ok(())
             }
             Opcode::LeaveOp16 => {
@@ -1241,11 +1235,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // =========================================================================
             // System instructions
             // =========================================================================
-            Opcode::Hlt => {
-                self.hlt(instr);
-                Ok(())
-            }
+            Opcode::Hlt => self.hlt(instr),
             Opcode::Wbinvd => self.wbinvd(instr),
+            Opcode::Invd => self.invd(instr),
             Opcode::Invlpg => self.invlpg(instr),
             Opcode::Clts => self.clts(instr),
 
@@ -1267,6 +1259,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.cpuid(instr);
                 Ok(())
             }
+            Opcode::Rdtsc => self.rdtsc(instr),
             Opcode::Rdmsr => self.rdmsr(instr),
             Opcode::Wrmsr => self.wrmsr(instr),
 
@@ -1307,6 +1300,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
             Opcode::ShlEdIb => {
                 self.shl_ed_ib(instr)?;
+                Ok(())
+            }
+            Opcode::ShldEwGwIb => {
+                self.shld_ew_gw_ib(instr)?;
+                Ok(())
+            }
+            Opcode::ShldEwGw => {
+                self.shld_ew_gw_cl(instr)?;
+                Ok(())
+            }
+            Opcode::ShrdEwGwIb => {
+                self.shrd_ew_gw_ib(instr)?;
+                Ok(())
+            }
+            Opcode::ShrdEwGw => {
+                self.shrd_ew_gw_cl(instr)?;
                 Ok(())
             }
             Opcode::ShldEdGdIb => {
@@ -1440,6 +1449,33 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.ror_ed_ib(instr)?;
                 Ok(())
             }
+
+            // =========================================================================
+            // RCL - Rotate through Carry Left
+            // =========================================================================
+            Opcode::RclEbI1 => self.rcl_eb_1(instr),
+            Opcode::RclEb => self.rcl_eb_cl(instr),
+            Opcode::RclEbIb => self.rcl_eb_ib(instr),
+            Opcode::RclEwI1 => self.rcl_ew_1(instr),
+            Opcode::RclEw => self.rcl_ew_cl(instr),
+            Opcode::RclEwIb => self.rcl_ew_ib(instr),
+            Opcode::RclEdI1 => self.rcl_ed_1(instr),
+            Opcode::RclEd => self.rcl_ed_cl(instr),
+            Opcode::RclEdIb => self.rcl_ed_ib(instr),
+
+            // =========================================================================
+            // RCR - Rotate through Carry Right
+            // =========================================================================
+            Opcode::RcrEbI1 => self.rcr_eb_1(instr),
+            Opcode::RcrEb => self.rcr_eb_cl(instr),
+            Opcode::RcrEbIb => self.rcr_eb_ib(instr),
+            Opcode::RcrEwI1 => self.rcr_ew_1(instr),
+            Opcode::RcrEw => self.rcr_ew_cl(instr),
+            Opcode::RcrEwIb => self.rcr_ew_ib(instr),
+            Opcode::RcrEdI1 => self.rcr_ed_1(instr),
+            Opcode::RcrEd => self.rcr_ed_cl(instr),
+            Opcode::RcrEdIb => self.rcr_ed_ib(instr),
+
             Opcode::SarEbI1 => {
                 self.sar_eb_1(instr)?;
                 Ok(())
@@ -1486,20 +1522,40 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
             Opcode::XchgEbGb => self.xchg_eb_gb_dispatch(instr),
             Opcode::XchgEwGw => self.xchg_ew_gw_dispatch(instr),
-            Opcode::XchgEdGd => {
-                if instr.mod_c0() {
-                    self.xchg_ed_gd(instr);
-                    Ok(())
-                } else {
-                    self.xchg_ed_gd_m(instr)
-                }
-            }
+            Opcode::XchgEdGd => self.xchg_ed_gd_dispatch(instr),
             Opcode::XchgErxEax => {
                 self.xchg_eax_rd(instr);
                 Ok(())
             }
             Opcode::XchgRxax => {
                 self.xchg_ax_rw(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // CMPXCHG — Compare and Exchange
+            // =========================================================================
+            Opcode::CmpxchgEbGb => crate::cpu::arith8::CMPXCHG_EbGb(self, instr),
+            Opcode::CmpxchgEwGw => crate::cpu::arith16::CMPXCHG_EwGw(self, instr),
+            Opcode::CmpxchgEdGd => crate::cpu::arith32::CMPXCHG_EdGd(self, instr),
+            Opcode::Cmpxchg8b => crate::cpu::arith32::CMPXCHG8B(self, instr),
+
+            // =========================================================================
+            // XADD — Exchange and Add
+            // =========================================================================
+            Opcode::XaddEbGb => crate::cpu::arith8::XADD_EbGb(self, instr),
+            Opcode::XaddEwGw => crate::cpu::arith16::XADD_EwGw(self, instr),
+            Opcode::XaddEdGd => crate::cpu::arith32::XADD_EdGd(self, instr),
+
+            // =========================================================================
+            // BSWAP — Byte Swap
+            // =========================================================================
+            Opcode::BswapRx => {
+                self.bswap_rx(instr);
+                Ok(())
+            }
+            Opcode::BswapErx => {
+                self.bswap_erx(instr);
                 Ok(())
             }
 
@@ -1569,6 +1625,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.sahf(instr);
                 Ok(())
             }
+            Opcode::Salc => self.salc(instr),
 
             // =========================================================================
             // Data transfer (64-bit) instructions
@@ -1737,6 +1794,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // =========================================================================
             // BCD (Binary Coded Decimal) instructions
             // =========================================================================
+            Opcode::Aaa => crate::cpu::bcd::AAA(self, instr),
+            Opcode::Aas => crate::cpu::bcd::AAS(self, instr),
+            Opcode::Aam => crate::cpu::bcd::AAM(self, instr),
+            Opcode::Aad => crate::cpu::bcd::AAD(self, instr),
+            Opcode::Daa => crate::cpu::bcd::DAA(self, instr),
             Opcode::Das => crate::cpu::bcd::DAS(self, instr),
 
             // =========================================================================

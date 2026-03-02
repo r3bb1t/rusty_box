@@ -89,6 +89,7 @@
 //!   (sector count, sector number, cylinder low/high) update HOB (High Order Byte)
 //!   registers on BOTH drives on the channel, supporting LBA48 addressing.
 
+use alloc::format;
 use alloc::string::String;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -282,12 +283,35 @@ pub struct AtaController {
     pub(crate) buffer_size: usize,
     /// Internal remaining-sector counter (Bochs `controller_t::num_sectors`).
     /// Set at command start by `lba48_transform()` from `sector_count` register
-    /// (0 means 256). Decremented by `increment_address()` after each sector.
+    /// (0 means 256 in 28-bit mode, 65536 in 48-bit mode with both zero).
+    /// Decremented by `increment_address()` after each sector.
     /// When it reaches 0, the transfer is complete and DRQ is cleared.
     pub(crate) num_sectors: u32,
+    /// LBA48 flag (Bochs controller_t::lba48).
+    /// Set to true when a 48-bit EXT command is issued (0x24, 0x29, 0x34, 0x39).
+    pub(crate) lba48: bool,
     /// Reset in progress — set when SRST bit is written to Device Control register.
     /// Cleared when SRST is deasserted, at which point the drive signature is set.
     pub(crate) reset_in_progress: bool,
+    /// Index pulse counter (Bochs harddrv.cc INDEX_PULSE_CYCLE).
+    /// Incremented on each status register read. When it reaches 10,
+    /// the IDX bit is set in the status byte and counter resets to 0.
+    pub(crate) index_pulse_count: u8,
+    /// High Order Byte registers for LBA48 (Bochs controller_t::hob).
+    /// Stores the previous value of each register before a new write,
+    /// allowing 48-bit addressing by reading back the previous values.
+    pub(crate) hob: AtaHob,
+}
+
+/// High Order Byte (HOB) registers for LBA48 addressing.
+/// Each field stores the previous value of the corresponding task file register.
+#[derive(Debug, Default, Clone)]
+pub struct AtaHob {
+    pub(crate) feature: u8,
+    pub(crate) nsector: u8,
+    pub(crate) sector: u8,
+    pub(crate) lcyl: u8,
+    pub(crate) hcyl: u8,
 }
 
 impl Default for AtaController {
@@ -309,7 +333,10 @@ impl Default for AtaController {
             buffer_index: 0,
             buffer_size: 0,
             num_sectors: 0,
+            lba48: false,
             reset_in_progress: false,
+            index_pulse_count: 0,
+            hob: AtaHob::default(),
         }
     }
 }
@@ -415,11 +442,23 @@ impl AtaDrive {
     /// In the ATA spec, a sector count of 0 means 256 sectors (for 28-bit commands)
     /// or 65536 sectors (for 48-bit LBA48 commands). We only support 28-bit LBA,
     /// so `num_sectors = sector_count` or 256 if `sector_count == 0`.
-    fn lba48_transform(&mut self) {
-        if self.controller.sector_count == 0 {
-            self.controller.num_sectors = 256;
+    fn lba48_transform(&mut self, lba48: bool) {
+        self.controller.lba48 = lba48;
+        if !lba48 {
+            // 28-bit mode: 0 means 256 sectors
+            if self.controller.sector_count == 0 {
+                self.controller.num_sectors = 256;
+            } else {
+                self.controller.num_sectors = self.controller.sector_count as u32;
+            }
         } else {
-            self.controller.num_sectors = self.controller.sector_count as u32;
+            // 48-bit mode: use HOB (High Order Byte) nsector
+            if self.controller.sector_count == 0 && self.controller.hob.nsector == 0 {
+                self.controller.num_sectors = 65536;
+            } else {
+                self.controller.num_sectors =
+                    ((self.controller.hob.nsector as u32) << 8) | self.controller.sector_count as u32;
+            }
         }
     }
 
@@ -738,11 +777,51 @@ impl AtaDrive {
         buf[116] = ((total >> 16) & 0xFF) as u8;
         buf[117] = ((total >> 24) & 0xFF) as u8;
 
+        // Word 59: Multiple sector setting (Bochs harddrv.cc:695)
+        // Low byte = current multiple sector count, bit 8 = valid if multiple mode active
+        if self.controller.multiple_sectors > 0 {
+            let w59 = 0x0100u16 | self.controller.multiple_sectors as u16;
+            buf[118] = (w59 & 0xFF) as u8;
+            buf[119] = (w59 >> 8) as u8;
+        }
+
         // Word 60-61: Total addressable sectors (LBA)
         buf[120] = (total & 0xFF) as u8;
         buf[121] = ((total >> 8) & 0xFF) as u8;
         buf[122] = ((total >> 16) & 0xFF) as u8;
         buf[123] = ((total >> 24) & 0xFF) as u8;
+
+        // Word 80: Major ATA version number (Bochs harddrv.cc:713)
+        // Bits 1-6: ATA-1 through ATA-6 supported
+        buf[160] = 0x7E; // supports ATA-1 through ATA-6
+        buf[161] = 0x00;
+
+        // Word 82: Command set supported 1 (Bochs harddrv.cc:718)
+        // Bit 14: NOP supported, bit 5: write cache, bit 4: packet, bit 0: SMART
+        buf[164] = 0x00;
+        buf[165] = 0x40; // NOP supported
+
+        // Word 83: Command set supported 2 (Bochs harddrv.cc:720)
+        // Bit 14: must be 1, bit 12: FLUSH CACHE supported
+        buf[166] = 0x00;
+        buf[167] = 0x50; // bit 14 + bit 12 (FLUSH CACHE)
+
+        // Word 84: Command set/feature supported extension (Bochs harddrv.cc:722)
+        // Bit 14: must be 1
+        buf[168] = 0x00;
+        buf[169] = 0x40;
+
+        // Word 85: Command set enabled 1 (Bochs harddrv.cc:724)
+        buf[170] = 0x00;
+        buf[171] = 0x40; // NOP enabled
+
+        // Word 86: Command set enabled 2 (Bochs harddrv.cc:726)
+        buf[172] = 0x00;
+        buf[173] = 0x50; // FLUSH CACHE enabled
+
+        // Word 87: Command set/feature default (Bochs harddrv.cc:728)
+        buf[174] = 0x00;
+        buf[175] = 0x40;
 
         self.controller.buffer_size = 512;
         self.controller.buffer_index = 0;
@@ -761,6 +840,46 @@ impl AtaDrive {
                 self.controller.sector_no,
             )
         }
+    }
+
+    /// Calculate logical sector address with bounds checking.
+    /// Matches Bochs calculate_logical_address() (harddrv.cc:2873-2905).
+    /// Returns None if the address is out of bounds.
+    fn calculate_logical_address(&self) -> Option<i64> {
+        let logical_sector: i64;
+        if self.controller.lba_mode {
+            if !self.controller.lba48 {
+                // 28-bit LBA
+                logical_sector = ((self.controller.head_no as i64) << 24)
+                    | ((self.controller.cylinder_no as i64) << 8)
+                    | (self.controller.sector_no as i64);
+            } else {
+                // 48-bit LBA
+                logical_sector = ((self.controller.hob.hcyl as i64) << 40)
+                    | ((self.controller.hob.lcyl as i64) << 32)
+                    | ((self.controller.hob.sector as i64) << 24)
+                    | ((self.controller.cylinder_no as i64) << 8)
+                    | (self.controller.sector_no as i64);
+            }
+        } else {
+            // CHS mode
+            logical_sector = (self.controller.cylinder_no as i64
+                * self.geometry.heads as i64
+                * self.geometry.sectors_per_track as i64)
+                + (self.controller.head_no as i64 * self.geometry.sectors_per_track as i64)
+                + (self.controller.sector_no as i64 - 1);
+        }
+
+        let sector_count = self.geometry.total_sectors as i64;
+        if logical_sector >= sector_count {
+            tracing::error!(
+                "ATA: logical address out of bounds ({}/{}) - aborting command",
+                logical_sector,
+                sector_count
+            );
+            return None;
+        }
+        Some(logical_sector)
     }
 }
 
@@ -807,14 +926,29 @@ impl AtaChannel {
 pub struct BxHardDriveC {
     /// ATA channels
     pub(crate) channels: [AtaChannel; 2],
-    /// IRQ14 pending (primary)
-    pub(crate) irq14_pending: bool,
-    /// IRQ15 pending (secondary)
-    pub(crate) irq15_pending: bool,
+    /// IRQ14 needs to be raised at the PIC (fallback for non-immediate path)
+    pub(crate) irq14_needs_raise: bool,
+    /// IRQ15 needs to be raised at the PIC (fallback)
+    pub(crate) irq15_needs_raise: bool,
+    /// IRQ14 needs to be lowered at the PIC (fallback)
+    pub(crate) irq14_needs_lower: bool,
+    /// IRQ15 needs to be lowered at the PIC (fallback)
+    pub(crate) irq15_needs_lower: bool,
+    /// Raw pointer to PIC for IMMEDIATE raise/lower (matching Bochs
+    /// DEV_pic_raise_irq / DEV_pic_lower_irq calls in harddrv.cc).
+    /// When set, raise_interrupt() and status-read lower bypass the deferred
+    /// needs_raise/needs_lower flags and call pic.raise_irq/lower_irq directly.
+    pub(crate) pic_ptr: *mut super::pic::BxPicC,
     /// Diagnostic: total read() calls
     pub(crate) read_count: u64,
     /// Diagnostic: total write() calls
     pub(crate) write_count: u64,
+    /// Diagnostic: total times irq14 was raised (immediate or deferred)
+    pub(crate) diag_irq14_raise_count: u64,
+    /// Diagnostic: total times irq14 was lowered (immediate or deferred)
+    pub(crate) diag_irq14_lower_count: u64,
+    /// Diagnostic: command history (last 32 commands)
+    pub(crate) cmd_history: Vec<(u8, u8, u32)>, // (channel, command, lba)
 }
 
 impl Default for BxHardDriveC {
@@ -831,10 +965,16 @@ impl BxHardDriveC {
                 AtaChannel::new(0x1F0, 0x3F0, 14), // Primary
                 AtaChannel::new(0x170, 0x370, 15), // Secondary
             ],
-            irq14_pending: false,
-            irq15_pending: false,
+            irq14_needs_raise: false,
+            irq15_needs_raise: false,
+            irq14_needs_lower: false,
+            irq15_needs_lower: false,
+            pic_ptr: core::ptr::null_mut(),
             read_count: 0,
             write_count: 0,
+            diag_irq14_raise_count: 0,
+            diag_irq14_lower_count: 0,
+            cmd_history: Vec::new(),
         }
     }
 
@@ -852,8 +992,10 @@ impl BxHardDriveC {
             }
             channel.drive_select = 0;
         }
-        self.irq14_pending = false;
-        self.irq15_pending = false;
+        self.irq14_needs_raise = false;
+        self.irq15_needs_raise = false;
+        self.irq14_needs_lower = false;
+        self.irq15_needs_lower = false;
     }
 
     /// Attach a disk image to a drive (requires std feature)
@@ -913,14 +1055,38 @@ impl BxHardDriveC {
     fn raise_interrupt(&mut self, channel_num: usize) {
         let drive = self.channels[channel_num].selected_drive_mut();
         // Only raise if nIEN bit (bit 1 of control register) is clear
+        // Matches Bochs: raise_interrupt() calls DEV_pic_raise_irq() directly.
         if (drive.controller.control & 0x02) == 0 {
             drive.controller.interrupt_pending = true;
-            if channel_num == 0 {
-                self.irq14_pending = true;
+            let irq = match channel_num {
+                0 => 14u8,
+                _ => 15u8,
+            };
+            if !self.pic_ptr.is_null() {
+                // IMMEDIATE PIC raise — matches Bochs DEV_pic_raise_irq()
+                let pic = unsafe { &mut *self.pic_ptr };
+                pic.raise_irq(irq);
             } else {
-                self.irq15_pending = true;
+                // Fallback deferred path (no PIC pointer wired yet)
+                match channel_num {
+                    0 => self.irq14_needs_raise = true,
+                    _ => self.irq15_needs_raise = true,
+                }
+            }
+            if irq == 14 {
+                self.diag_irq14_raise_count += 1;
             }
         }
+    }
+
+    /// Get the current IRQ level for a channel (level-based, matching Bochs).
+    ///
+    /// Returns true if the interrupt line should be HIGH (interrupt pending
+    /// and not masked by nIEN). Called every tick by the device manager to
+    /// update the PIC via set_irq_level().
+    pub fn get_irq_level(&self, channel_num: usize) -> bool {
+        let drive = self.channels[channel_num].selected_drive();
+        drive.controller.interrupt_pending && (drive.controller.control & 0x02) == 0
     }
 
     /// Read from ATA I/O port (Bochs `bx_hard_drive_c::read`, harddrv.cc:770-1152).
@@ -978,6 +1144,14 @@ impl BxHardDriveC {
         match offset {
             ATA_DATA => {
                 // Bochs harddrv.cc:806-894 — data port read
+                // Bochs harddrv.cc:806-811: DRQ check
+                if (drive.controller.status & ATA_STATUS_DRQ) == 0 {
+                    tracing::debug!(
+                        "ATA: IO read(0x{:04x}) with drq == 0: last cmd was {:02x}",
+                        port, drive.controller.current_command
+                    );
+                    return 0;
+                }
                 let current_command = drive.controller.current_command;
                 let idx = drive.controller.buffer_index;
                 let bytes = io_len as usize;
@@ -1004,7 +1178,7 @@ impl BxHardDriveC {
                 // Check if buffer completely read
                 if drive.controller.buffer_index >= drive.controller.buffer_size {
                     match current_command {
-                        ATA_CMD_READ_SECTORS | ATA_CMD_READ_SECTORS_EXT | ATA_CMD_READ_MULTIPLE => {
+                        ATA_CMD_READ_SECTORS | 0x21 | ATA_CMD_READ_SECTORS_EXT | ATA_CMD_READ_MULTIPLE => {
                             // Bochs harddrv.cc:860-893
                             // Recalculate buffer_size for READ MULTIPLE
                             if current_command == ATA_CMD_READ_MULTIPLE {
@@ -1029,15 +1203,8 @@ impl BxHardDriveC {
 
                                 if drive.ide_read_sector() {
                                     drive.controller.buffer_index = 0;
-                                    // Raise interrupt for next sector
-                                    if (drive.controller.control & 0x02) == 0 {
-                                        drive.controller.interrupt_pending = true;
-                                        if channel_num == 0 {
-                                            self.irq14_pending = true;
-                                        } else {
-                                            self.irq15_pending = true;
-                                        }
-                                    }
+                                    // Bochs harddrv.cc:890: raise_interrupt(channel)
+                                    self.raise_interrupt(channel_num);
                                 } else {
                                     // Read error — abort command
                                     drive.controller.error = ATA_ERROR_ABRT;
@@ -1070,27 +1237,46 @@ impl BxHardDriveC {
                 (0xA0 | lba_bit | drive_bit | (drive.controller.head_no & 0x0F)) as u32
             }
             ATA_STATUS | ATA_ALT_STATUS => {
+                // Bochs harddrv.cc:1095-1120 — build status byte with index pulse
+                let mut status = drive.controller.status;
+
+                // Index pulse simulation (Bochs harddrv.cc:1110-1114)
+                // INDEX_PULSE_CYCLE = 10: set IDX bit once every 10 status reads
+                drive.controller.index_pulse_count += 1;
+                if drive.controller.index_pulse_count >= 10 {
+                    status |= ATA_STATUS_IDX;
+                    drive.controller.index_pulse_count = 0;
+                }
+
                 // Reading primary status clears the ATA-level interrupt flag
-                // (but not for alternate status port).
-                // NOTE: We do NOT clear irq14/15_pending here.  In Bochs,
-                // raise_interrupt() calls DEV_pic_raise_irq() directly so
-                // the PIC latches the IRQ immediately.  Our architecture
-                // defers IRQ delivery to the next tick().  If we cleared
-                // the pending flag on status read, the IRQ would be lost
-                // whenever the kernel polls status in the same CPU batch
-                // as the command that raised the interrupt.
+                // AND lowers the IRQ line (but not for alternate status port).
+                // Bochs harddrv.cc:1117-1118: DEV_pic_lower_irq() on port 0x07.
                 if offset == ATA_STATUS {
                     drive.controller.interrupt_pending = false;
+                    let irq = match channel_num { 0 => 14u8, _ => 15u8 };
+                    if !self.pic_ptr.is_null() {
+                        // IMMEDIATE PIC lower — matches Bochs DEV_pic_lower_irq()
+                        let pic = unsafe { &mut *self.pic_ptr };
+                        pic.lower_irq(irq);
+                    } else {
+                        match channel_num {
+                            0 => self.irq14_needs_lower = true,
+                            _ => self.irq15_needs_lower = true,
+                        }
+                    }
+                    if irq == 14 {
+                        self.diag_irq14_lower_count += 1;
+                    }
                 }
                 tracing::debug!(
                     "ATA: Status read #{} = {:#04x} (port={:#06x}) cmd={:#04x} drq={}",
                     self.read_count,
-                    drive.controller.status,
+                    status,
                     port,
                     drive.controller.current_command,
-                    (drive.controller.status & 0x08) != 0,
+                    (status & 0x08) != 0,
                 );
-                drive.controller.status as u32
+                status as u32
             }
             _ => 0xFF,
         }
@@ -1151,6 +1337,14 @@ impl BxHardDriveC {
             port - base
         };
 
+        // Bochs harddrv.cc:1223-1224: clear HOB (bit 7 of control) on command block writes
+        // (ports 0x01-0x07, i.e., all except ATA_DATA and ATA_ALT_STATUS)
+        if offset >= 1 && offset <= 7 {
+            for drive in &mut channel.drives {
+                drive.controller.control &= !0x80u8;
+            }
+        }
+
         match offset {
             ATA_DATA => {
                 // Bochs harddrv.cc:1229-1302 — data port write
@@ -1176,6 +1370,7 @@ impl BxHardDriveC {
                     let current_command = drive.controller.current_command;
                     match current_command {
                         ATA_CMD_WRITE_SECTORS
+                        | 0x31 // WRITE SECTORS without retries
                         | ATA_CMD_WRITE_SECTORS_EXT
                         | ATA_CMD_WRITE_MULTIPLE => {
                             // Bochs harddrv.cc:1266-1301
@@ -1205,16 +1400,9 @@ impl BxHardDriveC {
                                     drive.controller.error = 0;
                                 }
 
-                                // Raise interrupt after each sector write
-                                // (Bochs raises for both "more sectors" and "done")
-                                if (drive.controller.control & 0x02) == 0 {
-                                    drive.controller.interrupt_pending = true;
-                                    if channel_num == 0 {
-                                        self.irq14_pending = true;
-                                    } else {
-                                        self.irq15_pending = true;
-                                    }
-                                }
+                                // Bochs harddrv.cc: raise_interrupt(channel)
+                                // Raises for both "more sectors" and "done"
+                                self.raise_interrupt(channel_num);
                             } else {
                                 // Write error
                                 tracing::error!("ATA: ide_write_sector failed");
@@ -1234,30 +1422,45 @@ impl BxHardDriveC {
                 }
             }
             ATA_ERROR => {
-                // Features register (write)
-                let drive = channel.selected_drive_mut();
-                drive.controller.features = value as u8;
+                // Features register (write) — Bochs WRITE_FEATURES macro
+                let val = value as u8;
+                for drive in &mut channel.drives {
+                    drive.controller.hob.feature = drive.controller.features;
+                    drive.controller.features = val;
+                }
             }
             ATA_SECTOR_COUNT => {
+                // Bochs WRITE_SECTOR_COUNT macro — saves HOB on both drives
+                let val = value as u8;
                 for drive in &mut channel.drives {
-                    drive.controller.sector_count = value as u8;
+                    drive.controller.hob.nsector = drive.controller.sector_count;
+                    drive.controller.sector_count = val;
                 }
             }
             ATA_SECTOR_NUM => {
+                // Bochs WRITE_SECTOR_NUMBER macro — saves HOB on both drives
+                let val = value as u8;
                 for drive in &mut channel.drives {
-                    drive.controller.sector_no = value as u8;
+                    drive.controller.hob.sector = drive.controller.sector_no;
+                    drive.controller.sector_no = val;
                 }
             }
             ATA_CYL_LOW => {
+                // Bochs WRITE_CYLINDER_LOW macro — saves HOB on both drives
+                let val = value as u8;
                 for drive in &mut channel.drives {
+                    drive.controller.hob.lcyl = (drive.controller.cylinder_no & 0xFF) as u8;
                     drive.controller.cylinder_no =
-                        (drive.controller.cylinder_no & 0xFF00) | (value as u16 & 0xFF);
+                        (drive.controller.cylinder_no & 0xFF00) | (val as u16);
                 }
             }
             ATA_CYL_HIGH => {
+                // Bochs WRITE_CYLINDER_HIGH macro — saves HOB on both drives
+                let val = value as u8;
                 for drive in &mut channel.drives {
+                    drive.controller.hob.hcyl = (drive.controller.cylinder_no >> 8) as u8;
                     drive.controller.cylinder_no =
-                        (drive.controller.cylinder_no & 0x00FF) | ((value as u16 & 0xFF) << 8);
+                        (drive.controller.cylinder_no & 0x00FF) | ((val as u16) << 8);
                 }
             }
             ATA_DRIVE_HEAD => {
@@ -1269,38 +1472,140 @@ impl BxHardDriveC {
                 }
             }
             ATA_STATUS => {
-                // Command register (write)
+                // Command register (write) — clears pending IRQ first
+                // Bochs harddrv.cc:2167-2177
+
+                // Bochs harddrv.cc:2172-2175: ignore command if slave selected but not present
+                if channel.drive_select == 1
+                    && channel.drives[1].device_type == DeviceType::None
+                {
+                    tracing::debug!(
+                        "ATA ch{}: command {:#04x} ignored, slave not present",
+                        channel_num,
+                        value
+                    );
+                    return;
+                }
+
+                // Bochs harddrv.cc:2177: DEV_pic_lower_irq() before command dispatch
+                // Explicitly lower the IRQ line before dispatching a new command.
+                {
+                    let drive = channel.selected_drive_mut();
+                    drive.controller.interrupt_pending = false;
+                }
+                {
+                    let irq = match channel_num { 0 => 14u8, _ => 15u8 };
+                    if !self.pic_ptr.is_null() {
+                        // IMMEDIATE PIC lower — matches Bochs DEV_pic_lower_irq()
+                        let pic = unsafe { &mut *self.pic_ptr };
+                        pic.lower_irq(irq);
+                    } else {
+                        match channel_num {
+                            0 => self.irq14_needs_lower = true,
+                            _ => self.irq15_needs_lower = true,
+                        }
+                    }
+                }
+
+                // Bochs harddrv.cc:2179-2182: check BSY before executing command
+                let drive = channel.selected_drive();
+                if drive.controller.status & ATA_STATUS_BSY != 0 {
+                    tracing::debug!(
+                        "ATA ch{}: command {:#04x} sent while BSY, ignoring",
+                        channel_num,
+                        value
+                    );
+                    return;
+                }
+
                 self.execute_command(channel_num, value as u8);
             }
             ATA_ALT_STATUS => {
-                // Device control register
+                // Device control register (Bochs harddrv.cc:2806-2864)
+                // Writes go to BOTH drives on the channel
                 let value = value as u8;
-                let drive = channel.selected_drive_mut();
+                let prev_reset = channel.drives[0].controller.control & 0x04;
 
-                // Software reset
-                if (value & 0x04) != 0 && (drive.controller.control & 0x04) == 0 {
-                    tracing::debug!("ATA: Software reset");
-                    drive.controller.reset_in_progress = true;
-                    drive.controller.status = ATA_STATUS_BSY;
-                } else if (value & 0x04) == 0 && drive.controller.reset_in_progress {
-                    drive.controller.reset_in_progress = false;
-                    drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC;
-                    drive.controller.error = 0x01; // Diagnostic passed
-                    drive.controller.sector_count = 1;
-                    drive.controller.sector_no = 1;
-                    drive.controller.cylinder_no = 0;
-                    drive.controller.head_no = 0;
+                // Bochs harddrv.cc:2810-2816: Store control FIRST, then override
+                // during reset transitions (Bochs uses struct fields; we use raw byte).
+                for d in 0..2 {
+                    channel.drives[d].controller.control = value;
                 }
 
-                drive.controller.control = value;
+                // Software reset — affects both drives
+                if (value & 0x04) != 0 && prev_reset == 0 {
+                    // Transition 0→1: Assert SRST (Bochs harddrv.cc:2823-2849)
+                    tracing::debug!("ATA: Software reset asserted ch={}", channel_num);
+                    for d in 0..2 {
+                        // Bochs: BSY=1, DRDY=0, WF=0, DSC=1, DRQ=0, CORR=0, ERR=0
+                        channel.drives[d].controller.status =
+                            ATA_STATUS_BSY | ATA_STATUS_DSC;
+                        channel.drives[d].controller.reset_in_progress = true;
+                        channel.drives[d].controller.error = 0x01; // diagnostic: no error
+                        channel.drives[d].controller.current_command = 0;
+                        channel.drives[d].controller.buffer_index = 0;
+                        channel.drives[d].controller.multiple_sectors = 0;
+                        channel.drives[d].controller.lba_mode = false;
+                        // Bochs harddrv.cc:2847: disable_irq = 0 (clear nIEN)
+                        channel.drives[d].controller.control &= !0x02u8;
+                        channel.drives[d].controller.interrupt_pending = false;
+                    }
+                    // Bochs harddrv.cc:2848: DEV_pic_lower_irq()
+                    if !self.pic_ptr.is_null() {
+                        let pic = unsafe { &mut *self.pic_ptr };
+                        let irq = if channel_num == 0 { 14u8 } else { 15u8 };
+                        pic.lower_irq(irq);
+                    }
+                } else if (value & 0x04) == 0
+                    && channel.drives[0].controller.reset_in_progress
+                {
+                    // Transition 1→0: Deassert SRST (Bochs harddrv.cc:2850-2861)
+                    tracing::debug!("ATA: Software reset deasserted ch={}", channel_num);
+                    for d in 0..2 {
+                        channel.drives[d].controller.reset_in_progress = false;
+                        channel.drives[d].controller.status =
+                            ATA_STATUS_DRDY | ATA_STATUS_DSC;
+                        // Bochs set_signature(): head_no=0, sector_count=1, sector_no=1
+                        channel.drives[d].controller.head_no = 0;
+                        channel.drives[d].controller.sector_count = 1;
+                        channel.drives[d].controller.sector_no = 1;
+                        // Bochs set_signature(): HD → cylinder_no=0, CDROM → 0xEB14, absent → 0xFFFF
+                        match channel.drives[d].device_type {
+                            DeviceType::Disk => {
+                                channel.drives[d].controller.cylinder_no = 0;
+                            }
+                            DeviceType::Cdrom => {
+                                channel.drives[d].controller.cylinder_no = 0xEB14;
+                            }
+                            DeviceType::None => {
+                                channel.drives[d].controller.cylinder_no = 0xFFFF;
+                            }
+                        }
+                    }
+                }
             }
             _ => {}
         }
     }
 
+    /// Abort the current command (Bochs harddrv.cc:3517-3534).
+    ///
+    /// Sets error register to ABRT, clears BSY/DRQ, sets DRDY/ERR, raises interrupt.
+    fn command_aborted(&mut self, channel_num: usize, _value: u8) {
+        {
+            let drive = self.channels[channel_num].selected_drive_mut();
+            drive.controller.current_command = 0;
+            drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_ERR;
+            drive.controller.error = ATA_ERROR_ABRT;
+            drive.controller.buffer_index = 0;
+        }
+        // Bochs harddrv.cc:3533: raise_interrupt(channel)
+        self.raise_interrupt(channel_num);
+    }
+
     /// Execute an ATA command.
     ///
-    /// READ SECTORS (0x20) protocol matches Bochs harddrv.cc:2220-2283:
+    /// READ SECTORS (0x20/0x21) protocol matches Bochs harddrv.cc:2220-2283:
     /// 1. lba48_transform → set num_sectors from sector_count register
     /// 2. buffer_size = 512 (one sector for single-sector reads)
     /// 3. ide_read_sector fills buffer with first sector (decrements num_sectors)
@@ -1315,9 +1620,19 @@ impl BxHardDriveC {
     /// 4. When buffer full: ide_write_sector writes to disk
     /// 5. If num_sectors > 0: keep DRQ for next sector; else clear DRQ
     fn execute_command(&mut self, channel_num: usize, command: u8) {
+        // Bochs harddrv.cc:2183-2184: RECALIBRATE range masking
+        // Commands 0x10-0x1F all map to RECALIBRATE (only top nibble matters)
+        let command = if (command & 0xF0) == 0x10 { 0x10 } else { command };
+
         let channel = &mut self.channels[channel_num];
         let ds = channel.drive_select;
         let drive = channel.selected_drive_mut();
+
+        // Record command in history
+        let lba = drive.get_lba() as u32;
+        if self.cmd_history.len() < 64 {
+            self.cmd_history.push((channel_num as u8, command, lba));
+        }
 
         if drive.device_type == DeviceType::None {
             return;
@@ -1340,12 +1655,16 @@ impl BxHardDriveC {
 
         match command {
             ATA_CMD_RECALIBRATE => {
+                // Bochs harddrv.cc:2188-2216
+                drive.controller.error = 0;
                 drive.controller.cylinder_no = 0;
                 drive.controller.interrupt_pending = true;
             }
-            ATA_CMD_READ_SECTORS | ATA_CMD_READ_SECTORS_EXT => {
-                // Bochs harddrv.cc:2220-2283 — READ SECTORS
-                drive.lba48_transform();
+            // 0x20 = READ SECTORS with retries, 0x21 = without retries, 0x24 = READ SECTORS EXT (LBA48)
+            ATA_CMD_READ_SECTORS | 0x21 | ATA_CMD_READ_SECTORS_EXT => {
+                // Bochs harddrv.cc:2218-2283 — READ SECTORS (+ EXT variant)
+                let is_lba48 = command == ATA_CMD_READ_SECTORS_EXT;
+                drive.lba48_transform(is_lba48);
                 // Single-sector reads: one sector per batch
                 drive.controller.buffer_size = SECTOR_SIZE;
                 drive.controller.buffer_index = 0;
@@ -1369,8 +1688,8 @@ impl BxHardDriveC {
                 }
             }
             ATA_CMD_READ_MULTIPLE => {
-                // Bochs harddrv.cc:2250-2262 — READ MULTIPLE
-                drive.lba48_transform();
+                // Bochs harddrv.cc:2250-2262 — READ MULTIPLE (28-bit only; 0x29 EXT not yet)
+                drive.lba48_transform(false);
                 if drive.controller.multiple_sectors == 0 {
                     drive.controller.error = ATA_ERROR_ABRT;
                     drive.controller.status = ATA_STATUS_ERR | ATA_STATUS_DRDY;
@@ -1401,9 +1720,11 @@ impl BxHardDriveC {
                     }
                 }
             }
-            ATA_CMD_WRITE_SECTORS | ATA_CMD_WRITE_SECTORS_EXT => {
-                // Bochs harddrv.cc:2288-2345 — WRITE SECTORS
-                drive.lba48_transform();
+            // 0x30 = WRITE SECTORS with retries, 0x31 = without retries, 0x34 = WRITE SECTORS EXT (LBA48)
+            ATA_CMD_WRITE_SECTORS | 0x31 | ATA_CMD_WRITE_SECTORS_EXT => {
+                // Bochs harddrv.cc:2288-2345 — WRITE SECTORS (+ EXT variant)
+                let is_lba48 = command == ATA_CMD_WRITE_SECTORS_EXT;
+                drive.lba48_transform(is_lba48);
                 // Single-sector writes: one sector per batch
                 drive.controller.buffer_size = SECTOR_SIZE;
                 drive.controller.buffer_index = 0;
@@ -1419,8 +1740,8 @@ impl BxHardDriveC {
                 // No IRQ on initial write command (Bochs doesn't raise here)
             }
             ATA_CMD_WRITE_MULTIPLE => {
-                // Bochs harddrv.cc:2304-2345 — WRITE MULTIPLE
-                drive.lba48_transform();
+                // Bochs harddrv.cc:2304-2345 — WRITE MULTIPLE (28-bit only; 0x39 EXT not yet)
+                drive.lba48_transform(false);
                 if drive.controller.multiple_sectors == 0 {
                     drive.controller.error = ATA_ERROR_ABRT;
                     drive.controller.status = ATA_STATUS_ERR | ATA_STATUS_DRDY;
@@ -1444,11 +1765,14 @@ impl BxHardDriveC {
                     drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC | ATA_STATUS_DRQ;
                 }
             }
-            ATA_CMD_READ_VERIFY => {
-                // Just verify, no data transfer
+            // 0x40 = READ VERIFY with retries, 0x41 = without retries
+            ATA_CMD_READ_VERIFY | 0x41 => {
+                // Bochs harddrv.cc:2349-2396 — verify sectors, no data transfer
+                drive.lba48_transform(false);
                 drive.controller.interrupt_pending = true;
             }
             ATA_CMD_SEEK => {
+                // Bochs harddrv.cc:2400-2427 — seek to specified CHS/LBA
                 drive.controller.interrupt_pending = true;
             }
             ATA_CMD_EXECUTE_DIAGNOSTICS => {
@@ -1456,11 +1780,36 @@ impl BxHardDriveC {
                 drive.controller.interrupt_pending = true;
             }
             ATA_CMD_INITIALIZE_PARAMS => {
-                // Initialize drive parameters
-                let heads = (drive.controller.head_no & 0x0F) + 1;
+                // Bochs harddrv.cc:2341-2382 — INITIALIZE DRIVE PARAMETERS
                 let spt = drive.controller.sector_count;
-                tracing::debug!("ATA: Initialize params heads={} spt={}", heads, spt);
-                drive.controller.interrupt_pending = true;
+                let head_no = drive.controller.head_no;
+                let disk_spt = drive.geometry.sectors_per_track;
+                let disk_heads = drive.geometry.heads;
+                tracing::debug!("ATA: Initialize params sec={} head={}", spt, head_no);
+
+                if spt != disk_spt as u8 {
+                    tracing::error!(
+                        "ATA: init drive params: logical sector count {} not supported (expected {})",
+                        spt, disk_spt
+                    );
+                    self.command_aborted(channel_num, command);
+                    return;
+                } else if head_no == 0 {
+                    // Linux 2.6.x kernels use head_no=0 — log but don't abort (Bochs behavior)
+                    tracing::debug!("ATA: init drive params: max. logical head number 0");
+                    drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC;
+                    drive.controller.interrupt_pending = true;
+                } else if head_no != (disk_heads - 1) as u8 {
+                    tracing::error!(
+                        "ATA: init drive params: max. logical head number {} not supported (expected {})",
+                        head_no, disk_heads - 1
+                    );
+                    self.command_aborted(channel_num, command);
+                    return;
+                } else {
+                    drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC;
+                    drive.controller.interrupt_pending = true;
+                }
             }
             ATA_CMD_IDENTIFY => {
                 tracing::debug!("ATA: IDENTIFY command");
@@ -1469,42 +1818,146 @@ impl BxHardDriveC {
                 drive.controller.interrupt_pending = true;
             }
             ATA_CMD_SET_FEATURES => {
-                // Accept but don't do anything special
+                // Bochs harddrv.cc:2670-2745 — SET FEATURES sub-commands
+                let subcommand = drive.controller.features;
+                match subcommand {
+                    0x02 => {
+                        // Enable write cache — no-op, just succeed
+                        tracing::debug!("ATA: SET FEATURES: enable write cache");
+                    }
+                    0x03 => {
+                        // Set transfer mode (PIO/DMA) based on sector_count
+                        let mode = drive.controller.sector_count;
+                        tracing::debug!("ATA: SET FEATURES: set transfer mode {:#04x}", mode);
+                    }
+                    0x82 => {
+                        // Disable write cache — no-op, just succeed
+                        tracing::debug!("ATA: SET FEATURES: disable write cache");
+                    }
+                    0xAA => {
+                        // Enable read look-ahead — no-op
+                        tracing::debug!("ATA: SET FEATURES: enable read look-ahead");
+                    }
+                    0x55 => {
+                        // Disable read look-ahead — no-op
+                        tracing::debug!("ATA: SET FEATURES: disable read look-ahead");
+                    }
+                    0xCC => {
+                        // Enable reverting to power-on defaults — no-op
+                    }
+                    0x66 => {
+                        // Disable reverting to power-on defaults — no-op
+                    }
+                    _ => {
+                        tracing::debug!("ATA: SET FEATURES: unknown subcommand {:#04x}", subcommand);
+                        self.command_aborted(channel_num, command);
+                        return;
+                    }
+                }
                 drive.controller.interrupt_pending = true;
             }
             ATA_CMD_SET_MULTIPLE => {
-                drive.controller.multiple_sectors = drive.controller.sector_count;
+                // Bochs harddrv.cc:2640-2665 — SET MULTIPLE MODE
+                // Sector count must be a power of 2, 1-128
+                let count = drive.controller.sector_count;
+                if count == 0 || count > 128 || (count & (count - 1)) != 0 {
+                    self.command_aborted(channel_num, command);
+                    return;
+                }
+                drive.controller.multiple_sectors = count;
+                drive.controller.interrupt_pending = true;
+            }
+            // Bochs harddrv.cc: CHECK POWER MODE — returns 0xFF in sector count (active/idle)
+            0xE5 => {
+                drive.controller.sector_count = 0xFF;
+                drive.controller.interrupt_pending = true;
+            }
+            // Bochs harddrv.cc: FLUSH CACHE — no-op, just succeed with interrupt
+            0xE7 => {
+                drive.controller.interrupt_pending = true;
+            }
+            // Bochs harddrv.cc: IDLE IMMEDIATE — no-op, just succeed
+            0xE1 => {
                 drive.controller.interrupt_pending = true;
             }
             _ => {
                 tracing::warn!("ATA: Unknown command {:#04x}", command);
-                drive.controller.error = ATA_ERROR_ABRT;
-                drive.controller.status = ATA_STATUS_ERR | ATA_STATUS_DRDY;
+                self.command_aborted(channel_num, command);
+                return;
             }
         }
 
-        // Generate interrupt if pending and enabled
-        if drive.controller.interrupt_pending && (drive.controller.control & 0x02) == 0 {
-            if channel_num == 0 {
-                self.irq14_pending = true;
-            } else {
-                self.irq15_pending = true;
-            }
+        // Bochs harddrv.cc: Commands that want an interrupt set interrupt_pending=true.
+        // In Bochs, these commands call raise_interrupt() which does DEV_pic_raise_irq().
+        // We use raise_interrupt() here for proper PIC raise + diagnostic counting.
+        if self.channels[channel_num].selected_drive().controller.interrupt_pending {
+            self.raise_interrupt(channel_num);
         }
     }
 
-    /// Check and clear IRQ14 pending
-    pub fn check_irq14(&mut self) -> bool {
-        let pending = self.irq14_pending;
-        self.irq14_pending = false;
-        pending
+    /// Get diagnostic string for the ATA controller state
+    pub fn diag_string(&self) -> String {
+        let mut s = String::new();
+        for ch in 0..2 {
+            for drv in 0..2 {
+                let drive = &self.channels[ch].drives[drv];
+                s.push_str(&format!(
+                    "  ch{} drv{}: type={:?} cmd={:#04x} status={:#04x} ctrl={:#04x} irq_pend={} sec_cnt={} buf_idx={}\n",
+                    ch, drv, drive.device_type,
+                    drive.controller.current_command,
+                    drive.controller.status,
+                    drive.controller.control,
+                    drive.controller.interrupt_pending,
+                    drive.controller.sector_count,
+                    drive.controller.buffer_index,
+                ));
+            }
+        }
+        s.push_str(&format!(
+            "  irq14_level={} irq15_level={} irq14_raise={} irq15_raise={} irq14_lower={} irq15_lower={}\n  irq14_raise_count={} irq14_lower_count={}\n",
+            self.get_irq_level(0), self.get_irq_level(1),
+            self.irq14_needs_raise, self.irq15_needs_raise,
+            self.irq14_needs_lower, self.irq15_needs_lower,
+            self.diag_irq14_raise_count, self.diag_irq14_lower_count,
+        ));
+        s.push_str(&format!("  cmd_history ({} cmds):", self.cmd_history.len()));
+        for (i, &(ch, cmd, lba)) in self.cmd_history.iter().enumerate() {
+            if i % 8 == 0 { s.push('\n'); s.push_str("    "); }
+            s.push_str(&format!("ch{}:{:#04x}@{} ", ch, cmd, lba));
+        }
+        s
     }
 
-    /// Check and clear IRQ15 pending
-    pub fn check_irq15(&mut self) -> bool {
-        let pending = self.irq15_pending;
-        self.irq15_pending = false;
-        pending
+    /// Update PIC IRQ lines based on current ATA interrupt level.
+    ///
+    /// Called by DeviceManager::tick() on every tick. Uses set_irq_level()
+    /// to match Bochs' direct DEV_pic_raise_irq/DEV_pic_lower_irq calls.
+    /// The PIC's internal edge detection ensures raise/lower only fires on transitions.
+    pub fn update_irq_lines(&mut self, pic: &mut crate::iodev::pic::BxPicC) {
+        // Channel 0 (IRQ14): Matches Bochs where raise_interrupt() calls
+        // DEV_pic_raise_irq() immediately and status read / command write calls
+        // DEV_pic_lower_irq() immediately. We process lower FIRST then raise,
+        // so a status-read + new-sector-completion within the same batch
+        // creates a proper edge (low → high).
+        if self.irq14_needs_lower {
+            pic.lower_irq(14);
+            self.irq14_needs_lower = false;
+            self.diag_irq14_lower_count += 1;
+        }
+        if self.irq14_needs_raise {
+            pic.raise_irq(14);
+            self.irq14_needs_raise = false;
+            self.diag_irq14_raise_count += 1;
+        }
+        // Channel 1 (IRQ15)
+        if self.irq15_needs_lower {
+            pic.lower_irq(15);
+            self.irq15_needs_lower = false;
+        }
+        if self.irq15_needs_raise {
+            pic.raise_irq(15);
+            self.irq15_needs_raise = false;
+        }
     }
 }
 
@@ -1554,15 +2007,35 @@ mod tests {
     fn test_lba48_transform() {
         let mut drive = AtaDrive::create_disk(DriveGeometry::from_chs(306, 4, 17));
 
-        // sector_count = 5 → num_sectors = 5
+        // 28-bit mode: sector_count = 5 → num_sectors = 5
         drive.controller.sector_count = 5;
-        drive.lba48_transform();
+        drive.lba48_transform(false);
         assert_eq!(drive.controller.num_sectors, 5);
+        assert!(!drive.controller.lba48);
 
-        // sector_count = 0 → num_sectors = 256
+        // 28-bit mode: sector_count = 0 → num_sectors = 256
         drive.controller.sector_count = 0;
-        drive.lba48_transform();
+        drive.lba48_transform(false);
         assert_eq!(drive.controller.num_sectors, 256);
+
+        // 48-bit mode: sector_count = 5, hob.nsector = 0 → num_sectors = 5
+        drive.controller.sector_count = 5;
+        drive.controller.hob.nsector = 0;
+        drive.lba48_transform(true);
+        assert_eq!(drive.controller.num_sectors, 5);
+        assert!(drive.controller.lba48);
+
+        // 48-bit mode: sector_count = 0, hob.nsector = 1 → num_sectors = 256
+        drive.controller.sector_count = 0;
+        drive.controller.hob.nsector = 1;
+        drive.lba48_transform(true);
+        assert_eq!(drive.controller.num_sectors, 256);
+
+        // 48-bit mode: both zero → num_sectors = 65536
+        drive.controller.sector_count = 0;
+        drive.controller.hob.nsector = 0;
+        drive.lba48_transform(true);
+        assert_eq!(drive.controller.num_sectors, 65536);
     }
 
     #[test]

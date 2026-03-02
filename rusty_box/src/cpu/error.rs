@@ -8,8 +8,8 @@ pub type Result<T> = core::result::Result<T, CpuError>;
 
 #[derive(Error, Debug)]
 pub enum CpuError {
-    #[error("exception({vector:?}): bad vector")]
-    BadVector { vector: Exception },
+    #[error("exception({vector:?}): bad vector, error_code={error_code}")]
+    BadVector { vector: Exception, error_code: u16 },
 
     #[error("Shadow stack prematurely busy is left set !")]
     ShadowStackPrematurelyBusy,

@@ -100,8 +100,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
+        // Bochs fpu_trans.cc: FXTRACT uses CW as-is (no forced 80-bit precision)
         let mut status =
-            i387cw_to_softfloat_status_word(self.the_i387.get_control_word() | FPU_PR_80_BITS);
+            i387cw_to_softfloat_status_word(self.the_i387.get_control_word());
 
         let a = self.read_fpu_reg(0);
         let (significand, exponent) = extf80_extract_impl(a, &mut status);

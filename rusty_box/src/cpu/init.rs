@@ -105,15 +105,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.gen_reg[BX_NIL_REGISTER].rrx = 0;
 
-        // Initialize SP to a safe value for early BIOS execution
-        // Real x86 resets SP to 0, but BIOS needs some stack space immediately
-        // Place stack at conventional memory top (just below VGA at 0xA0000)
-        // Using 0x7000 as a safe location - below typical BIOS data area at 0x400-0x500
-        // and gives plenty of room for stack growth
-        self.gen_reg[4].rrx = 0x7000; // RSP/ESP/SP
-        tracing::info!("CPU reset: Initialized SP to {:#x}", unsafe {
-            self.gen_reg[4].rrx
-        });
+        // Bochs init.cc:867-868: all general registers reset to 0
+        // (includes ESP — BIOS sets SS:SP before any stack operations)
 
         self.eflags = EFlags::from_bits_retain(0x2); // Bit1 is always set
 
@@ -222,10 +215,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.tr.cache.segment = false; /* system segment */
         /* system segment */
         self.tr.cache.r#type = SystemAndGateDescriptorEnum::BxSysSegmentBusy386Tss as _;
-        self.ldtr.cache.u.segment.base = 0x00000000;
-        self.ldtr.cache.u.segment.limit_scaled = 0xFFFF;
-        self.ldtr.cache.u.segment.avl = false;
-        self.ldtr.cache.u.segment.g = false; /* byte granular */
+        self.tr.cache.u.segment.base = 0x00000000;
+        self.tr.cache.u.segment.limit_scaled = 0xFFFF;
+        self.tr.cache.u.segment.avl = false;
+        self.tr.cache.u.segment.g = false; /* byte granular */
 
         self.cpu_mode = CpuMode::Ia32Real;
 
@@ -246,6 +239,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         if self.bx_cpuid_support_isa_extension(X86Feature::IsaX87) {
             self.cr0.set32(0x60000010);
+        } else {
+            // Bochs init.cc: without x87, CR0 = 0x60000000 (no ET bit)
+            self.cr0.set32(0x60000000);
         }
 
         // handle reserved bits
@@ -482,7 +478,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     pub(super) fn handle_interrupt_mask_change(&mut self) {
-        // no-op for now; real implementation updates APIC/MSR state
+        // Based on Bochs flag_ctrl_pro.cc:122-177 handleInterruptMaskChange
+        // When IF transitions to 1, signal BX_EVENT_PENDING_INTR so the CPU
+        // checks for pending external interrupts at the next boundary.
+        // This matches Bochs which calls signal_event(BX_EVENT_PENDING_INTR).
+        if self.eflags.contains(super::eflags::EFlags::IF_) {
+            self.signal_event(0); // 0 = BX_EVENT_PENDING_INTR bit position
+        }
     }
 
     fn init_statistics(&mut self) {

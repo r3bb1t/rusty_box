@@ -877,72 +877,63 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        cpu.in_al_ib(instr);
-        Ok(())
+        cpu.in_al_ib(instr)
     }
 
     fn in_ax_ib_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        cpu.in_ax_ib(instr);
-        Ok(())
+        cpu.in_ax_ib(instr)
     }
 
     fn in_eax_ib_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        cpu.in_eax_ib(instr);
-        Ok(())
+        cpu.in_eax_ib(instr)
     }
 
     fn out_ib_al_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        cpu.out_ib_al(instr);
-        Ok(())
+        cpu.out_ib_al(instr)
     }
 
     fn out_ib_ax_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        cpu.out_ib_ax(instr);
-        Ok(())
+        cpu.out_ib_ax(instr)
     }
 
     fn out_ib_eax_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        cpu.out_ib_eax(instr);
-        Ok(())
+        cpu.out_ib_eax(instr)
     }
 
     fn in_al_dx_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        cpu.in_al_dx(instr);
-        Ok(())
+        cpu.in_al_dx(instr)
     }
 
     fn in_ax_dx_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        cpu.in_ax_dx(instr);
-        Ok(())
+        cpu.in_ax_dx(instr)
     }
 
     fn in_eax_dx_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        cpu.in_eax_dx(instr);
-        Ok(())
+        cpu.in_eax_dx(instr)
     }
 
     // Wrapper functions for MOV32S handlers are now at module level (after get_opcode_entry)
@@ -951,24 +942,21 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        cpu.out_dx_al(instr);
-        Ok(())
+        cpu.out_dx_al(instr)
     }
 
     fn out_dx_ax_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        cpu.out_dx_ax(instr);
-        Ok(())
+        cpu.out_dx_ax(instr)
     }
 
     fn out_dx_eax_wrapper<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        cpu.out_dx_eax(instr);
-        Ok(())
+        cpu.out_dx_eax(instr)
     }
 
     // Wrapper functions for PUSH/POP segment registers

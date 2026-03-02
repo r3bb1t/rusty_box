@@ -516,6 +516,12 @@ pub struct BxKeyboardC {
     /// Flag set when A20 state changes, cleared by emulator after propagation
     /// to the memory subsystem.
     pub(crate) a20_change_pending: bool,
+    /// IRQ1 lower pending — set when port 0x60 read clears keyboard output buffer.
+    /// Bochs calls DEV_pic_lower_irq(1) immediately; we defer to tick().
+    pub(crate) irq1_lower_pending: bool,
+    /// IRQ12 lower pending — set when port 0x60 read clears mouse output buffer.
+    /// Bochs calls DEV_pic_lower_irq(12) immediately; we defer to tick().
+    pub(crate) irq12_lower_pending: bool,
     /// First self-test flag (Bochs static `kbd_initialized`).
     /// Prevents double-initialization.
     kbd_initialized: bool,
@@ -596,6 +602,8 @@ impl BxKeyboardC {
             system_control_b: 0,
             a20_enabled: true,
             a20_change_pending: false,
+            irq1_lower_pending: false,
+            irq12_lower_pending: false,
             kbd_initialized: false,
         }
     }
@@ -684,6 +692,8 @@ impl BxKeyboardC {
                 self.controller_q_size -= 1;
             }
 
+            // Bochs keyboard.cc:315: DEV_pic_lower_irq(12)
+            self.irq12_lower_pending = true;
             self.activate_timer();
             tracing::debug!("Keyboard: Read port 0x60 [mouse] = {:#04x}", val);
             val as u32
@@ -709,6 +719,8 @@ impl BxKeyboardC {
                 self.controller_q_size -= 1;
             }
 
+            // Bochs keyboard.cc:340: DEV_pic_lower_irq(1)
+            self.irq1_lower_pending = true;
             self.activate_timer();
             tracing::debug!("Keyboard: Read port 0x60 [kbd] = {:#04x}", val);
             val as u32
@@ -1674,6 +1686,22 @@ impl BxKeyboardC {
     pub fn check_irq12(&mut self) -> bool {
         let pending = self.kbd_controller.irq12_requested;
         self.kbd_controller.irq12_requested = false;
+        pending
+    }
+
+    /// Check and clear IRQ1 lower pending (set on port 0x60 keyboard read)
+    /// Bochs calls DEV_pic_lower_irq(1) immediately; we defer to tick().
+    pub fn check_irq1_lower(&mut self) -> bool {
+        let pending = self.irq1_lower_pending;
+        self.irq1_lower_pending = false;
+        pending
+    }
+
+    /// Check and clear IRQ12 lower pending (set on port 0x60 mouse read)
+    /// Bochs calls DEV_pic_lower_irq(12) immediately; we defer to tick().
+    pub fn check_irq12_lower(&mut self) -> bool {
+        let pending = self.irq12_lower_pending;
+        self.irq12_lower_pending = false;
         pending
     }
 }

@@ -57,6 +57,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::error!("call_jq: canonical RIP violation");
             return Err(CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: 0,
             });
         }
 
@@ -77,6 +78,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::error!("call_eq_r: canonical RIP violation");
             return Err(CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: 0,
             });
         }
 
@@ -140,6 +142,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::error!("jmp_jq: canonical RIP violation");
             return Err(CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: 0,
             });
         }
 
@@ -157,6 +160,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::error!("jmp_eq_r: canonical RIP violation");
             return Err(CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: 0,
             });
         }
 
@@ -216,6 +220,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::error!("retnear64_iw: canonical RIP violation");
             return Err(CpuError::BadVector {
                 vector: Exception::Gp,
+                error_code: 0,
             });
         }
 

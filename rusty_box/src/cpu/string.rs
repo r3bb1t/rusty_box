@@ -5,9 +5,9 @@
 //!
 //! Implements MOVS, STOS, LODS, CMPS, SCAS instructions
 //!
-//! 16-bit address variants use raw memory access (suitable for real mode).
-//! 32-bit address variants use virtual memory access with segment limit
-//! checks and paging translation (required for protected mode with paging).
+//! Both 16-bit and 32-bit address variants use virtual memory access with
+//! segment limit checks and paging translation (required for protected mode
+//! with paging).
 
 use super::{
     cpu::BxCpuC,
@@ -37,18 +37,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// MOVSB - Move byte from DS:SI to ES:DI (16-bit address mode)
-    pub fn movsb16(&mut self, _instr: &Instruction) {
-        let si = self.si() as u64;
-        let di = self.di() as u64;
+    pub fn movsb16(&mut self, instr: &Instruction) -> super::Result<()> {
+        let si = self.si() as u32;
+        let di = self.di() as u32;
 
-        let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
-        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
-
-        let src_addr = ds_base.wrapping_add(si);
-        let dst_addr = es_base.wrapping_add(di);
-
-        let byte = self.mem_read_byte(src_addr);
-        self.mem_write_byte(dst_addr, byte);
+        let byte = self.read_virtual_byte(BxSegregs::from(instr.seg()), si)?;
+        self.write_virtual_byte(BxSegregs::Es, di, byte)?;
 
         if self.get_df() {
             self.set_si(self.si().wrapping_sub(1));
@@ -64,15 +58,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             di,
             byte
         );
+        Ok(())
     }
 
     /// MOVSB - Move byte from DS:ESI to ES:EDI (32-bit address mode)
     /// Uses virtual memory access for proper segment limits + paging translation.
-    pub fn movsb32(&mut self, _instr: &Instruction) -> super::Result<()> {
+    pub fn movsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
         let edi = self.edi();
 
-        let byte = self.read_virtual_byte(BxSegregs::Ds, esi)?;
+        let byte = self.read_virtual_byte(BxSegregs::from(instr.seg()), esi)?;
         self.write_virtual_byte(BxSegregs::Es, edi, byte)?;
 
         let increment: u32 = if self.get_df() { 0xFFFFFFFF } else { 1 };
@@ -89,18 +84,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSW - Move word from DS:SI to ES:DI (16-bit address mode)
-    pub fn movsw16(&mut self, _instr: &Instruction) {
-        let si = self.si() as u64;
-        let di = self.di() as u64;
+    pub fn movsw16(&mut self, instr: &Instruction) -> super::Result<()> {
+        let si = self.si() as u32;
+        let di = self.di() as u32;
 
-        let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
-        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
-
-        let src_addr = ds_base.wrapping_add(si);
-        let dst_addr = es_base.wrapping_add(di);
-
-        let word = self.mem_read_word(src_addr);
-        self.mem_write_word(dst_addr, word);
+        let word = self.read_virtual_word(BxSegregs::from(instr.seg()), si)?;
+        self.write_virtual_word(BxSegregs::Es, di, word)?;
 
         if self.get_df() {
             self.set_si(self.si().wrapping_sub(2));
@@ -111,14 +100,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         tracing::trace!("MOVSW16: word={:#06x}", word);
+        Ok(())
     }
 
     /// MOVSW - Move word from DS:ESI to ES:EDI (32-bit address mode)
-    pub fn movsw32(&mut self, _instr: &Instruction) -> super::Result<()> {
+    pub fn movsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
         let edi = self.edi();
 
-        let word = self.read_virtual_word(BxSegregs::Ds, esi)?;
+        let word = self.read_virtual_word(BxSegregs::from(instr.seg()), esi)?;
         self.write_virtual_word(BxSegregs::Es, edi, word)?;
 
         let increment: u32 = if self.get_df() { 0xFFFFFFFE } else { 2 };
@@ -130,18 +120,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSD - Move dword from DS:SI to ES:DI (16-bit address mode)
-    pub fn movsd16(&mut self, _instr: &Instruction) {
-        let si = self.si() as u64;
-        let di = self.di() as u64;
+    pub fn movsd16(&mut self, instr: &Instruction) -> super::Result<()> {
+        let si = self.si() as u32;
+        let di = self.di() as u32;
 
-        let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
-        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
-
-        let src_addr = ds_base.wrapping_add(si);
-        let dst_addr = es_base.wrapping_add(di);
-
-        let dword = self.mem_read_dword(src_addr);
-        self.mem_write_dword(dst_addr, dword);
+        let dword = self.read_virtual_dword(BxSegregs::from(instr.seg()), si)?;
+        self.write_virtual_dword(BxSegregs::Es, di, dword)?;
 
         if self.get_df() {
             self.set_si(self.si().wrapping_sub(4));
@@ -152,14 +136,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         tracing::trace!("MOVSD16: dword={:#010x}", dword);
+        Ok(())
     }
 
     /// MOVSD - Move dword from DS:ESI to ES:EDI (32-bit address mode)
-    pub fn movsd32(&mut self, _instr: &Instruction) -> super::Result<()> {
+    pub fn movsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
         let edi = self.edi();
 
-        let dword = self.read_virtual_dword(BxSegregs::Ds, esi)?;
+        let dword = self.read_virtual_dword(BxSegregs::from(instr.seg()), esi)?;
         self.write_virtual_dword(BxSegregs::Es, edi, dword)?;
 
         let increment: u32 = if self.get_df() { 0xFFFFFFFC } else { 4 };
@@ -180,13 +165,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// STOSB - Store AL at ES:DI (16-bit address mode)
-    pub fn stosb16(&mut self, _instr: &Instruction) {
-        let di = self.di() as u64;
+    pub fn stosb16(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let di = self.di() as u32;
         let al = self.al();
 
-        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
-        let dst_addr = es_base.wrapping_add(di);
-        self.mem_write_byte(dst_addr, al);
+        self.write_virtual_byte(BxSegregs::Es, di, al)?;
 
         if self.get_df() {
             self.set_di(self.di().wrapping_sub(1));
@@ -195,6 +178,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         tracing::trace!("STOSB16: AL={:#04x} -> ES:{:04x}", al, di);
+        Ok(())
     }
 
     /// STOSB - Store AL at ES:EDI (32-bit address mode)
@@ -212,13 +196,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// STOSW - Store AX at ES:DI (16-bit address mode)
-    pub fn stosw16(&mut self, _instr: &Instruction) {
-        let di = self.di() as u64;
+    pub fn stosw16(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let di = self.di() as u32;
         let ax = self.ax();
 
-        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
-        let dst_addr = es_base.wrapping_add(di);
-        self.mem_write_word(dst_addr, ax);
+        self.write_virtual_word(BxSegregs::Es, di, ax)?;
 
         if self.get_df() {
             self.set_di(self.di().wrapping_sub(2));
@@ -227,6 +209,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         tracing::trace!("STOSW16: AX={:#06x} -> ES:{:04x}", ax, di);
+        Ok(())
     }
 
     /// STOSW - Store AX at ES:EDI (32-bit address mode)
@@ -244,13 +227,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// STOSD - Store EAX at ES:DI (16-bit address mode)
-    pub fn stosd16(&mut self, _instr: &Instruction) {
-        let di = self.di() as u64;
+    pub fn stosd16(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let di = self.di() as u32;
         let eax = self.eax();
 
-        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
-        let dst_addr = es_base.wrapping_add(di);
-        self.mem_write_dword(dst_addr, eax);
+        self.write_virtual_dword(BxSegregs::Es, di, eax)?;
 
         if self.get_df() {
             self.set_di(self.di().wrapping_sub(4));
@@ -259,6 +240,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         tracing::trace!("STOSD16: EAX={:#010x} -> ES:{:04x}", eax, di);
+        Ok(())
     }
 
     /// STOSD - Store EAX at ES:EDI (32-bit address mode)
@@ -280,12 +262,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// LODSB - Load byte from DS:SI into AL (16-bit address mode)
-    pub fn lodsb16(&mut self, _instr: &Instruction) {
-        let si = self.si() as u64;
+    pub fn lodsb16(&mut self, instr: &Instruction) -> super::Result<()> {
+        let si = self.si() as u32;
 
-        let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
-        let src_addr = ds_base.wrapping_add(si);
-        let byte = self.mem_read_byte(src_addr);
+        let byte = self.read_virtual_byte(BxSegregs::from(instr.seg()), si)?;
 
         self.set_al(byte);
 
@@ -296,13 +276,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         tracing::trace!("LODSB16: DS:{:04x} -> AL={:#04x}", si, byte);
+        Ok(())
     }
 
     /// LODSB - Load byte from DS:ESI into AL (32-bit address mode)
-    pub fn lodsb32(&mut self, _instr: &Instruction) -> super::Result<()> {
+    pub fn lodsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
 
-        let byte = self.read_virtual_byte(BxSegregs::Ds, esi)?;
+        let byte = self.read_virtual_byte(BxSegregs::from(instr.seg()), esi)?;
         self.set_al(byte);
 
         let increment: u32 = if self.get_df() { 0xFFFFFFFF } else { 1 };
@@ -313,12 +294,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LODSW - Load word from DS:SI into AX (16-bit address mode)
-    pub fn lodsw16(&mut self, _instr: &Instruction) {
-        let si = self.si() as u64;
+    pub fn lodsw16(&mut self, instr: &Instruction) -> super::Result<()> {
+        let si = self.si() as u32;
 
-        let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
-        let src_addr = ds_base.wrapping_add(si);
-        let word = self.mem_read_word(src_addr);
+        let word = self.read_virtual_word(BxSegregs::from(instr.seg()), si)?;
 
         self.set_ax(word);
 
@@ -329,13 +308,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         tracing::trace!("LODSW16: DS:{:04x} -> AX={:#06x}", si, word);
+        Ok(())
     }
 
     /// LODSW - Load word from DS:ESI into AX (32-bit address mode)
-    pub fn lodsw32(&mut self, _instr: &Instruction) -> super::Result<()> {
+    pub fn lodsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
 
-        let word = self.read_virtual_word(BxSegregs::Ds, esi)?;
+        let word = self.read_virtual_word(BxSegregs::from(instr.seg()), esi)?;
         self.set_ax(word);
 
         let increment: u32 = if self.get_df() { 0xFFFFFFFE } else { 2 };
@@ -346,12 +326,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LODSD - Load dword from DS:SI into EAX (16-bit address mode)
-    pub fn lodsd16(&mut self, _instr: &Instruction) {
-        let si = self.si() as u64;
+    pub fn lodsd16(&mut self, instr: &Instruction) -> super::Result<()> {
+        let si = self.si() as u32;
 
-        let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
-        let src_addr = ds_base.wrapping_add(si);
-        let dword = self.mem_read_dword(src_addr);
+        let dword = self.read_virtual_dword(BxSegregs::from(instr.seg()), si)?;
 
         self.set_eax(dword);
 
@@ -362,13 +340,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         tracing::trace!("LODSD16: DS:{:04x} -> EAX={:#010x}", si, dword);
+        Ok(())
     }
 
     /// LODSD - Load dword from DS:ESI into EAX (32-bit address mode)
-    pub fn lodsd32(&mut self, _instr: &Instruction) -> super::Result<()> {
+    pub fn lodsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
 
-        let dword = self.read_virtual_dword(BxSegregs::Ds, esi)?;
+        let dword = self.read_virtual_dword(BxSegregs::from(instr.seg()), esi)?;
         self.set_eax(dword);
 
         let increment: u32 = if self.get_df() { 0xFFFFFFFC } else { 4 };
@@ -383,18 +362,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// CMPSB - Compare bytes at DS:SI and ES:DI (16-bit address mode)
-    pub fn cmpsb16(&mut self, _instr: &Instruction) {
-        let si = self.si() as u64;
-        let di = self.di() as u64;
+    pub fn cmpsb16(&mut self, instr: &Instruction) -> super::Result<()> {
+        let si = self.si() as u32;
+        let di = self.di() as u32;
 
-        let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
-        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
-
-        let src_addr = ds_base.wrapping_add(si);
-        let dst_addr = es_base.wrapping_add(di);
-
-        let op1 = self.mem_read_byte(src_addr);
-        let op2 = self.mem_read_byte(dst_addr);
+        let op1 = self.read_virtual_byte(BxSegregs::from(instr.seg()), si)?;
+        let op2 = self.read_virtual_byte(BxSegregs::Es, di)?;
 
         let result = op1.wrapping_sub(op2);
         self.update_flags_sub8(op1, op2, result);
@@ -408,14 +381,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         tracing::trace!("CMPSB16: [{:#04x}] vs [{:#04x}]", op1, op2);
+        Ok(())
     }
 
     /// CMPSB - Compare bytes at DS:ESI and ES:EDI (32-bit address mode)
-    pub fn cmpsb32(&mut self, _instr: &Instruction) -> super::Result<()> {
+    pub fn cmpsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
         let edi = self.edi();
 
-        let op1 = self.read_virtual_byte(BxSegregs::Ds, esi)?;
+        let op1 = self.read_virtual_byte(BxSegregs::from(instr.seg()), esi)?;
         let op2 = self.read_virtual_byte(BxSegregs::Es, edi)?;
 
         let result = op1.wrapping_sub(op2);
@@ -430,18 +404,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMPSW - Compare words at DS:SI and ES:DI (16-bit address mode)
-    pub fn cmpsw16(&mut self, _instr: &Instruction) {
-        let si = self.si() as u64;
-        let di = self.di() as u64;
+    pub fn cmpsw16(&mut self, instr: &Instruction) -> super::Result<()> {
+        let si = self.si() as u32;
+        let di = self.di() as u32;
 
-        let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
-        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
-
-        let src_addr = ds_base.wrapping_add(si);
-        let dst_addr = es_base.wrapping_add(di);
-
-        let op1 = self.mem_read_word(src_addr);
-        let op2 = self.mem_read_word(dst_addr);
+        let op1 = self.read_virtual_word(BxSegregs::from(instr.seg()), si)?;
+        let op2 = self.read_virtual_word(BxSegregs::Es, di)?;
 
         let result = op1.wrapping_sub(op2);
         self.update_flags_sub16(op1, op2, result);
@@ -455,14 +423,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         tracing::trace!("CMPSW16: [{:#06x}] vs [{:#06x}]", op1, op2);
+        Ok(())
     }
 
     /// CMPSW - Compare words at DS:ESI and ES:EDI (32-bit address mode)
-    pub fn cmpsw32(&mut self, _instr: &Instruction) -> super::Result<()> {
+    pub fn cmpsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
         let edi = self.edi();
 
-        let op1 = self.read_virtual_word(BxSegregs::Ds, esi)?;
+        let op1 = self.read_virtual_word(BxSegregs::from(instr.seg()), esi)?;
         let op2 = self.read_virtual_word(BxSegregs::Es, edi)?;
 
         let result = op1.wrapping_sub(op2);
@@ -477,18 +446,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CMPSD - Compare dwords at DS:SI and ES:DI (16-bit address mode)
-    pub fn cmpsd16(&mut self, _instr: &Instruction) {
-        let si = self.si() as u64;
-        let di = self.di() as u64;
+    pub fn cmpsd16(&mut self, instr: &Instruction) -> super::Result<()> {
+        let si = self.si() as u32;
+        let di = self.di() as u32;
 
-        let ds_base = unsafe { self.sregs[BxSegregs::Ds as usize].cache.u.segment.base };
-        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
-
-        let src_addr = ds_base.wrapping_add(si);
-        let dst_addr = es_base.wrapping_add(di);
-
-        let op1 = self.mem_read_dword(src_addr);
-        let op2 = self.mem_read_dword(dst_addr);
+        let op1 = self.read_virtual_dword(BxSegregs::from(instr.seg()), si)?;
+        let op2 = self.read_virtual_dword(BxSegregs::Es, di)?;
 
         let result = op1.wrapping_sub(op2);
         self.update_flags_sub32(op1, op2, result);
@@ -502,14 +465,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         tracing::trace!("CMPSD16: [{:#010x}] vs [{:#010x}]", op1, op2);
+        Ok(())
     }
 
     /// CMPSD - Compare dwords at DS:ESI and ES:EDI (32-bit address mode)
-    pub fn cmpsd32(&mut self, _instr: &Instruction) -> super::Result<()> {
+    pub fn cmpsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let esi = self.esi();
         let edi = self.edi();
 
-        let op1 = self.read_virtual_dword(BxSegregs::Ds, esi)?;
+        let op1 = self.read_virtual_dword(BxSegregs::from(instr.seg()), esi)?;
         let op2 = self.read_virtual_dword(BxSegregs::Es, edi)?;
 
         let result = op1.wrapping_sub(op2);
@@ -528,13 +492,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// SCASB - Compare AL with byte at ES:DI (16-bit address mode)
-    pub fn scasb16(&mut self, _instr: &Instruction) {
-        let di = self.di() as u64;
+    pub fn scasb16(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let di = self.di() as u32;
         let al = self.al();
 
-        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
-        let dst_addr = es_base.wrapping_add(di);
-        let op2 = self.mem_read_byte(dst_addr);
+        let op2 = self.read_virtual_byte(BxSegregs::Es, di)?;
 
         let result = al.wrapping_sub(op2);
         self.update_flags_sub8(al, op2, result);
@@ -546,6 +508,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         tracing::trace!("SCASB16: AL={:#04x} vs [{:#04x}]", al, op2);
+        Ok(())
     }
 
     /// SCASB - Compare AL with byte at ES:EDI (32-bit address mode)
@@ -566,13 +529,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SCASW - Compare AX with word at ES:DI (16-bit address mode)
-    pub fn scasw16(&mut self, _instr: &Instruction) {
-        let di = self.di() as u64;
+    pub fn scasw16(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let di = self.di() as u32;
         let ax = self.ax();
 
-        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
-        let dst_addr = es_base.wrapping_add(di);
-        let op2 = self.mem_read_word(dst_addr);
+        let op2 = self.read_virtual_word(BxSegregs::Es, di)?;
 
         let result = ax.wrapping_sub(op2);
         self.update_flags_sub16(ax, op2, result);
@@ -584,6 +545,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         tracing::trace!("SCASW16: AX={:#06x} vs [{:#06x}]", ax, op2);
+        Ok(())
     }
 
     /// SCASW - Compare AX with word at ES:EDI (32-bit address mode)
@@ -604,13 +566,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SCASD - Compare EAX with dword at ES:DI (16-bit address mode)
-    pub fn scasd16(&mut self, _instr: &Instruction) {
-        let di = self.di() as u64;
+    pub fn scasd16(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let di = self.di() as u32;
         let eax = self.eax();
 
-        let es_base = unsafe { self.sregs[BxSegregs::Es as usize].cache.u.segment.base };
-        let dst_addr = es_base.wrapping_add(di);
-        let op2 = self.mem_read_dword(dst_addr);
+        let op2 = self.read_virtual_dword(BxSegregs::Es, di)?;
 
         let result = eax.wrapping_sub(op2);
         self.update_flags_sub32(eax, op2, result);
@@ -622,6 +582,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         tracing::trace!("SCASD16: EAX={:#010x} vs [{:#010x}]", eax, op2);
+        Ok(())
     }
 
     /// SCASD - Compare EAX with dword at ES:EDI (32-bit address mode)
@@ -646,249 +607,312 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// REP MOVSB CX times (16-bit)
-    pub fn rep_movsb16(&mut self, instr: &Instruction) {
+    pub fn rep_movsb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.movsb16(instr);
+            self.movsb16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REP MOVSW CX times (16-bit)
-    pub fn rep_movsw16(&mut self, instr: &Instruction) {
+    pub fn rep_movsw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.movsw16(instr);
+            self.movsw16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REP MOVSD CX times (16-bit)
-    pub fn rep_movsd16(&mut self, instr: &Instruction) {
+    pub fn rep_movsd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.movsd16(instr);
+            self.movsd16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REP STOSB CX times (16-bit)
-    pub fn rep_stosb16(&mut self, instr: &Instruction) {
+    pub fn rep_stosb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.stosb16(instr);
+            self.stosb16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REP STOSW CX times (16-bit)
-    pub fn rep_stosw16(&mut self, instr: &Instruction) {
+    pub fn rep_stosw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.stosw16(instr);
+            self.stosw16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REP STOSD CX times (16-bit)
-    pub fn rep_stosd16(&mut self, instr: &Instruction) {
+    pub fn rep_stosd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.stosd16(instr);
+            self.stosd16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REP LODSB CX times (16-bit)
-    pub fn rep_lodsb16(&mut self, instr: &Instruction) {
+    pub fn rep_lodsb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.lodsb16(instr);
+            self.lodsb16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REP LODSW CX times (16-bit)
-    pub fn rep_lodsw16(&mut self, instr: &Instruction) {
+    pub fn rep_lodsw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.lodsw16(instr);
+            self.lodsw16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REP LODSD CX times (16-bit)
-    pub fn rep_lodsd16(&mut self, instr: &Instruction) {
+    pub fn rep_lodsd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.lodsd16(instr);
+            self.lodsd16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REPE CMPSB CX (16-bit)
-    pub fn repe_cmpsb16(&mut self, instr: &Instruction) {
+    pub fn repe_cmpsb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.cmpsb16(instr);
+            self.cmpsb16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
             if !self.get_zf() {
                 break;
             }
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REPNE CMPSB CX (16-bit)
-    pub fn repne_cmpsb16(&mut self, instr: &Instruction) {
+    pub fn repne_cmpsb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.cmpsb16(instr);
+            self.cmpsb16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
             if self.get_zf() {
                 break;
             }
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REPE CMPSW CX (16-bit)
-    pub fn repe_cmpsw16(&mut self, instr: &Instruction) {
+    pub fn repe_cmpsw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.cmpsw16(instr);
+            self.cmpsw16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
             if !self.get_zf() {
                 break;
             }
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REPNE CMPSW CX (16-bit)
-    pub fn repne_cmpsw16(&mut self, instr: &Instruction) {
+    pub fn repne_cmpsw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.cmpsw16(instr);
+            self.cmpsw16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
             if self.get_zf() {
                 break;
             }
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REPE CMPSD CX (16-bit)
-    pub fn repe_cmpsd16(&mut self, instr: &Instruction) {
+    pub fn repe_cmpsd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.cmpsd16(instr);
+            self.cmpsd16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
             if !self.get_zf() {
                 break;
             }
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REPNE CMPSD CX (16-bit)
-    pub fn repne_cmpsd16(&mut self, instr: &Instruction) {
+    pub fn repne_cmpsd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.cmpsd16(instr);
+            self.cmpsd16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
             if self.get_zf() {
                 break;
             }
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REPE SCASB CX (16-bit)
-    pub fn repe_scasb16(&mut self, instr: &Instruction) {
+    pub fn repe_scasb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.scasb16(instr);
+            self.scasb16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
             if !self.get_zf() {
                 break;
             }
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REPNE SCASB CX (16-bit)
-    pub fn repne_scasb16(&mut self, instr: &Instruction) {
+    pub fn repne_scasb16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.scasb16(instr);
+            self.scasb16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
             if self.get_zf() {
                 break;
             }
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REPE SCASW CX (16-bit)
-    pub fn repe_scasw16(&mut self, instr: &Instruction) {
+    pub fn repe_scasw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.scasw16(instr);
+            self.scasw16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
             if !self.get_zf() {
                 break;
             }
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REPNE SCASW CX (16-bit)
-    pub fn repne_scasw16(&mut self, instr: &Instruction) {
+    pub fn repne_scasw16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.scasw16(instr);
+            self.scasw16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
             if self.get_zf() {
                 break;
             }
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REPE SCASD CX (16-bit)
-    pub fn repe_scasd16(&mut self, instr: &Instruction) {
+    pub fn repe_scasd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.scasd16(instr);
+            self.scasd16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
             if !self.get_zf() {
                 break;
             }
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// REPNE SCASD CX (16-bit)
-    pub fn repne_scasd16(&mut self, instr: &Instruction) {
+    pub fn repne_scasd16(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut cx = self.cx();
         while cx != 0 {
-            self.scasd16(instr);
+            self.scasd16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
+            self.icount += 1;
             if self.get_zf() {
                 break;
             }
         }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     // =========================================================================
@@ -904,6 +928,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_ecx(ecx);
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -916,6 +941,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_ecx(ecx);
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -928,6 +954,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_ecx(ecx);
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -940,6 +967,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_ecx(ecx);
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -952,6 +980,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_ecx(ecx);
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -964,6 +993,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_ecx(ecx);
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -976,6 +1006,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_ecx(ecx);
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -988,6 +1019,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_ecx(ecx);
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1000,6 +1032,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_ecx(ecx);
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1015,6 +1048,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1030,6 +1064,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1045,6 +1080,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1060,6 +1096,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1075,6 +1112,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1090,6 +1128,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1105,6 +1144,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1120,6 +1160,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1135,6 +1176,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1150,6 +1192,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1165,6 +1208,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1180,6 +1224,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
         self.set_rcx(self.ecx() as u64);
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1389,9 +1434,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         } else {
             if instr.lock_rep_used_value() != 0 {
-                self.rep_movsb16(instr);
+                self.rep_movsb16(instr)?;
             } else {
-                self.movsb16(instr);
+                self.movsb16(instr)?;
             }
         }
         Ok(())
@@ -1407,9 +1452,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         } else {
             if instr.lock_rep_used_value() != 0 {
-                self.rep_movsw16(instr);
+                self.rep_movsw16(instr)?;
             } else {
-                self.movsw16(instr);
+                self.movsw16(instr)?;
             }
         }
         Ok(())
@@ -1425,9 +1470,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         } else {
             if instr.lock_rep_used_value() != 0 {
-                self.rep_movsd16(instr);
+                self.rep_movsd16(instr)?;
             } else {
-                self.movsd16(instr);
+                self.movsd16(instr)?;
             }
         }
         Ok(())
@@ -1445,9 +1490,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         } else {
             if instr.lock_rep_used_value() != 0 {
-                self.rep_stosb16(instr);
+                self.rep_stosb16(instr)?;
             } else {
-                self.stosb16(instr);
+                self.stosb16(instr)?;
             }
         }
         Ok(())
@@ -1463,9 +1508,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         } else {
             if instr.lock_rep_used_value() != 0 {
-                self.rep_stosw16(instr);
+                self.rep_stosw16(instr)?;
             } else {
-                self.stosw16(instr);
+                self.stosw16(instr)?;
             }
         }
         Ok(())
@@ -1481,9 +1526,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         } else {
             if instr.lock_rep_used_value() != 0 {
-                self.rep_stosd16(instr);
+                self.rep_stosd16(instr)?;
             } else {
-                self.stosd16(instr);
+                self.stosd16(instr)?;
             }
         }
         Ok(())
@@ -1501,9 +1546,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         } else {
             if instr.lock_rep_used_value() != 0 {
-                self.rep_lodsb16(instr);
+                self.rep_lodsb16(instr)?;
             } else {
-                self.lodsb16(instr);
+                self.lodsb16(instr)?;
             }
         }
         Ok(())
@@ -1519,9 +1564,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         } else {
             if instr.lock_rep_used_value() != 0 {
-                self.rep_lodsw16(instr);
+                self.rep_lodsw16(instr)?;
             } else {
-                self.lodsw16(instr);
+                self.lodsw16(instr)?;
             }
         }
         Ok(())
@@ -1537,9 +1582,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         } else {
             if instr.lock_rep_used_value() != 0 {
-                self.rep_lodsd16(instr);
+                self.rep_lodsd16(instr)?;
             } else {
-                self.lodsd16(instr);
+                self.lodsd16(instr)?;
             }
         }
         Ok(())
@@ -1560,11 +1605,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         } else {
             if rep == 3 {
-                self.repe_scasb16(instr);
+                self.repe_scasb16(instr)?;
             } else if rep == 2 {
-                self.repne_scasb16(instr);
+                self.repne_scasb16(instr)?;
             } else {
-                self.scasb16(instr);
+                self.scasb16(instr)?;
             }
         }
         Ok(())
@@ -1583,11 +1628,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         } else {
             if rep == 3 {
-                self.repe_scasw16(instr);
+                self.repe_scasw16(instr)?;
             } else if rep == 2 {
-                self.repne_scasw16(instr);
+                self.repne_scasw16(instr)?;
             } else {
-                self.scasw16(instr);
+                self.scasw16(instr)?;
             }
         }
         Ok(())
@@ -1606,11 +1651,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         } else {
             if rep == 3 {
-                self.repe_scasd16(instr);
+                self.repe_scasd16(instr)?;
             } else if rep == 2 {
-                self.repne_scasd16(instr);
+                self.repne_scasd16(instr)?;
             } else {
-                self.scasd16(instr);
+                self.scasd16(instr)?;
             }
         }
         Ok(())
@@ -1631,11 +1676,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         } else {
             if rep == 3 {
-                self.repe_cmpsb16(instr);
+                self.repe_cmpsb16(instr)?;
             } else if rep == 2 {
-                self.repne_cmpsb16(instr);
+                self.repne_cmpsb16(instr)?;
             } else {
-                self.cmpsb16(instr);
+                self.cmpsb16(instr)?;
             }
         }
         Ok(())
@@ -1654,11 +1699,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         } else {
             if rep == 3 {
-                self.repe_cmpsw16(instr);
+                self.repe_cmpsw16(instr)?;
             } else if rep == 2 {
-                self.repne_cmpsw16(instr);
+                self.repne_cmpsw16(instr)?;
             } else {
-                self.cmpsw16(instr);
+                self.cmpsw16(instr)?;
             }
         }
         Ok(())
@@ -1677,11 +1722,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         } else {
             if rep == 3 {
-                self.repe_cmpsd16(instr);
+                self.repe_cmpsd16(instr)?;
             } else if rep == 2 {
-                self.repne_cmpsd16(instr);
+                self.repne_cmpsd16(instr)?;
             } else {
-                self.cmpsd16(instr);
+                self.cmpsd16(instr)?;
             }
         }
         Ok(())

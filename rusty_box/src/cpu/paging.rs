@@ -38,6 +38,10 @@ const BX_LEVEL_PTE: usize = 0;
 // CR3 paging mask (bits 31:12)
 const BX_CR3_PAGING_MASK: u64 = 0xFFFFF000;
 
+// Reserved bits in 4MB PSE PDE entries (Bochs paging.cc PAGING_PDE4M_RESERVED_BITS).
+// For BX_PHY_ADDRESS_WIDTH=40: ((1 << (41-40))-1) << (13+40-32) = 1 << 21 = 0x200000
+const PAGING_PDE4M_RESERVED_BITS: u32 = 0x200000;
+
 // Privilege check array (for CR0.WP=0 and CR0.WP=1)
 // Index format: |wp|us|us|rw|rw| where:
 //   wp: CR0.WP value
@@ -185,6 +189,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Check for 4MB page (PSE bit in PDE, only if CR4.PSE enabled)
         if (entry[BX_LEVEL_PDE] & 0x80) != 0 && self.cr4.pse() {
+            // Bochs paging.cc: check reserved bits in PSE PDE
+            if (entry[BX_LEVEL_PDE] & PAGING_PDE4M_RESERVED_BITS) != 0 {
+                tracing::debug!("PSE PDE4M: reserved bit is set: PDE={:#010x}", entry[BX_LEVEL_PDE]);
+                return Err(super::CpuError::Memory(
+                    crate::memory::MemoryError::PageProtectionViolation,
+                ));
+            }
             // 4MB page — permission check using combined access from PDE only
             let combined =
                 entry[BX_LEVEL_PDE] & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
@@ -408,6 +419,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Check for 4MB page (PSE)
         if (pde & 0x80) != 0 && self.cr4.pse() {
+            // Bochs paging.cc: check reserved bits in PSE PDE
+            if (pde & PAGING_PDE4M_RESERVED_BITS) != 0 {
+                tracing::debug!("system_write PSE PDE4M: reserved bit set: PDE={:#010x}", pde);
+                return Err(super::CpuError::Memory(
+                    crate::memory::MemoryError::PageNotPresent,
+                ));
+            }
             // Set Accessed + Dirty bits on PDE for 4MB page
             let needed = 0x20 | 0x40; // A + D for write
             if pde & needed != needed {
@@ -694,6 +712,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // ---- 4 MB page (PSE) ----
         if pde & 0x80 != 0 && self.cr4.pse() {
+            // Bochs paging.cc: check reserved bits in PSE PDE
+            if (pde & PAGING_PDE4M_RESERVED_BITS) != 0 {
+                tracing::debug!("PSE PDE4M: reserved bit is set: PDE={:#010x}", pde);
+                self.page_fault(ERROR_RESERVED | ERROR_PROTECTION, laddr, user, is_write)?;
+                return Err(super::CpuError::CpuLoopRestart);
+            }
             let combined = pde & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
             let priv_index =
                 ((self.cr0.wp() as u32) << 4) | ((user as u32) << 3) | combined | (is_write as u32);

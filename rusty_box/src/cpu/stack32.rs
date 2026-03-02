@@ -371,25 +371,60 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// PUSHFD - Push flags (32-bit)
+    /// Based on Bochs flag_ctrl.cc:273-290 PUSHF_Fd
     pub fn pushf_fd(&mut self, _instr: &Instruction) -> super::Result<()> {
+        if self.v8086_mode() && self.eflags.iopl() < 3 {
+            tracing::debug!("PUSHFD: #GP(0) in v8086 mode");
+            self.exception(super::cpu::Exception::Gp, 0)?;
+        }
+
         // VM & RF flags cleared in image stored on the stack
         let flags = self.eflags.bits() & 0x00FCFFFF;
         self.push_32(flags)?;
-        tracing::trace!("PUSHFD: {:#010x}", flags);
         Ok(())
     }
 
     /// POPFD - Pop flags (32-bit)
+    /// Based on Bochs flag_ctrl.cc:292-340 POPF_Fd
     pub fn popf_fd(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let flags = self.pop_32()?;
+        use super::decoder::BxSegregs;
 
-        // RF is always zero after POPF
-        // VM, VIP, VIF are unaffected in protected mode
-        const CHANGE_MASK: u32 = 0x00244FD5;
+        // Base changeMask: OSZAPC + TF + DF + NT + RF + ID + AC
+        let mut change_mask: u32 = EFlags::OSZAPC.bits()
+            | EFlags::TF.bits()
+            | EFlags::DF.bits()
+            | EFlags::NT.bits()
+            | EFlags::RF.bits()
+            | EFlags::ID.bits()
+            | EFlags::AC.bits();
 
-        self.eflags =
-            EFlags::from_bits_retain((self.eflags.bits() & !CHANGE_MASK) | (flags & CHANGE_MASK));
-        tracing::trace!("POPFD: {:#010x}", flags);
+        // RF is always zero after the execution of POPF
+        let flags32 = self.pop_32()? & !EFlags::RF.bits();
+
+        if self.protected_mode() {
+            // IOPL changed only if CPL == 0
+            // IF changed only if CPL <= EFLAGS.IOPL
+            // VIF, VIP, VM are unaffected
+            let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl as u32;
+            if cpl == 0 {
+                change_mask |= EFlags::IOPL_MASK.bits();
+            }
+            if cpl <= self.eflags.iopl() as u32 {
+                change_mask |= EFlags::IF_.bits();
+            }
+        } else if self.v8086_mode() {
+            if self.eflags.iopl() < 3 {
+                tracing::debug!("POPFD: #GP(0) in v8086 mode");
+                self.exception(super::cpu::Exception::Gp, 0)?;
+            }
+            // v8086-mode: VM, IOPL, VIP, VIF are unaffected
+            change_mask |= EFlags::IF_.bits();
+        } else {
+            // Real mode: VIF, VIP, VM are unaffected
+            change_mask |= EFlags::IOPL_MASK.bits() | EFlags::IF_.bits();
+        }
+
+        self.write_eflags(flags32, change_mask);
         Ok(())
     }
 
@@ -416,6 +451,65 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.stack_write_word(sp.wrapping_sub(4) as u32, val_16)?;
             self.set_gpr16(4, sp.wrapping_sub(4));
         }
+        Ok(())
+    }
+
+    /// ENTER (32-bit operand size)
+    /// Based on Bochs stack32.cc:195-256 ENTER32_IwIb
+    pub fn enter32_iw_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        let imm16 = instr.iw() as u32;
+        let mut level = instr.ib2() & 0x1F;
+
+        self.push_32(self.ebp())?;
+        let frame_ptr32 = self.esp();
+
+        if self.is_stack_32bit() {
+            let mut ebp = self.ebp(); // Use temp copy for case of exception
+
+            if level > 0 {
+                // do level-1 times
+                while { level -= 1; level } > 0 {
+                    ebp = ebp.wrapping_sub(4);
+                    let temp32 = self.stack_read_dword(ebp)?;
+                    self.push_32(temp32)?;
+                }
+
+                // push(frame pointer)
+                self.push_32(frame_ptr32)?;
+            }
+
+            self.set_esp(self.esp().wrapping_sub(imm16));
+
+            // ENTER finishes with memory write check on the final stack pointer
+            // the memory is touched but no write actually occurs
+            // emulate it by doing RMW read access from SS:ESP
+            let esp = self.esp();
+            self.read_rmw_virtual_dword(super::decoder::BxSegregs::Ss, esp)?;
+        } else {
+            let mut bp = self.bp() as u32;
+
+            if level > 0 {
+                // do level-1 times
+                while { level -= 1; level } > 0 {
+                    bp = bp.wrapping_sub(4) & 0xFFFF;
+                    let temp32 = self.stack_read_dword(bp)?;
+                    self.push_32(temp32)?;
+                }
+
+                // push(frame pointer)
+                self.push_32(frame_ptr32)?;
+            }
+
+            self.set_sp(self.sp().wrapping_sub(imm16 as u16));
+
+            // ENTER finishes with memory write check on the final stack pointer
+            // the memory is touched but no write actually occurs
+            // emulate it by doing RMW read access from SS:SP
+            let sp = self.sp() as u32;
+            self.read_rmw_virtual_dword(super::decoder::BxSegregs::Ss, sp)?;
+        }
+
+        self.set_ebp(frame_ptr32);
         Ok(())
     }
 

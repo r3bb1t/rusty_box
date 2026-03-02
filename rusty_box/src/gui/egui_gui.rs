@@ -61,6 +61,8 @@ mod bridge_impl {
                     tm_info.cs_start,
                     tm_info.cs_end,
                     tm_info.line_graphics,
+                    tm_info.start_address as u32,
+                    tm_info.line_offset as u32,
                 );
             }
         }

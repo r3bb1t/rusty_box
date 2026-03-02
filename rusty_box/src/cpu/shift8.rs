@@ -320,6 +320,126 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
+    // RCL - Rotate through Carry Left (8-bit)
+    // Matches Bochs shift8.cc RCL_EbR / RCL_EbM
+    // =========================================================================
+
+    /// RCL r/m8, 1
+    pub fn rcl_eb_1(&mut self, instr: &Instruction) -> super::Result<()> {
+        let (op1, laddr) = self.shift_read8(instr)?;
+        let temp_cf = self.get_cf() as u8;
+        let result = (op1 << 1) | temp_cf;
+        self.shift_write8(instr, laddr, result);
+
+        let cf = (op1 >> 7) & 1;
+        let of = cf ^ (result >> 7);
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    /// RCL r/m8, CL
+    pub fn rcl_eb_cl(&mut self, instr: &Instruction) -> super::Result<()> {
+        let count = ((self.cl() & 0x1F) % 9) as u32;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (op1, laddr) = self.shift_read8(instr)?;
+        let temp_cf = self.get_cf() as u32;
+        let op1_32 = op1 as u32;
+        let result = if count == 1 {
+            ((op1_32 << 1) | temp_cf) as u8
+        } else {
+            ((op1_32 << count) | (temp_cf << (count - 1)) | (op1_32 >> (9 - count))) as u8
+        };
+        self.shift_write8(instr, laddr, result);
+
+        let cf = (op1_32 >> (8 - count)) & 1;
+        let of = cf ^ ((result >> 7) as u32);
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    /// RCL r/m8, imm8
+    pub fn rcl_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        let count = ((instr.ib() & 0x1F) % 9) as u32;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (op1, laddr) = self.shift_read8(instr)?;
+        let temp_cf = self.get_cf() as u32;
+        let op1_32 = op1 as u32;
+        let result = if count == 1 {
+            ((op1_32 << 1) | temp_cf) as u8
+        } else {
+            ((op1_32 << count) | (temp_cf << (count - 1)) | (op1_32 >> (9 - count))) as u8
+        };
+        self.shift_write8(instr, laddr, result);
+
+        let cf = (op1_32 >> (8 - count)) & 1;
+        let of = cf ^ ((result >> 7) as u32);
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    // =========================================================================
+    // RCR - Rotate through Carry Right (8-bit)
+    // Matches Bochs shift8.cc RCR_EbR / RCR_EbM
+    // =========================================================================
+
+    /// RCR r/m8, 1
+    pub fn rcr_eb_1(&mut self, instr: &Instruction) -> super::Result<()> {
+        let (op1, laddr) = self.shift_read8(instr)?;
+        let temp_cf = self.get_cf() as u8;
+        let result = (op1 >> 1) | (temp_cf << 7);
+        self.shift_write8(instr, laddr, result);
+
+        let cf = op1 & 1;
+        let of = (((result << 1) ^ result) >> 7) & 1;
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    /// RCR r/m8, CL
+    pub fn rcr_eb_cl(&mut self, instr: &Instruction) -> super::Result<()> {
+        let count = ((self.cl() & 0x1F) % 9) as u32;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (op1, laddr) = self.shift_read8(instr)?;
+        let temp_cf = self.get_cf() as u32;
+        let op1_32 = op1 as u32;
+        let result = ((op1_32 >> count) | (temp_cf << (8 - count)) | (op1_32 << (9 - count))) as u8;
+        self.shift_write8(instr, laddr, result);
+
+        let cf = (op1_32 >> (count - 1)) & 1;
+        let of = ((((result as u32) << 1) ^ (result as u32)) >> 7) & 1;
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    /// RCR r/m8, imm8
+    pub fn rcr_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        let count = ((instr.ib() & 0x1F) % 9) as u32;
+        if count == 0 {
+            return Ok(());
+        }
+
+        let (op1, laddr) = self.shift_read8(instr)?;
+        let temp_cf = self.get_cf() as u32;
+        let op1_32 = op1 as u32;
+        let result = ((op1_32 >> count) | (temp_cf << (8 - count)) | (op1_32 << (9 - count))) as u8;
+        self.shift_write8(instr, laddr, result);
+
+        let cf = (op1_32 >> (count - 1)) & 1;
+        let of = ((((result as u32) << 1) ^ (result as u32)) >> 7) & 1;
+        self.set_cf_of(cf != 0, of != 0);
+        Ok(())
+    }
+
+    // =========================================================================
     // Flag update helpers (8-bit)
     // =========================================================================
 

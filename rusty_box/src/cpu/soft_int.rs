@@ -25,7 +25,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Dispatches to real_mode_int or protected_mode_int based on current CPU mode.
     /// After delivery, invalidates prefetch and returns CpuLoopRestart to
     /// restart the trace (matching Bochs BX_NEXT_TRACE).
-    fn interrupt(
+    pub(super) fn interrupt(
         &mut self,
         vector: u8,
         soft_int: bool,
@@ -44,6 +44,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         );
 
         // Discard any traps and inhibits for new context (matches Bochs line 800-801)
+        self.debug_trap = 0;
         self.inhibit_mask = 0;
 
         // Invalidate prefetch queue (matches Bochs line 777)
@@ -62,15 +63,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Protected mode: dispatch through IDT
             match self.protected_mode_int(vector, soft_int, push_error, error_code) {
                 Ok(()) => {}
-                Err(super::error::CpuError::BadVector { vector: new_vector }) => {
+                Err(super::error::CpuError::BadVector { vector: new_vector, error_code: new_error_code }) => {
                     // Delivery failed — raise the indicated exception.
                     tracing::warn!(
-                        "interrupt({:#04x}) PM delivery failed, raising {:?}; icount={}",
+                        "interrupt({:#04x}) PM delivery failed, raising {:?} error_code={:#x}; icount={}",
                         vector,
                         new_vector,
+                        new_error_code,
                         self.icount
                     );
-                    return self.exception(new_vector, 0);
+                    return self.exception(new_vector, new_error_code);
                 }
                 Err(e) => return Err(e),
             }
@@ -152,9 +154,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr32(instr);
 
+        // Bochs: (eaddr+2) & i->asize_mask() — mask for 16-bit address wrap
+        let asize_mask: u32 = if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF };
+
         // Read lower and upper bounds from memory (2 words)
         let bound_min = self.read_virtual_word(seg, eaddr)? as i16;
-        let bound_max = self.read_virtual_word(seg, eaddr.wrapping_add(2))? as i16;
+        let bound_max = self.read_virtual_word(seg, eaddr.wrapping_add(2) & asize_mask)? as i16;
 
         tracing::trace!(
             "BOUND r16: value={}, min={}, max={}",
@@ -190,9 +195,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr32(instr);
 
+        // Bochs: (eaddr+4) & i->asize_mask() — mask for 16-bit address wrap
+        let asize_mask: u32 = if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF };
+
         // Read lower and upper bounds from memory (2 dwords)
         let bound_min = self.read_virtual_dword(seg, eaddr)? as i32;
-        let bound_max = self.read_virtual_dword(seg, eaddr.wrapping_add(4))? as i32;
+        let bound_max = self.read_virtual_dword(seg, eaddr.wrapping_add(4) & asize_mask)? as i32;
 
         tracing::trace!(
             "BOUND r32: value={}, min={}, max={}",
@@ -221,15 +229,31 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// IRET - Return from interrupt (16-bit operand size)
+    /// Based on Bochs ctrl_xfer16.cc IRET16
     pub fn iret16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        // Pop IP, CS, FLAGS from stack
+        // Invalidate prefetch queue at entry (Bochs ctrl_xfer16.cc:541)
+        self.invalidate_prefetch_q();
+
+        // Protected mode dispatch (Bochs ctrl_xfer16.cc:554)
+        if self.protected_mode() {
+            return self.iret_protected_16();
+        }
+        // V8086 mode is handled by protected_mode check
+        // (v8086_mode has CR0.PE=1, handled above)
+
+        // RSP_SPECULATIVE (Bochs ctrl_xfer16.cc:552)
+        self.speculative_rsp = true;
+        self.prev_rsp = self.esp() as u64;
+
+        // Real mode: Pop IP, CS, FLAGS from stack
         let new_ip = self.pop_16()?;
         let new_cs = self.pop_16()?;
         let new_flags = self.pop_16()?;
 
-        // Load CS with new selector (real mode)
+        // Load CS with new selector (real mode load_seg_reg)
         let cs_index = BxSegregs::Cs as usize;
-        parse_selector(new_cs, &mut self.sregs[cs_index].selector);
+        self.sregs[cs_index].selector.value = new_cs;
+        self.sregs[cs_index].selector.rpl = 0; // real mode RPL = 0
         unsafe {
             self.sregs[cs_index].cache.u.segment.base = (new_cs as u64) << 4;
         }
@@ -237,13 +261,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Set IP
         self.set_ip(new_ip);
 
-        // Update FLAGS (preserve some bits)
-        self.eflags =
-            EFlags::from_bits_retain((self.eflags.bits() & 0xFFFF0000) | (new_flags as u32));
+        // write_flags with change_IOPL=true, change_IF=true (Bochs ctrl_xfer16.cc:575)
+        self.write_flags(new_flags, true, true);
 
-        // Invalidate prefetch
-        self.eip_fetch_ptr = None;
-        self.eip_page_window_size = 0;
+        // RSP_COMMIT
+        self.speculative_rsp = false;
 
         tracing::debug!(
             "IRET16: returning to {:04x}:{:04x}, flags={:04x}",
@@ -255,19 +277,31 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// IRET - Return from interrupt (32-bit operand size)
+    /// Based on Bochs ctrl_xfer32.cc IRET32
     pub fn iret32(&mut self, _instr: &Instruction) -> super::Result<()> {
-        if !self.real_mode() {
+        // Invalidate prefetch queue at entry (Bochs ctrl_xfer32.cc:563)
+        self.invalidate_prefetch_q();
+
+        // Protected mode dispatch (Bochs ctrl_xfer32.cc:574)
+        if self.protected_mode() {
             return self.iret_protected();
         }
+        // V8086 mode — not implemented yet (Linux 1.3.89 doesn't use it)
+        // Bochs calls iret32_stack_return_from_v86 here
+
+        // RSP_SPECULATIVE (Bochs ctrl_xfer32.cc:574)
+        self.speculative_rsp = true;
+        self.prev_rsp = self.esp() as u64;
 
         // Real mode: Pop EIP, CS, EFLAGS from stack
         let new_eip = self.pop_32()?;
         let new_cs = self.pop_32()? as u16;
         let new_eflags = self.pop_32()?;
 
-        // Load CS with new selector (real mode: base = selector << 4)
+        // Load CS with new selector (real mode load_seg_reg)
         let cs_index = BxSegregs::Cs as usize;
-        parse_selector(new_cs, &mut self.sregs[cs_index].selector);
+        self.sregs[cs_index].selector.value = new_cs;
+        self.sregs[cs_index].selector.rpl = 0; // real mode RPL = 0
         unsafe {
             self.sregs[cs_index].cache.u.segment.base = (new_cs as u64) << 4;
         }
@@ -275,14 +309,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Set EIP
         self.set_eip(new_eip);
 
-        // Update EFLAGS (keep VM unchanged: 0x00257fd5 mask)
-        self.eflags = EFlags::from_bits_retain(
-            (self.eflags.bits() & 0x00020000) | (new_eflags & !0x00020000u32),
-        );
+        // writeEFlags with VIF, VIP, VM unchanged (Bochs ctrl_xfer32.cc:597)
+        self.write_eflags(new_eflags, EFlags::IRET32_REAL_CHANGE.bits());
 
-        // Invalidate prefetch
-        self.eip_fetch_ptr = None;
-        self.eip_page_window_size = 0;
+        // RSP_COMMIT
+        self.speculative_rsp = false;
 
         tracing::debug!(
             "IRET32: returning to {:04x}:{:08x}, eflags={:08x}",
@@ -359,6 +390,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             );
         }
 
+        // RSP_SPECULATIVE (Bochs iret.cc:107)
+        self.speculative_rsp = true;
+        self.prev_rsp = self.esp() as u64;
+
         // Peek at stack without modifying ESP
         let temp_esp = if self.is_stack_32bit() {
             self.esp()
@@ -372,7 +407,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // If VM bit is set in the saved EFLAGS and CPL==0, stack-return to V86 mode.
         // Not implemented; just log and continue (Linux never does this).
-        if (new_eflags & 0x0002_0000) != 0 {
+        if (new_eflags & EFlags::VM.bits()) != 0 {
             tracing::warn!(
                 "iret_protected: VM bit set in saved EFLAGS — V86 return not implemented"
             );
@@ -418,20 +453,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Compute EFLAGS changeMask based on OLD CPL (before loading new CS)
+        // Based on Bochs iret.cc:148-167
         let iopl = self.eflags.iopl();
-        let mut change_mask: u32 = 0x0000_08D5 | // CF, PF, AF, ZF, SF, OF
-            0x0000_0100 | // TF
-            0x0000_0400 | // DF
-            0x0000_4000 | // NT
-            0x0001_0000 | // RF
-            0x0004_0000 | // AC
-            0x0020_0000; // ID
+        let mut change_mask = EFlags::OSZAPC
+            .union(EFlags::TF)
+            .union(EFlags::DF)
+            .union(EFlags::NT)
+            .union(EFlags::RF)
+            .union(EFlags::AC)
+            .union(EFlags::ID);
         if cpl <= iopl {
-            change_mask |= 0x0000_0200; // IF
+            change_mask = change_mask.union(EFlags::IF_);
         }
         if cpl == 0 {
-            change_mask |= 0x0000_3000 | 0x0008_0000 | 0x0010_0000; // IOPL | VIF | VIP
+            change_mask = change_mask.union(EFlags::IOPL_MASK).union(EFlags::VIF).union(EFlags::VIP);
         }
+        let change_mask = change_mask.bits();
 
         let new_cpl = cs_selector.rpl;
         if new_cpl == cpl {
@@ -451,10 +488,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 new_cpl,
             )?;
 
-            // Restore EFLAGS with masked bits only
-            self.eflags = EFlags::from_bits_retain(
-                (self.eflags.bits() & !change_mask) | (new_eflags & change_mask),
-            );
+            // Restore EFLAGS with proper side effects (Bochs iret.cc:197)
+            self.write_eflags(new_eflags, change_mask);
 
             // Advance ESP by 12 (EIP + CS-dword + EFLAGS = 3 × 4 bytes)
             if self.is_stack_32bit() {
@@ -526,10 +561,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 new_cpl,
             )?;
 
-            // Restore EFLAGS (changeMask was computed from old CPL above)
-            self.eflags = EFlags::from_bits_retain(
-                (self.eflags.bits() & !change_mask) | (new_eflags & change_mask),
-            );
+            // Restore EFLAGS with proper side effects (Bochs iret.cc:318)
+            self.write_eflags(new_eflags, change_mask);
 
             // Load SS and restore ESP
             self.load_ss(&mut ss_selector, &mut ss_descriptor, new_cpl)?;
@@ -544,6 +577,196 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.validate_seg_regs();
         }
 
+        // RSP_COMMIT
+        self.speculative_rsp = false;
+        Ok(())
+    }
+
+    /// IRET in protected mode with 16-bit operand size.
+    /// Based on Bochs iret.cc:iret_protected() with os32=false.
+    /// Reads 16-bit IP/CS/FLAGS from stack instead of 32-bit values.
+    fn iret_protected_16(&mut self) -> super::Result<()> {
+        use super::cpu::Exception;
+
+        // Nested Task (NT) — same as 32-bit path
+        if self.eflags.contains(EFlags::NT) {
+            tracing::debug!("IRET16(PM): nested task return (NT=1)");
+            let tss_base = unsafe { self.tr.cache.u.segment.base };
+            let raw_link_selector = self.system_read_word(tss_base)?;
+            let mut link_selector = BxSelector::default();
+            parse_selector(raw_link_selector, &mut link_selector);
+            if link_selector.ti != 0 {
+                return self.exception(Exception::Ts, raw_link_selector & 0xfffc);
+            }
+            let (dword1, dword2) = match self.fetch_raw_descriptor(&link_selector) {
+                Ok(v) => v,
+                Err(_) => return self.exception(Exception::Ts, raw_link_selector & 0xfffc),
+            };
+            let tss_descriptor = match self.parse_descriptor(dword1, dword2) {
+                Ok(v) => v,
+                Err(_) => return self.exception(Exception::Ts, raw_link_selector & 0xfffc),
+            };
+            if tss_descriptor.valid == 0 || tss_descriptor.segment {
+                return self.exception(Exception::Ts, raw_link_selector & 0xfffc);
+            }
+            if tss_descriptor.r#type != 0x3 && tss_descriptor.r#type != 0xB {
+                return self.exception(Exception::Ts, raw_link_selector & 0xfffc);
+            }
+            if !tss_descriptor.p {
+                return self.exception(Exception::Np, raw_link_selector & 0xfffc);
+            }
+            return self.task_switch(
+                &link_selector,
+                &tss_descriptor,
+                super::tasking::BX_TASK_FROM_IRET,
+                dword1,
+                dword2,
+                false,
+                0,
+            );
+        }
+
+        // RSP_SPECULATIVE
+        self.speculative_rsp = true;
+        self.prev_rsp = self.esp() as u64;
+
+        // Peek at stack — 16-bit reads (6 bytes total)
+        let temp_esp = if self.is_stack_32bit() {
+            self.esp()
+        } else {
+            self.sp() as u32
+        };
+
+        let new_ip = self.stack_read_word(temp_esp + 0)? as u32;
+        let raw_cs_raw = self.stack_read_word(temp_esp + 2)?;
+        let new_flags = self.stack_read_word(temp_esp + 4)? as u32;
+
+        // Return CS selector must be non-null
+        if (raw_cs_raw & 0xfffc) == 0 {
+            self.speculative_rsp = false;
+            return self.exception(Exception::Gp, 0);
+        }
+
+        let mut cs_selector = BxSelector::default();
+        parse_selector(raw_cs_raw, &mut cs_selector);
+
+        let (dword1, dword2) = match self.fetch_raw_descriptor(&cs_selector) {
+            Ok(v) => v,
+            Err(_) => {
+                self.speculative_rsp = false;
+                return self.exception(Exception::Gp, raw_cs_raw & 0xfffc);
+            }
+        };
+        let mut cs_descriptor = match self.parse_descriptor(dword1, dword2) {
+            Ok(v) => v,
+            Err(_) => {
+                self.speculative_rsp = false;
+                return self.exception(Exception::Gp, raw_cs_raw & 0xfffc);
+            }
+        };
+
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        if cs_selector.rpl < cpl {
+            self.speculative_rsp = false;
+            return self.exception(Exception::Gp, raw_cs_raw & 0xfffc);
+        }
+
+        if let Err(_) = self.check_cs(&cs_descriptor, raw_cs_raw, 0, cs_selector.rpl) {
+            self.speculative_rsp = false;
+            return self.exception(Exception::Gp, raw_cs_raw & 0xfffc);
+        }
+
+        let new_cpl = cs_selector.rpl;
+        let iopl = self.eflags.iopl();
+
+        if new_cpl == cpl {
+            // Same privilege — 16-bit
+            self.branch_far(
+                &mut cs_selector,
+                &mut cs_descriptor,
+                new_ip as u64,
+                new_cpl,
+            )?;
+
+            // write_flags for 16-bit (Bochs iret.cc:201)
+            self.write_flags(new_flags as u16, cpl == 0, cpl <= iopl);
+
+            // Advance ESP by 6 (IP + CS + FLAGS = 3 × 2 bytes)
+            if self.is_stack_32bit() {
+                let esp = self.esp();
+                self.set_esp(esp.wrapping_add(6));
+            } else {
+                let sp = self.sp();
+                self.set_sp(sp.wrapping_add(6));
+            }
+        } else {
+            // Outer privilege — 16-bit
+            let new_sp = self.stack_read_word(temp_esp + 6)? as u32;
+            let raw_ss_raw = self.stack_read_word(temp_esp + 8)?;
+
+            if (raw_ss_raw & 0xfffc) == 0 {
+                self.speculative_rsp = false;
+                return self.exception(Exception::Gp, 0);
+            }
+
+            let mut ss_selector = BxSelector::default();
+            parse_selector(raw_ss_raw, &mut ss_selector);
+
+            if ss_selector.rpl != cs_selector.rpl {
+                self.speculative_rsp = false;
+                return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+            }
+
+            let (ss_dw1, ss_dw2) = match self.fetch_raw_descriptor(&ss_selector) {
+                Ok(v) => v,
+                Err(_) => {
+                    self.speculative_rsp = false;
+                    return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+                }
+            };
+            let mut ss_descriptor = match self.parse_descriptor(ss_dw1, ss_dw2) {
+                Ok(v) => v,
+                Err(_) => {
+                    self.speculative_rsp = false;
+                    return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+                }
+            };
+
+            if ss_descriptor.valid == 0
+                || !ss_descriptor.segment
+                || ss_descriptor.r#type >= 8
+                || (ss_descriptor.r#type & 2) == 0
+            {
+                self.speculative_rsp = false;
+                return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+            }
+            if ss_descriptor.dpl != cs_selector.rpl {
+                self.speculative_rsp = false;
+                return self.exception(Exception::Gp, raw_ss_raw & 0xfffc);
+            }
+            if !ss_descriptor.p {
+                self.speculative_rsp = false;
+                return self.exception(Exception::Np, raw_ss_raw & 0xfffc);
+            }
+
+            self.branch_far(
+                &mut cs_selector,
+                &mut cs_descriptor,
+                new_ip as u64,
+                new_cpl,
+            )?;
+
+            // write_flags for 16-bit (Bochs iret.cc:294)
+            self.write_flags(new_flags as u16, cpl == 0, cpl <= iopl);
+
+            self.load_ss(&mut ss_selector, &mut ss_descriptor, new_cpl)?;
+            self.set_sp(new_sp as u16);
+
+            self.validate_seg_regs();
+        }
+
+        // RSP_COMMIT
+        self.speculative_rsp = false;
         Ok(())
     }
 
@@ -552,39 +775,55 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// Handle interrupt in real mode using IVT
+    /// Based on Bochs exception.cc:731-760 real_mode_int()
     pub(super) fn interrupt_real_mode(&mut self, vector: u8) -> super::Result<()> {
+        // Bochs exception.cc:733-736: IDTR limit check
+        if (vector as u32 * 4 + 3) > self.idtr.limit as u32 {
+            tracing::error!("interrupt(real mode) vector > idtr.limit");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
         // Save current FLAGS, CS, IP on stack
+        // Bochs exception.cc:738-740: push FLAGS, CS, IP
         let flags = (self.eflags.bits() & 0xFFFF) as u16;
         let cs = self.sregs[BxSegregs::Cs as usize].selector.value;
         let ip = self.get_ip();
 
-        // Push FLAGS, CS, IP
         self.push_16(flags)?;
         self.push_16(cs)?;
         self.push_16(ip)?;
 
-        // Clear IF and TF
-        self.eflags.remove(EFlags::IF_ | EFlags::TF); // Clear IF and TF
+        // Bochs exception.cc:742: read new IP from IVT using system_read_word (paging-aware)
+        let ivt_addr = self.idtr.base + (vector as u64) * 4;
+        let new_ip = self.system_read_word(ivt_addr)?;
 
-        // Read interrupt vector from IVT at 0000:vector*4
-        let ivt_offset = (vector as u64) * 4;
-        let new_ip = self.mem_read_word(ivt_offset);
-        let new_cs = self.mem_read_word(ivt_offset + 2);
+        // Bochs exception.cc:744-747: CS limit check on loaded IP
+        let cs_limit = self.get_segment_limit(BxSegregs::Cs);
+        if (new_ip as u32) > cs_limit {
+            tracing::error!("interrupt(real mode): instruction pointer not within code segment limits");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Bochs exception.cc:749: read new CS from IVT
+        let new_cs = self.system_read_word(ivt_addr + 2)?;
 
         // Boot diagnostic: if we ever vector to 0000:0000 in real mode, BIOS likely
         // hit an unexpected exception/IRQ before IVT was initialized (or IVT reads are broken).
-        // Emit a one-time marker to port 0xE9 so the host can see it in headless mode.
         if new_ip == 0 && new_cs == 0 && (self.boot_debug_flags & 0x02) == 0 {
             self.boot_debug_flags |= 0x02;
             self.debug_puts(b"[IVT->0000:0000]\n");
         }
-        // Load CS:IP from IVT
+
+        // Bochs exception.cc:750-751: load CS:IP from IVT
         let cs_index = BxSegregs::Cs as usize;
         parse_selector(new_cs, &mut self.sregs[cs_index].selector);
         unsafe {
             self.sregs[cs_index].cache.u.segment.base = (new_cs as u64) << 4;
         }
         self.set_ip(new_ip);
+
+        // Bochs exception.cc:754-759: clear IF, TF, AC, RF
+        self.eflags.remove(EFlags::IF_ | EFlags::TF | EFlags::AC | EFlags::RF);
 
         // Invalidate prefetch
         self.eip_fetch_ptr = None;
@@ -614,24 +853,26 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// HLT - Halt CPU until interrupt
-    /// In Bochs: Sets activity_state to ActivityStateHlt and raises async_event
-    pub fn hlt(&mut self, _instr: &Instruction) {
+    /// Based on Bochs proc_ctrl.cc:197-235
+    pub fn hlt(&mut self, _instr: &Instruction) -> super::Result<()> {
+        // CPL is always 0 in real mode
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        if cpl != 0 {
+            tracing::debug!("HLT: CPL={} != 0, #GP(0)", cpl);
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
         // Check if interrupts are disabled (IF=0) - matches Bochs proc_ctrl.cc:206
         if !self.eflags.contains(EFlags::IF_) {
             tracing::warn!("HLT: CPU halted with IF=0 (interrupts disabled) - CPU will be stuck!");
         }
 
-        tracing::debug!(
-            "HLT: CPU halted, IF={}",
-            self.eflags.contains(EFlags::IF_) as u32
-        );
-
-        // Set activity state to halted (matches Bochs proc_ctrl.cc:203)
+        // Set activity state to halted (matches Bochs enter_sleep_state)
         self.activity_state = CpuActivityState::Hlt;
 
         // Set async event to indicate we need to sync and check for interrupts
-        // In Bochs, this causes the CPU to return from cpu_loop and check for interrupts
         self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     /// CPUID - CPU Identification

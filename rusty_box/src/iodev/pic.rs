@@ -340,6 +340,12 @@ pub struct BxPicC {
     pub(crate) slave: Pic8259State,
     /// Edge/Level Control Registers (ELCR)
     pub(crate) elcr: [u8; 2],
+    /// Raw pointer to CPU's `async_event` for BX_RAISE_INTR / BX_CLEAR_INTR signaling.
+    /// When master int_pin asserts, we write 1 here so the CPU breaks out of the
+    /// inner trace loop at the next instruction boundary (matching Bochs BX_RAISE_INTR).
+    cpu_async_event_ptr: *mut u32,
+    /// Raw pointer to CPU's `pending_event` for event-bit management.
+    cpu_pending_event_ptr: *mut u32,
 }
 
 impl Default for BxPicC {
@@ -365,6 +371,54 @@ impl BxPicC {
             master,
             slave,
             elcr: [0, 0],
+            cpu_async_event_ptr: core::ptr::null_mut(),
+            cpu_pending_event_ptr: core::ptr::null_mut(),
+        }
+    }
+
+    /// Wire CPU signal pointers for BX_RAISE_INTR / BX_CLEAR_INTR.
+    ///
+    /// Must be called before CPU execution begins. The pointers must remain
+    /// valid for the lifetime of the emulator.
+    ///
+    /// # Safety
+    /// The caller must ensure the pointers remain valid and that the PIC
+    /// is only accessed from one thread at a time.
+    pub unsafe fn set_cpu_signal_ptrs(
+        &mut self,
+        async_event: *mut u32,
+        pending_event: *mut u32,
+    ) {
+        self.cpu_async_event_ptr = async_event;
+        self.cpu_pending_event_ptr = pending_event;
+    }
+
+    /// BX_RAISE_INTR — signal CPU that an external interrupt is pending.
+    ///
+    /// Matches Bochs `BX_RAISE_INTR()` macro which calls
+    /// `BX_CPU(0)->signal_event(BX_EVENT_PENDING_INTR)`.
+    #[inline]
+    fn raise_intr(&self) {
+        if !self.cpu_async_event_ptr.is_null() {
+            unsafe {
+                // pending_event |= (1 << BX_EVENT_PENDING_INTR)
+                // BX_EVENT_PENDING_INTR = 0, so bit 0
+                *self.cpu_pending_event_ptr |= 1;
+                *self.cpu_async_event_ptr = 1;
+            }
+        }
+    }
+
+    /// BX_CLEAR_INTR — clear the external interrupt pending signal.
+    ///
+    /// Matches Bochs `BX_CLEAR_INTR()` macro which calls
+    /// `BX_CPU(0)->clear_event(BX_EVENT_PENDING_INTR)`.
+    #[inline]
+    fn clear_intr(&self) {
+        if !self.cpu_pending_event_ptr.is_null() {
+            unsafe {
+                *self.cpu_pending_event_ptr &= !1;
+            }
         }
     }
 
@@ -395,12 +449,16 @@ impl BxPicC {
 
     /// Dispatch `Pic8259State::service()` result, handling cascade side effects.
     ///
-    /// For master: `int_pin` is managed inside `service()`, no external action needed.
+    /// For master: signal CPU via BX_RAISE_INTR / BX_CLEAR_INTR (Bochs pic.cc).
     /// For slave: cascade via `raise_irq(2)` / `lower_irq(2)` on the master.
     fn service_pic_dispatch(&mut self, is_master: bool) {
         if is_master {
-            let _action = self.master.service();
-            // Master int_pin directly controls CPU INTR — no cascade needed
+            let action = self.master.service();
+            match action {
+                PicServiceAction::RaiseIntr => self.raise_intr(),
+                PicServiceAction::ClearIntr => self.clear_intr(),
+                _ => {}
+            }
         } else {
             let action = self.slave.service();
             match action {
@@ -474,10 +532,14 @@ impl BxPicC {
             PIC_SLAVE_DATA => self.write_data(value, false),
             PIC_ELCR1 => {
                 self.elcr[0] = value & 0xF8; // IRQ0-2 are edge-triggered only
+                // Sync ELCR to master PIC edge_level (Bochs pic.cc set_mode)
+                self.master.edge_level = self.elcr[0];
                 tracing::debug!("PIC: ELCR1 = {:#04x}", value);
             }
             PIC_ELCR2 => {
                 self.elcr[1] = value & 0xDE; // IRQ8,13 are edge-triggered only
+                // Sync ELCR to slave PIC edge_level (Bochs pic.cc set_mode)
+                self.slave.edge_level = self.elcr[1];
                 tracing::debug!("PIC: ELCR2 = {:#04x}", value);
             }
             _ => {
@@ -751,23 +813,21 @@ impl BxPicC {
     /// PCI IRQ sharing. The logic is equivalent for single-type IRQs.
     pub fn raise_irq(&mut self, irq_no: u8) {
         if irq_no < 8 {
-            // Master PIC
-            if self.master.irq_in[irq_no as usize] == 0 {
-                self.master.irq_in[irq_no as usize] = 1;
-                if (self.master.irr & (1 << irq_no)) == 0 {
-                    self.master.irr |= 1 << irq_no;
-                    self.service_pic_dispatch(true);
-                }
+            // Master PIC — Bochs pic.cc:491-496
+            // Bochs guard: `(IRQ_in[n] & ~irq_type) == 0` allows re-assertion of same type.
+            // For our single-type model, always set irq_in and check IRR.
+            self.master.irq_in[irq_no as usize] = 1;
+            if (self.master.irr & (1 << irq_no)) == 0 {
+                self.master.irr |= 1 << irq_no;
+                self.service_pic_dispatch(true);
             }
         } else if irq_no < 16 {
-            // Slave PIC
+            // Slave PIC — same logic
             let slave_irq = irq_no - 8;
-            if self.slave.irq_in[slave_irq as usize] == 0 {
-                self.slave.irq_in[slave_irq as usize] = 1;
-                if (self.slave.irr & (1 << slave_irq)) == 0 {
-                    self.slave.irr |= 1 << slave_irq;
-                    self.service_pic_dispatch(false);
-                }
+            self.slave.irq_in[slave_irq as usize] = 1;
+            if (self.slave.irr & (1 << slave_irq)) == 0 {
+                self.slave.irr |= 1 << slave_irq;
+                self.service_pic_dispatch(false);
             }
         }
     }
@@ -829,7 +889,8 @@ impl BxPicC {
     /// - Slave cascade via IRQ2
     /// - Re-service after acknowledge
     pub fn iac(&mut self) -> u8 {
-        // Deassert master INT (Bochs: BX_CLEAR_INTR + master_pic.INT = 0)
+        // Bochs pic.cc:620-621: BX_CLEAR_INTR(); master_pic.INT = 0;
+        self.clear_intr(); // Signal CPU to clear pending interrupt event
         self.master.int_pin = false;
 
         // Spurious interrupt check: if no unmasked requests, return spurious vector
@@ -839,14 +900,9 @@ impl BxPicC {
         }
 
         // Edge-triggered: clear IRR bit. Level-triggered: keep it.
-        // (Bochs pic.cc:627-628)
+        // (Bochs pic.cc:627-628) — Bochs does NOT clear irq_in here.
         if (self.master.edge_level & (1 << self.master.irq)) == 0 {
             self.master.irr &= !(1 << self.master.irq);
-            // Re-arm edge-triggered IRQ line for future edges.
-            // Deviation from Bochs: Bochs expects devices to call lower_irq/raise_irq
-            // to create edges. We auto-clear irq_in here since our device model
-            // may not always call lower_irq between raises.
-            self.master.irq_in[self.master.irq as usize] = 0;
         }
 
         // Auto-EOI: don't set ISR. Manual EOI: set ISR bit.
@@ -866,7 +922,9 @@ impl BxPicC {
             // IRQ2 = slave cascade (IRQ8-15)
             // (Bochs pic.cc:638-657)
             self.slave.int_pin = false;
-            self.master.irq_in[2] = 0; // Clear cascade assertion
+            // Bochs pic.cc:640: IRQ_in[2] &= ~BX_IRQ_TYPE_ISA
+            // Clear cascade assertion (single-type model: set to 0)
+            self.master.irq_in[2] = 0;
 
             // Slave spurious interrupt check (Bochs pic.cc:642-644)
             if (self.slave.irr & !self.slave.imr) == 0 {
@@ -876,9 +934,9 @@ impl BxPicC {
             vector = self.slave.irq + self.slave.interrupt_offset;
 
             // Edge-triggered: clear slave IRR bit. Level: keep it.
+            // (Bochs pic.cc:648-649) — Bochs does NOT clear irq_in here.
             if (self.slave.edge_level & (1 << self.slave.irq)) == 0 {
                 self.slave.irr &= !(1 << self.slave.irq);
-                self.slave.irq_in[self.slave.irq as usize] = 0;
             }
 
             // Slave auto-EOI handling

@@ -360,9 +360,22 @@ impl DeviceManager {
             self.diag_irq0_latched += 1;
         }
 
+        // CMOS: process IRQ8 lower BEFORE raise (from REG_STAT_C read)
+        if self.cmos.check_irq8_lower() {
+            self.pic.lower_irq(8);
+        }
         let _ = self.cmos.tick(usec);
         if self.cmos.check_irq8() {
             self.pic.raise_irq(8);
+        }
+
+        // Keyboard: process IRQ lower requests BEFORE raises (matching Bochs
+        // DEV_pic_lower_irq() calls in port 0x60 read handler, keyboard.cc:315/340)
+        if self.keyboard.check_irq1_lower() {
+            self.pic.lower_irq(1);
+        }
+        if self.keyboard.check_irq12_lower() {
+            self.pic.lower_irq(12);
         }
 
         // Keyboard periodic: transfer internal buffers → output buffer,
@@ -375,13 +388,11 @@ impl DeviceManager {
             self.pic.raise_irq(12);
         }
 
-        // Check hard drive IRQ14/15
-        if self.harddrv.check_irq14() {
-            self.pic.raise_irq(14);
-        }
-        if self.harddrv.check_irq15() {
-            self.pic.raise_irq(15);
-        }
+        // Hard drive IRQ14/15 — level-based, matching Bochs direct PIC calls.
+        // On every tick, sync the PIC IRQ lines to the ATA interrupt_pending state.
+        // This avoids the one-shot race where status register polling would
+        // lower the IRQ before the CPU could acknowledge it.
+        self.harddrv.update_irq_lines(&mut self.pic);
 
         self.pic.has_interrupt()
     }
@@ -420,6 +431,43 @@ impl DeviceManager {
             self.pic.master.irq_in[0],
             self.pic.master.interrupt_offset,
             self.pic.slave.interrupt_offset,
+        )
+    }
+
+    /// Get ATA controller diagnostic string
+    pub fn ata_diag(&self) -> String {
+        self.harddrv.diag_string()
+    }
+
+    /// Get full interrupt chain diagnostic summary (for end-of-run reporting)
+    pub fn interrupt_chain_diag(&self) -> String {
+        let c0 = &self.pit.counters[0];
+        format!(
+            "PIT: ticks={} total_usec={} pit_fires={} irq0_latched={} irq0_already_high={}\n\
+             PIT counter0: mode={:?} inlatch={} count={} count_written={} gate={} output={} first_pass={}\n\
+             PIC master: ISR={:#04x} IRR={:#04x} IMR={:#04x} int_pin={} irq_in[0..8]=[{},{},{},{},{},{},{},{}]\n\
+             PIC slave:  ISR={:#04x} IRR={:#04x} IMR={:#04x} int_pin={} irq_in[0..8]=[{},{},{},{},{},{},{},{}]\n\
+             PIC master_offset={:#04x} slave_offset={:#04x}\n\
+             IAC calls={} vector_hist[0x20]={} vector_hist[0x21]={} vector_hist[0x08]={} vector_hist[0x2E]={}",
+            self.diag_tick_count, self.diag_total_usec, self.diag_pit_fires,
+            self.diag_irq0_latched, self.diag_irq0_already_high,
+            c0.mode, c0.inlatch, c0.count, c0.count_written, c0.gate, c0.output, c0.first_pass,
+            self.pic.master.isr, self.pic.master.irr, self.pic.master.imr,
+            self.pic.master.int_pin,
+            self.pic.master.irq_in[0], self.pic.master.irq_in[1],
+            self.pic.master.irq_in[2], self.pic.master.irq_in[3],
+            self.pic.master.irq_in[4], self.pic.master.irq_in[5],
+            self.pic.master.irq_in[6], self.pic.master.irq_in[7],
+            self.pic.slave.isr, self.pic.slave.irr, self.pic.slave.imr,
+            self.pic.slave.int_pin,
+            self.pic.slave.irq_in[0], self.pic.slave.irq_in[1],
+            self.pic.slave.irq_in[2], self.pic.slave.irq_in[3],
+            self.pic.slave.irq_in[4], self.pic.slave.irq_in[5],
+            self.pic.slave.irq_in[6], self.pic.slave.irq_in[7],
+            self.pic.master.interrupt_offset, self.pic.slave.interrupt_offset,
+            self.diag_iac_count,
+            self.diag_vector_hist[0x20], self.diag_vector_hist[0x21],
+            self.diag_vector_hist[0x08], self.diag_vector_hist[0x2E],
         )
     }
 }
@@ -574,21 +622,19 @@ impl SystemControlPort {
         let old_a20 = self.a20_gate;
 
         self.value = value;
-        self.a20_gate = (value & 0x01) != 0;
-        self.reset_request = (value & 0x02) != 0;
+        // Bochs devices.cc:559-561: bit 1 = A20 gate, bit 0 = fast reset
+        self.a20_gate = (value & 0x02) != 0;
+        self.reset_request = (value & 0x01) != 0;
 
         // Return true if A20 state changed
         old_a20 != self.a20_gate
     }
 
     /// Read current port 92h value
+    /// Bochs devices.cc:505: return(BX_GET_ENABLE_A20() << 1)
     pub fn read(&self) -> u8 {
-        let mut value = 0u8;
-        if self.a20_gate {
-            value |= 0x01;
-        }
-        // Bit 1 is write-only (reset trigger), reads as 0
-        value
+        // Bit 1 = A20 gate state, Bit 0 = 0 (reset trigger write-only)
+        if self.a20_gate { 0x02 } else { 0x00 }
     }
 }
 
@@ -604,22 +650,22 @@ mod tests {
         assert!(port.a20_gate);
         assert!(!port.reset_request);
 
-        // Disable A20
+        // Disable A20 (bit 1 = 0)
         let changed = port.write(0x00);
         assert!(changed); // State changed
         assert!(!port.a20_gate);
 
-        // Enable A20 again
-        let changed = port.write(0x01);
+        // Enable A20 again (bit 1 = 1)
+        let changed = port.write(0x02);
         assert!(changed);
         assert!(port.a20_gate);
 
         // Write same value (no change)
-        let changed = port.write(0x01);
+        let changed = port.write(0x02);
         assert!(!changed);
 
-        // Trigger reset
-        port.write(0x02);
+        // Trigger reset (bit 0 = 1)
+        port.write(0x01);
         assert!(port.reset_request);
     }
 }

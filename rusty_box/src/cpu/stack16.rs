@@ -230,25 +230,83 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// PUSHF - Push flags (16-bit)
+    /// Based on Bochs flag_ctrl.cc:175-207 PUSHF_Fw
     pub fn pushf_fw(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let flags = (self.eflags.bits() & 0xFFFF) as u16;
+        let mut flags = (self.eflags.bits() & 0xFFFF) as u16;
+
+        if self.v8086_mode() {
+            if self.eflags.iopl() < 3 {
+                if self.cr4.vme() {
+                    // VME: push IOPL=3, replace IF with VIF
+                    flags |= EFlags::IOPL_MASK.bits() as u16;
+                    if self.eflags.contains(EFlags::VIF) {
+                        flags |= EFlags::IF_.bits() as u16;
+                    } else {
+                        flags &= !(EFlags::IF_.bits() as u16);
+                    }
+                } else {
+                    tracing::debug!("PUSHFW: #GP(0) in v8086 (no VME) mode");
+                    self.exception(super::cpu::Exception::Gp, 0)?;
+                }
+            }
+        }
+
         self.push_16(flags)?;
-        tracing::trace!("PUSHF: {:#06x}", flags);
         Ok(())
     }
 
     /// POPF - Pop flags (16-bit)
+    /// Based on Bochs flag_ctrl.cc:209-269 POPF_Fw
     pub fn popf_fw(&mut self, _instr: &Instruction) -> super::Result<()> {
-        let flags = self.pop_16()?;
+        use super::decoder::BxSegregs;
 
-        // Mask to preserve certain bits
-        // Changeable: CF, PF, AF, ZF, SF, TF, DF, OF, NT
-        const CHANGE_MASK: u32 = 0x0FD5; // bits 0,2,4,6,7,8,9,10,14
+        // Base changeMask: OSZAPC + TF + DF + NT
+        let mut change_mask: u32 = EFlags::OSZAPC.bits()
+            | EFlags::TF.bits()
+            | EFlags::DF.bits()
+            | EFlags::NT.bits();
 
-        self.eflags = EFlags::from_bits_retain(
-            (self.eflags.bits() & !CHANGE_MASK) | ((flags as u32) & CHANGE_MASK),
-        );
-        tracing::trace!("POPF: {:#06x}", flags);
+        // RSP_SPECULATIVE (conceptual - we'll adjust ESP after)
+        let flags16 = self.pop_16()?;
+
+        if self.protected_mode() {
+            let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl as u32;
+            if cpl == 0 {
+                change_mask |= EFlags::IOPL_MASK.bits();
+            }
+            if cpl <= self.eflags.iopl() as u32 {
+                change_mask |= EFlags::IF_.bits();
+            }
+        } else if self.v8086_mode() {
+            if self.eflags.iopl() < 3 {
+                if self.cr4.vme() {
+                    // VME path
+                    if ((flags16 as u32 & EFlags::IF_.bits()) != 0
+                        && self.eflags.contains(EFlags::VIP))
+                        || (flags16 as u32 & EFlags::TF.bits()) != 0
+                    {
+                        tracing::debug!("POPFW: #GP(0) in VME mode");
+                        self.exception(super::cpu::Exception::Gp, 0)?;
+                    }
+                    // IF, IOPL unchanged; VIF = flags16.IF
+                    change_mask |= EFlags::VIF.bits();
+                    let mut flags32 = flags16 as u32;
+                    if flags32 & EFlags::IF_.bits() != 0 {
+                        flags32 |= EFlags::VIF.bits();
+                    }
+                    self.write_eflags(flags32, change_mask);
+                    return Ok(());
+                }
+                tracing::debug!("POPFW: #GP(0) in v8086 (no VME) mode");
+                self.exception(super::cpu::Exception::Gp, 0)?;
+            }
+            change_mask |= EFlags::IF_.bits();
+        } else {
+            // Real mode: all non-reserved flags can be modified
+            change_mask |= EFlags::IOPL_MASK.bits() | EFlags::IF_.bits();
+        }
+
+        self.write_eflags(flags16 as u32, change_mask);
         Ok(())
     }
 
@@ -305,26 +363,92 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
+    // ENTER instruction (16-bit)
+    // Based on Bochs stack16.cc:178-241 ENTER16_IwIb
+    // =========================================================================
+
+    /// ENTER (16-bit operand size)
+    /// Based on Bochs stack16.cc:178-241 ENTER16_IwIb
+    pub fn enter16_iw_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        let imm16 = instr.iw();
+        let mut level = instr.ib2() & 0x1F;
+
+        self.push_16(self.bp())?;
+        let frame_ptr16 = self.sp();
+
+        if self.is_stack_32bit() {
+            let mut ebp = self.ebp(); // Use temp copy for case of exception
+
+            if level > 0 {
+                // do level-1 times
+                while { level -= 1; level } > 0 {
+                    ebp = ebp.wrapping_sub(2);
+                    let temp16 = self.stack_read_word(ebp)?;
+                    self.push_16(temp16)?;
+                }
+
+                // push(frame pointer)
+                self.push_16(frame_ptr16)?;
+            }
+
+            self.set_esp(self.esp().wrapping_sub(imm16 as u32));
+
+            // ENTER finishes with memory write check on the final stack pointer
+            // the memory is touched but no write actually occurs
+            // emulate it by doing RMW read access from SS:ESP
+            let esp = self.esp();
+            self.read_rmw_virtual_word(super::decoder::BxSegregs::Ss, esp)?;
+
+            self.set_bp(frame_ptr16);
+        } else {
+            let mut bp = self.bp() as u32;
+
+            if level > 0 {
+                // do level-1 times
+                while { level -= 1; level } > 0 {
+                    bp = bp.wrapping_sub(2) & 0xFFFF;
+                    let temp16 = self.stack_read_word(bp)?;
+                    self.push_16(temp16)?;
+                }
+
+                // push(frame pointer)
+                self.push_16(frame_ptr16)?;
+            }
+
+            self.set_sp(self.sp().wrapping_sub(imm16));
+
+            // ENTER finishes with memory write check on the final stack pointer
+            // the memory is touched but no write actually occurs
+            // emulate it by doing RMW read access from SS:SP
+            let sp = self.sp() as u32;
+            self.read_rmw_virtual_word(super::decoder::BxSegregs::Ss, sp)?;
+        }
+
+        self.set_bp(frame_ptr16);
+        Ok(())
+    }
+
+    // =========================================================================
     // LEAVE instruction
     // =========================================================================
 
     /// LEAVE - High level procedure exit (16-bit)
-    /// Equivalent to: MOV SP, BP; POP BP
-    /// Based on Bochs stack16.cc:178-192
+    /// Bochs stack16.cc:243-261
     pub fn leave16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        // Load SP from BP
-        let bp = self.bp();
-        self.set_sp(bp);
-
-        // Pop BP from stack
-        let new_bp = self.pop_16()?;
-        self.set_bp(new_bp);
-
-        tracing::trace!(
-            "LEAVE16: BP restored to {:#06x}, SP = {:#06x}",
-            new_bp,
-            self.sp()
-        );
+        // Bochs stack16.cc:249-256: check SS.D/B for 32-bit vs 16-bit stack
+        let value16;
+        if self.is_stack_32bit() {
+            // 32-bit stack mode: use full EBP address, set full ESP
+            let ebp = self.ebp();
+            value16 = self.stack_read_word(ebp)?;
+            self.set_esp(ebp.wrapping_add(2));
+        } else {
+            // 16-bit stack mode: use BP address, set SP
+            let bp = self.bp();
+            value16 = self.stack_read_word(bp as u32)?;
+            self.set_sp(bp.wrapping_add(2));
+        }
+        self.set_bp(value16);
         Ok(())
     }
 }

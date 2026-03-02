@@ -815,3 +815,149 @@ pub fn CMP_EwIw<'c, I: BxCpuIdTrait>(
         CMP_EwIwM(cpu, instr)
     }
 }
+
+// =========================================================================
+// CMPXCHG — Compare and Exchange (opcode 0x0F B1, operand-size 16)
+// Matches Bochs arith16.cc CMPXCHG_EwGwR / CMPXCHG_EwGwM
+// =========================================================================
+
+/// CMPXCHG r/m16, r16 — register form
+/// Bochs arith16.cc:528-545 (CMPXCHG_EwGwR)
+pub fn CMPXCHG_EwGw_R<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) {
+    let op1_16 = cpu.get_gpr16(instr.dst() as usize);
+    let ax = cpu.ax();
+    let diff_16 = ax.wrapping_sub(op1_16);
+    cpu.update_flags_sub16(ax, op1_16, diff_16);
+
+    if diff_16 == 0 {
+        cpu.set_gpr16(instr.dst() as usize, cpu.get_gpr16(instr.src() as usize));
+    } else {
+        cpu.set_ax(op1_16);
+    }
+}
+
+/// CMPXCHG r/m16, r16 — memory form
+/// Bochs arith16.cc:506-526 (CMPXCHG_EwGwM)
+pub fn CMPXCHG_EwGw_M<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1_16 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let ax = cpu.ax();
+    let diff_16 = ax.wrapping_sub(op1_16);
+    cpu.update_flags_sub16(ax, op1_16, diff_16);
+
+    if diff_16 == 0 {
+        cpu.write_rmw_linear_word(cpu.get_gpr16(instr.src() as usize));
+    } else {
+        cpu.write_rmw_linear_word(op1_16);
+        cpu.set_ax(op1_16);
+    }
+    Ok(())
+}
+
+// =========================================================================
+// XADD — Exchange and Add (opcode 0x0F C1, operand-size 16)
+// Matches Bochs arith16.cc XADD_EwGwR / XADD_EwGwM
+// =========================================================================
+
+/// XADD r/m16, r16 — register form
+/// Bochs arith16.cc:325-347
+pub fn XADD_EwGw_R<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) {
+    let op1_16 = cpu.get_gpr16(instr.dst() as usize);
+    let op2_16 = cpu.get_gpr16(instr.src() as usize);
+    let sum_16 = op1_16.wrapping_add(op2_16);
+
+    cpu.set_gpr16(instr.src() as usize, op1_16);
+    cpu.set_gpr16(instr.dst() as usize, sum_16);
+
+    cpu.update_flags_add16(op1_16, op2_16, sum_16);
+}
+
+/// XADD r/m16, r16 — memory form
+/// Bochs arith16.cc:301-323
+pub fn XADD_EwGw_M<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1_16 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op2_16 = cpu.get_gpr16(instr.src() as usize);
+    let sum_16 = op1_16.wrapping_add(op2_16);
+
+    cpu.write_rmw_linear_word(sum_16);
+    cpu.set_gpr16(instr.src() as usize, op1_16);
+    cpu.update_flags_add16(op1_16, op2_16, sum_16);
+    Ok(())
+}
+
+// =========================================================================
+// CMPXCHG - unified dispatch (16-bit)
+// =========================================================================
+
+/// CMPXCHG r/m16, r16 — unified dispatch
+pub fn CMPXCHG_EwGw<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        CMPXCHG_EwGw_R(cpu, instr);
+        Ok(())
+    } else {
+        CMPXCHG_EwGw_M(cpu, instr)
+    }
+}
+
+// =========================================================================
+// XADD - unified dispatch (16-bit)
+// =========================================================================
+
+/// XADD r/m16, r16 — unified dispatch
+pub fn XADD_EwGw<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        XADD_EwGw_R(cpu, instr);
+        Ok(())
+    } else {
+        XADD_EwGw_M(cpu, instr)
+    }
+}
+
+// =========================================================================
+// NEG - Two's Complement Negation (16-bit)
+// Matching Bochs arith16.cc NEG_EwR / NEG_EwM
+// =========================================================================
+
+/// NEG r/m16 - unified dispatch
+pub fn NEG_Ew<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        let dst = instr.dst() as usize;
+        let op1 = cpu.get_gpr16(dst);
+        let result = 0u16.wrapping_sub(op1);
+        cpu.set_gpr16(dst, result);
+        cpu.update_flags_sub16(0, op1, result);
+        Ok(())
+    } else {
+        let eaddr = cpu.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let op1 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+        let result = 0u16.wrapping_sub(op1);
+        cpu.write_rmw_linear_word(result);
+        cpu.update_flags_sub16(0, op1, result);
+        Ok(())
+    }
+}

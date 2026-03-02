@@ -56,6 +56,50 @@ impl EFlags {
         .union(Self::PF)
         .union(Self::CF);
 
+    /// Supported EFLAGS bits mask (Bochs EFlagsSupportMask)
+    /// All bits that the CPU implements: CF|PF|AF|ZF|SF|TF|IF|DF|OF|IOPL|NT|RF|VM|AC|VIF|VIP|ID
+    pub const SUPPORT_MASK: EFlags = Self::CF
+        .union(Self::PF)
+        .union(Self::AF)
+        .union(Self::ZF)
+        .union(Self::SF)
+        .union(Self::TF)
+        .union(Self::IF_)
+        .union(Self::DF)
+        .union(Self::OF)
+        .union(Self::IOPL1)
+        .union(Self::IOPL2)
+        .union(Self::NT)
+        .union(Self::RF)
+        .union(Self::VM)
+        .union(Self::AC)
+        .union(Self::VIF)
+        .union(Self::VIP)
+        .union(Self::ID);
+
+    /// Valid EFLAGS mask (Bochs EFlagsValidMask) — same as SUPPORT_MASK for P6+
+    pub const VALID_MASK: EFlags = Self::SUPPORT_MASK;
+
+    /// IRET32 real-mode changeMask: VIF, VIP, VM unchanged (Bochs 0x00257fd5)
+    pub const IRET32_REAL_CHANGE: EFlags = Self::CF
+        .union(Self::PF)
+        .union(Self::AF)
+        .union(Self::ZF)
+        .union(Self::SF)
+        .union(Self::TF)
+        .union(Self::IF_)
+        .union(Self::DF)
+        .union(Self::OF)
+        .union(Self::IOPL1)
+        .union(Self::IOPL2)
+        .union(Self::NT)
+        .union(Self::RF)
+        .union(Self::AC)
+        .union(Self::ID);
+
+    /// Arithmetic flags: CF|PF|AF|ZF|SF|OF = 0x08D5
+    pub const ARITH_FLAGS: EFlags = Self::OSZAPC;
+
     /// Get the IOPL value (0-3)
     #[inline]
     pub const fn iopl(self) -> u8 {
@@ -65,7 +109,7 @@ impl EFlags {
     /// Set the IOPL value (0-3), preserving other bits
     #[inline]
     pub fn set_iopl(&mut self, level: u8) {
-        let raw = (self.bits() & !0x3000) | (((level & 3) as u32) << 12);
+        let raw = (self.bits() & !Self::IOPL_MASK.bits()) | (((level & 3) as u32) << 12);
         *self = Self::from_bits_retain(raw);
     }
 }

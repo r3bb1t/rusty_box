@@ -1,5 +1,6 @@
 //! 8254 PIT (Programmable Interval Timer) Emulation
 //!
+//! Based on Bochs pit82c54.cc — faithful port of the Bochs state machine.
 //! The 8254 PIT provides three independent 16-bit counters:
 //! - Counter 0: System timer (IRQ0) - ~18.2 Hz for DOS tick
 //! - Counter 1: DRAM refresh (legacy, not used)
@@ -27,365 +28,632 @@ pub const USEC_PER_SECOND: u32 = 1_000_000;
 /// Number of PIT counters
 const PIT_NUM_COUNTERS: usize = 3;
 
-// ---- Control register bit fields (port 0x43 write) ----
-// Bits 7-6: Counter select (0-2, or 3 = read-back command)
-const CONTROL_COUNTER_SHIFT: u32 = 6;
-const CONTROL_COUNTER_MASK: u8 = 0x03;
-const CONTROL_READBACK_SELECT: u8 = 3;
-// Bits 5-4: Access mode
-const CONTROL_ACCESS_MODE_SHIFT: u32 = 4;
-const CONTROL_ACCESS_MODE_MASK: u8 = 0x03;
-// Bits 3-1: Operating mode (0-5)
-const CONTROL_MODE_SHIFT: u32 = 1;
-const CONTROL_MODE_MASK: u8 = 0x07;
-// Bit 0: BCD mode
-const CONTROL_BCD_BIT: u8 = 0x01;
-
-// ---- Status register bit positions (latch_status) ----
-const STATUS_OUTPUT_SHIFT: u32 = 7;
-const STATUS_NULL_COUNT_SHIFT: u32 = 6;
-const STATUS_ACCESS_MODE_SHIFT: u32 = 4;
-const STATUS_MODE_SHIFT: u32 = 1;
-
-// ---- Read-back command bit fields (D7-D6 = 11) ----
-// Bit 5: COUNT — 0 = latch count, 1 = don't latch count
-const READBACK_LATCH_COUNT_BIT: u8 = 0x20;
-// Bit 4: STATUS — 0 = latch status, 1 = don't latch status
-const READBACK_LATCH_STATUS_BIT: u8 = 0x10;
-// Bits 3-1: Counter select (bit 1 = counter 0, bit 2 = counter 1, bit 3 = counter 2)
-const READBACK_COUNTER0_BIT: u8 = 0x02;
-
-/// Counter operating modes
+// ---- Read/write state machine (Bochs pit82c54.h:60-66) ----
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PitMode {
-    /// Mode 0: Interrupt on terminal count
-    InterruptOnTerminalCount = 0,
-    /// Mode 1: Hardware retriggerable one-shot
-    HardwareOneShot = 1,
-    /// Mode 2: Rate generator
-    RateGenerator = 2,
-    /// Mode 3: Square wave generator
-    SquareWave = 3,
-    /// Mode 4: Software triggered strobe
-    SoftwareStrobe = 4,
-    /// Mode 5: Hardware triggered strobe
-    HardwareStrobe = 5,
+enum RWState {
+    LsByte = 0,
+    MsByte = 1,
+    LsByteMultiple = 2,
+    MsByteMultiple = 3,
 }
 
-impl From<u8> for PitMode {
-    fn from(value: u8) -> Self {
-        match value & 0x07 {
-            0 => PitMode::InterruptOnTerminalCount,
-            1 => PitMode::HardwareOneShot,
-            2 | 6 => PitMode::RateGenerator,
-            3 | 7 => PitMode::SquareWave,
-            4 => PitMode::SoftwareStrobe,
-            5 => PitMode::HardwareStrobe,
-            _ => PitMode::InterruptOnTerminalCount,
-        }
-    }
-}
-
-/// Read/Write access mode
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub enum PitAccessMode {
-    /// Latch count value
-    Latch = 0,
-    /// Low byte only
-    LowByte = 1,
-    /// High byte only  
-    HighByte = 2,
-    /// Low byte then high byte
-    LowHighByte = 3,
-}
-
-impl From<u8> for PitAccessMode {
-    fn from(value: u8) -> Self {
-        match value & 0x03 {
-            0 => PitAccessMode::Latch,
-            1 => PitAccessMode::LowByte,
-            2 => PitAccessMode::HighByte,
-            3 => PitAccessMode::LowHighByte,
-            _ => PitAccessMode::Latch,
-        }
-    }
-}
-
-/// State for a single PIT counter
+/// State for a single PIT counter — matches Bochs pit82c54.h counter_type
 #[derive(Debug, Clone)]
 pub struct PitCounter {
-    /// Counter number (0-2)
-    pub(crate) number: u8,
-    /// Current count value
+    // ---- Bochs counter_type fields (pit82c54.h:70-98) ----
+    /// Operating mode (0-5, with 6→2, 7→3 aliasing)
+    pub(crate) mode: u8,
+    /// Input latch (pending count value written by CPU, loaded into count on clock)
+    pub(crate) inlatch: u16,
+    /// Current count register
     pub(crate) count: u16,
-    /// Initial count (reload value)
-    pub(crate) initial_count: u16,
-    /// Count latched for reading
-    pub(crate) latched_count: u16,
-    /// Is count latched?
-    pub(crate) count_latched: bool,
+    /// Binary representation of count (same as count when bcd_mode=false)
+    pub(crate) count_binary: u16,
+    /// Output latch (for latched reads)
+    pub(crate) outlatch: u16,
+    /// Read/write mode (1=LSB, 2=MSB, 3=LSB then MSB)
+    pub(crate) rw_mode: u8,
+    /// Read state machine
+    pub(crate) read_state: RWState,
+    /// Write state machine
+    pub(crate) write_state: RWState,
+    /// LSB count latched for reading
+    pub(crate) count_lsb_latched: bool,
+    /// MSB count latched for reading
+    pub(crate) count_msb_latched: bool,
     /// Status latched for reading
     pub(crate) status_latched: bool,
     /// Latched status value
     pub(crate) latched_status: u8,
-    /// Operating mode
-    pub(crate) mode: PitMode,
-    /// Access mode (low/high byte)
-    pub(crate) access_mode: PitAccessMode,
-    /// BCD mode (false = binary)
-    pub(crate) bcd_mode: bool,
-    /// Next byte is low (for low-high access)
-    pub(crate) read_lsb_next: bool,
-    /// Next write is low (for low-high access)
-    pub(crate) write_lsb_next: bool,
+    /// Null count (count not yet loaded into CE from CR)
+    pub(crate) null_count: bool,
+    /// Gate input pin
+    pub(crate) gate: bool,
     /// Output pin state
     pub(crate) output: bool,
-    /// Gate input state
-    pub(crate) gate: bool,
-    /// Counter is enabled
-    pub(crate) enabled: bool,
-    /// Null count (count not yet loaded)
-    pub(crate) null_count: bool,
-    /// Countdown in progress
-    pub(crate) counting: bool,
+    /// GATE rising-edge trigger detected (Bochs: triggerGATE)
+    pub(crate) trigger_gate: bool,
+    /// BCD mode (false = binary)
+    pub(crate) bcd_mode: bool,
+    /// Count has been fully written (both bytes for 16-bit mode)
+    /// Gates ALL counter behavior in clock() — Bochs: count_written
+    pub(crate) count_written: bool,
+    /// First pass after count load — distinguishes reload from counting
+    /// Bochs: first_pass
+    pub(crate) first_pass: bool,
+    /// State bits for mode 3 square wave (Bochs: state_bit_1, state_bit_2)
+    pub(crate) state_bit_1: bool,
+    pub(crate) state_bit_2: bool,
+    /// Next change time (for scheduling optimization, 0 = no change expected)
+    pub(crate) next_change_time: u32,
 }
 
 impl Default for PitCounter {
     /// Default matching Bochs pit82c54::init() (pit82c54.cc:174-200).
-    ///
-    /// Key values from Bochs:
-    /// - read_state = LSByte, write_state = LSByte  (we model as access_mode + lsb_next flags)
-    /// - GATE = 1, OUTpin = 1, mode = 4 (SoftwareStrobe)
-    /// - count = 0, null_count = 0, count_written = 1
     fn default() -> Self {
         Self {
-            number: 0,
+            mode: 4,                              // Bochs: mode=4 (SoftwareStrobe)
+            inlatch: 0,
             count: 0,
-            initial_count: 0,
-            latched_count: 0,
-            count_latched: false,
+            count_binary: 0,
+            outlatch: 0,
+            rw_mode: 1,                           // Bochs: rw_mode=1 (LSByte)
+            read_state: RWState::LsByte,          // Bochs: read_state=LSByte
+            write_state: RWState::LsByte,         // Bochs: write_state=LSByte
+            count_lsb_latched: false,
+            count_msb_latched: false,
             status_latched: false,
             latched_status: 0,
-            mode: PitMode::SoftwareStrobe,       // Bochs: mode=4
-            access_mode: PitAccessMode::LowByte, // Bochs: rw_mode=1 (LSB_real), read_state=LSByte
+            null_count: false,                    // Bochs: null_count=0
+            gate: true,                           // Bochs: GATE=1
+            output: true,                         // Bochs: OUTpin=1
+            trigger_gate: false,                  // Bochs: triggerGATE=0
             bcd_mode: false,
-            read_lsb_next: true,
-            write_lsb_next: true,
-            output: true, // Bochs: OUTpin=1
-            gate: true,   // Bochs: GATE=1 for all counters
-            enabled: false,
-            null_count: false, // Bochs: null_count=0
-            counting: false,
+            count_written: true,                  // Bochs: count_written=1
+            first_pass: false,                    // Bochs: first_pass=0
+            state_bit_1: false,
+            state_bit_2: false,
+            next_change_time: 0,
         }
     }
 }
 
 impl PitCounter {
-    /// Create a new counter with specified number.
-    ///
-    /// Bochs pit82c54::init() sets GATE=1 for all 3 counters.
-    /// Counter 2's gate is later controlled by port 0x61, but starts high.
-    pub fn new(number: u8) -> Self {
-        let mut counter = Self::default();
-        counter.number = number;
-        // Bochs: GATE=1 for ALL counters in init().
-        // Counter 2's gate is later controlled by port 0x61 writes.
-        counter.gate = true;
-        counter
+    /// Create a new counter. Bochs pit82c54::init() sets GATE=1 for all 3 counters.
+    pub fn new(_number: u8) -> Self {
+        Self::default()
     }
 
-    /// Read the current count value
+    /// Bochs pit82c54.cc:116-124 set_OUT — only calls handler on transition
+    fn set_out(&mut self, data: bool) {
+        self.output = data;
+        // Note: Bochs calls out_handler callback here; we detect transitions in tick()
+    }
+
+    /// Bochs pit82c54.cc:126-130 set_count
+    fn set_count(&mut self, data: u16) {
+        self.count = data & 0xFFFF;
+        self.set_binary_to_count();
+    }
+
+    /// Bochs pit82c54.cc:145-156 set_binary_to_count (count → count_binary)
+    fn set_binary_to_count(&mut self) {
+        if self.bcd_mode {
+            self.count_binary = (1 * ((self.count >> 0) & 0xF))
+                + (10 * ((self.count >> 4) & 0xF))
+                + (100 * ((self.count >> 8) & 0xF))
+                + (1000 * ((self.count >> 12) & 0xF));
+        } else {
+            self.count_binary = self.count;
+        }
+    }
+
+    /// Bochs pit82c54.cc:132-143 set_count_to_binary (count_binary → count)
+    fn set_count_to_binary(&mut self) {
+        if self.bcd_mode {
+            self.count = (((self.count_binary / 1) % 10) << 0)
+                | (((self.count_binary / 10) % 10) << 4)
+                | (((self.count_binary / 100) % 10) << 8)
+                | (((self.count_binary / 1000) % 10) << 12);
+        } else {
+            self.count = self.count_binary;
+        }
+    }
+
+    /// Bochs pit82c54.cc:158-172 decrement
+    fn decrement(&mut self) {
+        if self.count == 0 {
+            if self.bcd_mode {
+                self.count = 0x9999;
+                self.count_binary = 9999;
+            } else {
+                self.count = 0xFFFF;
+                self.count_binary = 0xFFFF;
+            }
+        } else {
+            self.count_binary = self.count_binary.wrapping_sub(1);
+            self.set_count_to_binary();
+        }
+    }
+
+    /// Latch the current count value — Bochs pit82c54.cc:77-114
+    pub fn latch_count(&mut self) {
+        if self.count_lsb_latched || self.count_msb_latched {
+            // Previous latch not yet read — do nothing
+            return;
+        }
+        match self.read_state {
+            RWState::MsByte => {
+                self.outlatch = self.count & 0xFFFF;
+                self.count_msb_latched = true;
+            }
+            RWState::LsByte => {
+                self.outlatch = self.count & 0xFFFF;
+                self.count_lsb_latched = true;
+            }
+            RWState::LsByteMultiple => {
+                self.outlatch = self.count & 0xFFFF;
+                self.count_lsb_latched = true;
+                self.count_msb_latched = true;
+            }
+            RWState::MsByteMultiple => {
+                // Latching during 2-part read — reset to LSB first
+                self.read_state = RWState::LsByteMultiple;
+                self.outlatch = self.count & 0xFFFF;
+                self.count_lsb_latched = true;
+                self.count_msb_latched = true;
+            }
+        }
+    }
+
+    /// Latch the status register — Bochs pit82c54.cc:695-706
+    pub fn latch_status(&mut self) {
+        if !self.status_latched {
+            self.latched_status = ((self.output as u8) << 7)
+                | ((self.null_count as u8) << 6)
+                | ((self.rw_mode & 0x3) << 4)
+                | ((self.mode & 0x7) << 1)
+                | (self.bcd_mode as u8);
+            self.status_latched = true;
+        }
+    }
+
+    /// Read counter — Bochs pit82c54.cc:602-672
     pub fn read(&mut self) -> u8 {
         if self.status_latched {
             self.status_latched = false;
             return self.latched_status;
         }
 
-        let value = if self.count_latched {
-            self.latched_count
-        } else {
-            self.count
-        };
+        // Latched count read
+        if self.count_lsb_latched {
+            // Read LSB of latched value
+            self.count_lsb_latched = false;
+            return (self.outlatch & 0xFF) as u8;
+        }
+        if self.count_msb_latched {
+            // Read MSB of latched value
+            self.count_msb_latched = false;
+            return (self.outlatch >> 8) as u8;
+        }
 
-        match self.access_mode {
-            PitAccessMode::LowByte => {
-                self.count_latched = false;
-                (value & 0xFF) as u8
+        // Unlatched read — read directly from count register
+        match self.read_state {
+            RWState::LsByte => (self.count & 0xFF) as u8,
+            RWState::MsByte => (self.count >> 8) as u8,
+            RWState::LsByteMultiple => {
+                self.read_state = RWState::MsByteMultiple;
+                (self.count & 0xFF) as u8
             }
-            PitAccessMode::HighByte => {
-                self.count_latched = false;
-                (value >> 8) as u8
-            }
-            PitAccessMode::LowHighByte => {
-                if self.read_lsb_next {
-                    self.read_lsb_next = false;
-                    (value & 0xFF) as u8
-                } else {
-                    self.read_lsb_next = true;
-                    self.count_latched = false;
-                    (value >> 8) as u8
-                }
-            }
-            PitAccessMode::Latch => {
-                self.count_latched = false;
-                (value & 0xFF) as u8
+            RWState::MsByteMultiple => {
+                self.read_state = RWState::LsByteMultiple;
+                (self.count >> 8) as u8
             }
         }
     }
 
-    /// Write to the counter
-    pub fn write(&mut self, value: u8) {
-        match self.access_mode {
-            PitAccessMode::LowByte => {
-                self.initial_count = (self.initial_count & 0xFF00) | (value as u16);
-                self.load_count();
+    /// Write counter — Bochs pit82c54.cc:762-821
+    pub fn write(&mut self, data: u8) {
+        match self.write_state {
+            RWState::LsByteMultiple => {
+                self.inlatch = data as u16;
+                self.write_state = RWState::MsByteMultiple;
+                self.count_written = false;
             }
-            PitAccessMode::HighByte => {
-                self.initial_count = (self.initial_count & 0x00FF) | ((value as u16) << 8);
-                self.load_count();
+            RWState::LsByte => {
+                self.inlatch = data as u16;
+                self.count_written = true;
             }
-            PitAccessMode::LowHighByte => {
-                if self.write_lsb_next {
-                    self.initial_count = (self.initial_count & 0xFF00) | (value as u16);
-                    self.write_lsb_next = false;
-                } else {
-                    self.initial_count = (self.initial_count & 0x00FF) | ((value as u16) << 8);
-                    self.write_lsb_next = true;
-                    self.load_count();
-                }
+            RWState::MsByteMultiple => {
+                self.write_state = RWState::LsByteMultiple;
+                self.inlatch |= (data as u16) << 8;
+                self.count_written = true;
             }
-            PitAccessMode::Latch => {
-                // Latch mode doesn't accept writes
+            RWState::MsByte => {
+                self.inlatch = (data as u16) << 8;
+                self.count_written = true;
             }
         }
-    }
 
-    /// Load the count from initial_count
-    fn load_count(&mut self) {
-        // Handle 0 meaning 65536
-        self.count = if self.initial_count == 0 {
-            0xFFFF
-        } else {
-            self.initial_count
-        };
-        self.null_count = false;
-        self.counting = true;
-        self.enabled = true;
+        // Bochs pit82c54.cc:788-791
+        if self.count_written {
+            self.null_count = true;
+            self.set_count(self.inlatch);
+        }
 
-        // Set initial output based on mode
+        // Mode-specific actions after count write (Bochs pit82c54.cc:792-820)
         match self.mode {
-            PitMode::InterruptOnTerminalCount | PitMode::SoftwareStrobe => {
-                self.output = false;
+            0 => {
+                if self.count_written {
+                    self.set_out(false);
+                }
+                self.next_change_time = 1;
             }
-            PitMode::RateGenerator
-            | PitMode::SquareWave
-            | PitMode::HardwareOneShot
-            | PitMode::HardwareStrobe => {
-                self.output = true;
+            1 => {
+                if self.trigger_gate {
+                    self.next_change_time = 1;
+                }
             }
-        }
-
-        tracing::debug!(
-            "PIT: Counter {} loaded with {} (mode {:?})",
-            self.number,
-            self.count,
-            self.mode
-        );
-    }
-
-    /// Latch the current count value
-    pub fn latch_count(&mut self) {
-        if !self.count_latched {
-            self.latched_count = self.count;
-            self.count_latched = true;
-            self.read_lsb_next = true;
-        }
-    }
-
-    /// Latch the status register
-    pub fn latch_status(&mut self) {
-        if !self.status_latched {
-            self.latched_status = ((self.output as u8) << STATUS_OUTPUT_SHIFT)
-                | ((self.null_count as u8) << STATUS_NULL_COUNT_SHIFT)
-                | ((self.access_mode as u8) << STATUS_ACCESS_MODE_SHIFT)
-                | ((self.mode as u8) << STATUS_MODE_SHIFT)
-                | (self.bcd_mode as u8);
-            self.status_latched = true;
+            2 | 6 => {
+                self.next_change_time = 1;
+            }
+            3 | 7 => {
+                self.next_change_time = 1;
+            }
+            4 => {
+                self.next_change_time = 1;
+            }
+            5 => {
+                if self.trigger_gate {
+                    self.next_change_time = 1;
+                }
+            }
+            _ => {}
         }
     }
 
-    /// Clock the counter (decrement by 1)
+    /// Clock the counter by one tick — Bochs pit82c54.cc:259-591
+    /// Returns true if output transitioned LOW→HIGH (for IRQ generation)
     pub fn clock(&mut self) -> bool {
-        if !self.enabled || !self.gate || !self.counting {
-            return false;
-        }
-
         let old_output = self.output;
 
         match self.mode {
-            PitMode::InterruptOnTerminalCount => {
-                if self.count > 0 {
-                    self.count -= 1;
-                }
-                if self.count == 0 {
-                    self.output = true;
-                }
-            }
-            PitMode::RateGenerator => {
-                // Mode 2: output is normally HIGH.  When count decrements to 1,
-                // output goes LOW for exactly one clock period, then reloads and
-                // goes back HIGH (generating the IRQ on the rising edge).
-                //
-                // We must NOT set output back to HIGH in the same clock() call as
-                // the LOW pulse, otherwise the transition check at the end will
-                // never see a change.  Instead, leave it LOW for one tick; on the
-                // *next* clock() call the "count > 1" path raises it back HIGH.
-                if self.count > 1 {
-                    self.count -= 1;
-                    // Rising edge after the one-clock LOW pulse
-                    if !self.output {
-                        self.output = true;
+            // ---- Mode 0: Interrupt on Terminal Count (Bochs pit82c54.cc:328-376) ----
+            0 => {
+                if self.count_written {
+                    if self.null_count {
+                        self.set_count(self.inlatch);
+                        if self.gate {
+                            if self.count_binary == 0 {
+                                self.next_change_time = 1;
+                            } else {
+                                self.next_change_time = self.count_binary as u32;
+                            }
+                        } else {
+                            self.next_change_time = 0;
+                        }
+                        self.null_count = false;
+                        if self.write_state == RWState::MsByteMultiple {
+                            // Half-loaded count — undefined behavior
+                        }
+                    } else {
+                        if self.gate && (self.count_binary != 0) {
+                            self.decrement();
+                            if self.count_binary == 0 {
+                                self.next_change_time = 1;
+                            } else {
+                                self.next_change_time = self.count_binary as u32;
+                            }
+                            if self.count == 0 {
+                                self.set_out(true);
+                            }
+                        } else {
+                            self.next_change_time = 0;
+                        }
                     }
                 } else {
-                    // Terminal count: reload and pulse output LOW
-                    self.count = if self.initial_count == 0 {
-                        0xFFFF
-                    } else {
-                        self.initial_count
-                    };
-                    self.output = false;
+                    self.next_change_time = 0;
                 }
+                self.trigger_gate = false;
             }
-            PitMode::SquareWave => {
-                if self.count > 1 {
-                    self.count -= 2;
+
+            // ---- Mode 1: Hardware Retriggerable One-Shot (Bochs pit82c54.cc:378-411) ----
+            1 => {
+                if self.count_written {
+                    if self.trigger_gate {
+                        self.set_count(self.inlatch);
+                        if self.count_binary == 0 {
+                            self.next_change_time = 1;
+                        } else {
+                            self.next_change_time = self.count_binary as u32;
+                        }
+                        self.null_count = false;
+                        self.set_out(false);
+                    } else {
+                        self.decrement();
+                        if !self.output {
+                            if self.count_binary == 0 {
+                                self.next_change_time = 1;
+                            } else {
+                                self.next_change_time = self.count_binary as u32;
+                            }
+                            if self.count == 0 {
+                                self.set_out(true);
+                            }
+                        } else {
+                            self.next_change_time = 0;
+                        }
+                    }
                 } else {
-                    self.count = if self.initial_count == 0 {
-                        0xFFFF
+                    self.next_change_time = 0;
+                }
+                self.trigger_gate = false;
+            }
+
+            // ---- Mode 2: Rate Generator (Bochs pit82c54.cc:412-444) ----
+            2 | 6 => {
+                if self.count_written {
+                    if self.trigger_gate || self.first_pass {
+                        // RELOAD phase: load count, set output HIGH
+                        self.set_count(self.inlatch);
+                        self.next_change_time =
+                            (self.count_binary.wrapping_sub(1) & 0xFFFF) as u32;
+                        self.null_count = false;
+                        if !self.output {
+                            self.set_out(true);
+                        }
+                        self.first_pass = false;
                     } else {
-                        self.initial_count
-                    };
-                    self.output = !self.output;
+                        // COUNTING phase
+                        if self.gate {
+                            self.decrement();
+                            self.next_change_time =
+                                (self.count_binary.wrapping_sub(1) & 0xFFFF) as u32;
+                            if self.count == 1 {
+                                // Terminal: pulse LOW, schedule reload
+                                self.next_change_time = 1;
+                                self.set_out(false);
+                                self.first_pass = true;
+                            }
+                        } else {
+                            self.next_change_time = 0;
+                        }
+                    }
+                } else {
+                    self.next_change_time = 0;
                 }
+                self.trigger_gate = false;
             }
-            PitMode::SoftwareStrobe => {
-                if self.count > 0 {
-                    self.count -= 1;
+
+            // ---- Mode 3: Square Wave Generator (Bochs pit82c54.cc:446-506) ----
+            3 | 7 => {
+                if self.count_written {
+                    if (self.trigger_gate || self.first_pass || self.state_bit_2) && self.gate {
+                        self.set_count(self.inlatch & 0xFFFE);
+                        self.state_bit_1 = (self.inlatch & 0x1) != 0;
+                        if !self.output || !self.state_bit_1 {
+                            let half = self.count_binary / 2;
+                            if half <= 1 {
+                                self.next_change_time = 1;
+                            } else {
+                                self.next_change_time = (half - 1) as u32;
+                            }
+                        } else {
+                            let half = self.count_binary / 2;
+                            if half == 0 {
+                                self.next_change_time = 1;
+                            } else {
+                                self.next_change_time = half as u32;
+                            }
+                        }
+                        self.null_count = false;
+                        if !self.output {
+                            self.set_out(true);
+                        } else if self.output && !self.first_pass {
+                            self.set_out(false);
+                        }
+                        self.state_bit_2 = false;
+                        self.first_pass = false;
+                    } else {
+                        if self.gate {
+                            self.decrement();
+                            self.decrement();
+                            if !self.output || !self.state_bit_1 {
+                                self.next_change_time =
+                                    ((self.count_binary / 2).wrapping_sub(1) & 0xFFFF) as u32;
+                            } else {
+                                self.next_change_time = (self.count_binary / 2) as u32;
+                            }
+                            if self.count == 0 {
+                                self.state_bit_2 = true;
+                                self.next_change_time = 1;
+                            }
+                            if self.count == 2
+                                && (!self.output || !self.state_bit_1)
+                            {
+                                self.state_bit_2 = true;
+                                self.next_change_time = 1;
+                            }
+                        } else {
+                            self.next_change_time = 0;
+                        }
+                    }
+                } else {
+                    self.next_change_time = 0;
                 }
-                if self.count == 0 && !self.output {
-                    self.output = true;
-                    self.counting = false;
-                }
+                self.trigger_gate = false;
             }
+
+            // ---- Mode 4: Software Triggered Strobe (Bochs pit82c54.cc:507-549) ----
+            4 => {
+                if self.count_written {
+                    if !self.output {
+                        self.set_out(true);
+                    }
+                    if self.null_count {
+                        self.set_count(self.inlatch);
+                        if self.gate {
+                            if self.count_binary == 0 {
+                                self.next_change_time = 1;
+                            } else {
+                                self.next_change_time = self.count_binary as u32;
+                            }
+                        } else {
+                            self.next_change_time = 0;
+                        }
+                        self.null_count = false;
+                        self.first_pass = true;
+                    } else {
+                        if self.gate {
+                            self.decrement();
+                            if self.first_pass {
+                                self.next_change_time = self.count_binary as u32;
+                                if self.count == 0 {
+                                    self.set_out(false);
+                                    self.next_change_time = 1;
+                                    self.first_pass = false;
+                                }
+                            } else {
+                                self.next_change_time = 0;
+                            }
+                        } else {
+                            self.next_change_time = 0;
+                        }
+                    }
+                } else {
+                    self.next_change_time = 0;
+                }
+                self.trigger_gate = false;
+            }
+
+            // ---- Mode 5: Hardware Triggered Strobe (Bochs pit82c54.cc:550-591) ----
+            5 => {
+                if self.count_written {
+                    if !self.output {
+                        self.set_out(true);
+                    }
+                    if self.trigger_gate {
+                        self.set_count(self.inlatch);
+                        if self.count_binary == 0 {
+                            self.next_change_time = 1;
+                        } else {
+                            self.next_change_time = self.count_binary as u32;
+                        }
+                        self.null_count = false;
+                        self.first_pass = true;
+                    } else {
+                        self.decrement();
+                        if self.first_pass {
+                            self.next_change_time = self.count_binary as u32;
+                            if self.count == 0 {
+                                self.set_out(false);
+                                self.next_change_time = 1;
+                                self.first_pass = false;
+                            }
+                        } else {
+                            self.next_change_time = 0;
+                        }
+                    }
+                } else {
+                    self.next_change_time = 0;
+                }
+                self.trigger_gate = false;
+            }
+
             _ => {
-                if self.count > 0 {
-                    self.count -= 1;
-                }
+                self.trigger_gate = false;
             }
         }
 
-        // Return true if output transitioned (for IRQ generation)
-        old_output != self.output && self.output
+        // Return true if output transitioned LOW→HIGH (rising edge for IRQ)
+        !old_output && self.output
+    }
+
+    /// Set GATE input — Bochs pit82c54.cc:824-921
+    /// Detects rising edge and sets triggerGATE; mode-specific behavior
+    pub fn set_gate(&mut self, data: bool) {
+        let old_gate = self.gate;
+        // Only process on actual change (Bochs line 830)
+        if old_gate == data {
+            return;
+        }
+
+        self.gate = data;
+        if data {
+            self.trigger_gate = true; // Rising edge detected
+        }
+
+        match self.mode {
+            0 => {
+                if data && self.count_written {
+                    if self.null_count {
+                        self.next_change_time = 1;
+                    } else if !self.output && self.write_state != RWState::MsByteMultiple {
+                        if self.count_binary == 0 {
+                            self.next_change_time = 1;
+                        } else {
+                            self.next_change_time = self.count_binary as u32;
+                        }
+                    } else {
+                        self.next_change_time = 0;
+                    }
+                } else if self.null_count {
+                    self.next_change_time = 1;
+                } else {
+                    self.next_change_time = 0;
+                }
+            }
+            1 => {
+                if data && self.count_written {
+                    self.next_change_time = 1;
+                }
+            }
+            2 | 6 => {
+                if !data {
+                    // GATE dropped LOW: force output HIGH, stop counting
+                    self.set_out(true);
+                    self.next_change_time = 0;
+                } else if self.count_written {
+                    self.next_change_time = 1;
+                } else {
+                    self.next_change_time = 0;
+                }
+            }
+            3 | 7 => {
+                if !data {
+                    self.set_out(true);
+                    self.first_pass = true;
+                    self.next_change_time = 0;
+                } else if self.count_written {
+                    self.next_change_time = 1;
+                } else {
+                    self.next_change_time = 0;
+                }
+            }
+            4 => {
+                if !self.output || self.null_count {
+                    self.next_change_time = 1;
+                } else if data && self.count_written {
+                    if self.first_pass {
+                        if self.count_binary == 0 {
+                            self.next_change_time = 1;
+                        } else {
+                            self.next_change_time = self.count_binary as u32;
+                        }
+                    } else {
+                        self.next_change_time = 0;
+                    }
+                } else {
+                    self.next_change_time = 0;
+                }
+            }
+            5 => {
+                if data && self.count_written {
+                    self.next_change_time = 1;
+                }
+            }
+            _ => {}
+        }
     }
 }
 
@@ -427,9 +695,7 @@ impl BxPitC {
 
     /// Reset the PIT
     pub fn reset(&mut self) {
-        for counter in &mut self.counters {
-            *counter = PitCounter::new(counter.number);
-        }
+        self.counters = [PitCounter::new(0), PitCounter::new(1), PitCounter::new(2)];
         self.total_ticks = 0;
         self.irq0_pending = false;
     }
@@ -462,55 +728,84 @@ impl BxPitC {
         }
     }
 
-    /// Write to the control register
+    /// Write to the control register — Bochs pit82c54.cc:674-759
     fn write_control(&mut self, value: u8) {
-        let counter_num = (value >> CONTROL_COUNTER_SHIFT) & CONTROL_COUNTER_MASK;
+        let sc = (value >> 6) & 0x03;
 
-        if counter_num == CONTROL_READBACK_SELECT {
-            // Read-back command
+        if sc == 3 {
+            // Read-back command (D7-D6 = 11)
             self.read_back(value);
             return;
         }
 
-        let counter = &mut self.counters[counter_num as usize];
-        let access_mode =
-            PitAccessMode::from((value >> CONTROL_ACCESS_MODE_SHIFT) & CONTROL_ACCESS_MODE_MASK);
+        let rw = (value >> 4) & 0x03;
 
-        if access_mode == PitAccessMode::Latch {
-            // Counter latch command
-            counter.latch_count();
-            tracing::trace!(
-                "PIT: Latched counter {} = {}",
-                counter_num,
-                counter.latched_count
-            );
-        } else {
-            // Set counter mode
-            counter.access_mode = access_mode;
-            counter.mode = PitMode::from((value >> CONTROL_MODE_SHIFT) & CONTROL_MODE_MASK);
-            counter.bcd_mode = (value & CONTROL_BCD_BIT) != 0;
-            counter.write_lsb_next = true;
-            counter.read_lsb_next = true;
-            counter.null_count = true;
-            counter.counting = false;
-
-            tracing::debug!(
-                "PIT: Counter {} configured: mode={:?}, access={:?}, bcd={}",
-                counter_num,
-                counter.mode,
-                counter.access_mode,
-                counter.bcd_mode
-            );
+        if rw == 0 {
+            // Counter Latch command
+            self.counters[sc as usize].latch_count();
+            return;
         }
+
+        // Counter Program Command — Bochs pit82c54.cc:717-759
+        let m = (value >> 1) & 0x07;
+        let bcd = (value & 0x01) != 0;
+
+        let ctr = &mut self.counters[sc as usize];
+        ctr.null_count = true;
+        ctr.count_lsb_latched = false;
+        ctr.count_msb_latched = false;
+        ctr.status_latched = false;
+        ctr.inlatch = 0;
+        ctr.count_written = false;
+        ctr.first_pass = true;
+        ctr.rw_mode = rw;
+        ctr.bcd_mode = bcd;
+        ctr.mode = m;
+        // Mode aliasing: 6→2, 7→3 (Bochs pit82c54.cc:729-731)
+        if ctr.mode > 5 {
+            ctr.mode &= 0x3;
+        }
+
+        match rw {
+            1 => {
+                ctr.read_state = RWState::LsByte;
+                ctr.write_state = RWState::LsByte;
+            }
+            2 => {
+                ctr.read_state = RWState::MsByte;
+                ctr.write_state = RWState::MsByte;
+            }
+            3 => {
+                ctr.read_state = RWState::LsByteMultiple;
+                ctr.write_state = RWState::LsByteMultiple;
+            }
+            _ => {}
+        }
+
+        // All modes except mode 0 have initial output of 1 (Bochs line 752-757)
+        if m != 0 {
+            ctr.set_out(true);
+        } else {
+            ctr.set_out(false);
+        }
+        ctr.next_change_time = 0;
+
+        tracing::debug!(
+            "PIT: Counter {} configured: mode={}, rw={}, bcd={}",
+            sc,
+            ctr.mode,
+            rw,
+            bcd
+        );
     }
 
-    /// Handle read-back command
+    /// Handle read-back command — Bochs pit82c54.cc:674-709
     fn read_back(&mut self, value: u8) {
-        let latch_count = (value & READBACK_LATCH_COUNT_BIT) == 0;
-        let latch_status = (value & READBACK_LATCH_STATUS_BIT) == 0;
+        let latch_count = (value & 0x20) == 0;  // Bit 5: 0 = latch count
+        let latch_status = (value & 0x10) == 0;  // Bit 4: 0 = latch status
 
         for i in 0..PIT_NUM_COUNTERS {
-            if (value & (READBACK_COUNTER0_BIT << i)) != 0 {
+            if (value & (0x02 << i)) != 0 {
                 if latch_status {
                     self.counters[i].latch_status();
                 }
@@ -521,9 +816,9 @@ impl BxPitC {
         }
     }
 
-    /// Set gate input for counter 2 (speaker control)
+    /// Set gate input for counter 2 (speaker control) — uses edge-detecting set_gate
     pub fn set_gate2(&mut self, gate: bool) {
-        self.counters[2].gate = gate;
+        self.counters[2].set_gate(gate);
     }
 
     /// Get output state of counter 2 (speaker)
@@ -586,23 +881,92 @@ mod tests {
     #[test]
     fn test_pit_creation() {
         let pit = BxPitC::new();
-        assert_eq!(pit.counters[0].number, 0);
-        assert_eq!(pit.counters[1].number, 1);
-        assert_eq!(pit.counters[2].number, 2);
+        // Bochs init: mode=4, GATE=1, OUTpin=1, count_written=1
+        assert_eq!(pit.counters[0].mode, 4);
+        assert!(pit.counters[0].gate);
+        assert!(pit.counters[0].output);
+        assert!(pit.counters[0].count_written);
+        assert!(!pit.counters[0].first_pass);
     }
 
     #[test]
-    fn test_pit_counter_write() {
+    fn test_pit_mode2_rate_generator() {
         let mut pit = BxPitC::new();
 
         // Configure counter 0 for mode 2 (rate generator), low-high access
         pit.write(PIT_CONTROL, 0x34, 1); // Counter 0, low-high, mode 2
 
-        // Write count value 0x1234
-        pit.write(PIT_COUNTER0, 0x34, 1); // Low byte
-        pit.write(PIT_COUNTER0, 0x12, 1); // High byte
+        // After control word: count_written=false, first_pass=true
+        assert!(!pit.counters[0].count_written);
+        assert!(pit.counters[0].first_pass);
 
-        assert_eq!(pit.counters[0].initial_count, 0x1234);
-        assert_eq!(pit.counters[0].count, 0x1234);
+        // Write count value 10
+        pit.write(PIT_COUNTER0, 10, 1); // Low byte
+        pit.write(PIT_COUNTER0, 0, 1);  // High byte
+
+        // After full write: count_written=true
+        assert!(pit.counters[0].count_written);
+        assert_eq!(pit.counters[0].inlatch, 10);
+
+        // Clock: first_pass=true → reload from inlatch, set output HIGH
+        pit.counters[0].clock();
+        assert!(pit.counters[0].output);  // HIGH after reload
+        assert!(!pit.counters[0].first_pass); // first_pass cleared
+
+        // Clock 8 more times (count goes 10→9→...→2)
+        for _ in 0..8 {
+            let irq = pit.counters[0].clock();
+            assert!(!irq); // No IRQ yet
+            assert!(pit.counters[0].output); // Still HIGH
+        }
+
+        // Clock once more: count reaches 1, output goes LOW, first_pass=true
+        let irq = pit.counters[0].clock();
+        assert!(!irq); // LOW transition, not rising edge
+        assert!(!pit.counters[0].output); // LOW pulse
+        assert!(pit.counters[0].first_pass);
+
+        // Next clock: first_pass → reload and output HIGH (rising edge = IRQ)
+        let irq = pit.counters[0].clock();
+        assert!(irq); // Rising edge! IRQ fires
+        assert!(pit.counters[0].output); // Back to HIGH
+    }
+
+    #[test]
+    fn test_pit_gate_edge_detection() {
+        let mut ctr = PitCounter::new(0);
+        ctr.mode = 2;
+        ctr.count_written = true;
+        ctr.inlatch = 100;
+        ctr.gate = true;
+
+        // Gate is already true, setting again should NOT trigger
+        ctr.set_gate(true);
+        assert!(!ctr.trigger_gate);
+
+        // Drop gate LOW
+        ctr.set_gate(false);
+        assert!(!ctr.trigger_gate); // Falling edge doesn't set trigger
+        assert!(ctr.output);        // Mode 2: gate LOW forces output HIGH
+
+        // Raise gate HIGH — rising edge
+        ctr.set_gate(true);
+        assert!(ctr.trigger_gate);  // Rising edge detected!
+    }
+
+    #[test]
+    fn test_pit_count_written_gates_behavior() {
+        let mut ctr = PitCounter::new(0);
+        // After init: count_written=true but mode=4, no interesting behavior
+        // Program mode 2 via control word simulation:
+        ctr.null_count = true;
+        ctr.count_written = false; // Control word clears this
+        ctr.first_pass = true;
+        ctr.mode = 2;
+
+        // Clock with count_written=false → should be no-op
+        let old_count = ctr.count;
+        ctr.clock();
+        assert_eq!(ctr.count, old_count); // Count unchanged
     }
 }

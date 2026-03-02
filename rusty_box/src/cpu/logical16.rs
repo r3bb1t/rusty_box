@@ -791,4 +791,173 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmp_ew_iw_m(instr)
         }
     }
+
+    // =========================================================================
+    // Bit Test instructions (BT, BTS, BTR, BTC) — 16-bit
+    // Based on Bochs cpu/bit16.cc
+    // =========================================================================
+
+    /// BT r/m16, imm8 — Bit Test (0F BA /4 ib, 66h prefix)
+    pub fn bt_ew_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        let op1 = if instr.mod_c0() {
+            self.get_gpr16(instr.dst() as usize)
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let seg = BxSegregs::from(instr.seg());
+            self.read_virtual_word(seg, eaddr)?
+        };
+        let bit = (instr.ib() & 0x0F) as u16;
+        let cf = (op1 >> bit) & 1;
+        self.eflags.set(EFlags::CF, cf != 0);
+        Ok(())
+    }
+
+    /// BTS r/m16, imm8 — Bit Test and Set (0F BA /5 ib, 66h prefix)
+    pub fn bts_ew_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        let bit = (instr.ib() & 0x0F) as u16;
+        if instr.mod_c0() {
+            let dst = instr.dst() as usize;
+            let op1 = self.get_gpr16(dst);
+            let cf = (op1 >> bit) & 1;
+            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_gpr16(dst, op1 | (1 << bit));
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let seg = BxSegregs::from(instr.seg());
+            let op1 = self.read_rmw_virtual_word(seg, eaddr)?;
+            let cf = (op1 >> bit) & 1;
+            self.eflags.set(EFlags::CF, cf != 0);
+            self.write_rmw_linear_word(op1 | (1 << bit));
+        }
+        Ok(())
+    }
+
+    /// BTR r/m16, imm8 — Bit Test and Reset (0F BA /6 ib, 66h prefix)
+    pub fn btr_ew_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        let bit = (instr.ib() & 0x0F) as u16;
+        if instr.mod_c0() {
+            let dst = instr.dst() as usize;
+            let op1 = self.get_gpr16(dst);
+            let cf = (op1 >> bit) & 1;
+            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_gpr16(dst, op1 & !(1 << bit));
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let seg = BxSegregs::from(instr.seg());
+            let op1 = self.read_rmw_virtual_word(seg, eaddr)?;
+            let cf = (op1 >> bit) & 1;
+            self.eflags.set(EFlags::CF, cf != 0);
+            self.write_rmw_linear_word(op1 & !(1 << bit));
+        }
+        Ok(())
+    }
+
+    /// BTC r/m16, imm8 — Bit Test and Complement (0F BA /7 ib, 66h prefix)
+    pub fn btc_ew_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        let bit = (instr.ib() & 0x0F) as u16;
+        if instr.mod_c0() {
+            let dst = instr.dst() as usize;
+            let op1 = self.get_gpr16(dst);
+            let cf = (op1 >> bit) & 1;
+            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_gpr16(dst, op1 ^ (1 << bit));
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let seg = BxSegregs::from(instr.seg());
+            let op1 = self.read_rmw_virtual_word(seg, eaddr)?;
+            let cf = (op1 >> bit) & 1;
+            self.eflags.set(EFlags::CF, cf != 0);
+            self.write_rmw_linear_word(op1 ^ (1 << bit));
+        }
+        Ok(())
+    }
+
+    /// BT r/m16, r16 — Bit Test (0F A3, 66h prefix)
+    pub fn bt_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
+        let op2 = self.get_gpr16(instr.src() as usize);
+        let op1 = if instr.mod_c0() {
+            self.get_gpr16(instr.dst() as usize)
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            // For memory form, bit offset is full op2 (not masked to 15).
+            // Bochs bit16.cc: displacement = ((Bit16s)(op2 & 0xfff0)) / 16 * 2
+            let displacement = ((op2 as i16) >> 4) << 1;
+            let addr = (eaddr as i32).wrapping_add(displacement as i32) as u32;
+            let seg = BxSegregs::from(instr.seg());
+            self.read_virtual_word(seg, addr)?
+        };
+        let bit = op2 & 0x0F;
+        let cf = (op1 >> bit) & 1;
+        self.eflags.set(EFlags::CF, cf != 0);
+        Ok(())
+    }
+
+    /// BTS r/m16, r16 — Bit Test and Set (0F AB, 66h prefix)
+    pub fn bts_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
+        let op2 = self.get_gpr16(instr.src() as usize);
+        let bit = op2 & 0x0F;
+        if instr.mod_c0() {
+            let dst = instr.dst() as usize;
+            let op1 = self.get_gpr16(dst);
+            let cf = (op1 >> bit) & 1;
+            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_gpr16(dst, op1 | (1 << bit));
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let displacement = ((op2 as i16) >> 4) << 1;
+            let addr = (eaddr as i32).wrapping_add(displacement as i32) as u32;
+            let seg = BxSegregs::from(instr.seg());
+            let op1 = self.read_rmw_virtual_word(seg, addr)?;
+            let cf = (op1 >> bit) & 1;
+            self.eflags.set(EFlags::CF, cf != 0);
+            self.write_rmw_linear_word(op1 | (1 << bit));
+        }
+        Ok(())
+    }
+
+    /// BTR r/m16, r16 — Bit Test and Reset (0F B3, 66h prefix)
+    pub fn btr_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
+        let op2 = self.get_gpr16(instr.src() as usize);
+        let bit = op2 & 0x0F;
+        if instr.mod_c0() {
+            let dst = instr.dst() as usize;
+            let op1 = self.get_gpr16(dst);
+            let cf = (op1 >> bit) & 1;
+            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_gpr16(dst, op1 & !(1 << bit));
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let displacement = ((op2 as i16) >> 4) << 1;
+            let addr = (eaddr as i32).wrapping_add(displacement as i32) as u32;
+            let seg = BxSegregs::from(instr.seg());
+            let op1 = self.read_rmw_virtual_word(seg, addr)?;
+            let cf = (op1 >> bit) & 1;
+            self.eflags.set(EFlags::CF, cf != 0);
+            self.write_rmw_linear_word(op1 & !(1 << bit));
+        }
+        Ok(())
+    }
+
+    /// BTC r/m16, r16 — Bit Test and Complement (0F BB, 66h prefix)
+    pub fn btc_ew_gw(&mut self, instr: &Instruction) -> super::Result<()> {
+        let op2 = self.get_gpr16(instr.src() as usize);
+        let bit = op2 & 0x0F;
+        if instr.mod_c0() {
+            let dst = instr.dst() as usize;
+            let op1 = self.get_gpr16(dst);
+            let cf = (op1 >> bit) & 1;
+            self.eflags.set(EFlags::CF, cf != 0);
+            self.set_gpr16(dst, op1 ^ (1 << bit));
+        } else {
+            let eaddr = self.resolve_addr32(instr);
+            let displacement = ((op2 as i16) >> 4) << 1;
+            let addr = (eaddr as i32).wrapping_add(displacement as i32) as u32;
+            let seg = BxSegregs::from(instr.seg());
+            let op1 = self.read_rmw_virtual_word(seg, addr)?;
+            let cf = (op1 >> bit) & 1;
+            self.eflags.set(EFlags::CF, cf != 0);
+            self.write_rmw_linear_word(op1 ^ (1 << bit));
+        }
+        Ok(())
+    }
 }

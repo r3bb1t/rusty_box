@@ -349,6 +349,11 @@ pub(crate) struct BxVgaC {
     /// Bit 7: vert_sync_pol - vertical sync polarity
     misc_vert_sync_pol: bool,
 
+    /// Attribute controller: video_enabled (PAS = Palette Address Source)
+    /// Bit 5 of the value written to port 0x3C0 when flip_flop=0
+    /// Bochs: s.attribute_ctrl.video_enabled
+    video_enabled: bool,
+
     // =====================================================================
     // Dimension tracking (matching Bochs vgacore.cc s.last_xres etc.)
     // Used to detect when dimension_update needs to be called on the GUI.
@@ -418,6 +423,8 @@ impl BxVgaC {
             misc_select_high_bank: false, // Bit 5: Bochs default = 0
             misc_horiz_sync_pol: true,  // Bit 6: Bochs = 1
             misc_vert_sync_pol: true,   // Bit 7: Bochs = 1
+
+            video_enabled: false,       // PAS bit, set by 0x3C0 address writes
 
             last_xres: 0,
             last_yres: 0,
@@ -723,6 +730,13 @@ impl BxVgaC {
 
     /// Read from I/O port
     pub(crate) fn read_port(&mut self, port: u16, _io_len: u8) -> u32 {
+        // Bochs vgacore.cc:487-494: port gating based on color_emulation
+        if port >= 0x3B0 && port <= 0x3BF && self.misc_color_emulation {
+            return 0xFF; // mono ports disabled in color mode
+        }
+        if port >= 0x3D0 && port <= 0x3DF && !self.misc_color_emulation {
+            return 0xFF; // color ports disabled in mono mode
+        }
         match port {
             VGA_CRTC_INDEX | VGA_CRTC_INDEX_MONO => self.crtc_index as u32,
             VGA_CRTC_DATA | VGA_CRTC_DATA_MONO => {
@@ -745,19 +759,24 @@ impl BxVgaC {
                 self.attr_flip_flop = false;
                 self.status_reg as u32
             }
-            VGA_ATTRIB_ADDR | VGA_ATTRIB_DATA => {
-                // Attribute controller: reading toggles flip-flop
-                self.attr_flip_flop = !self.attr_flip_flop;
-                if self.attr_flip_flop {
-                    // Reading index
-                    self.attr_index as u32
+            VGA_ATTRIB_ADDR => {
+                // Bochs vgacore.cc:534-544: read returns (video_enabled<<5)|address
+                // Only valid when flip_flop==0 (address mode)
+                // Does NOT toggle flip-flop on read
+                if !self.attr_flip_flop {
+                    let ve = if self.video_enabled { 0x20u8 } else { 0 };
+                    (ve | self.attr_index) as u32
                 } else {
-                    // Reading data
-                    if self.attr_index < 21 {
-                        self.attr_regs[self.attr_index as usize] as u32
-                    } else {
-                        0
-                    }
+                    tracing::trace!("VGA: read 0x3C0 with flip_flop=1");
+                    0
+                }
+            }
+            VGA_ATTRIB_DATA => {
+                // Bochs vgacore.cc:546-571: read attribute data register
+                if self.attr_index < 21 {
+                    self.attr_regs[self.attr_index as usize] as u32
+                } else {
+                    0
                 }
             }
             VGA_SEQ_INDEX => self.seq_index as u32,
@@ -821,6 +840,13 @@ impl BxVgaC {
 
     /// Write to I/O port
     pub(crate) fn write_port(&mut self, port: u16, value: u32, io_len: u8) {
+        // Bochs vgacore.cc:812-817: port gating based on color_emulation
+        if port >= 0x3B0 && port <= 0x3BF && self.misc_color_emulation {
+            return; // mono ports disabled in color mode
+        }
+        if port >= 0x3D0 && port <= 0x3DF && !self.misc_color_emulation {
+            return; // color ports disabled in mono mode
+        }
         // Word writes: split into two byte writes (Bochs vgacore.cc:806-809)
         if io_len == 2 {
             self.write_port(port, value & 0xFF, 1);
@@ -856,14 +882,27 @@ impl BxVgaC {
             }
             VGA_ATTRIB_ADDR => {
                 // Writing to 0x3C0 toggles flip-flop
-                if self.attr_flip_flop {
-                    // Writing data
+                // Bochs vgacore.cc:821-843
+                if !self.attr_flip_flop {
+                    // Address mode (flip_flop=false): Bochs flip_flop==0
+                    // Bit 5 = video_enabled (PAS = Palette Address Source)
+                    // Bits 0-4 = attribute index
+                    let prev_video_enabled = self.video_enabled;
+                    self.video_enabled = (value & 0x20) != 0;
+
+                    if self.video_enabled && !prev_video_enabled {
+                        self.text_buffer_update = true;
+                    }
+
+                    self.attr_index = value & ATTR_INDEX_MASK; // bits 0-4 only
+
+                    // If index is in palette range, write happens on NEXT flip (data mode)
+                } else {
+                    // Data mode (flip_flop=true): Bochs flip_flop==1
+                    // Write to the attribute register selected by attr_index
                     if self.attr_index < 21 {
                         self.attr_regs[self.attr_index as usize] = value;
                     }
-                } else {
-                    // Writing index
-                    self.attr_index = value & ATTR_INDEX_MASK;
                 }
                 self.attr_flip_flop = !self.attr_flip_flop;
             }
@@ -1117,10 +1156,12 @@ impl BxVgaC {
         let cs_start = self.crtc_regs[CRTC_CURSOR_START] & CRTC_CURSOR_START_MASK;
         let cs_end = self.crtc_regs[CRTC_CURSOR_END] & CRTC_CURSOR_END_MASK;
 
-        // Line offset: CRTC offset register
-        let mut line_offset = (self.crtc_regs[CRTC_OFFSET] as u16) * 2; // Convert to bytes
+        // Line offset: CRTC offset register is in dwords; our text buffer is interleaved
+        // (char+attr pairs), so each row = crtc_offset * 4 bytes.
+        // Bochs planar uses * 2 (one byte per char in plane 0); we use * 4 for interleaved.
+        let mut line_offset = (self.crtc_regs[CRTC_OFFSET] as u16) * 4;
         if line_offset == 0 {
-            // Default to 80 columns * 2 bytes
+            // Default to 80 columns * 2 bytes per char (interleaved)
             line_offset = (TEXT_COLS * BYTES_PER_CHAR) as u16;
         }
 

@@ -494,8 +494,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ----- MOV Rd, CRn (reads) -----
+    // All MOV CRn require CPL=0, matching Bochs crregs.cc
+
+    /// Helper: check CPL=0 for privileged instructions, #GP(0) otherwise
+    /// Matches Bochs crregs.cc CPL check at start of every MOV CRn/DRn
+    fn check_cpl0_for_cr_dr(&mut self) -> super::Result<()> {
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
+        if cpl != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        Ok(())
+    }
 
     pub fn mov_rd_cr0(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
         let val_32 = self.cr0.get32();
         let gpr = instr.src() as usize;
         self.set_gpr32(gpr, val_32);
@@ -504,6 +518,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     pub fn mov_rd_cr2(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
         let val_32 = self.cr2 as u32;
         let gpr = instr.src() as usize;
         self.set_gpr32(gpr, val_32);
@@ -512,6 +527,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     pub fn mov_rd_cr3(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
         let val_32 = self.cr3 as u32;
         let gpr = instr.src() as usize;
         self.set_gpr32(gpr, val_32);
@@ -520,6 +536,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     pub fn mov_rd_cr4(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
         let val_32 = self.cr4.get32();
         let gpr = instr.src() as usize;
         self.set_gpr32(gpr, val_32);
@@ -530,22 +547,37 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ----- MOV CRn, Rd (writes) -----
 
     pub fn mov_cr0_rd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        self.invalidate_prefetch_q();
+
         let src = instr.src1() as usize;
         let val_32 = self.get_gpr32(src);
         let old_cr0 = self.cr0.get32();
+
+        // Bochs check_CR0(): PG without PE is illegal, NW without CD is illegal
+        if (val_32 & (1 << 31)) != 0 && (val_32 & 1) == 0 {
+            // PG=1, PE=0 → #GP(0)
+            tracing::debug!("MOV CR0: PG=1 without PE=1, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        if (val_32 & (1 << 29)) != 0 && (val_32 & (1 << 30)) == 0 {
+            // NW=1, CD=0 → #GP(0)
+            tracing::debug!("MOV CR0: NW=1 without CD=1, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Bochs SetCR0() (crregs.cc): mask reserved bits for CPU level 6
+        let val_32 = val_32 & 0xe005003f;
+
         self.cr0.set32(val_32);
 
-        if self.cr0.pe() {
-            self.cpu_mode = super::cpu::CpuMode::Ia32Protected;
-        } else {
-            self.cpu_mode = super::cpu::CpuMode::Ia32Real;
-        }
-
+        // Bochs: TLB flush if PG, PE, or WP changed
         if (old_cr0 & 0x80010001) != (val_32 & 0x80010001) {
             self.tlb_flush();
-        } else {
-            self.invalidate_prefetch_q();
         }
+
+        // Match Bochs handleCpuModeChange + handleAlignmentCheck
+        self.handle_cpu_context_change();
 
         tracing::trace!(
             "MOV CR0, r32: {:#010x} -> {:#010x} (PE={}, PG={})",
@@ -558,6 +590,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     pub fn mov_cr2_rd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
         let src = instr.src1() as usize;
         let val_32 = self.get_gpr32(src);
         self.cr2 = val_32 as u64;
@@ -566,6 +599,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     pub fn mov_cr3_rd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
         let src = instr.src1() as usize;
         let val_32 = self.get_gpr32(src);
         self.cr3 = val_32 as u64;
@@ -581,15 +615,50 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     pub fn mov_cr4_rd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        self.invalidate_prefetch_q();
+
         let src = instr.src1() as usize;
         let val_32 = self.get_gpr32(src);
+
+        // Bochs check_CR4(): reject unsupported bits.
+        // cr4_suppmask for Skylake-X: VME|PVI|TSD|DE|PSE|PAE|MCE|PGE|PCE|OSFXSR|OSXMMEXCPT|UMIP|SMEP|SMAP
+        // We allow the bits that our CPUID model advertises support for.
+        // For a 32-bit emulation: bits 0-10, 11(UMIP), 20(SMEP), 21(SMAP)
+        const CR4_SUPPMASK: u32 = (1 << 0)  // VME
+            | (1 << 1)  // PVI
+            | (1 << 2)  // TSD
+            | (1 << 3)  // DE
+            | (1 << 4)  // PSE
+            | (1 << 5)  // PAE
+            | (1 << 6)  // MCE
+            | (1 << 7)  // PGE
+            | (1 << 8)  // PCE
+            | (1 << 9)  // OSFXSR
+            | (1 << 10) // OSXMMEXCPT
+            | (1 << 11) // UMIP
+            | (1 << 18) // OSXSAVE
+            | (1 << 20) // SMEP
+            | (1 << 21); // SMAP
+
+        if (val_32 & !CR4_SUPPMASK) != 0 {
+            tracing::debug!(
+                "MOV CR4: unsupported bits set {:#010x} (mask={:#010x}), #GP(0)",
+                val_32 & !CR4_SUPPMASK,
+                CR4_SUPPMASK
+            );
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
         let old_cr4 = self.cr4.get32();
         self.cr4.set32(val_32);
 
-        if old_cr4 != val_32 {
+        // Bochs: TLB flush only if paging-related bits changed
+        // BX_CR4_FLUSH_TLB_MASK = PSE|PAE|PGE|PCIDE|SMEP|SMAP
+        const CR4_FLUSH_TLB_MASK: u32 = (1 << 4) | (1 << 5) | (1 << 7)
+            | (1 << 17) | (1 << 20) | (1 << 21);
+        if (old_cr4 ^ val_32) & CR4_FLUSH_TLB_MASK != 0 {
             self.tlb_flush();
-        } else {
-            self.invalidate_prefetch_q();
         }
 
         tracing::trace!("MOV CR4, r32: {:#010x}", val_32);
@@ -599,8 +668,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ----- LMSW -----
 
     /// LMSW - Load Machine Status Word
+    /// Based on Bochs crregs.cc:870-913
     pub fn lmsw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
-        let msw = if instr.mod_c0() {
+        // CPL must be 0 (CPL is always 0 in real mode)
+        // Based on Bochs crregs.cc:874
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        if cpl != 0 {
+            tracing::debug!("LMSW: CPL={} != 0, #GP(0)", cpl);
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        let mut msw = if instr.mod_c0() {
             self.get_gpr16(instr.meta_data[0] as usize)
         } else {
             let eaddr = self.resolve_addr32(instr);
@@ -608,23 +686,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.read_virtual_word(seg, eaddr)?
         };
 
-        let mut msw = msw;
+        // LMSW cannot clear PE (Bochs crregs.cc:903-905)
         if self.cr0.pe() {
             msw |= 1;
         }
 
-        let msw = msw & 0xF;
-        let cr0_val = (self.cr0.get32() & 0xFFFFFFF0) | msw as u32;
+        // LMSW only affects last 4 bits (Bochs crregs.cc:907)
+        msw &= 0xF;
+
+        let old_cr0 = self.cr0.get32();
+        let cr0_val = (old_cr0 & 0xFFFFFFF0) | msw as u32;
+
+        // Use same path as MOV CR0 — SetCR0 equivalent
+        // (Bochs crregs.cc:910 calls SetCR0)
         self.cr0.set32(cr0_val);
 
-        if self.cr0.pe() {
-            self.cpu_mode = super::cpu::CpuMode::Ia32Protected;
-        } else {
-            self.cpu_mode = super::cpu::CpuMode::Ia32Real;
+        // TLB flush if PG, PE, or WP changed (Bochs crregs.cc:1158)
+        if (old_cr0 & 0x80010001) != (cr0_val & 0x80010001) {
+            self.tlb_flush();
         }
 
-        self.eip_fetch_ptr = None;
-        self.eip_page_window_size = 0;
+        // handleAlignmentCheck + handleCpuModeChange (Bochs crregs.cc:1142-1145)
+        self.handle_cpu_context_change();
 
         tracing::debug!(
             "LMSW: msw={:#06x}, CR0={:#010x} (PE={})",

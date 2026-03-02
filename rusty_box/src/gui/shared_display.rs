@@ -86,6 +86,8 @@ impl SharedDisplay {
     /// - `cursor_x`, `cursor_y`: cursor position (column, row)
     /// - `cs_start`, `cs_end`: cursor scanline start/end (0..font_height)
     /// - `line_graphics`: if true, chars 0xC0-0xDF duplicate bit 0 to 9th pixel
+    /// - `start_address`: CRTC start address (byte offset into text buffer)
+    /// - `line_offset`: CRTC line offset (bytes per row in VGA memory)
     pub fn render_text_to_framebuffer(
         &mut self,
         text: &[u8],
@@ -94,6 +96,8 @@ impl SharedDisplay {
         cs_start: u8,
         cs_end: u8,
         line_graphics: bool,
+        start_address: u32,
+        line_offset: u32,
     ) {
         let cols = self.screen_cols;
         let rows = self.screen_rows;
@@ -178,7 +182,8 @@ impl SharedDisplay {
             let fb = &mut self.framebuffer;
             for row in 0..rows {
                 for col in 0..cols {
-                    let text_idx = ((row * cols + col) * 2) as usize;
+                    // Use CRTC start_address and line_offset, matching Bochs gui.cc:1311-1314
+                    let text_idx = (start_address + row * line_offset + col * 2) as usize;
                     if text_idx + 1 >= text.len() {
                         continue;
                     }

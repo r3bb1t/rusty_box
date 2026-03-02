@@ -256,7 +256,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut push_error = if (vector as usize) < BX_CPU_HANDLED_EXCEPTIONS {
             self.exception_push_error(vector as usize)
         } else {
-            return Err(super::error::CpuError::BadVector { vector });
+            return Err(super::error::CpuError::BadVector { vector, error_code });
         };
         /* Excluding page faults and double faults, error_code may not have the
          * least significant bit set correctly. This correction is applied first
@@ -379,16 +379,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // call exception() recursively so double-fault detection runs normally.
             match self.protected_mode_int(vector_u8, false, push_error, error_code) {
                 Ok(()) => {}
-                Err(super::error::CpuError::BadVector { vector: new_vector }) => {
+                Err(super::error::CpuError::BadVector { vector: new_vector, error_code: new_error_code }) => {
                     // Delivery failed — raise the indicated exception.
                     // Double-fault / triple-fault detection is in the recursive call.
                     tracing::warn!(
-                        "protected_mode_int({:?}) failed, raising {:?}; icount={}",
+                        "protected_mode_int({:?}) failed, raising {:?} error_code={:#x}; icount={}",
                         vector,
                         new_vector,
+                        new_error_code,
                         self.icount
                     );
-                    return self.exception(new_vector, 0);
+                    return self.exception(new_vector, new_error_code);
                 }
                 Err(e) => return Err(e),
             }

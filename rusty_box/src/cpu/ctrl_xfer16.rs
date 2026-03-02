@@ -16,8 +16,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Branch to a near 16-bit address
     /// Matching C++ ctrl_xfer16.cc:27-44 branch_near16
-    fn branch_near16(&mut self, new_ip: u16) {
+    fn branch_near16(&mut self, new_ip: u16) -> super::Result<()> {
         // Check CS limit (matching C++ line 32-36)
+        // Bochs: exception(BX_GP_EXCEPTION, 0) which longjmps
         let limit = self.get_segment_limit(BxSegregs::Cs);
         if (new_ip as u32) > limit {
             tracing::error!(
@@ -25,19 +26,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 new_ip,
                 limit
             );
-            // In C++, this calls exception(BX_GP_EXCEPTION, 0) which doesn't return
-            // In Rust, we should handle this properly
+            return self.exception(super::cpu::Exception::Gp, 0);
         }
 
         // Matching C++ line 38: EIP = new_IP;
         self.set_eip(new_ip as u32);
 
         // Matching C++ lines 40-43: Set STOP_TRACE when handlers chaining is disabled
-        // In C++, this is conditional on BX_SUPPORT_HANDLERS_CHAINING_SPEEDUPS == 0
-        // Since we don't have handlers chaining yet, we always set it
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
-        // Note: C++ branch_near16/32 don't call invalidate_prefetch_q() - only far jumps do
-        // The STOP_TRACE flag is enough to break the trace loop, and getICacheEntry will fetch from new location
+        Ok(())
     }
 
     // =========================================================================
@@ -53,30 +50,33 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// JMP rel8 - Short jump with 8-bit signed displacement
-    pub fn jmp_jb(&mut self, instr: &Instruction) {
+    pub fn jmp_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         let disp = instr.ib() as i8;
         let ip = self.get_ip();
         let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-        self.branch_near16(new_ip);
+        self.branch_near16(new_ip)?;
         tracing::trace!("JMP rel8: IP = {:#06x}", new_ip);
+        Ok(())
     }
 
     /// JMP rel16 - Near jump with 16-bit signed displacement
-    pub fn jmp_jw(&mut self, instr: &Instruction) {
+    pub fn jmp_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         let disp = instr.iw() as i16;
         let ip = self.get_ip();
         let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-        self.branch_near16(new_ip);
+        self.branch_near16(new_ip)?;
         tracing::trace!("JMP rel16: IP = {:#06x}", new_ip);
+        Ok(())
     }
 
     /// JMP r16 - Indirect jump through register (register form)
     /// Matching Bochs ctrl_xfer16.cc JMP_EwR
-    pub fn jmp_ew_r(&mut self, instr: &Instruction) {
+    pub fn jmp_ew_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let dst = instr.dst() as usize;
         let new_ip = self.get_gpr16(dst);
-        self.branch_near16(new_ip);
+        self.branch_near16(new_ip)?;
         tracing::trace!("JMP r16: IP = {:#06x}", new_ip);
+        Ok(())
     }
 
     /// JMP m16 - Indirect jump through memory (memory form)
@@ -85,7 +85,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let new_ip = self.read_virtual_word(seg, eaddr)?;
-        self.branch_near16(new_ip);
+        self.branch_near16(new_ip)?;
         tracing::trace!("JMP m16: [{:?}:{:#x}] -> IP = {:#06x}", seg, eaddr, new_ip);
         Ok(())
     }
@@ -93,8 +93,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// JMP r/m16 - Unified dispatch (checks mod_c0)
     pub fn jmp_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
-            self.jmp_ew_r(instr);
-            Ok(())
+            self.jmp_ew_r(instr)
         } else {
             self.jmp_ew_m(instr)
         }
@@ -113,7 +112,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.push_16(ip)?;
 
         let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-        self.branch_near16(new_ip);
+        self.branch_near16(new_ip)?;
         tracing::trace!("CALL rel16: IP = {:#06x}, ret = {:#06x}", new_ip, ip);
         Ok(())
     }
@@ -126,7 +125,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let ip = self.get_ip();
 
         self.push_16(ip)?;
-        self.branch_near16(new_ip);
+        self.branch_near16(new_ip)?;
         tracing::trace!("CALL r16: IP = {:#06x}, ret = {:#06x}", new_ip, ip);
         Ok(())
     }
@@ -140,7 +139,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let ip = self.get_ip();
 
         self.push_16(ip)?;
-        self.branch_near16(new_ip);
+        self.branch_near16(new_ip)?;
         tracing::trace!(
             "CALL m16: [{:?}:{:#x}] -> IP = {:#06x}, ret = {:#06x}",
             seg,
@@ -167,7 +166,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// RET near - Return from procedure (16-bit)
     pub fn ret_near16(&mut self, _instr: &Instruction) -> super::Result<()> {
         let return_ip = self.pop_16()?;
-        self.branch_near16(return_ip);
+        self.branch_near16(return_ip)?;
         tracing::trace!("RET near16: IP = {:#06x}", return_ip);
         Ok(())
     }
@@ -177,7 +176,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let return_ip = self.pop_16()?;
         let imm16 = instr.iw();
 
-        self.branch_near16(return_ip);
+        self.branch_near16(return_ip)?;
 
         // Pop additional bytes from stack
         let ss_d_b = self.get_segment_d_b(BxSegregs::Ss);
@@ -197,179 +196,195 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// JO rel8 - Jump if overflow (OF=1)
-    pub fn jo_jb(&mut self, instr: &Instruction) {
+    pub fn jo_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_of() {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JO taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JNO rel8 - Jump if not overflow (OF=0)
-    pub fn jno_jb(&mut self, instr: &Instruction) {
+    pub fn jno_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         if !self.get_of() {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JNO taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JB/JC/JNAE rel8 - Jump if below/carry (CF=1)
-    pub fn jb_jb(&mut self, instr: &Instruction) {
+    pub fn jb_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_cf() {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JB/JC taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JNB/JNC/JAE rel8 - Jump if not below/no carry (CF=0)
-    pub fn jnb_jb(&mut self, instr: &Instruction) {
+    pub fn jnb_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         if !self.get_cf() {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JNB/JNC taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JZ/JE rel8 - Jump if zero/equal (ZF=1)
-    pub fn jz_jb(&mut self, instr: &Instruction) {
+    pub fn jz_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_zf() {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JZ/JE taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JNZ/JNE rel8 - Jump if not zero/not equal (ZF=0)
-    pub fn jnz_jb(&mut self, instr: &Instruction) {
+    pub fn jnz_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         if !self.get_zf() {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JNZ/JNE taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JBE/JNA rel8 - Jump if below or equal (CF=1 or ZF=1)
-    pub fn jbe_jb(&mut self, instr: &Instruction) {
+    pub fn jbe_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_cf() || self.get_zf() {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JBE/JNA taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JNBE/JA rel8 - Jump if not below or equal/above (CF=0 and ZF=0)
-    pub fn jnbe_jb(&mut self, instr: &Instruction) {
+    pub fn jnbe_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         if !self.get_cf() && !self.get_zf() {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JNBE/JA taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JS rel8 - Jump if sign (SF=1)
-    pub fn js_jb(&mut self, instr: &Instruction) {
+    pub fn js_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_sf() {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JS taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JNS rel8 - Jump if not sign (SF=0)
-    pub fn jns_jb(&mut self, instr: &Instruction) {
+    pub fn jns_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         if !self.get_sf() {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JNS taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JP/JPE rel8 - Jump if parity/parity even (PF=1)
-    pub fn jp_jb(&mut self, instr: &Instruction) {
+    pub fn jp_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_pf() {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JP/JPE taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JNP/JPO rel8 - Jump if no parity/parity odd (PF=0)
-    pub fn jnp_jb(&mut self, instr: &Instruction) {
+    pub fn jnp_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         if !self.get_pf() {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JNP/JPO taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JL/JNGE rel8 - Jump if less (SF != OF)
-    pub fn jl_jb(&mut self, instr: &Instruction) {
+    pub fn jl_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_sf() != self.get_of() {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JL/JNGE taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JNL/JGE rel8 - Jump if not less/greater or equal (SF == OF)
-    pub fn jnl_jb(&mut self, instr: &Instruction) {
+    pub fn jnl_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_sf() == self.get_of() {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JNL/JGE taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JLE/JNG rel8 - Jump if less or equal (ZF=1 or SF!=OF)
-    pub fn jle_jb(&mut self, instr: &Instruction) {
+    pub fn jle_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_zf() || (self.get_sf() != self.get_of()) {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JLE/JNG taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JNLE/JG rel8 - Jump if not less or equal/greater (ZF=0 and SF==OF)
-    pub fn jnle_jb(&mut self, instr: &Instruction) {
+    pub fn jnle_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         if !self.get_zf() && (self.get_sf() == self.get_of()) {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JNLE/JG taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     // =========================================================================
@@ -377,179 +392,195 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// JZ/JE rel16 - Jump if zero/equal (ZF=1)
-    pub fn jz_jw(&mut self, instr: &Instruction) {
+    pub fn jz_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_zf() {
             let disp = instr.iw() as i16;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JZ/JE rel16 taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JNZ/JNE rel16 - Jump if not zero/not equal (ZF=0)
-    pub fn jnz_jw(&mut self, instr: &Instruction) {
+    pub fn jnz_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         if !self.get_zf() {
             let disp = instr.iw() as i16;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JNZ/JNE rel16 taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JO rel16 - Jump if overflow (OF=1)
-    pub fn jo_jw(&mut self, instr: &Instruction) {
+    pub fn jo_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_of() {
             let disp = instr.iw() as i16;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JO rel16 taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JNO rel16 - Jump if not overflow (OF=0)
-    pub fn jno_jw(&mut self, instr: &Instruction) {
+    pub fn jno_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         if !self.get_of() {
             let disp = instr.iw() as i16;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JNO rel16 taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JB/JC/JNAE rel16 - Jump if below/carry (CF=1)
-    pub fn jb_jw(&mut self, instr: &Instruction) {
+    pub fn jb_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_cf() {
             let disp = instr.iw() as i16;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JB/JC rel16 taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JNB/JNC/JAE rel16 - Jump if not below/no carry (CF=0)
-    pub fn jnb_jw(&mut self, instr: &Instruction) {
+    pub fn jnb_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         if !self.get_cf() {
             let disp = instr.iw() as i16;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JNB/JNC rel16 taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JBE/JNA rel16 - Jump if below or equal (CF=1 or ZF=1)
-    pub fn jbe_jw(&mut self, instr: &Instruction) {
+    pub fn jbe_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_cf() || self.get_zf() {
             let disp = instr.iw() as i16;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JBE/JNA rel16 taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JNBE/JA rel16 - Jump if not below or equal/above (CF=0 and ZF=0)
-    pub fn jnbe_jw(&mut self, instr: &Instruction) {
+    pub fn jnbe_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         if !self.get_cf() && !self.get_zf() {
             let disp = instr.iw() as i16;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JNBE/JA rel16 taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JS rel16 - Jump if sign (SF=1)
-    pub fn js_jw(&mut self, instr: &Instruction) {
+    pub fn js_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_sf() {
             let disp = instr.iw() as i16;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JS rel16 taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JNS rel16 - Jump if not sign (SF=0)
-    pub fn jns_jw(&mut self, instr: &Instruction) {
+    pub fn jns_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         if !self.get_sf() {
             let disp = instr.iw() as i16;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JNS rel16 taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JP/JPE rel16 - Jump if parity/parity even (PF=1)
-    pub fn jp_jw(&mut self, instr: &Instruction) {
+    pub fn jp_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_pf() {
             let disp = instr.iw() as i16;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JP/JPE rel16 taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JNP/JPO rel16 - Jump if no parity/parity odd (PF=0)
-    pub fn jnp_jw(&mut self, instr: &Instruction) {
+    pub fn jnp_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         if !self.get_pf() {
             let disp = instr.iw() as i16;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JNP/JPO rel16 taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JL/JNGE rel16 - Jump if less (SF != OF)
-    pub fn jl_jw(&mut self, instr: &Instruction) {
+    pub fn jl_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_sf() != self.get_of() {
             let disp = instr.iw() as i16;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JL/JNGE rel16 taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JNL/JGE rel16 - Jump if not less/greater or equal (SF == OF)
-    pub fn jnl_jw(&mut self, instr: &Instruction) {
+    pub fn jnl_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_sf() == self.get_of() {
             let disp = instr.iw() as i16;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JNL/JGE rel16 taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JLE/JNG rel16 - Jump if less or equal (ZF=1 or SF!=OF)
-    pub fn jle_jw(&mut self, instr: &Instruction) {
+    pub fn jle_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         if self.get_zf() || (self.get_sf() != self.get_of()) {
             let disp = instr.iw() as i16;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JLE/JNG rel16 taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JNLE/JG rel16 - Jump if not less or equal/greater (ZF=0 and SF==OF)
-    pub fn jnle_jw(&mut self, instr: &Instruction) {
+    pub fn jnle_jw(&mut self, instr: &Instruction) -> super::Result<()> {
         if !self.get_zf() && (self.get_sf() == self.get_of()) {
             let disp = instr.iw() as i16;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JNLE/JG rel16 taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     // =========================================================================
@@ -557,7 +588,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// LOOP rel8 - Decrement CX/ECX, jump if not zero
-    pub fn loop16_jb(&mut self, instr: &Instruction) {
+    pub fn loop16_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         let as32l = instr.as32_l() != 0;
 
         if as32l {
@@ -569,7 +600,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let disp = instr.ib() as i8;
                 let ip = self.get_ip();
                 let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-                self.branch_near16(new_ip);
+                self.branch_near16(new_ip)?;
                 tracing::trace!("LOOP taken (32-bit): IP = {:#06x}, ECX = {}", new_ip, count);
             }
         } else {
@@ -581,14 +612,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let disp = instr.ib() as i8;
                 let ip = self.get_ip();
                 let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-                self.branch_near16(new_ip);
+                self.branch_near16(new_ip)?;
                 tracing::trace!("LOOP taken (16-bit): IP = {:#06x}, CX = {}", new_ip, count);
             }
         }
+        Ok(())
     }
 
     /// LOOPE/LOOPZ rel8 - Decrement CX/ECX, jump if not zero and ZF=1
-    pub fn loope16_jb(&mut self, instr: &Instruction) {
+    pub fn loope16_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         let as32l = instr.as32_l() != 0;
 
         if as32l {
@@ -600,7 +632,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let disp = instr.ib() as i8;
                 let ip = self.get_ip();
                 let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-                self.branch_near16(new_ip);
+                self.branch_near16(new_ip)?;
             }
         } else {
             let cx = self.get_gpr16(1);
@@ -611,13 +643,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let disp = instr.ib() as i8;
                 let ip = self.get_ip();
                 let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-                self.branch_near16(new_ip);
+                self.branch_near16(new_ip)?;
             }
         }
+        Ok(())
     }
 
     /// LOOPNE/LOOPNZ rel8 - Decrement CX/ECX, jump if not zero and ZF=0
-    pub fn loopne16_jb(&mut self, instr: &Instruction) {
+    pub fn loopne16_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         let as32l = instr.as32_l() != 0;
 
         if as32l {
@@ -629,7 +662,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let disp = instr.ib() as i8;
                 let ip = self.get_ip();
                 let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-                self.branch_near16(new_ip);
+                self.branch_near16(new_ip)?;
             }
         } else {
             let cx = self.get_gpr16(1);
@@ -640,13 +673,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let disp = instr.ib() as i8;
                 let ip = self.get_ip();
                 let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-                self.branch_near16(new_ip);
+                self.branch_near16(new_ip)?;
             }
         }
+        Ok(())
     }
 
     /// JCXZ rel8 - Jump if CX is zero
-    pub fn jcxz_jb(&mut self, instr: &Instruction) {
+    pub fn jcxz_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         let as32l = instr.as32_l() != 0;
         let count = if as32l {
             self.get_gpr32(1)
@@ -658,23 +692,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JCXZ taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     /// JECXZ rel8 - Jump if ECX is zero (32-bit mode)
     /// Matching C++ ctrl_xfer16.cc:592-613 JCXZ_Jb
-    pub fn jecxz_jb(&mut self, instr: &Instruction) {
+    pub fn jecxz_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         let ecx = self.get_gpr32(1);
 
         if ecx == 0 {
             let disp = instr.ib() as i8;
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip);
+            self.branch_near16(new_ip)?;
             tracing::trace!("JECXZ taken: IP = {:#06x}", new_ip);
         }
+        Ok(())
     }
 
     // =========================================================================
@@ -714,6 +750,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 );
                 return Err(CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: 0,
                 });
             }
 
@@ -746,6 +783,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 );
                 return Err(CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: 0,
                 });
             }
 
@@ -854,6 +892,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 );
                 return Err(CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: 0,
                 });
             }
 
@@ -892,6 +931,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 );
                 return Err(CpuError::BadVector {
                     vector: Exception::Gp,
+                    error_code: 0,
                 });
             }
 

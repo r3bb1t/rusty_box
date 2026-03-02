@@ -222,6 +222,24 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             .init(&mut self.devices, &mut self.memory)?;
         tracing::debug!("Devices initialized");
 
+        // Wire PIC→CPU interrupt signaling (Bochs BX_RAISE_INTR / BX_CLEAR_INTR).
+        // The PIC needs raw pointers to cpu.async_event and cpu.pending_event so it
+        // can break the CPU inner loop when master int_pin asserts/deasserts.
+        // Also give the CPU a raw pointer to the PIC for DEV_pic_iac() in
+        // handle_async_event()'s external interrupt delivery.
+        unsafe {
+            let async_ptr = &mut self.cpu.async_event as *mut u32;
+            let pending_ptr = &mut self.cpu.pending_event as *mut u32;
+            self.device_manager
+                .pic
+                .set_cpu_signal_ptrs(async_ptr, pending_ptr);
+        }
+        self.cpu.pic_ptr = &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
+
+        // Wire HardDrive→PIC for immediate IRQ raise/lower (matches Bochs DEV_pic_raise_irq)
+        self.device_manager.harddrv.pic_ptr =
+            &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
+
         // Note: SIM->opt_plugin_ctrl("*", 0) at line 1355 unloads unused optional plugins
         // This is optional plugin management, not yet implemented in Rust version
 
@@ -317,6 +335,20 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.device_manager
             .init(&mut self.devices, &mut self.memory)?;
         tracing::info!("Device initialization complete");
+
+        // Wire PIC→CPU interrupt signaling (same as in initialize())
+        unsafe {
+            let async_ptr = &mut self.cpu.async_event as *mut u32;
+            let pending_ptr = &mut self.cpu.pending_event as *mut u32;
+            self.device_manager
+                .pic
+                .set_cpu_signal_ptrs(async_ptr, pending_ptr);
+        }
+        self.cpu.pic_ptr = &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
+
+        // Wire HardDrive→PIC for immediate IRQ raise/lower (matches Bochs DEV_pic_raise_irq)
+        self.device_manager.harddrv.pic_ptr =
+            &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
 
         // Note: SIM->opt_plugin_ctrl("*", 0) at line 1355 unloads unused optional plugins
         // This is optional plugin management, not yet implemented in Rust version
@@ -1462,7 +1494,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         let rip = self.cpu.rip();
                         let pit_c0 = &self.device_manager.pit.counters[0];
                         tracing::debug!(
-                            "IRQ-DIAG: {}M instr, RIP={:#x}, IF={}, has_int={}, PIC_imr={:#04x}, PIC_irr={:#04x}, PIT_c0: mode={:?} init={} count={} enabled={} counting={} output={}",
+                            "IRQ-DIAG: {}M instr, RIP={:#x}, IF={}, has_int={}, PIC_imr={:#04x}, PIC_irr={:#04x}, PIT_c0: mode={:?} inlatch={} count={} count_written={} gate={} output={}",
                             instructions_executed / 1_000_000,
                             rip,
                             if_flag,
@@ -1470,10 +1502,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             self.device_manager.pic.master.imr,
                             self.device_manager.pic.master.irr,
                             self.device_manager.pit.counters[0].mode,
-                            pit_c0.initial_count,
+                            pit_c0.inlatch,
                             pit_c0.count,
-                            pit_c0.enabled,
-                            pit_c0.counting,
+                            pit_c0.count_written,
+                            pit_c0.gate,
                             pit_c0.output,
                         );
                     }
@@ -1860,12 +1892,22 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             let ips_elapsed = last_ips_update.elapsed();
             if ips_elapsed >= IPS_UPDATE_INTERVAL {
                 let delta_instr = instructions_executed - last_ips_instructions;
-                let ips = (delta_instr as f64 / ips_elapsed.as_secs_f64()) as u32;
+                let mips = (delta_instr as f64 / ips_elapsed.as_secs_f64()) / 1_000_000.0;
+                let ips = (mips * 1_000_000.0) as u32;
                 last_ips_instructions = instructions_executed;
                 last_ips_update = std::time::Instant::now();
                 if let Some(ref mut gui) = self.gui {
                     gui.show_ips(ips);
                 }
+                tracing::error!(
+                    target: "mips",
+                    "[{:>6}M instr] {:>6.2} MIPS  RIP={:#010x}  CS={:#06x}  mode={}",
+                    instructions_executed / 1_000_000,
+                    mips,
+                    self.cpu.rip(),
+                    self.cpu.get_cs_selector(),
+                    self.cpu.get_cpu_mode(),
+                );
             }
 
             // 5. Check if we should exit (e.g., shutdown requested)
@@ -2082,6 +2124,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 update_result.tm_info.cs_start,
                 update_result.tm_info.cs_end,
                 update_result.tm_info.line_graphics,
+                update_result.tm_info.start_address as u32,
+                update_result.tm_info.line_offset as u32,
             );
         } else if dbg % 300 == 1 {
             // VGA returned None — not in text mode or not initialized
