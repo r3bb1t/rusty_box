@@ -129,7 +129,8 @@ Multiple `debug!`/`info!` calls on hot paths were causing I/O-bound slowdowns:
 Use `std::env::var("RUST_LOG").parse::<tracing::Level>()` instead.
 
 **For headless testing on Windows**: Set `RUSTY_BOX_HEADLESS=1` to skip TermGUI repaint.
-Performance: ~1.21 MIPS (100k instructions in 0.083s).
+Performance (windowed per-second MIPS, release build, 2026-03-02): BIOS ~22 MIPS, kernel decompressor ~29 MIPS, kernel init ~14 MIPS.
+Monitor per-phase throughput with: `RUST_LOG=error cargo run --release --example dlxlinux --features std` (output lines tagged `[mips]`).
 
 **New fixes (2026-02-19): Short jumps, CLC/STC/CMC, RDMSR/WRMSR, Jbd dispatch**
 

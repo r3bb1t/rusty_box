@@ -1,8 +1,8 @@
 # DLX Linux Boot Summary
 
-## Current State (2026-02-25)
+## Current State (2026-03-02)
 
-The Rusty Box emulator successfully boots DLX Linux from BIOS POST through LILO to kernel execution. The kernel reaches its idle HLT loop with timer interrupts being delivered at ~100M instructions.
+The Rusty Box emulator successfully boots DLX Linux from BIOS POST through LILO to kernel execution. The kernel completes all driver initialization and stalls at an idle HLT loop waiting for ATA disk I/O (IRQ14) after 132M+ instructions.
 
 ### VGA Text Output (headless mode)
 
@@ -52,16 +52,17 @@ This matches the reference Bochs output except for "NO Bochs VBE Support availab
 
 **Key reasoning**: LILO's two-stage loading was confirmed by watching far jump sequences. The first jump to 8A00:0098 is the boot sector code, then 8B00:0000 is the relocated first stage. LILO's "Loading linux......" dots correspond to batches of INT 13h sector reads.
 
-### Phase 3: Linux Kernel Boot (1.3M — ~100M instructions)
+### Phase 3: Linux Kernel Boot (1.3M — 132M+ instructions)
 
 | Stage | Instructions | Description |
 |-------|-------------|-------------|
 | Setup code | 1.28M-1.29M | Real-mode setup at 9020:0000, A20 enable, memory detect |
 | PM switch | 1.29M | Far jump to CS=0x10:0x1000 (32-bit flat PM) |
-| Decompressor | 1.29M-30.3M | Decompress bzImage at 0x1000, extracts to 0x100000 |
-| Kernel start | 30.3M | Far jump to CS=0x10:0x100000 (kernel entry) |
-| Paging enable | 30.3M | CR0 set to 0x80000013 (PE+WP+PG), CR3 points to page tables |
-| Kernel init | 30.3M-100M | Memory init, device probing, scheduler setup, idle loop |
+| Decompressor | 1.29M-90M | Decompress bzImage at 0x1000, extracts to 0x100000 (~29 MIPS) |
+| Kernel start | 90M | Far jump to CS=0x10:0x100000 (kernel entry) |
+| Paging enable | 90M | CR0 set to 0x80000013 (PE+WP+PG), CR3 points to page tables |
+| Kernel init | 90M-132M | Memory init, device probing, scheduler setup, driver init (~14 MIPS) |
+| Idle HLT | 132M+ | Waiting for ATA disk IRQ14 — nIEN=1 set by kernel, polls status instead |
 
 **Key reasoning**: The decompressor phase was identified by watching the RIP range (0x1000-0x5000 area) and the final far jump to 0x100000. Paging enable was confirmed by CR0 value in the `JmpfAp` log. The kernel uses segmentation with base=0xC0000000, limit=0x3FFFFFFF (3G/1G split) — this was diagnosed when string instructions failed because they used linear addresses as physical (fixed by adding paging translation to all 32-bit string ops).
 
@@ -107,16 +108,33 @@ This matches the reference Bochs output except for "NO Bochs VBE Support availab
 
 ---
 
+## Performance (as of 2026-03-02)
+
+Measured using windowed per-second MIPS output (`tracing::error!(target: "mips")`) in headless release mode:
+
+| Phase | Instructions | MIPS | Notes |
+|-------|-------------|------|-------|
+| BIOS real-mode | 0–67M | ~22 | Keyboard init, memory probe, PCI scan |
+| BIOS→PM / rombios32 | 67–90M | ~22 | PCI BIOS, ACPI tables, return to real mode |
+| Kernel decompressor | 90–118M | ~29 | **Exceeds Bochs target (~14.7 MIPS)** |
+| Kernel initialization | 118–132M | ~14 | Matches Bochs target |
+| Idle HLT | 132M+ | ~0 | Waiting for IRQ14 disk interrupt |
+
+### Key optimizations enabling this throughput
+
+1. **`fetch_decode32_inplace`** — decoder writes directly into the icache mpool, eliminating a 24-byte struct copy per instruction
+2. **Raw pointer execute loop** — dispatch uses a raw slice pointer, eliminating bounds-check overhead per instruction
+3. **Trace allocation guard** — `format!` / `collect::<String>()` in icache serve path gated on `tracing::enabled!(TRACE)`
+
+Previous full-run average (~3–4 MIPS) was misleadingly low because it included the HLT idle phase. Active execution rates have always been higher; the windowed measurement makes this visible.
+
 ## Remaining Issues
 
-### Linux Console Output Not Visible
+### Kernel Stalls After Driver Init
 
-The kernel reaches its idle loop (confirmed by timer interrupt delivery to HLT'd CPU) but no Linux console text appears in the VGA dump. Possible causes:
+The kernel prints through "loop: registered device at major 7" then enters HLT. It needs to:
+1. Read the root filesystem from the ATA disk (IRQ14 / DRQ polling)
+2. Mount the rootfs and start `/sbin/init`
+3. Continue to the `dlx login:` prompt
 
-1. **Kernel uses console driver that writes via INT 10h or direct port I/O** — may need more VGA register handling
-2. **Kernel console initialization hasn't completed** — may need more instructions or missing hardware responses
-3. **Serial console** — DLX Linux might default to serial output which isn't captured in VGA dump
-
-### Performance
-
-Current performance: ~6-7 MIPS in release mode. Adequate for booting but slow for interactive use. Main bottleneck is per-instruction paging translation and TLB management.
+**Root cause**: The kernel sets nIEN=1 (disabling disk interrupts) and polls the ATA status register. The polling loop should complete after the disk completes its command, but the drive state machine is not progressing. This is the primary remaining issue.
