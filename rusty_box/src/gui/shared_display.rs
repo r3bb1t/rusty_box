@@ -6,8 +6,10 @@
 //! for texture upload and pushes scancodes for keyboard input.
 
 use super::vga_font::{VGA_DEFAULT_PALETTE_16, VGA_FONT_8X16};
+use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
+use core::sync::atomic::AtomicBool;
 
 /// Shared state between the emulator and GUI threads.
 ///
@@ -37,6 +39,10 @@ pub struct SharedDisplay {
     pub ips: u32,
     /// Custom palette (index → [R, G, B]), initially standard VGA 16-color
     pub palette: [[u8; 3]; 16],
+    /// Set by GUI to request emulator restart; cleared by emulator thread when restart begins
+    pub reset_requested: bool,
+    /// Atomic flag polled by run_interactive to stop early (e.g. on reset); shared with GUI
+    pub stop_flag: Arc<AtomicBool>,
 }
 
 impl SharedDisplay {
@@ -61,6 +67,8 @@ impl SharedDisplay {
             emu_running: true,
             ips: 0,
             palette: VGA_DEFAULT_PALETTE_16,
+            reset_requested: false,
+            stop_flag: Arc::new(AtomicBool::new(false)),
         }
     }
 

@@ -12,7 +12,7 @@ use super::super::softfloat3e::specialize::FLOATX80_DEFAULT_NAN;
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FXCH ST(i) — Exchange ST(0) and ST(i)
     pub fn fxch_sti(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         let st0_tag = self.the_i387.fpu_gettagi(0);
@@ -46,7 +46,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FCHS — Change sign of ST(0)
     pub fn fchs(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         if self.is_tag_empty(0) {
@@ -62,7 +62,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FABS — Absolute value of ST(0)
     pub fn fabs_(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         if self.is_tag_empty(0) {
@@ -78,7 +78,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FDECSTP — Decrement stack pointer
     pub fn fdecstp(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -89,7 +89,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FINCSTP — Increment stack pointer
     pub fn fincstp(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -100,7 +100,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FFREE ST(i) — Set tag to Empty
     pub fn ffree_sti(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -112,7 +112,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FFREEP ST(i) — Free and pop (undocumented but used)
     pub fn ffreep_sti(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();

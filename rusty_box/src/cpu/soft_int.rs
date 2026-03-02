@@ -870,8 +870,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Set activity state to halted (matches Bochs enter_sleep_state)
         self.activity_state = CpuActivityState::Hlt;
 
-        // Set async event to indicate we need to sync and check for interrupts
-        self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
+        // Bochs proc_ctrl.cc:181 enter_sleep_state: sets `async_event = 1` (not |= STOP_TRACE).
+        // The value 1 (BX_ASYNC_EVENT_SLEEP bit) survives the `&= ~STOP_TRACE` clearing
+        // at line 226 of Bochs cpu.cc, ensuring the outer cpu_loop calls handle_async_event
+        // on the next iteration to wait for a wake event (interrupt/NMI/SIPI).
+        // Without this persistent bit, the CPU would skip the sleep check and execute
+        // the instruction after HLT instead of sleeping.
+        self.async_event |= BX_ASYNC_EVENT_STOP_TRACE | Self::BX_ASYNC_EVENT_SLEEP;
         Ok(())
     }
 

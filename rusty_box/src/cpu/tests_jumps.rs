@@ -30,7 +30,7 @@ mod tests {
 
         cpu.set_rip(0);
         // run cpu loop (limited iterations)
-        let _ = cpu.cpu_loop(&mut mem, &[]);
+        cpu.cpu_loop(&mut mem, &[]).ok();
 
         // After jump, RIP should point to target at 4
         assert_eq!(cpu.rip(), 4);
@@ -59,7 +59,7 @@ mod tests {
         }
 
         cpu.set_rip(0);
-        let _ = cpu.cpu_loop(&mut mem, &[]);
+        cpu.cpu_loop(&mut mem, &[]).ok();
 
         // After JE taken, RIP should be 6
         assert_eq!(cpu.rip(), 6);

@@ -318,19 +318,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.msr.sysenter_eip_msr = 0;
         }
 
-        // Do not change MTRR on INIT
-        self.msr.mtrrphys = [0; 16];
+        // MTRR/PAT registers must NOT change on INIT (software reset).
+        // Bochs init.cc:1135-1148: all MTRR init is inside if (source == BX_RESET_HARDWARE).
+        if source == ResetReason::Hardware {
+            self.msr.mtrrphys = [0; 16];
 
-        self.msr.mtrrfix64k = BxPackedRegister::default(); // all fix range MTRRs undefined according to manual
-        self.msr.mtrrfix16k[0] = BxPackedRegister::default();
-        self.msr.mtrrfix16k[1] = BxPackedRegister::default();
+            // Bochs init.cc: MTRR fix ranges initialized to 0 (not PAT default)
+            self.msr.mtrrfix64k = BxPackedRegister { U64: 0 };
+            self.msr.mtrrfix16k[0] = BxPackedRegister { U64: 0 };
+            self.msr.mtrrfix16k[1] = BxPackedRegister { U64: 0 };
 
-        self.msr.mtrrfix4k = [BxPackedRegister::default(); 8];
+            self.msr.mtrrfix4k = [BxPackedRegister { U64: 0 }; 8];
 
-        self.msr.pat = BxPackedRegister {
-            U64: 0x0007040600070406,
-        };
-        self.msr.mtrr_deftype = 0;
+            self.msr.pat = BxPackedRegister {
+                U64: 0x0007040600070406,
+            };
+            self.msr.mtrr_deftype = 0;
+        }
 
         // All configurable MSRs do not change on INIT
         #[cfg(feature = "bx_configure_msrs")]

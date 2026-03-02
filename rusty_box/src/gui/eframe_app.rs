@@ -7,7 +7,10 @@
 use super::keymap::char_to_scancode_sequence;
 use super::shared_display::SharedDisplay;
 
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::Ordering,
+    {Arc, Mutex},
+};
 
 /// The eframe application that displays the emulator's VGA output.
 pub struct RustyBoxApp {
@@ -214,6 +217,27 @@ impl eframe::App for RustyBoxApp {
                             .size(11.0)
                             .color(status_color),
                     );
+
+                    // Reset button — right-aligned
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let btn = egui::Button::new(
+                            egui::RichText::new("Reset")
+                                .monospace()
+                                .size(11.0)
+                                .color(egui::Color32::from_rgb(0xCC, 0x88, 0x44)),
+                        )
+                        .fill(egui::Color32::from_rgb(0x1E, 0x1E, 0x30))
+                        .stroke(egui::Stroke::new(
+                            1.0,
+                            egui::Color32::from_rgb(0x44, 0x44, 0x66),
+                        ));
+                        if ui.add(btn).clicked() {
+                            if let Ok(mut d) = self.shared.lock() {
+                                d.stop_flag.store(true, Ordering::Relaxed);
+                                d.reset_requested = true;
+                            }
+                        }
+                    });
                 });
             });
 

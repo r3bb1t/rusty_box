@@ -21,6 +21,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         use crate::cpu::data_xfer16;
         use crate::cpu::data_xfer32;
         use crate::cpu::data_xfer8;
+        #[allow(unused_imports)]
+        use crate::cpu::data_xfer_ext;
 
         match instr.get_ia_opcode() {
             // =========================================================================
@@ -63,7 +65,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::AdcEbGb => arith8::ADC_EbGb(self, instr),
             Opcode::AdcGbEb => arith8::ADC_GbEb(self, instr),
             Opcode::AdcGwEw => arith16::ADC_GwEw(self, instr),
+            Opcode::AdcEwGw => arith16::ADC_EwGw(self, instr),
             Opcode::AdcEwsIb => arith16::ADC_EwsIb(self, instr),
+            Opcode::AdcAxiw => arith16::ADC_AX_Iw(self, instr),
+            Opcode::AdcEwIw => arith16::ADC_EwIw(self, instr),
+            Opcode::AdcEdGd => arith32::ADC_EdGd(self, instr),
+            Opcode::AdcGdEd => arith32::ADC_GdEd(self, instr),
+            Opcode::AdcEaxid => {
+                arith32::ADC_EAX_Id(self, instr);
+                Ok(())
+            }
+            Opcode::AdcEdId => arith32::ADC_EdId(self, instr),
+            Opcode::AdcEdsIb => arith32::ADC_EdsIb(self, instr),
             Opcode::SubEbGb => arith8::SUB_EbGb(self, instr),
             Opcode::SubGbEb => arith8::SUB_GbEb(self, instr),
             Opcode::AndEbGb => {
@@ -216,20 +229,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::SubEwGw => arith16::SUB_EwGw(self, instr),
             Opcode::SbbGwEw => arith16::SBB_GwEw(self, instr),
             Opcode::SbbEwGw => arith16::SBB_EwGw(self, instr),
+            Opcode::SbbAxiw => arith16::SBB_AX_Iw(self, instr),
+            Opcode::SbbEwIw => arith16::SBB_EwIw(self, instr),
+            Opcode::SbbEwsIb => arith16::SBB_EwsIb(self, instr),
             Opcode::SbbEdGd => arith32::SBB_EdGd(self, instr),
             Opcode::SbbGdEd => arith32::SBB_GdEd(self, instr),
             Opcode::SbbEaxid => {
                 arith32::SBB_EAX_Id(self, instr);
                 Ok(())
             }
-            Opcode::SbbEdId => {
-                arith32::SBB_EdId_R(self, instr);
-                Ok(())
-            }
-            Opcode::SbbEdsIb => {
-                arith32::SBB_EdIb_R(self, instr);
-                Ok(())
-            }
+            Opcode::SbbEdId => arith32::SBB_EdId(self, instr),
+            Opcode::SbbEdsIb => arith32::SBB_EdsIb(self, instr),
             Opcode::SubEaxid => {
                 arith32::SUB_EAX_Id(self, instr);
                 Ok(())
@@ -330,6 +340,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::SldtEw => self.sldt_ew(instr),
             Opcode::StrEw => self.str_ew(instr),
             Opcode::SmswEw => self.smsw_ew(instr),
+            Opcode::ArplEwGw => self.arpl_ew_gw(instr),
+            Opcode::LarGwEw | Opcode::LarGdEw => self.lar_gv_ew(instr),
+            Opcode::LslGwEw | Opcode::LslGdEw => self.lsl_gv_ew(instr),
+            Opcode::VerrEw => self.verr_ew(instr),
+            Opcode::VerwEw => self.verw_ew(instr),
 
             // =========================================================================
             // Control Register Read Operations (MOV r32, CRx)
@@ -1656,72 +1671,42 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
 
             // =========================================================================
-            // CMOVcc (Conditional Move) instructions - 32-bit
+            // CMOVcc (Conditional Move) instructions - 16-bit and 32-bit
+            // Unified wrappers handle both register and memory forms per x86 spec:
+            // memory operand is always read regardless of condition.
             // =========================================================================
-            Opcode::CmovoGdEd => {
-                self.cmovo_gd_ed_r(instr);
-                Ok(())
-            }
-            Opcode::CmovnoGdEd => {
-                self.cmovno_gd_ed_r(instr);
-                Ok(())
-            }
-            Opcode::CmovbGdEd => {
-                self.cmovb_gd_ed_r(instr);
-                Ok(())
-            }
-            Opcode::CmovnbGdEd => {
-                self.cmovnb_gd_ed_r(instr);
-                Ok(())
-            }
-            Opcode::CmovzGdEd => {
-                self.cmovz_gd_ed_r(instr);
-                Ok(())
-            }
-            Opcode::CmovnzGdEd => {
-                self.cmovnz_gd_ed_r(instr);
-                Ok(())
-            }
-            Opcode::CmovbeGdEd => {
-                self.cmovbe_gd_ed_r(instr);
-                Ok(())
-            }
-            Opcode::CmovnbeGdEd => {
-                self.cmovnbe_gd_ed_r(instr);
-                Ok(())
-            }
-            Opcode::CmovsGdEd => {
-                self.cmovs_gd_ed_r(instr);
-                Ok(())
-            }
-            Opcode::CmovnsGdEd => {
-                self.cmovns_gd_ed_r(instr);
-                Ok(())
-            }
-            Opcode::CmovpGdEd => {
-                self.cmovp_gd_ed_r(instr);
-                Ok(())
-            }
-            Opcode::CmovnpGdEd => {
-                self.cmovnp_gd_ed_r(instr);
-                Ok(())
-            }
-            Opcode::CmovlGdEd => {
-                self.cmovl_gd_ed_r(instr);
-                Ok(())
-            }
-            Opcode::CmovnlGdEd => {
-                self.cmovnl_gd_ed_r(instr);
-                Ok(())
-            }
-            Opcode::CmovleGdEd => {
-                self.cmovle_gd_ed_r(instr);
-                Ok(())
-            }
-            Opcode::CmovnleGdEd => {
-                self.cmovnle_gd_ed_r(instr);
-                Ok(())
-            }
+            Opcode::CmovoGwEw => self.cmovo_gw_ew(instr),
+            Opcode::CmovnoGwEw => self.cmovno_gw_ew(instr),
+            Opcode::CmovbGwEw => self.cmovb_gw_ew(instr),
+            Opcode::CmovnbGwEw => self.cmovnb_gw_ew(instr),
+            Opcode::CmovzGwEw => self.cmovz_gw_ew(instr),
+            Opcode::CmovnzGwEw => self.cmovnz_gw_ew(instr),
+            Opcode::CmovbeGwEw => self.cmovbe_gw_ew(instr),
+            Opcode::CmovnbeGwEw => self.cmovnbe_gw_ew(instr),
+            Opcode::CmovsGwEw => self.cmovs_gw_ew(instr),
+            Opcode::CmovnsGwEw => self.cmovns_gw_ew(instr),
+            Opcode::CmovpGwEw => self.cmovp_gw_ew(instr),
+            Opcode::CmovnpGwEw => self.cmovnp_gw_ew(instr),
+            Opcode::CmovlGwEw => self.cmovl_gw_ew(instr),
+            Opcode::CmovnlGwEw => self.cmovnl_gw_ew(instr),
+            Opcode::CmovleGwEw => self.cmovle_gw_ew(instr),
+            Opcode::CmovnleGwEw => self.cmovnle_gw_ew(instr),
+            Opcode::CmovoGdEd => self.cmovo_gd_ed(instr),
+            Opcode::CmovnoGdEd => self.cmovno_gd_ed(instr),
+            Opcode::CmovbGdEd => self.cmovb_gd_ed(instr),
+            Opcode::CmovnbGdEd => self.cmovnb_gd_ed(instr),
+            Opcode::CmovzGdEd => self.cmovz_gd_ed(instr),
+            Opcode::CmovnzGdEd => self.cmovnz_gd_ed(instr),
+            Opcode::CmovbeGdEd => self.cmovbe_gd_ed(instr),
+            Opcode::CmovnbeGdEd => self.cmovnbe_gd_ed(instr),
+            Opcode::CmovsGdEd => self.cmovs_gd_ed(instr),
+            Opcode::CmovnsGdEd => self.cmovns_gd_ed(instr),
+            Opcode::CmovpGdEd => self.cmovp_gd_ed(instr),
+            Opcode::CmovnpGdEd => self.cmovnp_gd_ed(instr),
+            Opcode::CmovlGdEd => self.cmovl_gd_ed(instr),
+            Opcode::CmovnlGdEd => self.cmovnl_gd_ed(instr),
+            Opcode::CmovleGdEd => self.cmovle_gd_ed(instr),
+            Opcode::CmovnleGdEd => self.cmovnle_gd_ed(instr),
 
             // =========================================================================
             // CMOVcc (Conditional Move) instructions - 64-bit

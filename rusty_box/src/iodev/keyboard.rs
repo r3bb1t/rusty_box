@@ -1753,7 +1753,7 @@ mod tests {
 
         // Self test first
         kbd.write(KBD_COMMAND_PORT, CTRL_CMD_SELF_TEST as u32, 1);
-        let _ = kbd.read(KBD_DATA_PORT, 1);
+        kbd.read(KBD_DATA_PORT, 1);
 
         // Interface test
         kbd.write(KBD_COMMAND_PORT, CTRL_CMD_INTERFACE_TEST as u32, 1);
@@ -1769,7 +1769,7 @@ mod tests {
 
         // Self-test first
         kbd.write(KBD_COMMAND_PORT, CTRL_CMD_SELF_TEST as u32, 1);
-        let _ = kbd.read(KBD_DATA_PORT, 1);
+        kbd.read(KBD_DATA_PORT, 1);
 
         // Enable keyboard
         kbd.write(KBD_COMMAND_PORT, CTRL_CMD_ENABLE_KBD as u32, 1);
@@ -1789,11 +1789,10 @@ mod tests {
 
         // Activate timer for next transfer
         // (read_port_60 calls activate_timer internally)
-        let irq = kbd.periodic(10);
+        let _irq = kbd.periodic(10);
         assert!(kbd.kbd_controller.outb);
         let bat = kbd.read(KBD_DATA_PORT, 1);
         assert_eq!(bat, KBD_RESP_BAT_OK as u32);
-        let _ = irq; // suppress unused warning
     }
 
     #[test]
@@ -1831,7 +1830,7 @@ mod tests {
 
         // Self-test first
         kbd.write(KBD_COMMAND_PORT, CTRL_CMD_SELF_TEST as u32, 1);
-        let _ = kbd.read(KBD_DATA_PORT, 1);
+        kbd.read(KBD_DATA_PORT, 1);
 
         // Write CCB: translate=1, disable_aux=1, sysf=1, irq1=1
         // = 0b01100101 = 0x65

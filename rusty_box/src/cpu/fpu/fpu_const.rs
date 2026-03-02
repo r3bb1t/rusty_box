@@ -57,7 +57,7 @@ fn down_or_chop(cwd: u16) -> bool {
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FLDL2T — Load log2(10)
     pub fn fldl2t(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
         self.clear_c1();
 
@@ -77,7 +77,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FLDL2E — Load log2(e)
     pub fn fldl2e(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
         self.clear_c1();
 
@@ -97,7 +97,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FLDPI — Load pi
     pub fn fldpi(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
         self.clear_c1();
 
@@ -117,7 +117,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FLDLG2 — Load log10(2)
     pub fn fldlg2(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
         self.clear_c1();
 
@@ -137,7 +137,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FLDLN2 — Load ln(2)
     pub fn fldln2(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
         self.clear_c1();
 
@@ -157,7 +157,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FLD1 — Load +1.0
     pub fn fld1(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
         self.clear_c1();
 
@@ -172,7 +172,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FLDZ — Load +0.0
     pub fn fldz(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
         self.clear_c1();
 

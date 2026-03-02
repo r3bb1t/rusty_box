@@ -16,7 +16,10 @@ use rusty_box::{
     gui::{shared_display::SharedDisplay, BridgeGui, RustyBoxApp},
     Result,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    atomic::Ordering,
+    {Arc, Mutex},
+};
 use std::time::Instant;
 
 /// DLX Linux disk geometry (from bochsrc.bxrc)
@@ -88,20 +91,40 @@ fn main() {
     let max_instructions: u64 = std::env::var("MAX_INSTRUCTIONS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(250_000_000);
+        .unwrap_or(500_000_000);
 
     let emu_thread = std::thread::Builder::new()
         .stack_size(1500 * 1024 * 1024) // 1.5 GB stack
         .name("Emulator".to_string())
         .spawn(move || {
-            if let Err(e) = run_emulator(
-                bios_data,
-                vga_bios,
-                &disk_path_str,
-                shared_for_emu,
-                max_instructions,
-            ) {
-                eprintln!("Emulator error: {:?}", e);
+            loop {
+                // Clear stop flag and mark running before each (re)start
+                {
+                    let mut d = shared_for_emu.lock().unwrap();
+                    d.stop_flag.store(false, Ordering::Relaxed);
+                    d.emu_running = true;
+                    d.reset_requested = false;
+                }
+
+                if let Err(e) = run_emulator(
+                    &bios_data,
+                    vga_bios.as_deref(),
+                    &disk_path_str,
+                    Arc::clone(&shared_for_emu),
+                    max_instructions,
+                ) {
+                    eprintln!("Emulator error: {:?}", e);
+                }
+
+                // Only restart if the GUI explicitly requested a reset
+                let restart = {
+                    let d = shared_for_emu.lock().unwrap();
+                    d.reset_requested
+                };
+                if !restart {
+                    break;
+                }
+                println!("Restarting emulator (Reset requested)...");
             }
         })
         .expect("Failed to spawn emulator thread");
@@ -109,10 +132,13 @@ fn main() {
     // =========================================================================
     // Run eframe on main thread
     // =========================================================================
+    // Start at 1x VGA (720×400) plus 26px status bar + small padding, guaranteed to
+    // fit on any screen including 125% DPI on 1080p. The egui scale logic auto-scales
+    // to 2x when the user maximizes or resizes the window larger. Min size matches 1x.
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_inner_size([1440.0, 800.0])
-            .with_min_inner_size([720.0, 400.0])
+            .with_inner_size([760.0, 450.0])
+            .with_min_inner_size([720.0, 426.0])
             .with_title("Rusty Box - Starting..."),
         ..Default::default()
     };
@@ -134,8 +160,8 @@ fn main() {
 }
 
 fn run_emulator(
-    bios_data: Vec<u8>,
-    vga_bios: Option<Vec<u8>>,
+    bios_data: &[u8],
+    vga_bios: Option<&[u8]>,
     disk_path: &str,
     shared: Arc<Mutex<SharedDisplay>>,
     max_instructions: u64,
@@ -151,6 +177,12 @@ fn run_emulator(
 
     let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
 
+    // Wire the shared stop_flag so the GUI reset button can interrupt run_interactive
+    emu.stop_flag = {
+        let d = shared.lock().unwrap();
+        Arc::clone(&d.stop_flag)
+    };
+
     // Set BridgeGui as the GUI
     let bridge = BridgeGui::new(Arc::clone(&shared));
     emu.set_gui(bridge);
@@ -161,11 +193,11 @@ fn run_emulator(
     // Load BIOS
     let bios_size = bios_data.len() as u64;
     let bios_load_addr = !(bios_size - 1);
-    emu.load_bios(&bios_data, bios_load_addr)?;
+    emu.load_bios(bios_data, bios_load_addr)?;
 
     // Load VGA BIOS
     if let Some(vga_data) = vga_bios {
-        emu.load_optional_rom(&vga_data, 0xC0000)?;
+        emu.load_optional_rom(vga_data, 0xC0000)?;
     }
 
     // Initialize CPU and devices

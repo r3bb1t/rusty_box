@@ -32,7 +32,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FNOP — No operation
     pub fn fnop(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
         Ok(())
     }
@@ -44,7 +44,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FLDCW — Load control word from memory
     pub fn fldcw(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -106,7 +106,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FLDENV — Load FPU environment (14/28 bytes)
     pub fn fldenv(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_load_environment(instr)?;
 
         // Update tags for non-empty registers based on actual content
@@ -151,7 +151,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FRSTOR — Restore full FPU state (94/108 bytes)
     pub fn frstor(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let offset = self.fpu_load_environment(instr)?;
         let seg = BxSegregs::from(instr.seg());

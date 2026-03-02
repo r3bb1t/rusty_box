@@ -258,13 +258,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// ROL r/m16, CL
     pub fn rol_ew_cl(&mut self, instr: &Instruction) -> super::Result<()> {
-        let count = self.cl() & 0x0F; // Only low 4 bits for 16-bit rotate
+        // Bochs shift16.cc: masks CL to 5 bits (0..31), then uses low 4 bits as actual rotate count
+        let cl = self.cl() & 0x1F;
+        let count = (cl & 0x0F) as u32;
         if count == 0 {
+            // count & 0x0F == 0: no rotation. But if bit 4 is set (cl=16), still update CF/OF.
+            // Bochs shift16.cc:234-241
+            if cl & 0x10 != 0 {
+                let (op1, _) = self.shift_read16(instr)?;
+                let bit0 = (op1 & 0x0001) != 0;
+                let bit15 = (op1 >> 15) != 0;
+                self.set_cf_of(bit0, bit0 != bit15);
+            }
             return Ok(());
         }
 
         let (op1, laddr) = self.shift_read16(instr)?;
-        let result = op1.rotate_left(count as u32);
+        let result = op1.rotate_left(count);
         self.shift_write16(instr, laddr, result);
 
         let cf = (result & 0x0001) != 0;
@@ -275,13 +285,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// ROL r/m16, imm8
     pub fn rol_ew_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        let count = instr.ib() & 0x0F; // Only low 4 bits for 16-bit rotate
+        // Bochs: masks imm8 to 5 bits, uses low 4 bits as actual rotate count
+        let imm = instr.ib() & 0x1F;
+        let count = (imm & 0x0F) as u32;
         if count == 0 {
+            // If bit 4 is set, update CF/OF without rotating. Bochs shift16.cc:267-272
+            if imm & 0x10 != 0 {
+                let (op1, _) = self.shift_read16(instr)?;
+                let bit0 = (op1 & 0x0001) != 0;
+                let bit15 = (op1 >> 15) != 0;
+                self.set_cf_of(bit0, bit0 != bit15);
+            }
             return Ok(());
         }
 
         let (op1, laddr) = self.shift_read16(instr)?;
-        let result = op1.rotate_left(count as u32);
+        let result = op1.rotate_left(count);
         self.shift_write16(instr, laddr, result);
 
         let cf = (result & 0x0001) != 0;
@@ -308,13 +327,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// ROR r/m16, CL
     pub fn ror_ew_cl(&mut self, instr: &Instruction) -> super::Result<()> {
-        let count = self.cl() & 0x0F;
+        // Bochs shift16.cc: masks CL to 5 bits, uses low 4 bits as actual rotate count
+        let cl = self.cl() & 0x1F;
+        let count = (cl & 0x0F) as u32;
         if count == 0 {
+            // If bit 4 is set (cl=16), update CF/OF without rotating. Bochs shift16.cc:292-303
+            if cl & 0x10 != 0 {
+                let (op1, _) = self.shift_read16(instr)?;
+                let bit15 = (op1 >> 15) != 0;
+                let bit14 = ((op1 >> 14) & 1) != 0;
+                self.set_cf_of(bit15, bit15 != bit14);
+            }
             return Ok(());
         }
 
         let (op1, laddr) = self.shift_read16(instr)?;
-        let result = op1.rotate_right(count as u32);
+        let result = op1.rotate_right(count);
         self.shift_write16(instr, laddr, result);
 
         let cf = (result & 0x8000) != 0;
@@ -325,13 +353,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// ROR r/m16, imm8
     pub fn ror_ew_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        let count = instr.ib() & 0x0F;
+        // Bochs: masks imm8 to 5 bits, uses low 4 bits as actual rotate count
+        let imm = instr.ib() & 0x1F;
+        let count = (imm & 0x0F) as u32;
         if count == 0 {
+            // If bit 4 is set, update CF/OF without rotating. Bochs shift16.cc:314-325
+            if imm & 0x10 != 0 {
+                let (op1, _) = self.shift_read16(instr)?;
+                let bit15 = (op1 >> 15) != 0;
+                let bit14 = ((op1 >> 14) & 1) != 0;
+                self.set_cf_of(bit15, bit15 != bit14);
+            }
             return Ok(());
         }
 
         let (op1, laddr) = self.shift_read16(instr)?;
-        let result = op1.rotate_right(count as u32);
+        let result = op1.rotate_right(count);
         self.shift_write16(instr, laddr, result);
 
         let cf = (result & 0x8000) != 0;

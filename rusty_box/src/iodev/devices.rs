@@ -364,7 +364,7 @@ impl DeviceManager {
         if self.cmos.check_irq8_lower() {
             self.pic.lower_irq(8);
         }
-        let _ = self.cmos.tick(usec);
+        self.cmos.tick(usec);
         if self.cmos.check_irq8() {
             self.pic.raise_irq(8);
         }

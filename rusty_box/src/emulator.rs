@@ -19,7 +19,8 @@ use crate::{
     Result,
 };
 
-use alloc::{boxed::Box, string::String, vec::Vec};
+use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
+use core::sync::atomic::{AtomicBool, Ordering};
 
 /// Emulator configuration
 #[derive(Debug, Clone)]
@@ -97,6 +98,8 @@ pub struct Emulator<'a, I: BxCpuIdTrait> {
     /// BIOS output file for port 0x402/0x403/0xE9 messages (std feature only)
     #[cfg(feature = "std")]
     bios_output_file: Option<std::fs::File>,
+    /// Shared stop flag: when set to true by the GUI thread, run_interactive exits the loop
+    pub stop_flag: Arc<AtomicBool>,
 }
 
 impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
@@ -143,6 +146,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             gui: None,
             #[cfg(feature = "std")]
             bios_output_file: None,
+            stop_flag: Arc::new(AtomicBool::new(false)),
         }))
     }
 
@@ -619,6 +623,19 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.device_manager.vga.probe_summary()
     }
 
+    /// Scan all VGA text memory for any non-space printable characters.
+    /// Useful when the screen has been cleared and we need to find if a new
+    /// prompt was written somewhere in text_memory that the CRTC start address
+    /// may not be pointing to yet.
+    pub fn vga_scan_text_memory(&self) -> String {
+        self.device_manager.vga.scan_all_text_memory()
+    }
+
+    /// Return all rows from VGA text memory (for full-dump diagnostics).
+    pub fn vga_all_text_rows(&self) -> alloc::vec::Vec<alloc::string::String> {
+        self.device_manager.vga.get_all_text_rows()
+    }
+
     /// Peek at raw RAM at a physical address range (for diagnostics).
     /// Returns up to `len` bytes from the physical RAM array.
     pub fn peek_ram_at(&self, addr: usize, len: usize) -> alloc::vec::Vec<u8> {
@@ -809,7 +826,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         let mut last_rip: u64 = u64::MAX;
         let mut stuck_count: u32 = 0;
         let mut stuck_reported = false;
-        while instructions_executed < max_instructions {
+        while instructions_executed < max_instructions
+            && !self.stop_flag.load(Ordering::Relaxed)
+        {
             // 1. Handle GUI events (keyboard input) - do this first to avoid borrow conflicts
 
             let mut scancodes_to_send = Vec::new();
@@ -1420,19 +1439,19 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         // Write to BIOS output file if configured, otherwise to stdout
                         #[cfg(feature = "std")]
                         if let Some(ref mut bios_file) = self.bios_output_file {
-                            let _ = bios_file.write_all(&e9);
-                            let _ = bios_file.flush();
+                            bios_file.write_all(&e9).ok();
+                            bios_file.flush().ok();
                         } else {
                             let mut out = std::io::stdout();
-                            let _ = out.write_all(&e9);
-                            let _ = out.flush();
+                            out.write_all(&e9).ok();
+                            out.flush().ok();
                         }
 
                         #[cfg(not(feature = "std"))]
                         {
                             let mut out = std::io::stdout();
-                            let _ = out.write_all(&e9);
-                            let _ = out.flush();
+                            out.write_all(&e9).ok();
+                            out.flush().ok();
                         }
                     }
 

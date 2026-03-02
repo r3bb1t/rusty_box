@@ -466,28 +466,31 @@ impl BxVgaC {
     pub(crate) fn probe_summary(&self) -> String {
         use core::fmt::Write;
         let mut s = String::new();
-        let _ = writeln!(
+        writeln!(
             s,
             "handler_calls={} mapped_writes={} unmapped_writes={}",
             self.probe_handler_calls, self.probe_mapped_writes, self.probe_unmapped_writes
-        );
+        )
+        .ok();
         if let Some((addr, val, mm)) = self.probe_first_mapped {
-            let _ = writeln!(
+            writeln!(
                 s,
                 "first_mapped: addr={:#x} val={:#02x} memory_mapping={:?}",
                 addr, val, mm
-            );
+            )
+            .ok();
         } else {
-            let _ = writeln!(s, "first_mapped: <none>");
+            writeln!(s, "first_mapped: <none>").ok();
         }
         if let Some((addr, val, mm)) = self.probe_first_unmapped {
-            let _ = writeln!(
+            writeln!(
                 s,
                 "first_unmapped: addr={:#x} val={:#02x} memory_mapping={:?}",
                 addr, val, mm
-            );
+            )
+            .ok();
         } else {
-            let _ = writeln!(s, "first_unmapped: <none>");
+            writeln!(s, "first_unmapped: <none>").ok();
         }
         s
     }
@@ -1084,6 +1087,60 @@ impl BxVgaC {
             result.push('\n');
         }
         result
+    }
+
+    /// Scan all 32KB of VGA text memory and return summary: CRTC start address,
+    /// graphics mode flag, and any non-space printable chars found anywhere.
+    pub(crate) fn scan_all_text_memory(&self) -> String {
+        use core::fmt::Write;
+        let mut s = String::new();
+        let start_addr_words = ((self.crtc_regs[CRTC_START_ADDR_HIGH] as u16) << 8)
+            | (self.crtc_regs[CRTC_START_ADDR_LOW] as u16);
+        let graphics_alpha = (self.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0;
+        writeln!(
+            s,
+            "CRTC_start={:#x} graphics_alpha={} text_mem_len={}",
+            start_addr_words, graphics_alpha, self.text_memory.len()
+        )
+        .ok();
+        // Collect up to 256 printable non-space chars from ALL of text_memory
+        let mut chars = String::new();
+        for chunk in self.text_memory.chunks_exact(2) {
+            let ch = chunk[0];
+            if ch >= 0x20 && ch < 0x7F && ch != b' ' {
+                chars.push(ch as char);
+                if chars.len() >= 256 { break; }
+            }
+        }
+        if chars.is_empty() {
+            write!(s, "text_memory: all blank").ok();
+        } else {
+            write!(s, "text_memory chars: {}", chars).ok();
+        }
+        s
+    }
+
+    /// Return all rows from VGA text memory as a Vec of Strings (for diagnostics).
+    /// Scans the entire 32KB text_memory buffer row by row (80-col rows).
+    pub(crate) fn get_all_text_rows(&self) -> alloc::vec::Vec<alloc::string::String> {
+        let total_bytes = self.text_memory.len();
+        let total_rows = total_bytes / BYTES_PER_ROW;
+        let mut rows = alloc::vec::Vec::with_capacity(total_rows);
+        for row in 0..total_rows {
+            let row_base = row * BYTES_PER_ROW;
+            let mut row_str = alloc::string::String::with_capacity(TEXT_COLS);
+            for col in 0..TEXT_COLS {
+                let off = row_base + col * BYTES_PER_CHAR;
+                let ch = self.text_memory.get(off).copied().unwrap_or(0);
+                if ch >= 0x20 && ch < 0x7F {
+                    row_str.push(ch as char);
+                } else {
+                    row_str.push(' ');
+                }
+            }
+            rows.push(row_str);
+        }
+        rows
     }
 
     /// Get text mode memory buffer (for GUI updates)

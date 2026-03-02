@@ -61,7 +61,7 @@ impl TermGui {
                     termios.c_lflag &= !(libc::ICANON | libc::ECHO | libc::ECHONL);
                     termios.c_cc[libc::VMIN] = 0; // Non-blocking reads
                     termios.c_cc[libc::VTIME] = 0;
-                    let _ = libc::tcsetattr(stdin_fd, libc::TCSANOW, &termios);
+                    libc::tcsetattr(stdin_fd, libc::TCSANOW, &termios);
                 }
             }
         }
@@ -84,7 +84,7 @@ impl TermGui {
                         // Disable echo, line input, and processed input
                         let new_mode = mode
                             & !(ENABLE_ECHO_INPUT | ENABLE_LINE_INPUT | ENABLE_PROCESSED_INPUT);
-                        let _ = SetConsoleMode(handle, new_mode);
+                        SetConsoleMode(handle, new_mode);
                     }
                 }
             }
@@ -99,7 +99,7 @@ impl TermGui {
             if let Some(termios) = self.original_termios.take() {
                 let stdin_fd = stdin().as_raw_fd();
                 unsafe {
-                    let _ = libc::tcsetattr(stdin_fd, libc::TCSANOW, &termios);
+                    libc::tcsetattr(stdin_fd, libc::TCSANOW, &termios);
                 }
             }
         }
@@ -114,7 +114,7 @@ impl TermGui {
                 unsafe {
                     let handle = GetStdHandle(STD_INPUT_HANDLE);
                     if handle != winapi::um::handleapi::INVALID_HANDLE_VALUE {
-                        let _ = SetConsoleMode(handle, mode);
+                        SetConsoleMode(handle, mode);
                     }
                 }
             }
@@ -139,7 +139,7 @@ impl BxGui for TermGui {
 
     fn text_update(
         &mut self,
-        old_text: &[u8],
+        _old_text: &[u8],
         new_text: &[u8],
         cursor_x: u32,
         cursor_y: u32,
@@ -157,7 +157,7 @@ impl BxGui for TermGui {
         // For correctness (Bochs uses line_offset and start_address), render using tm_info.
         // This is fast enough for terminal output and avoids false negatives when buffers
         // are larger than 80x25*2.
-        let _ = old_text; // old_text diffing is handled by VGA snapshotting; we render directly.
+        // old_text diffing is handled by VGA snapshotting; we render directly.
         self.render_text_mode();
     }
 
@@ -489,6 +489,6 @@ impl TermGui {
         }
 
         // Flush output immediately to ensure it's visible
-        let _ = std::io::stdout().flush();
+        std::io::stdout().flush().ok();
     }
 }

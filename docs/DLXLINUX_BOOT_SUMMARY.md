@@ -132,9 +132,28 @@ Previous full-run average (~3–4 MIPS) was misleadingly low because it included
 
 ### Kernel Stalls After Driver Init
 
-The kernel prints through "loop: registered device at major 7" then enters HLT. It needs to:
-1. Read the root filesystem from the ATA disk (IRQ14 / DRQ polling)
-2. Mount the rootfs and start `/sbin/init`
-3. Continue to the `dlx login:` prompt
+The kernel prints through "loop: registered device at major 7" then enters HLT at exactly instruction **132,865,700**. It needs to:
+1. Timer ISRs (IRQ0) wake the scheduler periodically
+2. Scheduler runs the init process
+3. Init reads root filesystem via ATA IRQ14 (READ SECTORS 0x20)
+4. Rootfs mounts, `/sbin/init` starts
+5. Continue to the `dlx login:` prompt
 
-**Root cause**: The kernel sets nIEN=1 (disabling disk interrupts) and polls the ATA status register. The polling loop should complete after the disk completes its command, but the drive state machine is not progressing. This is the primary remaining issue.
+**Analysis (2026-03-02)**: The kernel HLT at 132M is the first idle. Previous test runs used
+`MAX_INSTRUCTIONS=132_865_710` which stopped immediately after the first HLT without giving
+the kernel any time to do ATA I/O. The default is now **500M** to allow timer ISRs and ATA
+I/O to complete. The code paths for HLT wake-up (timer→scheduler→init→ATA) all look correct.
+
+**cpu_loop_n fix**: The `> max_instructions` check in cpu_loop_n was changed to `>=`
+(2026-03-02). Previously each batch executed `batch_size+1` instructions instead of exactly
+`batch_size`, making instruction counts slightly off.
+
+**cmd_history fix**: The ATA command history is now a circular buffer of 256 entries. Previously
+capped at 64 (BIOS filled all slots), now keeps the last 256 so kernel-phase ATA commands are
+visible in the diagnostic output.
+
+**Diagnostics to run (after boot attempt)**:
+- Check `vector_hist[0x08]` — timer ISR count (should be >0 for boot to progress)
+- Check `vector_hist[0x2E]` — IRQ14 count (should be >0 for ATA I/O to happen)
+- Check `cmd_history` — kernel should show READ SECTORS (0x20) commands
+- Use `RUST_LOG=debug` to see ATA nIEN state changes at 0x3F6 writes

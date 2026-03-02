@@ -22,7 +22,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FADD ST(0), ST(j) -- ST(0) = ST(0) + ST(j)
     pub fn fadd_st0_stj(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -48,7 +48,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FADD ST(i), ST(0) -- ST(i) = ST(i) + ST(0), pop if instr.b1() & 2
     pub fn fadd_sti_st0(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         let pop_stack = (instr.b1() & 2) != 0;
@@ -84,7 +84,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FADD single real (f32 from memory)
     pub fn fadd_single_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -114,7 +114,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FADD double real (f64 from memory)
     pub fn fadd_double_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -144,7 +144,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FIADD word integer (i16 from memory)
     pub fn fiadd_word_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -175,7 +175,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FIADD dword integer (i32 from memory)
     pub fn fiadd_dword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -210,7 +210,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FMUL ST(0), ST(j) -- ST(0) = ST(0) * ST(j)
     pub fn fmul_st0_stj(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -236,7 +236,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FMUL ST(i), ST(0) -- ST(i) = ST(i) * ST(0), pop if instr.b1() & 2
     pub fn fmul_sti_st0(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         let pop_stack = (instr.b1() & 2) != 0;
@@ -272,7 +272,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FMUL single real (f32 from memory)
     pub fn fmul_single_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -302,7 +302,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FMUL double real (f64 from memory)
     pub fn fmul_double_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -332,7 +332,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FIMUL word integer (i16 from memory)
     pub fn fimul_word_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -363,7 +363,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FIMUL dword integer (i32 from memory)
     pub fn fimul_dword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -398,7 +398,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FSUB ST(0), ST(j) -- ST(0) = ST(0) - ST(j)
     pub fn fsub_st0_stj(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -424,7 +424,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FSUBR ST(0), ST(j) -- ST(0) = ST(j) - ST(0) (reverse)
     pub fn fsubr_st0_stj(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -451,7 +451,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FSUB ST(i), ST(0) -- ST(i) = ST(i) - ST(0), pop if instr.b1() & 2
     pub fn fsub_sti_st0(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         let pop_stack = (instr.b1() & 2) != 0;
@@ -487,7 +487,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FSUBR ST(i), ST(0) -- ST(i) = ST(0) - ST(i) (reverse), pop if instr.b1() & 2
     pub fn fsubr_sti_st0(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         let pop_stack = (instr.b1() & 2) != 0;
@@ -524,7 +524,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FSUB single real (f32 from memory) -- ST(0) = ST(0) - f32
     pub fn fsub_single_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -554,7 +554,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FSUBR single real (f32 from memory) -- ST(0) = f32 - ST(0)
     pub fn fsubr_single_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -585,7 +585,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FSUB double real (f64 from memory) -- ST(0) = ST(0) - f64
     pub fn fsub_double_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -615,7 +615,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FSUBR double real (f64 from memory) -- ST(0) = f64 - ST(0)
     pub fn fsubr_double_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -646,7 +646,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FISUB word integer (i16 from memory) -- ST(0) = ST(0) - i16
     pub fn fisub_word_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -677,7 +677,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FISUBR word integer (i16 from memory) -- ST(0) = i16 - ST(0)
     pub fn fisubr_word_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -709,7 +709,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FISUB dword integer (i32 from memory) -- ST(0) = ST(0) - i32
     pub fn fisub_dword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -737,7 +737,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FISUBR dword integer (i32 from memory) -- ST(0) = i32 - ST(0)
     pub fn fisubr_dword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -773,7 +773,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FDIV ST(0), ST(j) -- ST(0) = ST(0) / ST(j)
     pub fn fdiv_st0_stj(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -799,7 +799,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FDIVR ST(0), ST(j) -- ST(0) = ST(j) / ST(0) (reverse)
     pub fn fdivr_st0_stj(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -826,7 +826,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FDIV ST(i), ST(0) -- ST(i) = ST(i) / ST(0), pop if instr.b1() & 2
     pub fn fdiv_sti_st0(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         let pop_stack = (instr.b1() & 2) != 0;
@@ -862,7 +862,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FDIVR ST(i), ST(0) -- ST(i) = ST(0) / ST(i) (reverse), pop if instr.b1() & 2
     pub fn fdivr_sti_st0(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         let pop_stack = (instr.b1() & 2) != 0;
@@ -899,7 +899,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FDIV single real (f32 from memory) -- ST(0) = ST(0) / f32
     pub fn fdiv_single_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -929,7 +929,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FDIVR single real (f32 from memory) -- ST(0) = f32 / ST(0)
     pub fn fdivr_single_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -960,7 +960,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FDIV double real (f64 from memory) -- ST(0) = ST(0) / f64
     pub fn fdiv_double_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -990,7 +990,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FDIVR double real (f64 from memory) -- ST(0) = f64 / ST(0)
     pub fn fdivr_double_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -1021,7 +1021,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FIDIV word integer (i16 from memory) -- ST(0) = ST(0) / i16
     pub fn fidiv_word_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -1052,7 +1052,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FIDIVR word integer (i16 from memory) -- ST(0) = i16 / ST(0)
     pub fn fidivr_word_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -1084,7 +1084,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FIDIV dword integer (i32 from memory) -- ST(0) = ST(0) / i32
     pub fn fidiv_dword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -1115,7 +1115,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FIDIVRP dword integer (i32 from memory) -- ST(0) = i32 / ST(0)
     pub fn fidivrp_dword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -1151,7 +1151,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FSQRT -- ST(0) = sqrt(ST(0))
     pub fn fsqrt(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -1174,7 +1174,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FRNDINT -- ST(0) = round_to_integer(ST(0))
     pub fn frndint(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();

@@ -672,6 +672,11 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
+    /// Persistent sleep sentinel set by enter_sleep_state (HLT/MWAIT).
+    /// Matches Bochs proc_ctrl.cc:181 `async_event = 1` — survives the
+    /// `&= ~STOP_TRACE` clearing so handle_async_event is called next
+    /// outer-loop iteration to check for wake conditions.
+    pub(super) const BX_ASYNC_EVENT_SLEEP: u32 = 1;
 
     /// Event bit: external interrupt pending (PIC int_pin asserted).
     /// Matches Bochs `BX_EVENT_PENDING_INTR`.
@@ -1128,8 +1133,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     pub(crate) fn inject_external_interrupt(&mut self, vector: u8) -> Result<()> {
         // Wake from halt/wait state.
         self.activity_state = CpuActivityState::Active;
-        // Clear stop-trace so execution can resume.
-        self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+        // Clear stop-trace and sleep sentinel so execution can resume.
+        // BX_ASYNC_EVENT_SLEEP (bit 0) must be cleared here because this path
+        // bypasses handle_async_event's tail which normally clears async_event.
+        self.async_event &= !(BX_ASYNC_EVENT_STOP_TRACE | Self::BX_ASYNC_EVENT_SLEEP);
 
         // Mark as external interrupt (EXT=1) — affects error codes pushed
         // during any exception that occurs during interrupt delivery.
@@ -1266,7 +1273,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         let result = 'cpu_loop: loop {
             // Safety limit - pause when instruction limit is reached
-            if iteration > max_instructions {
+            // Use >= so each batch runs exactly max_instructions, not max_instructions+1.
+            if iteration >= max_instructions {
                 #[cfg(feature = "profiling")]
                 tracing::warn!(
                     "CPU-LOOP-STATS: {} instr, icache={}ms assign={}ms exec={}ms",
@@ -1283,6 +1291,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 }
                 self.perf_icache_miss = 0;
                 self.perf_prefetch = 0;
+                // Clear STOP_TRACE (trace-boundary hint only; served its purpose).
+                // BX_ASYNC_EVENT_SLEEP (bit 0) intentionally survives: if HLT was the
+                // last instruction in this batch, the next batch sees SLEEP set, calls
+                // handle_async_event → handle_wait_for_event, and correctly returns Ok(0)
+                // while waiting for an interrupt. This matches Bochs enter_sleep_state
+                // behavior (proc_ctrl.cc:181: async_event = 1).
+                self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
                 break Ok(iteration);
             }
 
@@ -1384,7 +1399,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 instr_idx += 1;
                 if instr_idx >= trace_end {
                     // Check instruction limit at trace boundary (not per-instruction)
-                    if iteration > max_instructions {
+                    if iteration >= max_instructions {
                         break 'cpu_loop Ok(iteration);
                     }
                     // Chain to new trace without breaking to outer loop

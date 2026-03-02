@@ -1030,7 +1030,7 @@ mod tests {
         let mut pic = BxPicC::new();
         pic.master.imr = 0x00;
         pic.raise_irq(0);
-        let _ = pic.iac();
+        pic.iac();
         assert_eq!(pic.master.isr, 1 << 0); // IRQ0 in service
                                             // Non-specific EOI (0x20)
         pic.write(PIC_MASTER_CMD, 0x20, 1);
@@ -1097,7 +1097,7 @@ mod tests {
         pic.master.imr = 0x00;
         pic.master.lowest_priority = 7; // Priority: 0 highest
         pic.raise_irq(0);
-        let _ = pic.iac();
+        pic.iac();
         assert_eq!(pic.master.isr, 1 << 0);
         // Rotate on non-specific EOI (0xA0): clears highest ISR, increments lowest_priority
         pic.write(PIC_MASTER_CMD, 0xA0, 1);

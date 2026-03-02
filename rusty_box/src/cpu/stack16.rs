@@ -175,7 +175,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let si = self.stack_read_word(temp_esp.wrapping_add(2))?;
             let bp = self.stack_read_word(temp_esp.wrapping_add(4))?;
             // Skip reading SP at offset +6 (it's discarded)
-            let _ = self.stack_read_word(temp_esp.wrapping_add(6))?;
+            let _sp_skip = self.stack_read_word(temp_esp.wrapping_add(6))?;
             let bx = self.stack_read_word(temp_esp.wrapping_add(8))?;
             let dx = self.stack_read_word(temp_esp.wrapping_add(10))?;
             let cx = self.stack_read_word(temp_esp.wrapping_add(12))?;
@@ -191,7 +191,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let si = self.stack_read_word(temp_sp.wrapping_add(2) as u32)?;
             let bp = self.stack_read_word(temp_sp.wrapping_add(4) as u32)?;
             // Skip reading SP at offset +6 (it's discarded)
-            let _ = self.stack_read_word(temp_sp.wrapping_add(6) as u32)?;
+            let _sp_skip = self.stack_read_word(temp_sp.wrapping_add(6) as u32)?;
             let bx = self.stack_read_word(temp_sp.wrapping_add(8) as u32)?;
             let dx = self.stack_read_word(temp_sp.wrapping_add(10) as u32)?;
             let cx = self.stack_read_word(temp_sp.wrapping_add(12) as u32)?;

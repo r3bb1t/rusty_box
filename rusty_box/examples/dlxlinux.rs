@@ -421,11 +421,18 @@ fn run_dlxlinux() -> Result<()> {
 
     let start_time = Instant::now();
 
-    // Run with instruction limit to allow debugging
+    // Run with instruction limit. The kernel first enters HLT at exactly 132,865,700
+    // instructions. After that, timer ISRs wake the scheduler and the init process
+    // does ATA disk I/O (IRQ14) to mount rootfs and start /sbin/init. Reaching the
+    // "dlx login:" prompt typically requires ~500M instructions at ~14 MIPS (~36s).
+    // Override with MAX_INSTRUCTIONS env var for shorter diagnostic runs:
+    //   MAX_INSTRUCTIONS=132865710   → stop at first kernel HLT (for HLT diagnostics)
+    //   MAX_INSTRUCTIONS=250000000   → diagnostic run (~18s at 14 MIPS)
+    //   MAX_INSTRUCTIONS=500000000   → try to reach login prompt
     let max_instructions: u64 = std::env::var("MAX_INSTRUCTIONS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(50_000_000); // 50M instructions default
+        .unwrap_or(250_000_000);
 
     // Use interactive loop that handles GUI events
     let result = emu.run_interactive(max_instructions);
@@ -589,7 +596,7 @@ fn run_dlxlinux() -> Result<()> {
 
         // Dump code at idle loop RIP
         let rip = emu.cpu.rip() as usize;
-        let ram = emu.memory.peek_ram(0, 0); // Get empty slice to check if method works
+        let _ram = emu.memory.peek_ram(0, 0); // Get empty slice to check if method works
         println!("\n===== IDLE LOOP CODE (RIP={:#x}) =====", rip);
         // Dump 128 bytes before and 64 bytes at RIP
         for off in (rip.saturating_sub(128)..rip + 64).step_by(16) {
@@ -816,22 +823,49 @@ fn run_dlxlinux() -> Result<()> {
         }
 
         // Dump where the kernel is spinning — show RIP and surrounding code
+        // Linux 1.3.89 uses PAGE_OFFSET=0 (identity mapping), so virtual == physical
         {
             let rip = emu.cpu.rip() as u32;
-            let rip_phys = rip.wrapping_sub(0xC0000000) as usize;
+            let rip_phys = rip as usize; // Linux 1.3.89: virtual == physical
             println!("\n===== KERNEL SPIN LOCATION =====");
             println!("  RIP={:#010x} (phys={:#010x})", rip, rip_phys);
             println!("  async_event={} activity={:?}", emu.cpu.get_async_event(), emu.cpu.get_activity_state());
             if rip_phys < 0x2000000 {
-                let code = emu.memory.peek_ram(rip_phys.saturating_sub(16), 48);
-                let hex: Vec<String> = code.iter().map(|b| format!("{:02x}", b)).collect();
-                println!("  Code @ phys {:#010x}: {}", rip_phys.saturating_sub(16), hex.join(" "));
+                // Dump 64 bytes before RIP and 32 after
+                let dump_start = rip_phys.saturating_sub(64);
+                let code = emu.memory.peek_ram(dump_start, 96);
+                println!("  Code around RIP (phys {:#010x}):", dump_start);
+                for chunk in code.chunks(16) {
+                    let hex: Vec<String> = chunk.iter().map(|b| format!("{:02x}", b)).collect();
+                    println!("    {}", hex.join(" "));
+                }
+                // Simpler: just dump the slice and mark offset
+                let offset_in_dump = rip_phys - dump_start;
+                println!("  (RIP is at offset {} = {:#x} in the above dump)", offset_in_dump, offset_in_dump);
             }
             // Check PIC masks
             println!("  PIC: {}", emu.device_manager.pic_diag());
             // Show async event state
             println!("  async_event={} activity={:?}",
                 emu.cpu.get_async_event(), emu.cpu.get_activity_state());
+        }
+
+        // Scan ALL VGA text memory from offset 0 for kernel output
+        // (kernel output may be before CRTC_start if screen scrolled)
+        println!("\n===== FULL VGA TEXT MEMORY (all non-empty rows) =====");
+        {
+            let vga_mem = emu.vga_all_text_rows();
+            let mut printed = 0;
+            for (row_idx, row) in vga_mem.iter().enumerate() {
+                let text: &str = row.trim();
+                if !text.is_empty() {
+                    println!("  row {:3}: {}", row_idx, row);
+                    printed += 1;
+                }
+            }
+            if printed == 0 {
+                println!("  (all VGA text memory is empty/spaces)");
+            }
         }
         } // end 'kernel_diag block
 
@@ -848,6 +882,10 @@ fn run_dlxlinux() -> Result<()> {
         println!();
         println!("===== VGA TEXT DUMP (headless) =====");
         println!("{}", emu.vga_text_dump());
+
+        // Raw VGA text memory scan (finds content at any CRTC offset)
+        println!("===== VGA SCAN =====");
+        println!("{}", emu.vga_scan_text_memory());
 
         // BIOS POST codes: show count and last 32 bytes only
         let post = emu.devices.take_port80_output();

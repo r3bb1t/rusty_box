@@ -46,7 +46,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return true;
             }
 
-            if (rw == MemoryAccessType::Execute || (self.cr4.smap() && !self.get_ac() != 0))
+            if (rw == MemoryAccessType::Execute || (self.cr4.smap() && self.get_ac() == 0))
                 && access_user_space
             {
                 return false;

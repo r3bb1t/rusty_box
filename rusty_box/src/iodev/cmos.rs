@@ -306,7 +306,7 @@ impl BxCmosC {
 
     /// Check if current time matches alarm registers (Bochs cmos.cc:770-786)
     fn check_alarm(&mut self) {
-        let is_binary = (self.ram[REG_STAT_B as usize] & 0x04) != 0;
+        let _is_binary = (self.ram[REG_STAT_B as usize] & 0x04) != 0;
 
         // Alarm registers: "don't care" values (0xC0-0xFF in BCD, or >= 0xC0 in binary)
         let sec_match = self.ram[REG_SEC_ALARM as usize] >= 0xC0
@@ -329,7 +329,6 @@ impl BxCmosC {
             }
         }
 
-        let _ = is_binary; // Used for clarity in comments
     }
 
     /// Update CMOS date/time registers from internal timeval

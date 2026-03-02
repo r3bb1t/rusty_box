@@ -222,26 +222,43 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ## Known Issues & Next Steps
 
 ### Next Steps
-1. **Investigate kernel stall after driver init** — Kernel stops at "loop: registered device at major 7" (~500M instructions). Runs 1B+ instructions without crashing but doesn't print more. Likely needs disk I/O (reading rootfs) or init process startup to continue.
+1. **Investigate kernel stall after driver init** — Kernel first enters HLT at exactly instruction **132,865,700**. Kernel stops at "loop: registered device at major 7" and waits for ATA disk I/O to complete. Likely needs disk I/O (reading rootfs) or init process startup to continue.
 2. **Reach DLX Linux login prompt** — Continue iterative bug fixing until the full boot completes
 3. ~~**Fix LDT triple fault**~~ — FIXED: root cause was INT using IVT in PM + XCHG mod_c0 bug
 4. ~~**Fix vsprintf**~~ — FIXED: ADD AL,Ib (opcode 0x04) operated on AH, breaking vsprintf's jump table index computation
 5. ~~**Fix swap init loop**~~ — RESOLVED: "Trying to free nonexistent swap-page" was caused by IDT corruption from the INT dispatch bug
 
+### Exact Instruction Threshold: 132,865,700
+
+The kernel first enters HLT idle at **exactly instruction 132,865,700**. Key notes:
+
+- Instruction 132,865,701 is the next instruction after HLT (part of the idle loop or an ISR return). Changing MAX_INSTRUCTIONS by ±1 changes which instruction is last-executed, which can affect whether a critical ATA command write or status check runs.
+- **cpu_loop_n `>=` fix (2026-03-02)**: Changed `if iteration > max_instructions` to `if iteration >= max_instructions` at both check sites in `cpu.rs`. This makes each batch run **exactly** `batch_size` instructions instead of `batch_size + 1`. Previously one extra instruction executed per batch — this off-by-one caused the exact threshold to depend on batch alignment.
+- The `>=` fix makes MAX_INSTRUCTIONS an exact count. Use `132_865_700` to stop just as the kernel enters HLT idle; use `132_865_701` to execute one more instruction.
+
 ### Quick Debug Commands
+
+**Key instruction count milestones — use the minimum needed:**
+- `132_865_710` — kernel first HLT threshold + 10; diagnostics print at run end. **Use this for ATA/IRQ debugging.**
+- `2_000_000` — BIOS POST only (fast check, VGA text visible)
+- `500_000` — BIOS early boot trace
+
 ```bash
 # Build release binary
 cargo build --release --example dlxlinux --features std
 
-# Run headless (fast) with default WARN logging
-RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=2000000 ./target/release/examples/dlxlinux.exe
+# Run headless to kernel HLT + diagnostics (use THIS for current ATA debugging)
+RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=132865710 ./target/release/examples/dlxlinux.exe
 
 # Run with debug logging to see port 0x402 writes (and port 0x80 POST codes)
 RUST_LOG=debug RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=500000 ./target/release/examples/dlxlinux.exe 2>&1 | grep -E "0x0402|0x0080|port_out.*402|BIOS output"
 
 # Check BIOS output buffer drain in emulator summary
-RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=1000000 ./target/release/examples/dlxlinux.exe 2>&1
+RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=2000000 ./target/release/examples/dlxlinux.exe 2>&1
 ```
+
+**Use MAX_INSTRUCTIONS=132_865_710** for ATA/IRQ debugging — the kernel HLTs at 132,865,700.
+Everything well past that is the idle loop spinning with timer ISRs. Running to 500M just wastes time.
 
 ### Progress Metrics
 - ✅ All major decoder bugs fixed (Group 1 opcodes, segment defaults, execute1/execute2)

@@ -1331,7 +1331,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let mut dummy_mapping: [u32; 0] = [];
             let mut stamp = BxPageWriteStampTable::new(&mut dummy_mapping);
             let mut data = [value];
-            let _ = mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 1, &mut data);
+            mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 1, &mut data).ok();
             self.i_cache.smc_write_check(paddr, 1);
             return;
         }

@@ -49,7 +49,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FSCALE -- Scale ST(0) by power of 2 stored in ST(1).
     /// Ported from Bochs fpu_trans.cc FSCALE.
     pub fn fscale(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -81,7 +81,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// After: ST(0) = significand, ST(1) = exponent.
     /// Ported from Bochs fpu_trans.cc FXTRACT.
     pub fn fxtract(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -125,7 +125,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FPREM -- IEEE partial remainder using truncation (round-to-zero).
     /// Ported from Bochs fpu_trans.cc FPREM and fprem.cc.
     pub fn fprem(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -176,7 +176,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FPREM1 -- IEEE partial remainder using round-to-nearest.
     /// Ported from Bochs fpu_trans.cc FPREM1 and fprem.cc.
     pub fn fprem1(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -234,7 +234,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// F2XM1 -- Compute 2^ST(0) - 1, where -1 <= ST(0) <= 1.
     /// Uses Float128 polynomial evaluation matching Bochs f2xm1.cc.
     pub fn f2xm1(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -264,7 +264,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FYL2X -- Compute ST(1) * log2(ST(0)), store result in ST(1), pop ST(0).
     /// Uses Float128 polynomial evaluation matching Bochs fyl2x.cc.
     pub fn fyl2x(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -296,7 +296,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FYL2XP1 -- Compute ST(1) * log2(ST(0) + 1), store result in ST(1), pop ST(0).
     /// Uses Float128 polynomial evaluation matching Bochs fyl2x.cc.
     pub fn fyl2xp1(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -329,7 +329,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Sets C2=1 if argument is out of range (|x| >= 2^63).
     /// Uses Float128 polynomial evaluation matching Bochs fsincos.cc ftan().
     pub fn fptan(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -389,7 +389,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Result = atan(ST(1)/ST(0)).
     /// Uses Float128 polynomial evaluation matching Bochs fpatan.cc.
     pub fn fpatan(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -422,7 +422,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Sets C2=1 if argument is out of range (|x| >= 2^63).
     /// Uses Float128 polynomial evaluation matching Bochs fsincos.cc.
     pub fn fsin(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -461,7 +461,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Sets C2=1 if argument is out of range (|x| >= 2^63).
     /// Uses Float128 polynomial evaluation matching Bochs fsincos.cc.
     pub fn fcos(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -503,7 +503,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Sets C2=1 if argument is out of range (|x| >= 2^63).
     /// Uses Float128 polynomial evaluation matching Bochs fsincos.cc.
     pub fn fsincos(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();

@@ -600,6 +600,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub fn mov_cr3_rd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
+        // Bochs crregs.cc:463 — invalidate prefetch queue before CR3 change
+        self.invalidate_prefetch_q();
         let src = instr.src1() as usize;
         let val_32 = self.get_gpr32(src);
         self.cr3 = val_32 as u64;

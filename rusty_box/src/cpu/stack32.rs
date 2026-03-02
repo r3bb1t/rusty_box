@@ -316,7 +316,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let esi = self.stack_read_dword(temp_esp.wrapping_add(4))?;
             let ebp = self.stack_read_dword(temp_esp.wrapping_add(8))?;
             // Skip reading ESP at offset +12 (it's discarded)
-            let _ = self.stack_read_dword(temp_esp.wrapping_add(12))?;
+            let _esp_skip = self.stack_read_dword(temp_esp.wrapping_add(12))?;
             let ebx = self.stack_read_dword(temp_esp.wrapping_add(16))?;
             let edx = self.stack_read_dword(temp_esp.wrapping_add(20))?;
             let ecx = self.stack_read_dword(temp_esp.wrapping_add(24))?;
@@ -332,7 +332,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let esi = self.stack_read_dword(temp_sp.wrapping_add(4) as u32)?;
             let ebp = self.stack_read_dword(temp_sp.wrapping_add(8) as u32)?;
             // Skip reading ESP at offset +12 (it's discarded)
-            let _ = self.stack_read_dword(temp_sp.wrapping_add(12) as u32)?;
+            let _esp_skip = self.stack_read_dword(temp_sp.wrapping_add(12) as u32)?;
             let ebx = self.stack_read_dword(temp_sp.wrapping_add(16) as u32)?;
             let edx = self.stack_read_dword(temp_sp.wrapping_add(20) as u32)?;
             let ecx = self.stack_read_dword(temp_sp.wrapping_add(24) as u32)?;

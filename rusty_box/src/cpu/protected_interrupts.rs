@@ -145,8 +145,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let mut tss_selector = BxSelector::default();
                 parse_selector(raw_tss_selector, &mut tss_selector);
 
-                let (tss_dword1, tss_dword2) = self.fetch_raw_descriptor(&tss_selector)?;
-                let tss_descriptor = self.parse_descriptor(tss_dword1, tss_dword2)?;
+                let (tss_dword1, tss_dword2) = match self.fetch_raw_descriptor(&tss_selector) {
+                    Ok(v) => v,
+                    Err(_) => return Err(super::error::CpuError::BadVector {
+                        vector: Exception::Ts,
+                        error_code: raw_tss_selector & 0xfffc,
+                    }),
+                };
+                let tss_descriptor = self.parse_descriptor(tss_dword1, tss_dword2)
+                    .map_err(|_| super::error::CpuError::BadVector {
+                        vector: Exception::Ts,
+                        error_code: raw_tss_selector & 0xfffc,
+                    })?;
 
                 // Call task_switch with BX_TASK_FROM_INT (0x2)
                 self.task_switch(
@@ -211,12 +221,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut cs_selector = BxSelector::default();
         parse_selector(gate_dest_selector, &mut cs_selector);
 
-        let (cs_dword1, cs_dword2) = self.fetch_raw_descriptor(&cs_selector)?;
-        let cs_descriptor = self.parse_descriptor(cs_dword1, cs_dword2)?;
+        let cs_err_code = cs_selector.value & 0xfffc;
+        let (cs_dword1, cs_dword2) = match self.fetch_raw_descriptor(&cs_selector) {
+            Ok(v) => v,
+            Err(_) => return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+                error_code: cs_err_code,
+            }),
+        };
+        let cs_descriptor = self.parse_descriptor(cs_dword1, cs_dword2)
+            .map_err(|_| super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+                error_code: cs_err_code,
+            })?;
 
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         // Bochs exception.cc:407-413: #GP(selector+EXT)
-        let cs_err_code = cs_selector.value & 0xfffc;
         if cs_descriptor.valid == 0
             || !cs_descriptor.segment
             || super::descriptor::is_data_segment(cs_descriptor.r#type)
@@ -430,11 +450,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Parse SS selector and fetch descriptor (matches lines 462-465)
         let mut ss_selector = BxSelector::default();
         parse_selector(ss_for_cpl_x, &mut ss_selector);
-        let (ss_dword1, ss_dword2) = self.fetch_raw_descriptor(&ss_selector)?;
-        let ss_descriptor = self.parse_descriptor(ss_dword1, ss_dword2)?;
+        let ss_err_code = ss_for_cpl_x & 0xfffc;
+        let (ss_dword1, ss_dword2) = match self.fetch_raw_descriptor(&ss_selector) {
+            Ok(v) => v,
+            Err(_) => return Err(super::error::CpuError::BadVector {
+                vector: Exception::Ts,
+                error_code: ss_err_code,
+            }),
+        };
+        let ss_descriptor = self.parse_descriptor(ss_dword1, ss_dword2)
+            .map_err(|_| super::error::CpuError::BadVector {
+                vector: Exception::Ts,
+                error_code: ss_err_code,
+            })?;
 
         // Bochs exception.cc:469-471: #TS(SS selector + ext)
-        let ss_err_code = ss_for_cpl_x & 0xfffc;
         if ss_selector.rpl != cs_descriptor.dpl {
             tracing::error!("handle_interrupt_to_inner_privilege(): SS.rpl != CS.dpl");
             return Err(super::error::CpuError::BadVector {
@@ -853,8 +883,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // index must be within GDT limits, else #TS(TSS selector) (matches line 354)
-        let (tss_dword1, tss_dword2) = self.fetch_raw_descriptor(&tss_selector)?;
-        let tss_descriptor = self.parse_descriptor(tss_dword1, tss_dword2)?;
+        let (tss_dword1, tss_dword2) = match self.fetch_raw_descriptor(&tss_selector) {
+            Ok(v) => v,
+            Err(_) => return Err(super::error::CpuError::BadVector {
+                vector: Exception::Ts,
+                error_code: raw_tss_selector & 0xfffc,
+            }),
+        };
+        let tss_descriptor = self.parse_descriptor(tss_dword1, tss_dword2)
+            .map_err(|_| super::error::CpuError::BadVector {
+                vector: Exception::Ts,
+                error_code: raw_tss_selector & 0xfffc,
+            })?;
 
         // AR byte must specify available TSS, else #GP(TSS selector) (matches line 360)
         if tss_descriptor.valid == 0 || tss_descriptor.segment {

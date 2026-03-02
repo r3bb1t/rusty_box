@@ -502,6 +502,152 @@ pub fn ADC_GdEd<I: BxCpuIdTrait>(
     }
 }
 
+/// ADC EAX, imm32 (opcode 0x15) - Bochs ADC_EAXId
+pub fn ADC_EAX_Id<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
+    let op1 = cpu.eax();
+    let op2 = instr.id();
+    let cf = cpu.get_cf() as u32;
+    let result = op1.wrapping_add(op2).wrapping_add(cf);
+    cpu.set_eax(result);
+    cpu.update_flags_add32(op1, op2, result);
+}
+
+/// ADC r/m32, imm32 - register form (opcode 0x81 /2) - Bochs ADC_EdIdR
+pub fn ADC_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
+    let op1 = cpu.get_gpr32(instr.meta_data[0] as usize);
+    let op2 = instr.id();
+    let cf = cpu.get_cf() as u32;
+    let result = op1.wrapping_add(op2).wrapping_add(cf);
+    cpu.set_gpr32(instr.meta_data[0] as usize, result);
+    cpu.update_flags_add32(op1, op2, result);
+}
+
+/// ADC r/m32, imm32 - memory form (opcode 0x81 /2) - Bochs ADC_EdIdM
+pub fn ADC_EdId_M<I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1 = cpu.read_rmw_virtual_dword(seg, eaddr)?;
+    let op2 = instr.id();
+    let cf = cpu.get_cf() as u32;
+    let result = op1.wrapping_add(op2).wrapping_add(cf);
+    cpu.write_rmw_linear_dword(result);
+    cpu.update_flags_add32(op1, op2, result);
+    Ok(())
+}
+
+/// ADC r/m32, imm32 - unified (Bochs ADC_EdIdR / ADC_EdIdM)
+pub fn ADC_EdId<I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        ADC_EdId_R(cpu, instr);
+        Ok(())
+    } else {
+        ADC_EdId_M(cpu, instr)
+    }
+}
+
+/// ADC r/m32, imm8 sign-extended - register form (opcode 0x83 /2) - Bochs ADC_EdIbR
+pub fn ADC_EdIb_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
+    let op1 = cpu.get_gpr32(instr.meta_data[0] as usize);
+    let op2 = instr.ib() as i8 as i32 as u32;
+    let cf = cpu.get_cf() as u32;
+    let result = op1.wrapping_add(op2).wrapping_add(cf);
+    cpu.set_gpr32(instr.meta_data[0] as usize, result);
+    cpu.update_flags_add32(op1, op2, result);
+}
+
+/// ADC r/m32, imm8 sign-extended - memory form (opcode 0x83 /2) - Bochs ADC_EdIbM
+pub fn ADC_EdIb_M<I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1 = cpu.read_rmw_virtual_dword(seg, eaddr)?;
+    let op2 = instr.ib() as i8 as i32 as u32;
+    let cf = cpu.get_cf() as u32;
+    let result = op1.wrapping_add(op2).wrapping_add(cf);
+    cpu.write_rmw_linear_dword(result);
+    cpu.update_flags_add32(op1, op2, result);
+    Ok(())
+}
+
+/// ADC r/m32, imm8 sign-extended - unified (Bochs ADC_EdsIb)
+pub fn ADC_EdsIb<I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        ADC_EdIb_R(cpu, instr);
+        Ok(())
+    } else {
+        ADC_EdIb_M(cpu, instr)
+    }
+}
+
+/// SBB r/m32, imm32 - memory form (opcode 0x81 /3) - Bochs SBB_EdIdM
+pub fn SBB_EdId_M<I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1 = cpu.read_rmw_virtual_dword(seg, eaddr)?;
+    let op2 = instr.id();
+    let cf = cpu.get_cf() as u32;
+    let result = op1.wrapping_sub(op2).wrapping_sub(cf);
+    cpu.write_rmw_linear_dword(result);
+    cpu.update_flags_sub32(op1, op2, result);
+    Ok(())
+}
+
+/// SBB r/m32, imm32 - unified (Bochs SBB_EdIdR / SBB_EdIdM)
+pub fn SBB_EdId<I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        SBB_EdId_R(cpu, instr);
+        Ok(())
+    } else {
+        SBB_EdId_M(cpu, instr)
+    }
+}
+
+/// SBB r/m32, imm8 sign-extended - memory form (opcode 0x83 /3) - Bochs SBB_EdIbM
+pub fn SBB_EdIb_M<I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1 = cpu.read_rmw_virtual_dword(seg, eaddr)?;
+    let op2 = instr.ib() as i8 as i32 as u32;
+    let cf = cpu.get_cf() as u32;
+    let result = op1.wrapping_sub(op2).wrapping_sub(cf);
+    cpu.write_rmw_linear_dword(result);
+    cpu.update_flags_sub32(op1, op2, result);
+    Ok(())
+}
+
+/// SBB r/m32, imm8 sign-extended - unified (Bochs SBB_EdsIb)
+pub fn SBB_EdsIb<I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        SBB_EdIb_R(cpu, instr);
+        Ok(())
+    } else {
+        SBB_EdIb_M(cpu, instr)
+    }
+}
+
 // =========================================================================
 // NEG - Two's Complement Negation (32-bit)
 // Matching Bochs arith32.cc NEG_EdR / NEG_EdM

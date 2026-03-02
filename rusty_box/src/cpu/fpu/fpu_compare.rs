@@ -61,7 +61,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FCOM ST(i) — Compare ST(0) with ST(src), set FPU condition codes.
     /// Also used for FCOMP (pops ST(0) after comparison).
     pub fn fcom_sti(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         let pop_stack = instr.get_ia_opcode() == Opcode::FcompSti;
@@ -113,7 +113,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Quiet comparison: only SNaN raises invalid (QNaN does not).
     /// Also used for FUCOMP (pops after comparison).
     pub fn fucom_sti(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         let pop_stack = instr.get_ia_opcode() == Opcode::FucompSti;
@@ -164,7 +164,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FCOM single-real — Compare ST(0) with a 32-bit float from memory.
     /// Also used for FCOMP single-real (pops after comparison).
     pub fn fcom_single_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let pop_stack = instr.get_ia_opcode() == Opcode::FcompSingleReal;
 
@@ -223,7 +223,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FCOM double-real — Compare ST(0) with a 64-bit float from memory.
     /// Also used for FCOMP double-real (pops after comparison).
     pub fn fcom_double_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let pop_stack = instr.get_ia_opcode() == Opcode::FcompDoubleReal;
 
@@ -285,7 +285,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FICOM word integer — Compare ST(0) with a 16-bit signed integer from memory.
     /// Also used for FICOMP (pops after comparison).
     pub fn ficom_word_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let pop_stack = instr.get_ia_opcode() == Opcode::FicompWordInteger;
 
@@ -341,7 +341,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FICOM dword integer — Compare ST(0) with a 32-bit signed integer from memory.
     /// Also used for FICOMP (pops after comparison).
     pub fn ficom_dword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let pop_stack = instr.get_ia_opcode() == Opcode::FicompDwordInteger;
 
@@ -397,7 +397,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FCOMPP — Compare ST(0) with ST(1) and pop both.
     /// Also used for FUCOMPP (quiet comparison — only SNaN raises invalid).
     pub fn fcompp(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -441,7 +441,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Signaling comparison: both SNaN and QNaN raise invalid.
     /// Also used for FCOMIP (pops after comparison).
     pub fn fcomi_st0_stj(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         let pop_stack = instr.get_ia_opcode() == Opcode::FcomipSt0Stj;
@@ -494,7 +494,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Quiet comparison: only SNaN raises invalid (QNaN does not).
     /// Also used for FUCOMIP (pops after comparison).
     pub fn fucomi_st0_stj(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         let pop_stack = instr.get_ia_opcode() == Opcode::FucomipSt0Stj;
@@ -545,7 +545,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// FTST — Compare ST(0) with positive zero and set condition codes.
     pub fn ftst(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -575,7 +575,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// C1 is set to the sign of the value in ST(0), regardless of whether the
     /// register is empty or full.
     pub fn fxam(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         let reg = self.read_fpu_reg(0);

@@ -777,6 +777,163 @@ pub fn SUB_EwsIb<'c, I: BxCpuIdTrait>(
     }
 }
 
+/// ADC_AX_Iw: ADC AX, imm16 (opcode 0x15) - Bochs ADC_AXIw
+pub fn ADC_AX_Iw<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    let ax = cpu.ax();
+    let imm16 = instr.iw();
+    let cf = cpu.get_cf() as u16;
+    let result = ax.wrapping_add(imm16).wrapping_add(cf);
+    cpu.set_ax(result);
+    cpu.update_flags_add16(ax, imm16, result);
+    Ok(())
+}
+
+/// ADC_EwIwR: ADC r16, imm16 (register form, opcode 0x81 /2)
+pub fn ADC_EwIwR<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    let dst = instr.meta_data[0] as usize;
+    let op1 = cpu.get_gpr16(dst);
+    let op2 = instr.iw();
+    let cf = cpu.get_cf() as u16;
+    let result = op1.wrapping_add(op2).wrapping_add(cf);
+    cpu.set_gpr16(dst, result);
+    cpu.update_flags_add16(op1, op2, result);
+    Ok(())
+}
+
+/// ADC_EwIwM: ADC m16, imm16 (memory form, opcode 0x81 /2)
+pub fn ADC_EwIwM<I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op2 = instr.iw();
+    let cf = cpu.get_cf() as u16;
+    let result = op1.wrapping_add(op2).wrapping_add(cf);
+    cpu.write_rmw_linear_word(result);
+    cpu.update_flags_add16(op1, op2, result);
+    Ok(())
+}
+
+/// ADC_EwIw: ADC r/m16, imm16 - dispatcher (Bochs AdcEwIw)
+pub fn ADC_EwIw<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        ADC_EwIwR(cpu, instr)
+    } else {
+        ADC_EwIwM(cpu, instr)
+    }
+}
+
+/// SBB_AX_Iw: SBB AX, imm16 (opcode 0x1D) - Bochs SBB_AXIw
+pub fn SBB_AX_Iw<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    let ax = cpu.ax();
+    let imm16 = instr.iw();
+    let cf = cpu.get_cf() as u16;
+    let result = ax.wrapping_sub(imm16).wrapping_sub(cf);
+    cpu.set_ax(result);
+    cpu.update_flags_sub16(ax, imm16, result);
+    Ok(())
+}
+
+/// SBB_EwIwR: SBB r16, imm16 (register form, opcode 0x81 /3)
+pub fn SBB_EwIwR<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    let dst = instr.meta_data[0] as usize;
+    let op1 = cpu.get_gpr16(dst);
+    let op2 = instr.iw();
+    let cf = cpu.get_cf() as u16;
+    let result = op1.wrapping_sub(op2).wrapping_sub(cf);
+    cpu.set_gpr16(dst, result);
+    cpu.update_flags_sub16(op1, op2, result);
+    Ok(())
+}
+
+/// SBB_EwIwM: SBB m16, imm16 (memory form, opcode 0x81 /3)
+pub fn SBB_EwIwM<I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op2 = instr.iw();
+    let cf = cpu.get_cf() as u16;
+    let result = op1.wrapping_sub(op2).wrapping_sub(cf);
+    cpu.write_rmw_linear_word(result);
+    cpu.update_flags_sub16(op1, op2, result);
+    Ok(())
+}
+
+/// SBB_EwIw: SBB r/m16, imm16 - dispatcher (Bochs SbbEwIw)
+pub fn SBB_EwIw<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        SBB_EwIwR(cpu, instr)
+    } else {
+        SBB_EwIwM(cpu, instr)
+    }
+}
+
+/// SBB_EwIbR: SBB r16, imm8 sign-extended (register form, opcode 0x83 /3)
+pub fn SBB_EwIbR<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    let dst = instr.meta_data[0] as usize;
+    let op1 = cpu.get_gpr16(dst);
+    let op2 = instr.ib() as i8 as i16 as u16;
+    let cf = cpu.get_cf() as u16;
+    let result = op1.wrapping_sub(op2).wrapping_sub(cf);
+    cpu.set_gpr16(dst, result);
+    cpu.update_flags_sub16(op1, op2, result);
+    Ok(())
+}
+
+/// SBB_EwIbM: SBB m16, imm8 sign-extended (memory form, opcode 0x83 /3)
+pub fn SBB_EwIbM<I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    let eaddr = cpu.resolve_addr32(instr);
+    let seg = BxSegregs::from(instr.seg());
+    let op1 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op2 = instr.ib() as i8 as i16 as u16;
+    let cf = cpu.get_cf() as u16;
+    let result = op1.wrapping_sub(op2).wrapping_sub(cf);
+    cpu.write_rmw_linear_word(result);
+    cpu.update_flags_sub16(op1, op2, result);
+    Ok(())
+}
+
+/// SBB_EwsIb: SBB r/m16, imm8 sign-extended - dispatcher (Bochs SbbEwsIb)
+pub fn SBB_EwsIb<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        SBB_EwIbR(cpu, instr)
+    } else {
+        SBB_EwIbM(cpu, instr)
+    }
+}
+
 /// CMP_EwIwR: CMP r16, imm16 (register form)
 pub fn CMP_EwIwR<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,

@@ -305,7 +305,7 @@ impl BxDevicesC {
             tracing::debug!("BIOS POST code port {:#06x}: {:#04x}", address, value as u8);
             const PORT80_CAPACITY: usize = 4096;
             if self.port80_output.len() >= PORT80_CAPACITY {
-                let _ = self.port80_output.pop_front();
+                self.port80_output.pop_front();
             }
             self.port80_output.push_back(value as u8);
             return;
@@ -324,7 +324,7 @@ impl BxDevicesC {
             );
             const PORT_E9_CAPACITY: usize = 4096;
             if self.port_e9_output.len() >= PORT_E9_CAPACITY {
-                let _ = self.port_e9_output.pop_front();
+                self.port_e9_output.pop_front();
             }
             self.port_e9_output.push_back(value as u8);
             return;

@@ -622,7 +622,7 @@ impl AtaDrive {
         }
 
         if let Some(f) = self.image_file.as_mut() {
-            let _ = f.flush();
+            f.flush().ok();
         }
 
         tracing::trace!(
@@ -714,6 +714,18 @@ impl AtaDrive {
             }
         }
 
+        // Word 20: buffer type (3 = dual-ported multi-sector with read caching)
+        buf[40] = 3;
+        buf[41] = 0;
+
+        // Word 21: buffer size in 512-byte increments (512 = 256kB cache)
+        buf[42] = 0x00;
+        buf[43] = 0x02; // 0x0200 = 512
+
+        // Word 22: # of ECC bytes available on read/write long commands
+        buf[44] = 4;
+        buf[45] = 0;
+
         // Words 23-26: Firmware revision (8 ASCII chars)
         let fw_bytes = self.firmware.as_bytes();
         for i in 0..4 {
@@ -748,7 +760,7 @@ impl AtaDrive {
 
         // Word 47: Maximum sectors per multiple command
         buf[94] = 16;
-        buf[95] = 0x80;
+        buf[95] = 0x00; // Bochs: id_drive[47] = MAX_MULTIPLE_SECTORS = 16 (high byte must be 0x00)
 
         // Word 48: PIO32 support (1 = 32-bit PIO supported)
         buf[96] = 0x01;
@@ -757,6 +769,14 @@ impl AtaDrive {
         // Word 49: Capabilities
         buf[98] = 0x00;
         buf[99] = 0x02; // LBA supported
+
+        // Word 51: PIO data transfer cycle timing mode (0x0200 = mode 2)
+        buf[102] = 0x00;
+        buf[103] = 0x02;
+
+        // Word 52: DMA data transfer cycle timing mode (0x0200 = mode 2)
+        buf[104] = 0x00;
+        buf[105] = 0x02;
 
         // Word 53: Field validity
         buf[106] = 0x07;
@@ -791,6 +811,19 @@ impl AtaDrive {
         buf[122] = ((total >> 16) & 0xFF) as u8;
         buf[123] = ((total >> 24) & 0xFF) as u8;
 
+        // Word 64: PIO modes supported (0 = none beyond PIO2)
+        // (buf[128-129] = 0 from fill)
+
+        // Words 65-68: PIO/DMA cycle time in nanoseconds (120 ns each)
+        buf[130] = 120;
+        buf[131] = 0x00;
+        buf[132] = 120;
+        buf[133] = 0x00;
+        buf[134] = 120;
+        buf[135] = 0x00;
+        buf[136] = 120;
+        buf[137] = 0x00;
+
         // Word 80: Major ATA version number (Bochs harddrv.cc:713)
         // Bits 1-6: ATA-1 through ATA-6 supported
         buf[160] = 0x7E; // supports ATA-1 through ATA-6
@@ -801,10 +834,11 @@ impl AtaDrive {
         buf[164] = 0x00;
         buf[165] = 0x40; // NOP supported
 
-        // Word 83: Command set supported 2 (Bochs harddrv.cc:720)
-        // Bit 14: must be 1, bit 12: FLUSH CACHE supported
+        // Word 83: Command set supported 2 (Bochs harddrv.cc:3294)
+        // Bit 14: must be ONE, bit 13: FLUSH CACHE EXT, bit 12: FLUSH CACHE, bit 10: 48-bit LBA
+        // = (1<<14)|(1<<13)|(1<<12)|(1<<10) = 0x7400
         buf[166] = 0x00;
-        buf[167] = 0x50; // bit 14 + bit 12 (FLUSH CACHE)
+        buf[167] = 0x74;
 
         // Word 84: Command set/feature supported extension (Bochs harddrv.cc:722)
         // Bit 14: must be 1
@@ -815,13 +849,27 @@ impl AtaDrive {
         buf[170] = 0x00;
         buf[171] = 0x40; // NOP enabled
 
-        // Word 86: Command set enabled 2 (Bochs harddrv.cc:726)
+        // Word 86: Command set enabled 2 (Bochs harddrv.cc:3314)
+        // Bit 14: must be ONE, bit 13: FLUSH CACHE EXT enabled, bit 12: FLUSH CACHE, bit 10: 48-bit LBA
+        // = (1<<14)|(1<<13)|(1<<12)|(1<<10) = 0x7400
         buf[172] = 0x00;
-        buf[173] = 0x50; // FLUSH CACHE enabled
+        buf[173] = 0x74;
 
         // Word 87: Command set/feature default (Bochs harddrv.cc:728)
         buf[174] = 0x00;
         buf[175] = 0x40;
+
+        // Word 93: Hardware reset result (Bochs harddrv.cc:3322)
+        // = 1 | (1<<14) | 0x2000 = 0x6001
+        buf[186] = 0x01;
+        buf[187] = 0x60;
+
+        // Words 100-103: 48-bit total number of sectors (Bochs harddrv.cc:3324-3328)
+        buf[200] = (total & 0xFF) as u8;
+        buf[201] = ((total >> 8) & 0xFF) as u8;
+        buf[202] = ((total >> 16) & 0xFF) as u8;
+        buf[203] = ((total >> 24) & 0xFF) as u8;
+        // buf[204-207] = 0 (total < 2^32 for any reasonable disk)
 
         self.controller.buffer_size = 512;
         self.controller.buffer_index = 0;
@@ -1063,8 +1111,11 @@ impl BxHardDriveC {
                 _ => 15u8,
             };
             if !self.pic_ptr.is_null() {
-                // IMMEDIATE PIC raise — matches Bochs DEV_pic_raise_irq()
+                // Lower then raise to guarantee an edge even if IRR bit was already set
+                // from a previous ATA command (e.g. BIOS-phase IRQ14 that was never cleared).
+                // Bochs: DEV_pic_lower_irq() + DEV_pic_raise_irq() in raise_interrupt().
                 let pic = unsafe { &mut *self.pic_ptr };
+                pic.lower_irq(irq);
                 pic.raise_irq(irq);
             } else {
                 // Fallback deferred path (no PIC pointer wired yet)
@@ -1524,6 +1575,17 @@ impl BxHardDriveC {
                 // Device control register (Bochs harddrv.cc:2806-2864)
                 // Writes go to BOTH drives on the channel
                 let value = value as u8;
+                let prev_nien = (channel.drives[0].controller.control & 0x02) != 0;
+                let new_nien = (value & 0x02) != 0;
+                if new_nien != prev_nien {
+                    tracing::debug!(
+                        "ATA: nIEN ch{} {} → {} (ctrl={:#04x})",
+                        channel_num,
+                        if prev_nien { "1" } else { "0" },
+                        if new_nien { "1" } else { "0" },
+                        value
+                    );
+                }
                 let prev_reset = channel.drives[0].controller.control & 0x04;
 
                 // Bochs harddrv.cc:2810-2816: Store control FIRST, then override
@@ -1628,11 +1690,13 @@ impl BxHardDriveC {
         let ds = channel.drive_select;
         let drive = channel.selected_drive_mut();
 
-        // Record command in history
+        // Record command in history (circular buffer — keep last 256 commands so
+        // BIOS-phase entries don't crowd out kernel-phase ATA activity).
         let lba = drive.get_lba() as u32;
-        if self.cmd_history.len() < 64 {
-            self.cmd_history.push((channel_num as u8, command, lba));
+        if self.cmd_history.len() >= 256 {
+            self.cmd_history.remove(0);
         }
+        self.cmd_history.push((channel_num as u8, command, lba));
 
         if drive.device_type == DeviceType::None {
             return;

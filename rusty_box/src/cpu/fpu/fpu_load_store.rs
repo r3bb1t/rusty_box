@@ -42,7 +42,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// If ST(-1) is not empty, stack overflow.
     /// If ST(src) is empty, stack underflow exception; if masked, push default NaN.
     pub fn fld_sti(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         self.clear_c1();
@@ -73,7 +73,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FLD m32real — Load single-precision float from memory, convert to
     /// extended precision, and push onto the FPU stack.
     pub fn fld_single_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -104,7 +104,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FLD m64real — Load double-precision float from memory, convert to
     /// extended precision, and push onto the FPU stack.
     pub fn fld_double_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -135,7 +135,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FLD m80real — Load 80-bit extended-precision float from memory
     /// (10 bytes: 8-byte significand + 2-byte sign/exponent) and push.
     pub fn fld_extended_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -166,7 +166,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FILD m16int — Load 16-bit signed integer from memory, convert to
     /// extended precision, and push onto the FPU stack.
     pub fn fild_word_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -190,7 +190,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FILD m32int — Load 32-bit signed integer from memory, convert to
     /// extended precision, and push onto the FPU stack.
     pub fn fild_dword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -214,7 +214,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FILD m64int — Load 64-bit signed integer from memory, convert to
     /// extended precision, and push onto the FPU stack.
     pub fn fild_qword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -246,7 +246,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Top 2 bytes: low nibble = 17th digit, next nibble = 18th digit,
     /// bit 15 of the top word = sign bit.
     pub fn fbld_packed_bcd(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -298,7 +298,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Opcode `FstpSpecialSti` (D9 D8-DF) behaves like FSTP but does not
     /// raise stack underflow — it just pops silently.
     pub fn fst_sti(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
         self.fpu_update_last_instruction(instr);
 
         let opcode = instr.get_ia_opcode();
@@ -332,7 +332,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FST/FSTP m32real — Convert ST(0) to single-precision float and store
     /// to memory.  FSTP also pops the stack.
     pub fn fst_single_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -390,7 +390,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FST/FSTP m64real — Convert ST(0) to double-precision float and store
     /// to memory.  FSTP also pops the stack.
     pub fn fst_double_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -447,7 +447,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FSTP m80real — Store ST(0) as 80-bit extended-precision float to memory
     /// (10 bytes: 8-byte significand + 2-byte sign/exponent).  Always pops.
     pub fn fstp_extended_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -483,7 +483,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FIST/FISTP m16int — Convert ST(0) to 16-bit signed integer and store
     /// to memory.  FISTP also pops the stack.
     pub fn fist_word_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -540,7 +540,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FIST/FISTP m32int — Convert ST(0) to 32-bit signed integer and store
     /// to memory.  FISTP also pops the stack.
     pub fn fist_dword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -602,7 +602,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FISTP m64int — Convert ST(0) to 64-bit signed integer and store
     /// to memory.  Always pops the stack.
     pub fn fistp_qword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -660,7 +660,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// is stored in response to a masked floating-point invalid-operation
     /// exception.
     pub fn fbstp_packed_bcd(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -745,7 +745,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FISTTP m16int — Convert ST(0) to 16-bit integer using round-to-zero
     /// (truncation), store to memory, and pop.  SSE3 instruction.
     pub fn fisttp16(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -790,7 +790,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FISTTP m32int — Convert ST(0) to 32-bit integer using round-to-zero
     /// (truncation), store to memory, and pop.  SSE3 instruction.
     pub fn fisttp32(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -835,7 +835,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// FISTTP m64int — Convert ST(0) to 64-bit integer using round-to-zero
     /// (truncation), store to memory, and pop.  SSE3 instruction.
     pub fn fisttp64(&mut self, instr: &Instruction) -> super::super::Result<()> {
-        self.fpu_check_pending_exceptions();
+        self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());

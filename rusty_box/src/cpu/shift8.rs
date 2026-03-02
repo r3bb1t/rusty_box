@@ -237,13 +237,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// ROL r/m8, CL
     pub fn rol_eb_cl(&mut self, instr: &Instruction) -> super::Result<()> {
-        let count = self.cl() & 0x07; // Only low 3 bits for 8-bit rotate
+        // Bochs shift8.cc: uses raw CL, checks count & 0x07 and count & 0x18
+        let cl = self.cl();
+        let count = (cl & 0x07) as u32;
         if count == 0 {
+            // count & 0x07 == 0: no rotation. If count & 0x18 != 0 (cl=8,16,24), update flags.
+            // Bochs shift8.cc:42-47
+            if cl & 0x18 != 0 {
+                let (op1, _) = self.shift_read8(instr)?;
+                let bit0 = (op1 & 0x01) != 0;
+                let bit7 = (op1 >> 7) != 0;
+                self.set_cf_of(bit0, bit0 != bit7);
+            }
             return Ok(());
         }
 
         let (op1, laddr) = self.shift_read8(instr)?;
-        let result = op1.rotate_left(count as u32);
+        let result = op1.rotate_left(count);
         self.shift_write8(instr, laddr, result);
 
         let cf = (result & 0x01) != 0;
@@ -254,13 +264,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// ROL r/m8, imm8
     pub fn rol_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        let count = instr.ib() & 0x07; // Only low 3 bits for 8-bit rotate
+        // Bochs shift8.cc: uses raw imm8, checks count & 0x07 and count & 0x18
+        let imm = instr.ib();
+        let count = (imm & 0x07) as u32;
         if count == 0 {
+            // If bit 3 or 4 set (imm=8,16,24), update flags. Bochs shift8.cc:82-87
+            if imm & 0x18 != 0 {
+                let (op1, _) = self.shift_read8(instr)?;
+                let bit0 = (op1 & 0x01) != 0;
+                let bit7 = (op1 >> 7) != 0;
+                self.set_cf_of(bit0, bit0 != bit7);
+            }
             return Ok(());
         }
 
         let (op1, laddr) = self.shift_read8(instr)?;
-        let result = op1.rotate_left(count as u32);
+        let result = op1.rotate_left(count);
         self.shift_write8(instr, laddr, result);
 
         let cf = (result & 0x01) != 0;
@@ -287,13 +306,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// ROR r/m8, CL
     pub fn ror_eb_cl(&mut self, instr: &Instruction) -> super::Result<()> {
-        let count = self.cl() & 0x07;
+        // Bochs shift8.cc: uses raw CL, checks count & 0x07 and count & 0x18
+        let cl = self.cl();
+        let count = (cl & 0x07) as u32;
         if count == 0 {
+            // If count & 0x18 != 0 (cl=8,16,24), update CF/OF without rotating.
+            // Bochs shift8.cc:120-127: CF=bit7, OF=bit6^bit7
+            if cl & 0x18 != 0 {
+                let (op1, _) = self.shift_read8(instr)?;
+                let bit6 = ((op1 >> 6) & 1) != 0;
+                let bit7 = (op1 >> 7) != 0;
+                self.set_cf_of(bit7, bit6 != bit7);
+            }
             return Ok(());
         }
 
         let (op1, laddr) = self.shift_read8(instr)?;
-        let result = op1.rotate_right(count as u32);
+        let result = op1.rotate_right(count);
         self.shift_write8(instr, laddr, result);
 
         let cf = (result & 0x80) != 0;
@@ -304,13 +333,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// ROR r/m8, imm8
     pub fn ror_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
-        let count = instr.ib() & 0x07;
+        // Bochs shift8.cc: uses raw imm8, checks count & 0x07 and count & 0x18
+        let imm = instr.ib();
+        let count = (imm & 0x07) as u32;
         if count == 0 {
+            // If imm & 0x18 != 0 (imm=8,16,24), update CF/OF without rotating.
+            // Bochs shift8.cc:161-167: CF=bit7, OF=bit6^bit7
+            if imm & 0x18 != 0 {
+                let (op1, _) = self.shift_read8(instr)?;
+                let bit6 = ((op1 >> 6) & 1) != 0;
+                let bit7 = (op1 >> 7) != 0;
+                self.set_cf_of(bit7, bit6 != bit7);
+            }
             return Ok(());
         }
 
         let (op1, laddr) = self.shift_read8(instr)?;
-        let result = op1.rotate_right(count as u32);
+        let result = op1.rotate_right(count);
         self.shift_write8(instr, laddr, result);
 
         let cf = (result & 0x80) != 0;

@@ -66,16 +66,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// raise #MF (exception 16).
     ///
     /// In MSDOS-compatibility mode (NE=0) we just log a warning.
-    pub fn fpu_check_pending_exceptions(&mut self) {
+    pub fn fpu_check_pending_exceptions(&mut self) -> super::super::Result<()> {
         if (self.the_i387.get_partial_status() & FPU_SW_SUMMARY) != 0 {
             // CR0.NE is bit 5
             if self.cr0.ne() {
                 // Native FPU error reporting — raise #MF
-                let _ = self.exception(Exception::Mf, 0u16);
+                return self.exception(Exception::Mf, 0u16);
             } else {
                 tracing::info!("math_abort: MSDOS compatibility FPU exception");
             }
         }
+        Ok(())
     }
 
     // -----------------------------------------------------------------------
