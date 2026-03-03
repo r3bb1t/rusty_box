@@ -384,11 +384,7 @@ impl BxPicC {
     /// # Safety
     /// The caller must ensure the pointers remain valid and that the PIC
     /// is only accessed from one thread at a time.
-    pub unsafe fn set_cpu_signal_ptrs(
-        &mut self,
-        async_event: *mut u32,
-        pending_event: *mut u32,
-    ) {
+    pub unsafe fn set_cpu_signal_ptrs(&mut self, async_event: *mut u32, pending_event: *mut u32) {
         self.cpu_async_event_ptr = async_event;
         self.cpu_pending_event_ptr = pending_event;
     }
@@ -532,13 +528,13 @@ impl BxPicC {
             PIC_SLAVE_DATA => self.write_data(value, false),
             PIC_ELCR1 => {
                 self.elcr[0] = value & 0xF8; // IRQ0-2 are edge-triggered only
-                // Sync ELCR to master PIC edge_level (Bochs pic.cc set_mode)
+                                             // Sync ELCR to master PIC edge_level (Bochs pic.cc set_mode)
                 self.master.edge_level = self.elcr[0];
                 tracing::debug!("PIC: ELCR1 = {:#04x}", value);
             }
             PIC_ELCR2 => {
                 self.elcr[1] = value & 0xDE; // IRQ8,13 are edge-triggered only
-                // Sync ELCR to slave PIC edge_level (Bochs pic.cc set_mode)
+                                             // Sync ELCR to slave PIC edge_level (Bochs pic.cc set_mode)
                 self.slave.edge_level = self.elcr[1];
                 tracing::debug!("PIC: ELCR2 = {:#04x}", value);
             }

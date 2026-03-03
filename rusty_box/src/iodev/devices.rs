@@ -16,10 +16,19 @@ use core::ffi::c_void;
 
 use crate::{cpu::ResetReason, memory::BxMemC, pc_system::BxPcSystemC, Result};
 
+#[cfg(feature = "bx_support_pci")]
+use super::acpi::BxAcpiCtrl;
 use super::cmos::{BxCmosC, CMOS_ADDR, CMOS_DATA};
 use super::dma::BxDmaC;
 use super::harddrv::BxHardDriveC;
+use super::ioapic::BxIoApic;
 use super::keyboard::{BxKeyboardC, KBD_DATA_PORT, KBD_STATUS_PORT, SYSTEM_CONTROL_B};
+#[cfg(feature = "bx_support_pci")]
+use super::pci::BxPciBridge;
+#[cfg(feature = "bx_support_pci")]
+use super::pci2isa::BxPiix3;
+#[cfg(feature = "bx_support_pci")]
+use super::pci_ide::BxPciIde;
 use super::pic::{
     BxPicC, PIC_ELCR1, PIC_ELCR2, PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA,
 };
@@ -59,6 +68,42 @@ pub struct DeviceManager {
     pub(crate) harddrv: BxHardDriveC,
     /// VGA Display Controller
     pub(crate) vga: BxVgaC,
+    /// I/O APIC (82093AA) — interrupt routing for APIC-based systems
+    /// Bochs: `bx_ioapic_c *pluginIOAPIC` (iodev/iodev.h)
+    #[cfg(feature = "bx_support_apic")]
+    pub(crate) ioapic: BxIoApic,
+    /// PIIX4 ACPI Power Management controller
+    /// Bochs: `bx_acpi_ctrl_c *pluginACPIController` (iodev/iodev.h)
+    #[cfg(feature = "bx_support_pci")]
+    pub(crate) acpi: BxAcpiCtrl,
+    /// i440FX PCI Host Bridge (bus 0, dev 0, func 0)
+    /// Bochs: `bx_pci_bridge_c *pluginPciBridge` (iodev/iodev.h)
+    #[cfg(feature = "bx_support_pci")]
+    pub(crate) pci_bridge: BxPciBridge,
+    /// PIIX3 PCI-to-ISA Bridge (bus 0, dev 1, func 0)
+    /// Bochs: `bx_piix3_c *pluginPci2IsaBridge` (iodev/iodev.h)
+    #[cfg(feature = "bx_support_pci")]
+    pub(crate) pci2isa: BxPiix3,
+    /// PIIX3 PCI IDE Controller (bus 0, dev 1, func 1)
+    /// Bochs: `bx_pci_ide_c *pluginPciIdeController` (iodev/iodev.h)
+    #[cfg(feature = "bx_support_pci")]
+    pub(crate) pci_ide: BxPciIde,
+    /// PCI configuration address register (shadow copy for handler dispatch)
+    /// Bochs: bx_devices_c::pci_conf_addr (devices.cc)
+    #[cfg(feature = "bx_support_pci")]
+    pub(crate) pci_conf_addr: u32,
+    /// Deferred: PCI IDE BAR4 changed, needs BM-DMA port re-registration
+    #[cfg(feature = "bx_support_pci")]
+    pub(crate) pci_ide_bar4_needs_reregister: bool,
+    /// Deferred: ACPI PM base changed, needs port re-registration
+    #[cfg(feature = "bx_support_pci")]
+    pub(crate) acpi_pm_needs_reregister: bool,
+    /// Deferred: ACPI SMBus base changed, needs port re-registration
+    #[cfg(feature = "bx_support_pci")]
+    pub(crate) acpi_sm_needs_reregister: bool,
+    /// Deferred: PAM registers changed, needs memory type update
+    #[cfg(feature = "bx_support_pci")]
+    pub(crate) pam_needs_update: bool,
     /// Diagnostic: PIT fire count (check_irq0 returned true)
     pub diag_pit_fires: u64,
     /// Diagnostic: raise_irq(0) latched (irq_in was 0)
@@ -92,6 +137,26 @@ impl DeviceManager {
             keyboard: BxKeyboardC::new(),
             harddrv: BxHardDriveC::new(),
             vga: BxVgaC::new(),
+            #[cfg(feature = "bx_support_apic")]
+            ioapic: BxIoApic::new(),
+            #[cfg(feature = "bx_support_pci")]
+            acpi: BxAcpiCtrl::new(),
+            #[cfg(feature = "bx_support_pci")]
+            pci_bridge: BxPciBridge::new(),
+            #[cfg(feature = "bx_support_pci")]
+            pci2isa: BxPiix3::new(),
+            #[cfg(feature = "bx_support_pci")]
+            pci_ide: BxPciIde::new(),
+            #[cfg(feature = "bx_support_pci")]
+            pci_conf_addr: 0,
+            #[cfg(feature = "bx_support_pci")]
+            pci_ide_bar4_needs_reregister: false,
+            #[cfg(feature = "bx_support_pci")]
+            acpi_pm_needs_reregister: false,
+            #[cfg(feature = "bx_support_pci")]
+            acpi_sm_needs_reregister: false,
+            #[cfg(feature = "bx_support_pci")]
+            pam_needs_update: false,
             diag_pit_fires: 0,
             diag_irq0_latched: 0,
             diag_irq0_already_high: 0,
@@ -130,6 +195,19 @@ impl DeviceManager {
         self.keyboard.init();
         // 7. Hard drive
         self.harddrv.init();
+        // 8. I/O APIC (Bochs: pluginIOAPIC->init() in devices.cc)
+        #[cfg(feature = "bx_support_apic")]
+        self.ioapic.init(mem)?;
+        // 9. ACPI Power Management (Bochs: pluginACPIController->init() in devices.cc)
+        #[cfg(feature = "bx_support_pci")]
+        self.acpi.reset();
+        // 10. PCI bus devices (Bochs: pluginPciBridge->init(), pluginPci2IsaBridge->init(), etc.)
+        #[cfg(feature = "bx_support_pci")]
+        {
+            self.pci_bridge.reset();
+            self.pci2isa.reset();
+            self.pci_ide.reset();
+        }
 
         // Register I/O handlers for each device (order doesn't matter for handlers)
         self.register_cmos_handlers(io);
@@ -138,6 +216,10 @@ impl DeviceManager {
         self.register_pit_handlers(io);
         self.register_keyboard_handlers(io);
         self.register_harddrv_handlers(io);
+        #[cfg(feature = "bx_support_pci")]
+        self.register_acpi_handlers(io);
+        #[cfg(feature = "bx_support_pci")]
+        self.register_pci_handlers(io);
 
         tracing::info!("Device manager initialization complete");
         Ok(())
@@ -154,6 +236,20 @@ impl DeviceManager {
         self.keyboard.reset();
         self.harddrv.reset();
         self.vga.reset();
+        #[cfg(feature = "bx_support_apic")]
+        self.ioapic.reset();
+        #[cfg(feature = "bx_support_pci")]
+        self.acpi.reset();
+        #[cfg(feature = "bx_support_pci")]
+        {
+            self.pci_bridge.reset();
+            self.pci2isa.reset();
+            self.pci_ide.reset();
+            self.pci_conf_addr = 0;
+            self.pci_ide_bar4_needs_reregister = false;
+            self.acpi_pm_needs_reregister = false;
+            self.acpi_sm_needs_reregister = false;
+        }
 
         Ok(())
     }
@@ -335,6 +431,255 @@ impl DeviceManager {
         );
     }
 
+    /// Register ACPI I/O handlers.
+    /// Static ports: SMI command (0xB2), ACPI debug (0xB044).
+    /// Dynamic ports (PM/SM base) are re-registered when PCI config changes.
+    #[cfg(feature = "bx_support_pci")]
+    fn register_acpi_handlers(&mut self, io: &mut BxDevicesC) {
+        let acpi_ptr = &mut self.acpi as *mut BxAcpiCtrl as *mut c_void;
+
+        // SMI command port (0xB2) — Bochs acpi.cc:137-138
+        io.register_io_write_handler(
+            acpi_ptr,
+            acpi_write_handler,
+            0x00B2,
+            "ACPI SMI Command",
+            0x1,
+        );
+
+        // ACPI debug port (0xB044) — Bochs acpi.cc:145-148
+        io.register_io_handler(
+            acpi_ptr,
+            acpi_read_handler,
+            acpi_write_handler,
+            0xB044,
+            "ACPI Debug",
+            0x7, // 1, 2, 4 byte
+        );
+    }
+
+    /// Register ACPI PM I/O port range (called when PM base changes via PCI config).
+    #[cfg(feature = "bx_support_pci")]
+    pub fn register_acpi_pm_ports(&mut self, io: &mut BxDevicesC) {
+        let acpi_ptr = &mut self.acpi as *mut BxAcpiCtrl as *mut c_void;
+        let base = self.acpi.pm_base as u16;
+        if base == 0 {
+            return;
+        }
+        // Register 64 ports at PM base — Bochs acpi.cc:563-571
+        for offset in 0..64u16 {
+            let mask = self.acpi.pm_io_mask(offset as u8);
+            if mask != 0 {
+                io.register_io_handler(
+                    acpi_ptr,
+                    acpi_read_handler,
+                    acpi_write_handler,
+                    base + offset,
+                    "ACPI PM",
+                    mask,
+                );
+            }
+        }
+        self.acpi.pm_ports_registered = true;
+    }
+
+    /// Register ACPI SMBus I/O port range (called when SM base changes via PCI config).
+    #[cfg(feature = "bx_support_pci")]
+    pub fn register_acpi_sm_ports(&mut self, io: &mut BxDevicesC) {
+        let acpi_ptr = &mut self.acpi as *mut BxAcpiCtrl as *mut c_void;
+        let base = self.acpi.sm_base as u16;
+        if base == 0 {
+            return;
+        }
+        // Register 16 ports at SM base — Bochs acpi.cc:572-580
+        for offset in 0..16u16 {
+            let mask = self.acpi.sm_io_mask(offset as u8);
+            if mask != 0 {
+                io.register_io_handler(
+                    acpi_ptr,
+                    acpi_read_handler,
+                    acpi_write_handler,
+                    base + offset,
+                    "ACPI SMBus",
+                    mask,
+                );
+            }
+        }
+        self.acpi.sm_ports_registered = true;
+    }
+
+    /// Register PCI bus I/O handlers.
+    /// Ports: 0xCF8 (config address), 0xCFC-0xCFF (config data),
+    /// PIIX3 I/O ports (ELCR, CPU reset), and PCI IDE BM-DMA ports.
+    /// Bochs: devices.cc:264-270 (PCI bridge init order)
+    #[cfg(feature = "bx_support_pci")]
+    fn register_pci_handlers(&mut self, io: &mut BxDevicesC) {
+        let dm_ptr = self as *mut DeviceManager as *mut c_void;
+
+        // PCI config address register (0xCF8) — 4-byte write only
+        // Bochs: devices.cc register_io_* for 0xCF8
+        io.register_io_handler(
+            dm_ptr,
+            pci_read_handler,
+            pci_write_handler,
+            super::pci::PCI_CONFIG_ADDR,
+            "PCI Config Addr",
+            0x4, // 4-byte only
+        );
+
+        // PCI config data register (0xCFC-0xCFF) — 1/2/4-byte
+        for port in 0x0CFC..=0x0CFF_u16 {
+            io.register_io_handler(
+                dm_ptr,
+                pci_read_handler,
+                pci_write_handler,
+                port,
+                "PCI Config Data",
+                0x7, // 1, 2, 4 byte
+            );
+        }
+
+        // PIIX3 I/O ports: APM (0xB2-0xB3), ELCR (0x4D0-0x4D1)
+        // Bochs: pci2isa.cc:80-92 registers these during init()
+        for port in [
+            super::pci2isa::APM_CMD_PORT,
+            super::pci2isa::APM_STS_PORT,
+            super::pci2isa::ELCR1_PORT,
+            super::pci2isa::ELCR2_PORT,
+        ] {
+            io.register_io_handler(
+                dm_ptr,
+                pci_read_handler,
+                pci_write_handler,
+                port,
+                "PIIX3",
+                0x1,
+            );
+        }
+    }
+
+    /// Route a PCI config space read to the correct device.
+    /// Bochs: devices.cc bx_devices_c::pci_read_handler() (inline in read_handler)
+    #[cfg(feature = "bx_support_pci")]
+    fn pci_io_read(&self, address: u16, io_len: u8) -> u32 {
+        match address {
+            // Config address register (0xCF8)
+            0x0CF8 => self.pci_conf_addr,
+            // Config data register (0xCFC-0xCFF)
+            0x0CFC..=0x0CFF => {
+                let conf_addr = self.pci_conf_addr;
+                if conf_addr & 0x8000_0000 == 0 {
+                    return 0xFFFF_FFFF; // not enabled
+                }
+                let bus = ((conf_addr >> 16) & 0xFF) as u8;
+                let devfunc = ((conf_addr >> 8) & 0xFF) as u8;
+                let reg = (conf_addr & 0xFC) as u8;
+                let offset = (address - 0x0CFC) as u8;
+
+                if bus != 0 {
+                    return 0xFFFF_FFFF; // only bus 0 implemented
+                }
+
+                let reg_addr = reg + offset;
+                self.pci_device_read(devfunc, reg_addr, io_len)
+            }
+            // APM + ELCR ports → PIIX3
+            0x00B2 | 0x00B3 | 0x04D0 | 0x04D1 => self.pci2isa.read(address),
+            _ => {
+                // BM-DMA ports
+                let base = self.pci_ide.bmdma_base as u16;
+                if base > 0 && address >= base && address < base + 16 {
+                    self.pci_ide.bmdma_read(address, io_len)
+                } else {
+                    0xFFFF_FFFF
+                }
+            }
+        }
+    }
+
+    /// Dispatch a PCI config read to the correct device by devfunc.
+    /// Bochs: DEV_pci_rd_memtype() routing in devices.cc
+    #[cfg(feature = "bx_support_pci")]
+    fn pci_device_read(&self, devfunc: u8, address: u8, io_len: u8) -> u32 {
+        match devfunc {
+            // Device 0, Func 0: i440FX host bridge
+            0x00 => self.pci_bridge.pci_read(address, io_len),
+            // Device 1, Func 0: PIIX3 PCI-to-ISA bridge
+            0x08 => self.pci2isa.pci_read(address, io_len),
+            // Device 1, Func 1: PIIX3 IDE controller
+            0x09 => self.pci_ide.pci_read(address, io_len),
+            // Device 1, Func 3: PIIX4 ACPI controller
+            0x0B => self.acpi.pci_read(address, io_len),
+            // Unrecognized device
+            _ => {
+                tracing::trace!(
+                    "PCI config read: unrecognized devfunc={:#04x} reg={:#04x}",
+                    devfunc,
+                    address
+                );
+                0xFFFF_FFFF
+            }
+        }
+    }
+
+    /// Register PCI IDE BM-DMA I/O ports when BAR4 changes.
+    #[cfg(feature = "bx_support_pci")]
+    fn register_pci_ide_bmdma_ports(&mut self, io: &mut BxDevicesC) {
+        let dm_ptr = self as *mut DeviceManager as *mut c_void;
+        let base = self.pci_ide.bmdma_base as u16;
+        if base == 0 {
+            return;
+        }
+        for offset in 0..16u16 {
+            let mask = self.pci_ide.bmdma_io_mask(offset as u8);
+            if mask != 0 {
+                io.register_io_handler(
+                    dm_ptr,
+                    pci_read_handler,
+                    pci_write_handler,
+                    base + offset,
+                    "PCI IDE BM-DMA",
+                    mask,
+                );
+            }
+        }
+        tracing::info!("PCI IDE BM-DMA ports registered at base {:#06x}", base);
+    }
+
+    /// Process deferred PCI port re-registrations.
+    /// Called from the emulator loop when both DeviceManager and BxDevicesC are available.
+    #[cfg(feature = "bx_support_pci")]
+    pub fn process_pci_deferred<'c, I: crate::cpu::BxCpuIdTrait>(
+        &mut self,
+        io: &mut BxDevicesC,
+        mem: &mut crate::memory::BxMemC<'c>,
+    ) {
+        if self.pci_ide_bar4_needs_reregister {
+            self.pci_ide_bar4_needs_reregister = false;
+            if self.pci_ide.bmdma_base > 0 {
+                self.register_pci_ide_bmdma_ports(io);
+            }
+        }
+        if self.acpi_pm_needs_reregister {
+            self.acpi_pm_needs_reregister = false;
+            if self.acpi.pm_base != 0 {
+                self.register_acpi_pm_ports(io);
+            }
+        }
+        if self.acpi_sm_needs_reregister {
+            self.acpi_sm_needs_reregister = false;
+            if self.acpi.sm_base != 0 {
+                self.register_acpi_sm_ports(io);
+            }
+        }
+        if self.pam_needs_update {
+            self.pam_needs_update = false;
+            self.pci_bridge.apply_pam_to_memory::<I>(mem);
+        }
+        // Sync pci_conf_addr to BxDevicesC
+        io.pci_conf_addr = self.pci_conf_addr;
+    }
+
     /// Simulate time passing for timer-based devices
     /// Returns true if any interrupt is pending
     pub fn tick(&mut self, usec: u64) -> bool {
@@ -393,6 +738,17 @@ impl DeviceManager {
         // This avoids the one-shot race where status register polling would
         // lower the IRQ before the CPU could acknowledge it.
         self.harddrv.update_irq_lines(&mut self.pic);
+
+        // ACPI PM timer: tick and sync IRQ 9 (SCI) to PIC
+        #[cfg(feature = "bx_support_pci")]
+        {
+            self.acpi.tick(usec);
+            if self.acpi.irq9_level {
+                self.pic.raise_irq(9);
+            } else {
+                self.pic.lower_irq(9);
+            }
+        }
 
         self.pic.has_interrupt()
     }
@@ -634,7 +990,133 @@ impl SystemControlPort {
     /// Bochs devices.cc:505: return(BX_GET_ENABLE_A20() << 1)
     pub fn read(&self) -> u8 {
         // Bit 1 = A20 gate state, Bit 0 = 0 (reset trigger write-only)
-        if self.a20_gate { 0x02 } else { 0x00 }
+        if self.a20_gate {
+            0x02
+        } else {
+            0x00
+        }
+    }
+}
+
+/// PCI I/O read handler — dispatches to DeviceManager::pci_io_read()
+/// Handles: 0xCF8 (config addr), 0xCFC-0xCFF (config data), ELCR, BM-DMA
+#[cfg(feature = "bx_support_pci")]
+fn pci_read_handler(this_ptr: *mut c_void, address: u16, io_len: u8) -> u32 {
+    if this_ptr.is_null() {
+        return 0xFFFF_FFFF;
+    }
+    let dm = unsafe { &*(this_ptr as *const DeviceManager) };
+    dm.pci_io_read(address, io_len)
+}
+
+/// PCI I/O write handler — dispatches to DeviceManager::pci_io_write()
+/// Note: For write, we need BxDevicesC access for ACPI port re-registration.
+/// The handler casts back to DeviceManager and handles config addr write
+/// locally. Config data writes that trigger port re-registration will be
+/// handled when the emulator loop next calls tick().
+#[cfg(feature = "bx_support_pci")]
+fn pci_write_handler(this_ptr: *mut c_void, address: u16, value: u32, io_len: u8) {
+    if this_ptr.is_null() {
+        return;
+    }
+    let dm = unsafe { &mut *(this_ptr as *mut DeviceManager) };
+    // Handle writes that don't need BxDevicesC
+    match address {
+        0x0CF8 => {
+            dm.pci_conf_addr = value;
+        }
+        0x0CFC..=0x0CFF => {
+            let conf_addr = dm.pci_conf_addr;
+            if conf_addr & 0x8000_0000 == 0 {
+                return;
+            }
+            let bus = ((conf_addr >> 16) & 0xFF) as u8;
+            let devfunc = ((conf_addr >> 8) & 0xFF) as u8;
+            let reg = (conf_addr & 0xFC) as u8;
+            let offset = (address - 0x0CFC) as u8;
+            if bus != 0 {
+                return;
+            }
+            let reg_addr = reg + offset;
+            // Dispatch to device — note: ACPI port re-registration deferred
+            match devfunc {
+                0x00 => {
+                    let pam_changed = dm.pci_bridge.pci_write(reg_addr, value, io_len);
+                    if pam_changed {
+                        dm.pam_needs_update = true;
+                    }
+                }
+                0x08 => dm.pci2isa.pci_write(reg_addr, value, io_len),
+                0x09 => {
+                    let bar4_changed = dm.pci_ide.pci_write(reg_addr, value, io_len);
+                    if bar4_changed {
+                        // BM-DMA port registration needs BxDevicesC — deferred flag
+                        dm.pci_ide_bar4_needs_reregister = true;
+                    }
+                }
+                0x0B => {
+                    let (pm_changed, sm_changed) = dm.acpi.pci_write(reg_addr, value, io_len);
+                    if pm_changed {
+                        dm.acpi_pm_needs_reregister = true;
+                    }
+                    if sm_changed {
+                        dm.acpi_sm_needs_reregister = true;
+                    }
+                }
+                _ => {
+                    tracing::trace!("PCI config write: unrecognized devfunc={:#04x}", devfunc);
+                }
+            }
+        }
+        0x00B2 | 0x00B3 | 0x04D0 | 0x04D1 => {
+            dm.pci2isa.write(address, value, io_len);
+            // Port 0xB2 (SMI command): forward to ACPI for ACPI_ENABLE/DISABLE
+            // processing, then clear apms since we can't deliver real SMI
+            // (no SMM support). Bochs: pci2isa.cc calls DEV_acpi_generate_smi().
+            if address == 0x00B2 {
+                dm.acpi.generate_smi(value as u8);
+                // SMM not implemented: clear apms so BIOS smm_init() polling
+                // loop (rombios32.c:975) exits immediately.
+                dm.pci2isa.apms = 0;
+                tracing::debug!(
+                    "APM command {:#04x}: forwarded to ACPI, apms cleared (no SMM)",
+                    value
+                );
+            }
+        }
+        _ => {
+            let base = dm.pci_ide.bmdma_base as u16;
+            if base > 0 && address >= base && address < base + 16 {
+                dm.pci_ide.bmdma_write(address, value, io_len);
+            }
+        }
+    }
+}
+
+/// ACPI I/O read handler — dispatches to BxAcpiCtrl::read()
+/// Bochs: bx_acpi_ctrl_c::read_handler() (acpi.cc:302-310)
+#[cfg(feature = "bx_support_pci")]
+fn acpi_read_handler(this_ptr: *mut c_void, address: u16, io_len: u8) -> u32 {
+    if this_ptr.is_null() {
+        return 0xFFFF_FFFF;
+    }
+    let acpi = unsafe { &mut *(this_ptr as *mut BxAcpiCtrl) };
+    acpi.read(address, io_len)
+}
+
+/// ACPI I/O write handler — dispatches to BxAcpiCtrl::write() or generate_smi()
+/// Bochs: bx_acpi_ctrl_c::write_handler() (acpi.cc:386-395)
+#[cfg(feature = "bx_support_pci")]
+fn acpi_write_handler(this_ptr: *mut c_void, address: u16, value: u32, io_len: u8) {
+    if this_ptr.is_null() {
+        return;
+    }
+    let acpi = unsafe { &mut *(this_ptr as *mut BxAcpiCtrl) };
+    // SMI command port (0xB2) — Bochs acpi.cc:393
+    if address == 0x00B2 {
+        acpi.generate_smi(value as u8);
+    } else {
+        acpi.write(address, value, io_len);
     }
 }
 

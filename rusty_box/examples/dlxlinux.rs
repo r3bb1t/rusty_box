@@ -441,11 +441,11 @@ fn run_dlxlinux() -> Result<()> {
     // PS/2 Set 2 scancodes for "root\n". Break code = 0xF0 prefix + make code.
     // 'r'=0x2D, 'o'=0x44, 't'=0x2C, Enter=0x5A
     const LOGIN_SCANCODES: &[u8] = &[
-        0x2D, 0xF0, 0x2D,  // 'r' make + break
-        0x44, 0xF0, 0x44,  // 'o' make + break
-        0x44, 0xF0, 0x44,  // 'o' make + break
-        0x2C, 0xF0, 0x2C,  // 't' make + break
-        0x5A, 0xF0, 0x5A,  // Enter make + break
+        0x2D, 0xF0, 0x2D, // 'r' make + break
+        0x44, 0xF0, 0x44, // 'o' make + break
+        0x44, 0xF0, 0x44, // 'o' make + break
+        0x2C, 0xF0, 0x2C, // 't' make + break
+        0x5A, 0xF0, 0x5A, // Enter make + break
     ];
     // Harmless Left-Shift make+break: resets Linux console blank timer without
     // typing any character (the kernel discards modifier-only keypresses from
@@ -474,7 +474,10 @@ fn run_dlxlinux() -> Result<()> {
             let run_for = PHASE_SIZE.min(max_instructions - total_executed);
             match emu.run_interactive(run_for) {
                 Ok(n) => total_executed += n,
-                Err(e) => { run_result = Err(e); break 'phases; }
+                Err(e) => {
+                    run_result = Err(e);
+                    break 'phases;
+                }
             }
             run_result = Ok(total_executed);
 
@@ -484,7 +487,8 @@ fn run_dlxlinux() -> Result<()> {
                 let has_login = vga_text.contains("login:");
 
                 // Print VGA preview (first few non-empty lines) for diagnosis
-                let preview: Vec<&str> = vga_text.lines()
+                let preview: Vec<&str> = vga_text
+                    .lines()
                     .filter(|l| !l.trim().is_empty())
                     .take(3)
                     .collect();
@@ -493,14 +497,22 @@ fn run_dlxlinux() -> Result<()> {
                 } else {
                     preview.join(" | ")
                 };
-                println!("[{}M] VGA: {}{}",
+                println!(
+                    "[{}M] VGA: {}{}",
                     total_executed / 1_000_000,
                     preview_str,
-                    if has_login { " *** LOGIN DETECTED ***" } else { "" });
+                    if has_login {
+                        " *** LOGIN DETECTED ***"
+                    } else {
+                        ""
+                    }
+                );
 
                 if has_login && !logged_in {
-                    println!("(headless) Injecting 'root\\n' at {}M instructions",
-                        total_executed / 1_000_000);
+                    println!(
+                        "(headless) Injecting 'root\\n' at {}M instructions",
+                        total_executed / 1_000_000
+                    );
                     for &sc in LOGIN_SCANCODES {
                         emu.send_scancode(sc);
                     }
@@ -653,14 +665,36 @@ fn run_dlxlinux() -> Result<()> {
 
         // IRQ delivery chain diagnostic
         println!("\n===== IRQ DELIVERY CHAIN =====");
-        println!("tick() calls:          {}", emu.device_manager.diag_tick_count);
-        println!("PIT fires (check_irq0): {}", emu.device_manager.diag_pit_fires);
-        println!("IRQ0 latched (raise):   {}", emu.device_manager.diag_irq0_latched);
-        println!("IRQ0 was already high:  {}", emu.device_manager.diag_irq0_already_high);
-        println!("iac() calls:            {}", emu.device_manager.diag_iac_count);
+        println!(
+            "tick() calls:          {}",
+            emu.device_manager.diag_tick_count
+        );
+        println!(
+            "PIT fires (check_irq0): {}",
+            emu.device_manager.diag_pit_fires
+        );
+        println!(
+            "IRQ0 latched (raise):   {}",
+            emu.device_manager.diag_irq0_latched
+        );
+        println!(
+            "IRQ0 was already high:  {}",
+            emu.device_manager.diag_irq0_already_high
+        );
+        println!(
+            "iac() calls:            {}",
+            emu.device_manager.diag_iac_count
+        );
         let pic_diag = emu.device_manager.pic_diag();
-        println!("total usec:             {} ({:.2}s virtual)", emu.device_manager.diag_total_usec, emu.device_manager.diag_total_usec as f64 / 1_000_000.0);
-        println!("avg usec/tick:          {:.1}", emu.device_manager.diag_total_usec as f64 / emu.device_manager.diag_tick_count as f64);
+        println!(
+            "total usec:             {} ({:.2}s virtual)",
+            emu.device_manager.diag_total_usec,
+            emu.device_manager.diag_total_usec as f64 / 1_000_000.0
+        );
+        println!(
+            "avg usec/tick:          {:.1}",
+            emu.device_manager.diag_total_usec as f64 / emu.device_manager.diag_tick_count as f64
+        );
         println!("PIC state:              {}", pic_diag);
         // Print non-zero vector histogram entries
         print!("iac vectors:            ");
@@ -687,352 +721,468 @@ fn run_dlxlinux() -> Result<()> {
             println!("  {:#010x}: {}{}", off, hex.join(" "), marker);
         }
         // Also show CPU state
-        println!("  EAX={:#010x} EBX={:#010x} ECX={:#010x} EDX={:#010x}",
-            emu.cpu.eax(), emu.cpu.ebx(), emu.cpu.ecx(), emu.cpu.edx());
-        println!("  ESI={:#010x} EDI={:#010x} ESP={:#010x} EBP={:#010x}",
-            emu.cpu.esi(), emu.cpu.edi(), emu.cpu.esp(), emu.cpu.ebp());
-        println!("  CR0={:#010x} CS={:#06x}",
-            emu.cpu.get_cr0_val(), emu.cpu.get_cs_selector());
+        println!(
+            "  EAX={:#010x} EBX={:#010x} ECX={:#010x} EDX={:#010x}",
+            emu.cpu.eax(),
+            emu.cpu.ebx(),
+            emu.cpu.ecx(),
+            emu.cpu.edx()
+        );
+        println!(
+            "  ESI={:#010x} EDI={:#010x} ESP={:#010x} EBP={:#010x}",
+            emu.cpu.esi(),
+            emu.cpu.edi(),
+            emu.cpu.esp(),
+            emu.cpu.ebp()
+        );
+        println!(
+            "  CR0={:#010x} CS={:#06x}",
+            emu.cpu.get_cr0_val(),
+            emu.cpu.get_cs_selector()
+        );
 
         // Read IDT entry for vector 0x20 (timer interrupt)
         // Only do kernel diagnostics when CPU is in protected+paged mode (kernel loaded)
         'kernel_diag: {
-        let cr0 = emu.cpu.get_cr0_val();
-        if (cr0 & 0x80000001) != 0x80000001 {
-            println!("\n  (CPU not in protected+paged mode, kernel diagnostics skipped)");
-            break 'kernel_diag;
-        }
-        println!("\n===== IDT ENTRY FOR VECTOR 0x20 =====");
-        let idtr_base = emu.cpu.get_idtr_base();
-        let idtr_limit = emu.cpu.get_idtr_limit();
-        println!("  IDTR.base={:#010x} IDTR.limit={:#06x}", idtr_base, idtr_limit);
-        // IDT entry is at IDTR.base + 0x20*8
-        // But IDTR.base is a linear address, we need physical.
-        // For kernel, linear = physical + 0xC0000000, so physical = linear - 0xC0000000
-        let idt_entry_laddr = idtr_base + 0x20 * 8;
-        let idt_entry_paddr = (idt_entry_laddr as u32).wrapping_sub(0xC0000000) as usize;
-        let idt_bytes = emu.memory.peek_ram(idt_entry_paddr, 8);
-        if idt_bytes.len() < 8 {
-            println!("  (IDT entry address {:#010x} is outside RAM)", idt_entry_paddr);
-            break 'kernel_diag;
-        }
-        let dword1 = u32::from_le_bytes([idt_bytes[0], idt_bytes[1], idt_bytes[2], idt_bytes[3]]);
-        let dword2 = u32::from_le_bytes([idt_bytes[4], idt_bytes[5], idt_bytes[6], idt_bytes[7]]);
-        let handler_offset = (dword1 & 0xFFFF) | ((dword2 & 0xFFFF0000));
-        let handler_selector = (dword1 >> 16) & 0xFFFF;
-        let gate_type = (dword2 >> 8) & 0x1F;
-        let gate_dpl = (dword2 >> 13) & 0x3;
-        let gate_p = (dword2 >> 15) & 0x1;
-        println!("  IDT[0x20] @ laddr={:#010x} paddr={:#010x}", idt_entry_laddr, idt_entry_paddr);
-        println!("  dword1={:#010x} dword2={:#010x}", dword1, dword2);
-        println!("  handler={:#010x} selector={:#06x} type={:#x} DPL={} P={}", handler_offset, handler_selector, gate_type, gate_dpl, gate_p);
-        // Dump handler code — show 256 bytes to see the full handler
-        // Handle both identity-mapped (low) and kernel virtual (0xC0xxxxxx) addresses
-        let handler_phys = if handler_offset < 0x80000000 {
-            handler_offset as usize
-        } else {
-            (handler_offset as u32).wrapping_sub(0xC0000000) as usize
-        };
-        println!("  handler_phys={:#010x} (< 0x2000000 = {})", handler_phys, handler_phys < 0x2000000);
-        if handler_phys < 0x2000000 {
-            println!("  --- TIMER HANDLER CODE (256 bytes from {:#010x}) ---", handler_offset);
-            for chunk_start in (0..256).step_by(16) {
-                let off = handler_phys + chunk_start;
-                let handler_bytes = emu.memory.peek_ram(off, 16);
-                let hex: Vec<String> = handler_bytes.iter().map(|b| format!("{:02x}", b)).collect();
-                println!("  {:#010x}: {}", handler_offset as u32 + chunk_start as u32, hex.join(" "));
+            let cr0 = emu.cpu.get_cr0_val();
+            if (cr0 & 0x80000001) != 0x80000001 {
+                println!("\n  (CPU not in protected+paged mode, kernel diagnostics skipped)");
+                break 'kernel_diag;
             }
-        }
-
-        // Check the ACTUAL address the timer handler increments
-        // From disasm: ff 05 50 b6 19 00 = INC [0x0019b650]
-        {
-            // Read physical 0x19b650 directly (bypassing paging)
-            let b = emu.memory.peek_ram(0x19b650, 4);
-            let val = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-            println!("  phys [0x0019b650] = {} ({:#x})", val, val);
-
-            // Walk the page table manually to see where virtual 0x19b650 maps
-            let cr3 = emu.cpu.get_cr3_val() as usize;
-            println!("  CR3 = {:#010x}", cr3);
-
-            // Check several interesting virtual addresses
-            for &vaddr in &[0x0019b650u32, 0xC019b650u32, 0x0010b9c8u32, 0x0010ae7cu32] {
-                let pde_idx = (vaddr >> 22) as usize;
-                let pte_idx = ((vaddr >> 12) & 0x3FF) as usize;
-                let page_off = (vaddr & 0xFFF) as usize;
-
-                let pde_addr = cr3 + pde_idx * 4;
-                let pde_b = emu.memory.peek_ram(pde_addr, 4);
-                let pde = u32::from_le_bytes([pde_b[0], pde_b[1], pde_b[2], pde_b[3]]);
-
-                if pde & 1 == 0 {
-                    println!("  vaddr {:#010x}: PDE[{}]={:#010x} NOT PRESENT", vaddr, pde_idx, pde);
-                    continue;
-                }
-
-                // Check for 4MB PSE page
-                if pde & 0x80 != 0 {
-                    let phys = ((pde & 0xFFC00000) as usize) | ((vaddr & 0x003FFFFF) as usize);
-                    let v = emu.memory.peek_ram(phys, 4);
-                    let val = u32::from_le_bytes([v[0], v[1], v[2], v[3]]);
-                    println!("  vaddr {:#010x}: 4MB page PDE[{}]={:#010x} → phys {:#010x} = {} ({:#x})",
-                        vaddr, pde_idx, pde, phys, val, val);
-                    continue;
-                }
-
-                // 4KB page: read PTE
-                let pt_base = (pde & 0xFFFFF000) as usize;
-                let pte_addr = pt_base + pte_idx * 4;
-                let pte_b = emu.memory.peek_ram(pte_addr, 4);
-                let pte = u32::from_le_bytes([pte_b[0], pte_b[1], pte_b[2], pte_b[3]]);
-
-                if pte & 1 == 0 {
-                    println!("  vaddr {:#010x}: PDE[{}]={:#010x} PTE[{}]={:#010x} NOT PRESENT",
-                        vaddr, pde_idx, pde, pte_idx, pte);
-                    continue;
-                }
-
-                let phys = ((pte & 0xFFFFF000) as usize) | page_off;
-                let v = emu.memory.peek_ram(phys, 4);
-                let val = u32::from_le_bytes([v[0], v[1], v[2], v[3]]);
-                println!("  vaddr {:#010x}: PDE[{}]={:#010x} PTE[{}]={:#010x} → phys {:#010x} = {} ({:#x})",
-                    vaddr, pde_idx, pde, pte_idx, pte, phys, val, val);
+            println!("\n===== IDT ENTRY FOR VECTOR 0x20 =====");
+            let idtr_base = emu.cpu.get_idtr_base();
+            let idtr_limit = emu.cpu.get_idtr_limit();
+            println!(
+                "  IDTR.base={:#010x} IDTR.limit={:#06x}",
+                idtr_base, idtr_limit
+            );
+            // IDT entry is at IDTR.base + 0x20*8
+            // But IDTR.base is a linear address, we need physical.
+            // For kernel, linear = physical + 0xC0000000, so physical = linear - 0xC0000000
+            let idt_entry_laddr = idtr_base + 0x20 * 8;
+            let idt_entry_paddr = (idt_entry_laddr as u32).wrapping_sub(0xC0000000) as usize;
+            let idt_bytes = emu.memory.peek_ram(idt_entry_paddr, 8);
+            if idt_bytes.len() < 8 {
+                println!(
+                    "  (IDT entry address {:#010x} is outside RAM)",
+                    idt_entry_paddr
+                );
+                break 'kernel_diag;
             }
-        }
-
-        // Dump crash region and store instruction area for exec() crash debugging
-        {
-            // The crash: EIP=0x0012c52d, MOV EAX,[EAX+0x40], EAX=0x1bac1800
-            // The store: RIP=0x00196704 writes 0x1bac1800 to kernel stack at ~126M instr
-            println!("\n===== CRASH REGION CODE (phys 0x12c4e0..0x12c570) =====");
-            for chunk in (0x12c4e0u32..0x12c570).step_by(16) {
-                let b = emu.memory.peek_ram(chunk as usize, 16);
-                let hex: Vec<String> = b.iter().map(|b| format!("{:02x}", b)).collect();
-                let marker = if chunk == 0x12c520 { " <<< CRASH AREA" } else { "" };
-                println!("  {:#010x}: {}{}", chunk, hex.join(" "), marker);
-            }
-            println!("\n===== STORE INSTRUCTION AREA (phys 0x196690..0x196730) =====");
-            for chunk in (0x196690u32..0x196730).step_by(16) {
-                let b = emu.memory.peek_ram(chunk as usize, 16);
-                let hex: Vec<String> = b.iter().map(|b| format!("{:02x}", b)).collect();
-                let marker = if chunk == 0x196700 { " <<< STORE AREA" } else { "" };
-                println!("  {:#010x}: {}{}", chunk, hex.join(" "), marker);
-            }
-            // Also scan physical RAM for 0x1bac1800 value (little-endian bytes 00 18 ac 1b)
-            println!("\n===== SCAN FOR 0x1bac1800 IN PHYSICAL RAM =====");
-            let target = [0x00u8, 0x18, 0xac, 0x1b];
-            let mut found_count = 0;
-            let mut found_addr = 0usize;
-            for addr in (0x100000usize..0x2000000).step_by(4) {
-                let b = emu.memory.peek_ram(addr, 4);
-                if b.len() >= 4 && b[0] == target[0] && b[1] == target[1] && b[2] == target[2] && b[3] == target[3] {
-                    if found_count < 20 {
-                        let ctx = emu.memory.peek_ram(addr.saturating_sub(8), 20);
-                        println!("  Found at phys {:#010x}: ctx={}", addr, ctx.iter().map(|x| format!("{:02x}", x)).collect::<Vec<_>>().join(" "));
-                        found_addr = addr;
-                    }
-                    found_count += 1;
+            let dword1 =
+                u32::from_le_bytes([idt_bytes[0], idt_bytes[1], idt_bytes[2], idt_bytes[3]]);
+            let dword2 =
+                u32::from_le_bytes([idt_bytes[4], idt_bytes[5], idt_bytes[6], idt_bytes[7]]);
+            let handler_offset = (dword1 & 0xFFFF) | (dword2 & 0xFFFF0000);
+            let handler_selector = (dword1 >> 16) & 0xFFFF;
+            let gate_type = (dword2 >> 8) & 0x1F;
+            let gate_dpl = (dword2 >> 13) & 0x3;
+            let gate_p = (dword2 >> 15) & 0x1;
+            println!(
+                "  IDT[0x20] @ laddr={:#010x} paddr={:#010x}",
+                idt_entry_laddr, idt_entry_paddr
+            );
+            println!("  dword1={:#010x} dword2={:#010x}", dword1, dword2);
+            println!(
+                "  handler={:#010x} selector={:#06x} type={:#x} DPL={} P={}",
+                handler_offset, handler_selector, gate_type, gate_dpl, gate_p
+            );
+            // Dump handler code — show 256 bytes to see the full handler
+            // Handle both identity-mapped (low) and kernel virtual (0xC0xxxxxx) addresses
+            let handler_phys = if handler_offset < 0x80000000 {
+                handler_offset as usize
+            } else {
+                (handler_offset as u32).wrapping_sub(0xC0000000) as usize
+            };
+            println!(
+                "  handler_phys={:#010x} (< 0x2000000 = {})",
+                handler_phys,
+                handler_phys < 0x2000000
+            );
+            if handler_phys < 0x2000000 {
+                println!(
+                    "  --- TIMER HANDLER CODE (256 bytes from {:#010x}) ---",
+                    handler_offset
+                );
+                for chunk_start in (0..256).step_by(16) {
+                    let off = handler_phys + chunk_start;
+                    let handler_bytes = emu.memory.peek_ram(off, 16);
+                    let hex: Vec<String> =
+                        handler_bytes.iter().map(|b| format!("{:02x}", b)).collect();
+                    println!(
+                        "  {:#010x}: {}",
+                        handler_offset as u32 + chunk_start as u32,
+                        hex.join(" ")
+                    );
                 }
             }
-            println!("  Total occurrences: {}", found_count);
 
-            // Dump the full struct context around the found address
-            if found_addr > 0 {
-                // The struct base = found_addr - 0x3c (offset of inode ptr in struct)
-                let struct_base = found_addr.saturating_sub(0x3c);
-                println!("\n===== STRUCT CONTAINING 0x1bac1800 (base=phys {:#010x}) =====", struct_base);
-                for off in (0usize..0x80).step_by(16) {
-                    let b = emu.memory.peek_ram(struct_base + off, 16);
-                    println!("  +{:#04x}: {}", off, b.iter().map(|x| format!("{:02x}", x)).collect::<Vec<_>>().join(" "));
-                }
-                // Also try base = found_addr directly (if offset is actually 0)
-                println!("  Also dump at found_addr itself:");
-                let b = emu.memory.peek_ram(found_addr.saturating_sub(0x10), 0x40);
-                println!("  {}", b.iter().map(|x| format!("{:02x}", x)).collect::<Vec<_>>().join(" "));
+            // Check the ACTUAL address the timer handler increments
+            // From disasm: ff 05 50 b6 19 00 = INC [0x0019b650]
+            {
+                // Read physical 0x19b650 directly (bypassing paging)
+                let b = emu.memory.peek_ram(0x19b650, 4);
+                let val = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                println!("  phys [0x0019b650] = {} ({:#x})", val, val);
 
-                // Walk the page table to check if physical 0x1bac1800 (the garbage pointer value) is mapped
-                println!("\n===== PAGE TABLE WALK FOR VIRTUAL 0x1bac1800 =====");
-                let vaddr = 0x1bac1800u32;
+                // Walk the page table manually to see where virtual 0x19b650 maps
                 let cr3 = emu.cpu.get_cr3_val() as usize;
-                let pde_idx = (vaddr >> 22) as usize;
-                let pte_idx = ((vaddr >> 12) & 0x3FF) as usize;
-                let pde_addr = cr3 + pde_idx * 4;
-                let pde_b = emu.memory.peek_ram(pde_addr, 4);
-                let pde = u32::from_le_bytes([pde_b[0], pde_b[1], pde_b[2], pde_b[3]]);
-                println!("  vaddr={:#010x} PDE[{}] @ phys {:#010x} = {:#010x}", vaddr, pde_idx, pde_addr, pde);
-                if pde & 1 != 0 && pde & 0x80 == 0 {
+                println!("  CR3 = {:#010x}", cr3);
+
+                // Check several interesting virtual addresses
+                for &vaddr in &[0x0019b650u32, 0xC019b650u32, 0x0010b9c8u32, 0x0010ae7cu32] {
+                    let pde_idx = (vaddr >> 22) as usize;
+                    let pte_idx = ((vaddr >> 12) & 0x3FF) as usize;
+                    let page_off = (vaddr & 0xFFF) as usize;
+
+                    let pde_addr = cr3 + pde_idx * 4;
+                    let pde_b = emu.memory.peek_ram(pde_addr, 4);
+                    let pde = u32::from_le_bytes([pde_b[0], pde_b[1], pde_b[2], pde_b[3]]);
+
+                    if pde & 1 == 0 {
+                        println!(
+                            "  vaddr {:#010x}: PDE[{}]={:#010x} NOT PRESENT",
+                            vaddr, pde_idx, pde
+                        );
+                        continue;
+                    }
+
+                    // Check for 4MB PSE page
+                    if pde & 0x80 != 0 {
+                        let phys = ((pde & 0xFFC00000) as usize) | ((vaddr & 0x003FFFFF) as usize);
+                        let v = emu.memory.peek_ram(phys, 4);
+                        let val = u32::from_le_bytes([v[0], v[1], v[2], v[3]]);
+                        println!("  vaddr {:#010x}: 4MB page PDE[{}]={:#010x} → phys {:#010x} = {} ({:#x})",
+                        vaddr, pde_idx, pde, phys, val, val);
+                        continue;
+                    }
+
+                    // 4KB page: read PTE
                     let pt_base = (pde & 0xFFFFF000) as usize;
                     let pte_addr = pt_base + pte_idx * 4;
                     let pte_b = emu.memory.peek_ram(pte_addr, 4);
                     let pte = u32::from_le_bytes([pte_b[0], pte_b[1], pte_b[2], pte_b[3]]);
-                    println!("  PTE[{}] @ phys {:#010x} = {:#010x}", pte_idx, pte_addr, pte);
-                }
-                // Also check DS.base + 0x1bac1800 page walk
-                println!("\n===== PAGE TABLE WALK FOR LINEAR 0xDBac1800 =====");
-                let laddr = 0xDBac1800u32;
-                let pde_idx2 = (laddr >> 22) as usize;
-                let pde_addr2 = cr3 + pde_idx2 * 4;
-                let pde_b2 = emu.memory.peek_ram(pde_addr2, 4);
-                let pde2 = u32::from_le_bytes([pde_b2[0], pde_b2[1], pde_b2[2], pde_b2[3]]);
-                println!("  laddr={:#010x} PDE[{}] @ phys {:#010x} = {:#010x}", laddr, pde_idx2, pde_addr2, pde2);
-            }
-        }
 
-        // Dump do_IRQ function at 0x10cb88 and timer_interrupt at 0x10f7b0
-        {
-            println!("\n===== do_IRQ CODE (0x10cb88) =====");
-            for chunk in (0x10cb88u32..0x10cd00).step_by(16) {
-                let b = emu.memory.peek_ram(chunk as usize, 16);
-                let hex: Vec<String> = b.iter().map(|b| format!("{:02x}", b)).collect();
-                println!("  {:#010x}: {}", chunk, hex.join(" "));
-            }
-            println!("\n===== timer_interrupt CODE (0x10f7b0) =====");
-            for chunk in (0x10f7b0u32..0x10f830).step_by(16) {
-                let b = emu.memory.peek_ram(chunk as usize, 16);
-                let hex: Vec<String> = b.iter().map(|b| format!("{:02x}", b)).collect();
-                println!("  {:#010x}: {}", chunk, hex.join(" "));
-            }
-            println!("\n===== do_timer CODE (0x111dd4) =====");
-            for chunk in (0x111dd4u32..0x111f00).step_by(16) {
-                let b = emu.memory.peek_ram(chunk as usize, 16);
-                let hex: Vec<String> = b.iter().map(|b| format!("{:02x}", b)).collect();
-                println!("  {:#010x}: {}", chunk, hex.join(" "));
-            }
-        }
-
-        // Check critical kernel data structures
-        {
-            let b = emu.memory.peek_ram(0x19b650, 4);
-            let intr_count = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-            println!("\n  intr_count @ phys 0x19b650 = {}", intr_count);
-
-            // irq_action[0] pointer (from do_IRQ: MOV EBX, [ESI*4 + 0x197878])
-            // ESI=0 for IRQ0, so address is 0x197878 (phys, via DS.base=0xC0000000)
-            let b = emu.memory.peek_ram(0x197878, 4);
-            let irq_action_0 = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-            println!("  irq_action[0] @ phys 0x197878 = {:#010x}", irq_action_0);
-
-            // kstat.interrupts[0] (from do_IRQ: INC [ESI*4 + 0x19b454])
-            let b = emu.memory.peek_ram(0x19b454, 4);
-            let kstat_irq0 = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-            println!("  kstat.interrupts[0] @ phys 0x19b454 = {}", kstat_irq0);
-
-            // If irq_action_0 != 0, dump the struct irqaction
-            if irq_action_0 != 0 {
-                // The pointer is stored as a kernel virtual address.
-                // If it looks like 0xC0XXXXXX, subtract PAGE_OFFSET.
-                // If it looks like 0x00XXXXXX, the kernel might use identity mapping.
-                let phys_action = if irq_action_0 >= 0xC0000000 {
-                    (irq_action_0 - 0xC0000000) as usize
-                } else {
-                    irq_action_0 as usize
-                };
-                if phys_action < 0x2000000 {
-                    println!("  irqaction struct @ phys {:#010x}:", phys_action);
-                    let action = emu.memory.peek_ram(phys_action, 24);
-                    for i in (0..24).step_by(4) {
-                        let val = u32::from_le_bytes([action[i], action[i+1], action[i+2], action[i+3]]);
-                        println!("    +{:#04x}: {:#010x}", i, val);
+                    if pte & 1 == 0 {
+                        println!(
+                            "  vaddr {:#010x}: PDE[{}]={:#010x} PTE[{}]={:#010x} NOT PRESENT",
+                            vaddr, pde_idx, pde, pte_idx, pte
+                        );
+                        continue;
                     }
-                    // Also show the handler function pointer (first dword)
-                    let handler_ptr = u32::from_le_bytes([action[0], action[1], action[2], action[3]]);
-                    println!("  handler = {:#010x} (phys={:#010x})",
-                        handler_ptr,
-                        if handler_ptr >= 0xC0000000 { handler_ptr - 0xC0000000 } else { handler_ptr });
-                } else {
-                    println!("  irqaction phys_addr {:#010x} out of range!", phys_action);
+
+                    let phys = ((pte & 0xFFFFF000) as usize) | page_off;
+                    let v = emu.memory.peek_ram(phys, 4);
+                    let val = u32::from_le_bytes([v[0], v[1], v[2], v[3]]);
+                    println!("  vaddr {:#010x}: PDE[{}]={:#010x} PTE[{}]={:#010x} → phys {:#010x} = {} ({:#x})",
+                    vaddr, pde_idx, pde, pte_idx, pte, phys, val, val);
                 }
             }
 
-            // Check jiffies (REAL: 0x19abe0 from do_timer disasm) and related
-            for &(addr, label) in &[
-                (0x19abe0u32, "jiffies (from do_timer INC)"),
-                (0x19b4d8, "lost_ticks"),
-                (0x19b654, "timer_active bitmask"),
-                (0x10ae7cu32, "old candidate (NOT jiffies)"),
-                (0x19b454, "kstat.interrupts[0]"),
-                (0x19b650, "intr_count"),
-            ] {
-                let b = emu.memory.peek_ram(addr as usize, 4);
+            // Dump crash region and store instruction area for exec() crash debugging
+            {
+                // The crash: EIP=0x0012c52d, MOV EAX,[EAX+0x40], EAX=0x1bac1800
+                // The store: RIP=0x00196704 writes 0x1bac1800 to kernel stack at ~126M instr
+                println!("\n===== CRASH REGION CODE (phys 0x12c4e0..0x12c570) =====");
+                for chunk in (0x12c4e0u32..0x12c570).step_by(16) {
+                    let b = emu.memory.peek_ram(chunk as usize, 16);
+                    let hex: Vec<String> = b.iter().map(|b| format!("{:02x}", b)).collect();
+                    let marker = if chunk == 0x12c520 {
+                        " <<< CRASH AREA"
+                    } else {
+                        ""
+                    };
+                    println!("  {:#010x}: {}{}", chunk, hex.join(" "), marker);
+                }
+                println!("\n===== STORE INSTRUCTION AREA (phys 0x196690..0x196730) =====");
+                for chunk in (0x196690u32..0x196730).step_by(16) {
+                    let b = emu.memory.peek_ram(chunk as usize, 16);
+                    let hex: Vec<String> = b.iter().map(|b| format!("{:02x}", b)).collect();
+                    let marker = if chunk == 0x196700 {
+                        " <<< STORE AREA"
+                    } else {
+                        ""
+                    };
+                    println!("  {:#010x}: {}{}", chunk, hex.join(" "), marker);
+                }
+                // Also scan physical RAM for 0x1bac1800 value (little-endian bytes 00 18 ac 1b)
+                println!("\n===== SCAN FOR 0x1bac1800 IN PHYSICAL RAM =====");
+                let target = [0x00u8, 0x18, 0xac, 0x1b];
+                let mut found_count = 0;
+                let mut found_addr = 0usize;
+                for addr in (0x100000usize..0x2000000).step_by(4) {
+                    let b = emu.memory.peek_ram(addr, 4);
+                    if b.len() >= 4
+                        && b[0] == target[0]
+                        && b[1] == target[1]
+                        && b[2] == target[2]
+                        && b[3] == target[3]
+                    {
+                        if found_count < 20 {
+                            let ctx = emu.memory.peek_ram(addr.saturating_sub(8), 20);
+                            println!(
+                                "  Found at phys {:#010x}: ctx={}",
+                                addr,
+                                ctx.iter()
+                                    .map(|x| format!("{:02x}", x))
+                                    .collect::<Vec<_>>()
+                                    .join(" ")
+                            );
+                            found_addr = addr;
+                        }
+                        found_count += 1;
+                    }
+                }
+                println!("  Total occurrences: {}", found_count);
+
+                // Dump the full struct context around the found address
+                if found_addr > 0 {
+                    // The struct base = found_addr - 0x3c (offset of inode ptr in struct)
+                    let struct_base = found_addr.saturating_sub(0x3c);
+                    println!(
+                        "\n===== STRUCT CONTAINING 0x1bac1800 (base=phys {:#010x}) =====",
+                        struct_base
+                    );
+                    for off in (0usize..0x80).step_by(16) {
+                        let b = emu.memory.peek_ram(struct_base + off, 16);
+                        println!(
+                            "  +{:#04x}: {}",
+                            off,
+                            b.iter()
+                                .map(|x| format!("{:02x}", x))
+                                .collect::<Vec<_>>()
+                                .join(" ")
+                        );
+                    }
+                    // Also try base = found_addr directly (if offset is actually 0)
+                    println!("  Also dump at found_addr itself:");
+                    let b = emu.memory.peek_ram(found_addr.saturating_sub(0x10), 0x40);
+                    println!(
+                        "  {}",
+                        b.iter()
+                            .map(|x| format!("{:02x}", x))
+                            .collect::<Vec<_>>()
+                            .join(" ")
+                    );
+
+                    // Walk the page table to check if physical 0x1bac1800 (the garbage pointer value) is mapped
+                    println!("\n===== PAGE TABLE WALK FOR VIRTUAL 0x1bac1800 =====");
+                    let vaddr = 0x1bac1800u32;
+                    let cr3 = emu.cpu.get_cr3_val() as usize;
+                    let pde_idx = (vaddr >> 22) as usize;
+                    let pte_idx = ((vaddr >> 12) & 0x3FF) as usize;
+                    let pde_addr = cr3 + pde_idx * 4;
+                    let pde_b = emu.memory.peek_ram(pde_addr, 4);
+                    let pde = u32::from_le_bytes([pde_b[0], pde_b[1], pde_b[2], pde_b[3]]);
+                    println!(
+                        "  vaddr={:#010x} PDE[{}] @ phys {:#010x} = {:#010x}",
+                        vaddr, pde_idx, pde_addr, pde
+                    );
+                    if pde & 1 != 0 && pde & 0x80 == 0 {
+                        let pt_base = (pde & 0xFFFFF000) as usize;
+                        let pte_addr = pt_base + pte_idx * 4;
+                        let pte_b = emu.memory.peek_ram(pte_addr, 4);
+                        let pte = u32::from_le_bytes([pte_b[0], pte_b[1], pte_b[2], pte_b[3]]);
+                        println!(
+                            "  PTE[{}] @ phys {:#010x} = {:#010x}",
+                            pte_idx, pte_addr, pte
+                        );
+                    }
+                    // Also check DS.base + 0x1bac1800 page walk
+                    println!("\n===== PAGE TABLE WALK FOR LINEAR 0xDBac1800 =====");
+                    let laddr = 0xDBac1800u32;
+                    let pde_idx2 = (laddr >> 22) as usize;
+                    let pde_addr2 = cr3 + pde_idx2 * 4;
+                    let pde_b2 = emu.memory.peek_ram(pde_addr2, 4);
+                    let pde2 = u32::from_le_bytes([pde_b2[0], pde_b2[1], pde_b2[2], pde_b2[3]]);
+                    println!(
+                        "  laddr={:#010x} PDE[{}] @ phys {:#010x} = {:#010x}",
+                        laddr, pde_idx2, pde_addr2, pde2
+                    );
+                }
+            }
+
+            // Dump do_IRQ function at 0x10cb88 and timer_interrupt at 0x10f7b0
+            {
+                println!("\n===== do_IRQ CODE (0x10cb88) =====");
+                for chunk in (0x10cb88u32..0x10cd00).step_by(16) {
+                    let b = emu.memory.peek_ram(chunk as usize, 16);
+                    let hex: Vec<String> = b.iter().map(|b| format!("{:02x}", b)).collect();
+                    println!("  {:#010x}: {}", chunk, hex.join(" "));
+                }
+                println!("\n===== timer_interrupt CODE (0x10f7b0) =====");
+                for chunk in (0x10f7b0u32..0x10f830).step_by(16) {
+                    let b = emu.memory.peek_ram(chunk as usize, 16);
+                    let hex: Vec<String> = b.iter().map(|b| format!("{:02x}", b)).collect();
+                    println!("  {:#010x}: {}", chunk, hex.join(" "));
+                }
+                println!("\n===== do_timer CODE (0x111dd4) =====");
+                for chunk in (0x111dd4u32..0x111f00).step_by(16) {
+                    let b = emu.memory.peek_ram(chunk as usize, 16);
+                    let hex: Vec<String> = b.iter().map(|b| format!("{:02x}", b)).collect();
+                    println!("  {:#010x}: {}", chunk, hex.join(" "));
+                }
+            }
+
+            // Check critical kernel data structures
+            {
+                let b = emu.memory.peek_ram(0x19b650, 4);
+                let intr_count = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                println!("\n  intr_count @ phys 0x19b650 = {}", intr_count);
+
+                // irq_action[0] pointer (from do_IRQ: MOV EBX, [ESI*4 + 0x197878])
+                // ESI=0 for IRQ0, so address is 0x197878 (phys, via DS.base=0xC0000000)
+                let b = emu.memory.peek_ram(0x197878, 4);
+                let irq_action_0 = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                println!("  irq_action[0] @ phys 0x197878 = {:#010x}", irq_action_0);
+
+                // kstat.interrupts[0] (from do_IRQ: INC [ESI*4 + 0x19b454])
+                let b = emu.memory.peek_ram(0x19b454, 4);
+                let kstat_irq0 = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                println!("  kstat.interrupts[0] @ phys 0x19b454 = {}", kstat_irq0);
+
+                // If irq_action_0 != 0, dump the struct irqaction
+                if irq_action_0 != 0 {
+                    // The pointer is stored as a kernel virtual address.
+                    // If it looks like 0xC0XXXXXX, subtract PAGE_OFFSET.
+                    // If it looks like 0x00XXXXXX, the kernel might use identity mapping.
+                    let phys_action = if irq_action_0 >= 0xC0000000 {
+                        (irq_action_0 - 0xC0000000) as usize
+                    } else {
+                        irq_action_0 as usize
+                    };
+                    if phys_action < 0x2000000 {
+                        println!("  irqaction struct @ phys {:#010x}:", phys_action);
+                        let action = emu.memory.peek_ram(phys_action, 24);
+                        for i in (0..24).step_by(4) {
+                            let val = u32::from_le_bytes([
+                                action[i],
+                                action[i + 1],
+                                action[i + 2],
+                                action[i + 3],
+                            ]);
+                            println!("    +{:#04x}: {:#010x}", i, val);
+                        }
+                        // Also show the handler function pointer (first dword)
+                        let handler_ptr =
+                            u32::from_le_bytes([action[0], action[1], action[2], action[3]]);
+                        println!(
+                            "  handler = {:#010x} (phys={:#010x})",
+                            handler_ptr,
+                            if handler_ptr >= 0xC0000000 {
+                                handler_ptr - 0xC0000000
+                            } else {
+                                handler_ptr
+                            }
+                        );
+                    } else {
+                        println!("  irqaction phys_addr {:#010x} out of range!", phys_action);
+                    }
+                }
+
+                // Check jiffies (REAL: 0x19abe0 from do_timer disasm) and related
+                for &(addr, label) in &[
+                    (0x19abe0u32, "jiffies (from do_timer INC)"),
+                    (0x19b4d8, "lost_ticks"),
+                    (0x19b654, "timer_active bitmask"),
+                    (0x10ae7cu32, "old candidate (NOT jiffies)"),
+                    (0x19b454, "kstat.interrupts[0]"),
+                    (0x19b650, "intr_count"),
+                ] {
+                    let b = emu.memory.peek_ram(addr as usize, 4);
+                    let val = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
+                    println!("  phys {:#010x} = {:>8} ({:#x})  {}", addr, val, val, label);
+                }
+            }
+
+            // ATA controller state
+            {
+                println!("\n===== ATA CONTROLLER STATE =====");
+                println!("{}", emu.device_manager.ata_diag());
+            }
+
+            // Search for jiffies — look for a u32 that's a reasonable timer count
+            // With IPS=4M, 220M instructions, PIT at 100Hz ≈ 5500 ticks expected
+            for addr in (0x106000..0x10c000).step_by(4) {
+                let b = emu.memory.peek_ram(addr, 4);
                 let val = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-                println!("  phys {:#010x} = {:>8} ({:#x})  {}", addr, val, val, label);
-            }
-        }
-
-        // ATA controller state
-        {
-            println!("\n===== ATA CONTROLLER STATE =====");
-            println!("{}", emu.device_manager.ata_diag());
-        }
-
-        // Search for jiffies — look for a u32 that's a reasonable timer count
-        // With IPS=4M, 220M instructions, PIT at 100Hz ≈ 5500 ticks expected
-        for addr in (0x106000..0x10c000).step_by(4) {
-            let b = emu.memory.peek_ram(addr, 4);
-            let val = u32::from_le_bytes([b[0], b[1], b[2], b[3]]);
-            if val > 100 && val < 100000 {
-                // Also check if addr+4 could be need_resched (typically 0 or 1)
-                let b2 = emu.memory.peek_ram(addr + 4, 4);
-                let next = u32::from_le_bytes([b2[0], b2[1], b2[2], b2[3]]);
-                if next <= 1 {
-                    println!("  Possible jiffies at {:#x} = {}, next_word={}", addr, val, next);
+                if val > 100 && val < 100000 {
+                    // Also check if addr+4 could be need_resched (typically 0 or 1)
+                    let b2 = emu.memory.peek_ram(addr + 4, 4);
+                    let next = u32::from_le_bytes([b2[0], b2[1], b2[2], b2[3]]);
+                    if next <= 1 {
+                        println!(
+                            "  Possible jiffies at {:#x} = {}, next_word={}",
+                            addr, val, next
+                        );
+                    }
                 }
             }
-        }
 
-        // Dump where the kernel is spinning — show RIP and surrounding code
-        // Linux 1.3.89 uses PAGE_OFFSET=0 (identity mapping), so virtual == physical
-        {
-            let rip = emu.cpu.rip() as u32;
-            let rip_phys = rip as usize; // Linux 1.3.89: virtual == physical
-            println!("\n===== KERNEL SPIN LOCATION =====");
-            println!("  RIP={:#010x} (phys={:#010x})", rip, rip_phys);
-            println!("  async_event={} activity={:?}", emu.cpu.get_async_event(), emu.cpu.get_activity_state());
-            if rip_phys < 0x2000000 {
-                // Dump 64 bytes before RIP and 32 after
-                let dump_start = rip_phys.saturating_sub(64);
-                let code = emu.memory.peek_ram(dump_start, 96);
-                println!("  Code around RIP (phys {:#010x}):", dump_start);
-                for chunk in code.chunks(16) {
-                    let hex: Vec<String> = chunk.iter().map(|b| format!("{:02x}", b)).collect();
-                    println!("    {}", hex.join(" "));
+            // Dump where the kernel is spinning — show RIP and surrounding code
+            // Linux 1.3.89 uses PAGE_OFFSET=0 (identity mapping), so virtual == physical
+            {
+                let rip = emu.cpu.rip() as u32;
+                let rip_phys = rip as usize; // Linux 1.3.89: virtual == physical
+                println!("\n===== KERNEL SPIN LOCATION =====");
+                println!("  RIP={:#010x} (phys={:#010x})", rip, rip_phys);
+                println!(
+                    "  async_event={} activity={:?}",
+                    emu.cpu.get_async_event(),
+                    emu.cpu.get_activity_state()
+                );
+                if rip_phys < 0x2000000 {
+                    // Dump 64 bytes before RIP and 32 after
+                    let dump_start = rip_phys.saturating_sub(64);
+                    let code = emu.memory.peek_ram(dump_start, 96);
+                    println!("  Code around RIP (phys {:#010x}):", dump_start);
+                    for chunk in code.chunks(16) {
+                        let hex: Vec<String> = chunk.iter().map(|b| format!("{:02x}", b)).collect();
+                        println!("    {}", hex.join(" "));
+                    }
+                    // Simpler: just dump the slice and mark offset
+                    let offset_in_dump = rip_phys - dump_start;
+                    println!(
+                        "  (RIP is at offset {} = {:#x} in the above dump)",
+                        offset_in_dump, offset_in_dump
+                    );
                 }
-                // Simpler: just dump the slice and mark offset
-                let offset_in_dump = rip_phys - dump_start;
-                println!("  (RIP is at offset {} = {:#x} in the above dump)", offset_in_dump, offset_in_dump);
+                // Check PIC masks
+                println!("  PIC: {}", emu.device_manager.pic_diag());
+                // Show async event state
+                println!(
+                    "  async_event={} activity={:?}",
+                    emu.cpu.get_async_event(),
+                    emu.cpu.get_activity_state()
+                );
             }
-            // Check PIC masks
-            println!("  PIC: {}", emu.device_manager.pic_diag());
-            // Show async event state
-            println!("  async_event={} activity={:?}",
-                emu.cpu.get_async_event(), emu.cpu.get_activity_state());
-        }
 
-        // Scan ALL VGA text memory from offset 0 for kernel output
-        // (kernel output may be before CRTC_start if screen scrolled)
-        println!("\n===== FULL VGA TEXT MEMORY (all non-empty rows) =====");
-        {
-            let vga_mem = emu.vga_all_text_rows();
-            let mut printed = 0;
-            for (row_idx, row) in vga_mem.iter().enumerate() {
-                let text: &str = row.trim();
-                if !text.is_empty() {
-                    println!("  row {:3}: {}", row_idx, row);
-                    printed += 1;
+            // Scan ALL VGA text memory from offset 0 for kernel output
+            // (kernel output may be before CRTC_start if screen scrolled)
+            println!("\n===== FULL VGA TEXT MEMORY (all non-empty rows) =====");
+            {
+                let vga_mem = emu.vga_all_text_rows();
+                let mut printed = 0;
+                for (row_idx, row) in vga_mem.iter().enumerate() {
+                    let text: &str = row.trim();
+                    if !text.is_empty() {
+                        println!("  row {:3}: {}", row_idx, row);
+                        printed += 1;
+                    }
+                }
+                if printed == 0 {
+                    println!("  (all VGA text memory is empty/spaces)");
                 }
             }
-            if printed == 0 {
-                println!("  (all VGA text memory is empty/spaces)");
-            }
-        }
         } // end 'kernel_diag block
 
         println!();
         println!("===== CPU HANDLE_ASYNC_EVENT INTR DELIVERY =====");
         let (delivered, if_blocked, no_pic, pic_empty) = emu.cpu.get_hae_intr_diag();
-        println!("  delivered={} if_blocked={} no_pic={} pic_empty={}",
-            delivered, if_blocked, no_pic, pic_empty);
+        println!(
+            "  delivered={} if_blocked={} no_pic={} pic_empty={}",
+            delivered, if_blocked, no_pic, pic_empty
+        );
 
         println!();
         println!("===== INTERRUPT CHAIN DIAGNOSTIC =====");

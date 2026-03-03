@@ -147,9 +147,17 @@ impl SharedDisplay {
                     for bit in 0..8u32 {
                         let pixel_on = (font_byte >> bit) & 1 != 0;
                         let color = if cursor_invert {
-                            if pixel_on { bg } else { fg }
+                            if pixel_on {
+                                bg
+                            } else {
+                                fg
+                            }
                         } else {
-                            if pixel_on { fg } else { bg }
+                            if pixel_on {
+                                fg
+                            } else {
+                                bg
+                            }
                         };
                         let fb_x = px + bit;
                         let fb_y = py + scanline;
@@ -169,9 +177,17 @@ impl SharedDisplay {
                             false
                         };
                         let color = if cursor_invert {
-                            if ninth_on { bg } else { fg }
+                            if ninth_on {
+                                bg
+                            } else {
+                                fg
+                            }
                         } else {
-                            if ninth_on { fg } else { bg }
+                            if ninth_on {
+                                fg
+                            } else {
+                                bg
+                            }
                         };
                         let fb_x = px + 8;
                         let fb_y = py + scanline;

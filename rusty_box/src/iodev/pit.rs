@@ -92,25 +92,25 @@ impl Default for PitCounter {
     /// Default matching Bochs pit82c54::init() (pit82c54.cc:174-200).
     fn default() -> Self {
         Self {
-            mode: 4,                              // Bochs: mode=4 (SoftwareStrobe)
+            mode: 4, // Bochs: mode=4 (SoftwareStrobe)
             inlatch: 0,
             count: 0,
             count_binary: 0,
             outlatch: 0,
-            rw_mode: 1,                           // Bochs: rw_mode=1 (LSByte)
-            read_state: RWState::LsByte,          // Bochs: read_state=LSByte
-            write_state: RWState::LsByte,         // Bochs: write_state=LSByte
+            rw_mode: 1,                   // Bochs: rw_mode=1 (LSByte)
+            read_state: RWState::LsByte,  // Bochs: read_state=LSByte
+            write_state: RWState::LsByte, // Bochs: write_state=LSByte
             count_lsb_latched: false,
             count_msb_latched: false,
             status_latched: false,
             latched_status: 0,
-            null_count: false,                    // Bochs: null_count=0
-            gate: true,                           // Bochs: GATE=1
-            output: true,                         // Bochs: OUTpin=1
-            trigger_gate: false,                  // Bochs: triggerGATE=0
+            null_count: false,   // Bochs: null_count=0
+            gate: true,          // Bochs: GATE=1
+            output: true,        // Bochs: OUTpin=1
+            trigger_gate: false, // Bochs: triggerGATE=0
             bcd_mode: false,
-            count_written: true,                  // Bochs: count_written=1
-            first_pass: false,                    // Bochs: first_pass=0
+            count_written: true, // Bochs: count_written=1
+            first_pass: false,   // Bochs: first_pass=0
             state_bit_1: false,
             state_bit_2: false,
             next_change_time: 0,
@@ -396,8 +396,7 @@ impl PitCounter {
                     if self.trigger_gate || self.first_pass {
                         // RELOAD phase: load count, set output HIGH
                         self.set_count(self.inlatch);
-                        self.next_change_time =
-                            (self.count_binary.wrapping_sub(1) & 0xFFFF) as u32;
+                        self.next_change_time = (self.count_binary.wrapping_sub(1) & 0xFFFF) as u32;
                         self.null_count = false;
                         if !self.output {
                             self.set_out(true);
@@ -468,9 +467,7 @@ impl PitCounter {
                                 self.state_bit_2 = true;
                                 self.next_change_time = 1;
                             }
-                            if self.count == 2
-                                && (!self.output || !self.state_bit_1)
-                            {
+                            if self.count == 2 && (!self.output || !self.state_bit_1) {
                                 self.state_bit_2 = true;
                                 self.next_change_time = 1;
                             }
@@ -801,8 +798,8 @@ impl BxPitC {
 
     /// Handle read-back command — Bochs pit82c54.cc:674-709
     fn read_back(&mut self, value: u8) {
-        let latch_count = (value & 0x20) == 0;  // Bit 5: 0 = latch count
-        let latch_status = (value & 0x10) == 0;  // Bit 4: 0 = latch status
+        let latch_count = (value & 0x20) == 0; // Bit 5: 0 = latch count
+        let latch_status = (value & 0x10) == 0; // Bit 4: 0 = latch status
 
         for i in 0..PIT_NUM_COUNTERS {
             if (value & (0x02 << i)) != 0 {
@@ -902,7 +899,7 @@ mod tests {
 
         // Write count value 10
         pit.write(PIT_COUNTER0, 10, 1); // Low byte
-        pit.write(PIT_COUNTER0, 0, 1);  // High byte
+        pit.write(PIT_COUNTER0, 0, 1); // High byte
 
         // After full write: count_written=true
         assert!(pit.counters[0].count_written);
@@ -910,7 +907,7 @@ mod tests {
 
         // Clock: first_pass=true → reload from inlatch, set output HIGH
         pit.counters[0].clock();
-        assert!(pit.counters[0].output);  // HIGH after reload
+        assert!(pit.counters[0].output); // HIGH after reload
         assert!(!pit.counters[0].first_pass); // first_pass cleared
 
         // Clock 8 more times (count goes 10→9→...→2)
@@ -947,11 +944,11 @@ mod tests {
         // Drop gate LOW
         ctr.set_gate(false);
         assert!(!ctr.trigger_gate); // Falling edge doesn't set trigger
-        assert!(ctr.output);        // Mode 2: gate LOW forces output HIGH
+        assert!(ctr.output); // Mode 2: gate LOW forces output HIGH
 
         // Raise gate HIGH — rising edge
         ctr.set_gate(true);
-        assert!(ctr.trigger_gate);  // Rising edge detected!
+        assert!(ctr.trigger_gate); // Rising edge detected!
     }
 
     #[test]

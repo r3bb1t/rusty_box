@@ -681,6 +681,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Event bit: external interrupt pending (PIC int_pin asserted).
     /// Matches Bochs `BX_EVENT_PENDING_INTR`.
     pub(crate) const BX_EVENT_PENDING_INTR: u32 = 1 << 0;
+
+    /// Returns a mutable raw pointer to the Local APIC for cross-module wiring.
+    /// Used by emulator.rs to wire I/O APIC → LAPIC interrupt delivery.
+    #[cfg(feature = "bx_support_apic")]
+    pub(crate) fn lapic_ptr_mut(&mut self) -> *mut crate::cpu::apic::BxLocalApic {
+        &mut self.lapic as *mut _
+    }
 }
 
 // Note: Memory access is done through mem_ptr/mem_len raw pointer
@@ -720,7 +727,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ── Debug trap bits (DR6 bits set by CPU) ──
     // Bochs cpu.h:950-958
-    pub(super) const BX_DEBUG_SINGLE_STEP_BIT: u32 = 1 << 14;    // BS flag in DR6 (bit 14)
+    pub(super) const BX_DEBUG_SINGLE_STEP_BIT: u32 = 1 << 14; // BS flag in DR6 (bit 14)
     pub(super) const BX_DEBUG_TRAP_TASK_SWITCH_BIT: u32 = 0x8000; // BT flag in DR6
 
     // ── DR7 local breakpoint enable bits mask ──

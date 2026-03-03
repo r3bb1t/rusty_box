@@ -63,7 +63,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Protected mode: dispatch through IDT
             match self.protected_mode_int(vector, soft_int, push_error, error_code) {
                 Ok(()) => {}
-                Err(super::error::CpuError::BadVector { vector: new_vector, error_code: new_error_code }) => {
+                Err(super::error::CpuError::BadVector {
+                    vector: new_vector,
+                    error_code: new_error_code,
+                }) => {
                     // Delivery failed — raise the indicated exception.
                     tracing::warn!(
                         "interrupt({:#04x}) PM delivery failed, raising {:?} error_code={:#x}; icount={}",
@@ -155,7 +158,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr32(instr);
 
         // Bochs: (eaddr+2) & i->asize_mask() — mask for 16-bit address wrap
-        let asize_mask: u32 = if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF };
+        let asize_mask: u32 = if instr.as32_l() == 0 {
+            0xFFFF
+        } else {
+            0xFFFFFFFF
+        };
 
         // Read lower and upper bounds from memory (2 words)
         let bound_min = self.read_virtual_word(seg, eaddr)? as i16;
@@ -196,7 +203,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr32(instr);
 
         // Bochs: (eaddr+4) & i->asize_mask() — mask for 16-bit address wrap
-        let asize_mask: u32 = if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF };
+        let asize_mask: u32 = if instr.as32_l() == 0 {
+            0xFFFF
+        } else {
+            0xFFFFFFFF
+        };
 
         // Read lower and upper bounds from memory (2 dwords)
         let bound_min = self.read_virtual_dword(seg, eaddr)? as i32;
@@ -465,7 +476,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             change_mask = change_mask.union(EFlags::IF_);
         }
         if cpl == 0 {
-            change_mask = change_mask.union(EFlags::IOPL_MASK).union(EFlags::VIF).union(EFlags::VIP);
+            change_mask = change_mask
+                .union(EFlags::IOPL_MASK)
+                .union(EFlags::VIF)
+                .union(EFlags::VIP);
         }
         let change_mask = change_mask.bits();
 
@@ -678,12 +692,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         if new_cpl == cpl {
             // Same privilege — 16-bit
-            self.branch_far(
-                &mut cs_selector,
-                &mut cs_descriptor,
-                new_ip as u64,
-                new_cpl,
-            )?;
+            self.branch_far(&mut cs_selector, &mut cs_descriptor, new_ip as u64, new_cpl)?;
 
             // write_flags for 16-bit (Bochs iret.cc:201)
             self.write_flags(new_flags as u16, cpl == 0, cpl <= iopl);
@@ -746,12 +755,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return self.exception(Exception::Np, raw_ss_raw & 0xfffc);
             }
 
-            self.branch_far(
-                &mut cs_selector,
-                &mut cs_descriptor,
-                new_ip as u64,
-                new_cpl,
-            )?;
+            self.branch_far(&mut cs_selector, &mut cs_descriptor, new_ip as u64, new_cpl)?;
 
             // write_flags for 16-bit (Bochs iret.cc:294)
             self.write_flags(new_flags as u16, cpl == 0, cpl <= iopl);
@@ -797,7 +801,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Bochs exception.cc:744-747: CS limit check on loaded IP
         let cs_limit = self.get_segment_limit(BxSegregs::Cs);
         if (new_ip as u32) > cs_limit {
-            tracing::error!("interrupt(real mode): instruction pointer not within code segment limits");
+            tracing::error!(
+                "interrupt(real mode): instruction pointer not within code segment limits"
+            );
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
@@ -820,7 +826,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_ip(new_ip);
 
         // Bochs exception.cc:754-759: clear IF, TF, AC, RF
-        self.eflags.remove(EFlags::IF_ | EFlags::TF | EFlags::AC | EFlags::RF);
+        self.eflags
+            .remove(EFlags::IF_ | EFlags::TF | EFlags::AC | EFlags::RF);
 
         // Invalidate prefetch
         self.eip_fetch_ptr = None;

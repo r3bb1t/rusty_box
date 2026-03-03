@@ -424,7 +424,7 @@ impl BxVgaC {
             misc_horiz_sync_pol: true,  // Bit 6: Bochs = 1
             misc_vert_sync_pol: true,   // Bit 7: Bochs = 1
 
-            video_enabled: false,       // PAS bit, set by 0x3C0 address writes
+            video_enabled: false, // PAS bit, set by 0x3C0 address writes
 
             last_xres: 0,
             last_yres: 0,
@@ -899,7 +899,7 @@ impl BxVgaC {
 
                     self.attr_index = value & ATTR_INDEX_MASK; // bits 0-4 only
 
-                    // If index is in palette range, write happens on NEXT flip (data mode)
+                // If index is in palette range, write happens on NEXT flip (data mode)
                 } else {
                     // Data mode (flip_flop=true): Bochs flip_flop==1
                     // Write to the attribute register selected by attr_index
@@ -1100,7 +1100,9 @@ impl BxVgaC {
         writeln!(
             s,
             "CRTC_start={:#x} graphics_alpha={} text_mem_len={}",
-            start_addr_words, graphics_alpha, self.text_memory.len()
+            start_addr_words,
+            graphics_alpha,
+            self.text_memory.len()
         )
         .ok();
         // Collect up to 256 printable non-space chars from ALL of text_memory
@@ -1109,7 +1111,9 @@ impl BxVgaC {
             let ch = chunk[0];
             if ch >= 0x20 && ch < 0x7F && ch != b' ' {
                 chars.push(ch as char);
-                if chars.len() >= 256 { break; }
+                if chars.len() >= 256 {
+                    break;
+                }
             }
         }
         if chars.is_empty() {

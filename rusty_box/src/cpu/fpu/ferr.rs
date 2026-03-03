@@ -315,9 +315,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// ```
     pub fn write_eflags_fpu_compare(&mut self, float_relation: i32) {
         // Bochs clearEFlagsOSZAPC(): clear OF, SF, ZF, AF, PF, CF
-        self.eflags.remove(
-            EFlags::CF | EFlags::PF | EFlags::AF | EFlags::ZF | EFlags::SF | EFlags::OF,
-        );
+        self.eflags
+            .remove(EFlags::CF | EFlags::PF | EFlags::AF | EFlags::ZF | EFlags::SF | EFlags::OF);
 
         match float_relation {
             RELATION_LESS => {

@@ -943,10 +943,7 @@ pub fn SUB_AL_Ib<'c, I: BxCpuIdTrait>(
 
 /// CMPXCHG r/m8, r8 — register form
 /// Bochs arith8.cc:513-531 (CMPXCHG_EbGbR)
-pub fn CMPXCHG_EbGb_R<'c, I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<'c, I>,
-    instr: &Instruction,
-) {
+pub fn CMPXCHG_EbGb_R<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) {
     let op1_8 = cpu.get_gpr8(instr.dst() as usize) as u32;
     let al = cpu.al() as u32;
     let diff_8 = al.wrapping_sub(op1_8);
@@ -990,10 +987,7 @@ pub fn CMPXCHG_EbGb_M<'c, I: BxCpuIdTrait>(
 
 /// XADD r/m8, r8 — register form
 /// Bochs arith8.cc:286-308
-pub fn XADD_EbGb_R<'c, I: BxCpuIdTrait>(
-    cpu: &mut BxCpuC<'c, I>,
-    instr: &Instruction,
-) {
+pub fn XADD_EbGb_R<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) {
     let op1 = cpu.get_gpr8(instr.dst() as usize) as u32;
     let op2 = cpu.get_gpr8(instr.src() as usize) as u32;
     let sum = op1.wrapping_add(op2);

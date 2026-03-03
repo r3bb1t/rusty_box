@@ -328,7 +328,6 @@ impl BxCmosC {
                 }
             }
         }
-
     }
 
     /// Update CMOS date/time registers from internal timeval
@@ -520,11 +519,7 @@ impl BxCmosC {
                     }
                     REG_SHUTDOWN => {
                         let val = self.ram[addr];
-                        tracing::info!(
-                            "CMOS: Read shutdown status [{:#04x}] = {:#04x}",
-                            addr,
-                            val
-                        );
+                        tracing::info!("CMOS: Read shutdown status [{:#04x}] = {:#04x}", addr, val);
                         val
                     }
                     _ => {

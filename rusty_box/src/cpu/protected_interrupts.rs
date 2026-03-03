@@ -9,9 +9,7 @@ use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
     decoder::BxSegregs,
-    descriptor::{
-        BxDescriptor, BxSegmentReg, BxSelector, SystemAndGateDescriptorEnum,
-    },
+    descriptor::{BxDescriptor, BxSegmentReg, BxSelector, SystemAndGateDescriptorEnum},
     eflags::EFlags,
     segment_ctrl_pro::parse_selector,
     Result,
@@ -147,15 +145,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
                 let (tss_dword1, tss_dword2) = match self.fetch_raw_descriptor(&tss_selector) {
                     Ok(v) => v,
-                    Err(_) => return Err(super::error::CpuError::BadVector {
-                        vector: Exception::Ts,
-                        error_code: raw_tss_selector & 0xfffc,
-                    }),
+                    Err(_) => {
+                        return Err(super::error::CpuError::BadVector {
+                            vector: Exception::Ts,
+                            error_code: raw_tss_selector & 0xfffc,
+                        })
+                    }
                 };
-                let tss_descriptor = self.parse_descriptor(tss_dword1, tss_dword2)
-                    .map_err(|_| super::error::CpuError::BadVector {
-                        vector: Exception::Ts,
-                        error_code: raw_tss_selector & 0xfffc,
+                let tss_descriptor =
+                    self.parse_descriptor(tss_dword1, tss_dword2).map_err(|_| {
+                        super::error::CpuError::BadVector {
+                            vector: Exception::Ts,
+                            error_code: raw_tss_selector & 0xfffc,
+                        }
                     })?;
 
                 // Call task_switch with BX_TASK_FROM_INT (0x2)
@@ -224,16 +226,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cs_err_code = cs_selector.value & 0xfffc;
         let (cs_dword1, cs_dword2) = match self.fetch_raw_descriptor(&cs_selector) {
             Ok(v) => v,
-            Err(_) => return Err(super::error::CpuError::BadVector {
-                vector: Exception::Gp,
-                error_code: cs_err_code,
-            }),
+            Err(_) => {
+                return Err(super::error::CpuError::BadVector {
+                    vector: Exception::Gp,
+                    error_code: cs_err_code,
+                })
+            }
         };
-        let cs_descriptor = self.parse_descriptor(cs_dword1, cs_dword2)
-            .map_err(|_| super::error::CpuError::BadVector {
+        let cs_descriptor = self.parse_descriptor(cs_dword1, cs_dword2).map_err(|_| {
+            super::error::CpuError::BadVector {
                 vector: Exception::Gp,
                 error_code: cs_err_code,
-            })?;
+            }
+        })?;
 
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         // Bochs exception.cc:407-413: #GP(selector+EXT)
@@ -453,16 +458,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let ss_err_code = ss_for_cpl_x & 0xfffc;
         let (ss_dword1, ss_dword2) = match self.fetch_raw_descriptor(&ss_selector) {
             Ok(v) => v,
-            Err(_) => return Err(super::error::CpuError::BadVector {
-                vector: Exception::Ts,
-                error_code: ss_err_code,
-            }),
+            Err(_) => {
+                return Err(super::error::CpuError::BadVector {
+                    vector: Exception::Ts,
+                    error_code: ss_err_code,
+                })
+            }
         };
-        let ss_descriptor = self.parse_descriptor(ss_dword1, ss_dword2)
-            .map_err(|_| super::error::CpuError::BadVector {
+        let ss_descriptor = self.parse_descriptor(ss_dword1, ss_dword2).map_err(|_| {
+            super::error::CpuError::BadVector {
                 vector: Exception::Ts,
                 error_code: ss_err_code,
-            })?;
+            }
+        })?;
 
         // Bochs exception.cc:469-471: #TS(SS selector + ext)
         if ss_selector.rpl != cs_descriptor.dpl {
@@ -832,7 +840,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // paging permission checks during the interrupt handler to use user-mode access.
         let mut new_cs_selector = cs_selector.clone();
         let mut new_cs_descriptor = cs_descriptor.clone();
-        self.load_cs(&mut new_cs_selector, &mut new_cs_descriptor, cs_descriptor.dpl)?;
+        self.load_cs(
+            &mut new_cs_selector,
+            &mut new_cs_descriptor,
+            cs_descriptor.dpl,
+        )?;
 
         // Load new SS:ESP values from TSS (matches line 638)
         let mut new_ss_selector = new_stack.selector.clone();
@@ -885,16 +897,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // index must be within GDT limits, else #TS(TSS selector) (matches line 354)
         let (tss_dword1, tss_dword2) = match self.fetch_raw_descriptor(&tss_selector) {
             Ok(v) => v,
-            Err(_) => return Err(super::error::CpuError::BadVector {
-                vector: Exception::Ts,
-                error_code: raw_tss_selector & 0xfffc,
-            }),
+            Err(_) => {
+                return Err(super::error::CpuError::BadVector {
+                    vector: Exception::Ts,
+                    error_code: raw_tss_selector & 0xfffc,
+                })
+            }
         };
-        let tss_descriptor = self.parse_descriptor(tss_dword1, tss_dword2)
-            .map_err(|_| super::error::CpuError::BadVector {
+        let tss_descriptor = self.parse_descriptor(tss_dword1, tss_dword2).map_err(|_| {
+            super::error::CpuError::BadVector {
                 vector: Exception::Ts,
                 error_code: raw_tss_selector & 0xfffc,
-            })?;
+            }
+        })?;
 
         // AR byte must specify available TSS, else #GP(TSS selector) (matches line 360)
         if tss_descriptor.valid == 0 || tss_descriptor.segment {

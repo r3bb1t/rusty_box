@@ -657,8 +657,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Bochs: TLB flush only if paging-related bits changed
         // BX_CR4_FLUSH_TLB_MASK = PSE|PAE|PGE|PCIDE|SMEP|SMAP
-        const CR4_FLUSH_TLB_MASK: u32 = (1 << 4) | (1 << 5) | (1 << 7)
-            | (1 << 17) | (1 << 20) | (1 << 21);
+        const CR4_FLUSH_TLB_MASK: u32 =
+            (1 << 4) | (1 << 5) | (1 << 7) | (1 << 17) | (1 << 20) | (1 << 21);
         if (old_cr4 ^ val_32) & CR4_FLUSH_TLB_MASK != 0 {
             self.tlb_flush();
         }
@@ -674,7 +674,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn lmsw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         // CPL must be 0 (CPL is always 0 in real mode)
         // Based on Bochs crregs.cc:874
-        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
         if cpl != 0 {
             tracing::debug!("LMSW: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);

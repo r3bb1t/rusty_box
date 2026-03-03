@@ -261,10 +261,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         use super::decoder::BxSegregs;
 
         // Base changeMask: OSZAPC + TF + DF + NT
-        let mut change_mask: u32 = EFlags::OSZAPC.bits()
-            | EFlags::TF.bits()
-            | EFlags::DF.bits()
-            | EFlags::NT.bits();
+        let mut change_mask: u32 =
+            EFlags::OSZAPC.bits() | EFlags::TF.bits() | EFlags::DF.bits() | EFlags::NT.bits();
 
         // RSP_SPECULATIVE (conceptual - we'll adjust ESP after)
         let flags16 = self.pop_16()?;
@@ -381,7 +379,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             if level > 0 {
                 // do level-1 times
-                while { level -= 1; level } > 0 {
+                while {
+                    level -= 1;
+                    level
+                } > 0
+                {
                     ebp = ebp.wrapping_sub(2);
                     let temp16 = self.stack_read_word(ebp)?;
                     self.push_16(temp16)?;
@@ -405,7 +407,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             if level > 0 {
                 // do level-1 times
-                while { level -= 1; level } > 0 {
+                while {
+                    level -= 1;
+                    level
+                } > 0
+                {
                     bp = bp.wrapping_sub(2) & 0xFFFF;
                     let temp16 = self.stack_read_word(bp)?;
                     self.push_16(temp16)?;

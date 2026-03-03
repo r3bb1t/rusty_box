@@ -42,10 +42,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // in real mode after leaving protected mode)
             unsafe {
                 let seg = &mut self.sregs[super::decoder::BxSegregs::Cs as usize];
-                seg.cache.p = true;                   // present
-                seg.cache.u.segment.d_b = false;      // 16-bit default
-                seg.cache.r#type = 3;                  // DATA_READ_WRITE_ACCESSED
-                seg.selector.rpl = 0;                 // CPL = 0
+                seg.cache.p = true; // present
+                seg.cache.u.segment.d_b = false; // 16-bit default
+                seg.cache.r#type = 3; // DATA_READ_WRITE_ACCESSED
+                seg.selector.rpl = 0; // CPL = 0
             }
         }
     }
@@ -85,7 +85,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         _instr: &super::decoder::Instruction,
     ) -> crate::cpu::Result<()> {
         // CPL is always 0 in real mode
-        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
         if cpl != 0 {
             tracing::debug!("WBINVD: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
@@ -96,11 +98,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// INVD — Invalidate Cache
     /// Based on Bochs proc_ctrl.cc:238-266
-    pub(super) fn invd(
-        &mut self,
-        _instr: &super::decoder::Instruction,
-    ) -> crate::cpu::Result<()> {
-        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+    pub(super) fn invd(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
         if cpl != 0 {
             tracing::debug!("INVD: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
@@ -130,7 +131,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// CLTS — Clear Task-Switched Flag in CR0
     /// Based on Bochs crregs.cc:1566-1599
     pub(super) fn clts(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
-        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
         if cpl != 0 {
             tracing::debug!("CLTS: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
@@ -163,8 +166,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rax((ticks & 0xFFFF_FFFF) as u64);
         self.set_rdx((ticks >> 32) as u64);
 
-        tracing::trace!("RDTSC: ticks={:#018x} -> EDX:EAX={:#010x}:{:#010x}",
-            ticks, self.edx(), self.eax());
+        tracing::trace!(
+            "RDTSC: ticks={:#018x} -> EDX:EAX={:#010x}:{:#010x}",
+            ticks,
+            self.edx(),
+            self.eax()
+        );
         Ok(())
     }
 
@@ -177,7 +184,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn rdmsr(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         use super::msr::*;
 
-        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
         if cpl != 0 {
             tracing::debug!("RDMSR: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
@@ -225,7 +234,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn wrmsr(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         use super::msr::*;
 
-        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
         if cpl != 0 {
             tracing::debug!("WRMSR: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
@@ -252,14 +263,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Fixed MTRR registers (Bochs msr.cc)
             BX_MSR_MTRRFIX64K_00000 => unsafe {
                 self.msr.mtrrfix64k.U64 = val;
-            }
+            },
             BX_MSR_MTRRFIX16K_80000..=BX_MSR_MTRRFIX16K_A0000 => {
                 let idx = (msr - BX_MSR_MTRRFIX16K_80000) as usize;
-                unsafe { self.msr.mtrrfix16k[idx].U64 = val; }
+                unsafe {
+                    self.msr.mtrrfix16k[idx].U64 = val;
+                }
             }
             BX_MSR_MTRRFIX4K_C0000..=BX_MSR_MTRRFIX4K_F8000 => {
                 let idx = (msr - BX_MSR_MTRRFIX4K_C0000) as usize;
-                unsafe { self.msr.mtrrfix4k[idx].U64 = val; }
+                unsafe {
+                    self.msr.mtrrfix4k[idx].U64 = val;
+                }
             }
             BX_MSR_MTRRCAP => {
                 // MTRRCAP is read-only (Bochs msr.cc)
@@ -293,8 +308,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // DST=rm=GPR destination, SRC1=nnn=DR number
         // Bochs crregs.cc: switch(i->src())=DR, BX_WRITE_32BIT_REGZ(i->dst())=GPR
         // Our decoder maps: dst()=rm=GPR, src1()=nnn=DR
-        let dr_idx = instr.src1() as usize;  // nnn = DR register number
-        let dst_gpr = instr.dst() as usize;  // rm = GPR destination register
+        let dr_idx = instr.src1() as usize; // nnn = DR register number
+        let dst_gpr = instr.dst() as usize; // rm = GPR destination register
 
         // Bochs crregs.cc: CR4.DE check — DR4/DR5 access raises #UD when DE=1
         if (dr_idx == 4 || dr_idx == 5) && self.cr4.de() {
@@ -303,8 +318,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let val: u32 = match dr_idx {
             0..=3 => self.dr[dr_idx] as u32,
-            4 | 6 => self.dr6.val32,   // DR4 aliases DR6 when CR4.DE=0
-            5 | 7 => self.dr7.val32,   // DR5 aliases DR7 when CR4.DE=0
+            4 | 6 => self.dr6.val32, // DR4 aliases DR6 when CR4.DE=0
+            5 | 7 => self.dr7.val32, // DR5 aliases DR7 when CR4.DE=0
             _ => 0,
         };
         self.set_gpr32(dst_gpr, val);

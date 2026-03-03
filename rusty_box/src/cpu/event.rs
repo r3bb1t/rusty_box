@@ -56,6 +56,30 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             if self.eflags.contains(EFlags::IF_)
                 && !self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS)
             {
+                // Check LAPIC first (higher priority than PIC in APIC mode).
+                // Bochs event.cc:383-388: BX_CPU_INTR is checked, then
+                // service_local_apic() is called for APIC-mode delivery.
+                #[cfg(feature = "bx_support_apic")]
+                if self.lapic.intr {
+                    let vector = self.lapic.acknowledge_int();
+                    if vector > 0 {
+                        self.diag_hae_intr_delivered += 1;
+                        self.activity_state = CpuActivityState::Active;
+                        self.ext = true;
+                        let result = self.interrupt(vector, false, false, 0);
+                        self.ext = false;
+                        match result {
+                            Ok(()) => {
+                                self.prev_rip = self.rip() as u64;
+                            }
+                            Err(super::error::CpuError::CpuLoopRestart) => {
+                                return false;
+                            }
+                            Err(_) => {}
+                        }
+                    }
+                }
+                // Then check PIC (legacy 8259 path, or when LAPIC has no pending interrupt)
                 if !self.pic_ptr.is_null() {
                     let pic = unsafe { &mut *self.pic_ptr };
                     if pic.has_interrupt() {
@@ -120,7 +144,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         //
         // In Bochs, handleWaitForEvent checks BX_EVENT_PENDING_INTR (if IF=1)
         // and NMI/SMI/INIT to decide whether to wake the CPU. For our
-        // single-processor model, we check pending_event for PENDING_INTR.
+        // single-processor model, we check pending_event for PENDING_INTR
+        // and also the LAPIC's intr flag.
         if self.pending_event & Self::BX_EVENT_PENDING_INTR != 0 {
             if self.eflags.contains(EFlags::IF_) {
                 // External interrupt can wake from HLT
@@ -128,6 +153,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.inhibit_mask = 0;
                 return false; // Continue to interrupt delivery
             }
+        }
+        // LAPIC interrupt can also wake from HLT
+        #[cfg(feature = "bx_support_apic")]
+        if self.lapic.intr && self.eflags.contains(EFlags::IF_) {
+            self.activity_state = CpuActivityState::Active;
+            self.inhibit_mask = 0;
+            return false; // Continue to LAPIC interrupt delivery
         }
 
         // For now, if activity_state became ACTIVE (e.g., from reset), wake up

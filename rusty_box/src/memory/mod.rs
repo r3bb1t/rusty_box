@@ -150,6 +150,18 @@ impl BxMemC<'_> {
         self.smram_enable = false;
         self.smram_restricted = false;
     }
+
+    /// Get a raw pointer to the memory_type array for immediate PAM updates.
+    ///
+    /// This is used by the PCI bridge to update memory_type directly when PAM
+    /// registers change, matching how Bochs uses `DEV_mem_set_memory_type()`
+    /// as a global call from the PCI handler.
+    ///
+    /// # Safety
+    /// The returned pointer is valid as long as this BxMemC is alive and not moved.
+    pub fn memory_type_ptr(&mut self) -> *mut [[bool; 2]; 13] {
+        &mut self.memory_type as *mut _
+    }
 }
 
 // implement getters and setters for memory stub
@@ -266,6 +278,25 @@ impl<'m> BxMemC<'m> {
     /// Count how many registered (non-None) memory handlers exist (for diagnostics).
     pub fn memory_handler_info(&self) -> usize {
         self.memory_handlers.iter().filter(|h| h.is_some()).count()
+    }
+
+    /// Set memory type for a specific area (PAM register support).
+    /// Bochs: BX_MEM_C::set_memory_type() (misc_mem.cc:902-905)
+    ///
+    /// `area` is one of the 13 memory areas (C0000..F0000, 16KB each).
+    /// `rw`: 0 = read path, 1 = write path.
+    /// `dram`: true = DRAM (shadow RAM), false = ROM.
+    pub fn set_memory_type(&mut self, area: usize, rw: usize, dram: bool) {
+        if area < 13 && rw < 2 {
+            tracing::debug!(
+                "set_memory_type: area={}, rw={}, dram={} (was {})",
+                area,
+                rw,
+                dram,
+                self.memory_type[area][rw]
+            );
+            self.memory_type[area][rw] = dram;
+        }
     }
 
     /// Read bytes from the ROM array at the given offset (for diagnostics).

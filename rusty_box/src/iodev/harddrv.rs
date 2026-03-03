@@ -456,8 +456,8 @@ impl AtaDrive {
             if self.controller.sector_count == 0 && self.controller.hob.nsector == 0 {
                 self.controller.num_sectors = 65536;
             } else {
-                self.controller.num_sectors =
-                    ((self.controller.hob.nsector as u32) << 8) | self.controller.sector_count as u32;
+                self.controller.num_sectors = ((self.controller.hob.nsector as u32) << 8)
+                    | self.controller.sector_count as u32;
             }
         }
     }
@@ -1201,7 +1201,8 @@ impl BxHardDriveC {
                 if (drive.controller.status & ATA_STATUS_DRQ) == 0 {
                     tracing::debug!(
                         "ATA: IO read(0x{:04x}) with drq == 0: last cmd was {:02x}",
-                        port, drive.controller.current_command
+                        port,
+                        drive.controller.current_command
                     );
                     return 0;
                 }
@@ -1231,7 +1232,10 @@ impl BxHardDriveC {
                 // Check if buffer completely read
                 if drive.controller.buffer_index >= drive.controller.buffer_size {
                     match current_command {
-                        ATA_CMD_READ_SECTORS | 0x21 | ATA_CMD_READ_SECTORS_EXT | ATA_CMD_READ_MULTIPLE => {
+                        ATA_CMD_READ_SECTORS
+                        | 0x21
+                        | ATA_CMD_READ_SECTORS_EXT
+                        | ATA_CMD_READ_MULTIPLE => {
                             // Bochs harddrv.cc:860-893
                             // Recalculate buffer_size for READ MULTIPLE
                             if current_command == ATA_CMD_READ_MULTIPLE {
@@ -1306,7 +1310,10 @@ impl BxHardDriveC {
                 // Bochs harddrv.cc:1117-1118: DEV_pic_lower_irq() on port 0x07.
                 if offset == ATA_STATUS {
                     drive.controller.interrupt_pending = false;
-                    let irq = match channel_num { 0 => 14u8, _ => 15u8 };
+                    let irq = match channel_num {
+                        0 => 14u8,
+                        _ => 15u8,
+                    };
                     if !self.pic_ptr.is_null() {
                         // IMMEDIATE PIC lower — matches Bochs DEV_pic_lower_irq()
                         let pic = unsafe { &mut *self.pic_ptr };
@@ -1529,9 +1536,7 @@ impl BxHardDriveC {
                 // Bochs harddrv.cc:2167-2177
 
                 // Bochs harddrv.cc:2172-2175: ignore command if slave selected but not present
-                if channel.drive_select == 1
-                    && channel.drives[1].device_type == DeviceType::None
-                {
+                if channel.drive_select == 1 && channel.drives[1].device_type == DeviceType::None {
                     tracing::debug!(
                         "ATA ch{}: command {:#04x} ignored, slave not present",
                         channel_num,
@@ -1547,7 +1552,10 @@ impl BxHardDriveC {
                     drive.controller.interrupt_pending = false;
                 }
                 {
-                    let irq = match channel_num { 0 => 14u8, _ => 15u8 };
+                    let irq = match channel_num {
+                        0 => 14u8,
+                        _ => 15u8,
+                    };
                     if !self.pic_ptr.is_null() {
                         // IMMEDIATE PIC lower — matches Bochs DEV_pic_lower_irq()
                         let pic = unsafe { &mut *self.pic_ptr };
@@ -1602,8 +1610,7 @@ impl BxHardDriveC {
                     tracing::debug!("ATA: Software reset asserted ch={}", channel_num);
                     for d in 0..2 {
                         // Bochs: BSY=1, DRDY=0, WF=0, DSC=1, DRQ=0, CORR=0, ERR=0
-                        channel.drives[d].controller.status =
-                            ATA_STATUS_BSY | ATA_STATUS_DSC;
+                        channel.drives[d].controller.status = ATA_STATUS_BSY | ATA_STATUS_DSC;
                         channel.drives[d].controller.reset_in_progress = true;
                         channel.drives[d].controller.error = 0x01; // diagnostic: no error
                         channel.drives[d].controller.current_command = 0;
@@ -1620,15 +1627,12 @@ impl BxHardDriveC {
                         let irq = if channel_num == 0 { 14u8 } else { 15u8 };
                         pic.lower_irq(irq);
                     }
-                } else if (value & 0x04) == 0
-                    && channel.drives[0].controller.reset_in_progress
-                {
+                } else if (value & 0x04) == 0 && channel.drives[0].controller.reset_in_progress {
                     // Transition 1→0: Deassert SRST (Bochs harddrv.cc:2850-2861)
                     tracing::debug!("ATA: Software reset deasserted ch={}", channel_num);
                     for d in 0..2 {
                         channel.drives[d].controller.reset_in_progress = false;
-                        channel.drives[d].controller.status =
-                            ATA_STATUS_DRDY | ATA_STATUS_DSC;
+                        channel.drives[d].controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC;
                         // Bochs set_signature(): head_no=0, sector_count=1, sector_no=1
                         channel.drives[d].controller.head_no = 0;
                         channel.drives[d].controller.sector_count = 1;
@@ -1686,7 +1690,11 @@ impl BxHardDriveC {
     fn execute_command(&mut self, channel_num: usize, command: u8) {
         // Bochs harddrv.cc:2183-2184: RECALIBRATE range masking
         // Commands 0x10-0x1F all map to RECALIBRATE (only top nibble matters)
-        let command = if (command & 0xF0) == 0x10 { 0x10 } else { command };
+        let command = if (command & 0xF0) == 0x10 {
+            0x10
+        } else {
+            command
+        };
 
         let channel = &mut self.channels[channel_num];
         let ds = channel.drive_select;
@@ -1915,7 +1923,10 @@ impl BxHardDriveC {
                         // Disable reverting to power-on defaults — no-op
                     }
                     _ => {
-                        tracing::debug!("ATA: SET FEATURES: unknown subcommand {:#04x}", subcommand);
+                        tracing::debug!(
+                            "ATA: SET FEATURES: unknown subcommand {:#04x}",
+                            subcommand
+                        );
                         self.command_aborted(channel_num, command);
                         return;
                     }
@@ -1956,7 +1967,11 @@ impl BxHardDriveC {
         // Bochs harddrv.cc: Commands that want an interrupt set interrupt_pending=true.
         // In Bochs, these commands call raise_interrupt() which does DEV_pic_raise_irq().
         // We use raise_interrupt() here for proper PIC raise + diagnostic counting.
-        if self.channels[channel_num].selected_drive().controller.interrupt_pending {
+        if self.channels[channel_num]
+            .selected_drive()
+            .controller
+            .interrupt_pending
+        {
             self.raise_interrupt(channel_num);
         }
     }
@@ -1988,7 +2003,10 @@ impl BxHardDriveC {
         ));
         s.push_str(&format!("  cmd_history ({} cmds):", self.cmd_history.len()));
         for (i, &(ch, cmd, lba)) in self.cmd_history.iter().enumerate() {
-            if i % 8 == 0 { s.push('\n'); s.push_str("    "); }
+            if i % 8 == 0 {
+                s.push('\n');
+                s.push_str("    ");
+            }
             s.push_str(&format!("ch{}:{:#04x}@{} ", ch, cmd, lba));
         }
         s

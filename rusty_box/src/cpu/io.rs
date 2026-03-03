@@ -50,9 +50,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return Ok(false);
             }
 
-            let permission16 = self.system_read_word(
-                tr_base + io_base as u64 + (port as u64) / 8
-            )?;
+            let permission16 =
+                self.system_read_word(tr_base + io_base as u64 + (port as u64) / 8)?;
 
             let bit_index = (port & 7) as u32;
             let mask = (1u32 << len) - 1;

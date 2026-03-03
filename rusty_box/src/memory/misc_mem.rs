@@ -139,41 +139,21 @@ impl<'c> BxMemC<'c> {
             if a20_addr >= 0x000a0000 && a20_addr < 0x000c0000 {
                 // VGA memory area - vetoed (no handler registered)
                 Ok(None)
-            } else if (a20_addr & 0xfffe0000) == 0x000e0000 {
-                // last 128K of BIOS ROM mapped to 0xE0000-0xFFFFF - handle first
-                // Matching C++ line 737-739 and 721: return (Bit8u *) &BX_MEM_THIS rom[BIOS_MAP_LAST128K(a20addr)];
-                // The C++ code uses BIOS_MAP_LAST128K(a20addr) directly where a20addr is pAddrFetchPage (page-aligned).
-                // When CPU accesses bytes, it uses eipFetchPtr[pageOffset], which correctly accesses the actual byte.
-                // BIOS_MAP_LAST128K(0xFF000) + 0x55A = BIOS_MAP_LAST128K(0xFF55A), so this works correctly.
-                let mapped = bios_map_last128k(a20_addr.try_into()?);
-                let final_offset = mapped;
-                let rom = self.inherited_memory_stub.rom();
-                // Log access to 0xFFFF0 (reset vector) for debugging
-                if a20_addr == 0xFF000 {
-                    let bios_load_offset = (self.bios_rom_addr as usize) & (BIOSROMSZ - 1);
-                    let offset_from_bios = final_offset - bios_load_offset;
-                    if offset_from_bios < rom.len() - bios_load_offset {
-                        let check_offset = bios_load_offset + offset_from_bios;
-                        if check_offset + 0xFF0 < rom.len() {
-                            let reset_vector_bytes =
-                                &rom[check_offset + 0xFF0..check_offset + 0xFF0 + 16];
-                            tracing::info!(
-                                "get_host_mem_addr: a20_addr={:#x}, mapped={:#x}, final_offset={:#x}, offset_from_bios={:#x}, reset_vector_bytes={:02x?}",
-                                a20_addr, mapped, final_offset, offset_from_bios, reset_vector_bytes
-                            );
-                        }
-                    }
-                }
-                Ok(Some(&mut self.inherited_memory_stub.rom()[final_offset..]))
             } else if cfg!(feature = "bx_support_pci")
                 && self.pci_enabled
                 && (a20_addr >= 0x000c0000 && a20_addr < 0x00100000)
             {
+                // PCI path for C0000-FFFFF: check memory_type to decide ROM vs ShadowRAM.
+                // Bochs: misc_mem.cc:714-729 — this check MUST come before the unconditional
+                // E0000 ROM return, because PAM registers can redirect reads to shadow DRAM.
                 let mut area: usize = ((a20_addr as u32 >> 14) & 0x0f).try_into()?;
                 if area > MemoryAreaT::F0000 as _ {
                     area = MemoryAreaT::F0000 as _;
                 }
-                if self.memory_type[area][0] == false {
+                if self.memory_type[area][0] {
+                    // Read from ShadowRAM (PAM enabled DRAM reads)
+                    Ok(Some(self.get_vector(cpus, a20_addr)?))
+                } else {
                     // Read from ROM
                     let rom_offset = if (a20_addr & 0xfffe0000) == 0x000e0000 {
                         // Last 128K of BIOS ROM mapped to 0xE0000-0xFFFFF
@@ -183,27 +163,21 @@ impl<'c> BxMemC<'c> {
                         ((a20_addr & EXROM_MASK as BxPhyAddress) + BIOSROMSZ as BxPhyAddress)
                             .try_into()?
                     };
-                    let to_return = &mut self.inherited_memory_stub.rom()[rom_offset..];
-                    Ok(Some(to_return))
-                } else {
-                    // Read from ShadowRAM
-                    Ok(Some(self.get_vector(cpus, a20_addr)?))
+                    Ok(Some(&mut self.inherited_memory_stub.rom()[rom_offset..]))
                 }
             } else if (a20_addr < self.inherited_memory_stub.len.try_into()?) && !is_bios {
+                // Regular RAM or non-PCI ROM
                 if a20_addr < 0x000c0000 || a20_addr >= 0x00100000 {
                     Ok(Some(self.get_vector(cpus, a20_addr)?))
                 }
-                // must be in C0000 - FFFFF range
-                // Matching C++ line 737-743: check for 0xE0000-0xFFFFF range first
+                // must be in C0000 - FFFFF range (non-PCI path)
+                // Bochs: misc_mem.cc:731-744
                 else if (a20_addr & 0xfffe0000) == 0x000e0000 {
                     // last 128K of BIOS ROM mapped to 0xE0000-0xFFFFF
-                    // Matching C++ line 739: return (Bit8u *) &BX_MEM_THIS rom[BIOS_MAP_LAST128K(a20addr)];
                     let mapped = bios_map_last128k(a20_addr.try_into()?);
-                    let final_offset = mapped;
-                    Ok(Some(&mut self.inherited_memory_stub.rom()[final_offset..]))
+                    Ok(Some(&mut self.inherited_memory_stub.rom()[mapped..]))
                 } else {
                     // non-last-128K ROM (C0000-DFFFF)
-                    // Matching C++ line 742: return((Bit8u *) &BX_MEM_THIS rom[(a20addr & EXROM_MASK) + BIOSROMSZ]);
                     Ok(Some(
                         &mut self.inherited_memory_stub.rom()[((a20_addr
                             & EXROM_MASK as BxPhyAddress)
@@ -217,19 +191,16 @@ impl<'c> BxMemC<'c> {
                     &mut self.inherited_memory_stub.bogus()[(a20_addr & 0xfff).try_into()?..],
                 ))
             } else if a20_addr >= 0xFEE00000 && a20_addr < 0xFEF00000 {
-                // APIC MMIO at 0xFEE00000-0xFEEFFFFF: return zeroed scratch (not 0xFF bogus)
-                let offset = ((a20_addr - 0xFEE00000) & 0xFFF) as usize;
-                Ok(Some(
-                    &mut self.inherited_memory_stub.apic_scratch()[offset..],
-                ))
+                // APIC MMIO at 0xFEE00000-0xFEEFFFFF: veto direct access.
+                // LAPIC register reads have side effects and must go through
+                // the CPU's mem_read_dword → lapic.read() intercept path.
+                Ok(None)
             } else if is_bios {
-                // BIOS ROM access - use bios_map_last128k to map 0xE0000-0xFFFFF
-                // to the last 128KB of the 4MB ROM array (matching Bochs misc_mem.cc:721)
+                // High BIOS ROM access (>= bios_rom_addr, e.g. 0xFFFF0000+)
                 let rom_offset = bios_map_last128k(a20_addr.try_into()?);
                 Ok(Some(&mut self.inherited_memory_stub.rom()[rom_offset..]))
             } else {
                 // Out of bounds - return bogus memory (matches Bochs)
-                // From cpp_orig/bochs/memory/misc_mem.cc:746-758
                 Ok(Some(
                     &mut self.inherited_memory_stub.bogus()[(a20_addr & 0xfff).try_into()?..],
                 ))
@@ -237,11 +208,10 @@ impl<'c> BxMemC<'c> {
         } else {
             // op == {BX_WRITE, BX_RW}
             if a20_addr >= 0xFEE00000 && a20_addr < 0xFEF00000 {
-                // APIC MMIO at 0xFEE00000-0xFEEFFFFF: accept writes into scratch buffer
-                let offset = ((a20_addr - 0xFEE00000) & 0xFFF) as usize;
-                return Ok(Some(
-                    &mut self.inherited_memory_stub.apic_scratch()[offset..],
-                ));
+                // APIC MMIO at 0xFEE00000-0xFEEFFFFF: veto direct access.
+                // LAPIC register writes have side effects (EOI, ICR, timer, etc.)
+                // and must go through the CPU's mem_write_dword → lapic.write() intercept.
+                return Ok(None);
             }
             if (a20_addr >= self.inherited_memory_stub.len.try_into()?) || is_bios {
                 // Error, requested addr is out of bounds or writing to BIOS ROM
@@ -563,8 +533,12 @@ impl BxMemC<'_> {
 
         // mem_write: (from memory.cc:85)
 
-        // All memory access fits in single 4K page
-        if (a20_addr < self.inherited_memory_stub.len.try_into()?) && !is_bios {
+        // All memory access fits in single 4K page.
+        // Note: Bochs does NOT check is_bios here — addresses in E0000-FFFFF
+        // (where is_bios=true) must enter this block to reach the PCI shadow RAM
+        // write path. High BIOS addresses (>= bios_rom_addr like 0xFFFF0000) are
+        // above RAM len so the `a20_addr < len` check naturally excludes them.
+        if a20_addr < self.inherited_memory_stub.len.try_into()? {
             // All of data is within limits of physical memory
             if a20_addr < 0x000a0000 || a20_addr >= 0x00100000 {
                 // Log writes to very low RAM (first 4KB) - these might be IVT/BDA initialization
@@ -627,7 +601,7 @@ impl BxMemC<'_> {
                             *byte = data[i];
                         }
                     } else if (area >= MemoryAreaT::E0000 as usize) && self.bios_write_enabled {
-                        // Volatile BIOS write support
+                        // Volatile BIOS write support (flash ROM path)
                         let rom_offset = bios_map_last128k(a20_addr as usize);
                         if rom_offset < BIOSROMSZ {
                             let rom = self.inherited_memory_stub.rom();
@@ -771,8 +745,9 @@ impl BxMemC<'_> {
         }
 
         // mem_read:
-
-        if (a20_addr < self.inherited_memory_stub.len.try_into()?) && !is_bios {
+        // Note: Bochs does NOT check is_bios here — addresses in E0000-FFFFF
+        // must enter this block to reach the PCI shadow RAM read path.
+        if a20_addr < self.inherited_memory_stub.len.try_into()? {
             // All of data is within limits of physical memory
             if a20_addr < 0x000a0000 || a20_addr >= 0x00100000 {
                 // Regular RAM - delegate to stub

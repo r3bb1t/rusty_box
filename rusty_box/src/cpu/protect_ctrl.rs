@@ -28,7 +28,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr32(instr);
         // Bochs: (eaddr + 2) & i->asize_mask() — mask for 16-bit address wrap
-        let asize_mask: u32 = if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF };
+        let asize_mask: u32 = if instr.as32_l() == 0 {
+            0xFFFF
+        } else {
+            0xFFFFFFFF
+        };
         let limit = self.read_virtual_word(seg, eaddr)?;
         let mut base = self.read_virtual_dword(seg, eaddr.wrapping_add(2) & asize_mask)? as u64;
 
@@ -57,9 +61,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr32(instr);
-        let asize_mask: u32 = if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF };
+        let asize_mask: u32 = if instr.as32_l() == 0 {
+            0xFFFF
+        } else {
+            0xFFFFFFFF
+        };
         self.write_virtual_word(seg, eaddr, self.gdtr.limit)?;
-        self.write_virtual_dword(seg, eaddr.wrapping_add(2) & asize_mask, self.gdtr.base as u32)?;
+        self.write_virtual_dword(
+            seg,
+            eaddr.wrapping_add(2) & asize_mask,
+            self.gdtr.base as u32,
+        )?;
         Ok(())
     }
 
@@ -75,7 +87,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr32(instr);
-        let asize_mask: u32 = if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF };
+        let asize_mask: u32 = if instr.as32_l() == 0 {
+            0xFFFF
+        } else {
+            0xFFFFFFFF
+        };
         let limit = self.read_virtual_word(seg, eaddr)?;
         let mut base = self.read_virtual_dword(seg, eaddr.wrapping_add(2) & asize_mask)? as u64;
 
@@ -103,9 +119,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr32(instr);
-        let asize_mask: u32 = if instr.as32_l() == 0 { 0xFFFF } else { 0xFFFFFFFF };
+        let asize_mask: u32 = if instr.as32_l() == 0 {
+            0xFFFF
+        } else {
+            0xFFFFFFFF
+        };
         self.write_virtual_word(seg, eaddr, self.idtr.limit)?;
-        self.write_virtual_dword(seg, eaddr.wrapping_add(2) & asize_mask, self.idtr.base as u32)?;
+        self.write_virtual_dword(
+            seg,
+            eaddr.wrapping_add(2) & asize_mask,
+            self.idtr.base as u32,
+        )?;
         Ok(())
     }
 
@@ -256,7 +280,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
             let offset = self.gdtr.base + index * 8;
             let qword = self.system_read_qword(offset).ok()?;
-            Some(((qword & 0xFFFFFFFF) as u32, ((qword >> 32) & 0xFFFFFFFF) as u32))
+            Some((
+                (qword & 0xFFFFFFFF) as u32,
+                ((qword >> 32) & 0xFFFFFFFF) as u32,
+            ))
         } else {
             // LDT
             if self.ldtr.cache.valid == 0 {
@@ -269,7 +296,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ldt_base = unsafe { self.ldtr.cache.u.segment.base };
             let offset = ldt_base + index * 8;
             let qword = self.system_read_qword(offset).ok()?;
-            Some(((qword & 0xFFFFFFFF) as u32, ((qword >> 32) & 0xFFFFFFFF) as u32))
+            Some((
+                (qword & 0xFFFFFFFF) as u32,
+                ((qword >> 32) & 0xFFFFFFFF) as u32,
+            ))
         }
     }
 

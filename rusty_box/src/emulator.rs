@@ -224,6 +224,22 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Initialize device manager (actual hardware + I/O handler registration)
         self.device_manager
             .init(&mut self.devices, &mut self.memory)?;
+        // Initialize PCI bridge DRAM row boundaries from RAM size,
+        // and wire PCI bridge to memory_type for immediate PAM updates.
+        #[cfg(feature = "bx_support_pci")]
+        {
+            let ramsize_mb = (self.config.guest_memory_size / (1024 * 1024)) as u32;
+            self.device_manager.pci_bridge.init_dram(ramsize_mb);
+            // Give PCI bridge a raw pointer to memory_type so PAM writes
+            // take effect immediately (matches Bochs DEV_mem_set_memory_type).
+            let memory_type_ptr = self.memory.memory_type_ptr();
+            unsafe {
+                self.device_manager
+                    .pci_bridge
+                    .set_memory_type_ptr(memory_type_ptr);
+            }
+            tracing::debug!("PCI bridge DRAM initialized for {}MB", ramsize_mb);
+        }
         tracing::debug!("Devices initialized");
 
         // Wire PIC→CPU interrupt signaling (Bochs BX_RAISE_INTR / BX_CLEAR_INTR).
@@ -243,6 +259,33 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Wire HardDrive→PIC for immediate IRQ raise/lower (matches Bochs DEV_pic_raise_irq)
         self.device_manager.harddrv.pic_ptr =
             &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
+
+        // Wire I/O APIC → LAPIC for interrupt delivery (matches Bochs apic_bus_deliver_interrupt)
+        #[cfg(feature = "bx_support_apic")]
+        {
+            let lapic_ptr = self.cpu.lapic_ptr_mut();
+            self.device_manager.ioapic.set_lapic_ptr(lapic_ptr);
+        }
+
+        // Register LAPIC timer with pc_system (matches Bochs apic.cc:190-191)
+        // Timer is registered inactive; activated when LAPIC timer ICR is written.
+        #[cfg(feature = "bx_support_apic")]
+        {
+            let lapic_ptr = self.cpu.lapic_ptr_mut();
+            let timer_handle = self.pc_system.register_timer(
+                crate::cpu::apic::BxLocalApic::timer_handler,
+                lapic_ptr as *mut core::ffi::c_void,
+                0,     // period=0 (inactive)
+                false, // continuous=false (one-shot, re-armed by periodic())
+                false, // active=false
+                "lapic",
+            );
+            if let Some(handle) = timer_handle {
+                let lapic = unsafe { &mut *lapic_ptr };
+                lapic.timer_handle = Some(handle);
+                tracing::debug!("LAPIC timer registered with handle {}", handle);
+            }
+        }
 
         // Note: SIM->opt_plugin_ctrl("*", 0) at line 1355 unloads unused optional plugins
         // This is optional plugin management, not yet implemented in Rust version
@@ -338,6 +381,21 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Initialize device manager (actual hardware + I/O handler registration)
         self.device_manager
             .init(&mut self.devices, &mut self.memory)?;
+
+        // Initialize PCI bridge DRAM row boundaries from RAM size,
+        // and wire PCI bridge to memory_type for immediate PAM updates.
+        #[cfg(feature = "bx_support_pci")]
+        {
+            let ramsize_mb = (self.config.guest_memory_size / (1024 * 1024)) as u32;
+            self.device_manager.pci_bridge.init_dram(ramsize_mb);
+            let memory_type_ptr = self.memory.memory_type_ptr();
+            unsafe {
+                self.device_manager
+                    .pci_bridge
+                    .set_memory_type_ptr(memory_type_ptr);
+            }
+            tracing::debug!("PCI bridge DRAM initialized for {}MB", ramsize_mb);
+        }
         tracing::info!("Device initialization complete");
 
         // Wire PIC→CPU interrupt signaling (same as in initialize())
@@ -353,6 +411,33 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Wire HardDrive→PIC for immediate IRQ raise/lower (matches Bochs DEV_pic_raise_irq)
         self.device_manager.harddrv.pic_ptr =
             &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
+
+        // Wire I/O APIC → LAPIC for interrupt delivery (matches Bochs apic_bus_deliver_interrupt)
+        #[cfg(feature = "bx_support_apic")]
+        {
+            let lapic_ptr = self.cpu.lapic_ptr_mut();
+            self.device_manager.ioapic.set_lapic_ptr(lapic_ptr);
+        }
+
+        // Register LAPIC timer with pc_system (matches Bochs apic.cc:190-191)
+        // Timer is registered inactive; activated when LAPIC timer ICR is written.
+        #[cfg(feature = "bx_support_apic")]
+        {
+            let lapic_ptr = self.cpu.lapic_ptr_mut();
+            let timer_handle = self.pc_system.register_timer(
+                crate::cpu::apic::BxLocalApic::timer_handler,
+                lapic_ptr as *mut core::ffi::c_void,
+                0,     // period=0 (inactive)
+                false, // continuous=false (one-shot, re-armed by periodic())
+                false, // active=false
+                "lapic",
+            );
+            if let Some(handle) = timer_handle {
+                let lapic = unsafe { &mut *lapic_ptr };
+                lapic.timer_handle = Some(handle);
+                tracing::debug!("LAPIC timer registered with handle {}", handle);
+            }
+        }
 
         // Note: SIM->opt_plugin_ctrl("*", 0) at line 1355 unloads unused optional plugins
         // This is optional plugin management, not yet implemented in Rust version
@@ -731,6 +816,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     /// Simulate time passing (for timer-based devices)
     pub fn tick_devices(&mut self, usec: u64) {
         self.device_manager.tick(usec);
+        // Process any deferred PCI port re-registrations and PAM changes
+        #[cfg(feature = "bx_support_pci")]
+        self.device_manager
+            .process_pci_deferred::<I>(&mut self.devices, &mut self.memory);
     }
 
     /// Configure CMOS memory size
@@ -842,9 +931,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         let mut last_rip: u64 = u64::MAX;
         let mut stuck_count: u32 = 0;
         let mut stuck_reported = false;
-        while instructions_executed < max_instructions
-            && !self.stop_flag.load(Ordering::Relaxed)
-        {
+        while instructions_executed < max_instructions && !self.stop_flag.load(Ordering::Relaxed) {
             // 1. Handle GUI events (keyboard input) - do this first to avoid borrow conflicts
 
             let mut scancodes_to_send = Vec::new();
@@ -1502,8 +1589,40 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 None
                             };
                             let mut hlt_usec = 0u64;
+                            // Tick increment per HLT iteration: approximate bus ticks from IPS
+                            let hlt_tick_increment = (self.config.ips as u64 * 10) / 1_000_000;
                             while !self.has_interrupt() && hlt_usec < 200_000 {
                                 self.tick_devices(10);
+                                // Also drive pc_system timers (LAPIC timer)
+                                self.pc_system.tick(hlt_tick_increment.max(1));
+                                self.pc_system.check_timers();
+                                #[cfg(feature = "bx_support_apic")]
+                                {
+                                    let lapic_ptr = self.cpu.lapic_ptr_mut();
+                                    let lapic = unsafe { &mut *lapic_ptr };
+                                    if lapic.timer_fired {
+                                        lapic.timer_fired = false;
+                                        let current_ticks = self.pc_system.time_ticks();
+                                        lapic.periodic(current_ticks);
+                                    }
+                                    if lapic.timer_deactivate_request {
+                                        lapic.timer_deactivate_request = false;
+                                        if let Some(handle) = lapic.timer_handle {
+                                            self.pc_system.deactivate_timer(handle);
+                                        }
+                                    }
+                                    if let Some(period) = lapic.timer_activate_request.take() {
+                                        if let Some(handle) = lapic.timer_handle {
+                                            self.pc_system.activate_timer(handle, period, false);
+                                        }
+                                        lapic.set_ticks_initial(self.pc_system.time_ticks());
+                                    }
+                                    // LAPIC interrupt can also break the HLT spin
+                                    if lapic.intr {
+                                        self.cpu.signal_event(0);
+                                        break;
+                                    }
+                                }
                                 hlt_usec += 10;
                             }
                             if let Some(start) = hlt_real_start {
@@ -1514,8 +1633,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     // minimum timer granularity (Bochs also busy-spins).
                                     const SPIN_THRESHOLD_US: u64 = 2_000; // 2ms
                                     if sleep_us < SPIN_THRESHOLD_US {
-                                        let deadline = start
-                                            + std::time::Duration::from_micros(hlt_usec);
+                                        let deadline =
+                                            start + std::time::Duration::from_micros(hlt_usec);
                                         while std::time::Instant::now() < deadline {
                                             std::hint::spin_loop();
                                         }
@@ -1532,6 +1651,49 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             // min 10 usec to prevent timer starvation at low instruction counts.
                             let usec = usec_from_instr.max(10);
                             self.tick_devices(usec);
+                        }
+                    }
+
+                    // Drive pc_system timers (LAPIC timer uses this infrastructure).
+                    // Advance tick count by instructions executed and fire expired timers.
+                    // Matches Bochs: bx_pc_system.time_ticks() advances by instruction count.
+                    self.pc_system.tick(executed);
+                    self.pc_system.check_timers();
+
+                    // Handle LAPIC timer fire + activate/deactivate requests
+                    #[cfg(feature = "bx_support_apic")]
+                    {
+                        let lapic_ptr = self.cpu.lapic_ptr_mut();
+                        let lapic = unsafe { &mut *lapic_ptr };
+
+                        // Process timer fire: call periodic() to trigger interrupt vector
+                        // and set up next period (Bochs apic.cc:1029-1069)
+                        if lapic.timer_fired {
+                            lapic.timer_fired = false;
+                            let current_ticks = self.pc_system.time_ticks();
+                            lapic.periodic(current_ticks);
+                        }
+
+                        // Process pending timer deactivation (Bochs: deactivate_timer)
+                        if lapic.timer_deactivate_request {
+                            lapic.timer_deactivate_request = false;
+                            if let Some(handle) = lapic.timer_handle {
+                                self.pc_system.deactivate_timer(handle);
+                            }
+                        }
+
+                        // Process pending timer activation (Bochs: activate_timer_ticks)
+                        if let Some(period) = lapic.timer_activate_request.take() {
+                            if let Some(handle) = lapic.timer_handle {
+                                self.pc_system.activate_timer(handle, period, false);
+                            }
+                            lapic.set_ticks_initial(self.pc_system.time_ticks());
+                        }
+
+                        // Signal pending LAPIC interrupt to CPU event system
+                        // Matches Bochs: cpu->signal_event(BX_EVENT_PENDING_INTR)
+                        if lapic.intr {
+                            self.cpu.signal_event(0); // BX_EVENT_PENDING_INTR = 1 << 0
                         }
                     }
 
@@ -2044,6 +2206,37 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     10
                 };
                 self.tick_devices(usec);
+
+                // Drive pc_system timers (LAPIC timer infrastructure)
+                self.pc_system.tick(executed);
+                self.pc_system.check_timers();
+
+                // Handle LAPIC timer fire + activate/deactivate requests
+                #[cfg(feature = "bx_support_apic")]
+                {
+                    let lapic_ptr = self.cpu.lapic_ptr_mut();
+                    let lapic = unsafe { &mut *lapic_ptr };
+                    if lapic.timer_fired {
+                        lapic.timer_fired = false;
+                        let current_ticks = self.pc_system.time_ticks();
+                        lapic.periodic(current_ticks);
+                    }
+                    if lapic.timer_deactivate_request {
+                        lapic.timer_deactivate_request = false;
+                        if let Some(handle) = lapic.timer_handle {
+                            self.pc_system.deactivate_timer(handle);
+                        }
+                    }
+                    if let Some(period) = lapic.timer_activate_request.take() {
+                        if let Some(handle) = lapic.timer_handle {
+                            self.pc_system.activate_timer(handle, period, false);
+                        }
+                        lapic.set_ticks_initial(self.pc_system.time_ticks());
+                    }
+                    if lapic.intr {
+                        self.cpu.signal_event(0);
+                    }
+                }
 
                 // When CPU is halted, advance one full PIT cycle so timer
                 // interrupts can fire (Bochs handleWaitForEvent BX_TICKN loop).

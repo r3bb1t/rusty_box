@@ -1255,6 +1255,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[cold]
     #[inline(never)]
     fn mem_read_byte_slow(&self, addr: u64) -> u8 {
+        // LAPIC MMIO intercept at byte level (fallback for non-dword accesses)
+        #[cfg(feature = "bx_support_apic")]
+        {
+            let a20_addr = (addr & self.a20_mask) as BxPhyAddress;
+            if self.lapic.is_selected(a20_addr) {
+                // Read aligned dword, extract requested byte
+                let aligned = a20_addr & !0x3;
+                let dword = self.lapic.read(aligned, 4);
+                let byte_offset = (a20_addr & 0x3) as u32;
+                return (dword >> (byte_offset * 8)) as u8;
+            }
+        }
         if let Some(mem_bus) = self.mem_bus {
             let mem = unsafe { &mut *mem_bus.as_ptr() };
             let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
@@ -1311,6 +1323,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[cold]
     #[inline(never)]
     fn mem_write_byte_slow(&mut self, addr: u64, value: u8) {
+        // LAPIC MMIO intercept at byte level (fallback for non-dword accesses)
+        #[cfg(feature = "bx_support_apic")]
+        {
+            let a20_addr = (addr & self.a20_mask) as BxPhyAddress;
+            if self.lapic.is_selected(a20_addr) {
+                // Byte-level write to LAPIC: read-modify-write the aligned dword.
+                // In practice, LAPIC is always accessed as dword — this is a safety net.
+                let aligned = a20_addr & !0x3;
+                let old = self.lapic.read(aligned, 4);
+                let byte_offset = (a20_addr & 0x3) as u32;
+                let mask = !(0xFFu32 << (byte_offset * 8));
+                let new_val = (old & mask) | ((value as u32) << (byte_offset * 8));
+                self.lapic.write(aligned, new_val, 4);
+                return;
+            }
+        }
         if let Some(mem_bus) = self.mem_bus {
             let mem = unsafe { &mut *mem_bus.as_ptr() };
             let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
@@ -1331,7 +1359,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let mut dummy_mapping: [u32; 0] = [];
             let mut stamp = BxPageWriteStampTable::new(&mut dummy_mapping);
             let mut data = [value];
-            mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 1, &mut data).ok();
+            mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 1, &mut data)
+                .ok();
             self.i_cache.smc_write_check(paddr, 1);
             return;
         }
@@ -1391,6 +1420,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         {
             return unsafe { (host_base.add(a20_addr) as *const u32).read_unaligned() };
         }
+        // LAPIC MMIO intercept: 32-bit aligned register access
+        // Bochs apic.cc read() — LAPIC registers are always dword-accessed.
+        #[cfg(feature = "bx_support_apic")]
+        if self.lapic.is_selected(a20_addr as BxPhyAddress) {
+            return self.lapic.read(a20_addr as BxPhyAddress, 4);
+        }
         // Slow path: per-word reads (handles MMIO/VGA/ROM)
         let lo = self.mem_read_word(addr) as u32;
         let hi = self.mem_read_word(addr + 2) as u32;
@@ -1407,6 +1442,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         {
             unsafe { (host_base.add(a20_addr) as *mut u32).write_unaligned(value) };
             self.i_cache.smc_write_check(a20_addr as BxPhyAddress, 4);
+            return;
+        }
+        // LAPIC MMIO intercept: 32-bit aligned register access
+        // Bochs apic.cc write() — LAPIC registers are always dword-accessed.
+        #[cfg(feature = "bx_support_apic")]
+        if self.lapic.is_selected(a20_addr as BxPhyAddress) {
+            self.lapic.write(a20_addr as BxPhyAddress, value, 4);
             return;
         }
         // Slow path: per-word writes (handles MMIO/VGA/ROM)

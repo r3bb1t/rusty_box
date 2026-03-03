@@ -1363,98 +1363,146 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     pub fn cmovo_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_of() { self.set_gpr32(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_of() {
+            self.set_gpr32(instr.dst() as usize, op2);
+        }
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
     pub fn cmovno_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if !self.get_of() { self.set_gpr32(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if !self.get_of() {
+            self.set_gpr32(instr.dst() as usize, op2);
+        }
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
     pub fn cmovb_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_cf() { self.set_gpr32(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_cf() {
+            self.set_gpr32(instr.dst() as usize, op2);
+        }
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
     pub fn cmovnb_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if !self.get_cf() { self.set_gpr32(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if !self.get_cf() {
+            self.set_gpr32(instr.dst() as usize, op2);
+        }
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
     pub fn cmovz_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_zf() { self.set_gpr32(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_zf() {
+            self.set_gpr32(instr.dst() as usize, op2);
+        }
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
     pub fn cmovnz_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if !self.get_zf() { self.set_gpr32(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if !self.get_zf() {
+            self.set_gpr32(instr.dst() as usize, op2);
+        }
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
     pub fn cmovbe_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_cf() || self.get_zf() { self.set_gpr32(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_cf() || self.get_zf() {
+            self.set_gpr32(instr.dst() as usize, op2);
+        }
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
     pub fn cmovnbe_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if !self.get_cf() && !self.get_zf() { self.set_gpr32(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if !self.get_cf() && !self.get_zf() {
+            self.set_gpr32(instr.dst() as usize, op2);
+        }
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
     pub fn cmovs_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_sf() { self.set_gpr32(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_sf() {
+            self.set_gpr32(instr.dst() as usize, op2);
+        }
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
     pub fn cmovns_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if !self.get_sf() { self.set_gpr32(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if !self.get_sf() {
+            self.set_gpr32(instr.dst() as usize, op2);
+        }
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
     pub fn cmovp_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_pf() { self.set_gpr32(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_pf() {
+            self.set_gpr32(instr.dst() as usize, op2);
+        }
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
     pub fn cmovnp_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if !self.get_pf() { self.set_gpr32(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if !self.get_pf() {
+            self.set_gpr32(instr.dst() as usize, op2);
+        }
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
     pub fn cmovl_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_sf() != self.get_of() { self.set_gpr32(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_sf() != self.get_of() {
+            self.set_gpr32(instr.dst() as usize, op2);
+        }
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
     pub fn cmovnl_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_sf() == self.get_of() { self.set_gpr32(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_sf() == self.get_of() {
+            self.set_gpr32(instr.dst() as usize, op2);
+        }
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
     pub fn cmovle_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_zf() || self.get_sf() != self.get_of() { self.set_gpr32(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_zf() || self.get_sf() != self.get_of() {
+            self.set_gpr32(instr.dst() as usize, op2);
+        }
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
     pub fn cmovnle_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if !self.get_zf() && self.get_sf() == self.get_of() { self.set_gpr32(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if !self.get_zf() && self.get_sf() == self.get_of() {
+            self.set_gpr32(instr.dst() as usize, op2);
+        }
         self.bx_clear_64bit_high(instr.dst() as usize);
         Ok(())
     }
@@ -1462,127 +1510,399 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     // CMOV 32-bit unified dispatch wrappers
     // =========================================================================
-    pub fn cmovo_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovo_gd_ed_r(instr); Ok(()) } else { self.cmovo_gd_ed_m(instr) } }
-    pub fn cmovno_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovno_gd_ed_r(instr); Ok(()) } else { self.cmovno_gd_ed_m(instr) } }
-    pub fn cmovb_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovb_gd_ed_r(instr); Ok(()) } else { self.cmovb_gd_ed_m(instr) } }
-    pub fn cmovnb_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovnb_gd_ed_r(instr); Ok(()) } else { self.cmovnb_gd_ed_m(instr) } }
-    pub fn cmovz_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovz_gd_ed_r(instr); Ok(()) } else { self.cmovz_gd_ed_m(instr) } }
-    pub fn cmovnz_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovnz_gd_ed_r(instr); Ok(()) } else { self.cmovnz_gd_ed_m(instr) } }
-    pub fn cmovbe_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovbe_gd_ed_r(instr); Ok(()) } else { self.cmovbe_gd_ed_m(instr) } }
-    pub fn cmovnbe_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovnbe_gd_ed_r(instr); Ok(()) } else { self.cmovnbe_gd_ed_m(instr) } }
-    pub fn cmovs_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovs_gd_ed_r(instr); Ok(()) } else { self.cmovs_gd_ed_m(instr) } }
-    pub fn cmovns_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovns_gd_ed_r(instr); Ok(()) } else { self.cmovns_gd_ed_m(instr) } }
-    pub fn cmovp_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovp_gd_ed_r(instr); Ok(()) } else { self.cmovp_gd_ed_m(instr) } }
-    pub fn cmovnp_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovnp_gd_ed_r(instr); Ok(()) } else { self.cmovnp_gd_ed_m(instr) } }
-    pub fn cmovl_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovl_gd_ed_r(instr); Ok(()) } else { self.cmovl_gd_ed_m(instr) } }
-    pub fn cmovnl_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovnl_gd_ed_r(instr); Ok(()) } else { self.cmovnl_gd_ed_m(instr) } }
-    pub fn cmovle_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovle_gd_ed_r(instr); Ok(()) } else { self.cmovle_gd_ed_m(instr) } }
-    pub fn cmovnle_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovnle_gd_ed_r(instr); Ok(()) } else { self.cmovnle_gd_ed_m(instr) } }
+    pub fn cmovo_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovo_gd_ed_r(instr);
+            Ok(())
+        } else {
+            self.cmovo_gd_ed_m(instr)
+        }
+    }
+    pub fn cmovno_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovno_gd_ed_r(instr);
+            Ok(())
+        } else {
+            self.cmovno_gd_ed_m(instr)
+        }
+    }
+    pub fn cmovb_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovb_gd_ed_r(instr);
+            Ok(())
+        } else {
+            self.cmovb_gd_ed_m(instr)
+        }
+    }
+    pub fn cmovnb_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovnb_gd_ed_r(instr);
+            Ok(())
+        } else {
+            self.cmovnb_gd_ed_m(instr)
+        }
+    }
+    pub fn cmovz_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovz_gd_ed_r(instr);
+            Ok(())
+        } else {
+            self.cmovz_gd_ed_m(instr)
+        }
+    }
+    pub fn cmovnz_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovnz_gd_ed_r(instr);
+            Ok(())
+        } else {
+            self.cmovnz_gd_ed_m(instr)
+        }
+    }
+    pub fn cmovbe_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovbe_gd_ed_r(instr);
+            Ok(())
+        } else {
+            self.cmovbe_gd_ed_m(instr)
+        }
+    }
+    pub fn cmovnbe_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovnbe_gd_ed_r(instr);
+            Ok(())
+        } else {
+            self.cmovnbe_gd_ed_m(instr)
+        }
+    }
+    pub fn cmovs_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovs_gd_ed_r(instr);
+            Ok(())
+        } else {
+            self.cmovs_gd_ed_m(instr)
+        }
+    }
+    pub fn cmovns_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovns_gd_ed_r(instr);
+            Ok(())
+        } else {
+            self.cmovns_gd_ed_m(instr)
+        }
+    }
+    pub fn cmovp_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovp_gd_ed_r(instr);
+            Ok(())
+        } else {
+            self.cmovp_gd_ed_m(instr)
+        }
+    }
+    pub fn cmovnp_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovnp_gd_ed_r(instr);
+            Ok(())
+        } else {
+            self.cmovnp_gd_ed_m(instr)
+        }
+    }
+    pub fn cmovl_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovl_gd_ed_r(instr);
+            Ok(())
+        } else {
+            self.cmovl_gd_ed_m(instr)
+        }
+    }
+    pub fn cmovnl_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovnl_gd_ed_r(instr);
+            Ok(())
+        } else {
+            self.cmovnl_gd_ed_m(instr)
+        }
+    }
+    pub fn cmovle_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovle_gd_ed_r(instr);
+            Ok(())
+        } else {
+            self.cmovle_gd_ed_m(instr)
+        }
+    }
+    pub fn cmovnle_gd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovnle_gd_ed_r(instr);
+            Ok(())
+        } else {
+            self.cmovnle_gd_ed_m(instr)
+        }
+    }
 
     // =========================================================================
     // CMOV 16-bit memory forms — Bochs data_xfer16.cc CMOV*_GwEwM
     // Memory operand is ALWAYS read per x86 spec.
     // =========================================================================
     pub fn cmovo_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_of() { self.set_gpr16(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_of() {
+            self.set_gpr16(instr.dst() as usize, op2);
+        }
         Ok(())
     }
     pub fn cmovno_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if !self.get_of() { self.set_gpr16(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if !self.get_of() {
+            self.set_gpr16(instr.dst() as usize, op2);
+        }
         Ok(())
     }
     pub fn cmovb_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_cf() { self.set_gpr16(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_cf() {
+            self.set_gpr16(instr.dst() as usize, op2);
+        }
         Ok(())
     }
     pub fn cmovnb_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if !self.get_cf() { self.set_gpr16(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if !self.get_cf() {
+            self.set_gpr16(instr.dst() as usize, op2);
+        }
         Ok(())
     }
     pub fn cmovz_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_zf() { self.set_gpr16(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_zf() {
+            self.set_gpr16(instr.dst() as usize, op2);
+        }
         Ok(())
     }
     pub fn cmovnz_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if !self.get_zf() { self.set_gpr16(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if !self.get_zf() {
+            self.set_gpr16(instr.dst() as usize, op2);
+        }
         Ok(())
     }
     pub fn cmovbe_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_cf() || self.get_zf() { self.set_gpr16(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_cf() || self.get_zf() {
+            self.set_gpr16(instr.dst() as usize, op2);
+        }
         Ok(())
     }
     pub fn cmovnbe_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if !self.get_cf() && !self.get_zf() { self.set_gpr16(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if !self.get_cf() && !self.get_zf() {
+            self.set_gpr16(instr.dst() as usize, op2);
+        }
         Ok(())
     }
     pub fn cmovs_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_sf() { self.set_gpr16(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_sf() {
+            self.set_gpr16(instr.dst() as usize, op2);
+        }
         Ok(())
     }
     pub fn cmovns_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if !self.get_sf() { self.set_gpr16(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if !self.get_sf() {
+            self.set_gpr16(instr.dst() as usize, op2);
+        }
         Ok(())
     }
     pub fn cmovp_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_pf() { self.set_gpr16(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_pf() {
+            self.set_gpr16(instr.dst() as usize, op2);
+        }
         Ok(())
     }
     pub fn cmovnp_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if !self.get_pf() { self.set_gpr16(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if !self.get_pf() {
+            self.set_gpr16(instr.dst() as usize, op2);
+        }
         Ok(())
     }
     pub fn cmovl_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_sf() != self.get_of() { self.set_gpr16(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_sf() != self.get_of() {
+            self.set_gpr16(instr.dst() as usize, op2);
+        }
         Ok(())
     }
     pub fn cmovnl_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_sf() == self.get_of() { self.set_gpr16(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_sf() == self.get_of() {
+            self.set_gpr16(instr.dst() as usize, op2);
+        }
         Ok(())
     }
     pub fn cmovle_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if self.get_zf() || self.get_sf() != self.get_of() { self.set_gpr16(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if self.get_zf() || self.get_sf() != self.get_of() {
+            self.set_gpr16(instr.dst() as usize, op2);
+        }
         Ok(())
     }
     pub fn cmovnle_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let op2 = self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
-        if !self.get_zf() && self.get_sf() == self.get_of() { self.set_gpr16(instr.dst() as usize, op2); }
+        let op2 =
+            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+        if !self.get_zf() && self.get_sf() == self.get_of() {
+            self.set_gpr16(instr.dst() as usize, op2);
+        }
         Ok(())
     }
 
     // =========================================================================
     // CMOV 16-bit unified dispatch wrappers
     // =========================================================================
-    pub fn cmovo_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovo_gw_ew_r(instr); Ok(()) } else { self.cmovo_gw_ew_m(instr) } }
-    pub fn cmovno_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovno_gw_ew_r(instr); Ok(()) } else { self.cmovno_gw_ew_m(instr) } }
-    pub fn cmovb_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovb_gw_ew_r(instr); Ok(()) } else { self.cmovb_gw_ew_m(instr) } }
-    pub fn cmovnb_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovnb_gw_ew_r(instr); Ok(()) } else { self.cmovnb_gw_ew_m(instr) } }
-    pub fn cmovz_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovz_gw_ew_r(instr); Ok(()) } else { self.cmovz_gw_ew_m(instr) } }
-    pub fn cmovnz_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovnz_gw_ew_r(instr); Ok(()) } else { self.cmovnz_gw_ew_m(instr) } }
-    pub fn cmovbe_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovbe_gw_ew_r(instr); Ok(()) } else { self.cmovbe_gw_ew_m(instr) } }
-    pub fn cmovnbe_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovnbe_gw_ew_r(instr); Ok(()) } else { self.cmovnbe_gw_ew_m(instr) } }
-    pub fn cmovs_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovs_gw_ew_r(instr); Ok(()) } else { self.cmovs_gw_ew_m(instr) } }
-    pub fn cmovns_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovns_gw_ew_r(instr); Ok(()) } else { self.cmovns_gw_ew_m(instr) } }
-    pub fn cmovp_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovp_gw_ew_r(instr); Ok(()) } else { self.cmovp_gw_ew_m(instr) } }
-    pub fn cmovnp_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovnp_gw_ew_r(instr); Ok(()) } else { self.cmovnp_gw_ew_m(instr) } }
-    pub fn cmovl_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovl_gw_ew_r(instr); Ok(()) } else { self.cmovl_gw_ew_m(instr) } }
-    pub fn cmovnl_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovnl_gw_ew_r(instr); Ok(()) } else { self.cmovnl_gw_ew_m(instr) } }
-    pub fn cmovle_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovle_gw_ew_r(instr); Ok(()) } else { self.cmovle_gw_ew_m(instr) } }
-    pub fn cmovnle_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> { if instr.mod_c0() { self.cmovnle_gw_ew_r(instr); Ok(()) } else { self.cmovnle_gw_ew_m(instr) } }
+    pub fn cmovo_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovo_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmovo_gw_ew_m(instr)
+        }
+    }
+    pub fn cmovno_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovno_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmovno_gw_ew_m(instr)
+        }
+    }
+    pub fn cmovb_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovb_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmovb_gw_ew_m(instr)
+        }
+    }
+    pub fn cmovnb_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovnb_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmovnb_gw_ew_m(instr)
+        }
+    }
+    pub fn cmovz_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovz_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmovz_gw_ew_m(instr)
+        }
+    }
+    pub fn cmovnz_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovnz_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmovnz_gw_ew_m(instr)
+        }
+    }
+    pub fn cmovbe_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovbe_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmovbe_gw_ew_m(instr)
+        }
+    }
+    pub fn cmovnbe_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovnbe_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmovnbe_gw_ew_m(instr)
+        }
+    }
+    pub fn cmovs_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovs_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmovs_gw_ew_m(instr)
+        }
+    }
+    pub fn cmovns_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovns_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmovns_gw_ew_m(instr)
+        }
+    }
+    pub fn cmovp_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovp_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmovp_gw_ew_m(instr)
+        }
+    }
+    pub fn cmovnp_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovnp_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmovnp_gw_ew_m(instr)
+        }
+    }
+    pub fn cmovl_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovl_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmovl_gw_ew_m(instr)
+        }
+    }
+    pub fn cmovnl_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovnl_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmovnl_gw_ew_m(instr)
+        }
+    }
+    pub fn cmovle_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovle_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmovle_gw_ew_m(instr)
+        }
+    }
+    pub fn cmovnle_gw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.cmovnle_gw_ew_r(instr);
+            Ok(())
+        } else {
+            self.cmovnle_gw_ew_m(instr)
+        }
+    }
 
     // =========================================================================
     // Helper functions for 32-bit memory operations

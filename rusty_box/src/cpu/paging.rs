@@ -191,7 +191,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if (entry[BX_LEVEL_PDE] & 0x80) != 0 && self.cr4.pse() {
             // Bochs paging.cc: check reserved bits in PSE PDE
             if (entry[BX_LEVEL_PDE] & PAGING_PDE4M_RESERVED_BITS) != 0 {
-                tracing::debug!("PSE PDE4M: reserved bit is set: PDE={:#010x}", entry[BX_LEVEL_PDE]);
+                tracing::debug!(
+                    "PSE PDE4M: reserved bit is set: PDE={:#010x}",
+                    entry[BX_LEVEL_PDE]
+                );
                 return Err(super::CpuError::Memory(
                     crate::memory::MemoryError::PageProtectionViolation,
                 ));
@@ -421,7 +424,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if (pde & 0x80) != 0 && self.cr4.pse() {
             // Bochs paging.cc: check reserved bits in PSE PDE
             if (pde & PAGING_PDE4M_RESERVED_BITS) != 0 {
-                tracing::debug!("system_write PSE PDE4M: reserved bit set: PDE={:#010x}", pde);
+                tracing::debug!(
+                    "system_write PSE PDE4M: reserved bit set: PDE={:#010x}",
+                    pde
+                );
                 return Err(super::CpuError::Memory(
                     crate::memory::MemoryError::PageNotPresent,
                 ));

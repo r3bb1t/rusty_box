@@ -105,7 +105,9 @@ pub fn AAD<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let tmp = (cpu.ah() as u16).wrapping_mul(instr.ib() as u16).wrapping_add(cpu.al() as u16);
+    let tmp = (cpu.ah() as u16)
+        .wrapping_mul(instr.ib() as u16)
+        .wrapping_add(cpu.al() as u16);
     cpu.set_ax(tmp & 0xFF);
 
     cpu.update_flags_logic8(cpu.al());

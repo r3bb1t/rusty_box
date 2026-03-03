@@ -468,7 +468,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             if level > 0 {
                 // do level-1 times
-                while { level -= 1; level } > 0 {
+                while {
+                    level -= 1;
+                    level
+                } > 0
+                {
                     ebp = ebp.wrapping_sub(4);
                     let temp32 = self.stack_read_dword(ebp)?;
                     self.push_32(temp32)?;
@@ -490,7 +494,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             if level > 0 {
                 // do level-1 times
-                while { level -= 1; level } > 0 {
+                while {
+                    level -= 1;
+                    level
+                } > 0
+                {
                     bp = bp.wrapping_sub(4) & 0xFFFF;
                     let temp32 = self.stack_read_dword(bp)?;
                     self.push_32(temp32)?;

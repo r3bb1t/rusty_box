@@ -252,9 +252,9 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             // Read trap word from TSS offset 0x64 (Bochs tasking.cc:405)
             let trap_word = self.system_read_word((nbase32 + 0x64) as u64)?;
             (
-                new_cr3, trap_word,
-                new_eip, new_eflags, new_eax, new_ecx, new_edx, new_ebx, new_esp, new_ebp, new_esi,
-                new_edi, raw_es, raw_cs, raw_ss, raw_ds, raw_fs, raw_gs, raw_ldt,
+                new_cr3, trap_word, new_eip, new_eflags, new_eax, new_ecx, new_edx, new_ebx,
+                new_esp, new_ebp, new_esi, new_edi, raw_es, raw_cs, raw_ss, raw_ds, raw_fs, raw_gs,
+                raw_ldt,
             )
         };
 
@@ -548,9 +548,19 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         // Instruction pointer must be in CS limit, else #GP(0) (Bochs tasking.cc:831-834)
-        let cs_limit = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.limit_scaled };
+        let cs_limit = unsafe {
+            self.sregs[BxSegregs::Cs as usize]
+                .cache
+                .u
+                .segment
+                .limit_scaled
+        };
         if new_eip > cs_limit {
-            tracing::error!("task_switch: EIP ({:#x}) > CS.limit ({:#x})", new_eip, cs_limit);
+            tracing::error!(
+                "task_switch: EIP ({:#x}) > CS.limit ({:#x})",
+                new_eip,
+                cs_limit
+            );
             self.speculative_rsp = false;
             return self.exception(Exception::Gp, 0);
         }

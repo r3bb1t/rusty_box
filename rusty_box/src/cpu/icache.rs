@@ -723,8 +723,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // Decode instruction based on CPU mode — Bochs style: write directly into mpool slot
             let long64 = self.long64_mode();
             let decode_result = if long64 {
-                fetchdecode64::fetch_decode64(current_fetch_ptr)
-                    .map(|instr| { self.i_cache.mpool[current_mpindex] = instr; })
+                fetchdecode64::fetch_decode64(current_fetch_ptr).map(|instr| {
+                    self.i_cache.mpool[current_mpindex] = instr;
+                })
             } else {
                 // Bochs fetchDecode32(fetchPtr, &mpool[mpindex], remain) — inplace, no copy
                 fetchdecode32::fetch_decode32_inplace(
@@ -750,9 +751,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     }
 
                     // Instruction is already in mpool[current_mpindex] — get its length
-                    let i_len = {
-                        self.i_cache.mpool[current_mpindex].meta_info.ilen as u32
-                    };
+                    let i_len = { self.i_cache.mpool[current_mpindex].meta_info.ilen as u32 };
 
                     // Call assignHandler during trace creation (matching C++ line 169)
                     // This checks feature flags and determines if trace should stop
@@ -848,7 +847,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     let current_remaining = remaining as usize;
                     tracing::debug!(
                         "DECODE-ERR n=0: remaining={} RIP={:#x} p_addr={:#x} err={:?}",
-                        current_remaining, self.rip(), current_p_addr, decode_err
+                        current_remaining,
+                        self.rip(),
+                        current_p_addr,
+                        decode_err
                     );
 
                     // If there are >= 15 bytes remaining, the instruction SHOULD have fit
@@ -1024,7 +1026,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         tracing::debug!(
             "boundary_fetch: remaining_in_page={} RIP={:#x} icount={}",
-            remaining_in_page, self.rip(), self.icount
+            remaining_in_page,
+            self.rip(),
+            self.icount
         );
 
         // Based on BX_CPU_C::boundaryFetch in icache.cc

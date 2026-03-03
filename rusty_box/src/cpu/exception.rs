@@ -379,7 +379,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // call exception() recursively so double-fault detection runs normally.
             match self.protected_mode_int(vector_u8, false, push_error, error_code) {
                 Ok(()) => {}
-                Err(super::error::CpuError::BadVector { vector: new_vector, error_code: new_error_code }) => {
+                Err(super::error::CpuError::BadVector {
+                    vector: new_vector,
+                    error_code: new_error_code,
+                }) => {
                     // Delivery failed — raise the indicated exception.
                     // Double-fault / triple-fault detection is in the recursive call.
                     tracing::warn!(

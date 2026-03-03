@@ -469,7 +469,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let (op1, laddr) = self.shift_read16(instr)?;
         let temp_cf = self.get_cf() as u32;
         let op1_32 = op1 as u32;
-        let result = ((op1_32 >> count) | (temp_cf << (16 - count)) | (op1_32 << (17 - count))) as u16;
+        let result =
+            ((op1_32 >> count) | (temp_cf << (16 - count)) | (op1_32 << (17 - count))) as u16;
         self.shift_write16(instr, laddr, result);
 
         let cf = (op1_32 >> (count - 1)) & 1;
@@ -488,7 +489,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let (op1, laddr) = self.shift_read16(instr)?;
         let temp_cf = self.get_cf() as u32;
         let op1_32 = op1 as u32;
-        let result = ((op1_32 >> count) | (temp_cf << (16 - count)) | (op1_32 << (17 - count))) as u16;
+        let result =
+            ((op1_32 >> count) | (temp_cf << (16 - count)) | (op1_32 << (17 - count))) as u16;
         self.shift_write16(instr, laddr, result);
 
         let cf = (op1_32 >> (count - 1)) & 1;

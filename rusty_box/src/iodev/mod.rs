@@ -19,20 +19,30 @@
 use alloc::{collections::VecDeque, string::String, vec::Vec};
 use core::ffi::c_void;
 
+pub mod acpi;
 pub mod cmos;
 pub mod devices;
 pub mod dma;
 pub mod harddrv;
+pub mod ioapic;
 pub mod keyboard;
+pub mod pci;
+pub mod pci2isa;
+pub mod pci_ide;
 pub mod pic;
 pub mod pit;
 pub mod vga;
 
 // Re-export device types for convenience
+pub use acpi::BxAcpiCtrl;
 pub use cmos::BxCmosC;
 pub use dma::BxDmaC;
 pub use harddrv::BxHardDriveC;
+pub use ioapic::BxIoApic;
 pub use keyboard::BxKeyboardC;
+pub use pci::BxPciBridge;
+pub use pci2isa::BxPiix3;
+pub use pci_ide::BxPciIde;
 pub use pic::BxPicC;
 pub use pit::BxPitC;
 // BxVgaC is pub(crate) - not exported outside the crate
