@@ -1951,6 +1951,125 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Fcos => self.fcos(instr),
             Opcode::Fsincos => self.fsincos(instr),
 
+            // =========================================================================
+            // MMX Instructions (mmx.rs)
+            // =========================================================================
+
+            // --- Core MMX (Pentium) ---
+            Opcode::PunpcklbwPqQd => self.punpcklbw_pq_qd(instr),
+            Opcode::PunpcklwdPqQd => self.punpcklwd_pq_qd(instr),
+            Opcode::PunpckldqPqQd => self.punpckldq_pq_qd(instr),
+            Opcode::PacksswbPqQq => self.packsswb_pq_qq(instr),
+            Opcode::PcmpgtbPqQq => self.pcmpgtb_pq_qq(instr),
+            Opcode::PcmpgtwPqQq => self.pcmpgtw_pq_qq(instr),
+            Opcode::PcmpgtdPqQq => self.pcmpgtd_pq_qq(instr),
+            Opcode::PackuswbPqQq => self.packuswb_pq_qq(instr),
+            Opcode::PunpckhbwPqQq => self.punpckhbw_pq_qq(instr),
+            Opcode::PunpckhwdPqQq => self.punpckhwd_pq_qq(instr),
+            Opcode::PunpckhdqPqQq => self.punpckhdq_pq_qq(instr),
+            Opcode::PackssdwPqQq => self.packssdw_pq_qq(instr),
+            // MOVD Pq, Ed — check mod_c0 for register vs memory form
+            Opcode::MovdPqEd => {
+                if instr.mod_c0() { self.movd_pq_ed_r(instr) }
+                else { self.movd_pq_ed_m(instr) }
+            }
+            // MOVQ Pq, Qq — check mod_c0 for register vs memory form
+            Opcode::MovqPqQq => {
+                if instr.mod_c0() { self.movq_pq_qq_r(instr) }
+                else { self.movq_pq_qq_m(instr) }
+            }
+            Opcode::PcmpeqbPqQq => self.pcmpeqb_pq_qq(instr),
+            Opcode::PcmpeqwPqQq => self.pcmpeqw_pq_qq(instr),
+            Opcode::PcmpeqdPqQq => self.pcmpeqd_pq_qq(instr),
+            Opcode::Emms => self.emms(instr),
+            // MOVD Ed, Pq — check mod_c0 for register vs memory form
+            Opcode::MovdEdPq => {
+                if instr.mod_c0() { self.movd_ed_pq_r(instr) }
+                else { self.movd_ed_pq_m(instr) }
+            }
+            // MOVQ Qq, Pq — check mod_c0 for register vs memory form
+            Opcode::MovqQqPq => {
+                if instr.mod_c0() { self.movq_qq_pq_r(instr) }
+                else { self.movq_qq_pq_m(instr) }
+            }
+            Opcode::PsrlwPqQq => self.psrlw_pq_qq(instr),
+            Opcode::PsrldPqQq => self.psrld_pq_qq(instr),
+            Opcode::PsrlqPqQq => self.psrlq_pq_qq(instr),
+            Opcode::PmullwPqQq => self.pmullw_pq_qq(instr),
+            Opcode::PsubusbPqQq => self.psubusb_pq_qq(instr),
+            Opcode::PsubuswPqQq => self.psubusw_pq_qq(instr),
+            Opcode::PandPqQq => self.pand_pq_qq(instr),
+            Opcode::PaddusbPqQq => self.paddusb_pq_qq(instr),
+            Opcode::PadduswPqQq => self.paddusw_pq_qq(instr),
+            Opcode::PandnPqQq => self.pandn_pq_qq(instr),
+            Opcode::PsrawPqQq => self.psraw_pq_qq(instr),
+            Opcode::PsradPqQq => self.psrad_pq_qq(instr),
+            Opcode::PmulhwPqQq => self.pmulhw_pq_qq(instr),
+            Opcode::PsubsbPqQq => self.psubsb_pq_qq(instr),
+            Opcode::PsubswPqQq => self.psubsw_pq_qq(instr),
+            Opcode::PorPqQq => self.por_pq_qq(instr),
+            Opcode::PaddsbPqQq => self.paddsb_pq_qq(instr),
+            Opcode::PaddswPqQq => self.paddsw_pq_qq(instr),
+            Opcode::PxorPqQq => self.pxor_pq_qq(instr),
+            Opcode::PsllwPqQq => self.psllw_pq_qq(instr),
+            Opcode::PslldPqQq => self.pslld_pq_qq(instr),
+            Opcode::PsllqPqQq => self.psllq_pq_qq(instr),
+            Opcode::PmaddwdPqQq => self.pmaddwd_pq_qq(instr),
+            Opcode::PsubbPqQq => self.psubb_pq_qq(instr),
+            Opcode::PsubwPqQq => self.psubw_pq_qq(instr),
+            Opcode::PsubdPqQq => self.psubd_pq_qq(instr),
+            Opcode::PaddbPqQq => self.paddb_pq_qq(instr),
+            Opcode::PaddwPqQq => self.paddw_pq_qq(instr),
+            Opcode::PadddPqQq => self.paddd_pq_qq(instr),
+            // Immediate shifts
+            Opcode::PsrlwNqIb => self.psrlw_nq_ib(instr),
+            Opcode::PsrawNqIb => self.psraw_nq_ib(instr),
+            Opcode::PsllwNqIb => self.psllw_nq_ib(instr),
+            Opcode::PsrldNqIb => self.psrld_nq_ib(instr),
+            Opcode::PsradNqIb => self.psrad_nq_ib(instr),
+            Opcode::PslldNqIb => self.pslld_nq_ib(instr),
+            Opcode::PsrlqNqIb => self.psrlq_nq_ib(instr),
+            Opcode::PsllqNqIb => self.psllq_nq_ib(instr),
+
+            // --- SSE-era MMX extensions ---
+            Opcode::PshufwPqQqIb => self.pshufw_pq_qq_ib(instr),
+            Opcode::PinsrwPqEwIb => self.pinsrw_pq_ew_ib(instr),
+            Opcode::PextrwGdNqIb => self.pextrw_gd_nq_ib(instr),
+            Opcode::PmovmskbGdNq => self.pmovmskb_gd_nq(instr),
+            Opcode::PminubPqQq => self.pminub_pq_qq(instr),
+            Opcode::PmaxubPqQq => self.pmaxub_pq_qq(instr),
+            Opcode::PavgbPqQq => self.pavgb_pq_qq(instr),
+            Opcode::PavgwPqQq => self.pavgw_pq_qq(instr),
+            Opcode::PmulhuwPqQq => self.pmulhuw_pq_qq(instr),
+            Opcode::MovntqMqPq => self.movntq_mq_pq(instr),
+            Opcode::PminswPqQq => self.pminsw_pq_qq(instr),
+            Opcode::PmaxswPqQq => self.pmaxsw_pq_qq(instr),
+            Opcode::PsadbwPqQq => self.psadbw_pq_qq(instr),
+            Opcode::MaskmovqPqNq => self.maskmovq_pq_nq(instr),
+
+            // --- SSE2-era MMX extensions ---
+            Opcode::PaddqPqQq => self.paddq_pq_qq(instr),
+            Opcode::PsubqPqQq => self.psubq_pq_qq(instr),
+            Opcode::PmuludqPqQq => self.pmuludq_pq_qq(instr),
+
+            // --- SSSE3 MMX extensions ---
+            Opcode::PshufbPqQq => self.pshufb_pq_qq(instr),
+            Opcode::PhaddwPqQq => self.phaddw_pq_qq(instr),
+            Opcode::PhadddPqQq => self.phaddd_pq_qq(instr),
+            Opcode::PhaddswPqQq => self.phaddsw_pq_qq(instr),
+            Opcode::PmaddubswPqQq => self.pmaddubsw_pq_qq(instr),
+            Opcode::PhsubwPqQq => self.phsubw_pq_qq(instr),
+            Opcode::PhsubdPqQq => self.phsubd_pq_qq(instr),
+            Opcode::PhsubswPqQq => self.phsubsw_pq_qq(instr),
+            Opcode::PsignbPqQq => self.psignb_pq_qq(instr),
+            Opcode::PsignwPqQq => self.psignw_pq_qq(instr),
+            Opcode::PsigndPqQq => self.psignd_pq_qq(instr),
+            Opcode::PmulhrswPqQq => self.pmulhrsw_pq_qq(instr),
+            Opcode::PabsbPqQq => self.pabsb_pq_qq(instr),
+            Opcode::PabswPqQq => self.pabsw_pq_qq(instr),
+            Opcode::PabsdPqQq => self.pabsd_pq_qq(instr),
+            Opcode::PalignrPqQqIb => self.palignr_pq_qq_ib(instr),
+
             // End-of-trace sentinel (matching C++ BxEndTrace).
             // Sets STOP_TRACE so the inner loop breaks at the async_event check.
             Opcode::InsertedOpcode => {

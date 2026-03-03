@@ -576,6 +576,12 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     /// Load segment register (handles both real and protected mode)
     /// Based on BX_CPU_C::load_seg_reg in segment_ctrl_pro.cc:28-177
     pub(super) fn load_seg_reg(&mut self, seg: BxSegregs, new_value: u16) -> Result<()> {
+        // V8086 mode: use real-mode style loading (Bochs segment_ctrl_pro.cc:156-177)
+        if self.v8086_mode() {
+            self.load_seg_reg_real_mode(seg, new_value);
+            return Ok(());
+        }
+
         if !self.real_mode() {
             // Protected mode
             if seg as usize == BxSegregs::Ss as usize {

@@ -60,7 +60,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if self.real_mode() {
             self.interrupt_real_mode(vector)?;
         } else {
-            // Protected mode: dispatch through IDT
+            // V8086 mode software interrupt: try VME redirect first
+            // Bochs exception.cc: v86_redirect_interrupt checked before protected_mode_int
+            if self.v8086_mode() && soft_int {
+                if self.v86_redirect_interrupt(vector)? {
+                    // Interrupt was redirected through virtual IVT
+                    self.speculative_rsp = false;
+                    self.ext = false;
+                    self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
+                    return Err(super::error::CpuError::CpuLoopRestart);
+                }
+            }
+
+            // Protected mode (or V86 non-redirected): dispatch through IDT
             match self.protected_mode_int(vector, soft_int, push_error, error_code) {
                 Ok(()) => {}
                 Err(super::error::CpuError::BadVector {
@@ -245,12 +257,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Invalidate prefetch queue at entry (Bochs ctrl_xfer16.cc:541)
         self.invalidate_prefetch_q();
 
+        // V8086 mode dispatch (Bochs ctrl_xfer16.cc:545-547)
+        // Must be checked BEFORE protected_mode() since V86 is neither real nor protected
+        if self.v8086_mode() {
+            return self.iret16_stack_return_from_v86();
+        }
+
         // Protected mode dispatch (Bochs ctrl_xfer16.cc:554)
         if self.protected_mode() {
             return self.iret_protected_16();
         }
-        // V8086 mode is handled by protected_mode check
-        // (v8086_mode has CR0.PE=1, handled above)
 
         // RSP_SPECULATIVE (Bochs ctrl_xfer16.cc:552)
         self.speculative_rsp = true;
@@ -293,12 +309,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Invalidate prefetch queue at entry (Bochs ctrl_xfer32.cc:563)
         self.invalidate_prefetch_q();
 
+        // V8086 mode dispatch (Bochs ctrl_xfer32.cc:565-567)
+        // Must be checked BEFORE protected_mode() since V86 is neither real nor protected
+        if self.v8086_mode() {
+            return self.iret32_stack_return_from_v86();
+        }
+
         // Protected mode dispatch (Bochs ctrl_xfer32.cc:574)
         if self.protected_mode() {
             return self.iret_protected();
         }
-        // V8086 mode — not implemented yet (Linux 1.3.89 doesn't use it)
-        // Bochs calls iret32_stack_return_from_v86 here
 
         // RSP_SPECULATIVE (Bochs ctrl_xfer32.cc:574)
         self.speculative_rsp = true;
@@ -417,11 +437,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let new_eflags = self.stack_read_dword(temp_esp + 8)?;
 
         // If VM bit is set in the saved EFLAGS and CPL==0, stack-return to V86 mode.
-        // Not implemented; just log and continue (Linux never does this).
+        // Bochs iret.cc:121-131
         if (new_eflags & EFlags::VM.bits()) != 0 {
-            tracing::warn!(
-                "iret_protected: VM bit set in saved EFLAGS — V86 return not implemented"
-            );
+            let current_cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+            if current_cpl == 0 {
+                self.stack_return_to_v86(new_eip, raw_cs_raw as u32, new_eflags)?;
+                self.speculative_rsp = false;
+                return Ok(());
+            } else {
+                tracing::error!("iret_protected: VM bit set but CPL={} != 0", current_cpl);
+                return self.exception(Exception::Gp, 0);
+            }
         }
 
         // Return CS selector must be non-null

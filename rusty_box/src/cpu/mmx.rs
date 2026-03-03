@@ -1,0 +1,1676 @@
+//! MMX instruction set implementation
+//!
+//! Based on Bochs cpu/mmx.cc
+//! Copyright (C) 2001-2018 The Bochs Project
+//!
+//! Implements all MMX instructions including:
+//! - Data movement (MOVD, MOVQ, EMMS)
+//! - Packed arithmetic (PADD, PSUB, PMULL, PMADDWD, etc.)
+//! - Packed logical (PAND, POR, PXOR, PANDN)
+//! - Packed shift (PSLL, PSRL, PSRA by register and immediate)
+//! - Packed compare (PCMPEQ, PCMPGT)
+//! - Pack/Unpack (PUNPCKL/H, PACKS, PACKUS)
+//! - SSE-era MMX extensions (PSHUFW, PINSRW, PEXTRW, PMOVMSKB, etc.)
+//! - SSSE3 MMX extensions (PSHUFB, PHADD, PHSUB, PSIGN, PABS, PALIGNR)
+
+use super::{
+    cpu::BxCpuC,
+    cpuid::BxCpuIdTrait,
+    decoder::{BxSegregs, Instruction},
+    i387::BxPackedRegister,
+};
+
+// ============================================================================
+// Saturation helpers (matching Bochs mmx.cc inline functions)
+// ============================================================================
+
+/// Saturate a signed 16-bit value to signed 8-bit range [-128, 127]
+#[inline]
+fn saturate_word_s_to_byte_s(val: i16) -> i8 {
+    if val > 127 {
+        127
+    } else if val < -128 {
+        -128
+    } else {
+        val as i8
+    }
+}
+
+/// Saturate a signed 16-bit value to unsigned 8-bit range [0, 255]
+#[inline]
+fn saturate_word_s_to_byte_u(val: i16) -> u8 {
+    if val > 255 {
+        255
+    } else if val < 0 {
+        0
+    } else {
+        val as u8
+    }
+}
+
+/// Saturate a signed 32-bit value to signed 16-bit range [-32768, 32767]
+#[inline]
+fn saturate_dword_s_to_word_s(val: i32) -> i16 {
+    if val > 32767 {
+        32767
+    } else if val < -32768 {
+        -32768
+    } else {
+        val as i16
+    }
+}
+
+impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    // ========================================================================
+    // MMX infrastructure
+    // ========================================================================
+
+    /// Transition from FPU to MMX state.
+    /// Bochs: BX_CPU_C::prepareFPU2MMX() from proc_ctrl.cc
+    /// Sets TOS=0 and all FPU tags to valid (0).
+    #[inline]
+    fn prepare_fpu2mmx(&mut self) {
+        self.the_i387.tos = 0;
+        self.the_i387.twd = 0; // all tags = valid
+    }
+
+    /// Read MMX register by physical index (NOT TOS-rotated).
+    /// MMX registers alias the significand (64-bit) of FPU st_space.
+    /// Bochs: BX_READ_MMX_REG(index)
+    #[inline]
+    fn read_mmx_reg(&self, index: u8) -> BxPackedRegister {
+        let signif = self.the_i387.st_space[index as usize & 7].signif;
+        BxPackedRegister { U64: signif }
+    }
+
+    /// Write MMX register by physical index.
+    /// Also sets sign_exp = 0xFFFF (marking as MMX-modified).
+    /// Bochs: BX_WRITE_MMX_REG(index, val)
+    #[inline]
+    fn write_mmx_reg(&mut self, index: u8, val: BxPackedRegister) {
+        let reg = &mut self.the_i387.st_space[index as usize & 7];
+        reg.signif = unsafe { val.U64 };
+        reg.sign_exp = 0xFFFF;
+    }
+
+    /// Read the op2 operand: register if modC0, else read qword from memory.
+    /// This is the most common pattern in MMX instructions.
+    #[inline]
+    fn mmx_read_op2_qq(&mut self, instr: &Instruction) -> super::Result<BxPackedRegister> {
+        if instr.mod_c0() {
+            Ok(self.read_mmx_reg(instr.src1()))
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr32(instr);
+            let val = self.read_virtual_qword(seg, eaddr)?;
+            Ok(BxPackedRegister { U64: val })
+        }
+    }
+
+    /// Read op2 as dword (for PUNPCKL* instructions that read 32-bit from memory)
+    #[inline]
+    fn mmx_read_op2_qd(&mut self, instr: &Instruction) -> super::Result<BxPackedRegister> {
+        if instr.mod_c0() {
+            Ok(self.read_mmx_reg(instr.src1()))
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr32(instr);
+            let val = self.read_virtual_dword(seg, eaddr)? as u64;
+            Ok(BxPackedRegister { U64: val })
+        }
+    }
+
+    // ========================================================================
+    // SSSE3 MMX-register forms (0F 38 xx / 0F 3A xx)
+    // Bochs mmx.cc:44-517
+    // ========================================================================
+
+    /// PSHUFB PqQq (0F 38 00) - Packed Shuffle Bytes
+    /// Bochs mmx.cc:44
+    pub(super) fn pshufb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut result = BxPackedRegister { U64: 0 };
+        for j in 0..8u8 {
+            let mask = unsafe { op2.Ubyte[j as usize] };
+            if mask & 0x80 != 0 {
+                unsafe { result.Ubyte[j as usize] = 0 };
+            } else {
+                unsafe { result.Ubyte[j as usize] = op1.Ubyte[(mask & 7) as usize] };
+            }
+        }
+        self.write_mmx_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    /// PHADDW PqQq (0F 38 01) - Packed Horizontal Add Words
+    /// Bochs mmx.cc:77
+    pub(super) fn phaddw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            r.U16[0] = op1.U16[0].wrapping_add(op1.U16[1]);
+            r.U16[1] = op1.U16[2].wrapping_add(op1.U16[3]);
+            r.U16[2] = op2.U16[0].wrapping_add(op2.U16[1]);
+            r.U16[3] = op2.U16[2].wrapping_add(op2.U16[3]);
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PHADDD PqQq (0F 38 02) - Packed Horizontal Add Dwords
+    /// Bochs mmx.cc:106
+    pub(super) fn phaddd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            r.U32[0] = op1.U32[0].wrapping_add(op1.U32[1]);
+            r.U32[1] = op2.U32[0].wrapping_add(op2.U32[1]);
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PHADDSW PqQq (0F 38 03) - Packed Horizontal Add Saturate Words
+    /// Bochs mmx.cc:133
+    pub(super) fn phaddsw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            r.S16[0] = saturate_dword_s_to_word_s(op1.S16[0] as i32 + op1.S16[1] as i32);
+            r.S16[1] = saturate_dword_s_to_word_s(op1.S16[2] as i32 + op1.S16[3] as i32);
+            r.S16[2] = saturate_dword_s_to_word_s(op2.S16[0] as i32 + op2.S16[1] as i32);
+            r.S16[3] = saturate_dword_s_to_word_s(op2.S16[2] as i32 + op2.S16[3] as i32);
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PMADDUBSW PqQq (0F 38 04) - Multiply Unsigned/Signed Bytes, Add Pairs
+    /// Bochs mmx.cc:162
+    pub(super) fn pmaddubsw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..4usize {
+                let t = (op1.Ubyte[j * 2] as i32) * (op2.Sbyte[j * 2] as i32)
+                    + (op1.Ubyte[j * 2 + 1] as i32) * (op2.Sbyte[j * 2 + 1] as i32);
+                r.S16[j] = saturate_dword_s_to_word_s(t);
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PHSUBW PqQq (0F 38 05) - Packed Horizontal Subtract Words
+    /// Bochs mmx.cc:223
+    pub(super) fn phsubw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            r.U16[0] = op1.U16[0].wrapping_sub(op1.U16[1]);
+            r.U16[1] = op1.U16[2].wrapping_sub(op1.U16[3]);
+            r.U16[2] = op2.U16[0].wrapping_sub(op2.U16[1]);
+            r.U16[3] = op2.U16[2].wrapping_sub(op2.U16[3]);
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PHSUBD PqQq (0F 38 06) - Packed Horizontal Subtract Dwords
+    /// Bochs mmx.cc:252
+    pub(super) fn phsubd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            r.U32[0] = op1.U32[0].wrapping_sub(op1.U32[1]);
+            r.U32[1] = op2.U32[0].wrapping_sub(op2.U32[1]);
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PHSUBSW PqQq (0F 38 07) - Packed Horizontal Subtract Saturate Words
+    /// Bochs mmx.cc:194
+    pub(super) fn phsubsw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            r.S16[0] = saturate_dword_s_to_word_s(op1.S16[0] as i32 - op1.S16[1] as i32);
+            r.S16[1] = saturate_dword_s_to_word_s(op1.S16[2] as i32 - op1.S16[3] as i32);
+            r.S16[2] = saturate_dword_s_to_word_s(op2.S16[0] as i32 - op2.S16[1] as i32);
+            r.S16[3] = saturate_dword_s_to_word_s(op2.S16[2] as i32 - op2.S16[3] as i32);
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PSIGNB PqQq (0F 38 08) - Negate/Zero/Keep Bytes Based on Sign
+    /// Bochs mmx.cc:279
+    pub(super) fn psignb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = op1;
+        unsafe {
+            for j in 0..8usize {
+                if op2.Sbyte[j] < 0 {
+                    r.Sbyte[j] = -(op1.Sbyte[j] as i16) as i8;
+                } else if op2.Sbyte[j] == 0 {
+                    r.Ubyte[j] = 0;
+                }
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PSIGNW PqQq (0F 38 09)
+    /// Bochs mmx.cc:308
+    pub(super) fn psignw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = op1;
+        unsafe {
+            for j in 0..4usize {
+                if op2.S16[j] < 0 {
+                    r.S16[j] = -(op1.S16[j] as i32) as i16;
+                } else if op2.S16[j] == 0 {
+                    r.U16[j] = 0;
+                }
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PSIGND PqQq (0F 38 0A)
+    /// Bochs mmx.cc:337
+    pub(super) fn psignd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = op1;
+        unsafe {
+            for j in 0..2usize {
+                if op2.S32[j] < 0 {
+                    r.S32[j] = -(op1.S32[j] as i64) as i32;
+                } else if op2.S32[j] == 0 {
+                    r.U32[j] = 0;
+                }
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PMULHRSW PqQq (0F 38 0B)
+    /// Bochs mmx.cc:368
+    pub(super) fn pmulhrsw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..4usize {
+                let t = ((op1.S16[j] as i32) * (op2.S16[j] as i32) >> 14) + 1;
+                r.S16[j] = (t >> 1) as i16;
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PABSB PqQq (0F 38 1C) - Packed Absolute Value Bytes
+    /// Bochs mmx.cc:397
+    pub(super) fn pabsb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..8usize {
+                r.Sbyte[j] = if op2.Sbyte[j] < 0 {
+                    -(op2.Sbyte[j] as i16) as i8
+                } else {
+                    op2.Sbyte[j]
+                };
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PABSW PqQq (0F 38 1D)
+    /// Bochs mmx.cc:429
+    pub(super) fn pabsw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..4usize {
+                r.S16[j] = if op2.S16[j] < 0 {
+                    -(op2.S16[j] as i32) as i16
+                } else {
+                    op2.S16[j]
+                };
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PABSD PqQq (0F 38 1E)
+    /// Bochs mmx.cc:457
+    pub(super) fn pabsd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..2usize {
+                r.S32[j] = if op2.S32[j] < 0 {
+                    -(op2.S32[j] as i64) as i32
+                } else {
+                    op2.S32[j]
+                };
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PALIGNR PqQqIb (0F 3A 0F) - Byte-align concatenated qwords
+    /// Bochs mmx.cc:483
+    pub(super) fn palignr_pq_qq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let shift = (instr.ib() & 0x1f) * 8;
+        let r = if shift == 0 {
+            op2
+        } else if shift < 64 {
+            unsafe {
+                BxPackedRegister {
+                    U64: (op2.U64 >> shift) | (op1.U64 << (64 - shift)),
+                }
+            }
+        } else if shift == 64 {
+            op1
+        } else if shift < 128 {
+            unsafe {
+                BxPackedRegister {
+                    U64: op1.U64 >> (shift - 64),
+                }
+            }
+        } else {
+            BxPackedRegister { U64: 0 }
+        };
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    // ========================================================================
+    // MMX unpack low (0F 60-62) — Bochs mmx.cc:519-611
+    // ========================================================================
+
+    /// PUNPCKLBW PqQd (0F 60) — Unpack Low Bytes
+    /// Bochs mmx.cc:520
+    pub(super) fn punpcklbw_pq_qd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qd(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            r.Ubyte[7] = op2.Ubyte[3];
+            r.Ubyte[6] = op1.Ubyte[3];
+            r.Ubyte[5] = op2.Ubyte[2];
+            r.Ubyte[4] = op1.Ubyte[2];
+            r.Ubyte[3] = op2.Ubyte[1];
+            r.Ubyte[2] = op1.Ubyte[1];
+            r.Ubyte[1] = op2.Ubyte[0];
+            r.Ubyte[0] = op1.Ubyte[0];
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PUNPCKLWD PqQd (0F 61) — Unpack Low Words
+    /// Bochs mmx.cc:555
+    pub(super) fn punpcklwd_pq_qd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qd(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            r.U16[3] = op2.U16[1];
+            r.U16[2] = op1.U16[1];
+            r.U16[1] = op2.U16[0];
+            r.U16[0] = op1.U16[0];
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PUNPCKLDQ PqQd (0F 62) — Unpack Low Dwords
+    /// Bochs mmx.cc:586
+    pub(super) fn punpckldq_pq_qd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qd(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            r.U32[1] = op2.U32[0];
+            r.U32[0] = op1.U32[0];
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    // ========================================================================
+    // Pack and Compare (0F 63-6B) — Bochs mmx.cc:613-903
+    // ========================================================================
+
+    /// PACKSSWB PqQq (0F 63) — Pack Signed Words to Signed Bytes
+    /// Bochs mmx.cc:614
+    pub(super) fn packsswb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            r.Sbyte[0] = saturate_word_s_to_byte_s(op1.S16[0]);
+            r.Sbyte[1] = saturate_word_s_to_byte_s(op1.S16[1]);
+            r.Sbyte[2] = saturate_word_s_to_byte_s(op1.S16[2]);
+            r.Sbyte[3] = saturate_word_s_to_byte_s(op1.S16[3]);
+            r.Sbyte[4] = saturate_word_s_to_byte_s(op2.S16[0]);
+            r.Sbyte[5] = saturate_word_s_to_byte_s(op2.S16[1]);
+            r.Sbyte[6] = saturate_word_s_to_byte_s(op2.S16[2]);
+            r.Sbyte[7] = saturate_word_s_to_byte_s(op2.S16[3]);
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PCMPGTB PqQq (0F 64) — Compare Greater Than Bytes
+    /// Bochs mmx.cc:650
+    pub(super) fn pcmpgtb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..8usize {
+                r.Ubyte[j] = if op1.Sbyte[j] > op2.Sbyte[j] { 0xff } else { 0 };
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PCMPGTW PqQq (0F 65)
+    /// Bochs mmx.cc:685
+    pub(super) fn pcmpgtw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..4usize {
+                r.U16[j] = if op1.S16[j] > op2.S16[j] { 0xffff } else { 0 };
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PCMPGTD PqQq (0F 66)
+    /// Bochs mmx.cc:716
+    pub(super) fn pcmpgtd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..2usize {
+                r.U32[j] = if op1.S32[j] > op2.S32[j] { 0xffffffff } else { 0 };
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PACKUSWB PqQq (0F 67) — Pack Signed Words to Unsigned Bytes
+    /// Bochs mmx.cc:745
+    pub(super) fn packuswb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            r.Ubyte[0] = saturate_word_s_to_byte_u(op1.S16[0]);
+            r.Ubyte[1] = saturate_word_s_to_byte_u(op1.S16[1]);
+            r.Ubyte[2] = saturate_word_s_to_byte_u(op1.S16[2]);
+            r.Ubyte[3] = saturate_word_s_to_byte_u(op1.S16[3]);
+            r.Ubyte[4] = saturate_word_s_to_byte_u(op2.S16[0]);
+            r.Ubyte[5] = saturate_word_s_to_byte_u(op2.S16[1]);
+            r.Ubyte[6] = saturate_word_s_to_byte_u(op2.S16[2]);
+            r.Ubyte[7] = saturate_word_s_to_byte_u(op2.S16[3]);
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PUNPCKHBW PqQq (0F 68) — Unpack High Bytes
+    /// Bochs mmx.cc:780
+    pub(super) fn punpckhbw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            r.Ubyte[0] = op1.Ubyte[4]; r.Ubyte[1] = op2.Ubyte[4];
+            r.Ubyte[2] = op1.Ubyte[5]; r.Ubyte[3] = op2.Ubyte[5];
+            r.Ubyte[4] = op1.Ubyte[6]; r.Ubyte[5] = op2.Ubyte[6];
+            r.Ubyte[6] = op1.Ubyte[7]; r.Ubyte[7] = op2.Ubyte[7];
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PUNPCKHWD PqQq (0F 69) — Unpack High Words
+    /// Bochs mmx.cc:815
+    pub(super) fn punpckhwd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            r.U16[0] = op1.U16[2]; r.U16[1] = op2.U16[2];
+            r.U16[2] = op1.U16[3]; r.U16[3] = op2.U16[3];
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PUNPCKHDQ PqQq (0F 6A) — Unpack High Dwords
+    /// Bochs mmx.cc:846
+    pub(super) fn punpckhdq_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            r.U32[0] = op1.U32[1];
+            r.U32[1] = op2.U32[1];
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PACKSSDW PqQq (0F 6B) — Pack Signed Dwords to Signed Words
+    /// Bochs mmx.cc:875
+    pub(super) fn packssdw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            r.S16[0] = saturate_dword_s_to_word_s(op1.S32[0]);
+            r.S16[1] = saturate_dword_s_to_word_s(op1.S32[1]);
+            r.S16[2] = saturate_dword_s_to_word_s(op2.S32[0]);
+            r.S16[3] = saturate_dword_s_to_word_s(op2.S32[1]);
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    // ========================================================================
+    // MOVD/MOVQ — Data transfer (0F 6E, 0F 6F, 0F 7E, 0F 7F)
+    // Bochs mmx.cc:905-1180
+    // ========================================================================
+
+    /// MOVD PqEd (0F 6E) — register form: move 32-bit GPR to MMX
+    /// Bochs mmx.cc:906
+    pub(super) fn movd_pq_ed_r(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let val = self.get_gpr32(instr.src1() as usize) as u64;
+        self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: val });
+        Ok(())
+    }
+
+    /// MOVD PqEd (0F 6E) — memory form
+    /// Bochs mmx.cc:919
+    pub(super) fn movd_pq_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr32(instr);
+        let val = self.read_virtual_dword(seg, eaddr)? as u64;
+        self.prepare_fpu2mmx();
+        self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: val });
+        Ok(())
+    }
+
+    /// MOVQ PqQq (0F 6F) — register form: MMX to MMX
+    /// Bochs mmx.cc:950
+    pub(super) fn movq_pq_qq_r(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let val = self.read_mmx_reg(instr.src1());
+        self.write_mmx_reg(instr.dst(), val);
+        Ok(())
+    }
+
+    /// MOVQ PqQq (0F 6F) — memory form
+    /// Bochs mmx.cc:962
+    pub(super) fn movq_pq_qq_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr32(instr);
+        let val = self.read_virtual_qword(seg, eaddr)?;
+        self.prepare_fpu2mmx();
+        self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: val });
+        Ok(())
+    }
+
+    /// PSHUFW PqQqIb (0F 70) — Shuffle Words
+    /// Bochs mmx.cc:979
+    pub(super) fn pshufw_pq_qq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let order = instr.ib();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            r.U16[0] = op.U16[(order & 3) as usize];
+            r.U16[1] = op.U16[((order >> 2) & 3) as usize];
+            r.U16[2] = op.U16[((order >> 4) & 3) as usize];
+            r.U16[3] = op.U16[((order >> 6) & 3) as usize];
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PCMPEQB PqQq (0F 74)
+    /// Bochs mmx.cc:1011
+    pub(super) fn pcmpeqb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..8usize {
+                r.Ubyte[j] = if op1.Ubyte[j] == op2.Ubyte[j] { 0xff } else { 0 };
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PCMPEQW PqQq (0F 75)
+    /// Bochs mmx.cc:1046
+    pub(super) fn pcmpeqw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..4usize {
+                r.U16[j] = if op1.U16[j] == op2.U16[j] { 0xffff } else { 0 };
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PCMPEQD PqQq (0F 76)
+    /// Bochs mmx.cc:1077
+    pub(super) fn pcmpeqd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..2usize {
+                r.U32[j] = if op1.U32[j] == op2.U32[j] { 0xffffffff } else { 0 };
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// EMMS (0F 77) — Empty MMX State
+    /// Bochs mmx.cc:1106
+    pub(super) fn emms(&mut self, _instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.the_i387.twd = 0xFFFF; // all tags = empty
+        self.the_i387.tos = 0;
+        Ok(())
+    }
+
+    /// MOVD EdPq (0F 7E) — register form: MMX low dword to 32-bit GPR
+    /// Bochs mmx.cc:1118
+    pub(super) fn movd_ed_pq_r(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let op = self.read_mmx_reg(instr.src1());
+        let val = unsafe { op.U32[0] };
+        self.set_gpr32(instr.dst() as usize, val);
+        Ok(())
+    }
+
+    /// MOVD EdPq (0F 7E) — memory form
+    /// Bochs mmx.cc:1131
+    pub(super) fn movd_ed_pq_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op = self.read_mmx_reg(instr.src1());
+        let val = unsafe { op.U32[0] };
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr32(instr);
+        self.write_virtual_dword(seg, eaddr, val)?;
+        self.prepare_fpu2mmx();
+        Ok(())
+    }
+
+    /// MOVQ QqPq (0F 7F) / MOVNTQ MqPq (0F E7) — store MMX to memory
+    /// Bochs mmx.cc:1166
+    pub(super) fn movq_qq_pq_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let val = unsafe { self.read_mmx_reg(instr.src1()).U64 };
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr32(instr);
+        self.write_virtual_qword(seg, eaddr, val)?;
+        self.prepare_fpu2mmx();
+        Ok(())
+    }
+
+    // ========================================================================
+    // Insert/Extract word (0F C4, 0F C5) — Bochs mmx.cc:1182-1225
+    // ========================================================================
+
+    /// PINSRW PqEwIb (0F C4) — Insert Word
+    /// Bochs mmx.cc:1183
+    pub(super) fn pinsrw_pq_ew_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let mut op1 = self.read_mmx_reg(instr.dst());
+        let op2 = if instr.mod_c0() {
+            self.get_gpr16(instr.src1() as usize)
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr32(instr);
+            self.read_virtual_word(seg, eaddr)?
+        };
+        self.prepare_fpu2mmx();
+        unsafe { op1.U16[(instr.ib() & 3) as usize] = op2 };
+        self.write_mmx_reg(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// PEXTRW GdNqIb (0F C5) — Extract Word
+    /// Bochs mmx.cc:1212
+    pub(super) fn pextrw_gd_nq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let op = self.read_mmx_reg(instr.src1());
+        let result = unsafe { op.U16[(instr.ib() & 3) as usize] } as u32;
+        self.set_gpr32(instr.dst() as usize, result);
+        Ok(())
+    }
+
+    // ========================================================================
+    // Shift right, add qword, multiply (0F D1-D7)
+    // ========================================================================
+
+    /// PSRLW PqQq (0F D1)
+    /// Bochs mmx.cc:1228
+    pub(super) fn psrlw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let mut op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let count = unsafe { op2.U64 };
+        if count > 15 {
+            op1 = BxPackedRegister { U64: 0 };
+        } else {
+            let shift = count as u16;
+            unsafe {
+                op1.U16[0] >>= shift; op1.U16[1] >>= shift;
+                op1.U16[2] >>= shift; op1.U16[3] >>= shift;
+            }
+        }
+        self.write_mmx_reg(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// PSRLD PqQq (0F D2)
+    /// Bochs mmx.cc:1265
+    pub(super) fn psrld_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let mut op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let count = unsafe { op2.U64 };
+        if count > 31 {
+            op1 = BxPackedRegister { U64: 0 };
+        } else {
+            let shift = count as u32;
+            unsafe { op1.U32[0] >>= shift; op1.U32[1] >>= shift; }
+        }
+        self.write_mmx_reg(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// PSRLQ PqQq (0F D3)
+    /// Bochs mmx.cc:1300
+    pub(super) fn psrlq_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let mut op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let count = unsafe { op2.U64 };
+        if count > 63 { op1 = BxPackedRegister { U64: 0 }; }
+        else { unsafe { op1.U64 >>= count; } }
+        self.write_mmx_reg(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// PADDQ PqQq (0F D4) — Add Packed Qword
+    /// Bochs mmx.cc:1333
+    pub(super) fn paddq_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let r = BxPackedRegister { U64: unsafe { op1.U64.wrapping_add(op2.U64) } };
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PMULLW PqQq (0F D5) — Multiply Low Words
+    /// Bochs mmx.cc:1361
+    pub(super) fn pmullw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..4usize {
+                r.U16[j] = (op1.U16[j] as u32).wrapping_mul(op2.U16[j] as u32) as u16;
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PMOVMSKB GdNq (0F D7) — Move Byte Mask
+    /// Bochs mmx.cc:1397
+    pub(super) fn pmovmskb_gd_nq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let op = self.read_mmx_reg(instr.src1());
+        let mut mask = 0u32;
+        unsafe {
+            for j in 0..8usize {
+                if op.Ubyte[j] & 0x80 != 0 { mask |= 1 << j; }
+            }
+        }
+        self.set_gpr32(instr.dst() as usize, mask);
+        Ok(())
+    }
+
+    // ========================================================================
+    // Unsigned sub/add with saturation, min/max (0F D8-DE)
+    // ========================================================================
+
+    /// PSUBUSB PqQq (0F D8)
+    pub(super) fn psubusb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..8usize { r.Ubyte[j] = op1.Ubyte[j].saturating_sub(op2.Ubyte[j]); }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PSUBUSW PqQq (0F D9)
+    pub(super) fn psubusw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe { for j in 0..4usize { r.U16[j] = op1.U16[j].saturating_sub(op2.U16[j]); } }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PMINUB PqQq (0F DA)
+    pub(super) fn pminub_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe { for j in 0..8usize { r.Ubyte[j] = op1.Ubyte[j].min(op2.Ubyte[j]); } }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PAND PqQq (0F DB)
+    pub(super) fn pand_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: unsafe { op1.U64 & op2.U64 } });
+        Ok(())
+    }
+
+    /// PADDUSB PqQq (0F DC)
+    pub(super) fn paddusb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe { for j in 0..8usize { r.Ubyte[j] = op1.Ubyte[j].saturating_add(op2.Ubyte[j]); } }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PADDUSW PqQq (0F DD)
+    pub(super) fn paddusw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe { for j in 0..4usize { r.U16[j] = op1.U16[j].saturating_add(op2.U16[j]); } }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PMAXUB PqQq (0F DE)
+    pub(super) fn pmaxub_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe { for j in 0..8usize { r.Ubyte[j] = op1.Ubyte[j].max(op2.Ubyte[j]); } }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PANDN PqQq (0F DF) — bitwise AND NOT (~op1 & op2)
+    pub(super) fn pandn_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: unsafe { !op1.U64 & op2.U64 } });
+        Ok(())
+    }
+
+    // ========================================================================
+    // Average, arithmetic shift, multiply high (0F E0-E5)
+    // ========================================================================
+
+    /// PAVGB PqQq (0F E0) — Average Bytes
+    pub(super) fn pavgb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..8usize {
+                r.Ubyte[j] = ((op1.Ubyte[j] as u16 + op2.Ubyte[j] as u16 + 1) >> 1) as u8;
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PSRAW PqQq (0F E1) — Shift Right Arithmetic Words
+    pub(super) fn psraw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let mut op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let count = unsafe { op2.U64 };
+        if count == 0 { /* no change */ }
+        else if count > 15 {
+            unsafe {
+                for j in 0..4usize { op1.U16[j] = if op1.S16[j] < 0 { 0xffff } else { 0 }; }
+            }
+        } else {
+            unsafe {
+                for j in 0..4usize { op1.U16[j] = (op1.S16[j] >> count as u16) as u16; }
+            }
+        }
+        self.write_mmx_reg(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// PSRAD PqQq (0F E2) — Shift Right Arithmetic Dwords
+    pub(super) fn psrad_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let mut op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let count = unsafe { op2.U64 };
+        if count == 0 { /* no change */ }
+        else if count > 31 {
+            unsafe {
+                for j in 0..2usize { op1.U32[j] = if op1.S32[j] < 0 { 0xffffffff } else { 0 }; }
+            }
+        } else {
+            unsafe {
+                for j in 0..2usize { op1.U32[j] = (op1.S32[j] >> count as u32) as u32; }
+            }
+        }
+        self.write_mmx_reg(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// PAVGW PqQq (0F E3) — Average Words
+    pub(super) fn pavgw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..4usize {
+                r.U16[j] = ((op1.U16[j] as u32 + op2.U16[j] as u32 + 1) >> 1) as u16;
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PMULHUW PqQq (0F E4) — Multiply High Unsigned Words
+    pub(super) fn pmulhuw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..4usize {
+                r.U16[j] = ((op1.U16[j] as u32 * op2.U16[j] as u32) >> 16) as u16;
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PMULHW PqQq (0F E5) — Multiply High Signed Words
+    pub(super) fn pmulhw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..4usize {
+                r.U16[j] = ((op1.S16[j] as i32 * op2.S16[j] as i32) >> 16) as u16;
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    // ========================================================================
+    // Signed sub/add with saturation, min/max (0F E8-EF)
+    // ========================================================================
+
+    /// PSUBSB PqQq (0F E8)
+    pub(super) fn psubsb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..8usize {
+                r.Sbyte[j] = saturate_word_s_to_byte_s(op1.Sbyte[j] as i16 - op2.Sbyte[j] as i16);
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PSUBSW PqQq (0F E9)
+    pub(super) fn psubsw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..4usize {
+                r.S16[j] = saturate_dword_s_to_word_s(op1.S16[j] as i32 - op2.S16[j] as i32);
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PMINSW PqQq (0F EA)
+    pub(super) fn pminsw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe { for j in 0..4usize { r.S16[j] = op1.S16[j].min(op2.S16[j]); } }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// POR PqQq (0F EB)
+    pub(super) fn por_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: unsafe { op1.U64 | op2.U64 } });
+        Ok(())
+    }
+
+    /// PADDSB PqQq (0F EC)
+    pub(super) fn paddsb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..8usize {
+                r.Sbyte[j] = saturate_word_s_to_byte_s(op1.Sbyte[j] as i16 + op2.Sbyte[j] as i16);
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PADDSW PqQq (0F ED)
+    pub(super) fn paddsw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            for j in 0..4usize {
+                r.S16[j] = saturate_dword_s_to_word_s(op1.S16[j] as i32 + op2.S16[j] as i32);
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PMAXSW PqQq (0F EE)
+    pub(super) fn pmaxsw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe { for j in 0..4usize { r.S16[j] = op1.S16[j].max(op2.S16[j]); } }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PXOR PqQq (0F EF)
+    pub(super) fn pxor_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: unsafe { op1.U64 ^ op2.U64 } });
+        Ok(())
+    }
+
+    // ========================================================================
+    // Shift left, multiply-add, SAD, MASKMOVQ (0F F1-F7)
+    // ========================================================================
+
+    /// PSLLW PqQq (0F F1)
+    pub(super) fn psllw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let mut op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let count = unsafe { op2.U64 };
+        if count > 15 { op1 = BxPackedRegister { U64: 0 }; }
+        else { unsafe { for j in 0..4usize { op1.U16[j] <<= count as u16; } } }
+        self.write_mmx_reg(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// PSLLD PqQq (0F F2)
+    pub(super) fn pslld_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let mut op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let count = unsafe { op2.U64 };
+        if count > 31 { op1 = BxPackedRegister { U64: 0 }; }
+        else { unsafe { op1.U32[0] <<= count as u32; op1.U32[1] <<= count as u32; } }
+        self.write_mmx_reg(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// PSLLQ PqQq (0F F3)
+    pub(super) fn psllq_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let mut op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let count = unsafe { op2.U64 };
+        if count > 63 { op1 = BxPackedRegister { U64: 0 }; }
+        else { unsafe { op1.U64 <<= count; } }
+        self.write_mmx_reg(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// PMULUDQ PqQq (0F F4) — Multiply Unsigned Dwords to Qword
+    pub(super) fn pmuludq_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let val = unsafe { (op1.U32[0] as u64) * (op2.U32[0] as u64) };
+        self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: val });
+        Ok(())
+    }
+
+    /// PMADDWD PqQq (0F F5) — Multiply and Add Packed Words
+    /// Bochs mmx.cc:2288 — with 0x80008000 overflow guard
+    pub(super) fn pmaddwd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe {
+            if op1.U32[0] == 0x80008000 && op2.U32[0] == 0x80008000 {
+                r.U32[0] = 0x80000000;
+            } else {
+                r.S32[0] = (op1.S16[0] as i32) * (op2.S16[0] as i32)
+                    + (op1.S16[1] as i32) * (op2.S16[1] as i32);
+            }
+            if op1.U32[1] == 0x80008000 && op2.U32[1] == 0x80008000 {
+                r.U32[1] = 0x80000000;
+            } else {
+                r.S32[1] = (op1.S16[2] as i32) * (op2.S16[2] as i32)
+                    + (op1.S16[3] as i32) * (op2.S16[3] as i32);
+            }
+        }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PSADBW PqQq (0F F6) — Sum of Absolute Differences
+    pub(super) fn psadbw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+
+        let mut temp = 0u16;
+        unsafe {
+            for j in 0..8usize {
+                temp += (op1.Ubyte[j] as i16 - op2.Ubyte[j] as i16).unsigned_abs();
+            }
+        }
+        self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: temp as u64 });
+        Ok(())
+    }
+
+    /// MASKMOVQ PqNq (0F F7) — Masked Store Bytes
+    /// Bochs mmx.cc:2366
+    pub(super) fn maskmovq_pq_nq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+
+        let op = self.read_mmx_reg(instr.src1());
+        let mask = self.read_mmx_reg(instr.dst());
+
+        // If mask is all zero, nothing to do
+        if unsafe { mask.U64 } == 0 { return Ok(()); }
+
+        let rdi = self.edi() as u32; // 32-bit address mode
+        let seg = BxSegregs::Ds;
+
+        // Read-modify-write 8 bytes at [DS:EDI]
+        let mut tmp = BxPackedRegister {
+            U64: self.read_virtual_qword(seg, rdi)?,
+        };
+        unsafe {
+            for j in 0..8usize {
+                if mask.Ubyte[j] & 0x80 != 0 { tmp.Ubyte[j] = op.Ubyte[j]; }
+            }
+        }
+        self.write_virtual_qword(seg, rdi, unsafe { tmp.U64 })?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // Packed integer arithmetic (0F F8-FE)
+    // ========================================================================
+
+    /// PSUBB PqQq (0F F8)
+    pub(super) fn psubb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe { for j in 0..8usize { r.Ubyte[j] = op1.Ubyte[j].wrapping_sub(op2.Ubyte[j]); } }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PSUBW PqQq (0F F9)
+    pub(super) fn psubw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe { for j in 0..4usize { r.U16[j] = op1.U16[j].wrapping_sub(op2.U16[j]); } }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PSUBD PqQq (0F FA)
+    pub(super) fn psubd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe { for j in 0..2usize { r.U32[j] = op1.U32[j].wrapping_sub(op2.U32[j]); } }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PSUBQ PqQq (0F FB)
+    pub(super) fn psubq_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let r = BxPackedRegister { U64: unsafe { op1.U64.wrapping_sub(op2.U64) } };
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PADDB PqQq (0F FC)
+    pub(super) fn paddb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe { for j in 0..8usize { r.Ubyte[j] = op1.Ubyte[j].wrapping_add(op2.Ubyte[j]); } }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PADDW PqQq (0F FD)
+    pub(super) fn paddw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe { for j in 0..4usize { r.U16[j] = op1.U16[j].wrapping_add(op2.U16[j]); } }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    /// PADDD PqQq (0F FE)
+    pub(super) fn paddd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let op1 = self.read_mmx_reg(instr.dst());
+        let op2 = self.mmx_read_op2_qq(instr)?;
+        self.prepare_fpu2mmx();
+        let mut r = BxPackedRegister { U64: 0 };
+        unsafe { for j in 0..2usize { r.U32[j] = op1.U32[j].wrapping_add(op2.U32[j]); } }
+        self.write_mmx_reg(instr.dst(), r);
+        Ok(())
+    }
+
+    // ========================================================================
+    // Immediate-form shift instructions (0F 71-73 GrpA)
+    // Bochs mmx.cc:2616-2819
+    // ========================================================================
+
+    /// PSRLW NqIb (0F 71 /2) — Shift Right Logical Words by Immediate
+    pub(super) fn psrlw_nq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let mut op = self.read_mmx_reg(instr.dst());
+        let shift = instr.ib();
+        if shift > 15 { op = BxPackedRegister { U64: 0 }; }
+        else { unsafe { for j in 0..4usize { op.U16[j] >>= shift as u16; } } }
+        self.write_mmx_reg(instr.dst(), op);
+        Ok(())
+    }
+
+    /// PSRAW NqIb (0F 71 /4) — Shift Right Arithmetic Words by Immediate
+    pub(super) fn psraw_nq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let mut op = self.read_mmx_reg(instr.dst());
+        let shift = instr.ib();
+        if shift == 0 { /* no-op */ }
+        else if shift > 15 {
+            unsafe { for j in 0..4usize { op.U16[j] = if op.S16[j] < 0 { 0xffff } else { 0 }; } }
+        } else {
+            unsafe { for j in 0..4usize { op.U16[j] = (op.S16[j] >> shift as i16) as u16; } }
+        }
+        self.write_mmx_reg(instr.dst(), op);
+        Ok(())
+    }
+
+    /// PSLLW NqIb (0F 71 /6) — Shift Left Logical Words by Immediate
+    pub(super) fn psllw_nq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let mut op = self.read_mmx_reg(instr.dst());
+        let shift = instr.ib();
+        if shift > 15 { op = BxPackedRegister { U64: 0 }; }
+        else { unsafe { for j in 0..4usize { op.U16[j] <<= shift as u16; } } }
+        self.write_mmx_reg(instr.dst(), op);
+        Ok(())
+    }
+
+    /// PSRLD NqIb (0F 72 /2) — Shift Right Logical Dwords by Immediate
+    pub(super) fn psrld_nq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let mut op = self.read_mmx_reg(instr.dst());
+        let shift = instr.ib();
+        if shift > 31 { op = BxPackedRegister { U64: 0 }; }
+        else { unsafe { op.U32[0] >>= shift as u32; op.U32[1] >>= shift as u32; } }
+        self.write_mmx_reg(instr.dst(), op);
+        Ok(())
+    }
+
+    /// PSRAD NqIb (0F 72 /4) — Shift Right Arithmetic Dwords by Immediate
+    pub(super) fn psrad_nq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let mut op = self.read_mmx_reg(instr.dst());
+        let shift = instr.ib();
+        if shift == 0 { /* no-op */ }
+        else if shift > 31 {
+            unsafe { for j in 0..2usize { op.U32[j] = if op.S32[j] < 0 { 0xffffffff } else { 0 }; } }
+        } else {
+            unsafe { for j in 0..2usize { op.U32[j] = (op.S32[j] >> shift as i32) as u32; } }
+        }
+        self.write_mmx_reg(instr.dst(), op);
+        Ok(())
+    }
+
+    /// PSLLD NqIb (0F 72 /6) — Shift Left Logical Dwords by Immediate
+    pub(super) fn pslld_nq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let mut op = self.read_mmx_reg(instr.dst());
+        let shift = instr.ib();
+        if shift > 31 { op = BxPackedRegister { U64: 0 }; }
+        else { unsafe { op.U32[0] <<= shift as u32; op.U32[1] <<= shift as u32; } }
+        self.write_mmx_reg(instr.dst(), op);
+        Ok(())
+    }
+
+    /// PSRLQ NqIb (0F 73 /2) — Shift Right Logical Qword by Immediate
+    pub(super) fn psrlq_nq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let mut op = self.read_mmx_reg(instr.dst());
+        let shift = instr.ib();
+        if shift > 63 { op = BxPackedRegister { U64: 0 }; }
+        else { unsafe { op.U64 >>= shift as u64; } }
+        self.write_mmx_reg(instr.dst(), op);
+        Ok(())
+    }
+
+    /// PSLLQ NqIb (0F 73 /6) — Shift Left Logical Qword by Immediate
+    pub(super) fn psllq_nq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let mut op = self.read_mmx_reg(instr.dst());
+        let shift = instr.ib();
+        if shift > 63 { op = BxPackedRegister { U64: 0 }; }
+        else { unsafe { op.U64 <<= shift as u64; } }
+        self.write_mmx_reg(instr.dst(), op);
+        Ok(())
+    }
+
+    // ========================================================================
+    // MOVQ Qq, Pq — register form (MMX reg to MMX reg)
+    // Bochs: MOVQ_QqPq in mmx.cc, modC0 path
+    // ========================================================================
+
+    /// MOVQ register-to-register form: dst MMX = src MMX
+    pub(super) fn movq_qq_pq_r(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let op = self.read_mmx_reg(instr.src1());
+        self.write_mmx_reg(instr.dst(), op);
+        Ok(())
+    }
+
+    // ========================================================================
+    // MOVNTQ Mq, Pq — non-temporal store (always memory)
+    // Bochs: MOVNTQ_MqPq in sse_move.cc
+    // ========================================================================
+
+    /// MOVNTQ: non-temporal store of MMX register to memory
+    /// Non-temporal hint is ignored in emulation — same as MOVQ store
+    pub(super) fn movntq_mq_pq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let op = self.read_mmx_reg(instr.src1());
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+        unsafe { self.write_virtual_qword(seg, eaddr, op.U64)?; }
+        Ok(())
+    }
+}
