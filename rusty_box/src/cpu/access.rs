@@ -534,6 +534,66 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
+    /// Read a 128-bit XMM word from virtual memory.
+    /// Implemented as two qword reads (low then high).
+    /// Bochs: read_virtual_xmmword_32
+    pub(super) fn read_virtual_xmmword(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        offset: u32,
+    ) -> Result<super::xmm::BxPackedXmmRegister> {
+        let lo = self.read_virtual_qword(seg, offset)?;
+        let hi = self.read_virtual_qword(seg, offset.wrapping_add(8))?;
+        Ok(super::xmm::BxPackedXmmRegister {
+            xmm64u: [lo, hi],
+        })
+    }
+
+    /// Read a 128-bit XMM word with 16-byte alignment check.
+    /// Raises #GP(0) if address is not 16-byte aligned.
+    /// Bochs: read_virtual_xmmword_aligned_32
+    pub(super) fn read_virtual_xmmword_aligned(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        offset: u32,
+    ) -> Result<super::xmm::BxPackedXmmRegister> {
+        if (offset & 0xF) != 0 {
+            self.exception(super::cpu::Exception::Gp, 0)?;
+        }
+        self.read_virtual_xmmword(seg, offset)
+    }
+
+    /// Write a 128-bit XMM word to virtual memory.
+    /// Implemented as two qword writes (low then high).
+    /// Bochs: write_virtual_xmmword_32
+    pub(super) fn write_virtual_xmmword(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        offset: u32,
+        val: &super::xmm::BxPackedXmmRegister,
+    ) -> Result<()> {
+        unsafe {
+            self.write_virtual_qword(seg, offset, val.xmm64u[0])?;
+            self.write_virtual_qword(seg, offset.wrapping_add(8), val.xmm64u[1])?;
+        }
+        Ok(())
+    }
+
+    /// Write a 128-bit XMM word with 16-byte alignment check.
+    /// Raises #GP(0) if address is not 16-byte aligned.
+    /// Bochs: write_virtual_xmmword_aligned_32
+    pub(super) fn write_virtual_xmmword_aligned(
+        &mut self,
+        seg: super::decoder::BxSegregs,
+        offset: u32,
+        val: &super::xmm::BxPackedXmmRegister,
+    ) -> Result<()> {
+        if (offset & 0xF) != 0 {
+            self.exception(super::cpu::Exception::Gp, 0)?;
+        }
+        self.write_virtual_xmmword(seg, offset, val)
+    }
+
     /// Internal helper: write a single byte at a given linear address.
     /// Used by cross-page paths to avoid duplicating TLB fast-path code.
     #[inline]

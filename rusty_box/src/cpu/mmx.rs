@@ -69,7 +69,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Bochs: BX_CPU_C::prepareFPU2MMX() from proc_ctrl.cc
     /// Sets TOS=0 and all FPU tags to valid (0).
     #[inline]
-    fn prepare_fpu2mmx(&mut self) {
+    pub(super) fn prepare_fpu2mmx(&mut self) {
         self.the_i387.tos = 0;
         self.the_i387.twd = 0; // all tags = valid
     }
@@ -78,7 +78,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MMX registers alias the significand (64-bit) of FPU st_space.
     /// Bochs: BX_READ_MMX_REG(index)
     #[inline]
-    fn read_mmx_reg(&self, index: u8) -> BxPackedRegister {
+    pub(super) fn read_mmx_reg(&self, index: u8) -> BxPackedRegister {
         let signif = self.the_i387.st_space[index as usize & 7].signif;
         BxPackedRegister { U64: signif }
     }
@@ -87,7 +87,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Also sets sign_exp = 0xFFFF (marking as MMX-modified).
     /// Bochs: BX_WRITE_MMX_REG(index, val)
     #[inline]
-    fn write_mmx_reg(&mut self, index: u8, val: BxPackedRegister) {
+    pub(super) fn write_mmx_reg(&mut self, index: u8, val: BxPackedRegister) {
         let reg = &mut self.the_i387.st_space[index as usize & 7];
         reg.signif = unsafe { val.U64 };
         reg.sign_exp = 0xFFFF;

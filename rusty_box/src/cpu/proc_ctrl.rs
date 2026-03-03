@@ -385,4 +385,220 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         );
         Ok(())
     }
+
+    // ========================================================================
+    // FXSAVE — Save x87 FPU, MMX, SSE state (512 bytes)
+    // Bochs: FXSAVE in proc_ctrl.cc
+    // ========================================================================
+
+    pub(super) fn fxsave(
+        &mut self,
+        instr: &super::decoder::Instruction,
+    ) -> super::Result<()> {
+        use super::decoder::BxSegregs;
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+
+        // Must be 16-byte aligned
+        if (eaddr & 0xF) != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Bytes 0-1: FCW (FPU control word)
+        self.write_virtual_word(seg, eaddr, self.the_i387.cwd)?;
+        // Bytes 2-3: FSW (FPU status word)
+        self.write_virtual_word(seg, eaddr.wrapping_add(2), self.the_i387.swd)?;
+        // Byte 4: FTW (abridged tag word — compact form)
+        let abridged_ftw = self.abridged_ftw();
+        self.write_virtual_byte(seg, eaddr.wrapping_add(4), abridged_ftw)?;
+        // Byte 5: reserved
+        self.write_virtual_byte(seg, eaddr.wrapping_add(5), 0)?;
+        // Bytes 6-7: FOP (last FPU opcode) — not tracked, write 0
+        self.write_virtual_word(seg, eaddr.wrapping_add(6), 0)?;
+        // Bytes 8-11: FIP (FPU instruction pointer) — not tracked
+        self.write_virtual_dword(seg, eaddr.wrapping_add(8), 0)?;
+        // Bytes 12-13: FCS — not tracked
+        self.write_virtual_word(seg, eaddr.wrapping_add(12), 0)?;
+        // Bytes 14-15: reserved
+        self.write_virtual_word(seg, eaddr.wrapping_add(14), 0)?;
+        // Bytes 16-19: FDP (FPU data pointer) — not tracked
+        self.write_virtual_dword(seg, eaddr.wrapping_add(16), 0)?;
+        // Bytes 20-21: FDS — not tracked
+        self.write_virtual_word(seg, eaddr.wrapping_add(20), 0)?;
+        // Bytes 22-23: reserved
+        self.write_virtual_word(seg, eaddr.wrapping_add(22), 0)?;
+        // Bytes 24-27: MXCSR
+        self.write_virtual_dword(seg, eaddr.wrapping_add(24), self.mxcsr.mxcsr)?;
+        // Bytes 28-31: MXCSR_MASK
+        self.write_virtual_dword(seg, eaddr.wrapping_add(28), self.mxcsr_mask)?;
+
+        // Bytes 32-159: FPU/MMX registers ST0-ST7 (16 bytes each = 80-bit + 6 padding)
+        for i in 0..8 {
+            let offset = eaddr.wrapping_add(32 + i * 16);
+            let signif = self.the_i387.st_space[i as usize].signif;
+            let sign_exp = self.the_i387.st_space[i as usize].sign_exp;
+            self.write_virtual_qword(seg, offset, signif)?;
+            self.write_virtual_word(seg, offset.wrapping_add(8), sign_exp)?;
+            // Bytes 10-15 of each entry are padding (write zeros)
+            self.write_virtual_word(seg, offset.wrapping_add(10), 0)?;
+            self.write_virtual_dword(seg, offset.wrapping_add(12), 0)?;
+        }
+
+        // Bytes 160-415: XMM registers XMM0-XMM7 (16 bytes each, 32-bit mode)
+        for i in 0..8u32 {
+            let offset = eaddr.wrapping_add(160 + i * 16);
+            let lo = unsafe { self.vmm[i as usize].zmm64u[0] };
+            let hi = unsafe { self.vmm[i as usize].zmm64u[1] };
+            self.write_virtual_qword(seg, offset, lo)?;
+            self.write_virtual_qword(seg, offset.wrapping_add(8), hi)?;
+        }
+
+        // Bytes 416-511: reserved (zeros)
+        for i in (416u32..512).step_by(8) {
+            self.write_virtual_qword(seg, eaddr.wrapping_add(i), 0)?;
+        }
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // FXRSTOR — Restore x87 FPU, MMX, SSE state (512 bytes)
+    // Bochs: FXRSTOR in proc_ctrl.cc
+    // ========================================================================
+
+    pub(super) fn fxrstor(
+        &mut self,
+        instr: &super::decoder::Instruction,
+    ) -> super::Result<()> {
+        use super::decoder::BxSegregs;
+        let eaddr = self.resolve_addr32(instr);
+        let seg = BxSegregs::from(instr.seg());
+
+        // Must be 16-byte aligned
+        if (eaddr & 0xF) != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Bytes 0-1: FCW
+        let fcw = self.read_virtual_word(seg, eaddr)?;
+        // Bytes 2-3: FSW
+        let fsw = self.read_virtual_word(seg, eaddr.wrapping_add(2))?;
+        // Byte 4: abridged FTW
+        let abridged_ftw = self.read_virtual_byte(seg, eaddr.wrapping_add(4))?;
+        // Bytes 24-27: MXCSR
+        let new_mxcsr = self.read_virtual_dword(seg, eaddr.wrapping_add(24))?;
+
+        // Validate MXCSR — reserved bits must be zero
+        if (new_mxcsr & !self.mxcsr_mask) != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Now commit all state (no faults past this point)
+        self.the_i387.cwd = fcw;
+        self.the_i387.swd = fsw;
+        self.the_i387.tos = ((fsw >> 11) & 7) as u8;
+        self.restore_ftw_from_abridged(abridged_ftw);
+        self.mxcsr.mxcsr = new_mxcsr;
+
+        // Restore FPU/MMX registers
+        for i in 0..8 {
+            let offset = eaddr.wrapping_add(32 + i * 16);
+            let signif = self.read_virtual_qword(seg, offset)?;
+            let sign_exp = self.read_virtual_word(seg, offset.wrapping_add(8))?;
+            self.the_i387.st_space[i as usize].signif = signif;
+            self.the_i387.st_space[i as usize].sign_exp = sign_exp;
+        }
+
+        // Restore XMM registers (XMM0-XMM7 in 32-bit mode)
+        for i in 0..8u32 {
+            let offset = eaddr.wrapping_add(160 + i * 16);
+            let lo = self.read_virtual_qword(seg, offset)?;
+            let hi = self.read_virtual_qword(seg, offset.wrapping_add(8))?;
+            unsafe {
+                self.vmm[i as usize].zmm64u[0] = lo;
+                self.vmm[i as usize].zmm64u[1] = hi;
+                // Clear upper bits
+                self.vmm[i as usize].zmm64u[2] = 0;
+                self.vmm[i as usize].zmm64u[3] = 0;
+                self.vmm[i as usize].zmm64u[4] = 0;
+                self.vmm[i as usize].zmm64u[5] = 0;
+                self.vmm[i as usize].zmm64u[6] = 0;
+                self.vmm[i as usize].zmm64u[7] = 0;
+            }
+        }
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // LDMXCSR — Load MXCSR from memory
+    // Bochs: LDMXCSR in proc_ctrl.cc
+    // ========================================================================
+
+    pub(super) fn ldmxcsr(
+        &mut self,
+        instr: &super::decoder::Instruction,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+
+        let eaddr = self.resolve_addr32(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let new_mxcsr = self.read_virtual_dword(seg, eaddr)?;
+
+        // Validate: reserved bits must be zero per mxcsr_mask
+        if (new_mxcsr & !self.mxcsr_mask) != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        self.mxcsr.mxcsr = new_mxcsr;
+        Ok(())
+    }
+
+    // ========================================================================
+    // STMXCSR — Store MXCSR to memory
+    // Bochs: STMXCSR in proc_ctrl.cc
+    // ========================================================================
+
+    pub(super) fn stmxcsr(
+        &mut self,
+        instr: &super::decoder::Instruction,
+    ) -> super::Result<()> {
+        self.prepare_sse()?;
+
+        let eaddr = self.resolve_addr32(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        self.write_virtual_dword(seg, eaddr, self.mxcsr.mxcsr)?;
+        Ok(())
+    }
+
+    /// Compute abridged FPU tag word for FXSAVE
+    /// Converts 16-bit tag word to 8-bit abridged form
+    fn abridged_ftw(&self) -> u8 {
+        let mut abridged: u8 = 0;
+        for i in 0..8 {
+            let tag = (self.the_i387.twd >> (i * 2)) & 3;
+            if tag != 3 {
+                // Not empty
+                abridged |= 1 << i;
+            }
+        }
+        abridged
+    }
+
+    /// Restore full FPU tag word from abridged FXRSTOR form
+    fn restore_ftw_from_abridged(&mut self, abridged: u8) {
+        let mut twd: u16 = 0;
+        for i in 0..8 {
+            if (abridged & (1 << i)) != 0 {
+                // Tag is "valid" — set to 00 (valid)
+                // A more accurate implementation would examine the actual register
+                // value, but 00 (valid) is sufficient for most uses.
+                twd |= 0 << (i * 2);
+            } else {
+                // Tag is "empty" — set to 11
+                twd |= 3 << (i * 2);
+            }
+        }
+        self.the_i387.twd = twd;
+    }
 }
