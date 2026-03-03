@@ -289,8 +289,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if cpl != 0 {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
-        let dr_idx = instr.src1() as usize;
-        let dst_gpr = instr.dst() as usize;
+        // Decoder: for 0F 21 (MOV Rd, DRn): b1=0x121, (b1 & 0x0F)==0x01 → Ed,Gd branch:
+        // DST=rm=GPR destination, SRC1=nnn=DR number
+        // Bochs crregs.cc: switch(i->src())=DR, BX_WRITE_32BIT_REGZ(i->dst())=GPR
+        // Our decoder maps: dst()=rm=GPR, src1()=nnn=DR
+        let dr_idx = instr.src1() as usize;  // nnn = DR register number
+        let dst_gpr = instr.dst() as usize;  // rm = GPR destination register
 
         // Bochs crregs.cc: CR4.DE check — DR4/DR5 access raises #UD when DE=1
         if (dr_idx == 4 || dr_idx == 5) && self.cr4.de() {

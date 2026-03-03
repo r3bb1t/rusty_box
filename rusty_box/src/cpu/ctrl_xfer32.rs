@@ -17,7 +17,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Branch to a near 32-bit address
     /// Matching C++ ctrl_xfer32.cc:29-46 branch_near32
-    fn branch_near32(&mut self, new_eip: u32) -> Result<()> {
+    pub(super) fn branch_near32(&mut self, new_eip: u32) -> Result<()> {
         // Check CS limit (matching C++ line 33-37)
         // Original: Bochs cpu/ctrl_xfer32.cc:33-37
         let limit = self.get_segment_limit(BxSegregs::Cs);

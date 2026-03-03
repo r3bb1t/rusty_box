@@ -563,8 +563,12 @@ pub const fn fetch_decode32_inplace(bytes: &[u8], is_32: bool, instr: &mut Instr
             || matches!(b1, 0x1A3 | 0x1AB | 0x1B3 | 0x1BB)
             // 16-bit BT/BTS/BTR/BTC EwGw: same layout
             // (decoded with os_32=false but same b1 values)
-            // XADD EbGb (0F C0) and CMPXCHG EbGb (0F B0): rm=dst, nnn=src
-            || matches!(b1, 0x1B0 | 0x1C0)
+            // XADD EbGb (0F C0), XADD EdGd (0F C1): rm=dst, nnn=src
+            // CMPXCHG EbGb (0F B0), CMPXCHG EdGd (0F B1): rm=dst, nnn=src
+            || matches!(b1, 0x1B0 | 0x1B1 | 0x1C0 | 0x1C1)
+            // BT/BTS/BTR/BTC Ev,Ib (0F BA /4../7): rm=operand(dst), nnn=opcode-ext(src)
+            // Implementations use instr.dst() for Ev register form, so DST must be rm
+            || b1 == 0x1BA
         {
             // Ed,Gd format: rm (Ed) is destination, nnn (Gd) is source
             // Examples: ADD Ed,Gd | SUB Ed,Gd | MOV Ed,Gd | BTS EdGd | XADD EbGb

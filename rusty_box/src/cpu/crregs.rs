@@ -681,7 +681,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         let mut msw = if instr.mod_c0() {
-            self.get_gpr16(instr.meta_data[0] as usize)
+            // For Group 7 (0F 01): b1=0x101, (b1 & 0x0F)==0x01 → Ed,Gd branch: DST=rm, SRC1=nnn
+            // So dst() = rm = actual register. Matches Bochs: BX_READ_16BIT_REG(i->src()) where
+            // Bochs's i->src()=rm. In our decoder src1()=nnn (opcode ext), dst()=rm.
+            self.get_gpr16(instr.dst() as usize)
         } else {
             let eaddr = self.resolve_addr32(instr);
             let seg = super::decoder::BxSegregs::from(instr.seg());

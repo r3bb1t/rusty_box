@@ -124,10 +124,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let val = self.ldtr.selector.value;
         if instr.mod_c0() {
-            // Register destination
-            self.set_gpr16(instr.dst() as usize, val);
+            // Register destination: for Group 6 (0F 00), decoder puts nnn in dst() and rm in src1()
+            // The actual register operand is rm = src1() (Bochs: i->dst() = rm)
+            if instr.os32_l() != 0 {
+                self.set_gpr32(instr.src1() as usize, val as u32);
+            } else {
+                self.set_gpr16(instr.src1() as usize, val);
+            }
         } else {
-            // Memory destination — write 16-bit
+            // Memory destination — always write 16-bit
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr32(instr);
             self.write_virtual_word(seg, eaddr, val)?;
@@ -150,6 +155,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         if instr.mod_c0() {
             // Register form: writes 32-bit value (Bochs crregs.cc:928-935)
+            // For Group 7 (0F 01): b1=0x101, (b1 & 0x0F)==0x01 → Ed,Gd branch: DST=rm, SRC1=nnn
+            // So dst() = rm = actual register. Matches Bochs: BX_WRITE_32BIT_REGZ(i->dst(), val)
             if instr.os32_l() != 0 {
                 self.set_gpr32(instr.dst() as usize, msw);
             } else {
@@ -179,10 +186,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let val = self.tr.selector.value;
         if instr.mod_c0() {
-            // Register destination
-            self.set_gpr16(instr.dst() as usize, val);
+            // Register destination: for Group 6 (0F 00), decoder puts nnn in dst() and rm in src1()
+            // The actual register operand is rm = src1() (Bochs: i->dst() = rm)
+            if instr.os32_l() != 0 {
+                self.set_gpr32(instr.src1() as usize, val as u32);
+            } else {
+                self.set_gpr16(instr.src1() as usize, val);
+            }
         } else {
-            // Memory destination — write 16-bit
+            // Memory destination — always write 16-bit
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr32(instr);
             self.write_virtual_word(seg, eaddr, val)?;
@@ -197,22 +209,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        // op1_16 = Ew (dst), op2_16 = Gw (src)
+        // Decoder convention for 0x63 (ARPL Ew,Gw): dst()=nnn=Gw, src1()=rm=Ew
+        // Bochs: i->dst()=Ew(rm), i->src()=Gw(nnn) — opposite of our decoder!
+        // So: op1_16 = Ew = src1()=rm, op2_16 = Gw = dst()=nnn
         let op1_16: u16;
         if instr.mod_c0() {
-            op1_16 = self.get_gpr16(instr.dst() as usize);
+            // Register form: op1 comes from rm = src1()
+            op1_16 = self.get_gpr16(instr.src1() as usize);
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr32(instr);
             op1_16 = self.read_virtual_word(seg, eaddr)?;
         }
-        let op2_16 = self.get_gpr16(instr.src1() as usize);
+        // op2_16 = Gw = nnn = dst()
+        let op2_16 = self.get_gpr16(instr.dst() as usize);
 
         if (op1_16 & 0x03) < (op2_16 & 0x03) {
             // Adjust RPL field and set ZF
             let new_op1 = (op1_16 & 0xfffc) | (op2_16 & 0x03);
             if instr.mod_c0() {
-                self.set_gpr16(instr.dst() as usize, new_op1);
+                // Write back to rm = src1()
+                self.set_gpr16(instr.src1() as usize, new_op1);
             } else {
                 let seg = BxSegregs::from(instr.seg());
                 let eaddr = self.resolve_addr32(instr);

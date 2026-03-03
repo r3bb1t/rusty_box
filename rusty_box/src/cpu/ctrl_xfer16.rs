@@ -698,17 +698,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// JECXZ rel8 - Jump if ECX is zero (32-bit mode)
-    /// Matching C++ ctrl_xfer16.cc:592-613 JCXZ_Jb
+    /// JECXZ rel8 - Jump if ECX is zero (32-bit operand-size form)
+    /// Matching C++ ctrl_xfer32.cc:614-635 JECXZ_Jb
+    /// NOTE: counter is ECX (as32L check per Bochs), target is 32-bit EIP
     pub fn jecxz_jb(&mut self, instr: &Instruction) -> super::Result<()> {
-        let ecx = self.get_gpr32(1);
+        // Bochs: if (i->as32L()) use ECX else use CX
+        let count = if instr.as32_l() != 0 {
+            self.get_gpr32(1)
+        } else {
+            self.get_gpr16(1) as u32
+        };
 
-        if ecx == 0 {
-            let disp = instr.ib() as i8;
-            let ip = self.get_ip();
-            let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-            self.branch_near16(new_ip)?;
-            tracing::trace!("JECXZ taken: IP = {:#06x}", new_ip);
+        if count == 0 {
+            let disp = instr.id() as i32; // sign-extended byte displacement
+            let eip = self.eip();
+            let new_eip = (eip as i32).wrapping_add(disp) as u32;
+            self.branch_near32(new_eip)?;
+            tracing::trace!("JECXZ taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }
