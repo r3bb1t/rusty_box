@@ -352,21 +352,19 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     /// Check code segment descriptor validity
     /// Based on BX_CPU_C::check_cs in ctrl_xfer_pro.cc:29
     pub(super) fn check_cs(
-        &self,
+        &mut self,
         descriptor: &BxDescriptor,
         cs_raw: u16,
         check_rpl: u8,
         check_cpl: u8,
     ) -> Result<()> {
         use super::descriptor::{is_code_segment_non_conforming, is_data_segment};
+        // Mirrors Bochs ctrl_xfer_pro.cc:29 — calls exception() directly with cs_raw & 0xfffc
 
         // Descriptor must be valid and a code segment
         if descriptor.valid == 0 || !descriptor.segment || is_data_segment(descriptor.r#type) {
             tracing::error!("check_cs({:#06x}): not a valid code segment!", cs_raw);
-            return Err(super::error::CpuError::BadVector {
-                vector: Exception::Gp,
-                error_code: 0,
-            });
+            return self.exception(Exception::Gp, cs_raw & 0xfffc);
         }
 
         // Non-conforming code segment: DPL must = CPL
@@ -376,10 +374,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     "check_cs({:#06x}): non-conforming code seg descriptor dpl != cpl, dpl={}, cpl={}",
                     cs_raw, descriptor.dpl, check_cpl
                 );
-                return Err(super::error::CpuError::BadVector {
-                    vector: Exception::Gp,
-                    error_code: 0,
-                });
+                return self.exception(Exception::Gp, cs_raw & 0xfffc);
             }
 
             // RPL must be <= CPL
@@ -390,10 +385,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     check_rpl,
                     check_cpl
                 );
-                return Err(super::error::CpuError::BadVector {
-                    vector: Exception::Gp,
-                    error_code: 0,
-                });
+                return self.exception(Exception::Gp, cs_raw & 0xfffc);
             }
         } else {
             // Conforming code segment: DPL must be <= CPL
@@ -404,20 +396,14 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     descriptor.dpl,
                     check_cpl
                 );
-                return Err(super::error::CpuError::BadVector {
-                    vector: Exception::Gp,
-                    error_code: 0,
-                });
+                return self.exception(Exception::Gp, cs_raw & 0xfffc);
             }
         }
 
-        // Code segment must be present
+        // Code segment must be present — #NP (not #GP) for missing segment
         if !descriptor.p {
             tracing::error!("check_cs({:#06x}): code segment not present!", cs_raw);
-            return Err(super::error::CpuError::BadVector {
-                vector: Exception::Np,
-                error_code: 0,
-            });
+            return self.exception(Exception::Np, cs_raw & 0xfffc);
         }
 
         Ok(())
@@ -1553,9 +1539,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         // check_cs validates code segment, DPL, and presence
-        if let Err(_) = self.check_cs(&cs_descriptor, raw_cs_raw, 0, cs_selector.rpl) {
-            return self.exception(Exception::Gp, raw_cs_raw & 0xfffc);
-        }
+        // Bochs check_cs calls exception() directly (Gp for type/DPL, Np for not-present)
+        self.check_cs(&cs_descriptor, raw_cs_raw, 0, cs_selector.rpl)?;
 
         if cs_selector.rpl == cpl {
             // ── Same privilege return ──

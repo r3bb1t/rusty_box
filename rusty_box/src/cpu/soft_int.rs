@@ -448,9 +448,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Validate code-segment descriptor
-        if let Err(_) = self.check_cs(&cs_descriptor, raw_cs_raw, 0, cs_selector.rpl) {
-            return self.exception(Exception::Gp, raw_cs_raw & 0xfffc);
-        }
+        // check_cs calls exception() directly: Gp for type/DPL errors, Np for not-present
+        self.check_cs(&cs_descriptor, raw_cs_raw, 0, cs_selector.rpl)?;
 
         // Compute EFLAGS changeMask based on OLD CPL (before loading new CS)
         // Based on Bochs iret.cc:148-167
@@ -671,10 +670,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(Exception::Gp, raw_cs_raw & 0xfffc);
         }
 
-        if let Err(_) = self.check_cs(&cs_descriptor, raw_cs_raw, 0, cs_selector.rpl) {
-            self.speculative_rsp = false;
-            return self.exception(Exception::Gp, raw_cs_raw & 0xfffc);
-        }
+        // check_cs calls exception() directly: Gp for type/DPL errors, Np for not-present
+        self.check_cs(&cs_descriptor, raw_cs_raw, 0, cs_selector.rpl)?;
 
         let new_cpl = cs_selector.rpl;
         let iopl = self.eflags.iopl();
