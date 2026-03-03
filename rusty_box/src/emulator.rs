@@ -760,6 +760,16 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             .configure_disk_geometry(drive, cylinders, heads, spt);
     }
 
+    /// Configure floppy drives in CMOS
+    ///
+    /// drive_type: 0=none, 1=360K, 2=1.2M, 3=720K, 4=1.44M, 5=2.88M
+    /// Matches Bochs bochsrc `floppya`/`floppyb` type configuration.
+    pub fn configure_floppy_in_cmos(&mut self, drive_a_type: u8, drive_b_type: u8) {
+        self.device_manager
+            .cmos
+            .set_floppy_config(drive_a_type, drive_b_type);
+    }
+
     /// Configure boot sequence in CMOS
     ///
     /// Boot device codes: 0=none, 1=floppy, 2=hard disk, 3=cdrom
@@ -1500,7 +1510,20 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 let real_elapsed_us = start.elapsed().as_micros() as u64;
                                 if hlt_usec > real_elapsed_us {
                                     let sleep_us = hlt_usec - real_elapsed_us;
-                                    std::thread::sleep(std::time::Duration::from_micros(sleep_us));
+                                    // Busy-wait for short sleeps to avoid Windows 15.6ms
+                                    // minimum timer granularity (Bochs also busy-spins).
+                                    const SPIN_THRESHOLD_US: u64 = 2_000; // 2ms
+                                    if sleep_us < SPIN_THRESHOLD_US {
+                                        let deadline = start
+                                            + std::time::Duration::from_micros(hlt_usec);
+                                        while std::time::Instant::now() < deadline {
+                                            std::hint::spin_loop();
+                                        }
+                                    } else {
+                                        std::thread::sleep(std::time::Duration::from_micros(
+                                            sleep_us,
+                                        ));
+                                    }
                                 }
                             }
                         } else {

@@ -627,7 +627,7 @@ pub const fn fetch_decode32_inplace(bytes: &[u8], is_32: bool, instr: &mut Instr
                 // - 0x83 (Group 1 EdsIb): sign-extended imm8 to operand-size per Intel spec;
                 //   dispatchers route *EdsIb opcodes to *EdId handlers that read id()
                 let needs_sign_ext =
-                    opcode_map == 0 && matches!(b1 as u8, 0x70..=0x7F | 0xE0..=0xE3 | 0xEB | 0x83);
+                    opcode_map == 0 && matches!(b1 as u8, 0x70..=0x7F | 0xE0..=0xE3 | 0xEB | 0x83 | 0x6A | 0x6B);
                 instr.modrm_form.operand_data.id = if needs_sign_ext {
                     byte_val as i8 as i32 as u32
                 } else {

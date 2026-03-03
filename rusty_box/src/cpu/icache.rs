@@ -846,6 +846,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     // For n=0, this equals original_remaining_in_page
                     // For later instructions (if we ever get here), it would be decremented
                     let current_remaining = remaining as usize;
+                    tracing::debug!(
+                        "DECODE-ERR n=0: remaining={} RIP={:#x} p_addr={:#x} err={:?}",
+                        current_remaining, self.rip(), current_p_addr, decode_err
+                    );
 
                     // If there are >= 15 bytes remaining, the instruction SHOULD have fit
                     // in the page. Decode failure with >= 15 bytes means it's NOT a boundary
@@ -1018,6 +1022,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     ) -> Result<Instruction> {
         let mut fetch_buffer = [0u8; 32];
 
+        tracing::debug!(
+            "boundary_fetch: remaining_in_page={} RIP={:#x} icount={}",
+            remaining_in_page, self.rip(), self.icount
+        );
+
         // Based on BX_CPU_C::boundaryFetch in icache.cc
         // If remainingInPage >= 15, instruction should fit in current page
         // This condition indicates too many instruction prefixes -> #GP(0)
@@ -1087,7 +1096,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             fetchdecode32::fetch_decode32(&fetch_buffer[..total_bytes], is_32_bit_mode)
         };
 
-        let instr = decode_result.unwrap_or_else(|_| {
+        let instr = decode_result.unwrap_or_else(|e| {
+            tracing::error!(
+                "boundary_fetch FATAL: total_bytes={} remaining_in_page={} fetch_buffer_limit={} eip_page_window_size={} RIP={:#x} err={:?} bytes={:02x?}",
+                total_bytes, remaining_in_page, fetch_buffer_limit, self.eip_page_window_size,
+                self.rip(), e, &fetch_buffer[..total_bytes.min(16)]
+            );
             // Panic on decode failure with instruction bytes for debugging
             let bytes_str = fetch_buffer[..total_bytes.min(16)]
                 .iter()

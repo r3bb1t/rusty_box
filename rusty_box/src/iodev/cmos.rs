@@ -816,6 +816,35 @@ impl BxCmosC {
         self.update_checksum();
     }
 
+    /// Configure floppy drive types in CMOS (matching Bochs floppy.cc:332-337 / cmos.cc init)
+    ///
+    /// drive_type: 0=none, 1=360K, 2=1.2M, 3=720K, 4=1.44M, 5=2.88M
+    /// Sets CMOS 0x10 (floppy types) and updates equipment byte (0x14).
+    pub fn set_floppy_config(&mut self, drive_a_type: u8, drive_b_type: u8) {
+        // CMOS 0x10: high nibble = drive A type, low nibble = drive B type
+        self.ram[0x10] = (drive_a_type << 4) | (drive_b_type & 0x0F);
+
+        // CMOS 0x14 equipment byte floppy bits:
+        //   bit 0: floppy controller present
+        //   bits 7-6: number of floppy drives - 1 (0=1 drive, 1=2 drives)
+        let num_drives = match (drive_a_type > 0, drive_b_type > 0) {
+            (false, _) => 0u8,
+            (true, false) => 1,
+            (true, true) => 2,
+        };
+        if num_drives == 0 {
+            // No drives: clear floppy present bit and drive count
+            self.ram[REG_EQUIPMENT as usize] &= 0x3E; // clear bits 0, 7-6
+        } else {
+            // Floppy installed (bit 0) + (num_drives-1) in bits 7-6
+            let drive_bits = ((num_drives - 1) & 0x03) << 6;
+            self.ram[REG_EQUIPMENT as usize] =
+                (self.ram[REG_EQUIPMENT as usize] & 0x3E) | drive_bits | 0x01;
+        }
+
+        self.update_checksum();
+    }
+
     /// Configure boot sequence in CMOS
     ///
     /// Sets both the legacy (0x2D) and ELTORITO (0x3D, 0x38) boot sequence registers.

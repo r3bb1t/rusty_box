@@ -1587,6 +1587,17 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 if avail > 0 && fetch_slice[offset..offset + avail] != entry.first_bytes[..avail] {
                     smc_invalid = true;
                 }
+                // Page-boundary instructions: if fewer bytes are available in
+                // the current page than the instruction length, the remaining
+                // bytes live on the NEXT page.  The first_bytes check above
+                // only verifies the bytes on THIS page.  If the next page was
+                // remapped (e.g. uselib/mmap loaded a new library), the
+                // second-page bytes changed but the SMC check didn't catch it.
+                // Force a cache miss so boundary_fetch re-reads both pages.
+                let ilen = entry.i.meta_info.ilen as usize;
+                if ilen > 0 && avail < ilen {
+                    smc_invalid = true;
+                }
             }
 
             if !smc_invalid {
@@ -2095,10 +2106,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     );
                     None
                 }
-                Err(_) => {
-                    // Page fault occurred, exception was raised
-                    // Return None to indicate we need to handle the exception
-                    None
+                Err(e) => {
+                    // Page fault or other exception occurred during page walk.
+                    // The exception handler has already pushed the exception frame
+                    // and changed RIP. Propagate the error (CpuLoopRestart) so the
+                    // CPU loop restarts execution at the exception handler.
+                    // Previously this was silently swallowed, causing boundary_fetch
+                    // to continue with stale eip_page_window_size=0 and panic.
+                    return Err(e);
                 }
             }
         };
@@ -2115,7 +2130,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             let p_addr_fetch_page = self.p_addr_fetch_page.clone();
 
             match self.get_host_mem_addr(p_addr_fetch_page, MemoryAccessType::Execute, mem) {
-                Ok(Some(fetch_ptr)) => self.eip_fetch_ptr = Some(fetch_ptr),
+                Ok(Some(fetch_ptr)) => {
+                    // Bound to 4096 bytes (one page) to prevent the decoder
+                    // from reading past the page boundary into physically
+                    // adjacent (but virtually different) memory.
+                    let bounded_len = fetch_ptr.len().min(4096);
+                    self.eip_fetch_ptr = Some(&fetch_ptr[..bounded_len]);
+                }
                 Ok(None) => {
                     self.eip_fetch_ptr = None;
                 }

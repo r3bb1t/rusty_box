@@ -1183,10 +1183,12 @@ impl BxHardDriveC {
 
         let drive = channel.selected_drive_mut();
 
-        // Check if drive exists
+        // Check if drive exists.
+        // Bochs harddrv.cc:1097-1099: "Just return zero for these registers" (status/alt-status).
+        // Other registers return 0xFF when selected drive absent.
         if drive.device_type == DeviceType::None {
             return if offset == ATA_STATUS || offset == ATA_ALT_STATUS {
-                0x00 // No drive
+                0x00 // Bochs: return zero when selected drive not present
             } else {
                 0xFF
             };

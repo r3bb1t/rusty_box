@@ -16,7 +16,8 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-02-28):**
+**Current Status (2026-03-03):**
+- ✅ **DLX Linux boots to `dlx login:` prompt!** Full OS boot from BIOS POST through kernel init to user login.
 - ✅ BIOS-bochs-latest (128 KB) is now the primary BIOS
 - ✅ Full BIOS POST completes: rombios32_init, VGA BIOS, ATA detection, boot
 - ✅ VGA text output working! Clean headless text dump:
@@ -25,16 +26,24 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
   Console: colour VGA+ 80x25, 1 virtual console (max 63)
   Calibrating delay loop.. ok - 9.98 BogoMIPS
   Memory: 31140k/32768k available (612k kernel code, 384k reserved, 632k data)
-  Swansea University Computer Society NET3.034 for Linux 1.3.77
-  NET3: Unix domain sockets 0.12 for Linux NET3.033.
-  Swansea University Computer Society TCP/IP for NET3.034
-  IP Protocols: ICMP, UDP, TCP
-  Checking 386/387 coupling... Ok, fpu using old IRQ13 error reporting
-  Checking 'hlt' instruction... Ok.
+  ...
   Linux version 1.3.89 (root@merlin) (gcc version 2.7.2)
   Serial driver version 4.11a with no serial options enabled
   PS/2 auxiliary pointing device detected -- driver installed.
   loop: registered device at major 7
+  hda: RUSTY_BOX HARDDISK, 10MB w/256kB Cache, LBA, CHS=306/4/17
+  ide0 at 0x1f0-0x1f7,0x3f6 on irq 14
+  Started kswapd v 1.4.2.2
+  Partition check: hda: hda1
+  VFS: Mounted root (ext2 filesystem) readonly.
+  Jan  1 12:00:13 init[1]: version 2.4 booting
+  EXT2-fs warning: mounting unchecked fs, running e2fsck is recommended
+  Mounting remote file systems...
+  INET: syslogd
+  Jan  1 12:00:14 init[1]: Entering runlevel: 4
+  Welcome to DLX V1.0 (C) 1995-96 Erich Boehm
+                      (C) 1995    Hannes Boehm
+  dlx login:
   ```
 - ✅ LILO boot loader runs, loads compressed Linux kernel
 - ✅ Kernel decompresses and starts executing (paging enabled, CR0=0x80000013)
@@ -82,7 +91,13 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 - ✅ Triple fault FIXED: was caused by INT always using IVT (real-mode) + XCHG mod_c0 bug
 - ✅ vsprintf FIXED: ADD AL,Ib (opcode 0x04) was operating on AH instead of AL — jump table index wrong
 - ✅ "Trying to free nonexistent swap-page" RESOLVED: caused by triple-fault-induced IDT corruption
-- 🔄 Kernel stalls after "loop: registered device at major 7" — needs disk I/O or init to continue
+- ✅ PUSH imm8 (0x6A) sign-extension: was zero-extending → wait4(-1) became wait4(255) → init couldn't reap children
+- ✅ Prefetch page fault propagation: translate_linear errors in prefetch() were silently swallowed
+- ✅ Fetch buffer 4K page bounding: get_host_mem_addr returned unbounded slice, decoder read past page boundary into wrong physical memory → stale CALL displacement → wild jumps
+- ✅ Icache SMC boundary check: page-spanning instructions with only partial first_bytes match forced to re-decode
+- ✅ Empty ATA drive status returns 0xFF (floating bus) instead of 0x00
+- ✅ CMOS floppy registers set for DLX config (two 1.44M drives)
+- ✅ HLT busy-wait for small sleeps (<2ms) avoids Windows 15.6ms timer granularity
 
 **What Fixed the "Corrupted Symbols":**
 The previous investigation concluded BIOS ROM had wrong symbol addresses. In reality, the segment default bug caused stack reads via `[BP+offset]` to use DS (base=0) instead of SS, and the execute1/execute2 swap caused memory reads to return register values. Together, these made the BIOS load wrong values for `_end`, `__data_start`, etc. With both bugs fixed, the BIOS reads correct values from the stack and memory.
@@ -224,11 +239,13 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ## Known Issues & Next Steps
 
 ### Next Steps
-1. **Reach DLX Linux `dlx login:` prompt** — System now boots to `init[1]: version 2.4 booting`, mounts ext2 root, starts kswapd. Init runs but shows `/bin/sh: cannot duplicate fd 255` errors. Login prompt has not yet appeared. Next: investigate init script fd issues and whether getty starts.
-2. **Investigate `/bin/sh fd 255` errors** — DLX Linux init tries to exec getty for login; these shell errors may be preventing it
-3. ~~**Fix LDT triple fault**~~ — FIXED: root cause was INT using IVT in PM + XCHG mod_c0 bug
-4. ~~**Fix vsprintf**~~ — FIXED: ADD AL,Ib (opcode 0x04) operated on AH, breaking vsprintf's jump table index computation
-5. ~~**Fix swap init loop**~~ — RESOLVED: "Trying to free nonexistent swap-page" was caused by IDT corruption from the INT dispatch bug
+1. ~~**Reach DLX Linux `dlx login:` prompt**~~ — **DONE** (2026-03-03). Full boot to login prompt achieved.
+2. **Interactive login** — Type username/password at `dlx login:` prompt and get a shell
+3. **Fix `ide2 at 0x1e8` phantom** — PCI PIIX IDE BAR misconfiguration causes kernel to probe a non-existent 3rd IDE channel
+4. **Fix keyboard scancode 70** — `keyboard: unrecognized scancode (70) - ignored` appears repeatedly after login prompt
+5. ~~**Fix LDT triple fault**~~ — FIXED: root cause was INT using IVT in PM + XCHG mod_c0 bug
+6. ~~**Fix vsprintf**~~ — FIXED: ADD AL,Ib (opcode 0x04) operated on AH, breaking vsprintf's jump table index computation
+7. ~~**Fix swap init loop**~~ — RESOLVED: "Trying to free nonexistent swap-page" was caused by IDT corruption from the INT dispatch bug
 
 ### Exact Instruction Threshold: 132,865,700
 
@@ -241,26 +258,23 @@ The kernel first enters HLT idle at **exactly instruction 132,865,700**. Key not
 ### Quick Debug Commands
 
 **Key instruction count milestones — use the minimum needed:**
-- `132_865_710` — kernel first HLT threshold + 10; diagnostics print at run end. **Use this for ATA/IRQ debugging.**
+- `500_000_000` — full boot to `dlx login:` prompt (default). Takes ~15-25 seconds at ~20 MIPS.
+- `132_865_710` — kernel first HLT threshold + 10; diagnostics print at run end. Use for ATA/IRQ debugging.
 - `2_000_000` — BIOS POST only (fast check, VGA text visible)
-- `500_000` — BIOS early boot trace
 
 ```bash
 # Build release binary
 cargo build --release --example dlxlinux --features std
 
-# Run headless to kernel HLT + diagnostics (use THIS for current ATA debugging)
-RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=132865710 ./target/release/examples/dlxlinux.exe
+# Run headless — full boot to login prompt (default 500M instructions)
+RUSTY_BOX_HEADLESS=1 ./target/release/examples/dlxlinux.exe
+
+# Run with GUI (egui)
+cargo run --release --example dlxlinux --features "std,gui-egui"
 
 # Run with debug logging to see port 0x402 writes (and port 0x80 POST codes)
 RUST_LOG=debug RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=500000 ./target/release/examples/dlxlinux.exe 2>&1 | grep -E "0x0402|0x0080|port_out.*402|BIOS output"
-
-# Check BIOS output buffer drain in emulator summary
-RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=2000000 ./target/release/examples/dlxlinux.exe 2>&1
 ```
-
-**Use MAX_INSTRUCTIONS=132_865_710** for ATA/IRQ debugging — the kernel HLTs at 132,865,700.
-Everything well past that is the idle loop spinning with timer ISRs. Running to 500M just wastes time.
 
 ### Progress Metrics
 - ✅ All major decoder bugs fixed (Group 1 opcodes, segment defaults, execute1/execute2)
@@ -319,7 +333,11 @@ Everything well past that is the idle loop spinning with timer ISRs. Running to 
 - ✅ BOUND uses exception(Br, 0) instead of interrupt_real_mode(5) — matches Bochs
 - ✅ CpuLoopRestart leak fixed: InsertedOpcode path in cpu_loop_n properly catches CpuLoopRestart
 - ✅ Kernel boots to driver init: console, BogoMIPS, networking, serial, PS/2, loop device
-- 🔄 Kernel stalls after "loop: registered device at major 7" — needs investigation
+- ✅ **DLX Linux boots to `dlx login:` prompt** — init runs sysinit scripts, mounts ext2, starts syslogd, enters runlevel 4, launches agetty
+- ✅ Fetch buffer 4K page bounding: prevented decoder from reading past page boundaries (THE root cause of agetty crashes)
+- ✅ PUSH imm8 sign-extension: wait4(-1) fixed (was wait4(255) due to zero-extended 0xFF)
+- ✅ Prefetch page fault propagation: CpuLoopRestart from translate_linear now propagated correctly
+- ✅ Empty ATA drive returns 0xFF (floating bus), CMOS floppy registers configured, HLT busy-wait for Windows
 
 ## Build Commands
 
@@ -541,20 +559,9 @@ bios_table_cur_addr: 0x000001a3
 
 **Result:** PIT fires IRQ0 → PIC raises interrupt → CPU injects INT 8 → handler increments BDA[0x046C] → timer wait loops exit → BIOS continues.
 
-### INT 13h Read Sectors Error — Under Investigation (2026-02-24)
+### INT 13h Read Sectors Error — RESOLVED (2026-02-24)
 
-**Status:** Active investigation
-
-BIOS completes full POST (rombios32_init, VGA BIOS, ATA detection), then attempts to boot:
-```
-ata0-0: PCHS=306/4/17 translation=none LCHS=306/4/17
-int13_harddisk: function 02, error 04 !
-No bootable device.
-F000:0C48  HLT                 ; and halt forever
-```
-INT 13h function 02 = Read Sectors. Error 04 = sector not found. ATA IDENTIFY works (geometry detected correctly), but PIO sector read fails. The ATA read command path in `harddrv.rs` needs debugging — likely the command dispatch or data transfer phase is wrong.
-
-Fatal halt at F000:0C49 (CLI;HLT) at ~1.17M instructions after "No bootable device."
+**Status:** Fixed — INT 13h Read Sectors works, LILO boots, kernel loads and runs to login prompt.
 
 ### BIOS ROM Shadow Mapping (2026-02-17)
 
@@ -570,11 +577,18 @@ The decoder fails to account for immediate bytes in TEST instructions (opcodes 0
 
 ### Exception Handling (2026-02-02)
 
-**Status:** Partially implemented
-
-Exception handling infrastructure exists (Exception enum, IVT delivery in real mode). Protected mode IDT delivery needs work - currently fails with `BadVector` when IDT limit=0.
+**Status:** Fully implemented — real mode IVT, protected mode IDT, double/triple fault chain, recursive exception delivery all working. DLX Linux boots to login with full exception handling.
 
 ### Major Bug Fixes (Historical)
+
+**Session 10 (2026-03-03) — DLX Linux boots to `dlx login:`**
+0. **Fetch buffer 4K page bounding** (`cpu.rs`): `get_host_mem_addr()` returned `&actual_vector[start..]` extending to end of all emulator RAM. The decoder could read past a 4K page boundary into physically adjacent but virtually unrelated memory, producing stale CALL displacements → wild jumps to 0xBDED0580. Fixed by bounding to `fetch_ptr[..4096]`. The TLB code path already did this correctly.
+0. **PUSH imm8 sign-extension** (`fetchdecode32.rs`): Opcode 0x6A (PUSH imm8) zero-extended its immediate. `PUSH 0xFF` pushed 0x000000FF (255) instead of 0xFFFFFFFF (-1). This broke `wait4(-1)` in init → agetty children weren't reaped → "No more processes left in this runlevel". Fixed by adding 0x6A, 0x6B to sign-extension list.
+0. **Prefetch page fault propagation** (`cpu.rs`): `translate_linear` errors during `prefetch()` were silently swallowed (`Err(_) => { None }`). Page fault exceptions pushed a frame and changed RIP, but `CpuLoopRestart` was never returned → `boundary_fetch` continued with stale state → panic. Fixed by propagating the error.
+0. **Icache SMC boundary check** (`cpu.rs`): For page-spanning instructions, `first_bytes` only checked bytes on the current page. If the next page was remapped (e.g. `uselib`/`mmap`), the remaining bytes changed but SMC didn't catch it. Added `if avail < ilen { smc_invalid = true }`.
+0. **Empty ATA drive status** (`harddrv.rs`): Returned 0x00 for status register when no device attached. Fixed to return 0xFF (floating bus) matching real hardware.
+0. **CMOS floppy registers** (`cmos.rs`): CMOS 0x10 (drive types) and 0x14 (equipment byte) now set for DLX's two 1.44M floppy drives.
+0. **HLT busy-wait** (`emulator.rs`): Small sleeps (<2ms) now spin instead of calling `thread::sleep`, avoiding Windows 15.6ms timer granularity rounding.
 
 0. **INT/INT3/INTO always used IVT in protected mode (2026-02-28)**: `int_ib()`, `int3()`, `into()`, and `int1()` unconditionally called `interrupt_real_mode(vector)` regardless of CPU mode. In protected mode, this read the IVT at physical `vector*4` instead of dispatching through the IDT. For Linux INT 0x80 (syscall), this caused the kernel to jump to startup_32 (0x100000) with CS=0x0000, re-executing `setup_idt` which overwrote all IDT entries with the default `ignore_int` handler, then any subsequent exception would recursively call `printk` → stack overflow → GDT corruption → triple fault. Fixed by creating a unified `interrupt()` method (matching Bochs `exception.cc:762-839`) that dispatches to `interrupt_real_mode()` or `protected_mode_int()` based on CPU mode. Also fixed BOUND to use `exception(Br, 0)` matching Bochs.
 1. **XCHG r32, r/m32 missing mod_c0 dispatch (2026-02-28)**: `XchgEdGd` in the dispatcher always called the register form, never checking `instr.mod_c0()` for memory operands. `XCHG EAX, [ESP+offset]` in the Linux exception handler was treated as `XCHG EAX, ESP`, setting ESP=0xFFFFFFFF. The subsequent `PUSH` caused a page fault, leading to double/triple fault. Fixed by adding mod_c0 dispatch matching the 8-bit and 16-bit XCHG forms.
