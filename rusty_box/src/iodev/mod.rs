@@ -31,6 +31,7 @@ pub mod pci2isa;
 pub mod pci_ide;
 pub mod pic;
 pub mod pit;
+pub mod serial;
 pub mod vga;
 
 // Re-export device types for convenience
@@ -45,6 +46,7 @@ pub use pci2isa::BxPiix3;
 pub use pci_ide::BxPciIde;
 pub use pic::BxPicC;
 pub use pit::BxPitC;
+pub use serial::BxSerialC;
 // BxVgaC is pub(crate) - not exported outside the crate
 
 /// Number of I/O ports (0x0000 - 0xFFFF)

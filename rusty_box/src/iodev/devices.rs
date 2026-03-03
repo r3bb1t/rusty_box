@@ -33,6 +33,7 @@ use super::pic::{
     BxPicC, PIC_ELCR1, PIC_ELCR2, PIC_MASTER_CMD, PIC_MASTER_DATA, PIC_SLAVE_CMD, PIC_SLAVE_DATA,
 };
 use super::pit::{BxPitC, PIT_CONTROL, PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2};
+use super::serial::BxSerialC;
 use super::vga::BxVgaC;
 use super::BxDevicesC;
 
@@ -88,6 +89,9 @@ pub struct DeviceManager {
     /// Bochs: `bx_pci_ide_c *pluginPciIdeController` (iodev/iodev.h)
     #[cfg(feature = "bx_support_pci")]
     pub(crate) pci_ide: BxPciIde,
+    /// 16550 UART Serial Port Controller (COM1-COM4)
+    /// Bochs: `bx_serial_c *pluginSerial` (iodev/iodev.h)
+    pub(crate) serial: BxSerialC,
     /// PCI configuration address register (shadow copy for handler dispatch)
     /// Bochs: bx_devices_c::pci_conf_addr (devices.cc)
     #[cfg(feature = "bx_support_pci")]
@@ -147,6 +151,7 @@ impl DeviceManager {
             pci2isa: BxPiix3::new(),
             #[cfg(feature = "bx_support_pci")]
             pci_ide: BxPciIde::new(),
+            serial: BxSerialC::new(1), // COM1 only
             #[cfg(feature = "bx_support_pci")]
             pci_conf_addr: 0,
             #[cfg(feature = "bx_support_pci")]
@@ -216,6 +221,7 @@ impl DeviceManager {
         self.register_pit_handlers(io);
         self.register_keyboard_handlers(io);
         self.register_harddrv_handlers(io);
+        self.register_serial_handlers(io);
         #[cfg(feature = "bx_support_pci")]
         self.register_acpi_handlers(io);
         #[cfg(feature = "bx_support_pci")]
@@ -236,6 +242,7 @@ impl DeviceManager {
         self.keyboard.reset();
         self.harddrv.reset();
         self.vga.reset();
+        self.serial.reset();
         #[cfg(feature = "bx_support_apic")]
         self.ioapic.reset();
         #[cfg(feature = "bx_support_pci")]
@@ -429,6 +436,23 @@ impl DeviceManager {
             "ATA Secondary Control",
             0x1,
         );
+    }
+
+    /// Register Serial Port I/O handlers
+    fn register_serial_handlers(&mut self, io: &mut BxDevicesC) {
+        let serial_ptr = &mut self.serial as *mut BxSerialC as *mut c_void;
+
+        // COM1: 0x3F8-0x3FF (8 registers)
+        for port in 0x3F8..=0x3FF_u16 {
+            io.register_io_handler(
+                serial_ptr,
+                super::serial::serial_read_handler,
+                super::serial::serial_write_handler,
+                port,
+                "16550 COM1",
+                0x1, // byte access only
+            );
+        }
     }
 
     /// Register ACPI I/O handlers.
