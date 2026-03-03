@@ -129,8 +129,10 @@ Multiple `debug!`/`info!` calls on hot paths were causing I/O-bound slowdowns:
 Use `std::env::var("RUST_LOG").parse::<tracing::Level>()` instead.
 
 **For headless testing on Windows**: Set `RUSTY_BOX_HEADLESS=1` to skip TermGUI repaint.
-Performance (windowed per-second MIPS, release build, 2026-03-02): BIOS ~22 MIPS, kernel decompressor ~29 MIPS, kernel init ~14 MIPS.
-Monitor per-phase throughput with: `RUST_LOG=error cargo run --release --example dlxlinux --features std` (output lines tagged `[mips]`).
+Performance (windowed MIPS, release build, 2026-03-03): BIOS real-mode ~22 MIPS, kernel decompressor ~25-50 MIPS, kernel init ~22-27 MIPS.
+Monitor per-phase throughput with: `RUST_LOG=error cargo run --release --example dlxlinux --features std` (output lines tagged `[mips]`, fire every 5M instructions).
+
+**Interactive/egui HLT sync (2026-03-03)**: When a GUI is attached and the CPU is in protected mode, the emulator sleeps once per HLT batch to sync virtual time to wall-clock time (analogous to Bochs `clock: sync=slowdown`). This prevents the Linux console blank timer from firing ~360x too early. BIOS (real mode) runs at full speed. Implemented as `self.gui.is_some() && cpu_mode != 0` — no per-example config needed.
 
 **New fixes (2026-02-19): Short jumps, CLC/STC/CMC, RDMSR/WRMSR, Jbd dispatch**
 
@@ -222,8 +224,8 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ## Known Issues & Next Steps
 
 ### Next Steps
-1. **Investigate kernel stall after driver init** — Kernel first enters HLT at exactly instruction **132,865,700**. Kernel stops at "loop: registered device at major 7" and waits for ATA disk I/O to complete. Likely needs disk I/O (reading rootfs) or init process startup to continue.
-2. **Reach DLX Linux login prompt** — Continue iterative bug fixing until the full boot completes
+1. **Reach DLX Linux `dlx login:` prompt** — System now boots to `init[1]: version 2.4 booting`, mounts ext2 root, starts kswapd. Init runs but shows `/bin/sh: cannot duplicate fd 255` errors. Login prompt has not yet appeared. Next: investigate init script fd issues and whether getty starts.
+2. **Investigate `/bin/sh fd 255` errors** — DLX Linux init tries to exec getty for login; these shell errors may be preventing it
 3. ~~**Fix LDT triple fault**~~ — FIXED: root cause was INT using IVT in PM + XCHG mod_c0 bug
 4. ~~**Fix vsprintf**~~ — FIXED: ADD AL,Ib (opcode 0x04) operated on AH, breaking vsprintf's jump table index computation
 5. ~~**Fix swap init loop**~~ — RESOLVED: "Trying to free nonexistent swap-page" was caused by IDT corruption from the INT dispatch bug

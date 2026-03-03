@@ -11,7 +11,7 @@ path = "src/lib.rs"
 [features]
 default = ["bx_full", "std"]
 
-std = ["tracing/std", "tempfile", "libc"]
+std = ["tracing/std", "tempfile", "libc", "crossterm"]
 gui-egui = ["dep:egui", "dep:eframe"]
 
 bx_full = [
@@ -58,6 +58,7 @@ bitflags.workspace = true
 paste.workspace = true
 rusty_box_decoder = { path = "../rusty_box_decoder" }
 libc = { version = "0.2", optional = true }
+crossterm = { version = "0.29", optional = true }
 egui = { version = "0.31", optional = true }
 eframe = { version = "0.31", optional = true, default-features = false, features = ["default_fonts", "glow"] }
 
@@ -66,8 +67,6 @@ name = "dlxlinux_egui"
 path = "examples/gui/dlxlinux_egui.rs"
 required-features = ["std", "gui-egui"]
 
-[target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["consoleapi", "processenv", "winbase", "wincon", "handleapi"] }
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

@@ -193,6 +193,19 @@ pub fn ADD_EwIwM<'c, I: BxCpuIdTrait>(
     Ok(())
 }
 
+/// ADD_EwsIb: ADD r/m16, imm8 (sign-extended) - combined dispatcher
+/// Opcode: 0x83/0 with 66 prefix. Dispatches to register or memory form.
+pub fn ADD_EwsIb<'c, I: BxCpuIdTrait>(
+    cpu: &mut BxCpuC<'c, I>,
+    instr: &Instruction,
+) -> Result<(), crate::cpu::CpuError> {
+    if instr.mod_c0() {
+        ADD_EwIbR(cpu, instr)
+    } else {
+        ADD_EwIbM(cpu, instr)
+    }
+}
+
 /// ADD_EwIw: ADD r/m16, imm16
 pub fn ADD_EwIw<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,

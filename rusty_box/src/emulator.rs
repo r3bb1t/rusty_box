@@ -42,11 +42,11 @@ pub struct EmulatorConfig {
 impl Default for EmulatorConfig {
     fn default() -> Self {
         Self {
-            guest_memory_size: 32 * 1024 * 1024, // 32 MB
-            host_memory_size: 32 * 1024 * 1024,  // 32 MB
-            memory_block_size: 128 * 1024,       // 128 KB blocks
-            ips: 4_000_000,                      // 4 MIPS
-            pci_enabled: true,                   // Enable PCI for shadow RAM support
+            guest_memory_size: 32 * 1024 * 1024,
+            host_memory_size: 32 * 1024 * 1024,
+            memory_block_size: 128 * 1024,
+            ips: 4_000_000,
+            pci_enabled: true,
             cpu_params: BxParams::default(),
         }
     }
@@ -811,8 +811,14 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         let mut last_gui_update = std::time::Instant::now();
         let mut last_ips_update = std::time::Instant::now();
         let mut last_ips_instructions = 0u64;
-        const GUI_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100); // Update every 100ms
-        const IPS_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+        // MIPS terminal log: separate tracker fired every 5M instructions.
+        // At 20 MIPS (active) fires every 250ms; at 40K IPS (idle) fires every ~125s.
+        // This prevents flooding the terminal with "0.04 MIPS" lines during HLT idle.
+        let mut last_mips_log_update = std::time::Instant::now();
+        let mut last_mips_log_instructions = 0u64;
+        const GUI_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+        const IPS_SHOW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
+        const MIPS_LOG_INTERVAL: u64 = 5_000_000;
         let mut last_port92_value: u8 = self.system_control.value;
 
         const INSTRUCTION_BATCH_SIZE: u64 = 10000; // Larger batch size for better performance
@@ -1458,21 +1464,52 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     // Advance virtual time (Bochs-like ticking).
                     // Required so PIT can generate IRQ0 and BIOS can progress past HLT waits.
                     if self.config.ips != 0 {
-                        let usec_from_instr =
-                            (executed.saturating_mul(1_000_000)) / (self.config.ips as u64);
-                        // When CPU is halted, advance time aggressively (5ms per batch) so PIT
-                        // fires IRQ0 quickly (~11 batches per 54.9ms PIT cycle). When active,
-                        // use min 10 usec to prevent timer starvation at low instruction counts.
-                        let min_usec = if matches!(
+                        if matches!(
                             self.cpu.activity_state,
                             crate::cpu::cpu::CpuActivityState::Hlt
                         ) {
-                            5000
+                            // CPU is halted: advance virtual clock in 10-usec steps until an
+                            // interrupt is pending. Matches Bochs handleWaitForEvent + BX_TICKN.
+                            //
+                            // When a GUI is attached AND the CPU is in protected mode: sleep once
+                            // after the batch to synchronise virtual time to wall-clock time.
+                            // This prevents the Linux console blank timer from firing ~360x early.
+                            //
+                            // Protected-mode-only: BIOS runs in real mode (mode=0) and its F12
+                            // boot-wait HLTs should execute at full speed so the BIOS boots
+                            // quickly. The kernel (mode=2) is what needs real-time throttling.
+                            //
+                            // We sleep ONCE per batch (not per iteration): on Windows,
+                            // thread::sleep rounds up to ~15.6ms so per-iteration sleeps of 10µs
+                            // would become 15,600ms per batch instead of 1:1.
+                            //
+                            // Without a GUI (headless): spin at full speed; the caller injects
+                            // periodic keystrokes to keep the screen alive.
+                            let hlt_sync = self.gui.is_some() && self.cpu.get_cpu_mode() != 0;
+                            let hlt_real_start = if hlt_sync {
+                                Some(std::time::Instant::now())
+                            } else {
+                                None
+                            };
+                            let mut hlt_usec = 0u64;
+                            while !self.has_interrupt() && hlt_usec < 200_000 {
+                                self.tick_devices(10);
+                                hlt_usec += 10;
+                            }
+                            if let Some(start) = hlt_real_start {
+                                let real_elapsed_us = start.elapsed().as_micros() as u64;
+                                if hlt_usec > real_elapsed_us {
+                                    let sleep_us = hlt_usec - real_elapsed_us;
+                                    std::thread::sleep(std::time::Duration::from_micros(sleep_us));
+                                }
+                            }
                         } else {
-                            10
-                        };
-                        let usec = usec_from_instr.max(min_usec);
-                        self.tick_devices(usec);
+                            let usec_from_instr =
+                                (executed.saturating_mul(1_000_000)) / (self.config.ips as u64);
+                            // min 10 usec to prevent timer starvation at low instruction counts.
+                            let usec = usec_from_instr.max(10);
+                            self.tick_devices(usec);
+                        }
                     }
 
                     // Propagate A20 gate changes from keyboard controller to memory system
@@ -1907,9 +1944,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 self.update_gui();
             }
 
-            // Update IPS counter every second
+            // Update IPS: show_ips() every 1 real second (keeps egui status bar responsive).
+            // MIPS terminal log every 5M instructions (avoids flooding during HLT idle).
             let ips_elapsed = last_ips_update.elapsed();
-            if ips_elapsed >= IPS_UPDATE_INTERVAL {
+            if ips_elapsed >= IPS_SHOW_INTERVAL {
                 let delta_instr = instructions_executed - last_ips_instructions;
                 let mips = (delta_instr as f64 / ips_elapsed.as_secs_f64()) / 1_000_000.0;
                 let ips = (mips * 1_000_000.0) as u32;
@@ -1918,6 +1956,20 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 if let Some(ref mut gui) = self.gui {
                     gui.show_ips(ips);
                 }
+            }
+            // Print MIPS terminal line every 5M instructions.
+            if instructions_executed / MIPS_LOG_INTERVAL
+                > last_mips_log_instructions / MIPS_LOG_INTERVAL
+            {
+                let log_elapsed = last_mips_log_update.elapsed();
+                let log_delta = instructions_executed - last_mips_log_instructions;
+                let mips = if log_elapsed.as_secs_f64() > 0.001 {
+                    (log_delta as f64 / log_elapsed.as_secs_f64()) / 1_000_000.0
+                } else {
+                    0.0
+                };
+                last_mips_log_instructions = instructions_executed;
+                last_mips_log_update = std::time::Instant::now();
                 tracing::error!(
                     target: "mips",
                     "[{:>6}M instr] {:>6.2} MIPS  RIP={:#010x}  CS={:#06x}  mode={}",

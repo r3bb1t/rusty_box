@@ -205,7 +205,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::SbbEbIb => arith8::SBB_EbIb(self, instr),
             Opcode::SbbEbGb => arith8::SBB_EbGb(self, instr),
             Opcode::SbbGbEb => arith8::SBB_GbEb(self, instr),
-            Opcode::AddEwsIb => arith16::ADD_EwIbR(self, instr),
+            Opcode::AddEwsIb => arith16::ADD_EwsIb(self, instr),
             Opcode::AddEwIw => arith16::ADD_EwIw(self, instr),
             Opcode::AddEwGw => arith16::ADD_EwGw(self, instr),
             Opcode::AddGwEw => arith16::ADD_GwEw(self, instr),

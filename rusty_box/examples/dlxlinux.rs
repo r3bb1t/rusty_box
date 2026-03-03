@@ -200,6 +200,11 @@ fn run_dlxlinux() -> Result<()> {
     println!();
 
     // =========================================================================
+    // Detect headless mode early (needed for emulator config)
+    // =========================================================================
+    let headless = std::env::var_os("RUSTY_BOX_HEADLESS").is_some();
+
+    // =========================================================================
     // Create and configure emulator
     // =========================================================================
     let config = EmulatorConfig {
@@ -208,15 +213,15 @@ fn run_dlxlinux() -> Result<()> {
         guest_memory_size: 32 * 1024 * 1024, // 32 MB
         host_memory_size: 32 * 1024 * 1024,  // 32 MB
         memory_block_size: 128 * 1024,
-        ips: 15_000_000,   // IPS from bochsrc.bxrc
-        pci_enabled: true, // Enable PCI for shadow RAM support
+        ips: 15_000_000,
+        pci_enabled: true,
         ..Default::default()
     };
 
     tracing::info!(
         "Creating emulator: {} MB RAM, {} MIPS",
         config.guest_memory_size / (1024 * 1024),
-        config.ips / 1_000_000
+        config.ips / 1_000_000,
     );
 
     let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
@@ -224,7 +229,6 @@ fn run_dlxlinux() -> Result<()> {
     // =========================================================================
     // Set up GUI (must be done BEFORE initialize() to match original Bochs)
     // =========================================================================
-    let headless = std::env::var_os("RUSTY_BOX_HEADLESS").is_some();
     if headless {
         emu.set_gui(NoGui::new());
         tracing::info!("✓ GUI set (NoGui / headless)");
@@ -421,21 +425,98 @@ fn run_dlxlinux() -> Result<()> {
 
     let start_time = Instant::now();
 
-    // Run with instruction limit. The kernel first enters HLT at exactly 132,865,700
-    // instructions. After that, timer ISRs wake the scheduler and the init process
-    // does ATA disk I/O (IRQ14) to mount rootfs and start /sbin/init. Reaching the
-    // "dlx login:" prompt typically requires ~500M instructions at ~14 MIPS (~36s).
-    // Override with MAX_INSTRUCTIONS env var for shorter diagnostic runs:
-    //   MAX_INSTRUCTIONS=132865710   → stop at first kernel HLT (for HLT diagnostics)
-    //   MAX_INSTRUCTIONS=250000000   → diagnostic run (~18s at 14 MIPS)
-    //   MAX_INSTRUCTIONS=500000000   → try to reach login prompt
+    // Run with instruction limit. The kernel first enters HLT at ~132M instructions.
+    // After that, timer ISRs wake the scheduler. Init mounts rootfs, starts getty,
+    // which shows "dlx login:". In interactive mode the HLT sync keeps virtual
+    // time close to real time, so the console blank timer fires correctly at ~600s.
+    // Override with MAX_INSTRUCTIONS env var:
+    //   MAX_INSTRUCTIONS=132865710   → stop at first kernel HLT (ATA/IRQ diagnostics)
+    //   MAX_INSTRUCTIONS=200000000   → headless diagnostic run after HLT
+    //   MAX_INSTRUCTIONS=500000000   → headless run trying to reach login (default)
     let max_instructions: u64 = std::env::var("MAX_INSTRUCTIONS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(250_000_000);
+        .unwrap_or(500_000_000);
 
-    // Use interactive loop that handles GUI events
-    let result = emu.run_interactive(max_instructions);
+    // PS/2 Set 2 scancodes for "root\n". Break code = 0xF0 prefix + make code.
+    // 'r'=0x2D, 'o'=0x44, 't'=0x2C, Enter=0x5A
+    const LOGIN_SCANCODES: &[u8] = &[
+        0x2D, 0xF0, 0x2D,  // 'r' make + break
+        0x44, 0xF0, 0x44,  // 'o' make + break
+        0x44, 0xF0, 0x44,  // 'o' make + break
+        0x2C, 0xF0, 0x2C,  // 't' make + break
+        0x5A, 0xF0, 0x5A,  // Enter make + break
+    ];
+    // Harmless Left-Shift make+break: resets Linux console blank timer without
+    // typing any character (the kernel discards modifier-only keypresses from
+    // the TTY input buffer, but do_keyboard_interrupt() still calls unblank_screen()
+    // and resets the inactivity timer).
+    const KEEP_ALIVE_SCANCODE: &[u8] = &[0x12, 0xF0, 0x12]; // Left Shift
+
+    // In headless mode: run in 20M-instruction phases. After the kernel HLTs (~132M),
+    // inject a Shift keep-alive every phase to prevent the console blank timer from
+    // firing (~25M-instruction interval at our virtual-time rate). Once VGA text
+    // contains "login:", inject "root\n" scancodes to log in.
+    //
+    // In interactive mode: HLT sync keeps virtual≈real time, blank fires at ~600s,
+    // so no keep-alive injection needed — the user can type normally.
+    let result = if headless {
+        let mut total_executed: u64 = 0;
+        let mut run_result: Result<u64> = Ok(0);
+        let mut logged_in = false;
+
+        // Run in 20M-instruction phases so we can inject between phases
+        const PHASE_SIZE: u64 = 20_000_000;
+        'phases: loop {
+            if total_executed >= max_instructions {
+                break 'phases;
+            }
+            let run_for = PHASE_SIZE.min(max_instructions - total_executed);
+            match emu.run_interactive(run_for) {
+                Ok(n) => total_executed += n,
+                Err(e) => { run_result = Err(e); break 'phases; }
+            }
+            run_result = Ok(total_executed);
+
+            // After kernel HLT starts (~130M), blank timer is live — check VGA
+            if total_executed >= 130_000_000 {
+                let vga_text = emu.vga_scan_text_memory();
+                let has_login = vga_text.contains("login:");
+
+                // Print VGA preview (first few non-empty lines) for diagnosis
+                let preview: Vec<&str> = vga_text.lines()
+                    .filter(|l| !l.trim().is_empty())
+                    .take(3)
+                    .collect();
+                let preview_str = if preview.is_empty() {
+                    "(blank/empty)".to_string()
+                } else {
+                    preview.join(" | ")
+                };
+                println!("[{}M] VGA: {}{}",
+                    total_executed / 1_000_000,
+                    preview_str,
+                    if has_login { " *** LOGIN DETECTED ***" } else { "" });
+
+                if has_login && !logged_in {
+                    println!("(headless) Injecting 'root\\n' at {}M instructions",
+                        total_executed / 1_000_000);
+                    for &sc in LOGIN_SCANCODES {
+                        emu.send_scancode(sc);
+                    }
+                    logged_in = true;
+                } else {
+                    // Keep-alive: reset console blank timer (fires every ~25M instructions)
+                    for &sc in KEEP_ALIVE_SCANCODE {
+                        emu.send_scancode(sc);
+                    }
+                }
+            }
+        }
+        run_result
+    } else {
+        emu.run_interactive(max_instructions)
+    };
 
     let elapsed = start_time.elapsed();
 
@@ -717,6 +798,84 @@ fn run_dlxlinux() -> Result<()> {
                 let val = u32::from_le_bytes([v[0], v[1], v[2], v[3]]);
                 println!("  vaddr {:#010x}: PDE[{}]={:#010x} PTE[{}]={:#010x} → phys {:#010x} = {} ({:#x})",
                     vaddr, pde_idx, pde, pte_idx, pte, phys, val, val);
+            }
+        }
+
+        // Dump crash region and store instruction area for exec() crash debugging
+        {
+            // The crash: EIP=0x0012c52d, MOV EAX,[EAX+0x40], EAX=0x1bac1800
+            // The store: RIP=0x00196704 writes 0x1bac1800 to kernel stack at ~126M instr
+            println!("\n===== CRASH REGION CODE (phys 0x12c4e0..0x12c570) =====");
+            for chunk in (0x12c4e0u32..0x12c570).step_by(16) {
+                let b = emu.memory.peek_ram(chunk as usize, 16);
+                let hex: Vec<String> = b.iter().map(|b| format!("{:02x}", b)).collect();
+                let marker = if chunk == 0x12c520 { " <<< CRASH AREA" } else { "" };
+                println!("  {:#010x}: {}{}", chunk, hex.join(" "), marker);
+            }
+            println!("\n===== STORE INSTRUCTION AREA (phys 0x196690..0x196730) =====");
+            for chunk in (0x196690u32..0x196730).step_by(16) {
+                let b = emu.memory.peek_ram(chunk as usize, 16);
+                let hex: Vec<String> = b.iter().map(|b| format!("{:02x}", b)).collect();
+                let marker = if chunk == 0x196700 { " <<< STORE AREA" } else { "" };
+                println!("  {:#010x}: {}{}", chunk, hex.join(" "), marker);
+            }
+            // Also scan physical RAM for 0x1bac1800 value (little-endian bytes 00 18 ac 1b)
+            println!("\n===== SCAN FOR 0x1bac1800 IN PHYSICAL RAM =====");
+            let target = [0x00u8, 0x18, 0xac, 0x1b];
+            let mut found_count = 0;
+            let mut found_addr = 0usize;
+            for addr in (0x100000usize..0x2000000).step_by(4) {
+                let b = emu.memory.peek_ram(addr, 4);
+                if b.len() >= 4 && b[0] == target[0] && b[1] == target[1] && b[2] == target[2] && b[3] == target[3] {
+                    if found_count < 20 {
+                        let ctx = emu.memory.peek_ram(addr.saturating_sub(8), 20);
+                        println!("  Found at phys {:#010x}: ctx={}", addr, ctx.iter().map(|x| format!("{:02x}", x)).collect::<Vec<_>>().join(" "));
+                        found_addr = addr;
+                    }
+                    found_count += 1;
+                }
+            }
+            println!("  Total occurrences: {}", found_count);
+
+            // Dump the full struct context around the found address
+            if found_addr > 0 {
+                // The struct base = found_addr - 0x3c (offset of inode ptr in struct)
+                let struct_base = found_addr.saturating_sub(0x3c);
+                println!("\n===== STRUCT CONTAINING 0x1bac1800 (base=phys {:#010x}) =====", struct_base);
+                for off in (0usize..0x80).step_by(16) {
+                    let b = emu.memory.peek_ram(struct_base + off, 16);
+                    println!("  +{:#04x}: {}", off, b.iter().map(|x| format!("{:02x}", x)).collect::<Vec<_>>().join(" "));
+                }
+                // Also try base = found_addr directly (if offset is actually 0)
+                println!("  Also dump at found_addr itself:");
+                let b = emu.memory.peek_ram(found_addr.saturating_sub(0x10), 0x40);
+                println!("  {}", b.iter().map(|x| format!("{:02x}", x)).collect::<Vec<_>>().join(" "));
+
+                // Walk the page table to check if physical 0x1bac1800 (the garbage pointer value) is mapped
+                println!("\n===== PAGE TABLE WALK FOR VIRTUAL 0x1bac1800 =====");
+                let vaddr = 0x1bac1800u32;
+                let cr3 = emu.cpu.get_cr3_val() as usize;
+                let pde_idx = (vaddr >> 22) as usize;
+                let pte_idx = ((vaddr >> 12) & 0x3FF) as usize;
+                let pde_addr = cr3 + pde_idx * 4;
+                let pde_b = emu.memory.peek_ram(pde_addr, 4);
+                let pde = u32::from_le_bytes([pde_b[0], pde_b[1], pde_b[2], pde_b[3]]);
+                println!("  vaddr={:#010x} PDE[{}] @ phys {:#010x} = {:#010x}", vaddr, pde_idx, pde_addr, pde);
+                if pde & 1 != 0 && pde & 0x80 == 0 {
+                    let pt_base = (pde & 0xFFFFF000) as usize;
+                    let pte_addr = pt_base + pte_idx * 4;
+                    let pte_b = emu.memory.peek_ram(pte_addr, 4);
+                    let pte = u32::from_le_bytes([pte_b[0], pte_b[1], pte_b[2], pte_b[3]]);
+                    println!("  PTE[{}] @ phys {:#010x} = {:#010x}", pte_idx, pte_addr, pte);
+                }
+                // Also check DS.base + 0x1bac1800 page walk
+                println!("\n===== PAGE TABLE WALK FOR LINEAR 0xDBac1800 =====");
+                let laddr = 0xDBac1800u32;
+                let pde_idx2 = (laddr >> 22) as usize;
+                let pde_addr2 = cr3 + pde_idx2 * 4;
+                let pde_b2 = emu.memory.peek_ram(pde_addr2, 4);
+                let pde2 = u32::from_le_bytes([pde_b2[0], pde_b2[1], pde_b2[2], pde_b2[3]]);
+                println!("  laddr={:#010x} PDE[{}] @ phys {:#010x} = {:#010x}", laddr, pde_idx2, pde_addr2, pde2);
             }
         }
 
