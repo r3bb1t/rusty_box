@@ -730,32 +730,50 @@ impl BxCmosC {
     // Configuration helpers
     // =========================================================================
 
-    /// Configure memory size in CMOS
-    pub fn set_memory_size(&mut self, base_kb: u16, extended_kb: u16) {
-        // Base memory (in KB) - typically 640
-        self.ram[0x15] = (base_kb & 0xFF) as u8;
-        self.ram[0x16] = ((base_kb >> 8) & 0xFF) as u8;
+    /// Configure memory size in CMOS from total RAM bytes.
+    /// Matches Bochs devices.cc:320-345 exactly.
+    ///
+    /// Sets CMOS registers:
+    /// - 0x15-0x16: Base memory (640 KB)
+    /// - 0x17-0x18, 0x30-0x31: Extended memory 1MB-65MB (KB, capped at 0xFC00)
+    /// - 0x34-0x35: Extended memory above 16MB (64KB blocks, capped at 0xBF00)
+    pub fn set_memory_size_from_bytes(&mut self, total_bytes: u64) {
+        const BASE_MEMORY_IN_K: u16 = 640;
 
-        // Extended memory above 1MB (in KB)
-        self.ram[0x17] = (extended_kb & 0xFF) as u8;
-        self.ram[0x18] = ((extended_kb >> 8) & 0xFF) as u8;
-        self.ram[0x30] = (extended_kb & 0xFF) as u8;
-        self.ram[0x31] = ((extended_kb >> 8) & 0xFF) as u8;
+        // Base memory: always 640 KB
+        self.ram[0x15] = (BASE_MEMORY_IN_K & 0xFF) as u8;
+        self.ram[0x16] = ((BASE_MEMORY_IN_K >> 8) & 0xFF) as u8;
 
-        // Extended memory above 16MB (in 64KB blocks)
-        // Matching cpp_orig/bochs/iodev/devices.cc:332-337
-        let total_kb = base_kb as u32 + extended_kb as u32;
-        let extended_memory_in_64k = if total_kb > 16384 {
-            // Calculate (total - 16MB) / 64KB, limit to 3GB-16MB (0xBF00 blocks)
-            ((total_kb - 16384) / 64).min(0xbf00)
+        // Extended memory above 1MB (in KB), capped at 0xFC00 (63 MB)
+        // Bochs devices.cc:324-326
+        let memory_in_k = total_bytes / 1024;
+        let extended_memory_in_k = if memory_in_k > 1024 {
+            (memory_in_k - 1024).min(0xFC00)
         } else {
             0
         };
+        self.ram[0x17] = (extended_memory_in_k & 0xFF) as u8;
+        self.ram[0x18] = ((extended_memory_in_k >> 8) & 0xFF) as u8;
+        self.ram[0x30] = (extended_memory_in_k & 0xFF) as u8;
+        self.ram[0x31] = ((extended_memory_in_k >> 8) & 0xFF) as u8;
 
+        // Extended memory above 16MB (in 64KB blocks), capped at 0xBF00
+        // Bochs devices.cc:332-337
+        let extended_memory_in_64k = if memory_in_k > 16384 {
+            ((memory_in_k - 16384) / 64).min(0xBF00)
+        } else {
+            0
+        };
         self.ram[0x34] = (extended_memory_in_64k & 0xFF) as u8;
         self.ram[0x35] = ((extended_memory_in_64k >> 8) & 0xFF) as u8;
 
         self.update_checksum();
+    }
+
+    /// Configure memory size in CMOS (legacy interface, kept for compatibility)
+    pub fn set_memory_size(&mut self, base_kb: u16, extended_kb: u16) {
+        let total_bytes = (base_kb as u64 + extended_kb as u64 + 1024) * 1024;
+        self.set_memory_size_from_bytes(total_bytes);
     }
 
     /// Configure hard drive type byte only (legacy — prefer configure_disk_geometry)

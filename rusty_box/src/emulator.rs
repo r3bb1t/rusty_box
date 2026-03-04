@@ -822,7 +822,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             .process_pci_deferred::<I>(&mut self.devices, &mut self.memory);
     }
 
-    /// Configure CMOS memory size
+    /// Configure CMOS memory size from total RAM bytes.
+    /// This is the preferred method — it matches Bochs devices.cc:320-345.
+    pub fn configure_memory_in_cmos_from_config(&mut self) {
+        self.device_manager
+            .cmos
+            .set_memory_size_from_bytes(self.config.guest_memory_size as u64);
+    }
+
+    /// Configure CMOS memory size (legacy interface)
     pub fn configure_memory_in_cmos(&mut self, base_kb: u16, extended_kb: u16) {
         self.device_manager
             .cmos
