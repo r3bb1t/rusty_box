@@ -1277,6 +1277,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Rdtsc => self.rdtsc(instr),
             Opcode::Rdmsr => self.rdmsr(instr),
             Opcode::Wrmsr => self.wrmsr(instr),
+            Opcode::Sysenter => self.sysenter(instr),
+            Opcode::Sysexit => self.sysexit(instr),
+            Opcode::Xgetbv => self.xgetbv(instr),
+            Opcode::Xsetbv => self.xsetbv(instr),
+            Opcode::Xsave => self.xsave(instr),
+            Opcode::Xrstor => self.xrstor(instr),
+            Opcode::Xsavec | Opcode::Xsaveopt | Opcode::Xsaves | Opcode::Xrstors => {
+                // These variants require compaction support — stub as #UD for now
+                self.exception(super::cpu::Exception::Ud, 0)
+            }
 
             // =========================================================================
             // Shift/Rotate instructions
