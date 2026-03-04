@@ -1292,6 +1292,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Wrmsr => self.wrmsr(instr),
             Opcode::Sysenter => self.sysenter(instr),
             Opcode::Sysexit => self.sysexit(instr),
+            Opcode::Rsm => self.rsm(instr),
             Opcode::Xgetbv => self.xgetbv(instr),
             Opcode::Xsetbv => self.xsetbv(instr),
             Opcode::Xsave => self.xsave(instr),

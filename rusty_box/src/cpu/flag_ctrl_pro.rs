@@ -23,7 +23,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Set EFLAGS with full side effects.
     /// Based on Bochs flag_ctrl_pro.cc setEFlags()
-    fn set_eflags_internal(&mut self, new_eflags: u32) {
+    pub(super) fn set_eflags_internal(&mut self, new_eflags: u32) {
         let old = self.eflags;
         self.eflags = EFlags::from_bits_retain(new_eflags);
         let new_flags = self.eflags;
