@@ -727,6 +727,87 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
+    // Unified dispatchers (mod_c0 routing for register vs memory)
+    // =========================================================================
+
+    pub fn mov_eq_gq(&mut self, instr: &Instruction) {
+        if instr.mod_c0() {
+            // Register form: MOV r64, r64 - use the same register form
+            let src = instr.src() as usize;
+            let dst = instr.dst() as usize;
+            self.set_gpr64(dst, self.get_gpr64(src));
+        } else {
+            self.mov_eq_gq_m(instr);
+        }
+    }
+
+    pub fn mov_gq_eq(&mut self, instr: &Instruction) {
+        if instr.mod_c0() {
+            self.mov_gq_eq_r(instr);
+        } else {
+            self.mov_gq_eq_m(instr);
+        }
+    }
+
+    pub fn mov_eq_id(&mut self, instr: &Instruction) {
+        if instr.mod_c0() {
+            self.mov_eq_id_r(instr);
+        } else {
+            self.mov_eq_id_m(instr);
+        }
+    }
+
+    pub fn xchg_eq_gq(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.xchg_eq_gq_r(instr);
+            Ok(())
+        } else {
+            self.xchg_eq_gq_m(instr);
+            Ok(())
+        }
+    }
+
+    pub fn movsx_gq_eb(&mut self, instr: &Instruction) {
+        if instr.mod_c0() {
+            self.movsx_gq_eb_r(instr);
+        } else {
+            self.movsx_gq_eb_m(instr);
+        }
+    }
+
+    pub fn movsx_gq_ew(&mut self, instr: &Instruction) {
+        if instr.mod_c0() {
+            self.movsx_gq_ew_r(instr);
+        } else {
+            self.movsx_gq_ew_m(instr);
+        }
+    }
+
+    pub fn movsxd_gq_ed(&mut self, instr: &Instruction) {
+        if instr.mod_c0() {
+            self.movsx_gq_ed_r(instr);
+        } else {
+            self.movsx_gq_ed_m(instr);
+        }
+    }
+
+    pub fn movzx_gq_eb(&mut self, instr: &Instruction) {
+        if instr.mod_c0() {
+            self.movzx_gq_eb_r(instr);
+        } else {
+            self.movzx_gq_eb_m(instr);
+        }
+    }
+
+    pub fn movzx_gq_ew(&mut self, instr: &Instruction) {
+        if instr.mod_c0() {
+            self.movzx_gq_ew_r(instr);
+        } else {
+            self.movzx_gq_ew_m(instr);
+        }
+    }
+
+    // =========================================================================
     // Helper functions for 64-bit memory operations
     // =========================================================================
 
@@ -788,14 +869,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Read-Modify-Write: Read qword, return it and linear address for write back
     /// Matching read_RMW_linear_qword
-    fn read_rmw_linear_qword(&mut self, _seg: BxSegregs, laddr: u64) -> (u64, u64) {
+    pub(super) fn read_rmw_linear_qword(&mut self, _seg: BxSegregs, laddr: u64) -> (u64, u64) {
         let val = self.mem_read_qword(laddr);
         (val, laddr)
     }
 
     /// Write qword to linear address (for RMW operations)
     /// Matching write_RMW_linear_qword
-    fn write_rmw_linear_qword(&mut self, laddr: u64, val: u64) {
+    pub(super) fn write_rmw_linear_qword(&mut self, laddr: u64, val: u64) {
         self.mem_write_qword(laddr, val);
     }
 }

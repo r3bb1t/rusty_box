@@ -98,4 +98,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val32 = self.get_gpr32(instr.dst() as usize);
         self.set_gpr32(instr.dst() as usize, val32.swap_bytes());
     }
+
+    /// BSWAP r64 — reverse byte order of 64-bit register
+    /// Bochs bit.cc BSWAP_RRX (64-bit mode)
+    pub fn bswap_rqx(&mut self, instr: &Instruction) {
+        let reg = instr.dst() as usize;
+        let val = self.get_gpr64(reg);
+        self.set_gpr64(reg, val.swap_bytes());
+    }
 }

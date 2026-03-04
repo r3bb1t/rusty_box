@@ -96,6 +96,50 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         tracing::trace!("POP r64 (reg {}): {:#018x}", dst, value);
     }
 
+    /// PUSH m64 - Push 64-bit value from memory
+    /// Based on Bochs stack64.cc PUSH_EqM
+    pub fn push_eq_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        let eaddr = self.resolve_addr64(instr);
+        let seg = crate::cpu::decoder::BxSegregs::from(instr.seg());
+        let seg_idx = seg as usize;
+        let laddr = self.get_laddr64(seg_idx, eaddr);
+        let val64 = self.mem_read_qword(laddr);
+        self.push_64(val64);
+        Ok(())
+    }
+
+    /// POP m64 - Pop into 64-bit memory location
+    /// Based on Bochs stack64.cc POP_EqM
+    pub fn pop_eq_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        let val64 = self.pop_64();
+        let eaddr = self.resolve_addr64(instr);
+        let seg = crate::cpu::decoder::BxSegregs::from(instr.seg());
+        let seg_idx = seg as usize;
+        let laddr = self.get_laddr64(seg_idx, eaddr);
+        self.mem_write_qword(laddr, val64);
+        Ok(())
+    }
+
+    /// PUSH r/m64 - Unified dispatch based on mod_c0()
+    pub fn push_eq(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.push_eq_r(instr);
+            Ok(())
+        } else {
+            self.push_eq_m(instr)
+        }
+    }
+
+    /// POP r/m64 - Unified dispatch based on mod_c0()
+    pub fn pop_eq(&mut self, instr: &Instruction) -> super::Result<()> {
+        if instr.mod_c0() {
+            self.pop_eq_r(instr);
+            Ok(())
+        } else {
+            self.pop_eq_m(instr)
+        }
+    }
+
     // =========================================================================
     // PUSHFQ/POPFQ instructions (64-bit)
     // Based on Bochs flag_ctrl.cc

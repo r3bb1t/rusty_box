@@ -1175,6 +1175,168 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
 
             // =========================================================================
+            // 64-bit arithmetic instructions (arith64.rs)
+            // =========================================================================
+            Opcode::AddEqGq => self.add_eq_gq(instr),
+            Opcode::AddGqEq => self.add_gq_eq(instr),
+            Opcode::AddEqId => self.add_eq_id(instr),
+            Opcode::AddEqsIb => self.add_eqs_ib(instr),
+            Opcode::AdcEqGq => self.adc_eq_gq(instr),
+            Opcode::AdcGqEq => self.adc_gq_eq(instr),
+            Opcode::AdcEqId => self.adc_eq_id(instr),
+            Opcode::AdcEqsIb => self.adc_eqs_ib(instr),
+            Opcode::SubEqGq => self.sub_eq_gq(instr),
+            Opcode::SubGqEq => self.sub_gq_eq(instr),
+            Opcode::SubEqId => self.sub_eq_id(instr),
+            Opcode::SubEqsIb => self.sub_eqs_ib(instr),
+            Opcode::SbbEqGq => self.sbb_eq_gq(instr),
+            Opcode::SbbGqEq => self.sbb_gq_eq(instr),
+            Opcode::SbbEqId => self.sbb_eq_id(instr),
+            Opcode::SbbEqsIb => self.sbb_eqs_ib(instr),
+            Opcode::NegEq => self.neg_eq(instr),
+            Opcode::IncEq => self.inc_eq(instr),
+            Opcode::DecEq => self.dec_eq(instr),
+            Opcode::XaddEqGq => self.xadd_eq_gq(instr),
+            Opcode::CmpxchgEqGq => self.cmpxchg_eq_gq(instr),
+            Opcode::CMPXCHG16B => self.cmpxchg16b(instr),
+            Opcode::Cdqe => {
+                self.cdqe(instr);
+                Ok(())
+            }
+            Opcode::Cqo => {
+                self.cqo(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // 64-bit logical instructions (logical64.rs)
+            // =========================================================================
+            Opcode::XorEqGq | Opcode::XorEqGqZeroIdiom => self.xor_eq_gq(instr),
+            Opcode::XorGqEq | Opcode::XorGqEqZeroIdiom => self.xor_gq_eq(instr),
+            Opcode::XorEqId => self.xor_eq_id(instr),
+            Opcode::XorEqsIb => self.xor_eq_id(instr),
+            Opcode::OrEqGq => self.or_eq_gq(instr),
+            Opcode::OrGqEq => self.or_gq_eq(instr),
+            Opcode::OrEqId => self.or_eq_id(instr),
+            Opcode::OrEqsIb => self.or_eq_id(instr),
+            Opcode::AndEqGq => self.and_eq_gq(instr),
+            Opcode::AndGqEq => self.and_gq_eq(instr),
+            Opcode::AndEqId => self.and_eq_id(instr),
+            Opcode::AndEqsIb => self.and_eq_id(instr),
+            Opcode::NotEq => self.not_eq(instr),
+            Opcode::TestEqGq => self.test_eq_gq(instr),
+            Opcode::TestEqId => self.test_eq_id(instr),
+            Opcode::TestEqsIb => self.test_eq_id(instr),
+            Opcode::CmpEqGq => self.cmp_eq_gq(instr),
+            Opcode::CmpGqEq => self.cmp_gq_eq(instr),
+            Opcode::CmpEqId => self.cmp_eq_id(instr),
+            Opcode::CmpEqsIb => self.cmp_eqs_ib(instr),
+            Opcode::SubEqGqZeroIdiom => {
+                // Zero idiom: SUB r64, r64 where dst==src — zero the register
+                self.zero_idiom_gq_r(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // 64-bit shift/rotate instructions (shift64.rs)
+            // =========================================================================
+            Opcode::ShlEqI1 => self.shl_eq_1(instr),
+            Opcode::ShlEq => self.shl_eq_cl(instr),
+            Opcode::ShlEqIb => self.shl_eq_ib(instr),
+            Opcode::ShrEqI1 => self.shr_eq_1(instr),
+            Opcode::ShrEq => self.shr_eq_cl(instr),
+            Opcode::ShrEqIb => self.shr_eq_ib(instr),
+            Opcode::SarEqI1 => self.sar_eq_1(instr),
+            Opcode::SarEq => self.sar_eq_cl(instr),
+            Opcode::SarEqIb => self.sar_eq_ib(instr),
+            Opcode::RolEqI1 => self.rol_eq_1(instr),
+            Opcode::RolEq => self.rol_eq_cl(instr),
+            Opcode::RolEqIb => self.rol_eq_ib(instr),
+            Opcode::RorEqI1 => self.ror_eq_1(instr),
+            Opcode::RorEq => self.ror_eq_cl(instr),
+            Opcode::RorEqIb => self.ror_eq_ib(instr),
+            Opcode::RclEqI1 => self.rcl_eq_1(instr),
+            Opcode::RclEq => self.rcl_eq_cl(instr),
+            Opcode::RclEqIb => self.rcl_eq_ib(instr),
+            Opcode::RcrEqI1 => self.rcr_eq_1(instr),
+            Opcode::RcrEq => self.rcr_eq_cl(instr),
+            Opcode::RcrEqIb => self.rcr_eq_ib(instr),
+            Opcode::ShldEqGqIb => self.shld_eq_gq_ib(instr),
+            Opcode::ShldEqGq => self.shld_eq_gq_cl(instr),
+            Opcode::ShrdEqGqIb => self.shrd_eq_gq_ib(instr),
+            Opcode::ShrdEqGq => self.shrd_eq_gq_cl(instr),
+
+            // =========================================================================
+            // 64-bit multiply/divide instructions (mult64.rs)
+            // =========================================================================
+            Opcode::MulRaxeq => self.mul_rax_eq(instr),
+            Opcode::ImulRaxeq => self.imul_rax_eq(instr),
+            Opcode::DivRaxeq => self.div_rax_eq(instr),
+            Opcode::IdivRaxeq => self.idiv_rax_eq(instr),
+            Opcode::ImulGqEq => self.imul_gq_eq(instr),
+            Opcode::ImulGqEqId => self.imul_gq_eq_id(instr),
+            Opcode::ImulGqEqsIb => self.imul_gq_eq_sib(instr),
+
+            // =========================================================================
+            // 64-bit data transfer (data_xfer64.rs)
+            // =========================================================================
+            Opcode::MovEqId => {
+                self.mov_eq_id(instr);
+                Ok(())
+            }
+            Opcode::XchgEqGq => self.xchg_eq_gq(instr),
+            Opcode::MovsxGqEb => {
+                self.movsx_gq_eb(instr);
+                Ok(())
+            }
+            Opcode::MovsxGqEw => {
+                self.movsx_gq_ew(instr);
+                Ok(())
+            }
+            Opcode::MovsxdGqEd => {
+                self.movsxd_gq_ed(instr);
+                Ok(())
+            }
+            Opcode::MovzxGqEb => {
+                self.movzx_gq_eb(instr);
+                Ok(())
+            }
+            Opcode::MovzxGqEw => {
+                self.movzx_gq_ew(instr);
+                Ok(())
+            }
+            Opcode::MovRrxiq => {
+                self.mov_rrxiq(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // 64-bit stack operations (stack64.rs)
+            // =========================================================================
+            Opcode::PushEq => self.push_eq(instr),
+            Opcode::PopEq => self.pop_eq(instr),
+            Opcode::PushfFq => {
+                self.pushf_fq(instr);
+                Ok(())
+            }
+            Opcode::PopfFq => {
+                self.popf_fq(instr);
+                Ok(())
+            }
+            Opcode::PushOp64Id => {
+                self.push_iq(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // 64-bit BSWAP
+            // =========================================================================
+            Opcode::BswapRrx => {
+                self.bswap_rqx(instr);
+                Ok(())
+            }
+
+            // =========================================================================
             // 64-bit control transfer instructions
             // =========================================================================
             Opcode::CallJq => self.call_jq(instr),
@@ -1309,6 +1471,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Stac => self.stac(instr),
             Opcode::Clflush | Opcode::Clflushopt => self.clflush(instr),
             Opcode::Rdtscp => self.rdtscp(instr),
+            Opcode::Swapgs => self.swapgs(instr),
 
             // =========================================================================
             // Shift/Rotate instructions
@@ -1677,10 +1840,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // =========================================================================
             // Data transfer (64-bit) instructions
             // =========================================================================
-            Opcode::MovRrxiq => {
-                self.mov_rrxiq(instr);
-                Ok(())
-            }
             Opcode::MovOp64GdEd => {
                 self.mov64_gd_ed_m(instr);
                 Ok(())
@@ -1690,11 +1849,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 Ok(())
             }
             Opcode::MovEqGq => {
-                self.mov_eq_gq_m(instr);
+                self.mov_eq_gq(instr);
                 Ok(())
             }
             Opcode::MovGqEq => {
-                self.mov_gq_eq_m(instr);
+                self.mov_gq_eq(instr);
                 Ok(())
             }
             Opcode::LeaGqM => {

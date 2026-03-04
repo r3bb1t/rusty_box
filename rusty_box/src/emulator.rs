@@ -20,7 +20,9 @@ use crate::{
 };
 
 use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::AtomicBool;
+#[cfg(feature = "std")]
+use core::sync::atomic::Ordering;
 
 /// Emulator configuration
 #[derive(Debug, Clone)]

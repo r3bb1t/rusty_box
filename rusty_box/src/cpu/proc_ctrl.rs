@@ -19,33 +19,60 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // handleAvxModeChange();
     }
 
-    /// Update cpu_mode based on CR0.PE and EFLAGS.VM
-    /// Based on Bochs proc_ctrl.cc handleCpuModeChange()
+    /// Update cpu_mode based on CR0.PE, EFLAGS.VM, EFER.LMA, CS.L
+    /// Based on Bochs proc_ctrl.cc:356-403 handleCpuModeChange()
     pub(super) fn handle_cpu_mode_change(&mut self) {
         use super::cpu::CpuMode;
         use super::eflags::EFlags;
 
-        if self.cr0.pe() {
-            if self.eflags.contains(EFlags::VM) {
-                self.cpu_mode = CpuMode::Ia32V8086;
-                // Bochs: CPL = 3 in V8086 mode
-                self.sregs[super::decoder::BxSegregs::Cs as usize]
-                    .selector
-                    .rpl = 3;
-            } else {
-                self.cpu_mode = CpuMode::Ia32Protected;
+        // Bochs proc_ctrl.cc:358 — check EFER.LMA first (long mode active)
+        if self.efer.lma() {
+            if !self.cr0.pe() {
+                // EFER.LMA set when CR0.PE=0 should not happen
+                tracing::error!("handle_cpu_mode_change: EFER.LMA is set when CR0.PE=0!");
             }
+            // Bochs proc_ctrl.cc:366 — check CS.L bit for 64-bit vs compat mode
+            let cs_l = unsafe {
+                self.sregs[super::decoder::BxSegregs::Cs as usize]
+                    .cache
+                    .u
+                    .segment
+                    .l
+            };
+            if cs_l {
+                self.cpu_mode = CpuMode::Long64;
+            } else {
+                self.cpu_mode = CpuMode::LongCompat;
+                // Bochs proc_ctrl.cc:371 — clear upper 32 bits of RIP/RSP
+                // when leaving 64-bit mode to compatibility mode
+                let rip = self.rip() & 0xFFFF_FFFF;
+                self.set_rip(rip);
+                let rsp = self.rsp() & 0xFFFF_FFFF;
+                self.set_rsp(rsp);
+            }
+            // Bochs proc_ctrl.cc:375 — invalidate stack cache on mode switch
+            self.invalidate_stack_cache();
         } else {
-            self.cpu_mode = CpuMode::Ia32Real;
-            // Bochs proc_ctrl.cc: When entering real mode, set CS cache
-            // to a writable data segment with CPL=0 (required for far jumps
-            // in real mode after leaving protected mode)
-            unsafe {
-                let seg = &mut self.sregs[super::decoder::BxSegregs::Cs as usize];
-                seg.cache.p = true; // present
-                seg.cache.u.segment.d_b = false; // 16-bit default
-                seg.cache.r#type = 3; // DATA_READ_WRITE_ACCESSED
-                seg.selector.rpl = 0; // CPL = 0
+            if self.cr0.pe() {
+                if self.eflags.contains(EFlags::VM) {
+                    self.cpu_mode = CpuMode::Ia32V8086;
+                    // Bochs: CPL = 3 in V8086 mode
+                    self.sregs[super::decoder::BxSegregs::Cs as usize]
+                        .selector
+                        .rpl = 3;
+                } else {
+                    self.cpu_mode = CpuMode::Ia32Protected;
+                }
+            } else {
+                self.cpu_mode = CpuMode::Ia32Real;
+                // Bochs proc_ctrl.cc:393 — CS segment in real mode allows full access
+                unsafe {
+                    let seg = &mut self.sregs[super::decoder::BxSegregs::Cs as usize];
+                    seg.cache.p = true; // present
+                    seg.cache.u.segment.d_b = false; // 16-bit default
+                    seg.cache.r#type = 3; // DATA_READ_WRITE_ACCESSED
+                    seg.selector.rpl = 0; // CPL = 0
+                }
             }
         }
     }
@@ -398,6 +425,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let idx = (msr - BX_MSR_MTRRFIX4K_C0000) as usize;
                 unsafe { self.msr.mtrrfix4k[idx].U64 }
             }
+            // Long-mode MSRs (Bochs msr.cc:521-620)
+            BX_MSR_EFER => self.efer.get32() as u64,
+            BX_MSR_STAR => self.msr.star,
+            BX_MSR_LSTAR => self.msr.lstar,
+            BX_MSR_CSTAR => self.msr.cstar,
+            BX_MSR_FMASK => self.msr.fmask as u64,
+            BX_MSR_FSBASE => {
+                self.get_segment_base(super::decoder::BxSegregs::Fs)
+            }
+            BX_MSR_GSBASE => {
+                self.get_segment_base(super::decoder::BxSegregs::Gs)
+            }
+            BX_MSR_KERNELGSBASE => self.msr.kernelgsbase,
+            BX_MSR_TSC_AUX => self.msr.tsc_aux as u64,
             _ => {
                 tracing::trace!("RDMSR: unhandled MSR={:#010x}, returning 0", msr);
                 0
@@ -461,6 +502,71 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 tracing::debug!("WRMSR: MTRRCAP is read-only, #GP(0)");
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
+            // Long-mode MSRs (Bochs msr.cc:1177-1280)
+            BX_MSR_EFER => {
+                // Bochs crregs.cc:1448 SetEFER()
+                let val32 = val as u32;
+                // Check reserved bits against efer_suppmask
+                if (val32 & !self.efer_suppmask) != 0 {
+                    tracing::debug!(
+                        "WRMSR EFER: attempt to set reserved bits {:#010x} (mask={:#010x}), #GP(0)",
+                        val32 & !self.efer_suppmask,
+                        self.efer_suppmask
+                    );
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                // Cannot change LME when CR0.PG=1 (Bochs crregs.cc:1458-1463)
+                if self.efer.lme() != ((val32 >> 8) & 1 != 0) && self.cr0.pg() {
+                    tracing::debug!("WRMSR EFER: attempt to change LME when CR0.PG=1, #GP(0)");
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                // Keep LMA untouched — it's controlled by CR0.PG + EFER.LME
+                // Bochs crregs.cc:1474-1475
+                use super::crregs::BxEfer;
+                let new_efer = BxEfer::from_bits_truncate(
+                    (val32 & self.efer_suppmask & !BxEfer::LMA.bits())
+                        | (self.efer.get32() & BxEfer::LMA.bits()),
+                );
+                self.efer = new_efer;
+            }
+            BX_MSR_STAR => self.msr.star = val,
+            BX_MSR_LSTAR => {
+                if !self.is_canonical(val) {
+                    tracing::debug!("WRMSR: non-canonical value for MSR_LSTAR, #GP(0)");
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.lstar = val;
+            }
+            BX_MSR_CSTAR => {
+                if !self.is_canonical(val) {
+                    tracing::debug!("WRMSR: non-canonical value for MSR_CSTAR, #GP(0)");
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.cstar = val;
+            }
+            BX_MSR_FMASK => self.msr.fmask = val as u32,
+            BX_MSR_FSBASE => {
+                if !self.is_canonical(val) {
+                    tracing::debug!("WRMSR: non-canonical value for MSR_FSBASE, #GP(0)");
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.set_segment_base(super::decoder::BxSegregs::Fs, val);
+            }
+            BX_MSR_GSBASE => {
+                if !self.is_canonical(val) {
+                    tracing::debug!("WRMSR: non-canonical value for MSR_GSBASE, #GP(0)");
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.set_segment_base(super::decoder::BxSegregs::Gs, val);
+            }
+            BX_MSR_KERNELGSBASE => {
+                if !self.is_canonical(val) {
+                    tracing::debug!("WRMSR: non-canonical value for MSR_KERNELGSBASE, #GP(0)");
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.msr.kernelgsbase = val;
+            }
+            BX_MSR_TSC_AUX => self.msr.tsc_aux = val as u32,
             _ => {
                 tracing::trace!("WRMSR: unhandled MSR={:#010x} = {:#018x}", msr, val);
             }
@@ -969,6 +1075,32 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[ss_idx].cache.u.segment.l = false;
         }
 
+        Ok(())
+    }
+
+    // ========================================================================
+    // SWAPGS — Swap GS base with KernelGSbase MSR (opcode 0F 01 F8)
+    // Bochs: proc_ctrl.cc:1346-1360
+    // ========================================================================
+
+    pub(super) fn swapgs(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
+        // SWAPGS is only valid in 64-bit mode at CPL=0
+        if !self.long64_mode() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
+        if cpl != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Swap GS.base with MSR_KERNELGSBASE
+        let gs_base = self.get_segment_base(super::decoder::BxSegregs::Gs);
+        let kernel_gs = self.msr.kernelgsbase;
+        self.set_segment_base(super::decoder::BxSegregs::Gs, kernel_gs);
+        self.msr.kernelgsbase = gs_base;
+        tracing::trace!("SWAPGS: GS.base={:#018x} <-> KernelGSbase={:#018x}", gs_base, kernel_gs);
         Ok(())
     }
 

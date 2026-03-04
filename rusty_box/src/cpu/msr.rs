@@ -50,6 +50,37 @@ pub const BX_MSR_MTRR_DEFTYPE: u32 = 0x2FF;
 /// IA32_TSC_DEADLINE
 pub const BX_MSR_TSC_DEADLINE: u32 = 0x6E0;
 
+// =========================================================================
+// Long-mode MSRs (AMD64/Intel EM64T) — Bochs msr.h
+// =========================================================================
+
+/// EFER (Extended Feature Enable Register)
+pub const BX_MSR_EFER: u32 = 0xC000_0080;
+
+/// STAR — SYSCALL/SYSRET target CS/SS and EIP (32-bit mode)
+pub const BX_MSR_STAR: u32 = 0xC000_0081;
+
+/// LSTAR — SYSCALL target RIP (64-bit mode)
+pub const BX_MSR_LSTAR: u32 = 0xC000_0082;
+
+/// CSTAR — SYSCALL target RIP (compatibility mode)
+pub const BX_MSR_CSTAR: u32 = 0xC000_0083;
+
+/// FMASK — SYSCALL RFLAGS mask
+pub const BX_MSR_FMASK: u32 = 0xC000_0084;
+
+/// FS.base — 64-bit FS segment base address
+pub const BX_MSR_FSBASE: u32 = 0xC000_0100;
+
+/// GS.base — 64-bit GS segment base address
+pub const BX_MSR_GSBASE: u32 = 0xC000_0101;
+
+/// KernelGSbase — used by SWAPGS instruction
+pub const BX_MSR_KERNELGSBASE: u32 = 0xC000_0102;
+
+/// TSC_AUX — auxiliary TSC value (returned by RDTSCP in ECX)
+pub const BX_MSR_TSC_AUX: u32 = 0xC000_0103;
+
 /// Default APICBASE value when APIC support is disabled
 pub const BX_MSR_APICBASE_DEFAULT: u64 = 0xFEE00900;
 

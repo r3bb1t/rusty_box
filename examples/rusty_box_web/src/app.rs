@@ -559,9 +559,11 @@ impl eframe::App for WasmEmulatorApp {
                     // VGA BIOS at ROM offset 0x400000 (expansion ROM area)
                     let rom_vgabios = emu.peek_rom(0x400000, 16);
                     log::info!(
-                        "ROM@reset={:02x?} ROM@vga_bios={:02x?} GR6={:#04x} | VGA: {}",
+                        "ROM@reset={:02x?} ROM@start={:02x?} ROM@vga={:02x?} RAM@C0={:02x?} GR6={:#04x} | VGA: {}",
                         &rom_reset[..rom_reset.len().min(16)],
+                        &rom_start[..rom_start.len().min(16)],
                         &rom_vgabios[..rom_vgabios.len().min(16)],
+                        &ram_c0000[..ram_c0000.len().min(16)],
                         emu.peek_vga_gr6(),
                         probe.trim(),
                     );

@@ -1652,6 +1652,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
     }
 
+
     pub(super) fn update_flags_add32(&mut self, op1: u32, op2: u32, res: u32) {
         // Bochs ADD_COUT_VEC: carry-out at each bit position
         // Works correctly for both ADD and ADC (result includes carry-in)

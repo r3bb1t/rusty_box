@@ -18,6 +18,11 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 **Current Status (2026-03-04):**
 - ✅ **DLX Linux boots to interactive bash shell!** Full boot: BIOS POST → LILO → kernel → init → `dlx login: root` → `dlx:~#`
+- ✅ **Full 64-bit instruction set**: arith64, logical64, shift64, mult64 all implemented and dispatched (~110 new opcodes)
+- ✅ **Long mode activation**: EFER MSR handling, handle_cpu_mode_change for Long64/LongCompat, CR0/CR3 long mode writes
+- ✅ **64-bit MSRs**: STAR, LSTAR, CSTAR, FMASK, FSBASE, GSBASE, KERNELGSBASE, TSC_AUX + SWAPGS instruction
+- ✅ **64-bit data transfer**: MOV/MOVSX/MOVSXD/MOVZX/XCHG/LEA/CMOV all 64-bit forms
+- ✅ **64-bit stack ops**: PUSH/POP r/m64, PUSHFQ/POPFQ, PUSH imm64
 - ✅ **SHRD/SHLD decoder fix**: Opcodes 0F A4/A5/AC/AD were in wrong decoder branch (ELSE instead of Ed,Gd). Operands were swapped — result went to wrong register. Fixed ext2 "directory #12 contains a hole" errors that blocked login.
 - ✅ All control/debug register types converted to bitflags (BxCr0, BxCr4, BxEfer, BxDr6, BxDr7)
 - ✅ CPU-level feature gates removed — APIC, MONITOR/MWAIT, MEMTYPE, AMX, PKEYS, EVEX, SSE, AVX, VMX, SVM always compiled
@@ -325,8 +330,13 @@ RUST_LOG=debug RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=500000 ./target/release/exa
 - ✅ Far JMP system descriptors: TSS direct, task gates, call gates in jump_protected()
 - ✅ IRET NT nested task return: back-link selector from TSS, validates busy TSS, task_switch
 - ✅ MOV SS / POP SS interrupt inhibition (inhibit_mask + inhibit_icount checked before IRQ delivery)
-- ✅ Enhanced RDMSR/WRMSR with actual MSR fields (sysenter CS/ESP/EIP, PAT, MTRR)
-- ✅ handleCpuModeChange: cpu_mode updated from CR0.PE + EFLAGS.VM
+- ✅ Enhanced RDMSR/WRMSR with actual MSR fields (sysenter CS/ESP/EIP, PAT, MTRR, EFER, STAR/LSTAR/CSTAR/FMASK, FS/GS/KernelGS base)
+- ✅ handleCpuModeChange: cpu_mode updated from CR0.PE + EFLAGS.VM + EFER.LMA + CS.L (Long64/LongCompat)
+- ✅ Long mode activation: EFER.LME + CR0.PG + CR4.PAE → sets EFER.LMA, CR3 64-bit in long mode
+- ✅ Full 64-bit ALU: arith64 (ADD/ADC/SUB/SBB/CMP/NEG/INC/DEC/XADD/CMPXCHG), logical64 (XOR/OR/AND/NOT/TEST), shift64 (SHL/SHR/SAR/ROL/ROR/RCL/RCR/SHLD/SHRD), mult64 (MUL/IMUL/DIV/IDIV)
+- ✅ 64-bit data transfer: MOV/MOVSX/MOVSXD/MOVZX/XCHG/LEA/BSWAP/CMOVcc all Eq/Gq forms
+- ✅ 64-bit stack: PUSH/POP r/m64, PUSHFQ/POPFQ, PUSH imm64
+- ✅ SWAPGS instruction for kernel/user GS base switching
 - ✅ Zero compiler warnings (crate-level allows for intentional Bochs naming + dead code)
 - ✅ Paging: system_write_byte/word/dword translate via page walk (was bypassing paging entirely)
 - ✅ Paging: user_pl updated in load_cs() (was always false — no user-mode page protection)

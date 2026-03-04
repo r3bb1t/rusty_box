@@ -765,6 +765,53 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
+        let pg = (val_32 >> 31) & 1 != 0;
+
+        // Bochs crregs.cc:1055-1092 — Long mode activation/deactivation
+        // When enabling paging (PG: 0→1) with EFER.LME=1: activate long mode
+        if !self.cr0.pg() && pg {
+            if self.efer.lme() {
+                if !self.cr4.pae() {
+                    tracing::debug!(
+                        "MOV CR0: attempt to enter long mode without CR4.PAE, #GP(0)"
+                    );
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                let cs_l = unsafe {
+                    self.sregs[super::decoder::BxSegregs::Cs as usize]
+                        .cache
+                        .u
+                        .segment
+                        .l
+                };
+                if cs_l {
+                    tracing::debug!("MOV CR0: attempt to enter long mode with CS.L=1, #GP(0)");
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                // TSS must be 386 or later (type > 3)
+                if self.tr.cache.r#type <= 3 {
+                    tracing::debug!(
+                        "MOV CR0: attempt to enter long mode with TSS286 in TR, #GP(0)"
+                    );
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                // Bochs crregs.cc:1070 — set EFER.LMA=1
+                self.efer.set_lma(1);
+                tracing::debug!("MOV CR0: Long mode activated (EFER.LMA=1)");
+            }
+        } else if self.cr0.pg() && !pg {
+            // When disabling paging (PG: 1→0) with EFER.LMA=1: deactivate long mode
+            if self.cpu_mode == super::cpu::CpuMode::Long64 {
+                tracing::debug!("MOV CR0: attempt to leave 64-bit mode directly, #GP(0)");
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+            if self.efer.lma() {
+                // Bochs crregs.cc:1086 — clear EFER.LMA
+                self.efer.set_lma(0);
+                tracing::debug!("MOV CR0: Long mode deactivated (EFER.LMA=0)");
+            }
+        }
+
         // Bochs SetCR0() (crregs.cc): mask reserved bits for CPU level 6
         let val_32 = val_32 & 0xe005003f;
 
@@ -779,11 +826,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.handle_cpu_context_change();
 
         tracing::trace!(
-            "MOV CR0, r32: {:#010x} -> {:#010x} (PE={}, PG={})",
+            "MOV CR0, r32: {:#010x} -> {:#010x} (PE={}, PG={}, LMA={})",
             old_cr0,
             val_32,
             self.cr0.pe(),
-            (val_32 >> 31) & 1
+            (val_32 >> 31) & 1,
+            self.efer.lma(),
         );
         Ok(())
     }
@@ -802,8 +850,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Bochs crregs.cc:463 — invalidate prefetch queue before CR3 change
         self.invalidate_prefetch_q();
         let src = instr.src1() as usize;
-        let val_32 = self.get_gpr32(src);
-        self.cr3 = val_32 as u64;
+
+        // Bochs crregs.cc: In long mode, CR3 gets full 64-bit value
+        let val = if self.long_mode() {
+            self.get_gpr64(src)
+        } else {
+            self.get_gpr32(src) as u64
+        };
+        self.cr3 = val;
 
         // In PAE mode (but not long mode), validate and cache PDPTE entries.
         // Bochs crregs.cc calls CheckPDPTR() which reads 4 PDPTE entries from
@@ -818,7 +872,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.tlb_flush();
         }
 
-        tracing::trace!("MOV CR3, r32: {:#010x}", val_32);
+        tracing::trace!("MOV CR3: {:#018x} (long_mode={})", val, self.long_mode());
         Ok(())
     }
 
