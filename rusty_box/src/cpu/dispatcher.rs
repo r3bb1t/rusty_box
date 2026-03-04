@@ -930,7 +930,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.xor_ew_iw(instr)?;
                 Ok(())
             }
-            Opcode::XorEdId => {
+            Opcode::XorEdId | Opcode::XorEdsIb => {
                 self.xor_ed_id(instr)?;
                 Ok(())
             }
