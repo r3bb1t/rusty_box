@@ -429,6 +429,15 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         self.sregs[BxSegregs::Cs as usize].cache = descriptor.clone();
         self.sregs[BxSegregs::Cs as usize].cache.valid = super::descriptor::SEG_VALID_CACHE;
 
+        // Verify consistency: CS.val RPL bits must match CS.rpl field
+        debug_assert_eq!(
+            self.sregs[BxSegregs::Cs as usize].selector.value & 3,
+            self.sregs[BxSegregs::Cs as usize].selector.rpl as u16,
+            "load_cs: CS.val RPL bits ({}) != CS.rpl field ({}) after load!",
+            self.sregs[BxSegregs::Cs as usize].selector.value & 3,
+            self.sregs[BxSegregs::Cs as usize].selector.rpl
+        );
+
         // Update user privilege level flag (Bochs cpu.h:5501)
         self.user_pl = cpl == 3;
 

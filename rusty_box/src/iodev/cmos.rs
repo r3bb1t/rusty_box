@@ -771,8 +771,16 @@ impl BxCmosC {
     }
 
     /// Configure memory size in CMOS (legacy interface, kept for compatibility)
+    ///
+    /// `base_kb`: conventional memory (typically 640 KB, within the first 1 MB)
+    /// `extended_kb`: extended memory above 1 MB
+    ///
+    /// Total physical = 1 MB + extended_kb (base_kb is within the first 1 MB,
+    /// not added separately — it was previously double-counted causing the kernel
+    /// to allocate pages beyond physical RAM).
     pub fn set_memory_size(&mut self, base_kb: u16, extended_kb: u16) {
-        let total_bytes = (base_kb as u64 + extended_kb as u64 + 1024) * 1024;
+        let _ = base_kb; // base_kb is within first 1 MB, always reported as 640k
+        let total_bytes = (1024u64 + extended_kb as u64) * 1024;
         self.set_memory_size_from_bytes(total_bytes);
     }
 

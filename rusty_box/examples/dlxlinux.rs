@@ -289,8 +289,8 @@ fn run_dlxlinux() -> Result<()> {
     // Configure CMOS (AFTER device initialization)
     // =========================================================================
     // Configure CMOS for 32 MB memory (matches bochsrc.bxrc)
-    // Base: 640KB, Extended: 31 MB = 31 * 1024 KB
-    emu.configure_memory_in_cmos(640, 31 * 1024);
+    // Uses guest_memory_size from config (32 MB) — avoids double-counting base_kb
+    emu.configure_memory_in_cmos_from_config();
 
     // Configure hard drive geometry in CMOS (matching Bochs harddrv.cc:448-474)
     // Sets type=0xF (extended) + registers 0x19, 0x1B-0x23 for drive 0
@@ -1185,12 +1185,83 @@ fn run_dlxlinux() -> Result<()> {
         );
 
         println!();
+        println!("===== SYSCALL DIAGNOSTIC =====");
+
+        println!();
+        println!("===== ATA DIAGNOSTIC =====");
+        println!("{}", emu.device_manager.ata_diag());
+
+        println!();
         println!("===== INTERRUPT CHAIN DIAGNOSTIC =====");
         println!("{}", emu.device_manager.interrupt_chain_diag());
 
         println!();
         println!("===== VGA TEXT DUMP (headless) =====");
         println!("{}", emu.vga_text_dump());
+
+        // Full row dump — shows ALL text memory rows including scrolled-off ones
+        println!("===== VGA ALL ROWS (including scrolled-off) =====");
+        for (i, row) in emu.vga_all_text_rows().iter().enumerate() {
+            let trimmed = row.trim_end();
+            if !trimmed.is_empty() {
+                println!("  row {:3}: {}", i, trimmed);
+            }
+        }
+
+        // Search for kernel process state
+        println!("===== KERNEL PROCESS STATE =====");
+        let ram = emu.peek_ram_at(0x100000, 0x400000); // Kernel at 1MB, check 4MB
+        // Find "nr_running" or similar kernel state
+        // In Linux 1.3.89, try to find the process list by searching for known markers
+        // The kernel process table `task[]` is MAX_TASKS entries
+        // Try to find init process state by searching for "init" in the kernel's string table
+        for (search, label) in &[
+            (b"Remounting" as &[u8], "remount"),
+            (b"Adding Swap" as &[u8], "swap"),
+            (b"Freeing" as &[u8], "freeing"),
+            (b"fork" as &[u8], "fork"),
+            (b"cannot execute" as &[u8], "cant_exec"),
+            (b"No such file" as &[u8], "nofile"),
+            (b"exec format error" as &[u8], "exec_format"),
+            (b"open" as &[u8], "open"),
+            (b"/dev/tty" as &[u8], "dev_tty"),
+            (b"dlx login" as &[u8], "login"),
+            (b"/bin/sh" as &[u8], "bin_sh"),
+            (b"Mounted root" as &[u8], "mounted_root"),
+            (b"Unable to" as &[u8], "unable_to"),
+        ] {
+            if let Some(pos) = ram.windows(search.len()).position(|w| w == *search) {
+                println!("  Found [{}]: {:?} at kernel offset {:#x}", label,
+                    core::str::from_utf8(search).unwrap_or("?"), pos);
+            }
+        }
+        for pattern in &[
+            b"No init found" as &[u8],
+            b"/sbin/init",
+            b"/dev/console",
+            b"init[",
+            b"panic",
+            b"Freeing unused kernel",
+            b"INIT: version",
+        ] {
+            let needle = *pattern;
+            if let Some(pos) = ram
+                .windows(needle.len())
+                .position(|w| w == needle)
+            {
+                println!(
+                    "  Found {:?} at kernel offset 0x{:x} (phys 0x{:x})",
+                    core::str::from_utf8(needle).unwrap_or("?"),
+                    pos,
+                    0x100000 + pos
+                );
+            } else {
+                println!(
+                    "  NOT FOUND: {:?}",
+                    core::str::from_utf8(needle).unwrap_or("?")
+                );
+            }
+        }
 
         // Raw VGA text memory scan (finds content at any CRTC offset)
         println!("===== VGA SCAN =====");
