@@ -93,31 +93,6 @@ impl BxCr0 {
     }
 }
 
-use paste::paste;
-
-macro_rules! impl_crreg_accessors {
-    // $name: the base name of the field
-    // $bitnum: the bit index (0..31)
-    ($struct_name:ident, $name:ident, $bitnum:expr) => {
-        paste! {
-            impl $struct_name {
-                /// Returns the bit at position $bitnum as a bool.
-                pub fn $name(&self) -> bool {
-                    ((self.val32 >> $bitnum) & 1) != 0
-                }
-
-                /// Sets the bit at position $bitnum from the low bit of `val: u8`.
-                pub fn [<set_ $name>](&mut self, val: u8) {
-                    let mask = 1u32 << $bitnum;
-                    // clear that bit, then or‐in the new value (0 or 1) shifted into place
-                    self.val32 = (self.val32 & !mask)
-                                | (((val != 0) as u32) << $bitnum);
-                }
-            }
-        }
-    };
-}
-
 bitflags::bitflags! {
     #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
     pub struct BxCr4: u32 {
@@ -271,106 +246,330 @@ impl BxCr4 {
     }
 }
 
-#[derive(Debug, Default)]
-pub struct BxDr6 {
-    pub(crate) val32: u32, // 32bit value of register
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct BxDr6: u32 {
+        const B0 = 1 << 0;   // Breakpoint 0 condition detected
+        const B1 = 1 << 1;   // Breakpoint 1 condition detected
+        const B2 = 1 << 2;   // Breakpoint 2 condition detected
+        const B3 = 1 << 3;   // Breakpoint 3 condition detected
+        const BD = 1 << 13;  // Debug register access detected
+        const BS = 1 << 14;  // Single step
+        const BT = 1 << 15;  // Task switch
+    }
 }
-
-impl_crreg_accessors!(BxDr6, b0, 0);
-impl_crreg_accessors!(BxDr6, b1, 1);
-impl_crreg_accessors!(BxDr6, b2, 2);
-impl_crreg_accessors!(BxDr6, b3, 3);
-
-impl_crreg_accessors!(BxDr6, bd, 13);
-impl_crreg_accessors!(BxDr6, bs, 14);
-impl_crreg_accessors!(BxDr6, bt, 15);
 
 impl BxDr6 {
     #[inline]
-    pub(super) fn get32(&self) -> u32 {
-        self.val32
+    pub fn b0(self) -> bool {
+        self.contains(Self::B0)
+    }
+    #[inline]
+    pub fn set_b0(&mut self, val: u8) {
+        self.set(Self::B0, val != 0);
+    }
+    #[inline]
+    pub fn b1(self) -> bool {
+        self.contains(Self::B1)
+    }
+    #[inline]
+    pub fn set_b1(&mut self, val: u8) {
+        self.set(Self::B1, val != 0);
+    }
+    #[inline]
+    pub fn b2(self) -> bool {
+        self.contains(Self::B2)
+    }
+    #[inline]
+    pub fn set_b2(&mut self, val: u8) {
+        self.set(Self::B2, val != 0);
+    }
+    #[inline]
+    pub fn b3(self) -> bool {
+        self.contains(Self::B3)
+    }
+    #[inline]
+    pub fn set_b3(&mut self, val: u8) {
+        self.set(Self::B3, val != 0);
+    }
+    #[inline]
+    pub fn bd(self) -> bool {
+        self.contains(Self::BD)
+    }
+    #[inline]
+    pub fn set_bd(&mut self, val: u8) {
+        self.set(Self::BD, val != 0);
+    }
+    #[inline]
+    pub fn bs(self) -> bool {
+        self.contains(Self::BS)
+    }
+    #[inline]
+    pub fn set_bs(&mut self, val: u8) {
+        self.set(Self::BS, val != 0);
+    }
+    #[inline]
+    pub fn bt(self) -> bool {
+        self.contains(Self::BT)
+    }
+    #[inline]
+    pub fn set_bt(&mut self, val: u8) {
+        self.set(Self::BT, val != 0);
+    }
+
+    #[inline]
+    pub(super) fn get32(self) -> u32 {
+        self.bits()
     }
     #[inline]
     pub(super) fn set32(&mut self, val: u32) {
-        self.val32 = val
+        *self = Self::from_bits_retain(val);
     }
 }
 
-#[derive(Debug, Default)]
-pub struct BxDr7 {
-    pub(crate) val32: u32, // 32bit value of register
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct BxDr7: u32 {
+        const L0 = 1 << 0;   // Local breakpoint 0 enable
+        const G0 = 1 << 1;   // Global breakpoint 0 enable
+        const L1 = 1 << 2;   // Local breakpoint 1 enable
+        const G1 = 1 << 3;   // Global breakpoint 1 enable
+        const L2 = 1 << 4;   // Local breakpoint 2 enable
+        const G2 = 1 << 5;   // Global breakpoint 2 enable
+        const L3 = 1 << 6;   // Local breakpoint 3 enable
+        const G3 = 1 << 7;   // Global breakpoint 3 enable
+        const LE = 1 << 8;   // Local exact breakpoint enable
+        const GE = 1 << 9;   // Global exact breakpoint enable
+        const GD = 1 << 13;  // General detect enable
+    }
 }
-
-macro_rules! impl_drreg_accessors {
-    ($ty:ident, $name:ident, $mask:literal, $shift:expr) => {
-        paste! {
-            impl $ty {
-                #[inline]
-                pub fn $name(&self) -> u32 {
-                    (self.val32 & $mask) >> $shift
-                }
-            }
-        }
-    };
-}
-
-impl_crreg_accessors!(BxDr7, l0, 0);
-impl_crreg_accessors!(BxDr7, g0, 1);
-impl_crreg_accessors!(BxDr7, l1, 2);
-impl_crreg_accessors!(BxDr7, g1, 3);
-impl_crreg_accessors!(BxDr7, l2, 4);
-impl_crreg_accessors!(BxDr7, g2, 5);
-impl_crreg_accessors!(BxDr7, l3, 6);
-impl_crreg_accessors!(BxDr7, g3, 7);
-impl_crreg_accessors!(BxDr7, le, 8);
-impl_crreg_accessors!(BxDr7, ge, 9);
-impl_crreg_accessors!(BxDr7, gd, 13);
-
-impl_drreg_accessors!(BxDr7, r_w0, 0x00030000, 16);
-impl_drreg_accessors!(BxDr7, len0, 0x000C0000, 18);
-impl_drreg_accessors!(BxDr7, r_w1, 0x00300000, 20);
-impl_drreg_accessors!(BxDr7, len1, 0x00C00000, 22);
-impl_drreg_accessors!(BxDr7, r_w2, 0x03000000, 24);
-impl_drreg_accessors!(BxDr7, len2, 0x0C000000, 26);
-impl_drreg_accessors!(BxDr7, r_w3, 0x30000000, 28);
-impl_drreg_accessors!(BxDr7, len3, 0xC0000000, 30);
-
-impl_drreg_accessors!(BxDr7, bp_enabled, 0xFF, 0);
 
 impl BxDr7 {
-    pub(super) fn get32(&self) -> u32 {
-        self.val32
+    // Single-bit accessors (matching old API)
+    #[inline]
+    pub fn l0(self) -> bool {
+        self.contains(Self::L0)
     }
+    #[inline]
+    pub fn set_l0(&mut self, val: u8) {
+        self.set(Self::L0, val != 0);
+    }
+    #[inline]
+    pub fn g0(self) -> bool {
+        self.contains(Self::G0)
+    }
+    #[inline]
+    pub fn set_g0(&mut self, val: u8) {
+        self.set(Self::G0, val != 0);
+    }
+    #[inline]
+    pub fn l1(self) -> bool {
+        self.contains(Self::L1)
+    }
+    #[inline]
+    pub fn set_l1(&mut self, val: u8) {
+        self.set(Self::L1, val != 0);
+    }
+    #[inline]
+    pub fn g1(self) -> bool {
+        self.contains(Self::G1)
+    }
+    #[inline]
+    pub fn set_g1(&mut self, val: u8) {
+        self.set(Self::G1, val != 0);
+    }
+    #[inline]
+    pub fn l2(self) -> bool {
+        self.contains(Self::L2)
+    }
+    #[inline]
+    pub fn set_l2(&mut self, val: u8) {
+        self.set(Self::L2, val != 0);
+    }
+    #[inline]
+    pub fn g2(self) -> bool {
+        self.contains(Self::G2)
+    }
+    #[inline]
+    pub fn set_g2(&mut self, val: u8) {
+        self.set(Self::G2, val != 0);
+    }
+    #[inline]
+    pub fn l3(self) -> bool {
+        self.contains(Self::L3)
+    }
+    #[inline]
+    pub fn set_l3(&mut self, val: u8) {
+        self.set(Self::L3, val != 0);
+    }
+    #[inline]
+    pub fn g3(self) -> bool {
+        self.contains(Self::G3)
+    }
+    #[inline]
+    pub fn set_g3(&mut self, val: u8) {
+        self.set(Self::G3, val != 0);
+    }
+    #[inline]
+    pub fn le(self) -> bool {
+        self.contains(Self::LE)
+    }
+    #[inline]
+    pub fn set_le(&mut self, val: u8) {
+        self.set(Self::LE, val != 0);
+    }
+    #[inline]
+    pub fn ge(self) -> bool {
+        self.contains(Self::GE)
+    }
+    #[inline]
+    pub fn set_ge(&mut self, val: u8) {
+        self.set(Self::GE, val != 0);
+    }
+    #[inline]
+    pub fn gd(self) -> bool {
+        self.contains(Self::GD)
+    }
+    #[inline]
+    pub fn set_gd(&mut self, val: u8) {
+        self.set(Self::GD, val != 0);
+    }
+
+    // Multi-bit field accessors (R/W and LEN fields, 2 bits each)
+    #[inline]
+    pub fn r_w0(self) -> u32 {
+        (self.bits() & 0x0003_0000) >> 16
+    }
+    #[inline]
+    pub fn len0(self) -> u32 {
+        (self.bits() & 0x000C_0000) >> 18
+    }
+    #[inline]
+    pub fn r_w1(self) -> u32 {
+        (self.bits() & 0x0030_0000) >> 20
+    }
+    #[inline]
+    pub fn len1(self) -> u32 {
+        (self.bits() & 0x00C0_0000) >> 22
+    }
+    #[inline]
+    pub fn r_w2(self) -> u32 {
+        (self.bits() & 0x0300_0000) >> 24
+    }
+    #[inline]
+    pub fn len2(self) -> u32 {
+        (self.bits() & 0x0C00_0000) >> 26
+    }
+    #[inline]
+    pub fn r_w3(self) -> u32 {
+        (self.bits() & 0x3000_0000) >> 28
+    }
+    #[inline]
+    pub fn len3(self) -> u32 {
+        (self.bits() & 0xC000_0000) >> 30
+    }
+    #[inline]
+    pub fn bp_enabled(self) -> u32 {
+        self.bits() & 0xFF
+    }
+
+    #[inline]
+    pub(super) fn get32(self) -> u32 {
+        self.bits()
+    }
+    #[inline]
     pub(super) fn set32(&mut self, val: u32) {
-        self.val32 = val
+        *self = Self::from_bits_retain(val);
     }
 }
 
-#[derive(Debug, Default)]
-pub struct BxEfer {
-    pub(crate) val32: u32,
+bitflags::bitflags! {
+    #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+    pub struct BxEfer: u32 {
+        const SCE   = 1 << 0;  // System Call Extensions
+        const LME   = 1 << 8;  // Long Mode Enable
+        const LMA   = 1 << 10; // Long Mode Active
+        const NXE   = 1 << 11; // No-Execute Enable
+        const SVME  = 1 << 12; // AMD Secure Virtual Machine Enable
+        const LMSLE = 1 << 13; // AMD Long Mode Segment Limit Enable
+        const FFXSR = 1 << 14; // Fast FXSAVE/FXRSTOR
+        const TCE   = 1 << 15; // AMD Translation Cache Extensions
+    }
 }
-
-impl_crreg_accessors!(BxEfer, sce, 0);
-
-impl_crreg_accessors!(BxEfer, lme, 8);
-impl_crreg_accessors!(BxEfer, lma, 10);
-
-impl_crreg_accessors!(BxEfer, nxe, 11);
-
-impl_crreg_accessors!(BxEfer, svme, 12); /* AMD Secure Virtual Machine */
-impl_crreg_accessors!(BxEfer, lmsle, 13); /* AMD Long Mode Segment Limit */
-impl_crreg_accessors!(BxEfer, ffxsr, 14);
-impl_crreg_accessors!(BxEfer, tce, 15); /* AMD Translation Cache Extensions */
 
 impl BxEfer {
     #[inline]
-    pub(super) fn get32(&self) -> u32 {
-        self.val32
+    pub fn sce(&self) -> bool {
+        self.contains(Self::SCE)
+    }
+    #[inline]
+    pub fn set_sce(&mut self, val: u8) {
+        self.set(Self::SCE, val != 0);
+    }
+    #[inline]
+    pub fn lme(&self) -> bool {
+        self.contains(Self::LME)
+    }
+    #[inline]
+    pub fn set_lme(&mut self, val: u8) {
+        self.set(Self::LME, val != 0);
+    }
+    #[inline]
+    pub fn lma(&self) -> bool {
+        self.contains(Self::LMA)
+    }
+    #[inline]
+    pub fn set_lma(&mut self, val: u8) {
+        self.set(Self::LMA, val != 0);
+    }
+    #[inline]
+    pub fn nxe(&self) -> bool {
+        self.contains(Self::NXE)
+    }
+    #[inline]
+    pub fn set_nxe(&mut self, val: u8) {
+        self.set(Self::NXE, val != 0);
+    }
+    #[inline]
+    pub fn svme(&self) -> bool {
+        self.contains(Self::SVME)
+    }
+    #[inline]
+    pub fn set_svme(&mut self, val: u8) {
+        self.set(Self::SVME, val != 0);
+    }
+    #[inline]
+    pub fn lmsle(&self) -> bool {
+        self.contains(Self::LMSLE)
+    }
+    #[inline]
+    pub fn set_lmsle(&mut self, val: u8) {
+        self.set(Self::LMSLE, val != 0);
+    }
+    #[inline]
+    pub fn ffxsr(&self) -> bool {
+        self.contains(Self::FFXSR)
+    }
+    #[inline]
+    pub fn set_ffxsr(&mut self, val: u8) {
+        self.set(Self::FFXSR, val != 0);
+    }
+    #[inline]
+    pub fn tce(&self) -> bool {
+        self.contains(Self::TCE)
+    }
+    #[inline]
+    pub fn set_tce(&mut self, val: u8) {
+        self.set(Self::TCE, val != 0);
+    }
+
+    #[inline]
+    pub(super) fn get32(self) -> u32 {
+        self.bits()
     }
     #[inline]
     pub(super) fn set32(&mut self, val: u32) {
-        self.val32 = val
+        *self = Self::from_bits_retain(val);
     }
 }
 
@@ -606,6 +805,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val_32 = self.get_gpr32(src);
         self.cr3 = val_32 as u64;
 
+        // In PAE mode (but not long mode), validate and cache PDPTE entries.
+        // Bochs crregs.cc calls CheckPDPTR() which reads 4 PDPTE entries from
+        // physical memory at (cr3 & 0xFFFFFFE0) + n*8 and validates reserved bits.
+        if self.cr4.pae() && !self.efer.lma() {
+            self.load_pdptrs();
+        }
+
         if self.cr4.pge() {
             self.tlb_flush_non_global();
         } else {
@@ -616,6 +822,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
+    // load_pdptrs is defined in paging.rs where page_walk_read_qword is accessible.
+
     pub fn mov_cr4_rd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
         self.invalidate_prefetch_q();
@@ -623,31 +831,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let src = instr.src1() as usize;
         let val_32 = self.get_gpr32(src);
 
-        // Bochs check_CR4(): reject unsupported bits.
-        // cr4_suppmask for Skylake-X: VME|PVI|TSD|DE|PSE|PAE|MCE|PGE|PCE|OSFXSR|OSXMMEXCPT|UMIP|SMEP|SMAP
-        // We allow the bits that our CPUID model advertises support for.
-        // For a 32-bit emulation: bits 0-10, 11(UMIP), 20(SMEP), 21(SMAP)
-        const CR4_SUPPMASK: u32 = (1 << 0)  // VME
-            | (1 << 1)  // PVI
-            | (1 << 2)  // TSD
-            | (1 << 3)  // DE
-            | (1 << 4)  // PSE
-            | (1 << 5)  // PAE
-            | (1 << 6)  // MCE
-            | (1 << 7)  // PGE
-            | (1 << 8)  // PCE
-            | (1 << 9)  // OSFXSR
-            | (1 << 10) // OSXMMEXCPT
-            | (1 << 11) // UMIP
-            | (1 << 18) // OSXSAVE
-            | (1 << 20) // SMEP
-            | (1 << 21); // SMAP
-
-        if (val_32 & !CR4_SUPPMASK) != 0 {
+        // Bochs check_CR4(): reject unsupported bits using cr4_suppmask
+        // computed at reset from CPUID features (matches crregs.cc:1173-1300)
+        if (val_32 & !self.cr4_suppmask) != 0 {
             tracing::debug!(
                 "MOV CR4: unsupported bits set {:#010x} (mask={:#010x}), #GP(0)",
-                val_32 & !CR4_SUPPMASK,
-                CR4_SUPPMASK
+                val_32 & !self.cr4_suppmask,
+                self.cr4_suppmask
             );
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -657,9 +847,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Bochs: TLB flush only if paging-related bits changed
         // BX_CR4_FLUSH_TLB_MASK = PSE|PAE|PGE|PCIDE|SMEP|SMAP
-        const CR4_FLUSH_TLB_MASK: u32 =
-            (1 << 4) | (1 << 5) | (1 << 7) | (1 << 17) | (1 << 20) | (1 << 21);
-        if (old_cr4 ^ val_32) & CR4_FLUSH_TLB_MASK != 0 {
+        let cr4_flush_tlb_mask = BxCr4::PSE.bits()
+            | BxCr4::PAE.bits()
+            | BxCr4::PGE.bits()
+            | BxCr4::PCIDE.bits()
+            | BxCr4::SMEP.bits()
+            | BxCr4::SMAP.bits();
+        if (old_cr4 ^ val_32) & cr4_flush_tlb_mask != 0 {
             self.tlb_flush();
         }
 
@@ -723,5 +917,191 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cr0.pe()
         );
         Ok(())
+    }
+
+    // =========================================================================
+    // Allow-mask computation functions
+    // Matching Bochs crregs.cc:1173-1933
+    // =========================================================================
+
+    /// Compute CR4 supported bits mask from CPUID features.
+    /// Matches Bochs crregs.cc:1173-1300 get_cr4_allow_mask()
+    pub(super) fn get_cr4_allow_mask(&self) -> u32 {
+        use super::decoder::features::X86Feature;
+
+        let mut allow = 0u32;
+
+        // VME → CR4.VME + CR4.PVI
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaVME) {
+            allow |= BxCr4::VME.bits() | BxCr4::PVI.bits();
+        }
+        // Pentium → CR4.TSD
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPENTIUM) {
+            allow |= BxCr4::TSD.bits();
+        }
+        // Debug Extensions → CR4.DE
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaDEBUG_EXTENSIONS) {
+            allow |= BxCr4::DE.bits();
+        }
+        // PSE → CR4.PSE
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPSE) {
+            allow |= BxCr4::PSE.bits();
+        }
+        // PAE → CR4.PAE
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPAE) {
+            allow |= BxCr4::PAE.bits();
+        }
+        // MCE always allowed (Bochs crregs.cc:1227)
+        allow |= BxCr4::MCE.bits();
+        // PGE → CR4.PGE
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPGE) {
+            allow |= BxCr4::PGE.bits();
+        }
+        // PCE always allowed for CPU level >= 6 (Bochs crregs.cc:1233)
+        allow |= BxCr4::PCE.bits();
+        // SSE → CR4.OSFXSR + CR4.OSXMMEXCPT
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaSSE) {
+            allow |= BxCr4::OSFXSR.bits() | BxCr4::OSXMMEXCPT.bits();
+        }
+        // VMX → CR4.VMXE
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaVMX) {
+            allow |= BxCr4::VMXE.bits();
+        }
+        // SMX → CR4.SMXE
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaSMX) {
+            allow |= BxCr4::SMXE.bits();
+        }
+        // PCID → CR4.PCIDE
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPCID) {
+            allow |= BxCr4::PCIDE.bits();
+        }
+        // FSGSBASE → CR4.FSGSBASE
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaFSGSBASE) {
+            allow |= BxCr4::FSGSBASE.bits();
+        }
+        // XSAVE → CR4.OSXSAVE
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaXSAVE) {
+            allow |= BxCr4::OSXSAVE.bits();
+        }
+        // SMEP → CR4.SMEP
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaSMEP) {
+            allow |= BxCr4::SMEP.bits();
+        }
+        // SMAP → CR4.SMAP
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaSMAP) {
+            allow |= BxCr4::SMAP.bits();
+        }
+        // PKU → CR4.PKE
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPKU) {
+            allow |= BxCr4::PKE.bits();
+        }
+        // UMIP → CR4.UMIP
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaUMIP) {
+            allow |= BxCr4::UMIP.bits();
+        }
+        // LA57 → CR4.LA57
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaLA57) {
+            allow |= BxCr4::LA57.bits();
+        }
+        // CET → CR4.CET
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaCET) {
+            allow |= BxCr4::CET.bits();
+        }
+        // PKS → CR4.PKS
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPKS) {
+            allow |= BxCr4::PKS.bits();
+        }
+        // UINTR → CR4.UINTR
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaUINTR) {
+            allow |= BxCr4::UINTR.bits();
+        }
+        // LASS → CR4.LASS
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaLASS) {
+            allow |= BxCr4::LASS.bits();
+        }
+
+        allow
+    }
+
+    /// Compute EFER supported bits mask from CPUID features.
+    /// Matches Bochs crregs.cc:1870-1893 get_efer_allow_mask()
+    pub(super) fn get_efer_allow_mask(&self) -> u32 {
+        use super::decoder::features::X86Feature;
+
+        let mut allow = 0u32;
+
+        // NX → EFER.NXE (bit 11)
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaNX) {
+            allow |= 1 << 11; // BX_EFER_NXE_MASK
+        }
+        // SYSCALL_SYSRET_LEGACY → EFER.SCE (bit 0)
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaSYSCALL_SYSRET_LEGACY) {
+            allow |= 1 << 0; // BX_EFER_SCE_MASK
+        }
+        // Long mode → SCE + LME + LMA
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaLONG_MODE) {
+            allow |= (1 << 0) | (1 << 8) | (1 << 10); // SCE | LME | LMA
+                                                      // FFXSR → EFER.FFXSR (bit 14)
+            if self.bx_cpuid_support_isa_extension(X86Feature::IsaFFXSR) {
+                allow |= 1 << 14;
+            }
+            // SVM → EFER.SVME (bit 12)
+            if self.bx_cpuid_support_isa_extension(X86Feature::IsaSVM) {
+                allow |= 1 << 12;
+            }
+            // TCE → EFER.TCE (bit 15)
+            if self.bx_cpuid_support_isa_extension(X86Feature::IsaTCE) {
+                allow |= 1 << 15;
+            }
+        }
+
+        allow
+    }
+
+    /// Compute XCR0 supported bits mask from CPUID features.
+    /// Matches Bochs crregs.cc:1897-1917 get_xcr0_allow_mask()
+    pub(super) fn get_xcr0_allow_mask(&self) -> u32 {
+        use super::decoder::features::X86Feature;
+
+        // FPU (bit 0) and SSE (bit 1) always present
+        let mut allow = (1u32 << 0) | (1u32 << 1);
+
+        // AVX → YMM (bit 2)
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaAVX) {
+            allow |= 1 << 2;
+        }
+        // AVX-512 → OPMASK (bit 5), ZMM_HI256 (bit 6), HI_ZMM (bit 7)
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaAVX512) {
+            allow |= (1 << 5) | (1 << 6) | (1 << 7);
+        }
+        // PKU → PKRU (bit 9)
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPKU) {
+            allow |= 1 << 9;
+        }
+        // AMX → XTILECFG (bit 17) + XTILEDATA (bit 18)
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaAMX) {
+            allow |= (1 << 17) | (1 << 18);
+        }
+
+        allow
+    }
+
+    /// Compute IA32_XSS supported bits mask from CPUID features.
+    /// Matches Bochs crregs.cc:1919-1931 get_ia32_xss_allow_mask()
+    pub(super) fn get_ia32_xss_allow_mask(&self) -> u32 {
+        use super::decoder::features::X86Feature;
+
+        let mut allow = 0u32;
+
+        // CET → CET_U (bit 11) + CET_S (bit 12)
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaCET) {
+            allow |= (1 << 11) | (1 << 12);
+        }
+        // UINTR → UINTR (bit 14)
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaUINTR) {
+            allow |= 1 << 14;
+        }
+
+        allow
     }
 }

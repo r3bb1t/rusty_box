@@ -40,12 +40,12 @@ const REG_SCR: u16 = 7; // Scratch Register
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 enum IntSource {
-    Ier = 0,      // IER changed — re-evaluate pending interrupts
-    RxData = 1,   // Received data available
-    TxHold = 2,   // THR empty
-    RxLstat = 3,  // Receiver line status error
-    ModStat = 4,  // Modem status change
-    Fifo = 5,     // FIFO character timeout
+    Ier = 0,     // IER changed — re-evaluate pending interrupts
+    RxData = 1,  // Received data available
+    TxHold = 2,  // THR empty
+    RxLstat = 3, // Receiver line status error
+    ModStat = 4, // Modem status change
+    Fifo = 5,    // FIFO character timeout
 }
 
 /// Interrupt Enable Register bits
@@ -83,13 +83,13 @@ struct FifoControl {
 /// Line Control Register state
 #[derive(Debug, Clone, Copy)]
 struct LineControl {
-    wordlen_sel: u8,      // 0=5, 1=6, 2=7, 3=8 bits
-    stopbits: bool,       // 0=1 stop, 1=1.5/2 stop
+    wordlen_sel: u8, // 0=5, 1=6, 2=7, 3=8 bits
+    stopbits: bool,  // 0=1 stop, 1=1.5/2 stop
     parity_enable: bool,
     evenparity_sel: bool,
     stick_parity: bool,
     break_cntl: bool,
-    dlab: bool,           // Divisor Latch Access Bit
+    dlab: bool, // Divisor Latch Access Bit
 }
 
 impl Default for LineControl {
@@ -112,7 +112,7 @@ struct ModemControl {
     dtr: bool,
     rts: bool,
     out1: bool,
-    out2: bool,            // MUST be set for interrupts to reach PIC
+    out2: bool, // MUST be set for interrupts to reach PIC
     local_loopback: bool,
 }
 
@@ -137,8 +137,8 @@ impl Default for LineStatus {
             parity_error: false,
             framing_error: false,
             break_int: false,
-            thr_empty: true,  // THR starts empty
-            tsr_empty: true,  // TSR starts empty
+            thr_empty: true, // THR starts empty
+            tsr_empty: true, // TSR starts empty
             fifo_error: false,
         }
     }
@@ -410,8 +410,11 @@ impl BxSerialC {
 
     fn lower_interrupt(&mut self, port_idx: usize) {
         let s = &self.ports[port_idx];
-        if !s.ls_interrupt && !s.ms_interrupt && !s.rx_interrupt
-            && !s.tx_interrupt && !s.fifo_interrupt
+        if !s.ls_interrupt
+            && !s.ms_interrupt
+            && !s.rx_interrupt
+            && !s.tx_interrupt
+            && !s.fifo_interrupt
         {
             self.pending_irq_lower[port_idx] = true;
         }
@@ -503,10 +506,18 @@ impl BxSerialC {
                 } else {
                     let s = &self.ports[port_idx];
                     let mut val = 0u8;
-                    if s.int_enable.rxdata_enable { val |= 0x01; }
-                    if s.int_enable.txhold_enable { val |= 0x02; }
-                    if s.int_enable.rxlstat_enable { val |= 0x04; }
-                    if s.int_enable.modstat_enable { val |= 0x08; }
+                    if s.int_enable.rxdata_enable {
+                        val |= 0x01;
+                    }
+                    if s.int_enable.txhold_enable {
+                        val |= 0x02;
+                    }
+                    if s.int_enable.rxlstat_enable {
+                        val |= 0x04;
+                    }
+                    if s.int_enable.modstat_enable {
+                        val |= 0x08;
+                    }
                     val as u32
                 }
             }
@@ -527,9 +538,7 @@ impl BxSerialC {
                     (true, 0x00)
                 };
                 let fifo_bits = if s.fifo_cntl.enable { 0xC0u8 } else { 0x00 };
-                let iir_val = (if ipending { 1u8 } else { 0 })
-                    | ((int_id & 0x07) << 1)
-                    | fifo_bits;
+                let iir_val = (if ipending { 1u8 } else { 0 }) | ((int_id & 0x07) << 1) | fifo_bits;
 
                 self.ports[port_idx].tx_interrupt = false;
                 self.lower_interrupt(port_idx);
@@ -539,37 +548,75 @@ impl BxSerialC {
             REG_LCR => {
                 let s = &self.ports[port_idx];
                 let mut val = s.line_cntl.wordlen_sel;
-                if s.line_cntl.stopbits { val |= 0x04; }
-                if s.line_cntl.parity_enable { val |= 0x08; }
-                if s.line_cntl.evenparity_sel { val |= 0x10; }
-                if s.line_cntl.stick_parity { val |= 0x20; }
-                if s.line_cntl.break_cntl { val |= 0x40; }
-                if s.line_cntl.dlab { val |= 0x80; }
+                if s.line_cntl.stopbits {
+                    val |= 0x04;
+                }
+                if s.line_cntl.parity_enable {
+                    val |= 0x08;
+                }
+                if s.line_cntl.evenparity_sel {
+                    val |= 0x10;
+                }
+                if s.line_cntl.stick_parity {
+                    val |= 0x20;
+                }
+                if s.line_cntl.break_cntl {
+                    val |= 0x40;
+                }
+                if s.line_cntl.dlab {
+                    val |= 0x80;
+                }
                 val as u32
             }
 
             REG_MCR => {
                 let s = &self.ports[port_idx];
                 let mut val = 0u8;
-                if s.modem_cntl.dtr { val |= 0x01; }
-                if s.modem_cntl.rts { val |= 0x02; }
-                if s.modem_cntl.out1 { val |= 0x04; }
-                if s.modem_cntl.out2 { val |= 0x08; }
-                if s.modem_cntl.local_loopback { val |= 0x10; }
+                if s.modem_cntl.dtr {
+                    val |= 0x01;
+                }
+                if s.modem_cntl.rts {
+                    val |= 0x02;
+                }
+                if s.modem_cntl.out1 {
+                    val |= 0x04;
+                }
+                if s.modem_cntl.out2 {
+                    val |= 0x08;
+                }
+                if s.modem_cntl.local_loopback {
+                    val |= 0x10;
+                }
                 val as u32
             }
 
             REG_LSR => {
                 let s = &self.ports[port_idx];
                 let mut val = 0u8;
-                if s.line_status.rxdata_ready { val |= 0x01; }
-                if s.line_status.overrun_error { val |= 0x02; }
-                if s.line_status.parity_error { val |= 0x04; }
-                if s.line_status.framing_error { val |= 0x08; }
-                if s.line_status.break_int { val |= 0x10; }
-                if s.line_status.thr_empty { val |= 0x20; }
-                if s.line_status.tsr_empty { val |= 0x40; }
-                if s.line_status.fifo_error { val |= 0x80; }
+                if s.line_status.rxdata_ready {
+                    val |= 0x01;
+                }
+                if s.line_status.overrun_error {
+                    val |= 0x02;
+                }
+                if s.line_status.parity_error {
+                    val |= 0x04;
+                }
+                if s.line_status.framing_error {
+                    val |= 0x08;
+                }
+                if s.line_status.break_int {
+                    val |= 0x10;
+                }
+                if s.line_status.thr_empty {
+                    val |= 0x20;
+                }
+                if s.line_status.tsr_empty {
+                    val |= 0x40;
+                }
+                if s.line_status.fifo_error {
+                    val |= 0x80;
+                }
 
                 let s = &mut self.ports[port_idx];
                 s.line_status.overrun_error = false;
@@ -587,14 +634,30 @@ impl BxSerialC {
             REG_MSR => {
                 let s = &self.ports[port_idx];
                 let mut val = 0u8;
-                if s.modem_status.delta_cts { val |= 0x01; }
-                if s.modem_status.delta_dsr { val |= 0x02; }
-                if s.modem_status.ri_trailedge { val |= 0x04; }
-                if s.modem_status.delta_dcd { val |= 0x08; }
-                if s.modem_status.cts { val |= 0x10; }
-                if s.modem_status.dsr { val |= 0x20; }
-                if s.modem_status.ri { val |= 0x40; }
-                if s.modem_status.dcd { val |= 0x80; }
+                if s.modem_status.delta_cts {
+                    val |= 0x01;
+                }
+                if s.modem_status.delta_dsr {
+                    val |= 0x02;
+                }
+                if s.modem_status.ri_trailedge {
+                    val |= 0x04;
+                }
+                if s.modem_status.delta_dcd {
+                    val |= 0x08;
+                }
+                if s.modem_status.cts {
+                    val |= 0x10;
+                }
+                if s.modem_status.dsr {
+                    val |= 0x20;
+                }
+                if s.modem_status.ri {
+                    val |= 0x40;
+                }
+                if s.modem_status.dcd {
+                    val |= 0x80;
+                }
 
                 let s = &mut self.ports[port_idx];
                 s.modem_status.delta_cts = false;
@@ -817,7 +880,9 @@ impl BxSerialC {
                         let baudrate = (UART_CLOCK_XTL / (16.0 * divisor as f64)) as u32;
                         tracing::debug!(
                             "COM{}: baud rate set to {} (divisor={})",
-                            port_idx + 1, baudrate, divisor
+                            port_idx + 1,
+                            baudrate,
+                            divisor
                         );
                     }
                 }
@@ -842,18 +907,28 @@ impl BxSerialC {
                     let new_dcd = s.modem_cntl.out2;
 
                     // Detect changes for delta bits
-                    if new_cts != s.modem_status.cts { s.modem_status.delta_cts = true; }
-                    if new_dsr != s.modem_status.dsr { s.modem_status.delta_dsr = true; }
-                    if !new_ri && s.modem_status.ri { s.modem_status.ri_trailedge = true; }
-                    if new_dcd != s.modem_status.dcd { s.modem_status.delta_dcd = true; }
+                    if new_cts != s.modem_status.cts {
+                        s.modem_status.delta_cts = true;
+                    }
+                    if new_dsr != s.modem_status.dsr {
+                        s.modem_status.delta_dsr = true;
+                    }
+                    if !new_ri && s.modem_status.ri {
+                        s.modem_status.ri_trailedge = true;
+                    }
+                    if new_dcd != s.modem_status.dcd {
+                        s.modem_status.delta_dcd = true;
+                    }
 
                     s.modem_status.cts = new_cts;
                     s.modem_status.dsr = new_dsr;
                     s.modem_status.ri = new_ri;
                     s.modem_status.dcd = new_dcd;
 
-                    if s.modem_status.delta_cts || s.modem_status.delta_dsr
-                        || s.modem_status.ri_trailedge || s.modem_status.delta_dcd
+                    if s.modem_status.delta_cts
+                        || s.modem_status.delta_dsr
+                        || s.modem_status.ri_trailedge
+                        || s.modem_status.delta_dcd
                     {
                         self.raise_interrupt(port_idx, IntSource::ModStat);
                     }
@@ -869,12 +944,20 @@ impl BxSerialC {
 
             REG_LSR => {
                 // LSR is mostly read-only. Writes are ignored per 16550 spec.
-                tracing::trace!("COM{}: write to LSR ignored (value={:#04x})", port_idx + 1, val);
+                tracing::trace!(
+                    "COM{}: write to LSR ignored (value={:#04x})",
+                    port_idx + 1,
+                    val
+                );
             }
 
             REG_MSR => {
                 // MSR is read-only. Writes are ignored.
-                tracing::trace!("COM{}: write to MSR ignored (value={:#04x})", port_idx + 1, val);
+                tracing::trace!(
+                    "COM{}: write to MSR ignored (value={:#04x})",
+                    port_idx + 1,
+                    val
+                );
             }
 
             REG_SCR => {
@@ -919,7 +1002,7 @@ mod tests {
         let mut serial = BxSerialC::new(1);
         // Write to scratch register
         serial.write(0x03FF, 0xA5, 1); // base + 7 = SCR
-        // Read it back
+                                       // Read it back
         assert_eq!(serial.read(0x03FF, 1), 0xA5);
     }
 
@@ -927,7 +1010,7 @@ mod tests {
     fn test_lsr_initial_state() {
         let mut serial = BxSerialC::new(1);
         let lsr = serial.read(0x03FD, 1); // base + 5 = LSR
-        // thr_empty(bit5) + tsr_empty(bit6) should be set
+                                          // thr_empty(bit5) + tsr_empty(bit6) should be set
         assert_eq!(lsr & 0x60, 0x60);
     }
 
@@ -935,7 +1018,7 @@ mod tests {
     fn test_iir_no_interrupt() {
         let mut serial = BxSerialC::new(1);
         let iir = serial.read(0x03FA, 1); // base + 2 = IIR
-        // ipending bit should be set (no interrupt)
+                                          // ipending bit should be set (no interrupt)
         assert_eq!(iir & 0x01, 0x01);
     }
 
@@ -962,7 +1045,7 @@ mod tests {
         let mut serial = BxSerialC::new(1);
         // Enable FIFO
         serial.write(0x03FA, 0x01, 1); // FCR = 0x01 (enable)
-        // Read IIR — bits 7:6 should be 0xC0 (FIFO enabled)
+                                       // Read IIR — bits 7:6 should be 0xC0 (FIFO enabled)
         let iir = serial.read(0x03FA, 1);
         assert_eq!(iir & 0xC0, 0xC0);
     }
@@ -1008,7 +1091,7 @@ mod tests {
     fn test_msr_initial_connected() {
         let mut serial = BxSerialC::new(1);
         let msr = serial.read(0x03FE, 1); // MSR
-        // CTS and DSR should be set (simulated connected device)
+                                          // CTS and DSR should be set (simulated connected device)
         assert_ne!(msr & 0x10, 0, "CTS should be set");
         assert_ne!(msr & 0x20, 0, "DSR should be set");
     }

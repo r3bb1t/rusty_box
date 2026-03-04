@@ -1292,6 +1292,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Wrmsr => self.wrmsr(instr),
             Opcode::Sysenter => self.sysenter(instr),
             Opcode::Sysexit => self.sysexit(instr),
+            Opcode::Syscall | Opcode::SyscallLegacy => self.syscall(instr),
+            Opcode::Sysret | Opcode::SysretLegacy => self.sysret(instr),
             Opcode::Rsm => self.rsm(instr),
             Opcode::Xgetbv => self.xgetbv(instr),
             Opcode::Xsetbv => self.xsetbv(instr),
@@ -2000,13 +2002,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::PackssdwPqQq => self.packssdw_pq_qq(instr),
             // MOVD Pq, Ed — check mod_c0 for register vs memory form
             Opcode::MovdPqEd => {
-                if instr.mod_c0() { self.movd_pq_ed_r(instr) }
-                else { self.movd_pq_ed_m(instr) }
+                if instr.mod_c0() {
+                    self.movd_pq_ed_r(instr)
+                } else {
+                    self.movd_pq_ed_m(instr)
+                }
             }
             // MOVQ Pq, Qq — check mod_c0 for register vs memory form
             Opcode::MovqPqQq => {
-                if instr.mod_c0() { self.movq_pq_qq_r(instr) }
-                else { self.movq_pq_qq_m(instr) }
+                if instr.mod_c0() {
+                    self.movq_pq_qq_r(instr)
+                } else {
+                    self.movq_pq_qq_m(instr)
+                }
             }
             Opcode::PcmpeqbPqQq => self.pcmpeqb_pq_qq(instr),
             Opcode::PcmpeqwPqQq => self.pcmpeqw_pq_qq(instr),
@@ -2014,13 +2022,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Emms => self.emms(instr),
             // MOVD Ed, Pq — check mod_c0 for register vs memory form
             Opcode::MovdEdPq => {
-                if instr.mod_c0() { self.movd_ed_pq_r(instr) }
-                else { self.movd_ed_pq_m(instr) }
+                if instr.mod_c0() {
+                    self.movd_ed_pq_r(instr)
+                } else {
+                    self.movd_ed_pq_m(instr)
+                }
             }
             // MOVQ Qq, Pq — check mod_c0 for register vs memory form
             Opcode::MovqQqPq => {
-                if instr.mod_c0() { self.movq_qq_pq_r(instr) }
-                else { self.movq_qq_pq_m(instr) }
+                if instr.mod_c0() {
+                    self.movq_qq_pq_r(instr)
+                } else {
+                    self.movq_qq_pq_m(instr)
+                }
             }
             Opcode::PsrlwPqQq => self.psrlw_pq_qq(instr),
             Opcode::PsrldPqQq => self.psrld_pq_qq(instr),
@@ -2109,9 +2123,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Stmxcsr => self.stmxcsr(instr),
 
             // Prefetch hints and memory fences — NOPs in emulation
-            Opcode::PrefetchMb | Opcode::Prefetcht0Mb | Opcode::Prefetcht1Mb
-            | Opcode::Prefetcht2Mb | Opcode::PrefetchntaMb
-            | Opcode::Lfence | Opcode::Sfence | Opcode::Mfence => Ok(()),
+            Opcode::PrefetchMb
+            | Opcode::Prefetcht0Mb
+            | Opcode::Prefetcht1Mb
+            | Opcode::Prefetcht2Mb
+            | Opcode::PrefetchntaMb
+            | Opcode::Lfence
+            | Opcode::Sfence
+            | Opcode::Mfence => Ok(()),
 
             // =========================================================================
             // SSE/SSE2 Data Movement (sse_move.rs)
@@ -2124,7 +2143,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     let val = self.read_xmm_reg(instr.src1());
                     self.write_xmm_reg_lo128(instr.dst(), val);
                     Ok(())
-                } else { self.movups_vps_wps_m(instr) }
+                } else {
+                    self.movups_vps_wps_m(instr)
+                }
             }
             // MOVUPS (unaligned packed single) — store
             Opcode::MovupsWpsVps => {
@@ -2133,7 +2154,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     let val = self.read_xmm_reg(instr.dst());
                     self.write_xmm_reg_lo128(instr.src1(), val);
                     Ok(())
-                } else { self.movups_wps_vps_m(instr) }
+                } else {
+                    self.movups_wps_vps_m(instr)
+                }
             }
             // MOVUPD (unaligned packed double) — load
             Opcode::MovupdVpdWpd => {
@@ -2142,7 +2165,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     let val = self.read_xmm_reg(instr.src1());
                     self.write_xmm_reg_lo128(instr.dst(), val);
                     Ok(())
-                } else { self.movupd_vpd_wpd_m(instr) }
+                } else {
+                    self.movupd_vpd_wpd_m(instr)
+                }
             }
             // MOVUPD (unaligned packed double) — store
             Opcode::MovupdWpdVpd => {
@@ -2151,12 +2176,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     let val = self.read_xmm_reg(instr.dst());
                     self.write_xmm_reg_lo128(instr.src1(), val);
                     Ok(())
-                } else { self.movupd_wpd_vpd_m(instr) }
+                } else {
+                    self.movupd_wpd_vpd_m(instr)
+                }
             }
             // MOVAPS (aligned packed single) — load
             Opcode::MovapsVpsWps => {
-                if instr.mod_c0() { self.movaps_vps_wps_r(instr) }
-                else { self.movaps_vps_wps_m(instr) }
+                if instr.mod_c0() {
+                    self.movaps_vps_wps_r(instr)
+                } else {
+                    self.movaps_vps_wps_m(instr)
+                }
             }
             // MOVAPS (aligned packed single) — store
             Opcode::MovapsWpsVps => {
@@ -2165,12 +2195,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     let val = self.read_xmm_reg(instr.dst());
                     self.write_xmm_reg_lo128(instr.src1(), val);
                     Ok(())
-                } else { self.movaps_wps_vps_m(instr) }
+                } else {
+                    self.movaps_wps_vps_m(instr)
+                }
             }
             // MOVAPD (aligned packed double) — load
             Opcode::MovapdVpdWpd => {
-                if instr.mod_c0() { self.movaps_vps_wps_r(instr) }
-                else { self.movapd_vpd_wpd_m(instr) }
+                if instr.mod_c0() {
+                    self.movaps_vps_wps_r(instr)
+                } else {
+                    self.movapd_vpd_wpd_m(instr)
+                }
             }
             // MOVAPD (aligned packed double) — store
             Opcode::MovapdWpdVpd => {
@@ -2179,12 +2214,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     let val = self.read_xmm_reg(instr.dst());
                     self.write_xmm_reg_lo128(instr.src1(), val);
                     Ok(())
-                } else { self.movapd_wpd_vpd_m(instr) }
+                } else {
+                    self.movapd_wpd_vpd_m(instr)
+                }
             }
             // MOVDQA (aligned packed integer) — load
             Opcode::MovdqaVdqWdq => {
-                if instr.mod_c0() { self.movaps_vps_wps_r(instr) }
-                else { self.movdqa_vdq_wdq_m(instr) }
+                if instr.mod_c0() {
+                    self.movaps_vps_wps_r(instr)
+                } else {
+                    self.movdqa_vdq_wdq_m(instr)
+                }
             }
             // MOVDQA (aligned packed integer) — store
             Opcode::MovdqaWdqVdq => {
@@ -2193,7 +2233,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     let val = self.read_xmm_reg(instr.dst());
                     self.write_xmm_reg_lo128(instr.src1(), val);
                     Ok(())
-                } else { self.movdqa_wdq_vdq_m(instr) }
+                } else {
+                    self.movdqa_wdq_vdq_m(instr)
+                }
             }
             // MOVDQU (unaligned packed integer) — load
             Opcode::MovdquVdqWdq => {
@@ -2202,7 +2244,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     let val = self.read_xmm_reg(instr.src1());
                     self.write_xmm_reg_lo128(instr.dst(), val);
                     Ok(())
-                } else { self.movdqu_vdq_wdq_m(instr) }
+                } else {
+                    self.movdqu_vdq_wdq_m(instr)
+                }
             }
             // MOVDQU (unaligned packed integer) — store
             Opcode::MovdquWdqVdq => {
@@ -2211,26 +2255,40 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     let val = self.read_xmm_reg(instr.dst());
                     self.write_xmm_reg_lo128(instr.src1(), val);
                     Ok(())
-                } else { self.movdqu_wdq_vdq_m(instr) }
+                } else {
+                    self.movdqu_wdq_vdq_m(instr)
+                }
             }
 
             // MOVSS (scalar single) — different R vs M semantics
             Opcode::MovssVssWss => {
-                if instr.mod_c0() { self.movss_vss_wss_r(instr) }
-                else { self.movss_vss_wss_m(instr) }
+                if instr.mod_c0() {
+                    self.movss_vss_wss_r(instr)
+                } else {
+                    self.movss_vss_wss_m(instr)
+                }
             }
             Opcode::MovssWssVss => {
-                if instr.mod_c0() { self.movss_wss_vss_r(instr) }
-                else { self.movss_wss_vss_m(instr) }
+                if instr.mod_c0() {
+                    self.movss_wss_vss_r(instr)
+                } else {
+                    self.movss_wss_vss_m(instr)
+                }
             }
             // MOVSD (scalar double) — different R vs M semantics
             Opcode::MovsdVsdWsd => {
-                if instr.mod_c0() { self.movsd_vsd_wsd_r(instr) }
-                else { self.movsd_vsd_wsd_m(instr) }
+                if instr.mod_c0() {
+                    self.movsd_vsd_wsd_r(instr)
+                } else {
+                    self.movsd_vsd_wsd_m(instr)
+                }
             }
             Opcode::MovsdWsdVsd => {
-                if instr.mod_c0() { self.movsd_wsd_vsd_r(instr) }
-                else { self.movsd_wsd_vsd_m(instr) }
+                if instr.mod_c0() {
+                    self.movsd_wsd_vsd_r(instr)
+                } else {
+                    self.movsd_wsd_vsd_m(instr)
+                }
             }
 
             // MOVLPS/MOVHLPS — 0F 12 (memory=MOVLPS, register=MOVHLPS)
@@ -2260,21 +2318,33 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             // MOVD (GPR ↔ XMM)
             Opcode::MovdVdqEd => {
-                if instr.mod_c0() { self.movd_vdq_ed_r(instr) }
-                else { self.movd_vdq_ed_m(instr) }
+                if instr.mod_c0() {
+                    self.movd_vdq_ed_r(instr)
+                } else {
+                    self.movd_vdq_ed_m(instr)
+                }
             }
             Opcode::MovdEdVd => {
-                if instr.mod_c0() { self.movd_ed_vdq_r(instr) }
-                else { self.movd_ed_vdq_m(instr) }
+                if instr.mod_c0() {
+                    self.movd_ed_vdq_r(instr)
+                } else {
+                    self.movd_ed_vdq_m(instr)
+                }
             }
             // MOVQ (XMM ↔ XMM/mem)
             Opcode::MovqVqWq => {
-                if instr.mod_c0() { self.movq_vq_wq_r(instr) }
-                else { self.movq_vq_wq_m(instr) }
+                if instr.mod_c0() {
+                    self.movq_vq_wq_r(instr)
+                } else {
+                    self.movq_vq_wq_m(instr)
+                }
             }
             Opcode::MovqWqVq => {
-                if instr.mod_c0() { self.movq_wq_vq_r(instr) }
-                else { self.movq_wq_vq_m(instr) }
+                if instr.mod_c0() {
+                    self.movq_wq_vq_r(instr)
+                } else {
+                    self.movq_wq_vq_m(instr)
+                }
             }
 
             // MMX ↔ SSE transfer
@@ -2283,16 +2353,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             // SSE3 duplicate moves
             Opcode::MovddupVpdWq => {
-                if instr.mod_c0() { self.movddup_vpd_wq_r(instr) }
-                else { self.movddup_vpd_wq_m(instr) }
+                if instr.mod_c0() {
+                    self.movddup_vpd_wq_r(instr)
+                } else {
+                    self.movddup_vpd_wq_m(instr)
+                }
             }
             Opcode::MovsldupVpsWps => {
-                if instr.mod_c0() { self.movsldup_vps_wps_r(instr) }
-                else { self.movsldup_vps_wps_m(instr) }
+                if instr.mod_c0() {
+                    self.movsldup_vps_wps_r(instr)
+                } else {
+                    self.movsldup_vps_wps_m(instr)
+                }
             }
             Opcode::MovshdupVpsWps => {
-                if instr.mod_c0() { self.movshdup_vps_wps_r(instr) }
-                else { self.movshdup_vps_wps_m(instr) }
+                if instr.mod_c0() {
+                    self.movshdup_vps_wps_r(instr)
+                } else {
+                    self.movshdup_vps_wps_m(instr)
+                }
             }
 
             // =========================================================================
@@ -2483,52 +2562,88 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // SSE4.1 Sign/Zero Extend (sse_move.rs)
             // =========================================================================
             Opcode::PmovsxbwVdqWq => {
-                if instr.mod_c0() { self.pmovsxbw_vdq_wq_r(instr) }
-                else { self.pmovsxbw_vdq_wq_m(instr) }
+                if instr.mod_c0() {
+                    self.pmovsxbw_vdq_wq_r(instr)
+                } else {
+                    self.pmovsxbw_vdq_wq_m(instr)
+                }
             }
             Opcode::PmovsxbdVdqWd => {
-                if instr.mod_c0() { self.pmovsxbd_vdq_wd_r(instr) }
-                else { self.pmovsxbd_vdq_wd_m(instr) }
+                if instr.mod_c0() {
+                    self.pmovsxbd_vdq_wd_r(instr)
+                } else {
+                    self.pmovsxbd_vdq_wd_m(instr)
+                }
             }
             Opcode::PmovsxbqVdqWw => {
-                if instr.mod_c0() { self.pmovsxbq_vdq_ww_r(instr) }
-                else { self.pmovsxbq_vdq_ww_m(instr) }
+                if instr.mod_c0() {
+                    self.pmovsxbq_vdq_ww_r(instr)
+                } else {
+                    self.pmovsxbq_vdq_ww_m(instr)
+                }
             }
             Opcode::PmovsxwdVdqWq => {
-                if instr.mod_c0() { self.pmovsxwd_vdq_wq_r(instr) }
-                else { self.pmovsxwd_vdq_wq_m(instr) }
+                if instr.mod_c0() {
+                    self.pmovsxwd_vdq_wq_r(instr)
+                } else {
+                    self.pmovsxwd_vdq_wq_m(instr)
+                }
             }
             Opcode::PmovsxwqVdqWd => {
-                if instr.mod_c0() { self.pmovsxwq_vdq_wd_r(instr) }
-                else { self.pmovsxwq_vdq_wd_m(instr) }
+                if instr.mod_c0() {
+                    self.pmovsxwq_vdq_wd_r(instr)
+                } else {
+                    self.pmovsxwq_vdq_wd_m(instr)
+                }
             }
             Opcode::PmovsxdqVdqWq => {
-                if instr.mod_c0() { self.pmovsxdq_vdq_wq_r(instr) }
-                else { self.pmovsxdq_vdq_wq_m(instr) }
+                if instr.mod_c0() {
+                    self.pmovsxdq_vdq_wq_r(instr)
+                } else {
+                    self.pmovsxdq_vdq_wq_m(instr)
+                }
             }
             Opcode::PmovzxbwVdqWq => {
-                if instr.mod_c0() { self.pmovzxbw_vdq_wq_r(instr) }
-                else { self.pmovzxbw_vdq_wq_m(instr) }
+                if instr.mod_c0() {
+                    self.pmovzxbw_vdq_wq_r(instr)
+                } else {
+                    self.pmovzxbw_vdq_wq_m(instr)
+                }
             }
             Opcode::PmovzxbdVdqWd => {
-                if instr.mod_c0() { self.pmovzxbd_vdq_wd_r(instr) }
-                else { self.pmovzxbd_vdq_wd_m(instr) }
+                if instr.mod_c0() {
+                    self.pmovzxbd_vdq_wd_r(instr)
+                } else {
+                    self.pmovzxbd_vdq_wd_m(instr)
+                }
             }
             Opcode::PmovzxbqVdqWw => {
-                if instr.mod_c0() { self.pmovzxbq_vdq_ww_r(instr) }
-                else { self.pmovzxbq_vdq_ww_m(instr) }
+                if instr.mod_c0() {
+                    self.pmovzxbq_vdq_ww_r(instr)
+                } else {
+                    self.pmovzxbq_vdq_ww_m(instr)
+                }
             }
             Opcode::PmovzxwdVdqWq => {
-                if instr.mod_c0() { self.pmovzxwd_vdq_wq_r(instr) }
-                else { self.pmovzxwd_vdq_wq_m(instr) }
+                if instr.mod_c0() {
+                    self.pmovzxwd_vdq_wq_r(instr)
+                } else {
+                    self.pmovzxwd_vdq_wq_m(instr)
+                }
             }
             Opcode::PmovzxwqVdqWd => {
-                if instr.mod_c0() { self.pmovzxwq_vdq_wd_r(instr) }
-                else { self.pmovzxwq_vdq_wd_m(instr) }
+                if instr.mod_c0() {
+                    self.pmovzxwq_vdq_wd_r(instr)
+                } else {
+                    self.pmovzxwq_vdq_wd_m(instr)
+                }
             }
             Opcode::PmovzxdqVdqWq => {
-                if instr.mod_c0() { self.pmovzxdq_vdq_wq_r(instr) }
-                else { self.pmovzxdq_vdq_wq_m(instr) }
+                if instr.mod_c0() {
+                    self.pmovzxdq_vdq_wq_r(instr)
+                } else {
+                    self.pmovzxdq_vdq_wq_m(instr)
+                }
             }
 
             // End-of-trace sentinel (matching C++ BxEndTrace).

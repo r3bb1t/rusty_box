@@ -250,8 +250,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.cr4.set32(0);
 
-        // FIXME: implement this
-        // self.cr4_suppmask = get_cr4_allow_mask();
+        self.cr4_suppmask = self.get_cr4_allow_mask();
 
         self.linaddr_width = 48;
 
@@ -259,9 +258,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.xcr0.set32(0x1);
         }
 
-        // FIXME: implement this
-        // BX_CPU_THIS_PTR xcr0_suppmask = get_xcr0_allow_mask();
-        // BX_CPU_THIS_PTR ia32_xss_suppmask = get_ia32_xss_allow_mask();
+        self.xcr0_suppmask = self.get_xcr0_allow_mask();
+        self.ia32_xss_suppmask = self.get_ia32_xss_allow_mask();
 
         self.msr.ia32_xss = 0;
 
@@ -287,8 +285,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.lapic.enable_xapic_extensions();
 
         self.efer.set32(0);
-        // Allow-mask helpers are not implemented yet; use conservative default
-        self.efer_suppmask = 0;
+        self.efer_suppmask = self.get_efer_allow_mask();
         self.msr.star = 0;
 
         if self.bx_cpuid_support_isa_extension(X86Feature::IsaLONG_MODE) {

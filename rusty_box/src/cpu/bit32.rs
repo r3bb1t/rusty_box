@@ -72,9 +72,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr32(instr.dst() as usize, result);
 
         // POPCNT clears OF, SF, AF, CF, PF; sets ZF if result is 0
-        self.eflags.remove(
-            EFlags::OF | EFlags::SF | EFlags::AF | EFlags::CF | EFlags::PF,
-        );
+        self.eflags
+            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::CF | EFlags::PF);
         if result == 0 {
             self.eflags.insert(EFlags::ZF);
         } else {
@@ -98,9 +97,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let current = self.get_gpr32(dst);
         self.set_gpr32(dst, (current & 0xFFFF0000) | result as u32);
 
-        self.eflags.remove(
-            EFlags::OF | EFlags::SF | EFlags::AF | EFlags::CF | EFlags::PF,
-        );
+        self.eflags
+            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::CF | EFlags::PF);
         if result == 0 {
             self.eflags.insert(EFlags::ZF);
         } else {
@@ -126,7 +124,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr32(instr.dst() as usize, result);
 
         // CF = (op2 == 0), ZF = (result == 0 i.e. op2 has bit 31 set)
-        self.eflags.remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::PF);
+        self.eflags
+            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::PF);
         if op2 == 0 {
             self.eflags.insert(EFlags::CF);
         } else {
@@ -154,7 +153,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let current = self.get_gpr32(dst);
         self.set_gpr32(dst, (current & 0xFFFF0000) | result as u32);
 
-        self.eflags.remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::PF);
+        self.eflags
+            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::PF);
         if op2 == 0 {
             self.eflags.insert(EFlags::CF);
         } else {
@@ -184,7 +184,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op2.trailing_zeros();
         self.set_gpr32(instr.dst() as usize, result);
 
-        self.eflags.remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::PF);
+        self.eflags
+            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::PF);
         if op2 == 0 {
             self.eflags.insert(EFlags::CF);
         } else {
@@ -212,7 +213,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let current = self.get_gpr32(dst);
         self.set_gpr32(dst, (current & 0xFFFF0000) | result as u32);
 
-        self.eflags.remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::PF);
+        self.eflags
+            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::PF);
         if op2 == 0 {
             self.eflags.insert(EFlags::CF);
         } else {

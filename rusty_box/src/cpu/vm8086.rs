@@ -38,7 +38,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             0,
             "stack_return_to_v86: CPL must be 0"
         );
-        debug_assert!(self.protected_mode(), "stack_return_to_v86: must be in protected mode");
+        debug_assert!(
+            self.protected_mode(),
+            "stack_return_to_v86: must be in protected mode"
+        );
 
         // ── Stack layout (Bochs vm8086.cc:65-73) ──
         // eSP+32: OLD GS
@@ -219,9 +222,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let offset = io_base.wrapping_sub(32).wrapping_add((vector >> 3) as u32);
 
             if offset > tr_limit as u32 {
-                tracing::error!(
-                    "v86_redirect_interrupt(): failed to fetch VME redirection bitmap"
-                );
+                tracing::error!("v86_redirect_interrupt(): failed to fetch VME redirection bitmap");
                 return self.exception(super::cpu::Exception::Gp, 0).map(|_| false);
             }
 

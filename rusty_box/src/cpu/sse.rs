@@ -229,9 +229,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             for i in 0..16 {
-                result.xmm_sbyte[i] = saturate_word_s_to_byte_s(
-                    op1.xmm_sbyte[i] as i16 + op2.xmm_sbyte[i] as i16,
-                );
+                result.xmm_sbyte[i] =
+                    saturate_word_s_to_byte_s(op1.xmm_sbyte[i] as i16 + op2.xmm_sbyte[i] as i16);
             }
         }
         self.write_xmm_reg_lo128(instr.dst(), result);
@@ -247,9 +246,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             for i in 0..8 {
-                result.xmm16s[i] = saturate_dword_s_to_word_s(
-                    op1.xmm16s[i] as i32 + op2.xmm16s[i] as i32,
-                );
+                result.xmm16s[i] =
+                    saturate_dword_s_to_word_s(op1.xmm16s[i] as i32 + op2.xmm16s[i] as i32);
             }
         }
         self.write_xmm_reg_lo128(instr.dst(), result);
@@ -301,9 +299,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             for i in 0..16 {
-                result.xmm_sbyte[i] = saturate_word_s_to_byte_s(
-                    op1.xmm_sbyte[i] as i16 - op2.xmm_sbyte[i] as i16,
-                );
+                result.xmm_sbyte[i] =
+                    saturate_word_s_to_byte_s(op1.xmm_sbyte[i] as i16 - op2.xmm_sbyte[i] as i16);
             }
         }
         self.write_xmm_reg_lo128(instr.dst(), result);
@@ -319,9 +316,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             for i in 0..8 {
-                result.xmm16s[i] = saturate_dword_s_to_word_s(
-                    op1.xmm16s[i] as i32 - op2.xmm16s[i] as i32,
-                );
+                result.xmm16s[i] =
+                    saturate_dword_s_to_word_s(op1.xmm16s[i] as i32 - op2.xmm16s[i] as i32);
             }
         }
         self.write_xmm_reg_lo128(instr.dst(), result);
@@ -373,8 +369,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             for i in 0..8 {
-                result.xmm16u[i] =
-                    (op1.xmm16u[i] as u32).wrapping_mul(op2.xmm16u[i] as u32) as u16;
+                result.xmm16u[i] = (op1.xmm16u[i] as u32).wrapping_mul(op2.xmm16u[i] as u32) as u16;
             }
         }
         self.write_xmm_reg_lo128(instr.dst(), result);
@@ -390,8 +385,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             for i in 0..8 {
-                result.xmm16u[i] =
-                    ((op1.xmm16s[i] as i32 * op2.xmm16s[i] as i32) >> 16) as u16;
+                result.xmm16u[i] = ((op1.xmm16s[i] as i32 * op2.xmm16s[i] as i32) >> 16) as u16;
             }
         }
         self.write_xmm_reg_lo128(instr.dst(), result);
@@ -407,8 +401,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             for i in 0..8 {
-                result.xmm16u[i] =
-                    ((op1.xmm16u[i] as u32 * op2.xmm16u[i] as u32) >> 16) as u16;
+                result.xmm16u[i] = ((op1.xmm16u[i] as u32 * op2.xmm16u[i] as u32) >> 16) as u16;
             }
         }
         self.write_xmm_reg_lo128(instr.dst(), result);
@@ -449,10 +442,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 {
                     result.xmm32u[i] = 0x80000000;
                 } else {
-                    result.xmm32s[i] = (op1.xmm16s[i * 2] as i32)
-                        * (op2.xmm16s[i * 2] as i32)
-                        + (op1.xmm16s[i * 2 + 1] as i32)
-                            * (op2.xmm16s[i * 2 + 1] as i32);
+                    result.xmm32s[i] = (op1.xmm16s[i * 2] as i32) * (op2.xmm16s[i * 2] as i32)
+                        + (op1.xmm16s[i * 2 + 1] as i32) * (op2.xmm16s[i * 2 + 1] as i32);
                 }
             }
         }
@@ -1445,8 +1436,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             for i in 0..8 {
-                result.xmm16u[i] =
-                    ((op1.xmm16u[i] as u32 + op2.xmm16u[i] as u32 + 1) >> 1) as u16;
+                result.xmm16u[i] = ((op1.xmm16u[i] as u32 + op2.xmm16u[i] as u32 + 1) >> 1) as u16;
             }
         }
         self.write_xmm_reg_lo128(instr.dst(), result);
@@ -1484,15 +1474,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         unsafe {
             let mut temp0 = 0u16;
             for i in 0..8 {
-                temp0 +=
-                    (op1.xmmubyte[i] as i16 - op2.xmmubyte[i] as i16).unsigned_abs();
+                temp0 += (op1.xmmubyte[i] as i16 - op2.xmmubyte[i] as i16).unsigned_abs();
             }
             result.xmm64u[0] = temp0 as u64;
 
             let mut temp1 = 0u16;
             for i in 8..16 {
-                temp1 +=
-                    (op1.xmmubyte[i] as i16 - op2.xmmubyte[i] as i16).unsigned_abs();
+                temp1 += (op1.xmmubyte[i] as i16 - op2.xmmubyte[i] as i16).unsigned_abs();
             }
             result.xmm64u[1] = temp1 as u64;
         }
@@ -1510,9 +1498,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mask = self.read_xmm_reg(instr.dst());
 
         // Check if any byte needs to be written
-        let any_set = unsafe {
-            (mask.xmm64u[0] | mask.xmm64u[1]) & 0x8080808080808080 != 0
-        };
+        let any_set = unsafe { (mask.xmm64u[0] | mask.xmm64u[1]) & 0x8080808080808080 != 0 };
         if !any_set {
             return Ok(());
         }

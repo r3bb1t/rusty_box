@@ -18,12 +18,12 @@ use crate::config::BxAddress;
 #[derive(Debug, Default, Clone)]
 pub(crate) struct BxSelector {
     /* bx_selector_t */
-    pub(super) value: u16, /* the 16bit value of the selector */
+    pub(crate) value: u16, /* the 16bit value of the selector */
     /* the following fields are extracted from the value field in protected
     mode only.  They're used for sake of efficiency */
-    pub(super) index: u16, /* 13bit index extracted from value in protected mode */
-    pub(super) ti: u16,    /* table indicator bit extracted from value */
-    pub(super) rpl: u8,    /* RPL extracted from value */
+    pub(crate) index: u16, /* 13bit index extracted from value in protected mode */
+    pub(crate) ti: u16,    /* table indicator bit extracted from value */
+    pub(crate) rpl: u8,    /* RPL extracted from value */
 }
 
 pub(crate) struct Gate {
@@ -67,14 +67,14 @@ struct Taskgate {
 //}
 
 #[derive(Clone, Copy)]
-pub(super) union Descriptor {
+pub(crate) union Descriptor {
     pub(crate) segment: DescriptorSegment,
     pub(crate) gate: DescriptorGate,
     pub(crate) task_gate: DescriptorTaskGate,
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct DescriptorSegment {
+pub(crate) struct DescriptorSegment {
     /// base address: 286=24bits, 386=32bits, long=64
     pub(crate) base: BxAddress,
     /// for efficiency, this contrived field is set to
@@ -322,9 +322,9 @@ pub(super) enum BxDataAndCodeDescriptorEnum {
 }
 
 #[derive(Default, Clone)]
-pub(super) struct BxSegmentReg {
-    pub(super) selector: BxSelector,
-    pub(super) cache: BxDescriptor, // Idk if really option
+pub(crate) struct BxSegmentReg {
+    pub(crate) selector: BxSelector,
+    pub(crate) cache: BxDescriptor, // Idk if really option
 }
 
 #[derive(Debug, Default)]

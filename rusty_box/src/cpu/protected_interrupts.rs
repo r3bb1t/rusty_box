@@ -279,8 +279,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let old_eip = self.eip();
         let old_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
 
-        // For now, handle same privilege level case (simplest)
-        // TODO: Implement inner privilege level case
+        // Bochs exception.cc:667-711: conforming or DPL == CPL → same privilege
+        // Bochs exception.cc:435-665: non-conforming and DPL < CPL → inner privilege
         if super::descriptor::is_code_segment_conforming(cs_descriptor.r#type)
             || cs_descriptor.dpl == cpl
         {

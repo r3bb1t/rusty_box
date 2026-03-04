@@ -2,8 +2,6 @@
 //!
 //! Based on Bochs ctrl_xfer64.cc
 
-use alloc::string::ToString;
-
 use super::{
     cpu::{BxCpuC, Exception},
     cpuid::BxCpuIdTrait,
@@ -104,24 +102,30 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let _op1_64 = self.read_linear_qword(seg, laddr);
+        let op1_64 = self.read_linear_qword(seg, laddr);
         let asize_mask = if instr.as64_l() != 0 {
-            0xFFFFFFFFFFFFFFFF
+            0xFFFFFFFFFFFFFFFFu64
         } else {
             0xFFFFFFFF
         };
-        let _cs_raw = self.read_linear_word(
+        let cs_raw = self.read_linear_word(
             seg,
             self.get_laddr64(seg_idx, (eaddr.wrapping_add(8)) & asize_mask),
         );
 
-        // TODO: Implement call_protected for protected mode (matching C++ line 191)
-        // For now, return error if not in real mode
-        if !self.real_mode() {
-            return Err(CpuError::UnimplementedOpcode {
-                opcode: "call64_ep protected mode".to_string(),
-            });
-        }
+        // BX_ASSERT(protected_mode()) — in 64-bit mode we are always in protected mode
+        // (matching C++ line 187)
+
+        // RSP_SPECULATIVE (matching C++ line 189)
+        self.speculative_rsp = true;
+        self.prev_rsp = self.rsp();
+
+        // call_protected dispatches through the protected mode call mechanism
+        // (matching C++ line 191)
+        self.call_protected_64(instr, cs_raw, op1_64)?;
+
+        // RSP_COMMIT (matching C++ line 193)
+        self.speculative_rsp = false;
 
         // Set STOP_TRACE to break trace loop
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -182,24 +186,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let _op1_64 = self.read_linear_qword(seg, laddr);
+        let op1_64 = self.read_linear_qword(seg, laddr);
         let asize_mask = if instr.as64_l() != 0 {
-            0xFFFFFFFFFFFFFFFF
+            0xFFFFFFFFFFFFFFFFu64
         } else {
             0xFFFFFFFF
         };
-        let _cs_raw = self.read_linear_word(
+        let cs_raw = self.read_linear_word(
             seg,
             self.get_laddr64(seg_idx, (eaddr.wrapping_add(8)) & asize_mask),
         );
 
-        // TODO: Implement jump_protected for protected mode (matching C++ line 443)
-        // For now, return error if not in real mode
-        if !self.real_mode() {
-            return Err(CpuError::UnimplementedOpcode {
-                opcode: "jmp64_ep protected mode".to_string(),
-            });
-        }
+        // BX_ASSERT(protected_mode()) — in 64-bit mode we are always in protected mode
+        // (matching C++ line 441)
+
+        // jump_protected dispatches through the protected mode jump mechanism
+        // (matching C++ line 443)
+        self.jump_protected(cs_raw, op1_64)?;
 
         // Set STOP_TRACE to break trace loop
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -234,18 +237,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Far return with immediate (64-bit)
     /// Matching C++ ctrl_xfer64.cc:78-102 RETfar64_Iw
     /// Note: return_protected is RSP safe
-    pub fn retfar64_iw(&mut self, _instr: &Instruction) -> Result<()> {
+    pub fn retfar64_iw(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue (matching C++ line 80)
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
-        // TODO: Implement return_protected for protected mode (matching C++ line 93)
-        // For now, return error if not in real mode
-        if !self.real_mode() {
-            return Err(CpuError::UnimplementedOpcode {
-                opcode: "retfar64_iw protected mode".to_string(),
-            });
-        }
+        // BX_ASSERT(protected_mode()) — in 64-bit mode we are always in protected mode
+        // (matching C++ line 88)
+
+        // RSP_SPECULATIVE (matching C++ line 90)
+        self.speculative_rsp = true;
+        self.prev_rsp = self.rsp();
+
+        // return_protected is RSP safe (matching C++ line 93)
+        self.return_protected_64(instr, instr.iw())?;
+
+        // RSP_COMMIT (matching C++ line 95)
+        self.speculative_rsp = false;
 
         // Set STOP_TRACE to break trace loop
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -260,16 +268,30 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Interrupt return (64-bit)
     /// Matching C++ ctrl_xfer64.cc:456-505 IRET64
-    pub fn iret64(&mut self, _instr: &Instruction) -> Result<()> {
+    pub fn iret64(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue (matching C++ line 458)
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
-        // TODO: Implement long_iret for long mode (matching C++ line 492)
-        // For now, return error
-        Err(CpuError::UnimplementedOpcode {
-            opcode: "iret64 long mode".to_string(),
-        })
+        // Unmask NMI (matching C++ line 478)
+        // unmask_event(BX_EVENT_NMI)
+        self.nmi_unblocking_iret = false;
+
+        // BX_ASSERT(long_mode()) — matching C++ line 488
+
+        // RSP_SPECULATIVE (matching C++ line 490)
+        self.speculative_rsp = true;
+        self.prev_rsp = self.rsp();
+
+        // long_iret dispatches the long mode IRET (matching C++ line 492)
+        self.long_iret(instr)?;
+
+        // RSP_COMMIT (matching C++ line 494)
+        self.speculative_rsp = false;
+
+        // Set STOP_TRACE to break trace loop
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
     }
 
     // =========================================================================

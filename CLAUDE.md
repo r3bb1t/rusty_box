@@ -16,8 +16,15 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-03-03):**
-- ✅ **DLX Linux boots to `dlx login:` prompt!** Full OS boot from BIOS POST through kernel init to user login.
+**Current Status (2026-03-04):**
+- ✅ **DLX Linux boots to interactive bash shell!** Full boot: BIOS POST → LILO → kernel → init → `dlx login: root` → `dlx:~#`
+- ✅ **SHRD/SHLD decoder fix**: Opcodes 0F A4/A5/AC/AD were in wrong decoder branch (ELSE instead of Ed,Gd). Operands were swapped — result went to wrong register. Fixed ext2 "directory #12 contains a hole" errors that blocked login.
+- ✅ All control/debug register types converted to bitflags (BxCr0, BxCr4, BxEfer, BxDr6, BxDr7)
+- ✅ CPU-level feature gates removed — APIC, MONITOR/MWAIT, MEMTYPE, AMX, PKEYS, EVEX, SSE, AVX, VMX, SVM always compiled
+- ✅ CR4/EFER/XCR0/XSS allow-masks computed from CPUID features (matching Bochs crregs.cc)
+- ✅ PAE + long mode paging infrastructure added (page_walk_for_dtlb_pae, page_walk_for_dtlb_long_mode)
+- ✅ 64-bit control transfers: call_protected_64, return_protected_64, long_iret, call_gate64
+- ✅ L bit parsing in segment descriptors (bit 21 of dword2) for 64-bit code segments
 - ✅ BIOS-bochs-latest (128 KB) is now the primary BIOS
 - ✅ Full BIOS POST completes: rombios32_init, VGA BIOS, ATA detection, boot
 - ✅ VGA text output working! Clean headless text dump:
@@ -240,12 +247,13 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 
 ### Next Steps
 1. ~~**Reach DLX Linux `dlx login:` prompt**~~ — **DONE** (2026-03-03). Full boot to login prompt achieved.
-2. **Interactive login** — Type username/password at `dlx login:` prompt and get a shell
-3. **Fix `ide2 at 0x1e8` phantom** — PCI PIIX IDE BAR misconfiguration causes kernel to probe a non-existent 3rd IDE channel
-4. **Fix keyboard scancode 70** — `keyboard: unrecognized scancode (70) - ignored` appears repeatedly after login prompt
+2. ~~**Interactive login**~~ — **DONE** (2026-03-04). SHRD/SHLD decoder fix resolved ext2 "directory #12 contains a hole" errors. `root` login → `dlx:~#` bash shell works.
+3. **Boot Alpine Linux** — Target modern Linux kernel. Requires SSE2, APIC, ACPI, PCI (Phases 1-7 of parity plan).
+4. **Fix `ide2 at 0x1e8` phantom** — PCI PIIX IDE BAR misconfiguration causes kernel to probe a non-existent 3rd IDE channel
 5. ~~**Fix LDT triple fault**~~ — FIXED: root cause was INT using IVT in PM + XCHG mod_c0 bug
 6. ~~**Fix vsprintf**~~ — FIXED: ADD AL,Ib (opcode 0x04) operated on AH, breaking vsprintf's jump table index computation
 7. ~~**Fix swap init loop**~~ — RESOLVED: "Trying to free nonexistent swap-page" was caused by IDT corruption from the INT dispatch bug
+8. ~~**Fix ext2 "directory #12 contains a hole"**~~ — **FIXED** (2026-03-04): SHRD/SHLD decoder convention bug. Opcodes 0F A4/A5/AC/AD were in ELSE branch instead of Ed,Gd. Operands swapped → shift never applied to destination register.
 
 ### Exact Instruction Threshold: 132,865,700
 
@@ -509,6 +517,15 @@ Key Cargo features in `rusty_box/Cargo.toml`:
 - `bx_support_apic`: APIC support
 - `bx_support_pci`: PCI bus support
 
+**Feature gate removal (2026-03-04):** Most CPU-level `#[cfg(feature = "bx_support_*")]` gates have been removed from CPU core files (cpu.rs, event.rs, init.rs, builder.rs, proc_ctrl.rs, string.rs, mwait.rs, paging.rs, tlb.rs, icache.rs, opcodes_table.rs). Features like APIC, MONITOR/MWAIT, MEMTYPE, AMX, PKEYS, EVEX, SSE, AVX, VMX, SVM, alignment check, and handler chaining are now always compiled. The I/O device files (devices.rs, ioapic.rs) still retain PCI/APIC gates for structural reasons.
+
+**Register types (2026-03-04):** All control/debug register types now use the `bitflags` crate:
+- `BxCr0`: bitflags (PE, MP, EM, TS, ET, NE, WP, AM, NW, CD, PG)
+- `BxCr4`: bitflags (VME, PVI, TSD, DE, PSE, PAE, MCE, PGE, PCE, OSFXSR, etc.)
+- `BxEfer`: bitflags (SCE, LME, LMA, NXE, SVME, LMSLE, FFXSR, TCE)
+- `BxDr6`: bitflags (B0-B3, BD, BS, BT)
+- `BxDr7`: bitflags (L0-L3, G0-G3, LE, GE, GD) + multi-bit field accessors (R/W, LEN)
+
 ## Key Files for Common Tasks
 
 | Task | Files |
@@ -580,6 +597,14 @@ The decoder fails to account for immediate bytes in TEST instructions (opcodes 0
 **Status:** Fully implemented — real mode IVT, protected mode IDT, double/triple fault chain, recursive exception delivery all working. DLX Linux boots to login with full exception handling.
 
 ### Major Bug Fixes (Historical)
+
+**Session 13 (2026-03-04) — DLX Linux boots to interactive bash shell**
+0. **SHRD/SHLD decoder convention** (`fetchdecode32.rs`): Opcodes 0F A4/A5 (SHLD) and 0F AC/AD (SHRD) were in the ELSE decoder branch, making `dst()=nnn` and `src1()=rm`. The implementations expected Ed,Gd convention (`dst()=rm`, `src1()=nnn`). This swapped operands: the shift result went to the wrong register. Root cause of ext2 "directory #12 contains a hole" errors — the kernel's `block = f_pos >> block_size_bits` (using SHRD) never actually shifted the destination register, so block was always the raw f_pos value. Fixed by adding SHRD/SHLD opcodes to the Ed,Gd branch.
+0. **Diagnostic cleanup** (`dlxlinux.rs`): Removed ~1600 lines of debugging code (inode12 monitoring, RAM scanning, page table walks, kernel code dumps). Replaced with clean 60-line headless boot loop.
+0. **Control register bitflags** (`crregs.rs`): CR0, CR4, EFER, DR6, DR7 converted to `bitflags!` types matching Bochs crregs.cc.
+0. **Feature gate removal**: Removed CPU-level `#[cfg(feature)]` gates — APIC, MONITOR/MWAIT, SSE, AVX, VMX, SVM always compiled.
+0. **PAE + long mode paging** (`paging.rs`): Added page_walk_for_dtlb_pae and page_walk_for_dtlb_long_mode.
+0. **64-bit control transfers** (`segment_ctrl_pro.rs`): call_protected_64, return_protected_64, long_iret, call_gate64.
 
 **Session 10 (2026-03-03) — DLX Linux boots to `dlx login:`**
 0. **Fetch buffer 4K page bounding** (`cpu.rs`): `get_host_mem_addr()` returned `&actual_vector[start..]` extending to end of all emulator RAM. The decoder could read past a 4K page boundary into physically adjacent but virtually unrelated memory, producing stale CALL displacements → wild jumps to 0xBDED0580. Fixed by bounding to `fetch_ptr[..4096]`. The TLB code path already did this correctly.

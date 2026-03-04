@@ -88,10 +88,13 @@ fn main() {
     // Spawn emulator on background thread
     // =========================================================================
     let disk_path_str = disk_path.to_string_lossy().to_string();
+    // For interactive GUI sessions, run effectively forever (until window close).
+    // The stop_flag (set when the user closes the window or clicks Reset) will
+    // terminate run_interactive regardless of the instruction limit.
     let max_instructions: u64 = std::env::var("MAX_INSTRUCTIONS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(500_000_000);
+        .unwrap_or(u64::MAX);
 
     let emu_thread = std::thread::Builder::new()
         .stack_size(1500 * 1024 * 1024) // 1.5 GB stack

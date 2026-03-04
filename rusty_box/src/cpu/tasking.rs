@@ -276,7 +276,8 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         self.cr0.set32(self.cr0.get32() | (1 << 3));
 
         // Task switch clears LE/L3/L2/L1/L0 in DR7 (Bochs tasking.cc:475)
-        self.dr7.val32 &= !Self::DR7_LOCAL_ENABLE_MASK;
+        self.dr7
+            .set32(self.dr7.get32() & !Self::DR7_LOCAL_ENABLE_MASK);
 
         // CR3 change — after commit point (Bochs tasking.cc:543-567)
         if tss_descriptor.r#type >= 9 && self.cr0.pg() {

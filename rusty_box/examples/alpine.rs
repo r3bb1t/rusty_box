@@ -199,7 +199,11 @@ fn run_alpine() -> Result<()> {
     });
 
     if let Some((ref vga_path, ref vga)) = vga_bios {
-        println!("  VGA BIOS loaded: {} bytes ({})", vga.len(), vga_path.display());
+        println!(
+            "  VGA BIOS loaded: {} bytes ({})",
+            vga.len(),
+            vga_path.display()
+        );
     } else {
         println!("  VGA BIOS not found (optional)");
     }
@@ -207,7 +211,11 @@ fn run_alpine() -> Result<()> {
     // Disk image info
     let disk_meta = std::fs::metadata(&disk_path).expect("Cannot read disk image metadata");
     let disk_size = disk_meta.len();
-    println!("  Disk image: {} ({} MB)", disk_path.display(), disk_size / (1024 * 1024));
+    println!(
+        "  Disk image: {} ({} MB)",
+        disk_path.display(),
+        disk_size / (1024 * 1024)
+    );
 
     // Determine disk geometry
     let (cylinders, heads, spt) = if let Some(chs_str) = std::env::var("ALPINE_CHS").ok() {
@@ -304,12 +312,26 @@ fn run_alpine() -> Result<()> {
     println!("╔════════════════════════════════════════════════════════════╗");
     println!("║                      SYSTEM STATE                         ║");
     println!("╠════════════════════════════════════════════════════════════╣");
-    println!("║  CS:IP  = F000:{:04X}                                      ║", emu.rip());
-    println!("║  A20    = {}                                         ║",
-        if emu.pc_system.get_enable_a20() { "enabled " } else { "disabled" });
-    println!("║  Memory = {} MB                                         ║", ram_mb);
-    println!("║  Disk   = {} cyl x {} heads x {} spt                    ║",
-        cylinders, heads, spt);
+    println!(
+        "║  CS:IP  = F000:{:04X}                                      ║",
+        emu.rip()
+    );
+    println!(
+        "║  A20    = {}                                         ║",
+        if emu.pc_system.get_enable_a20() {
+            "enabled "
+        } else {
+            "disabled"
+        }
+    );
+    println!(
+        "║  Memory = {} MB                                         ║",
+        ram_mb
+    );
+    println!(
+        "║  Disk   = {} cyl x {} heads x {} spt                    ║",
+        cylinders, heads, spt
+    );
     println!("╚════════════════════════════════════════════════════════════╝");
     println!();
 
@@ -385,7 +407,11 @@ fn run_alpine() -> Result<()> {
                     "[{}M] VGA: {}{}",
                     total_executed / 1_000_000,
                     preview_str,
-                    if has_login { " *** LOGIN DETECTED ***" } else { "" }
+                    if has_login {
+                        " *** LOGIN DETECTED ***"
+                    } else {
+                        ""
+                    }
                 );
 
                 if has_login && !logged_in {
@@ -422,7 +448,10 @@ fn run_alpine() -> Result<()> {
     match result {
         Ok(executed) => {
             println!("║  Instructions: {:>15}                       ║", executed);
-            println!("║  Time:         {:>12.3} sec                      ║", elapsed.as_secs_f64());
+            println!(
+                "║  Time:         {:>12.3} sec                      ║",
+                elapsed.as_secs_f64()
+            );
             if elapsed.as_secs_f64() > 0.001 {
                 let mips = executed as f64 / elapsed.as_secs_f64() / 1_000_000.0;
                 println!("║  Speed:        {:>12.2} MIPS                     ║", mips);
@@ -450,11 +479,17 @@ fn run_alpine() -> Result<()> {
     );
     println!(
         "║  EAX={:08x} EBX={:08x} ECX={:08x} EDX={:08x} ║",
-        emu.cpu.eax(), emu.cpu.ebx(), emu.cpu.ecx(), emu.cpu.edx()
+        emu.cpu.eax(),
+        emu.cpu.ebx(),
+        emu.cpu.ecx(),
+        emu.cpu.edx()
     );
     println!(
         "║  ESP={:08x} EBP={:08x} ESI={:08x} EDI={:08x} ║",
-        emu.cpu.esp(), emu.cpu.ebp(), emu.cpu.esi(), emu.cpu.edi()
+        emu.cpu.esp(),
+        emu.cpu.ebp(),
+        emu.cpu.esi(),
+        emu.cpu.edi()
     );
     println!("╚════════════════════════════════════════════════════════════╝");
 
@@ -470,10 +505,22 @@ fn run_alpine() -> Result<()> {
         println!("ATA read_count={}, write_count={}", ata_reads, ata_writes);
 
         println!("\n===== IRQ DELIVERY CHAIN =====");
-        println!("tick() calls:          {}", emu.device_manager.diag_tick_count);
-        println!("PIT fires (check_irq0): {}", emu.device_manager.diag_pit_fires);
-        println!("IRQ0 latched (raise):   {}", emu.device_manager.diag_irq0_latched);
-        println!("iac() calls:            {}", emu.device_manager.diag_iac_count);
+        println!(
+            "tick() calls:          {}",
+            emu.device_manager.diag_tick_count
+        );
+        println!(
+            "PIT fires (check_irq0): {}",
+            emu.device_manager.diag_pit_fires
+        );
+        println!(
+            "IRQ0 latched (raise):   {}",
+            emu.device_manager.diag_irq0_latched
+        );
+        println!(
+            "iac() calls:            {}",
+            emu.device_manager.diag_iac_count
+        );
         let pic_diag = emu.device_manager.pic_diag();
         println!("PIC state:              {}", pic_diag);
         print!("iac vectors:            ");

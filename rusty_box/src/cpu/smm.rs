@@ -271,10 +271,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ========================================================================
 
     pub(super) fn enter_system_management_mode(&mut self) {
-        tracing::debug!(
-            "enter_system_management_mode: smbase={:#010x}",
-            self.smbase
-        );
+        tracing::debug!("enter_system_management_mode: smbase={:#010x}", self.smbase);
 
         // Set SMM active
         self.in_smm = true;

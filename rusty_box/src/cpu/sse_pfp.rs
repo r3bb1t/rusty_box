@@ -33,14 +33,14 @@ use super::{
 #[inline]
 fn sse_compare_f32(op1: f32, op2: f32, predicate: u8) -> bool {
     match predicate & 7 {
-        0 => op1 == op2,                           // EQ
-        1 => op1 < op2,                            // LT
-        2 => op1 <= op2,                           // LE
-        3 => op1.is_nan() || op2.is_nan(),         // UNORD
+        0 => op1 == op2,                                 // EQ
+        1 => op1 < op2,                                  // LT
+        2 => op1 <= op2,                                 // LE
+        3 => op1.is_nan() || op2.is_nan(),               // UNORD
         4 => op1 != op2 || op1.is_nan() || op2.is_nan(), // NEQ (unordered or not equal)
-        5 => !(op1 < op2),                         // NLT (not less than)
-        6 => !(op1 <= op2),                        // NLE (not less than or equal)
-        7 => !op1.is_nan() && !op2.is_nan(),       // ORD
+        5 => !(op1 < op2),                               // NLT (not less than)
+        6 => !(op1 <= op2),                              // NLE (not less than or equal)
+        7 => !op1.is_nan() && !op2.is_nan(),             // ORD
         _ => unreachable!(),
     }
 }
@@ -50,14 +50,14 @@ fn sse_compare_f32(op1: f32, op2: f32, predicate: u8) -> bool {
 #[inline]
 fn sse_compare_f64(op1: f64, op2: f64, predicate: u8) -> bool {
     match predicate & 7 {
-        0 => op1 == op2,                           // EQ
-        1 => op1 < op2,                            // LT
-        2 => op1 <= op2,                           // LE
-        3 => op1.is_nan() || op2.is_nan(),         // UNORD
+        0 => op1 == op2,                                 // EQ
+        1 => op1 < op2,                                  // LT
+        2 => op1 <= op2,                                 // LE
+        3 => op1.is_nan() || op2.is_nan(),               // UNORD
         4 => op1 != op2 || op1.is_nan() || op2.is_nan(), // NEQ
-        5 => !(op1 < op2),                         // NLT
-        6 => !(op1 <= op2),                        // NLE
-        7 => !op1.is_nan() && !op2.is_nan(),       // ORD
+        5 => !(op1 < op2),                               // NLT
+        6 => !(op1 <= op2),                              // NLE
+        7 => !op1.is_nan() && !op2.is_nan(),             // ORD
         _ => unreachable!(),
     }
 }
@@ -918,26 +918,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op = self.sse_pfp_read_op2_ss(instr)?;
         // Use round-half-to-even (default MXCSR rounding mode)
         // Rust's f32::round_ties_even() matches IEEE 754 roundTiesToEven
-        let result = if op.is_nan() || op.is_infinite() || op > i32::MAX as f32 || op < i32::MIN as f32 {
-            // Integer indefinite value for out-of-range conversions
-            0x8000_0000u32
-        } else {
-            #[cfg(not(feature = "no_std"))]
-            {
-                (op.round_ties_even() as i32) as u32
-            }
-            #[cfg(feature = "no_std")]
-            {
-                // Fallback: use truncation toward nearest (not exactly round-to-even
-                // but close enough for emulation)
-                let rounded = if op >= 0.0 {
-                    (op + 0.5) as i32
-                } else {
-                    (op - 0.5) as i32
-                };
-                rounded as u32
-            }
-        };
+        let result =
+            if op.is_nan() || op.is_infinite() || op > i32::MAX as f32 || op < i32::MIN as f32 {
+                // Integer indefinite value for out-of-range conversions
+                0x8000_0000u32
+            } else {
+                #[cfg(not(feature = "no_std"))]
+                {
+                    (op.round_ties_even() as i32) as u32
+                }
+                #[cfg(feature = "no_std")]
+                {
+                    // Fallback: use truncation toward nearest (not exactly round-to-even
+                    // but close enough for emulation)
+                    let rounded = if op >= 0.0 {
+                        (op + 0.5) as i32
+                    } else {
+                        (op - 0.5) as i32
+                    };
+                    rounded as u32
+                }
+            };
         self.set_gpr32(instr.dst().into(), result);
         Ok(())
     }
@@ -946,23 +947,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn cvtsd2si_gd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
-        let result = if op.is_nan() || op.is_infinite() || op > i32::MAX as f64 || op < i32::MIN as f64 {
-            0x8000_0000u32
-        } else {
-            #[cfg(not(feature = "no_std"))]
-            {
-                (op.round_ties_even() as i32) as u32
-            }
-            #[cfg(feature = "no_std")]
-            {
-                let rounded = if op >= 0.0 {
-                    (op + 0.5) as i32
-                } else {
-                    (op - 0.5) as i32
-                };
-                rounded as u32
-            }
-        };
+        let result =
+            if op.is_nan() || op.is_infinite() || op > i32::MAX as f64 || op < i32::MIN as f64 {
+                0x8000_0000u32
+            } else {
+                #[cfg(not(feature = "no_std"))]
+                {
+                    (op.round_ties_even() as i32) as u32
+                }
+                #[cfg(feature = "no_std")]
+                {
+                    let rounded = if op >= 0.0 {
+                        (op + 0.5) as i32
+                    } else {
+                        (op - 0.5) as i32
+                    };
+                    rounded as u32
+                }
+            };
         self.set_gpr32(instr.dst().into(), result);
         Ok(())
     }
@@ -971,11 +973,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn cvttss2si_gd_wss(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_ss(instr)?;
-        let result = if op.is_nan() || op.is_infinite() || op > i32::MAX as f32 || op < i32::MIN as f32 {
-            0x8000_0000u32
-        } else {
-            (op as i32) as u32
-        };
+        let result =
+            if op.is_nan() || op.is_infinite() || op > i32::MAX as f32 || op < i32::MIN as f32 {
+                0x8000_0000u32
+            } else {
+                (op as i32) as u32
+            };
         self.set_gpr32(instr.dst().into(), result);
         Ok(())
     }
@@ -984,11 +987,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn cvttsd2si_gd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_sd(instr)?;
-        let result = if op.is_nan() || op.is_infinite() || op > i32::MAX as f64 || op < i32::MIN as f64 {
-            0x8000_0000u32
-        } else {
-            (op as i32) as u32
-        };
+        let result =
+            if op.is_nan() || op.is_infinite() || op > i32::MAX as f64 || op < i32::MIN as f64 {
+                0x8000_0000u32
+            } else {
+                (op as i32) as u32
+            };
         self.set_gpr32(instr.dst().into(), result);
         Ok(())
     }
@@ -1011,7 +1015,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let seg = BxSegregs::from(instr.seg());
             let lo = self.read_virtual_qword(seg, eaddr)?;
             let mut tmp = BxPackedXmmRegister::default();
-            unsafe { tmp.xmm64u[0] = lo; }
+            unsafe {
+                tmp.xmm64u[0] = lo;
+            }
             tmp
         };
         let mut result = BxPackedXmmRegister::default();
@@ -1089,7 +1095,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         unsafe {
             for i in 0..4 {
                 let val = op2.xmm32f[i];
-                result.xmm32s[i] = if val.is_nan() || val.is_infinite()
+                result.xmm32s[i] = if val.is_nan()
+                    || val.is_infinite()
                     || val > i32::MAX as f32
                     || val < i32::MIN as f32
                 {
@@ -1101,7 +1108,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     }
                     #[cfg(feature = "no_std")]
                     {
-                        if val >= 0.0 { (val + 0.5) as i32 } else { (val - 0.5) as i32 }
+                        if val >= 0.0 {
+                            (val + 0.5) as i32
+                        } else {
+                            (val - 0.5) as i32
+                        }
                     }
                 };
             }
@@ -1118,7 +1129,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         unsafe {
             for i in 0..4 {
                 let val = op2.xmm32f[i];
-                result.xmm32s[i] = if val.is_nan() || val.is_infinite()
+                result.xmm32s[i] = if val.is_nan()
+                    || val.is_infinite()
                     || val > i32::MAX as f32
                     || val < i32::MIN as f32
                 {
@@ -1144,7 +1156,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let seg = BxSegregs::from(instr.seg());
             let lo = self.read_virtual_qword(seg, eaddr)?;
             let mut tmp = BxPackedXmmRegister::default();
-            unsafe { tmp.xmm64u[0] = lo; }
+            unsafe {
+                tmp.xmm64u[0] = lo;
+            }
             tmp
         };
         let mut result = BxPackedXmmRegister::default();
@@ -1165,7 +1179,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         unsafe {
             for i in 0..2 {
                 let val = op2.xmm64f[i];
-                result.xmm32s[i] = if val.is_nan() || val.is_infinite()
+                result.xmm32s[i] = if val.is_nan()
+                    || val.is_infinite()
                     || val > i32::MAX as f64
                     || val < i32::MIN as f64
                 {
@@ -1177,7 +1192,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     }
                     #[cfg(feature = "no_std")]
                     {
-                        if val >= 0.0 { (val + 0.5) as i32 } else { (val - 0.5) as i32 }
+                        if val >= 0.0 {
+                            (val + 0.5) as i32
+                        } else {
+                            (val - 0.5) as i32
+                        }
                     }
                 };
             }
@@ -1196,7 +1215,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         unsafe {
             for i in 0..2 {
                 let val = op2.xmm64f[i];
-                result.xmm32s[i] = if val.is_nan() || val.is_infinite()
+                result.xmm32s[i] = if val.is_nan()
+                    || val.is_infinite()
                     || val > i32::MAX as f64
                     || val < i32::MIN as f64
                 {

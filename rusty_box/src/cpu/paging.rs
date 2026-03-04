@@ -31,16 +31,42 @@ const TLB_USER_READ_OK: u32 = 0x02;
 const TLB_SYS_WRITE_OK: u32 = 0x04;
 const TLB_USER_WRITE_OK: u32 = 0x08;
 
-// Paging level constants
-const BX_LEVEL_PDE: usize = 1;
+// Paging level constants (matching Bochs paging.cc:542-548)
 const BX_LEVEL_PTE: usize = 0;
+const BX_LEVEL_PDE: usize = 1;
+const BX_LEVEL_PDPTE: usize = 2;
+const BX_LEVEL_PML4: usize = 3;
+const BX_LEVEL_PML5: usize = 4;
 
-// CR3 paging mask (bits 31:12)
+// CR3 paging mask — legacy uses bits 31:12, PAE/long mode uses bits 51:12
 const BX_CR3_PAGING_MASK: u64 = 0xFFFFF000;
+const BX_CR3_PAGING_MASK_PAE: u64 = 0x000F_FFFF_FFFF_F000;
+
+// NX bit in 64-bit page table entries
+const PAGE_DIRECTORY_NX_BIT: u64 = 0x8000_0000_0000_0000;
 
 // Reserved bits in 4MB PSE PDE entries (Bochs paging.cc PAGING_PDE4M_RESERVED_BITS).
 // For BX_PHY_ADDRESS_WIDTH=40: ((1 << (41-40))-1) << (13+40-32) = 1 << 21 = 0x200000
 const PAGING_PDE4M_RESERVED_BITS: u32 = 0x200000;
+
+// Reserved bits for PAE paging (BX_PHY_ADDRESS_WIDTH=40)
+// BX_PAGING_PHY_ADDRESS_RESERVED_BITS = bits 51:40 = 0x000F_FF00_0000_0000
+const PAGING_PAE_PHY_RESERVED_BITS: u64 = 0x000F_FF00_0000_0000;
+
+// In legacy PAE mode, bits [62:52] are reserved (bit 63 is NX)
+// PAGING_LEGACY_PAE_RESERVED_BITS = PHY_RESERVED | 0x7FF0_0000_0000_0000
+const PAGING_LEGACY_PAE_RESERVED_BITS: u64 = 0x7FFF_FF00_0000_0000;
+
+// PAE PDE 2MB page reserved bits: bits 20:13 must be zero
+// PAGING_PAE_PDE2M_RESERVED_BITS = PHY_RESERVED | 0x001F_E000
+const PAGING_PAE_PDE2M_RESERVED_BITS: u64 = 0x000F_FF00_001F_E000;
+
+// Legacy PAE PDPTE reserved bits: PHY_RESERVED | bits 63:52, 8:5, 2:1
+// = 0x000F_FF00_0000_0000 | 0xFFF0_0000_0000_01E6 = 0xFFFF_FF00_0000_01E6
+const PAGING_PAE_PDPTE_RESERVED_BITS: u64 = 0xFFFF_FF00_0000_01E6;
+
+// Long mode PDPTE 1GB page reserved bits: bits 29:13 + PHY_RESERVED
+const PAGING_PAE_PDPTE1G_RESERVED_BITS: u64 = 0x000F_FF00_3FFF_E000;
 
 // Privilege check array (for CR0.WP=0 and CR0.WP=1)
 // Index format: |wp|us|us|rw|rw| where:
@@ -338,21 +364,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
     ) -> Result<BxPhyAddress> {
         // Mask to 32 bits if not in long mode
-        let laddr = laddr & 0xFFFFFFFF;
+        let laddr = if self.long_mode() {
+            laddr
+        } else {
+            laddr & 0xFFFFFFFF
+        };
 
         // If paging is disabled, linear address = physical address (with A20 mask)
         if !self.cr0.pg() {
             let paddr = laddr & a20_mask;
-            // tracing::trace!("translate_linear (no paging): laddr={:#x} -> paddr={:#x}", laddr, paddr);
             return Ok(paddr);
         }
 
-        // Paging is enabled - walk page tables
-        // tracing::trace!("translate_linear (paging enabled): laddr={:#x}", laddr);
-
-        // For now, only support legacy 32-bit paging
-        // TODO: Add PAE and long mode support
-        let result = self.translate_linear_legacy(laddr, user, rw, mem, page_write_stamp_table);
+        // Paging is enabled — dispatch to the appropriate paging mode.
+        // Bochs paging.cc:1324-1334
+        let result = if self.long_mode() {
+            self.translate_linear_long_mode_slow(laddr, user, rw, mem, page_write_stamp_table)
+        } else if self.cr4.pae() {
+            self.translate_linear_pae_slow(laddr, user, rw, mem, page_write_stamp_table)
+        } else {
+            self.translate_linear_legacy(laddr, user, rw, mem, page_write_stamp_table)
+        };
 
         match result {
             Ok(paddr) => {
@@ -366,12 +398,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 // Based on BX_CPU_C::page_fault in paging.cc:503
                 self.cr2 = laddr;
                 let is_write = matches!(rw, MemoryAccessType::Write);
-                let error_code = match &e {
+                let is_execute = matches!(rw, MemoryAccessType::Execute);
+                let mut error_code = match &e {
                     super::CpuError::Memory(
                         crate::memory::MemoryError::PageProtectionViolation,
                     ) => ERROR_PROTECTION | ((user as u32) << 2) | ((is_write as u32) << 1),
                     _ => ERROR_NOT_PRESENT | ((user as u32) << 2) | ((is_write as u32) << 1),
                 };
+                // Set I/D bit for execute access when PAE+NXE is enabled
+                if is_execute && self.cr4.pae() && self.efer.nxe() {
+                    error_code |= ERROR_CODE_ACCESS;
+                }
 
                 // Raise page fault exception (based on page_fault function in paging.cc:539)
                 if let Err(exc_err) = self.exception(super::cpu::Exception::Pf, error_code as u16) {
@@ -380,6 +417,335 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 Err(e)
             }
         }
+    }
+}
+
+impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    /// PAE paging translation (slow path, used by translate_linear for prefetch).
+    /// Based on Bochs translate_linear_PAE in paging.cc:1044.
+    fn translate_linear_pae_slow(
+        &mut self,
+        laddr: BxAddress,
+        user: bool,
+        rw: MemoryAccessType,
+        mem: &mut BxMemC,
+        _page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
+    ) -> Result<BxPhyAddress> {
+        let mut combined_access = BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER;
+        let mut nx_page = false;
+
+        let mut reserved = PAGING_LEGACY_PAE_RESERVED_BITS;
+        if !self.efer.nxe() {
+            reserved |= PAGE_DIRECTORY_NX_BIT;
+        }
+
+        // ---- PDPTE from cache ----
+        let pdpte_index = ((laddr >> 30) & 0x3) as usize;
+        let pdpte = self.pdptrcache.entry[pdpte_index];
+        if pdpte & 0x1 == 0 {
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageNotPresent,
+            ));
+        }
+        let mut ppf = pdpte & 0x000F_FFFF_FFFF_F000;
+
+        let mut entry_addr = [0u64; 2];
+        let mut entry = [0u64; 2];
+
+        // ---- PDE ----
+        entry_addr[BX_LEVEL_PDE] = ppf + (((laddr >> 21) & 0x1FF) << 3);
+        let pde_bytes = {
+            let mut buf = [0u8; 8];
+            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            match mem.read_physical_page(&[cpu_ref], entry_addr[BX_LEVEL_PDE], 8, &mut buf) {
+                Ok(()) => u64::from_le_bytes(buf),
+                Err(_) => {
+                    return Err(super::CpuError::Memory(
+                        crate::memory::MemoryError::PageNotPresent,
+                    ))
+                }
+            }
+        };
+        entry[BX_LEVEL_PDE] = pde_bytes;
+
+        if entry[BX_LEVEL_PDE] & 0x1 == 0 {
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageNotPresent,
+            ));
+        }
+        if entry[BX_LEVEL_PDE] & reserved != 0 {
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageProtectionViolation,
+            ));
+        }
+        if entry[BX_LEVEL_PDE] & PAGE_DIRECTORY_NX_BIT != 0 {
+            nx_page = true;
+        }
+
+        ppf = entry[BX_LEVEL_PDE] & 0x000F_FFFF_FFFF_F000;
+
+        // ---- 2MB large page ----
+        if entry[BX_LEVEL_PDE] & 0x80 != 0 {
+            if entry[BX_LEVEL_PDE] & PAGING_PAE_PDE2M_RESERVED_BITS != 0 {
+                return Err(super::CpuError::Memory(
+                    crate::memory::MemoryError::PageProtectionViolation,
+                ));
+            }
+            ppf = entry[BX_LEVEL_PDE] & 0x000F_FFFF_FFE0_0000;
+
+            combined_access &=
+                (entry[BX_LEVEL_PDE] as u32) & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+            let is_write = matches!(rw, MemoryAccessType::Write);
+            let is_execute = matches!(rw, MemoryAccessType::Execute);
+            let priv_index = ((self.cr0.wp() as u32) << 4)
+                | ((user as u32) << 3)
+                | combined_access
+                | (is_write as u32);
+            if PRIV_CHECK[priv_index as usize] == 0 || (nx_page && is_execute) {
+                return Err(super::CpuError::Memory(
+                    crate::memory::MemoryError::PageProtectionViolation,
+                ));
+            }
+
+            // A/D bits
+            let needed = 0x20u64 | if is_write { 0x40 } else { 0 };
+            if entry[BX_LEVEL_PDE] & needed != needed {
+                entry[BX_LEVEL_PDE] |= needed;
+                let data = entry[BX_LEVEL_PDE].to_le_bytes();
+                let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+                let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+                let _ = mem.write_physical_page(
+                    &[cpu_ref],
+                    _page_write_stamp_table,
+                    entry_addr[BX_LEVEL_PDE],
+                    8,
+                    &mut data.clone(),
+                );
+            }
+            return Ok(ppf | (laddr & 0x1FFFFF));
+        }
+
+        combined_access &= entry[BX_LEVEL_PDE] as u32;
+
+        // ---- PTE ----
+        entry_addr[BX_LEVEL_PTE] = ppf + (((laddr >> 12) & 0x1FF) << 3);
+        let pte_bytes = {
+            let mut buf = [0u8; 8];
+            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            match mem.read_physical_page(&[cpu_ref], entry_addr[BX_LEVEL_PTE], 8, &mut buf) {
+                Ok(()) => u64::from_le_bytes(buf),
+                Err(_) => {
+                    return Err(super::CpuError::Memory(
+                        crate::memory::MemoryError::PageNotPresent,
+                    ))
+                }
+            }
+        };
+        entry[BX_LEVEL_PTE] = pte_bytes;
+
+        if entry[BX_LEVEL_PTE] & 0x1 == 0 {
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageNotPresent,
+            ));
+        }
+        if entry[BX_LEVEL_PTE] & reserved != 0 {
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageProtectionViolation,
+            ));
+        }
+        if entry[BX_LEVEL_PTE] & PAGE_DIRECTORY_NX_BIT != 0 {
+            nx_page = true;
+        }
+
+        combined_access &=
+            (entry[BX_LEVEL_PTE] as u32) & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+        let is_write = matches!(rw, MemoryAccessType::Write);
+        let is_execute = matches!(rw, MemoryAccessType::Execute);
+        let priv_index = ((self.cr0.wp() as u32) << 4)
+            | ((user as u32) << 3)
+            | combined_access
+            | (is_write as u32);
+        if PRIV_CHECK[priv_index as usize] == 0 || (nx_page && is_execute) {
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageProtectionViolation,
+            ));
+        }
+
+        // A/D bits — PDE gets A, PTE gets A+D
+        if entry[BX_LEVEL_PDE] & 0x20 == 0 {
+            entry[BX_LEVEL_PDE] |= 0x20;
+            let data = entry[BX_LEVEL_PDE].to_le_bytes();
+            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            let _ = mem.write_physical_page(
+                &[cpu_ref],
+                _page_write_stamp_table,
+                entry_addr[BX_LEVEL_PDE],
+                8,
+                &mut data.clone(),
+            );
+        }
+        let pte_needed = 0x20u64 | if is_write { 0x40 } else { 0 };
+        if entry[BX_LEVEL_PTE] & pte_needed != pte_needed {
+            entry[BX_LEVEL_PTE] |= pte_needed;
+            let data = entry[BX_LEVEL_PTE].to_le_bytes();
+            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            let _ = mem.write_physical_page(
+                &[cpu_ref],
+                _page_write_stamp_table,
+                entry_addr[BX_LEVEL_PTE],
+                8,
+                &mut data.clone(),
+            );
+        }
+
+        ppf = entry[BX_LEVEL_PTE] & 0x000F_FFFF_FFFF_F000;
+        Ok(ppf | (laddr & 0xFFF))
+    }
+
+    /// Long mode paging translation (slow path, used by translate_linear for prefetch).
+    /// Based on Bochs translate_linear_long_mode in paging.cc:828.
+    fn translate_linear_long_mode_slow(
+        &mut self,
+        laddr: BxAddress,
+        user: bool,
+        rw: MemoryAccessType,
+        mem: &mut BxMemC,
+        _page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
+    ) -> Result<BxPhyAddress> {
+        let mut combined_access = BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER;
+        let mut nx_page = false;
+
+        let mut reserved = PAGING_PAE_PHY_RESERVED_BITS;
+        if !self.efer.nxe() {
+            reserved |= PAGE_DIRECTORY_NX_BIT;
+        }
+
+        let start_leaf = if self.cr4.la57() {
+            BX_LEVEL_PML5
+        } else {
+            BX_LEVEL_PML4
+        };
+        let mut ppf = self.cr3 & BX_CR3_PAGING_MASK_PAE;
+        let mut offset_mask = ((1u64 << self.linaddr_width as u64) - 1) as u64;
+
+        let mut entry_addr = [0u64; 5];
+        let mut entry = [0u64; 5];
+        let mut leaf = start_leaf;
+        let mut lpf_mask = 0xFFFu32;
+
+        loop {
+            entry_addr[leaf] = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0x1FF) * 8;
+
+            let entry_val = {
+                let mut buf = [0u8; 8];
+                let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+                let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+                match mem.read_physical_page(&[cpu_ref], entry_addr[leaf], 8, &mut buf) {
+                    Ok(()) => u64::from_le_bytes(buf),
+                    Err(_) => {
+                        return Err(super::CpuError::Memory(
+                            crate::memory::MemoryError::PageNotPresent,
+                        ))
+                    }
+                }
+            };
+            entry[leaf] = entry_val;
+
+            offset_mask >>= 9;
+            let curr_entry = entry[leaf];
+
+            if curr_entry & 0x1 == 0 {
+                return Err(super::CpuError::Memory(
+                    crate::memory::MemoryError::PageNotPresent,
+                ));
+            }
+            if curr_entry & reserved != 0 {
+                return Err(super::CpuError::Memory(
+                    crate::memory::MemoryError::PageProtectionViolation,
+                ));
+            }
+            // PS at PML4/PML5 is reserved
+            if curr_entry & 0x80 != 0 && leaf > BX_LEVEL_PDPTE {
+                return Err(super::CpuError::Memory(
+                    crate::memory::MemoryError::PageProtectionViolation,
+                ));
+            }
+            if curr_entry & PAGE_DIRECTORY_NX_BIT != 0 {
+                nx_page = true;
+            }
+
+            ppf = curr_entry & 0x000F_FFFF_FFFF_F000;
+
+            if leaf == BX_LEVEL_PTE {
+                break;
+            }
+
+            if curr_entry & 0x80 != 0 {
+                ppf &= 0x000F_FFFF_FFFF_E000;
+                if ppf & offset_mask != 0 {
+                    return Err(super::CpuError::Memory(
+                        crate::memory::MemoryError::PageProtectionViolation,
+                    ));
+                }
+                lpf_mask = offset_mask as u32;
+                break;
+            }
+
+            combined_access &= curr_entry as u32;
+            leaf -= 1;
+        }
+
+        // Leaf permission check
+        combined_access &=
+            (entry[leaf] as u32) & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+        let is_write = matches!(rw, MemoryAccessType::Write);
+        let is_execute = matches!(rw, MemoryAccessType::Execute);
+        let priv_index = ((self.cr0.wp() as u32) << 4)
+            | ((user as u32) << 3)
+            | combined_access
+            | (is_write as u32);
+        if PRIV_CHECK[priv_index as usize] == 0 || (nx_page && is_execute) {
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageProtectionViolation,
+            ));
+        }
+
+        // A/D bits
+        for level in (leaf + 1..=start_leaf).rev() {
+            if entry[level] & 0x20 == 0 {
+                entry[level] |= 0x20;
+                let data = entry[level].to_le_bytes();
+                let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+                let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+                let _ = mem.write_physical_page(
+                    &[cpu_ref],
+                    _page_write_stamp_table,
+                    entry_addr[level],
+                    8,
+                    &mut data.clone(),
+                );
+            }
+        }
+        let leaf_needed = 0x20u64 | if is_write { 0x40 } else { 0 };
+        if entry[leaf] & leaf_needed != leaf_needed {
+            entry[leaf] |= leaf_needed;
+            let data = entry[leaf].to_le_bytes();
+            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            let _ = mem.write_physical_page(
+                &[cpu_ref],
+                _page_write_stamp_table,
+                entry_addr[leaf],
+                8,
+                &mut data.clone(),
+            );
+        }
+
+        Ok(ppf | (laddr & lpf_mask as u64))
     }
 }
 
@@ -393,11 +759,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         &mut self,
         laddr: BxAddress,
     ) -> Result<BxPhyAddress> {
-        let laddr = laddr & 0xFFFFFFFF; // Mask to 32 bits
+        let laddr = if self.long_mode() {
+            laddr
+        } else {
+            laddr & 0xFFFFFFFF
+        };
 
         // If paging disabled, linear = physical
         if !self.cr0.pg() {
             return Ok(laddr & self.a20_mask);
+        }
+
+        // Dispatch based on paging mode
+        if self.long_mode() {
+            return self.translate_linear_system_write_long_mode(laddr);
+        }
+        if self.cr4.pae() {
+            return self.translate_linear_system_write_pae(laddr);
         }
 
         // Legacy 32-bit paging: two-level page table walk
@@ -475,16 +853,156 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok((page_base | offset) & self.a20_mask)
     }
 
+    /// PAE paging system write translation (3-level, 64-bit entries, CPL=0).
+    fn translate_linear_system_write_pae(&mut self, laddr: BxAddress) -> Result<BxPhyAddress> {
+        // PDPTE from cache
+        let pdpte_index = ((laddr >> 30) & 0x3) as usize;
+        let pdpte = self.pdptrcache.entry[pdpte_index];
+        if pdpte & 0x1 == 0 {
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageNotPresent,
+            ));
+        }
+        let mut ppf = pdpte & 0x000F_FFFF_FFFF_F000;
+
+        // PDE
+        let pde_addr = ppf + (((laddr >> 21) & 0x1FF) << 3);
+        let mut pde = self.page_walk_read_qword(pde_addr);
+        if pde & 0x1 == 0 {
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageNotPresent,
+            ));
+        }
+        ppf = pde & 0x000F_FFFF_FFFF_F000;
+
+        // 2MB page
+        if pde & 0x80 != 0 {
+            if pde & PAGING_PAE_PDE2M_RESERVED_BITS != 0 {
+                return Err(super::CpuError::Memory(
+                    crate::memory::MemoryError::PageNotPresent,
+                ));
+            }
+            let needed = 0x20u64 | 0x40;
+            if pde & needed != needed {
+                pde |= needed;
+                self.page_walk_write_qword(pde_addr, pde);
+            }
+            ppf = pde & 0x000F_FFFF_FFE0_0000;
+            return Ok((ppf | (laddr & 0x1FFFFF)) & self.a20_mask);
+        }
+
+        // PTE
+        let pte_addr = ppf + (((laddr >> 12) & 0x1FF) << 3);
+        let mut pte = self.page_walk_read_qword(pte_addr);
+        if pte & 0x1 == 0 {
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageNotPresent,
+            ));
+        }
+
+        // A bit on PDE
+        if pde & 0x20 == 0 {
+            pde |= 0x20;
+            self.page_walk_write_qword(pde_addr, pde);
+        }
+        // A+D on PTE
+        let pte_needed = 0x20u64 | 0x40;
+        if pte & pte_needed != pte_needed {
+            pte |= pte_needed;
+            self.page_walk_write_qword(pte_addr, pte);
+        }
+
+        ppf = pte & 0x000F_FFFF_FFFF_F000;
+        Ok((ppf | (laddr & 0xFFF)) & self.a20_mask)
+    }
+
+    /// Long mode paging system write translation (4-level, 64-bit entries, CPL=0).
+    fn translate_linear_system_write_long_mode(
+        &mut self,
+        laddr: BxAddress,
+    ) -> Result<BxPhyAddress> {
+        let start_leaf = if self.cr4.la57() {
+            BX_LEVEL_PML5
+        } else {
+            BX_LEVEL_PML4
+        };
+        let mut ppf = self.cr3 & BX_CR3_PAGING_MASK_PAE;
+        let mut offset_mask = ((1u64 << self.linaddr_width as u64) - 1) as u64;
+
+        let mut entry_addr = [0u64; 5];
+        let mut entry = [0u64; 5];
+        let mut leaf = start_leaf;
+
+        loop {
+            entry_addr[leaf] = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0x1FF) * 8;
+            entry[leaf] = self.page_walk_read_qword(entry_addr[leaf]);
+
+            offset_mask >>= 9;
+
+            if entry[leaf] & 0x1 == 0 {
+                return Err(super::CpuError::Memory(
+                    crate::memory::MemoryError::PageNotPresent,
+                ));
+            }
+
+            ppf = entry[leaf] & 0x000F_FFFF_FFFF_F000;
+
+            if leaf == BX_LEVEL_PTE {
+                break;
+            }
+
+            if entry[leaf] & 0x80 != 0 {
+                ppf &= 0x000F_FFFF_FFFF_E000;
+                if ppf & offset_mask != 0 {
+                    return Err(super::CpuError::Memory(
+                        crate::memory::MemoryError::PageNotPresent,
+                    ));
+                }
+                break;
+            }
+
+            leaf -= 1;
+        }
+
+        // A/D bits — non-leaf get A, leaf gets A+D
+        for level in (leaf + 1..=start_leaf).rev() {
+            if entry[level] & 0x20 == 0 {
+                entry[level] |= 0x20;
+                self.page_walk_write_qword(entry_addr[level], entry[level]);
+            }
+        }
+        let leaf_needed = 0x20u64 | 0x40;
+        if entry[leaf] & leaf_needed != leaf_needed {
+            entry[leaf] |= leaf_needed;
+            self.page_walk_write_qword(entry_addr[leaf], entry[leaf]);
+        }
+
+        let paddr = ppf | (laddr & offset_mask);
+        Ok(paddr & self.a20_mask)
+    }
+
     /// Lightweight page table walk for system reads (CPL=0, read-only).
     /// Uses mem_read_dword (reads from physical memory via mem_ptr).
     /// Does NOT update accessed/dirty bits or go through TLB.
     /// Matching Bochs translate_linear_legacy but read-only, no side effects.
     pub(super) fn translate_linear_system_read(&self, laddr: BxAddress) -> Result<BxPhyAddress> {
-        let laddr = laddr & 0xFFFFFFFF; // Mask to 32 bits
+        let laddr = if self.long_mode() {
+            laddr
+        } else {
+            laddr & 0xFFFFFFFF
+        };
 
         // If paging disabled, linear = physical
         if !self.cr0.pg() {
             return Ok(laddr & self.a20_mask);
+        }
+
+        // Dispatch based on paging mode
+        if self.long_mode() {
+            return self.translate_linear_system_read_long_mode(laddr);
+        }
+        if self.cr4.pae() {
+            return self.translate_linear_system_read_pae(laddr);
         }
 
         // Legacy 32-bit paging: two-level page table walk
@@ -536,6 +1054,84 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok((page_base | offset) & self.a20_mask)
     }
 
+    /// PAE paging system read translation (read-only, no A/D updates).
+    fn translate_linear_system_read_pae(&self, laddr: BxAddress) -> Result<BxPhyAddress> {
+        let pdpte_index = ((laddr >> 30) & 0x3) as usize;
+        let pdpte = self.pdptrcache.entry[pdpte_index];
+        if pdpte & 0x1 == 0 {
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageNotPresent,
+            ));
+        }
+        let ppf = pdpte & 0x000F_FFFF_FFFF_F000;
+
+        let pde_addr = ppf + (((laddr >> 21) & 0x1FF) << 3);
+        let pde = self.page_walk_read_qword(pde_addr);
+        if pde & 0x1 == 0 {
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageNotPresent,
+            ));
+        }
+
+        if pde & 0x80 != 0 {
+            let ppf_2m = pde & 0x000F_FFFF_FFE0_0000;
+            return Ok((ppf_2m | (laddr & 0x1FFFFF)) & self.a20_mask);
+        }
+
+        let ppf = pde & 0x000F_FFFF_FFFF_F000;
+        let pte_addr = ppf + (((laddr >> 12) & 0x1FF) << 3);
+        let pte = self.page_walk_read_qword(pte_addr);
+        if pte & 0x1 == 0 {
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageNotPresent,
+            ));
+        }
+
+        let page_base = pte & 0x000F_FFFF_FFFF_F000;
+        Ok((page_base | (laddr & 0xFFF)) & self.a20_mask)
+    }
+
+    /// Long mode paging system read translation (read-only, no A/D updates).
+    fn translate_linear_system_read_long_mode(&self, laddr: BxAddress) -> Result<BxPhyAddress> {
+        let start_leaf = if self.cr4.la57() {
+            BX_LEVEL_PML5
+        } else {
+            BX_LEVEL_PML4
+        };
+        let mut ppf = self.cr3 & BX_CR3_PAGING_MASK_PAE;
+        let mut offset_mask = ((1u64 << self.linaddr_width as u64) - 1) as u64;
+        let mut leaf = start_leaf;
+
+        loop {
+            let entry_addr = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0x1FF) * 8;
+            let entry = self.page_walk_read_qword(entry_addr);
+
+            offset_mask >>= 9;
+
+            if entry & 0x1 == 0 {
+                return Err(super::CpuError::Memory(
+                    crate::memory::MemoryError::PageNotPresent,
+                ));
+            }
+
+            ppf = entry & 0x000F_FFFF_FFFF_F000;
+
+            if leaf == BX_LEVEL_PTE {
+                break;
+            }
+
+            if entry & 0x80 != 0 {
+                ppf &= 0x000F_FFFF_FFFF_E000;
+                break;
+            }
+
+            leaf -= 1;
+        }
+
+        let paddr = ppf | (laddr & offset_mask);
+        Ok(paddr & self.a20_mask)
+    }
+
     /// Apply the A20 mask to a physical address.
     #[inline]
     fn apply_a20(&self, paddr: u64) -> u64 {
@@ -568,7 +1164,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     #[inline]
     fn translate_data_access(&mut self, laddr: u64, is_write: bool) -> Result<u64> {
-        let laddr = laddr & 0xFFFF_FFFF;
+        // Mask to 32 bits if not in long mode
+        let laddr = if self.long_mode() {
+            laddr
+        } else {
+            laddr & 0xFFFF_FFFF
+        };
 
         // Paging disabled → linear == physical (modulo A20).
         if !self.cr0.pg() {
@@ -595,9 +1196,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // ---- DTLB miss — full page table walk ----
-        let (paddr, combined_access, is_large_page) =
-            self.page_walk_for_dtlb(laddr, user, is_write)?;
+        let (paddr, combined_access, lpf_mask) = self.page_walk_for_dtlb(laddr, user, is_write)?;
         let paddr = self.apply_a20(paddr);
+        let is_large_page = lpf_mask > 0xFFF;
 
         // ---- Populate DTLB entry ----
         // Compute full access bits for this page so future accesses with
@@ -654,7 +1255,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tlb_entry.lpf = lpf;
             tlb_entry.ppf = ppf;
             tlb_entry.access_bits = access_bits;
-            tlb_entry.lpf_mask = if is_large_page { 0x3F_FFFF } else { 0xFFF };
+            tlb_entry.lpf_mask = lpf_mask;
             tlb_entry.host_page_addr = host_page_addr;
         }
 
@@ -697,16 +1298,71 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.mem_write_dword(paddr, val);
     }
 
+    /// Fast physical qword (64-bit) read for PAE/long mode page walks.
+    #[inline(always)]
+    fn page_walk_read_qword(&self, paddr: u64) -> u64 {
+        let a20_addr = (paddr & self.a20_mask) as usize;
+        let host_base = self.mem_host_base;
+        if !host_base.is_null() && a20_addr + 8 <= self.mem_host_len {
+            return unsafe { (host_base.add(a20_addr) as *const u64).read_unaligned() };
+        }
+        // Fallback
+        self.mem_read_qword(paddr)
+    }
+
+    /// Fast physical qword (64-bit) write for PAE/long mode A/D bit updates.
+    #[inline(always)]
+    fn page_walk_write_qword(&mut self, paddr: u64, val: u64) {
+        let a20_addr = (paddr & self.a20_mask) as usize;
+        let host_base = self.mem_host_base;
+        if !host_base.is_null() && a20_addr + 8 <= self.mem_host_len {
+            unsafe { (host_base.add(a20_addr) as *mut u64).write_unaligned(val) };
+            return;
+        }
+        self.mem_write_qword(paddr, val);
+    }
+
+    /// Load PDPTE entries from physical memory into the PDPTR cache.
+    /// Called when CR3 is written in PAE mode (not long mode).
+    /// Based on Bochs CheckPDPTR (paging.cc:958-993).
+    pub(super) fn load_pdptrs(&mut self) {
+        let cr3_val = self.cr3 & 0xFFFF_FFE0; // bits 31:5 of CR3
+        for n in 0..4usize {
+            let pdpe_addr = cr3_val | ((n as u64) << 3);
+            let pdptr = self.page_walk_read_qword(pdpe_addr);
+            self.pdptrcache.entry[n] = pdptr;
+            // Bochs validates reserved bits and returns false on violation,
+            // which causes #GP(0). We check reserved bits at walk time.
+        }
+    }
+
     /// Perform the actual page table walk for a data access.
-    /// Returns (physical_address_before_a20, combined_access_bits, is_large_page).
+    /// Returns (physical_address_before_a20, combined_access_bits, lpf_mask).
     /// The combined_access_bits are the intersection of PDE and PTE R/W + U/S bits
     /// (only bits 1 and 2), suitable for indexing into PRIV_CHECK.
+    /// lpf_mask is 0xFFF for 4K pages, 0x1FFFFF for 2M, 0x3FFFFF for 4M, 0x3FFFFFFF for 1G.
     fn page_walk_for_dtlb(
         &mut self,
         laddr: u64,
         user: bool,
         is_write: bool,
-    ) -> Result<(u64, u32, bool)> {
+    ) -> Result<(u64, u32, u32)> {
+        if self.long_mode() {
+            return self.page_walk_for_dtlb_long_mode(laddr, user, is_write);
+        }
+        if self.cr4.pae() {
+            return self.page_walk_for_dtlb_pae(laddr, user, is_write);
+        }
+        self.page_walk_for_dtlb_legacy(laddr, user, is_write)
+    }
+
+    /// Legacy 32-bit paging page walk for DTLB (2-level, 32-bit entries).
+    fn page_walk_for_dtlb_legacy(
+        &mut self,
+        laddr: u64,
+        user: bool,
+        is_write: bool,
+    ) -> Result<(u64, u32, u32)> {
         // ---- PDE ----
         let pde_addr = (self.cr3 & BX_CR3_PAGING_MASK) | (((laddr >> 22) & 0x3FF) << 2);
         let pde = self.page_walk_read_dword(pde_addr);
@@ -737,7 +1393,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.page_walk_write_dword(pde_addr, pde | needed);
             }
             let paddr = (pde as u64 & 0xFFC0_0000) | (laddr & 0x003F_FFFF);
-            return Ok((paddr, combined, true));
+            return Ok((paddr, combined, 0x3F_FFFF)); // 4MB lpf_mask
         }
 
         // ---- PTE ----
@@ -768,7 +1424,308 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         let paddr = (pte as u64 & 0xFFFF_F000) | (laddr & 0xFFF);
-        Ok((paddr, combined, false))
+        Ok((paddr, combined, 0xFFF)) // 4KB lpf_mask
+    }
+
+    /// PAE paging page walk for DTLB (3-level: PDPTE -> PDE -> PTE, 64-bit entries).
+    /// Based on Bochs translate_linear_PAE in paging.cc:1044.
+    fn page_walk_for_dtlb_pae(
+        &mut self,
+        laddr: u64,
+        user: bool,
+        is_write: bool,
+    ) -> Result<(u64, u32, u32)> {
+        let mut combined_access = BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER;
+        let mut nx_page = false;
+
+        // Compute reserved bits mask — in legacy PAE, bits [62:52] are reserved.
+        // If NXE is not enabled, bit 63 is also reserved.
+        let mut reserved = PAGING_LEGACY_PAE_RESERVED_BITS;
+        if !self.efer.nxe() {
+            reserved |= PAGE_DIRECTORY_NX_BIT;
+        }
+
+        // ---- PDPTE ----
+        // In legacy PAE mode, PDPTRs are cached. Load from PDPTR_CACHE.
+        let pdpte_index = ((laddr >> 30) & 0x3) as usize;
+        let pdpte = self.pdptrcache.entry[pdpte_index];
+
+        if pdpte & 0x1 == 0 {
+            self.page_fault(ERROR_NOT_PRESENT, laddr, user, is_write)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+
+        // PDPTE reserved bit check is done at CR3 load time (CheckPDPTR),
+        // but also verify here for safety.
+        if pdpte & PAGING_PAE_PDPTE_RESERVED_BITS != 0 {
+            tracing::debug!("PAE PDPTE: reserved bit set: {:#018x}", pdpte);
+            self.page_fault(ERROR_RESERVED | ERROR_PROTECTION, laddr, user, is_write)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+
+        let mut ppf = pdpte & 0x000F_FFFF_FFFF_F000;
+
+        // ---- PDE ----
+        let mut entry_addr = [0u64; 2];
+        let mut entry = [0u64; 2];
+
+        entry_addr[BX_LEVEL_PDE] = ppf + (((laddr >> (9 + 9)) & 0x1FF) << 3);
+        entry[BX_LEVEL_PDE] = self.page_walk_read_qword(entry_addr[BX_LEVEL_PDE]);
+
+        // Check present
+        if entry[BX_LEVEL_PDE] & 0x1 == 0 {
+            self.page_fault(ERROR_NOT_PRESENT, laddr, user, is_write)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+
+        // Check reserved bits
+        if entry[BX_LEVEL_PDE] & reserved != 0 {
+            tracing::debug!(
+                "PAE PDE: reserved bit set: {:#018x} (reserved mask: {:#018x})",
+                entry[BX_LEVEL_PDE],
+                entry[BX_LEVEL_PDE] & reserved
+            );
+            self.page_fault(ERROR_RESERVED | ERROR_PROTECTION, laddr, user, is_write)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+
+        // Check NX bit
+        if entry[BX_LEVEL_PDE] & PAGE_DIRECTORY_NX_BIT != 0 {
+            nx_page = true;
+        }
+
+        ppf = entry[BX_LEVEL_PDE] & 0x000F_FFFF_FFFF_F000;
+
+        // ---- 2MB large page (PDE.PS=1) ----
+        // In PAE mode, CR4.PSE is ignored — PS bit in PDE is always checked.
+        if entry[BX_LEVEL_PDE] & 0x80 != 0 {
+            // Check 2MB PDE reserved bits (bits 20:13 must be zero)
+            if entry[BX_LEVEL_PDE] & PAGING_PAE_PDE2M_RESERVED_BITS != 0 {
+                tracing::debug!("PAE PDE2M: reserved bit set: {:#018x}", entry[BX_LEVEL_PDE]);
+                self.page_fault(ERROR_RESERVED | ERROR_PROTECTION, laddr, user, is_write)?;
+                return Err(super::CpuError::CpuLoopRestart);
+            }
+
+            // Physical page frame for 2MB page
+            ppf = entry[BX_LEVEL_PDE] & 0x000F_FFFF_FFE0_0000;
+
+            // Leaf entry permission check
+            combined_access &=
+                (entry[BX_LEVEL_PDE] as u32) & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+
+            let priv_index = ((self.cr0.wp() as u32) << 4)
+                | ((user as u32) << 3)
+                | combined_access
+                | (is_write as u32);
+            if PRIV_CHECK[priv_index as usize] == 0 || nx_page {
+                // NX page check: in PAE, NX violation causes #PF with ERROR_PROTECTION
+                // (for data accesses, NX doesn't apply — only for execute, which is not
+                // handled in this data-access path, but we check nx_page for completeness
+                // since Bochs does `if (!priv_check[priv_index] || (nx_page && rw == BX_EXECUTE))`)
+                // For data access, nx_page has no effect on permission.
+                if PRIV_CHECK[priv_index as usize] == 0 {
+                    self.page_fault(ERROR_PROTECTION, laddr, user, is_write)?;
+                    return Err(super::CpuError::CpuLoopRestart);
+                }
+            }
+
+            // Update A/D bits on PDE (leaf for 2MB page)
+            let needed = 0x20u64 | if is_write { 0x40 } else { 0 };
+            if entry[BX_LEVEL_PDE] & needed != needed {
+                entry[BX_LEVEL_PDE] |= needed;
+                self.page_walk_write_qword(entry_addr[BX_LEVEL_PDE], entry[BX_LEVEL_PDE]);
+            }
+
+            let paddr = ppf | (laddr & 0x001F_FFFF);
+            return Ok((paddr, combined_access, 0x1F_FFFF)); // 2MB lpf_mask
+        }
+
+        combined_access &= entry[BX_LEVEL_PDE] as u32; // U/S and R/W from PDE
+
+        // ---- PTE ----
+        entry_addr[BX_LEVEL_PTE] = ppf + (((laddr >> 12) & 0x1FF) << 3);
+        entry[BX_LEVEL_PTE] = self.page_walk_read_qword(entry_addr[BX_LEVEL_PTE]);
+
+        // Check present
+        if entry[BX_LEVEL_PTE] & 0x1 == 0 {
+            self.page_fault(ERROR_NOT_PRESENT, laddr, user, is_write)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+
+        // Check reserved bits
+        if entry[BX_LEVEL_PTE] & reserved != 0 {
+            tracing::debug!("PAE PTE: reserved bit set: {:#018x}", entry[BX_LEVEL_PTE]);
+            self.page_fault(ERROR_RESERVED | ERROR_PROTECTION, laddr, user, is_write)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+
+        // Check NX on PTE
+        if entry[BX_LEVEL_PTE] & PAGE_DIRECTORY_NX_BIT != 0 {
+            nx_page = true;
+        }
+
+        // Leaf permission check
+        combined_access &=
+            (entry[BX_LEVEL_PTE] as u32) & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+
+        let priv_index = ((self.cr0.wp() as u32) << 4)
+            | ((user as u32) << 3)
+            | combined_access
+            | (is_write as u32);
+        if PRIV_CHECK[priv_index as usize] == 0 {
+            self.page_fault(ERROR_PROTECTION, laddr, user, is_write)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+
+        // Update A/D bits — PDE gets A bit, PTE gets A+D
+        if entry[BX_LEVEL_PDE] & 0x20 == 0 {
+            entry[BX_LEVEL_PDE] |= 0x20;
+            self.page_walk_write_qword(entry_addr[BX_LEVEL_PDE], entry[BX_LEVEL_PDE]);
+        }
+        let pte_needed = 0x20u64 | if is_write { 0x40 } else { 0 };
+        if entry[BX_LEVEL_PTE] & pte_needed != pte_needed {
+            entry[BX_LEVEL_PTE] |= pte_needed;
+            self.page_walk_write_qword(entry_addr[BX_LEVEL_PTE], entry[BX_LEVEL_PTE]);
+        }
+
+        ppf = entry[BX_LEVEL_PTE] & 0x000F_FFFF_FFFF_F000;
+        let paddr = ppf | (laddr & 0xFFF);
+        Ok((paddr, combined_access, 0xFFF)) // 4KB lpf_mask
+    }
+
+    /// Long mode paging page walk for DTLB (4-level: PML4 -> PDPTE -> PDE -> PTE, 64-bit entries).
+    /// Based on Bochs translate_linear_long_mode in paging.cc:828.
+    fn page_walk_for_dtlb_long_mode(
+        &mut self,
+        laddr: u64,
+        user: bool,
+        is_write: bool,
+    ) -> Result<(u64, u32, u32)> {
+        let mut combined_access = BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER;
+        let mut nx_page = false;
+
+        // Reserved bits: in long mode, bits [62:52] are ignored (NOT reserved).
+        // Only PHY_RESERVED bits are reserved. If NXE not enabled, bit 63 is reserved.
+        let mut reserved = PAGING_PAE_PHY_RESERVED_BITS;
+        if !self.efer.nxe() {
+            reserved |= PAGE_DIRECTORY_NX_BIT;
+        }
+
+        let mut ppf = self.cr3 & BX_CR3_PAGING_MASK_PAE;
+        let mut entry_addr = [0u64; 5];
+        let mut entry = [0u64; 5];
+
+        // Determine start level: PML5 if LA57, otherwise PML4
+        let start_leaf = if self.cr4.la57() {
+            BX_LEVEL_PML5
+        } else {
+            BX_LEVEL_PML4
+        };
+        let mut leaf = start_leaf;
+
+        // Offset mask tracks how many bits of the linear address are used as the page offset.
+        // We start with the full linear address width mask and shift right 9 bits per level.
+        let mut offset_mask = ((1u64 << self.linaddr_width as u64) - 1) as u64;
+        let mut lpf_mask = 0xFFFu32;
+
+        loop {
+            entry_addr[leaf] = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0x1FF) * 8;
+            entry[leaf] = self.page_walk_read_qword(entry_addr[leaf]);
+
+            offset_mask >>= 9;
+
+            let curr_entry = entry[leaf];
+
+            // Check present
+            if curr_entry & 0x1 == 0 {
+                self.page_fault(ERROR_NOT_PRESENT, laddr, user, is_write)?;
+                return Err(super::CpuError::CpuLoopRestart);
+            }
+
+            // Check reserved bits
+            if curr_entry & reserved != 0 {
+                tracing::debug!(
+                    "Long mode level {}: reserved bit set: {:#018x}",
+                    leaf,
+                    curr_entry
+                );
+                self.page_fault(ERROR_RESERVED | ERROR_PROTECTION, laddr, user, is_write)?;
+                return Err(super::CpuError::CpuLoopRestart);
+            }
+
+            // PS bit at invalid level (only PDE level 1 and PDPTE level 2 with 1G support)
+            if curr_entry & 0x80 != 0 {
+                // PS bit set — valid only at BX_LEVEL_PDE (2MB) and BX_LEVEL_PDPTE (1GB)
+                if leaf > BX_LEVEL_PDPTE {
+                    // PS at PML4 or PML5 level is reserved
+                    self.page_fault(ERROR_RESERVED | ERROR_PROTECTION, laddr, user, is_write)?;
+                    return Err(super::CpuError::CpuLoopRestart);
+                }
+            }
+
+            // Check NX
+            if curr_entry & PAGE_DIRECTORY_NX_BIT != 0 {
+                nx_page = true;
+            }
+
+            ppf = curr_entry & 0x000F_FFFF_FFFF_F000;
+
+            if leaf == BX_LEVEL_PTE {
+                break;
+            }
+
+            // Large page?
+            if curr_entry & 0x80 != 0 {
+                ppf &= 0x000F_FFFF_FFFF_E000; // clear bit 12 for large pages
+                if ppf & offset_mask != 0 {
+                    tracing::debug!(
+                        "Long mode level {}: reserved bits in large page frame: {:#018x}",
+                        leaf,
+                        curr_entry
+                    );
+                    self.page_fault(ERROR_RESERVED | ERROR_PROTECTION, laddr, user, is_write)?;
+                    return Err(super::CpuError::CpuLoopRestart);
+                }
+                lpf_mask = offset_mask as u32;
+                break;
+            }
+
+            combined_access &= curr_entry as u32; // Accumulate U/S and R/W from non-leaf entries
+            leaf -= 1;
+        }
+
+        // Leaf entry permission check
+        combined_access &=
+            (entry[leaf] as u32) & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+
+        let priv_index = ((self.cr0.wp() as u32) << 4)
+            | ((user as u32) << 3)
+            | combined_access
+            | (is_write as u32);
+        if PRIV_CHECK[priv_index as usize] == 0 {
+            self.page_fault(ERROR_PROTECTION, laddr, user, is_write)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+
+        // SMEP check: supervisor cannot execute from user page
+        // (not applicable for data access, handled by translate_linear for execute)
+
+        // Update A/D bits for all levels
+        // Non-leaf levels get A bit, leaf gets A+D
+        for level in (leaf + 1..=start_leaf).rev() {
+            if entry[level] & 0x20 == 0 {
+                entry[level] |= 0x20;
+                self.page_walk_write_qword(entry_addr[level], entry[level]);
+            }
+        }
+        let leaf_needed = 0x20u64 | if is_write { 0x40 } else { 0 };
+        if entry[leaf] & leaf_needed != leaf_needed {
+            entry[leaf] |= leaf_needed;
+            self.page_walk_write_qword(entry_addr[leaf], entry[leaf]);
+        }
+
+        let paddr = ppf | (laddr & lpf_mask as u64);
+        Ok((paddr, combined_access, lpf_mask))
     }
 }
 

@@ -17,17 +17,17 @@ const TLB_GLOBAL_PAGE: u32 = 0x80000000;
 
 const BX_INVALID_TLB_ENTRY: u64 = 0xffffffffffffffffu64;
 
-pub(super) struct TLBEntry {
+pub(crate) struct TLBEntry {
     /// linear page frame
-    pub(super) lpf: BxAddress,
+    pub(crate) lpf: BxAddress,
     // physical page frame
-    pub(super) ppf: BxPhyAddress,
-    pub(super) host_page_addr: BxHostpageaddr,
-    pub(super) access_bits: u32,
+    pub(crate) ppf: BxPhyAddress,
+    pub(crate) host_page_addr: BxHostpageaddr,
+    pub(crate) access_bits: u32,
     #[cfg(feature = "bx_support_pkeys")]
     pub(super) pkey: u32,
     // linear address mask of the page size
-    pub(super) lpf_mask: u32,
+    pub(crate) lpf_mask: u32,
     #[cfg(feature = "bx_support_memtype")]
     pub(super) memtype: MemType, // (note from bochs)  // keep it Bit32u for alignment
 }
@@ -99,7 +99,7 @@ impl TLBEntry {
 
 // Our TLB struct, generic over the number of entries:
 pub struct Tlb<const SIZE: usize> {
-    entries: [TLBEntry; SIZE],
+    pub(crate) entries: [TLBEntry; SIZE],
 
     pub(crate) split_large: bool,
 }

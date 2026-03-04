@@ -544,9 +544,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     ) -> Result<super::xmm::BxPackedXmmRegister> {
         let lo = self.read_virtual_qword(seg, offset)?;
         let hi = self.read_virtual_qword(seg, offset.wrapping_add(8))?;
-        Ok(super::xmm::BxPackedXmmRegister {
-            xmm64u: [lo, hi],
-        })
+        Ok(super::xmm::BxPackedXmmRegister { xmm64u: [lo, hi] })
     }
 
     /// Read a 128-bit XMM word with 16-byte alignment check.
@@ -852,6 +850,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             let bytes = data.to_le_bytes();
             for i in 0..4u64 {
+                let la = (laddr.wrapping_add(i)) & 0xFFFF_FFFF;
+                let pa = self.translate_linear_system_write(la)?;
+                self.mem_write_byte(pa, bytes[i as usize]);
+            }
+        }
+        Ok(())
+    }
+
+    /// Write a qword to a system (linear) address with cross-page handling.
+    /// Bochs: system_write_qword (access.cc)
+    pub(super) fn system_write_qword(&mut self, laddr: BxAddress, data: u64) -> Result<()> {
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 8 <= 0x1000 {
+            let paddr = self.translate_linear_system_write(laddr)?;
+            self.mem_write_qword(paddr, data);
+        } else {
+            let bytes = data.to_le_bytes();
+            for i in 0..8u64 {
                 let la = (laddr.wrapping_add(i)) & 0xFFFF_FFFF;
                 let pa = self.translate_linear_system_write(la)?;
                 self.mem_write_byte(pa, bytes[i as usize]);

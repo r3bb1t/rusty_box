@@ -542,6 +542,8 @@ impl AtaDrive {
                 return false;
             }
 
+            tracing::debug!("ATA: read LBA {}", lba);
+
             self.increment_address();
             buf_offset += SECTOR_SIZE;
         }
@@ -1111,11 +1113,8 @@ impl BxHardDriveC {
                 _ => 15u8,
             };
             if !self.pic_ptr.is_null() {
-                // Lower then raise to guarantee an edge even if IRR bit was already set
-                // from a previous ATA command (e.g. BIOS-phase IRQ14 that was never cleared).
-                // Bochs: DEV_pic_lower_irq() + DEV_pic_raise_irq() in raise_interrupt().
+                // Bochs harddrv.cc:3511: just DEV_pic_raise_irq(irq) — no lower first.
                 let pic = unsafe { &mut *self.pic_ptr };
-                pic.lower_irq(irq);
                 pic.raise_irq(irq);
             } else {
                 // Fallback deferred path (no PIC pointer wired yet)
@@ -1263,9 +1262,11 @@ impl BxHardDriveC {
                                     // Bochs harddrv.cc:890: raise_interrupt(channel)
                                     self.raise_interrupt(channel_num);
                                 } else {
-                                    // Read error — abort command
-                                    drive.controller.error = ATA_ERROR_ABRT;
-                                    drive.controller.status = ATA_STATUS_ERR | ATA_STATUS_DRDY;
+                                    // Read error — abort and raise interrupt
+                                    // (Bochs doesn't handle this case either, but we should
+                                    // at least notify the kernel)
+                                    self.command_aborted(channel_num,
+                                        self.channels[channel_num].selected_drive().controller.current_command);
                                 }
                             }
                         }
@@ -1749,6 +1750,12 @@ impl BxHardDriveC {
                     drive.controller.num_sectors
                 );
 
+                // Bochs harddrv.cc:2263-2265: validate LBA before reading
+                if drive.calculate_logical_address().is_none() {
+                    self.command_aborted(channel_num, command);
+                    return;
+                }
+
                 // Read first sector into buffer (decrements num_sectors via increment_address)
                 if drive.ide_read_sector() {
                     // Skip seek timer — set DRQ and raise IRQ immediately
@@ -1757,8 +1764,9 @@ impl BxHardDriveC {
                     drive.controller.buffer_index = 0;
                     drive.controller.interrupt_pending = true;
                 } else {
-                    drive.controller.error = ATA_ERROR_ABRT;
-                    drive.controller.status = ATA_STATUS_ERR | ATA_STATUS_DRDY;
+                    // Bochs harddrv.cc:2279-2282: command_aborted on read failure
+                    self.command_aborted(channel_num, command);
+                    return;
                 }
             }
             ATA_CMD_READ_MULTIPLE => {

@@ -39,10 +39,8 @@ pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
 const BX_DTLB_SIZE: usize = 2048;
 const BX_ITLB_SIZE: usize = 1024;
 
-#[cfg(feature = "bx_support_amx")]
 use super::avx::amx::AMX;
 
-#[cfg(feature = "bx_support_memtype")]
 use super::tlb::BxMemType;
 
 // region:  x64 big endian
@@ -384,7 +382,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) inhibit_icount: u64,
 
     /// user segment register set
-    pub(super) sregs: [BxSegmentReg; 6],
+    pub(crate) sregs: [BxSegmentReg; 6],
 
     // system segment registers
     /// global descriptor table register
@@ -408,7 +406,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     // Control registers
     pub(crate) cr0: BxCr0,
     pub(super) cr2: BxAddress,
-    pub(super) cr3: BxAddress,
+    pub(crate) cr3: BxAddress,
 
     pub(super) cr4: BxCr4,
     pub(super) cr4_suppmask: u32,
@@ -433,9 +431,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) ia32_xss_suppmask: u32,
 
     // protection keys
-    #[cfg(feature = "bx_support_pkeys")]
     pub(super) pkru: u32,
-    #[cfg(feature = "bx_support_pkeys")]
     pub(super) pkrs: u32,
 
     // unpacked protection keys to be tested together with accessBits from TLB
@@ -450,9 +446,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     // When protection key prevents all accesses to the page both bits 1 and 3 are cleared
     // When protection key prevents writes to the page bit 1 will be set and 3 cleared
     // When no protection keys are enabled all bits should be set for all keys
-    #[cfg(feature = "bx_support_pkeys")]
     pub(super) rd_pkey: [u32; 16],
-    #[cfg(feature = "bx_support_pkeys")]
     pub(super) wr_pkey: [u32; 16],
 
     pub(super) uintr: Uintr,
@@ -469,10 +463,8 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
 
     pub(super) opmask: [BxGenReg; 8],
 
-    #[cfg(feature = "bx_support_monitor_mwait")]
     pub(super) monitor: MonitorAddr,
 
-    #[cfg(feature = "bx_support_apic")]
     pub(super) lapic: BxLocalApic,
 
     /// SMM base register
@@ -483,7 +475,6 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     #[cfg(feature = "bx_configure_msrs")]
     pub(super) msrs: [MSR; BX_MSR_MAX_INDEX],
 
-    #[cfg(feature = "bx_support_amx")]
     pub(super) amx: Option<AMX>,
 
     pub(super) in_vmx: bool,
@@ -493,7 +484,6 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) in_smm_vmx_guest: bool,
     pub(super) vmcsptr: u64,
 
-    #[cfg(feature = "bx_support_memtype")]
     pub(super) vmcs_memtype: BxMemType,
 
     pub(super) vmxonptr: u64,
@@ -507,7 +497,6 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) svm_gif: bool,
     pub(super) vmcbptr: BxPhyAddress,
     pub(super) vmcbhostptr: BxHostpageaddr,
-    #[cfg(feature = "bx_support_memtype")]
     pub(super) vmcb_memtype: BxMemType,
 
     pub(super) vmcb: Option<VmcbCache>,
@@ -532,7 +521,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
 
     pub(super) in_smm: bool,
     pub(super) cpu_mode: CpuMode,
-    pub(super) user_pl: bool,
+    pub(crate) user_pl: bool,
 
     pub(super) ignore_bad_msrs: bool,
 
@@ -544,7 +533,6 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     // FIXME: skipped   static jmp_buf jmp_buf_env;
     pub(super) last_exception_type: u32,
 
-    #[cfg(feature = "bx_support_handlers_chaining_speedups")]
     pub(super) cpuloop_stack_anchor: Option<&'c [u8]>,
 
     // Perf counters (temporary, for diagnosing slowdowns)
@@ -572,13 +560,10 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     /// Guest physical address of current stack page
     pub(super) p_addr_stack_page: BxPhyAddress,
 
-    #[cfg(feature = "bx_support_memtype")]
     pub(super) espPageMemtype: BxMemType,
 
-    #[cfg(not(feature = "bx_support_smp"))]
     pub(super) esp_page_fine_granularity_mapping: u32,
 
-    #[cfg(feature = "bx_support_alignment_check")]
     pub(super) alignment_check_mask: u32,
 
     pub(super) stats: BxCpuStatistics,
@@ -611,7 +596,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     #[cfg(feature = "bx_instrumentation")]
     pub(super) far_branch: FarBranch,
 
-    pub(super) dtlb: Tlb<BX_DTLB_SIZE>,
+    pub(crate) dtlb: Tlb<BX_DTLB_SIZE>,
     pub(super) itlb: Tlb<BX_ITLB_SIZE>,
 
     pub(super) pdptrcache: PdptrCache,
@@ -638,10 +623,10 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     /// Host memory base pointer, pointing to physical address 0 (accounts for vector_offset).
     /// Used for direct memory access on TLB hits, bypassing get_host_mem_addr().
     /// SAFETY: Only valid during cpu_loop when memory is valid.
-    pub(super) mem_host_base: *mut u8,
+    pub(crate) mem_host_base: *mut u8,
     /// Usable guest RAM length (not including ROM/bogus).  Physical addresses below this
     /// (and outside VGA/MMIO ranges) can be accessed directly via mem_host_base.
-    pub(super) mem_host_len: usize,
+    pub(crate) mem_host_len: usize,
 
     /// Optional memory system pointer (MMIO/ROM handler access), wired during execution.
     ///
@@ -684,7 +669,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Returns a mutable raw pointer to the Local APIC for cross-module wiring.
     /// Used by emulator.rs to wire I/O APIC → LAPIC interrupt delivery.
-    #[cfg(feature = "bx_support_apic")]
     pub(crate) fn lapic_ptr_mut(&mut self) -> *mut crate::cpu::apic::BxLocalApic {
         &mut self.lapic as *mut _
     }
@@ -781,10 +765,8 @@ pub(crate) struct AddressXlation {
     /// normal cases) it is a native pointer and is used
     /// for a direct write access.
     pub(crate) pages: BxPtrEquiv,
-    #[cfg(feature = "bx_support_memtype")]
     /// memory type of the page 1
     pub(crate) memtype1: BxMemType,
-    #[cfg(feature = "bx_support_memtype")]
     /// memory type of the page 1
     pub(crate) memtype2: BxMemType,
 }
@@ -834,7 +816,6 @@ impl Default for BxCpuActivityState {
 
 #[derive(Debug, Default)]
 pub struct BxRegsMsr {
-    #[cfg(feature = "bx_support_apic")]
     pub(crate) apicbase: BxPhyAddress,
 
     // SYSCALL/SYSRET instruction msr's
@@ -956,13 +937,13 @@ pub struct MonitorAddr {
 }
 
 #[cfg(feature = "bx_support_monitor_mwait")]
-const BX_MONITOR_NOT_ARMED: u32 = 0;
+pub(super) const BX_MONITOR_NOT_ARMED: u32 = 0;
 #[cfg(feature = "bx_support_monitor_mwait")]
-const BX_MONITOR_ARMED_BY_MONITOR: u32 = 1;
+pub(super) const BX_MONITOR_ARMED_BY_MONITOR: u32 = 1;
 #[cfg(feature = "bx_support_monitor_mwait")]
-const BX_MONITOR_ARMED_BY_MONITORX: u32 = 2;
+pub(super) const BX_MONITOR_ARMED_BY_MONITORX: u32 = 2;
 #[cfg(feature = "bx_support_monitor_mwait")]
-const BX_MONITOR_ARMED_BY_UMONITOR: u32 = 3;
+pub(super) const BX_MONITOR_ARMED_BY_UMONITOR: u32 = 3;
 
 #[cfg(feature = "bx_support_monitor_mwait")]
 impl MonitorAddr {
@@ -2183,6 +2164,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
     pub(super) fn long64_mode(&self) -> bool {
         self.cpu_mode == CpuMode::Long64
+    }
+
+    /// Returns true when CPU is in long mode (either 64-bit or compatibility sub-mode).
+    /// Matches Bochs `long_mode()` which checks `EFER.LMA == 1`.
+    pub(super) fn long_mode(&self) -> bool {
+        self.cpu_mode == CpuMode::Long64 || self.cpu_mode == CpuMode::LongCompat
     }
 
     pub(crate) fn smm_mode(&self) -> bool {

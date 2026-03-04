@@ -38,14 +38,41 @@ impl RustyBoxApp {
     }
 
     /// Process keyboard input from egui and convert to PS/2 scancodes.
+    ///
+    /// Handles three event types:
+    /// - `Event::Text` — printable characters from the platform text input system
+    /// - `Event::Ime(ImeEvent::Commit)` — characters from IME (Windows may use this path)
+    /// - `Event::Key` — special keys (arrows, F-keys, Enter, etc.)
+    ///
+    /// Letter/number keys are handled via Text/Ime events (which include proper
+    /// OS-level shift/layout handling). The Key handler covers non-printable keys
+    /// and also serves as a fallback for letters when Text events aren't produced.
     fn process_input(&mut self, ctx: &egui::Context) {
         let mut scancodes = Vec::new();
 
         ctx.input(|i| {
+            // Pass 1: check if any Text or Ime::Commit events exist in this frame.
+            // If so, we rely on them for printable characters and skip the Key fallback
+            // (avoids double-sending since Key events fire BEFORE Text events).
+            let has_text_events = i.events.iter().any(|e| {
+                matches!(
+                    e,
+                    egui::Event::Text(_) | egui::Event::Ime(egui::ImeEvent::Commit(_))
+                )
+            });
+
+            // Pass 2: process events
             for event in &i.events {
                 match event {
                     egui::Event::Text(text) => {
-                        // Printable characters
+                        // Printable characters (primary path on most platforms)
+                        for ch in text.chars() {
+                            let seq = char_to_scancode_sequence(ch);
+                            scancodes.extend_from_slice(&seq);
+                        }
+                    }
+                    egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
+                        // IME commit — Windows may produce this instead of Event::Text
                         for ch in text.chars() {
                             let seq = char_to_scancode_sequence(ch);
                             scancodes.extend_from_slice(&seq);
@@ -54,7 +81,16 @@ impl RustyBoxApp {
                     egui::Event::Key { key, pressed, .. } => {
                         // Special keys (not covered by Text events)
                         let seq = egui_key_to_scancodes(*key, *pressed);
-                        scancodes.extend_from_slice(&seq);
+                        if !seq.is_empty() {
+                            scancodes.extend_from_slice(&seq);
+                        } else if *pressed && !has_text_events {
+                            // Fallback: no Text/Ime events in this frame, so the platform
+                            // isn't producing character events. Convert Key → char directly.
+                            if let Some(ch) = egui_key_to_char(*key) {
+                                let seq = char_to_scancode_sequence(ch);
+                                scancodes.extend_from_slice(&seq);
+                            }
+                        }
                     }
                     _ => {}
                 }
@@ -339,4 +375,62 @@ fn egui_key_to_scancodes(key: egui::Key, pressed: bool) -> Vec<u8> {
         seq.push(make_code);
     }
     seq
+}
+
+/// Fallback: convert an egui Key to a lowercase ASCII character.
+///
+/// Used when `Event::Text` / `Event::Ime` don't fire (e.g., certain IME states,
+/// accessibility tools, or platform edge cases). Returns lowercase because
+/// `char_to_scancode_sequence` handles shift detection from the character itself.
+fn egui_key_to_char(key: egui::Key) -> Option<char> {
+    match key {
+        egui::Key::A => Some('a'),
+        egui::Key::B => Some('b'),
+        egui::Key::C => Some('c'),
+        egui::Key::D => Some('d'),
+        egui::Key::E => Some('e'),
+        egui::Key::F => Some('f'),
+        egui::Key::G => Some('g'),
+        egui::Key::H => Some('h'),
+        egui::Key::I => Some('i'),
+        egui::Key::J => Some('j'),
+        egui::Key::K => Some('k'),
+        egui::Key::L => Some('l'),
+        egui::Key::M => Some('m'),
+        egui::Key::N => Some('n'),
+        egui::Key::O => Some('o'),
+        egui::Key::P => Some('p'),
+        egui::Key::Q => Some('q'),
+        egui::Key::R => Some('r'),
+        egui::Key::S => Some('s'),
+        egui::Key::T => Some('t'),
+        egui::Key::U => Some('u'),
+        egui::Key::V => Some('v'),
+        egui::Key::W => Some('w'),
+        egui::Key::X => Some('x'),
+        egui::Key::Y => Some('y'),
+        egui::Key::Z => Some('z'),
+        egui::Key::Num0 => Some('0'),
+        egui::Key::Num1 => Some('1'),
+        egui::Key::Num2 => Some('2'),
+        egui::Key::Num3 => Some('3'),
+        egui::Key::Num4 => Some('4'),
+        egui::Key::Num5 => Some('5'),
+        egui::Key::Num6 => Some('6'),
+        egui::Key::Num7 => Some('7'),
+        egui::Key::Num8 => Some('8'),
+        egui::Key::Num9 => Some('9'),
+        egui::Key::Minus => Some('-'),
+        egui::Key::Equals => Some('='),
+        egui::Key::OpenBracket => Some('['),
+        egui::Key::CloseBracket => Some(']'),
+        egui::Key::Backslash => Some('\\'),
+        egui::Key::Semicolon => Some(';'),
+        egui::Key::Quote => Some('\''),
+        egui::Key::Backtick => Some('`'),
+        egui::Key::Comma => Some(','),
+        egui::Key::Period => Some('.'),
+        egui::Key::Slash => Some('/'),
+        _ => None,
+    }
 }

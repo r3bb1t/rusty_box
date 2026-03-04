@@ -593,7 +593,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut r = BxPackedRegister { U64: 0 };
         unsafe {
             for j in 0..2usize {
-                r.U32[j] = if op1.S32[j] > op2.S32[j] { 0xffffffff } else { 0 };
+                r.U32[j] = if op1.S32[j] > op2.S32[j] {
+                    0xffffffff
+                } else {
+                    0
+                };
             }
         }
         self.write_mmx_reg(instr.dst(), r);
@@ -633,10 +637,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let mut r = BxPackedRegister { U64: 0 };
         unsafe {
-            r.Ubyte[0] = op1.Ubyte[4]; r.Ubyte[1] = op2.Ubyte[4];
-            r.Ubyte[2] = op1.Ubyte[5]; r.Ubyte[3] = op2.Ubyte[5];
-            r.Ubyte[4] = op1.Ubyte[6]; r.Ubyte[5] = op2.Ubyte[6];
-            r.Ubyte[6] = op1.Ubyte[7]; r.Ubyte[7] = op2.Ubyte[7];
+            r.Ubyte[0] = op1.Ubyte[4];
+            r.Ubyte[1] = op2.Ubyte[4];
+            r.Ubyte[2] = op1.Ubyte[5];
+            r.Ubyte[3] = op2.Ubyte[5];
+            r.Ubyte[4] = op1.Ubyte[6];
+            r.Ubyte[5] = op2.Ubyte[6];
+            r.Ubyte[6] = op1.Ubyte[7];
+            r.Ubyte[7] = op2.Ubyte[7];
         }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
@@ -652,8 +660,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let mut r = BxPackedRegister { U64: 0 };
         unsafe {
-            r.U16[0] = op1.U16[2]; r.U16[1] = op2.U16[2];
-            r.U16[2] = op1.U16[3]; r.U16[3] = op2.U16[3];
+            r.U16[0] = op1.U16[2];
+            r.U16[1] = op2.U16[2];
+            r.U16[2] = op1.U16[3];
+            r.U16[3] = op2.U16[3];
         }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
@@ -774,7 +784,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut r = BxPackedRegister { U64: 0 };
         unsafe {
             for j in 0..8usize {
-                r.Ubyte[j] = if op1.Ubyte[j] == op2.Ubyte[j] { 0xff } else { 0 };
+                r.Ubyte[j] = if op1.Ubyte[j] == op2.Ubyte[j] {
+                    0xff
+                } else {
+                    0
+                };
             }
         }
         self.write_mmx_reg(instr.dst(), r);
@@ -810,7 +824,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut r = BxPackedRegister { U64: 0 };
         unsafe {
             for j in 0..2usize {
-                r.U32[j] = if op1.U32[j] == op2.U32[j] { 0xffffffff } else { 0 };
+                r.U32[j] = if op1.U32[j] == op2.U32[j] {
+                    0xffffffff
+                } else {
+                    0
+                };
             }
         }
         self.write_mmx_reg(instr.dst(), r);
@@ -913,8 +931,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             let shift = count as u16;
             unsafe {
-                op1.U16[0] >>= shift; op1.U16[1] >>= shift;
-                op1.U16[2] >>= shift; op1.U16[3] >>= shift;
+                op1.U16[0] >>= shift;
+                op1.U16[1] >>= shift;
+                op1.U16[2] >>= shift;
+                op1.U16[3] >>= shift;
             }
         }
         self.write_mmx_reg(instr.dst(), op1);
@@ -934,7 +954,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op1 = BxPackedRegister { U64: 0 };
         } else {
             let shift = count as u32;
-            unsafe { op1.U32[0] >>= shift; op1.U32[1] >>= shift; }
+            unsafe {
+                op1.U32[0] >>= shift;
+                op1.U32[1] >>= shift;
+            }
         }
         self.write_mmx_reg(instr.dst(), op1);
         Ok(())
@@ -949,8 +972,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_fpu2mmx();
 
         let count = unsafe { op2.U64 };
-        if count > 63 { op1 = BxPackedRegister { U64: 0 }; }
-        else { unsafe { op1.U64 >>= count; } }
+        if count > 63 {
+            op1 = BxPackedRegister { U64: 0 };
+        } else {
+            unsafe {
+                op1.U64 >>= count;
+            }
+        }
         self.write_mmx_reg(instr.dst(), op1);
         Ok(())
     }
@@ -962,7 +990,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_mmx_reg(instr.dst());
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
-        let r = BxPackedRegister { U64: unsafe { op1.U64.wrapping_add(op2.U64) } };
+        let r = BxPackedRegister {
+            U64: unsafe { op1.U64.wrapping_add(op2.U64) },
+        };
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -994,7 +1024,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut mask = 0u32;
         unsafe {
             for j in 0..8usize {
-                if op.Ubyte[j] & 0x80 != 0 { mask |= 1 << j; }
+                if op.Ubyte[j] & 0x80 != 0 {
+                    mask |= 1 << j;
+                }
             }
         }
         self.set_gpr32(instr.dst() as usize, mask);
@@ -1013,7 +1045,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { U64: 0 };
         unsafe {
-            for j in 0..8usize { r.Ubyte[j] = op1.Ubyte[j].saturating_sub(op2.Ubyte[j]); }
+            for j in 0..8usize {
+                r.Ubyte[j] = op1.Ubyte[j].saturating_sub(op2.Ubyte[j]);
+            }
         }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
@@ -1026,7 +1060,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { U64: 0 };
-        unsafe { for j in 0..4usize { r.U16[j] = op1.U16[j].saturating_sub(op2.U16[j]); } }
+        unsafe {
+            for j in 0..4usize {
+                r.U16[j] = op1.U16[j].saturating_sub(op2.U16[j]);
+            }
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1038,7 +1076,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { U64: 0 };
-        unsafe { for j in 0..8usize { r.Ubyte[j] = op1.Ubyte[j].min(op2.Ubyte[j]); } }
+        unsafe {
+            for j in 0..8usize {
+                r.Ubyte[j] = op1.Ubyte[j].min(op2.Ubyte[j]);
+            }
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1049,7 +1091,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_mmx_reg(instr.dst());
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
-        self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: unsafe { op1.U64 & op2.U64 } });
+        self.write_mmx_reg(
+            instr.dst(),
+            BxPackedRegister {
+                U64: unsafe { op1.U64 & op2.U64 },
+            },
+        );
         Ok(())
     }
 
@@ -1060,7 +1107,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { U64: 0 };
-        unsafe { for j in 0..8usize { r.Ubyte[j] = op1.Ubyte[j].saturating_add(op2.Ubyte[j]); } }
+        unsafe {
+            for j in 0..8usize {
+                r.Ubyte[j] = op1.Ubyte[j].saturating_add(op2.Ubyte[j]);
+            }
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1072,7 +1123,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { U64: 0 };
-        unsafe { for j in 0..4usize { r.U16[j] = op1.U16[j].saturating_add(op2.U16[j]); } }
+        unsafe {
+            for j in 0..4usize {
+                r.U16[j] = op1.U16[j].saturating_add(op2.U16[j]);
+            }
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1084,7 +1139,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { U64: 0 };
-        unsafe { for j in 0..8usize { r.Ubyte[j] = op1.Ubyte[j].max(op2.Ubyte[j]); } }
+        unsafe {
+            for j in 0..8usize {
+                r.Ubyte[j] = op1.Ubyte[j].max(op2.Ubyte[j]);
+            }
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1095,7 +1154,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_mmx_reg(instr.dst());
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
-        self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: unsafe { !op1.U64 & op2.U64 } });
+        self.write_mmx_reg(
+            instr.dst(),
+            BxPackedRegister {
+                U64: unsafe { !op1.U64 & op2.U64 },
+            },
+        );
         Ok(())
     }
 
@@ -1126,14 +1190,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let count = unsafe { op2.U64 };
-        if count == 0 { /* no change */ }
-        else if count > 15 {
+        if count == 0 { /* no change */
+        } else if count > 15 {
             unsafe {
-                for j in 0..4usize { op1.U16[j] = if op1.S16[j] < 0 { 0xffff } else { 0 }; }
+                for j in 0..4usize {
+                    op1.U16[j] = if op1.S16[j] < 0 { 0xffff } else { 0 };
+                }
             }
         } else {
             unsafe {
-                for j in 0..4usize { op1.U16[j] = (op1.S16[j] >> count as u16) as u16; }
+                for j in 0..4usize {
+                    op1.U16[j] = (op1.S16[j] >> count as u16) as u16;
+                }
             }
         }
         self.write_mmx_reg(instr.dst(), op1);
@@ -1147,14 +1215,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let count = unsafe { op2.U64 };
-        if count == 0 { /* no change */ }
-        else if count > 31 {
+        if count == 0 { /* no change */
+        } else if count > 31 {
             unsafe {
-                for j in 0..2usize { op1.U32[j] = if op1.S32[j] < 0 { 0xffffffff } else { 0 }; }
+                for j in 0..2usize {
+                    op1.U32[j] = if op1.S32[j] < 0 { 0xffffffff } else { 0 };
+                }
             }
         } else {
             unsafe {
-                for j in 0..2usize { op1.U32[j] = (op1.S32[j] >> count as u32) as u32; }
+                for j in 0..2usize {
+                    op1.U32[j] = (op1.S32[j] >> count as u32) as u32;
+                }
             }
         }
         self.write_mmx_reg(instr.dst(), op1);
@@ -1252,7 +1324,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { U64: 0 };
-        unsafe { for j in 0..4usize { r.S16[j] = op1.S16[j].min(op2.S16[j]); } }
+        unsafe {
+            for j in 0..4usize {
+                r.S16[j] = op1.S16[j].min(op2.S16[j]);
+            }
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1263,7 +1339,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_mmx_reg(instr.dst());
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
-        self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: unsafe { op1.U64 | op2.U64 } });
+        self.write_mmx_reg(
+            instr.dst(),
+            BxPackedRegister {
+                U64: unsafe { op1.U64 | op2.U64 },
+            },
+        );
         Ok(())
     }
 
@@ -1306,7 +1387,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { U64: 0 };
-        unsafe { for j in 0..4usize { r.S16[j] = op1.S16[j].max(op2.S16[j]); } }
+        unsafe {
+            for j in 0..4usize {
+                r.S16[j] = op1.S16[j].max(op2.S16[j]);
+            }
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1317,7 +1402,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_mmx_reg(instr.dst());
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
-        self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: unsafe { op1.U64 ^ op2.U64 } });
+        self.write_mmx_reg(
+            instr.dst(),
+            BxPackedRegister {
+                U64: unsafe { op1.U64 ^ op2.U64 },
+            },
+        );
         Ok(())
     }
 
@@ -1332,8 +1422,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let count = unsafe { op2.U64 };
-        if count > 15 { op1 = BxPackedRegister { U64: 0 }; }
-        else { unsafe { for j in 0..4usize { op1.U16[j] <<= count as u16; } } }
+        if count > 15 {
+            op1 = BxPackedRegister { U64: 0 };
+        } else {
+            unsafe {
+                for j in 0..4usize {
+                    op1.U16[j] <<= count as u16;
+                }
+            }
+        }
         self.write_mmx_reg(instr.dst(), op1);
         Ok(())
     }
@@ -1345,8 +1442,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let count = unsafe { op2.U64 };
-        if count > 31 { op1 = BxPackedRegister { U64: 0 }; }
-        else { unsafe { op1.U32[0] <<= count as u32; op1.U32[1] <<= count as u32; } }
+        if count > 31 {
+            op1 = BxPackedRegister { U64: 0 };
+        } else {
+            unsafe {
+                op1.U32[0] <<= count as u32;
+                op1.U32[1] <<= count as u32;
+            }
+        }
         self.write_mmx_reg(instr.dst(), op1);
         Ok(())
     }
@@ -1358,8 +1461,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let count = unsafe { op2.U64 };
-        if count > 63 { op1 = BxPackedRegister { U64: 0 }; }
-        else { unsafe { op1.U64 <<= count; } }
+        if count > 63 {
+            op1 = BxPackedRegister { U64: 0 };
+        } else {
+            unsafe {
+                op1.U64 <<= count;
+            }
+        }
         self.write_mmx_reg(instr.dst(), op1);
         Ok(())
     }
@@ -1429,7 +1537,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mask = self.read_mmx_reg(instr.dst());
 
         // If mask is all zero, nothing to do
-        if unsafe { mask.U64 } == 0 { return Ok(()); }
+        if unsafe { mask.U64 } == 0 {
+            return Ok(());
+        }
 
         let rdi = self.edi() as u32; // 32-bit address mode
         let seg = BxSegregs::Ds;
@@ -1440,7 +1550,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         };
         unsafe {
             for j in 0..8usize {
-                if mask.Ubyte[j] & 0x80 != 0 { tmp.Ubyte[j] = op.Ubyte[j]; }
+                if mask.Ubyte[j] & 0x80 != 0 {
+                    tmp.Ubyte[j] = op.Ubyte[j];
+                }
             }
         }
         self.write_virtual_qword(seg, rdi, unsafe { tmp.U64 })?;
@@ -1458,7 +1570,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { U64: 0 };
-        unsafe { for j in 0..8usize { r.Ubyte[j] = op1.Ubyte[j].wrapping_sub(op2.Ubyte[j]); } }
+        unsafe {
+            for j in 0..8usize {
+                r.Ubyte[j] = op1.Ubyte[j].wrapping_sub(op2.Ubyte[j]);
+            }
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1470,7 +1586,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { U64: 0 };
-        unsafe { for j in 0..4usize { r.U16[j] = op1.U16[j].wrapping_sub(op2.U16[j]); } }
+        unsafe {
+            for j in 0..4usize {
+                r.U16[j] = op1.U16[j].wrapping_sub(op2.U16[j]);
+            }
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1482,7 +1602,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { U64: 0 };
-        unsafe { for j in 0..2usize { r.U32[j] = op1.U32[j].wrapping_sub(op2.U32[j]); } }
+        unsafe {
+            for j in 0..2usize {
+                r.U32[j] = op1.U32[j].wrapping_sub(op2.U32[j]);
+            }
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1493,7 +1617,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_mmx_reg(instr.dst());
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
-        let r = BxPackedRegister { U64: unsafe { op1.U64.wrapping_sub(op2.U64) } };
+        let r = BxPackedRegister {
+            U64: unsafe { op1.U64.wrapping_sub(op2.U64) },
+        };
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1505,7 +1631,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { U64: 0 };
-        unsafe { for j in 0..8usize { r.Ubyte[j] = op1.Ubyte[j].wrapping_add(op2.Ubyte[j]); } }
+        unsafe {
+            for j in 0..8usize {
+                r.Ubyte[j] = op1.Ubyte[j].wrapping_add(op2.Ubyte[j]);
+            }
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1517,7 +1647,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { U64: 0 };
-        unsafe { for j in 0..4usize { r.U16[j] = op1.U16[j].wrapping_add(op2.U16[j]); } }
+        unsafe {
+            for j in 0..4usize {
+                r.U16[j] = op1.U16[j].wrapping_add(op2.U16[j]);
+            }
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1529,7 +1663,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
         let mut r = BxPackedRegister { U64: 0 };
-        unsafe { for j in 0..2usize { r.U32[j] = op1.U32[j].wrapping_add(op2.U32[j]); } }
+        unsafe {
+            for j in 0..2usize {
+                r.U32[j] = op1.U32[j].wrapping_add(op2.U32[j]);
+            }
+        }
         self.write_mmx_reg(instr.dst(), r);
         Ok(())
     }
@@ -1545,8 +1683,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_fpu2mmx();
         let mut op = self.read_mmx_reg(instr.dst());
         let shift = instr.ib();
-        if shift > 15 { op = BxPackedRegister { U64: 0 }; }
-        else { unsafe { for j in 0..4usize { op.U16[j] >>= shift as u16; } } }
+        if shift > 15 {
+            op = BxPackedRegister { U64: 0 };
+        } else {
+            unsafe {
+                for j in 0..4usize {
+                    op.U16[j] >>= shift as u16;
+                }
+            }
+        }
         self.write_mmx_reg(instr.dst(), op);
         Ok(())
     }
@@ -1557,11 +1702,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_fpu2mmx();
         let mut op = self.read_mmx_reg(instr.dst());
         let shift = instr.ib();
-        if shift == 0 { /* no-op */ }
-        else if shift > 15 {
-            unsafe { for j in 0..4usize { op.U16[j] = if op.S16[j] < 0 { 0xffff } else { 0 }; } }
+        if shift == 0 { /* no-op */
+        } else if shift > 15 {
+            unsafe {
+                for j in 0..4usize {
+                    op.U16[j] = if op.S16[j] < 0 { 0xffff } else { 0 };
+                }
+            }
         } else {
-            unsafe { for j in 0..4usize { op.U16[j] = (op.S16[j] >> shift as i16) as u16; } }
+            unsafe {
+                for j in 0..4usize {
+                    op.U16[j] = (op.S16[j] >> shift as i16) as u16;
+                }
+            }
         }
         self.write_mmx_reg(instr.dst(), op);
         Ok(())
@@ -1573,8 +1726,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_fpu2mmx();
         let mut op = self.read_mmx_reg(instr.dst());
         let shift = instr.ib();
-        if shift > 15 { op = BxPackedRegister { U64: 0 }; }
-        else { unsafe { for j in 0..4usize { op.U16[j] <<= shift as u16; } } }
+        if shift > 15 {
+            op = BxPackedRegister { U64: 0 };
+        } else {
+            unsafe {
+                for j in 0..4usize {
+                    op.U16[j] <<= shift as u16;
+                }
+            }
+        }
         self.write_mmx_reg(instr.dst(), op);
         Ok(())
     }
@@ -1585,8 +1745,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_fpu2mmx();
         let mut op = self.read_mmx_reg(instr.dst());
         let shift = instr.ib();
-        if shift > 31 { op = BxPackedRegister { U64: 0 }; }
-        else { unsafe { op.U32[0] >>= shift as u32; op.U32[1] >>= shift as u32; } }
+        if shift > 31 {
+            op = BxPackedRegister { U64: 0 };
+        } else {
+            unsafe {
+                op.U32[0] >>= shift as u32;
+                op.U32[1] >>= shift as u32;
+            }
+        }
         self.write_mmx_reg(instr.dst(), op);
         Ok(())
     }
@@ -1597,11 +1763,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_fpu2mmx();
         let mut op = self.read_mmx_reg(instr.dst());
         let shift = instr.ib();
-        if shift == 0 { /* no-op */ }
-        else if shift > 31 {
-            unsafe { for j in 0..2usize { op.U32[j] = if op.S32[j] < 0 { 0xffffffff } else { 0 }; } }
+        if shift == 0 { /* no-op */
+        } else if shift > 31 {
+            unsafe {
+                for j in 0..2usize {
+                    op.U32[j] = if op.S32[j] < 0 { 0xffffffff } else { 0 };
+                }
+            }
         } else {
-            unsafe { for j in 0..2usize { op.U32[j] = (op.S32[j] >> shift as i32) as u32; } }
+            unsafe {
+                for j in 0..2usize {
+                    op.U32[j] = (op.S32[j] >> shift as i32) as u32;
+                }
+            }
         }
         self.write_mmx_reg(instr.dst(), op);
         Ok(())
@@ -1613,8 +1787,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_fpu2mmx();
         let mut op = self.read_mmx_reg(instr.dst());
         let shift = instr.ib();
-        if shift > 31 { op = BxPackedRegister { U64: 0 }; }
-        else { unsafe { op.U32[0] <<= shift as u32; op.U32[1] <<= shift as u32; } }
+        if shift > 31 {
+            op = BxPackedRegister { U64: 0 };
+        } else {
+            unsafe {
+                op.U32[0] <<= shift as u32;
+                op.U32[1] <<= shift as u32;
+            }
+        }
         self.write_mmx_reg(instr.dst(), op);
         Ok(())
     }
@@ -1625,8 +1805,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_fpu2mmx();
         let mut op = self.read_mmx_reg(instr.dst());
         let shift = instr.ib();
-        if shift > 63 { op = BxPackedRegister { U64: 0 }; }
-        else { unsafe { op.U64 >>= shift as u64; } }
+        if shift > 63 {
+            op = BxPackedRegister { U64: 0 };
+        } else {
+            unsafe {
+                op.U64 >>= shift as u64;
+            }
+        }
         self.write_mmx_reg(instr.dst(), op);
         Ok(())
     }
@@ -1637,8 +1822,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_fpu2mmx();
         let mut op = self.read_mmx_reg(instr.dst());
         let shift = instr.ib();
-        if shift > 63 { op = BxPackedRegister { U64: 0 }; }
-        else { unsafe { op.U64 <<= shift as u64; } }
+        if shift > 63 {
+            op = BxPackedRegister { U64: 0 };
+        } else {
+            unsafe {
+                op.U64 <<= shift as u64;
+            }
+        }
         self.write_mmx_reg(instr.dst(), op);
         Ok(())
     }
@@ -1670,7 +1860,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op = self.read_mmx_reg(instr.src1());
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
-        unsafe { self.write_virtual_qword(seg, eaddr, op.U64)?; }
+        unsafe {
+            self.write_virtual_qword(seg, eaddr, op.U64)?;
+        }
         Ok(())
     }
 }

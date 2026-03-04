@@ -145,43 +145,131 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // =========================================================================
     // MONITOR — Setup monitor address for MWAIT (opcode 0F 01 C8)
-    // Bochs: proc_ctrl.cc MONITOR instruction
+    // Bochs: mwait.cc:74-128 MONITOR instruction
     // =========================================================================
 
     pub(super) fn monitor(
         &mut self,
-        _instr: &super::decoder::Instruction,
+        instr: &super::decoder::Instruction,
     ) -> crate::cpu::Result<()> {
-        // MONITOR sets up an address range for MWAIT to monitor.
-        // For our emulator, this is a NOP — we don't actually implement
-        // cache-line monitoring. MWAIT will just act like HLT.
-        tracing::trace!("MONITOR: NOP (address monitoring not implemented)");
+        tracing::debug!("MONITOR: RAX={:#x}", self.rax());
+
+        // Bochs mwait.cc:79-84: MONITOR requires CPL==0 (CPL always 0 in real mode)
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
+        if cpl != 0 {
+            tracing::debug!("MONITOR: CPL={} != 0, #UD", cpl);
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        // Bochs mwait.cc:95-98: RCX must be 0 (no optional extensions supported)
+        if self.rcx() != 0 {
+            tracing::error!(
+                "MONITOR: no optional extensions supported, RCX={:#x}",
+                self.rcx()
+            );
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Bochs mwait.cc:100: effective address = RAX & asize_mask
+        let asize_mask: u64 = if instr.as32_l() != 0 {
+            0xFFFF_FFFF
+        } else {
+            0xFFFF
+        };
+        let eaddr = self.rax() & asize_mask;
+
+        // Bochs mwait.cc:102-103: MONITOR performs same segmentation and paging
+        // checks as a 1-byte read (tickle_read_virtual)
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let _ = self.read_virtual_byte(seg, eaddr as u32)?;
+
+        // Bochs mwait.cc:105: get physical address from address translation
+        let paddr = self.address_xlation.paddress1;
+
+        // Bochs mwait.cc:121: invalidate page in monitoring system
+        // (In Bochs this calls bx_pc_system.invlpg(paddr) to clear any
+        // cached page state. We don't need this since we check is_monitor
+        // on every memory write.)
+
+        // Bochs mwait.cc:123: arm the monitor with the physical address
+        #[cfg(feature = "bx_support_monitor_mwait")]
+        {
+            self.monitor
+                .arm(paddr, super::cpu::BX_MONITOR_ARMED_BY_MONITOR);
+            tracing::debug!(
+                "MONITOR: armed for phys_addr={:#x}",
+                self.monitor.monitor_addr
+            );
+        }
+
         Ok(())
     }
 
     // =========================================================================
     // MWAIT — Monitor Wait (opcode 0F 01 C9)
-    // Bochs: proc_ctrl.cc MWAIT instruction
+    // Bochs: mwait.cc:137-242 MWAIT instruction
     // =========================================================================
 
-    pub(super) fn mwait(
-        &mut self,
-        instr: &super::decoder::Instruction,
-    ) -> crate::cpu::Result<()> {
-        // MWAIT waits for a monitored write or interrupt.
-        // We treat it as equivalent to HLT — stop until interrupt.
-        tracing::trace!("MWAIT: treated as HLT");
-        self.hlt(instr)
+    pub(super) fn mwait(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
+        tracing::debug!("MWAIT: ECX={:#x}", self.ecx());
+
+        // Bochs mwait.cc:142-147: MWAIT requires CPL==0 (CPL always 0 in real mode)
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
+        if cpl != 0 {
+            tracing::debug!("MWAIT: CPL={} != 0, #UD", cpl);
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        // Bochs mwait.cc:158-172: Check ECX extensions
+        // ECX[0] = interrupt MWAIT even if EFLAGS.IF = 0
+        // ECX[1] = timed MWAITX (MWAITX only, not applicable here)
+        // ECX[2] = monitorless MWAIT
+        // All other bits reserved
+        let supported_bits: u64 = 0x1; // Only bit 0 supported for MWAIT
+        if self.rcx() & !supported_bits != 0 {
+            tracing::error!(
+                "MWAIT: incorrect optional extensions in RCX={:#x}",
+                self.rcx()
+            );
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Bochs mwait.cc:183-198: If monitor not armed, just return
+        #[cfg(feature = "bx_support_monitor_mwait")]
+        {
+            if !self.monitor.armed_by_monitor() {
+                tracing::debug!("MWAIT: monitor not armed or already triggered, returning");
+                return Ok(());
+            }
+        }
+
+        // Bochs mwait.cc:216-228: Determine sleep state
+        // ECX[0] = 1: wake on interrupt even if IF=0
+        let mwait_if = self.ecx() & 0x1 != 0;
+
+        // Bochs mwait.cc:238: enter_sleep_state(new_state)
+        // Matches the pattern in hlt() — set activity state and async event
+        if mwait_if {
+            self.activity_state = super::cpu::CpuActivityState::MwaitIf;
+            tracing::debug!("MWAIT: entering sleep state MwaitIf (wake on interrupt even if IF=0)");
+        } else {
+            self.activity_state = super::cpu::CpuActivityState::Mwait;
+            tracing::debug!("MWAIT: entering sleep state Mwait");
+        }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE | Self::BX_ASYNC_EVENT_SLEEP;
+
+        Ok(())
     }
 
     // =========================================================================
     // CLAC — Clear AC Flag (SMAP, opcode 0F 01 CA)
     // =========================================================================
 
-    pub(super) fn clac(
-        &mut self,
-        _instr: &super::decoder::Instruction,
-    ) -> crate::cpu::Result<()> {
+    pub(super) fn clac(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         self.clear_ac();
         Ok(())
     }
@@ -190,10 +278,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // STAC — Set AC Flag (SMAP, opcode 0F 01 CB)
     // =========================================================================
 
-    pub(super) fn stac(
-        &mut self,
-        _instr: &super::decoder::Instruction,
-    ) -> crate::cpu::Result<()> {
+    pub(super) fn stac(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         self.assert_ac();
         Ok(())
     }
@@ -413,8 +498,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let val: u32 = match dr_idx {
             0..=3 => self.dr[dr_idx] as u32,
-            4 | 6 => self.dr6.val32, // DR4 aliases DR6 when CR4.DE=0
-            5 | 7 => self.dr7.val32, // DR5 aliases DR7 when CR4.DE=0
+            4 | 6 => self.dr6.get32(), // DR4 aliases DR6 when CR4.DE=0
+            5 | 7 => self.dr7.get32(), // DR5 aliases DR7 when CR4.DE=0
             _ => 0,
         };
         self.set_gpr32(dst_gpr, val);
@@ -460,12 +545,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             4 | 6 => {
                 // DR6: preserve reserved bits, only allow bits 0-3 (B0-B3) and bits 13-15 (BD,BS,BT)
                 // Bochs crregs.cc: (dr6.val32 & 0xFFFF0FF0) | (val & 0x0000E00F)
-                self.dr6.val32 = (self.dr6.val32 & 0xFFFF0FF0) | (val & 0x0000E00F);
+                self.dr6
+                    .set32((self.dr6.get32() & 0xFFFF0FF0) | (val & 0x0000E00F));
             }
             5 | 7 => {
                 // DR7: mask off reserved bits and set bit 10 (always 1)
                 // Bochs crregs.cc: (val & 0xFFFF2FFF) | 0x00000400
-                self.dr7.val32 = (val & 0xFFFF2FFF) | 0x00000400;
+                self.dr7.set32((val & 0xFFFF2FFF) | 0x00000400);
                 // Bochs: TLB_flush after DR7 write
                 self.tlb_flush();
             }
@@ -486,10 +572,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Bochs: FXSAVE in proc_ctrl.cc
     // ========================================================================
 
-    pub(super) fn fxsave(
-        &mut self,
-        instr: &super::decoder::Instruction,
-    ) -> super::Result<()> {
+    pub(super) fn fxsave(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         use super::decoder::BxSegregs;
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -561,10 +644,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Bochs: FXRSTOR in proc_ctrl.cc
     // ========================================================================
 
-    pub(super) fn fxrstor(
-        &mut self,
-        instr: &super::decoder::Instruction,
-    ) -> super::Result<()> {
+    pub(super) fn fxrstor(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         use super::decoder::BxSegregs;
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -630,10 +710,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Bochs: LDMXCSR in proc_ctrl.cc
     // ========================================================================
 
-    pub(super) fn ldmxcsr(
-        &mut self,
-        instr: &super::decoder::Instruction,
-    ) -> super::Result<()> {
+    pub(super) fn ldmxcsr(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         self.prepare_sse()?;
 
         let eaddr = self.resolve_addr32(instr);
@@ -654,10 +731,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Bochs: STMXCSR in proc_ctrl.cc
     // ========================================================================
 
-    pub(super) fn stmxcsr(
-        &mut self,
-        instr: &super::decoder::Instruction,
-    ) -> super::Result<()> {
+    pub(super) fn stmxcsr(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         self.prepare_sse()?;
 
         let eaddr = self.resolve_addr32(instr);
@@ -702,44 +776,45 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Bochs: proc_ctrl.cc:861-963
     // ========================================================================
 
-    pub(super) fn sysenter(
-        &mut self,
-        _instr: &super::decoder::Instruction,
-    ) -> super::Result<()> {
+    pub(super) fn sysenter(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
         use super::decoder::BxSegregs;
         use super::descriptor::{
-            SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G,
-            SEG_VALID_CACHE,
+            SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
         };
 
-        // SYSENTER not recognized in real mode
         if self.real_mode() {
-            tracing::debug!("SYSENTER: not recognized in real mode, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
-
-        // sysenter_cs_msr must have a non-null selector
         if (self.msr.sysenter_cs_msr & 0xFFFC) == 0 {
-            tracing::debug!("SYSENTER: sysenter_cs_msr is zero, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
         self.invalidate_prefetch_q();
 
-        // Clear VM, IF, RF flags (Bochs proc_ctrl.cc:878-880)
+        // Clear VM, IF, RF (Bochs proc_ctrl.cc:877-879)
         self.clear_vm();
         self.clear_if();
         self.clear_rf();
 
-        // Load CS at CPL=0 — flat 32-bit code segment
-        let cs_sel = self.msr.sysenter_cs_msr & 0xFFFC;
+        // Long mode: canonical checks (Bochs proc_ctrl.cc:882-891)
+        if self.long_mode() {
+            if !self.is_canonical(self.msr.sysenter_eip_msr) {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+            if !self.is_canonical(self.msr.sysenter_esp_msr) {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+        }
+
+        // Load CS: flat code segment, DPL=0 (Bochs proc_ctrl.cc:901-916)
         let cs_idx = BxSegregs::Cs as usize;
         super::segment_ctrl_pro::parse_selector(
-            cs_sel as u16,
+            (self.msr.sysenter_cs_msr & 0xFFFC) as u16,
             &mut self.sregs[cs_idx].selector,
         );
-        self.sregs[cs_idx].cache.valid =
+        let seg_valid =
             SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
+        self.sregs[cs_idx].cache.valid = seg_valid;
         self.sregs[cs_idx].cache.p = true;
         self.sregs[cs_idx].cache.dpl = 0;
         self.sregs[cs_idx].cache.segment = true;
@@ -749,24 +824,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
             self.sregs[cs_idx].cache.u.segment.g = true;
             self.sregs[cs_idx].cache.u.segment.avl = false;
-            self.sregs[cs_idx].cache.u.segment.d_b = true; // 32-bit
-            self.sregs[cs_idx].cache.u.segment.l = false;
+            self.sregs[cs_idx].cache.u.segment.d_b = !self.long_mode();
+            self.sregs[cs_idx].cache.u.segment.l = self.long_mode();
         }
 
-        // Update CPU mode (VM was cleared)
         self.handle_cpu_mode_change();
-
-        // CPL=0 — no alignment check
         self.alignment_check_mask = 0;
-        // Update user_pl for paging
         self.user_pl = false;
 
-        // Load SS at CPL=0 — flat 32-bit data segment
-        let ss_sel = ((self.msr.sysenter_cs_msr + 8) & 0xFFFC) as u16;
+        // Load SS: flat data segment, DPL=0 (Bochs proc_ctrl.cc:928-943)
         let ss_idx = BxSegregs::Ss as usize;
-        super::segment_ctrl_pro::parse_selector(ss_sel, &mut self.sregs[ss_idx].selector);
-        self.sregs[ss_idx].cache.valid =
-            SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
+        super::segment_ctrl_pro::parse_selector(
+            ((self.msr.sysenter_cs_msr + 8) & 0xFFFC) as u16,
+            &mut self.sregs[ss_idx].selector,
+        );
+        self.sregs[ss_idx].cache.valid = seg_valid;
         self.sregs[ss_idx].cache.p = true;
         self.sregs[ss_idx].cache.dpl = 0;
         self.sregs[ss_idx].cache.segment = true;
@@ -775,19 +847,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[ss_idx].cache.u.segment.base = 0;
             self.sregs[ss_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
             self.sregs[ss_idx].cache.u.segment.g = true;
-            self.sregs[ss_idx].cache.u.segment.d_b = true; // 32-bit
+            self.sregs[ss_idx].cache.u.segment.d_b = true;
             self.sregs[ss_idx].cache.u.segment.avl = false;
             self.sregs[ss_idx].cache.u.segment.l = false;
         }
 
-        // Load ESP and EIP from MSRs (32-bit mode)
-        self.set_esp(self.msr.sysenter_esp_msr as u32);
-        self.set_eip(self.msr.sysenter_eip_msr as u32);
-
-        tracing::debug!(
-            "SYSENTER: CS={:#06x} SS={:#06x} EIP={:#010x} ESP={:#010x}",
-            cs_sel, ss_sel, self.eip(), self.esp()
-        );
+        // Load RSP/RIP from MSRs (Bochs proc_ctrl.cc:946-955)
+        if self.long_mode() {
+            self.set_rsp(self.msr.sysenter_esp_msr);
+            self.set_rip(self.msr.sysenter_eip_msr);
+        } else {
+            self.set_esp(self.msr.sysenter_esp_msr as u32);
+            self.set_eip(self.msr.sysenter_eip_msr as u32);
+        }
 
         Ok(())
     }
@@ -797,83 +869,385 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Bochs: proc_ctrl.cc:965-1074
     // ========================================================================
 
-    pub(super) fn sysexit(
-        &mut self,
-        _instr: &super::decoder::Instruction,
-    ) -> super::Result<()> {
+    pub(super) fn sysexit(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         use super::decoder::BxSegregs;
         use super::descriptor::{
-            SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G,
-            SEG_VALID_CACHE,
+            SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
         };
 
-        // Must be in protected mode at CPL=0
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         if self.real_mode() || cpl != 0 {
-            tracing::debug!("SYSEXIT: real mode or CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
-
-        // sysenter_cs_msr must have a non-null selector
         if (self.msr.sysenter_cs_msr & 0xFFFC) == 0 {
-            tracing::debug!("SYSEXIT: sysenter_cs_msr is zero, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
         self.invalidate_prefetch_q();
+        self.monitor.reset_umonitor();
 
-        // 32-bit SYSEXIT: CS = (sysenter_cs_msr + 16) | 3, DPL=3
-        let cs_sel = (((self.msr.sysenter_cs_msr + 16) & 0xFFFC) | 3) as u16;
-        let cs_idx = BxSegregs::Cs as usize;
-        super::segment_ctrl_pro::parse_selector(cs_sel, &mut self.sregs[cs_idx].selector);
-        self.sregs[cs_idx].cache.valid =
+        let seg_valid =
             SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
-        self.sregs[cs_idx].cache.p = true;
-        self.sregs[cs_idx].cache.dpl = 3;
-        self.sregs[cs_idx].cache.segment = true;
-        self.sregs[cs_idx].cache.r#type = 0xb; // CODE_EXEC_READ_ACCESSED
-        unsafe {
-            self.sregs[cs_idx].cache.u.segment.base = 0;
-            self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
-            self.sregs[cs_idx].cache.u.segment.g = true;
-            self.sregs[cs_idx].cache.u.segment.avl = false;
-            self.sregs[cs_idx].cache.u.segment.d_b = true; // 32-bit
-            self.sregs[cs_idx].cache.u.segment.l = false;
+        let cs_idx = BxSegregs::Cs as usize;
+        let ss_idx = BxSegregs::Ss as usize;
+
+        // 64-bit SYSEXIT (Bochs proc_ctrl.cc:986-1012)
+        if instr.os64_l() != 0 {
+            if !self.is_canonical(self.rdx()) {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+            if !self.is_canonical(self.rcx()) {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+
+            // CS = (sysenter_cs_msr + 32) | 3, 64-bit code DPL=3
+            super::segment_ctrl_pro::parse_selector(
+                (((self.msr.sysenter_cs_msr + 32) & 0xFFFC) | 3) as u16,
+                &mut self.sregs[cs_idx].selector,
+            );
+            self.sregs[cs_idx].cache.valid = seg_valid;
+            self.sregs[cs_idx].cache.p = true;
+            self.sregs[cs_idx].cache.dpl = 3;
+            self.sregs[cs_idx].cache.segment = true;
+            self.sregs[cs_idx].cache.r#type = 0xb;
+            unsafe {
+                self.sregs[cs_idx].cache.u.segment.base = 0;
+                self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
+                self.sregs[cs_idx].cache.u.segment.g = true;
+                self.sregs[cs_idx].cache.u.segment.avl = false;
+                self.sregs[cs_idx].cache.u.segment.d_b = false;
+                self.sregs[cs_idx].cache.u.segment.l = true; // 64-bit
+            }
+
+            self.set_rsp(self.rcx());
+            self.set_rip(self.rdx());
+        } else {
+            // 32-bit SYSEXIT: CS = (sysenter_cs_msr + 16) | 3 (Bochs proc_ctrl.cc:1016-1036)
+            super::segment_ctrl_pro::parse_selector(
+                (((self.msr.sysenter_cs_msr + 16) & 0xFFFC) | 3) as u16,
+                &mut self.sregs[cs_idx].selector,
+            );
+            self.sregs[cs_idx].cache.valid = seg_valid;
+            self.sregs[cs_idx].cache.p = true;
+            self.sregs[cs_idx].cache.dpl = 3;
+            self.sregs[cs_idx].cache.segment = true;
+            self.sregs[cs_idx].cache.r#type = 0xb;
+            unsafe {
+                self.sregs[cs_idx].cache.u.segment.base = 0;
+                self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
+                self.sregs[cs_idx].cache.u.segment.g = true;
+                self.sregs[cs_idx].cache.u.segment.avl = false;
+                self.sregs[cs_idx].cache.u.segment.d_b = true;
+                self.sregs[cs_idx].cache.u.segment.l = false;
+            }
+
+            self.set_esp(self.ecx());
+            self.set_eip(self.edx());
         }
 
-        // EIP = EDX, ESP = ECX (32-bit mode)
-        self.set_esp(self.ecx());
-        self.set_eip(self.edx());
-
-        // Handle CPU mode change and alignment check for CPL=3
         self.handle_cpu_mode_change();
         self.handle_alignment_check();
-        // Update user_pl for paging
         self.user_pl = true;
 
-        // Load SS at CPL=3: (sysenter_cs_msr + 24) | 3
-        let ss_sel = (((self.msr.sysenter_cs_msr + 24) & 0xFFFC) | 3) as u16;
-        let ss_idx = BxSegregs::Ss as usize;
-        super::segment_ctrl_pro::parse_selector(ss_sel, &mut self.sregs[ss_idx].selector);
-        self.sregs[ss_idx].cache.valid =
-            SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
+        // SS = (sysenter_cs_msr + (os64 ? 40 : 24)) | 3 (Bochs proc_ctrl.cc:1046-1061)
+        let ss_offset: u32 = if instr.os64_l() != 0 { 40 } else { 24 };
+        super::segment_ctrl_pro::parse_selector(
+            (((self.msr.sysenter_cs_msr + ss_offset) & 0xFFFC) | 3) as u16,
+            &mut self.sregs[ss_idx].selector,
+        );
+        self.sregs[ss_idx].cache.valid = seg_valid;
         self.sregs[ss_idx].cache.p = true;
         self.sregs[ss_idx].cache.dpl = 3;
         self.sregs[ss_idx].cache.segment = true;
-        self.sregs[ss_idx].cache.r#type = 0x3; // DATA_READ_WRITE_ACCESSED
+        self.sregs[ss_idx].cache.r#type = 0x3;
         unsafe {
             self.sregs[ss_idx].cache.u.segment.base = 0;
             self.sregs[ss_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
             self.sregs[ss_idx].cache.u.segment.g = true;
-            self.sregs[ss_idx].cache.u.segment.d_b = true; // 32-bit
+            self.sregs[ss_idx].cache.u.segment.d_b = true;
             self.sregs[ss_idx].cache.u.segment.avl = false;
             self.sregs[ss_idx].cache.u.segment.l = false;
         }
 
-        tracing::debug!(
-            "SYSEXIT: CS={:#06x} SS={:#06x} EIP={:#010x} ESP={:#010x}",
-            cs_sel, ss_sel, self.eip(), self.esp()
-        );
+        Ok(())
+    }
+
+    // ========================================================================
+    // SYSCALL — Fast System Call (opcode 0F 05)
+    // Bochs: proc_ctrl.cc:1076-1218
+    // ========================================================================
+
+    pub(super) fn syscall(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
+        use super::decoder::BxSegregs;
+        use super::descriptor::{
+            SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
+        };
+        use super::eflags::EFlags;
+
+        if !self.efer.sce() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+
+        self.invalidate_prefetch_q();
+
+        let seg_valid =
+            SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
+        let cs_idx = BxSegregs::Cs as usize;
+        let ss_idx = BxSegregs::Ss as usize;
+
+        if self.long_mode() {
+            // Long mode SYSCALL (Bochs proc_ctrl.cc:1096-1148)
+            let saved_rip = self.rip();
+            self.set_rcx(saved_rip);
+            let saved_rflags = self.eflags.bits() & !EFlags::RF.bits();
+            self.set_r11(saved_rflags as u64);
+
+            let temp_rip = if self.cpu_mode == super::cpu::CpuMode::Long64 {
+                self.msr.lstar
+            } else {
+                self.msr.cstar
+            };
+
+            // CS: flat 64-bit code, DPL=0 (Bochs proc_ctrl.cc:1109-1122)
+            super::segment_ctrl_pro::parse_selector(
+                ((self.msr.star >> 32) & 0xFFFC) as u16,
+                &mut self.sregs[cs_idx].selector,
+            );
+            self.sregs[cs_idx].cache.valid = seg_valid;
+            self.sregs[cs_idx].cache.p = true;
+            self.sregs[cs_idx].cache.dpl = 0;
+            self.sregs[cs_idx].cache.segment = true;
+            self.sregs[cs_idx].cache.r#type = 0xb;
+            unsafe {
+                self.sregs[cs_idx].cache.u.segment.base = 0;
+                self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
+                self.sregs[cs_idx].cache.u.segment.g = true;
+                self.sregs[cs_idx].cache.u.segment.d_b = false;
+                self.sregs[cs_idx].cache.u.segment.l = true; // 64-bit code
+                self.sregs[cs_idx].cache.u.segment.avl = false;
+            }
+
+            self.handle_cpu_mode_change();
+            self.alignment_check_mask = 0;
+            self.user_pl = false;
+
+            // SS: flat data, DPL=0 (Bochs proc_ctrl.cc:1131-1144)
+            super::segment_ctrl_pro::parse_selector(
+                (((self.msr.star >> 32) + 8) & 0xFFFC) as u16,
+                &mut self.sregs[ss_idx].selector,
+            );
+            self.sregs[ss_idx].cache.valid = seg_valid;
+            self.sregs[ss_idx].cache.p = true;
+            self.sregs[ss_idx].cache.dpl = 0;
+            self.sregs[ss_idx].cache.segment = true;
+            self.sregs[ss_idx].cache.r#type = 0x3;
+            unsafe {
+                self.sregs[ss_idx].cache.u.segment.base = 0;
+                self.sregs[ss_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
+                self.sregs[ss_idx].cache.u.segment.g = true;
+                self.sregs[ss_idx].cache.u.segment.d_b = true;
+                self.sregs[ss_idx].cache.u.segment.l = false;
+                self.sregs[ss_idx].cache.u.segment.avl = false;
+            }
+
+            // Mask RFLAGS with FMASK, clear RF (Bochs proc_ctrl.cc:1146)
+            let new_flags = saved_rflags & !(self.msr.fmask as u32) & !EFlags::RF.bits();
+            self.write_eflags(new_flags, EFlags::VALID_MASK.bits());
+            self.set_rip(temp_rip);
+        } else {
+            // Legacy mode SYSCALL (Bochs proc_ctrl.cc:1151-1203)
+            let saved_eip = self.eip();
+            self.set_ecx(saved_eip);
+            let temp_rip = self.msr.star as u32;
+
+            // CS: flat 32-bit code, DPL=0 (Bochs proc_ctrl.cc:1158-1173)
+            super::segment_ctrl_pro::parse_selector(
+                ((self.msr.star >> 32) & 0xFFFC) as u16,
+                &mut self.sregs[cs_idx].selector,
+            );
+            self.sregs[cs_idx].cache.valid = seg_valid;
+            self.sregs[cs_idx].cache.p = true;
+            self.sregs[cs_idx].cache.dpl = 0;
+            self.sregs[cs_idx].cache.segment = true;
+            self.sregs[cs_idx].cache.r#type = 0xb;
+            unsafe {
+                self.sregs[cs_idx].cache.u.segment.base = 0;
+                self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
+                self.sregs[cs_idx].cache.u.segment.g = true;
+                self.sregs[cs_idx].cache.u.segment.d_b = true;
+                self.sregs[cs_idx].cache.u.segment.l = false;
+                self.sregs[cs_idx].cache.u.segment.avl = false;
+            }
+
+            self.handle_cpu_mode_change();
+            self.alignment_check_mask = 0;
+            self.user_pl = false;
+
+            // SS: flat data, DPL=0 (Bochs proc_ctrl.cc:1182-1197)
+            super::segment_ctrl_pro::parse_selector(
+                (((self.msr.star >> 32) + 8) & 0xFFFC) as u16,
+                &mut self.sregs[ss_idx].selector,
+            );
+            self.sregs[ss_idx].cache.valid = seg_valid;
+            self.sregs[ss_idx].cache.p = true;
+            self.sregs[ss_idx].cache.dpl = 0;
+            self.sregs[ss_idx].cache.segment = true;
+            self.sregs[ss_idx].cache.r#type = 0x3;
+            unsafe {
+                self.sregs[ss_idx].cache.u.segment.base = 0;
+                self.sregs[ss_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
+                self.sregs[ss_idx].cache.u.segment.g = true;
+                self.sregs[ss_idx].cache.u.segment.d_b = true;
+                self.sregs[ss_idx].cache.u.segment.l = false;
+                self.sregs[ss_idx].cache.u.segment.avl = false;
+            }
+
+            self.clear_vm();
+            self.clear_if();
+            self.clear_rf();
+            self.set_rip(temp_rip as u64);
+        }
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // SYSRET — Fast System Call Return (opcode 0F 07)
+    // Bochs: proc_ctrl.cc:1220-1358
+    // ========================================================================
+
+    pub(super) fn sysret(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        use super::decoder::BxSegregs;
+        use super::descriptor::{
+            SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
+        };
+        use super::eflags::EFlags;
+
+        if !self.efer.sce() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        if !self.protected_mode() || cpl != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        self.invalidate_prefetch_q();
+        self.monitor.reset_umonitor();
+
+        let seg_valid =
+            SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK | SEG_ACCESS_ROK4_G | SEG_ACCESS_WOK4_G;
+        let cs_idx = BxSegregs::Cs as usize;
+        let ss_idx = BxSegregs::Ss as usize;
+
+        if self.cpu_mode == super::cpu::CpuMode::Long64 {
+            // 64-bit mode SYSRET (Bochs proc_ctrl.cc:1244-1306)
+            if instr.os64_l() != 0 {
+                // Return to 64-bit mode (Bochs proc_ctrl.cc:1247-1269)
+                if !self.is_canonical(self.rcx()) {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+
+                // CS = ((star >> 48) + 16) | 3, 64-bit code DPL=3
+                super::segment_ctrl_pro::parse_selector(
+                    ((((self.msr.star >> 48) + 16) & 0xFFFC) | 3) as u16,
+                    &mut self.sregs[cs_idx].selector,
+                );
+                self.sregs[cs_idx].cache.valid = seg_valid;
+                self.sregs[cs_idx].cache.p = true;
+                self.sregs[cs_idx].cache.dpl = 3;
+                self.sregs[cs_idx].cache.segment = true;
+                self.sregs[cs_idx].cache.r#type = 0xb;
+                unsafe {
+                    self.sregs[cs_idx].cache.u.segment.base = 0;
+                    self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
+                    self.sregs[cs_idx].cache.u.segment.g = true;
+                    self.sregs[cs_idx].cache.u.segment.d_b = false;
+                    self.sregs[cs_idx].cache.u.segment.l = true; // 64-bit
+                    self.sregs[cs_idx].cache.u.segment.avl = false;
+                }
+
+                self.set_rip(self.rcx());
+            } else {
+                // Return to 32-bit compat mode (Bochs proc_ctrl.cc:1271-1289)
+                super::segment_ctrl_pro::parse_selector(
+                    (((self.msr.star >> 48) & 0xFFFC) | 3) as u16,
+                    &mut self.sregs[cs_idx].selector,
+                );
+                self.sregs[cs_idx].cache.valid = seg_valid;
+                self.sregs[cs_idx].cache.p = true;
+                self.sregs[cs_idx].cache.dpl = 3;
+                self.sregs[cs_idx].cache.segment = true;
+                self.sregs[cs_idx].cache.r#type = 0xb;
+                unsafe {
+                    self.sregs[cs_idx].cache.u.segment.base = 0;
+                    self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
+                    self.sregs[cs_idx].cache.u.segment.g = true;
+                    self.sregs[cs_idx].cache.u.segment.d_b = true;
+                    self.sregs[cs_idx].cache.u.segment.l = false;
+                    self.sregs[cs_idx].cache.u.segment.avl = false;
+                }
+
+                self.set_rip(self.ecx() as u64);
+            }
+
+            self.handle_cpu_mode_change();
+            self.handle_alignment_check();
+            self.user_pl = true;
+
+            // SS: (star >> 48) + 8) | 3 (Bochs proc_ctrl.cc:1296-1304)
+            super::segment_ctrl_pro::parse_selector(
+                ((((self.msr.star >> 48) + 8) & 0xFFFC) | 3) as u16,
+                &mut self.sregs[ss_idx].selector,
+            );
+            self.sregs[ss_idx].cache.valid = seg_valid;
+            self.sregs[ss_idx].cache.p = true;
+            self.sregs[ss_idx].cache.dpl = 3;
+            self.sregs[ss_idx].cache.segment = true;
+            self.sregs[ss_idx].cache.r#type = 0x3;
+
+            // Restore RFLAGS from R11 (Bochs proc_ctrl.cc:1305)
+            self.write_eflags(self.r11() as u32, EFlags::VALID_MASK.bits());
+        } else {
+            // Legacy/compat mode SYSRET (Bochs proc_ctrl.cc:1309-1344)
+            super::segment_ctrl_pro::parse_selector(
+                (((self.msr.star >> 48) & 0xFFFC) | 3) as u16,
+                &mut self.sregs[cs_idx].selector,
+            );
+            self.sregs[cs_idx].cache.valid = seg_valid;
+            self.sregs[cs_idx].cache.p = true;
+            self.sregs[cs_idx].cache.dpl = 3;
+            self.sregs[cs_idx].cache.segment = true;
+            self.sregs[cs_idx].cache.r#type = 0xb;
+            unsafe {
+                self.sregs[cs_idx].cache.u.segment.base = 0;
+                self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
+                self.sregs[cs_idx].cache.u.segment.g = true;
+                self.sregs[cs_idx].cache.u.segment.d_b = true;
+                self.sregs[cs_idx].cache.u.segment.l = false;
+                self.sregs[cs_idx].cache.u.segment.avl = false;
+            }
+
+            self.handle_cpu_mode_change();
+            self.handle_alignment_check();
+            self.user_pl = true;
+
+            // SS: (star >> 48) + 8) | 3 (Bochs proc_ctrl.cc:1333-1340)
+            super::segment_ctrl_pro::parse_selector(
+                ((((self.msr.star >> 48) + 8) & 0xFFFC) | 3) as u16,
+                &mut self.sregs[ss_idx].selector,
+            );
+            self.sregs[ss_idx].cache.valid = seg_valid;
+            self.sregs[ss_idx].cache.p = true;
+            self.sregs[ss_idx].cache.dpl = 3;
+            self.sregs[ss_idx].cache.segment = true;
+            self.sregs[ss_idx].cache.r#type = 0x3;
+
+            // Restore IF, set RIP from ECX (Bochs proc_ctrl.cc:1342-1343)
+            self.eflags.insert(super::eflags::EFlags::IF_);
+            self.set_rip(self.ecx() as u64);
+        }
+
+        self.handle_cpu_mode_change();
 
         Ok(())
     }
@@ -883,10 +1257,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Bochs: proc_ctrl.cc:1195-1226
     // ========================================================================
 
-    pub(super) fn xgetbv(
-        &mut self,
-        _instr: &super::decoder::Instruction,
-    ) -> super::Result<()> {
+    pub(super) fn xgetbv(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
         // CR4.OSXSAVE must be set
         if !self.cr4.osxsave() {
             tracing::debug!("XGETBV: CR4.OSXSAVE not set, #UD");
@@ -913,10 +1284,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Bochs: proc_ctrl.cc:1229-1302
     // ========================================================================
 
-    pub(super) fn xsetbv(
-        &mut self,
-        _instr: &super::decoder::Instruction,
-    ) -> super::Result<()> {
+    pub(super) fn xsetbv(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
         // CR4.OSXSAVE must be set
         if !self.cr4.osxsave() {
             tracing::debug!("XSETBV: CR4.OSXSAVE not set, #UD");
@@ -946,7 +1314,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if edx != 0 || (eax & !self.xcr0_suppmask) != 0 || (eax & 0x1) == 0 {
             tracing::debug!(
                 "XSETBV: invalid value EDX:EAX={:#010x}:{:#010x} suppmask={:#010x}, #GP(0)",
-                edx, eax, self.xcr0_suppmask
+                edx,
+                eax,
+                self.xcr0_suppmask
             );
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -969,10 +1339,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Saves x87 + SSE state + XSAVE header based on XCR0 & EDX:EAX mask
     // ========================================================================
 
-    pub(super) fn xsave(
-        &mut self,
-        instr: &super::decoder::Instruction,
-    ) -> super::Result<()> {
+    pub(super) fn xsave(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         use super::decoder::BxSegregs;
 
         // Check CR4.OSXSAVE and CR0.TS
@@ -1030,10 +1397,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Bochs: xsave.cc:242-449
     // ========================================================================
 
-    pub(super) fn xrstor(
-        &mut self,
-        instr: &super::decoder::Instruction,
-    ) -> super::Result<()> {
+    pub(super) fn xrstor(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         use super::decoder::BxSegregs;
 
         // Check CR4.OSXSAVE and CR0.TS
@@ -1112,11 +1476,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Save x87 FPU state to XSAVE area (offset 0-159)
     /// Same layout as FXSAVE bytes 0-159
-    fn xsave_x87_state(
-        &mut self,
-        seg: super::decoder::BxSegregs,
-        eaddr: u32,
-    ) -> super::Result<()> {
+    fn xsave_x87_state(&mut self, seg: super::decoder::BxSegregs, eaddr: u32) -> super::Result<()> {
         // FCW
         self.write_virtual_word(seg, eaddr, self.the_i387.cwd)?;
         // FSW
@@ -1151,11 +1511,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Save SSE state to XSAVE area (at given offset, 256 bytes: XMM0-XMM7)
-    fn xsave_sse_state(
-        &mut self,
-        seg: super::decoder::BxSegregs,
-        base: u32,
-    ) -> super::Result<()> {
+    fn xsave_sse_state(&mut self, seg: super::decoder::BxSegregs, base: u32) -> super::Result<()> {
         for i in 0..8u32 {
             let offset = base.wrapping_add(i * 16);
             let lo = unsafe { self.vmm[i as usize].zmm64u[0] };
@@ -1205,11 +1561,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Restore SSE state from XSAVE area
-    fn xrstor_sse_state(
-        &mut self,
-        seg: super::decoder::BxSegregs,
-        base: u32,
-    ) -> super::Result<()> {
+    fn xrstor_sse_state(&mut self, seg: super::decoder::BxSegregs, base: u32) -> super::Result<()> {
         for i in 0..8u32 {
             let offset = base.wrapping_add(i * 16);
             let lo = self.read_virtual_qword(seg, offset)?;

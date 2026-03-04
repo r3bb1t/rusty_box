@@ -146,23 +146,28 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // and NMI/SMI/INIT to decide whether to wake the CPU. For our
         // single-processor model, we check pending_event for PENDING_INTR
         // and also the LAPIC's intr flag.
+        //
+        // MWAIT_IF (ECX[0]=1 at MWAIT): wake on interrupt even when IF=0
+        // (Bochs event.cc:73-80)
+        let mwait_if = matches!(self.activity_state, CpuActivityState::MwaitIf);
+
         if self.pending_event & Self::BX_EVENT_PENDING_INTR != 0 {
-            if self.eflags.contains(EFlags::IF_) {
-                // External interrupt can wake from HLT
+            if self.eflags.contains(EFlags::IF_) || mwait_if {
+                // External interrupt can wake from HLT/MWAIT
                 self.activity_state = CpuActivityState::Active;
                 self.inhibit_mask = 0;
                 return false; // Continue to interrupt delivery
             }
         }
-        // LAPIC interrupt can also wake from HLT
+        // LAPIC interrupt can also wake from HLT/MWAIT
         #[cfg(feature = "bx_support_apic")]
-        if self.lapic.intr && self.eflags.contains(EFlags::IF_) {
+        if self.lapic.intr && (self.eflags.contains(EFlags::IF_) || mwait_if) {
             self.activity_state = CpuActivityState::Active;
             self.inhibit_mask = 0;
             return false; // Continue to LAPIC interrupt delivery
         }
 
-        // For now, if activity_state became ACTIVE (e.g., from reset), wake up
+        // Monitor triggered by a write (wakeup_monitor set activity_state to Active)
         if matches!(self.activity_state, CpuActivityState::Active) {
             tracing::debug!("CPU activity_state became ACTIVE, waking up");
             self.inhibit_mask = 0;

@@ -574,6 +574,9 @@ pub const fn fetch_decode32_inplace(
             // BT/BTS/BTR/BTC Ev,Ib (0F BA /4../7): rm=operand(dst), nnn=opcode-ext(src)
             // Implementations use instr.dst() for Ev register form, so DST must be rm
             || b1 == 0x1BA
+            // SHLD Ed,Gd,Ib/CL (0F A4/A5), SHRD Ed,Gd,Ib/CL (0F AC/AD):
+            // rm=Ed=destination (shifted), nnn=Gd=source (provides bits)
+            || matches!(b1, 0x1A4 | 0x1A5 | 0x1AC | 0x1AD)
         {
             // Ed,Gd format: rm (Ed) is destination, nnn (Gd) is source
             // Examples: ADD Ed,Gd | SUB Ed,Gd | MOV Ed,Gd | BTS EdGd | XADD EbGb

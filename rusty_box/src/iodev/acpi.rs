@@ -521,7 +521,8 @@ impl BxAcpiCtrl {
                 // SMBus control (acpi.cc:482-484)
                 0x02 => {
                     self.smbus.ctl = 0;
-                    // TODO: execute SMBus command (Bochs acpi.cc:484)
+                    // Bochs acpi.cc:484 also has "TODO: execute SMBus command" —
+                    // SMBus transaction execution is unimplemented in Bochs itself.
                 }
                 // SMBus command (acpi.cc:486-487)
                 0x03 => self.smbus.cmd = 0,

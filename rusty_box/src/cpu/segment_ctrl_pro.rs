@@ -124,7 +124,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 limit_scaled,
                 g,
                 d_b,
-                l: false, // TODO: Support 64-bit mode
+                l: (dword2 & 0x00200000) != 0, // L bit for 64-bit mode
                 avl,
             };
 
@@ -251,6 +251,109 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
     }
 
+    /// Get RSP from TSS for a given privilege level (64-bit long mode).
+    /// Based on BX_CPU_C::get_RSP_from_TSS in tasking.cc:922
+    pub(super) fn get_rsp_from_tss(&mut self, pl: u8) -> Result<u64> {
+        if self.tr.cache.valid == 0 {
+            tracing::error!("get_rsp_from_tss: TR.cache invalid");
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Ts,
+                error_code: 0,
+            });
+        }
+
+        // 64-bit TSS: RSP fields at offsets 4, 12, 20 for PL 0, 1, 2
+        let tss_stackaddr = (8 * pl as u32) + 4;
+        let limit_scaled = unsafe { self.tr.cache.u.segment.limit_scaled };
+        if (tss_stackaddr + 7) > limit_scaled {
+            tracing::debug!("get_rsp_from_tss: TSSstackaddr > TSS.LIMIT");
+            let err_code = self.tr.selector.value & 0xfffc;
+            self.exception(Exception::Ts, err_code)?;
+            unreachable!();
+        }
+
+        let tss_base = unsafe { self.tr.cache.u.segment.base };
+        let rsp = self.system_read_qword(tss_base + tss_stackaddr as u64)?;
+
+        if !self.is_canonical(rsp) {
+            tracing::error!("get_rsp_from_tss: canonical address failure {:#018x}", rsp);
+            let err_code = self.sregs[BxSegregs::Ss as usize].selector.value & 0xfffc;
+            self.exception(Exception::Ss, err_code)?;
+            unreachable!();
+        }
+
+        Ok(rsp)
+    }
+
+    /// Fetch 16-byte (128-bit) raw descriptor from GDT/LDT for 64-bit system descriptors.
+    /// Returns (dword1, dword2, dword3) where dword3 is the upper 32 bits of the 64-bit base.
+    /// Based on BX_CPU_C::fetch_raw_descriptor_64 in segment_ctrl_pro.cc:599
+    pub(super) fn fetch_raw_descriptor_64(&self, selector: &BxSelector) -> Result<(u32, u32, u32)> {
+        let index = selector.index as u32;
+        let offset: u64;
+
+        if selector.ti == 0 {
+            // GDT — need 16 bytes (index*8 + 15)
+            let index_offset = index * 8 + 15;
+            if index_offset > self.gdtr.limit as u32 {
+                tracing::error!(
+                    "fetch_raw_descriptor_64: GDT: index ({}) {} > limit ({})",
+                    index_offset,
+                    index,
+                    self.gdtr.limit
+                );
+                return Err(super::error::CpuError::BadVector {
+                    vector: Exception::Gp,
+                    error_code: selector.value & 0xfffc,
+                });
+            }
+            offset = self.gdtr.base + (index as u64 * 8);
+        } else {
+            // LDT
+            if self.ldtr.cache.valid == 0 {
+                tracing::error!("fetch_raw_descriptor_64: LDTR.valid=0");
+                return Err(super::error::CpuError::BadVector {
+                    vector: Exception::Gp,
+                    error_code: selector.value & 0xfffc,
+                });
+            }
+            let ldt_limit = unsafe { self.ldtr.cache.u.segment.limit_scaled };
+            let index_offset = index * 8 + 15;
+            if index_offset > ldt_limit {
+                tracing::error!(
+                    "fetch_raw_descriptor_64: LDT: index ({}) {} > limit ({})",
+                    index_offset,
+                    index,
+                    ldt_limit
+                );
+                return Err(super::error::CpuError::BadVector {
+                    vector: Exception::Gp,
+                    error_code: selector.value & 0xfffc,
+                });
+            }
+            offset = unsafe { self.ldtr.cache.u.segment.base } + (index as u64 * 8);
+        }
+
+        // Read two qwords (16 bytes total = 128-bit descriptor)
+        let raw_descriptor1 = self.system_read_qword(offset)?;
+        let raw_descriptor2 = self.system_read_qword(offset + 8)?;
+
+        // Check that extended attributes in dword4 don't have type bits set
+        if raw_descriptor2 & 0x00001F0000000000u64 != 0 {
+            tracing::error!("fetch_raw_descriptor_64: extended attributes DWORD4 TYPE != 0");
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+                error_code: selector.value & 0xfffc,
+            });
+        }
+
+        let dword1 = (raw_descriptor1 & 0xFFFFFFFF) as u32;
+        let dword2 = ((raw_descriptor1 >> 32) & 0xFFFFFFFF) as u32;
+        let dword3 = (raw_descriptor2 & 0xFFFFFFFF) as u32;
+
+        Ok((dword1, dword2, dword3))
+    }
+
     /// Write word to new stack at given privilege level.
     ///
     /// Based on BX_CPU_C::write_new_stack_word in access.cc.
@@ -283,6 +386,19 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         let seg_base = unsafe { seg.cache.u.segment.base };
         let laddr = (seg_base + addr as u64) & 0xFFFFFFFF;
         self.system_write_dword(laddr, value)
+    }
+
+    /// Write qword to new stack at given privilege level (64-bit linear address variant).
+    ///
+    /// Based on BX_CPU_C::write_new_stack_qword(bx_address laddr, ...) in access.cc.
+    /// Used in long mode where the linear address is 64-bit and there is no segment base.
+    pub(super) fn write_new_stack_qword_64(
+        &mut self,
+        laddr: u64,
+        _dpl: u8,
+        value: u64,
+    ) -> Result<()> {
+        self.system_write_qword(laddr, value)
     }
 
     /// Load SS segment register
@@ -457,24 +573,37 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         rip: u64,
         cpl: u8,
     ) -> Result<()> {
-        // Mask RIP to 32 bits for legacy mode
-        let rip = rip & 0xFFFFFFFF;
-
-        // Check RIP is within segment limit
-        let limit = unsafe { descriptor.u.segment.limit_scaled };
-        if rip as u32 > limit {
-            tracing::error!("branch_far: RIP {:#010x} > limit {:#010x}", rip, limit);
-            return Err(super::error::CpuError::BadVector {
-                vector: Exception::Gp,
-                error_code: 0,
-            });
+        // Bochs ctrl_xfer_pro.cc:122-147
+        // In long mode with a 64-bit code segment, do canonical check instead of limit check
+        if self.long_mode() && unsafe { descriptor.u.segment.l } {
+            if !self.is_canonical(rip) {
+                tracing::error!("branch_far: canonical RIP violation {:#018x}", rip);
+                return self.exception(Exception::Gp, 0);
+            }
+        } else {
+            // Legacy mode: mask RIP to 32 bits and check segment limit
+            let rip_masked = rip & 0xFFFFFFFF;
+            let limit = unsafe { descriptor.u.segment.limit_scaled };
+            if rip_masked as u32 > limit {
+                tracing::error!(
+                    "branch_far: RIP {:#010x} > limit {:#010x}",
+                    rip_masked,
+                    limit
+                );
+                return self.exception(Exception::Gp, 0);
+            }
         }
 
         // Load CS with new descriptor
         self.load_cs(selector, descriptor, cpl)?;
 
         // Update RIP
-        self.set_rip(rip);
+        // In long mode with L=1, RIP is full 64-bit; otherwise mask to 32 bits
+        if self.long_mode() && unsafe { descriptor.u.segment.l } {
+            self.set_rip(rip);
+        } else {
+            self.set_rip(rip & 0xFFFFFFFF);
+        }
 
         Ok(())
     }
@@ -530,6 +659,23 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             if descriptor.dpl < selector.rpl {
                 tracing::error!("jump_protected: gate.dpl < selector.rpl");
                 return self.exception(Exception::Gp, cs_raw & 0xfffc);
+            }
+
+            // In long mode, only 386 call gates (type 0xC) are allowed
+            // Bochs jmp_far.cc:72-86
+            if self.long_mode() {
+                if descriptor.r#type != 0xC {
+                    tracing::error!(
+                        "jump_protected: gate type {:#x} unsupported in long mode",
+                        descriptor.r#type
+                    );
+                    return self.exception(Exception::Gp, cs_raw & 0xfffc);
+                }
+                if !descriptor.p {
+                    tracing::error!("jump_protected: call gate not present!");
+                    return self.exception(Exception::Np, cs_raw & 0xfffc);
+                }
+                return self.jmp_call_gate64(&selector);
             }
 
             match descriptor.r#type {
@@ -1724,6 +1870,64 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     }
 
     // =========================================================================
+    // JMP call gate 64-bit — JMP through a 64-bit call gate (long mode)
+    // Based on Bochs jmp_far.cc:224-279 jmp_call_gate64()
+    // =========================================================================
+
+    fn jmp_call_gate64(&mut self, gate_selector: &BxSelector) -> Result<()> {
+        use super::descriptor::is_data_segment;
+
+        tracing::debug!("jmp_call_gate64: jump to CALL GATE 64");
+
+        let (dword1, dword2, dword3) = self.fetch_raw_descriptor_64(gate_selector)?;
+        let gate_descriptor = self.parse_descriptor(dword1, dword2)?;
+
+        let dest_selector = unsafe { gate_descriptor.u.gate.dest_selector };
+        // selector must not be null else #GP(0)
+        if (dest_selector & 0xfffc) == 0 {
+            tracing::error!("jmp_call_gate64: selector in gate null");
+            return self.exception(Exception::Gp, 0);
+        }
+
+        let mut cs_selector = BxSelector::default();
+        parse_selector(dest_selector, &mut cs_selector);
+
+        let (dw1, dw2) = match self.fetch_raw_descriptor(&cs_selector) {
+            Ok(v) => v,
+            Err(_) => return self.exception(Exception::Gp, dest_selector & 0xfffc),
+        };
+        let mut cs_descriptor = self.parse_descriptor(dw1, dw2)?;
+
+        // Find the RIP from the gate_descriptor: high 32 bits from dword3, low 32 from gate offset
+        let gate_offset_lo = unsafe { gate_descriptor.u.gate.dest_offset };
+        let new_rip = ((dword3 as u64) << 32) | (gate_offset_lo as u64);
+
+        // AR byte of selected descriptor must indicate code segment, else #GP(code segment selector)
+        if cs_descriptor.valid == 0
+            || !cs_descriptor.segment
+            || is_data_segment(cs_descriptor.r#type)
+        {
+            tracing::error!("jmp_call_gate64: not code segment in 64-bit call gate");
+            return self.exception(Exception::Gp, dest_selector & 0xfffc);
+        }
+
+        // In long mode, only 64-bit call gates are allowed, and they must point
+        // to 64-bit code segments (L=1, D=0), else #GP(selector)
+        if !cs_descriptor.is_long64_segment() || unsafe { cs_descriptor.u.segment.d_b } {
+            tracing::error!("jmp_call_gate64: not 64-bit code segment in 64-bit call gate");
+            return self.exception(Exception::Gp, dest_selector & 0xfffc);
+        }
+
+        // check code-segment descriptor
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        self.check_cs(&cs_descriptor, dest_selector, 0, cpl)?;
+
+        // and transfer the control
+        self.branch_far(&mut cs_selector, &mut cs_descriptor, new_rip, cpl)?;
+        Ok(())
+    }
+
+    // =========================================================================
     // Task gate for JMP — JMP through a task gate
     // Based on Bochs jmp_far.cc:129-178 task_gate()
     // =========================================================================
@@ -1777,5 +1981,719 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             false,
             0,
         )
+    }
+
+    // =========================================================================
+    // 64-bit long mode: call_protected_64
+    // Based on Bochs call_far.cc:29-228 (the long_mode path)
+    // =========================================================================
+
+    /// Protected mode far call for 64-bit mode.
+    /// Based on Bochs call_far.cc call_protected() with long_mode() paths.
+    ///
+    /// In long mode, the call_protected function handles:
+    /// 1. Normal code segment: push return CS:RIP, branch_far
+    /// 2. 64-bit call gates (type 0xC only allowed in long mode)
+    pub(super) fn call_protected_64(
+        &mut self,
+        instr: &super::decoder::Instruction,
+        cs_raw: u16,
+        disp: u64,
+    ) -> Result<()> {
+        if (cs_raw & 0xfffc) == 0 {
+            tracing::debug!("call_protected_64: CS selector null");
+            return self.exception(Exception::Gp, 0);
+        }
+
+        let mut cs_selector = BxSelector::default();
+        parse_selector(cs_raw, &mut cs_selector);
+
+        let (dword1, dword2) = match self.fetch_raw_descriptor(&cs_selector) {
+            Ok(v) => v,
+            Err(_) => return self.exception(Exception::Gp, cs_raw & 0xfffc),
+        };
+        let mut cs_descriptor = self.parse_descriptor(dword1, dword2)?;
+
+        if cs_descriptor.valid == 0 {
+            tracing::error!("call_protected_64: invalid CS descriptor");
+            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+        }
+
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+
+        if cs_descriptor.segment {
+            // Normal code segment
+            self.check_cs(&cs_descriptor, cs_raw, cs_selector.rpl, cpl)?;
+
+            if self.long_mode() && unsafe { cs_descriptor.u.segment.l } {
+                // Moving to 64-bit long mode code segment — use 64-bit RSP directly
+                let temp_rsp = self.rsp();
+
+                if instr.os64_l() != 0 {
+                    self.write_new_stack_qword_64(
+                        temp_rsp.wrapping_sub(8),
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Cs as usize].selector.value as u64,
+                    )?;
+                    self.write_new_stack_qword_64(
+                        temp_rsp.wrapping_sub(16),
+                        cs_descriptor.dpl,
+                        self.rip(),
+                    )?;
+                    self.branch_far(&mut cs_selector, &mut cs_descriptor, disp, cpl)?;
+                    self.set_rsp(temp_rsp.wrapping_sub(16));
+                } else if instr.os32_l() != 0 {
+                    self.write_new_stack_qword_64(
+                        temp_rsp.wrapping_sub(4),
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Cs as usize].selector.value as u64,
+                    )?;
+                    self.write_new_stack_qword_64(
+                        temp_rsp.wrapping_sub(8),
+                        cs_descriptor.dpl,
+                        self.eip() as u64,
+                    )?;
+                    self.branch_far(&mut cs_selector, &mut cs_descriptor, disp, cpl)?;
+                    self.set_rsp(temp_rsp.wrapping_sub(8));
+                } else {
+                    self.write_new_stack_qword_64(
+                        temp_rsp.wrapping_sub(2),
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Cs as usize].selector.value as u64,
+                    )?;
+                    self.write_new_stack_qword_64(
+                        temp_rsp.wrapping_sub(4),
+                        cs_descriptor.dpl,
+                        self.get_ip() as u64,
+                    )?;
+                    self.branch_far(&mut cs_selector, &mut cs_descriptor, disp, cpl)?;
+                    self.set_rsp(temp_rsp.wrapping_sub(4));
+                }
+            } else {
+                // Legacy mode within long mode (compatibility sub-mode)
+                let temp_rsp = if unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b }
+                {
+                    self.esp() as u64
+                } else {
+                    self.sp() as u64
+                };
+
+                let ss_seg = self.sregs[BxSegregs::Ss as usize].clone();
+
+                if instr.os32_l() != 0 {
+                    self.write_new_stack_dword(
+                        &ss_seg,
+                        temp_rsp.wrapping_sub(4) as u32,
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Cs as usize].selector.value as u32,
+                    )?;
+                    self.write_new_stack_dword(
+                        &ss_seg,
+                        temp_rsp.wrapping_sub(8) as u32,
+                        cs_descriptor.dpl,
+                        self.eip(),
+                    )?;
+                    self.branch_far(&mut cs_selector, &mut cs_descriptor, disp, cpl)?;
+                    if unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b } {
+                        self.set_esp(temp_rsp.wrapping_sub(8) as u32);
+                    } else {
+                        self.set_sp(temp_rsp.wrapping_sub(8) as u16);
+                    }
+                } else {
+                    self.write_new_stack_word(
+                        &ss_seg,
+                        temp_rsp.wrapping_sub(2) as u32,
+                        cs_descriptor.dpl,
+                        self.sregs[BxSegregs::Cs as usize].selector.value,
+                    )?;
+                    self.write_new_stack_word(
+                        &ss_seg,
+                        temp_rsp.wrapping_sub(4) as u32,
+                        cs_descriptor.dpl,
+                        self.get_ip(),
+                    )?;
+                    self.branch_far(&mut cs_selector, &mut cs_descriptor, disp, cpl)?;
+                    if unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b } {
+                        self.set_esp(temp_rsp.wrapping_sub(4) as u32);
+                    } else {
+                        self.set_sp(temp_rsp.wrapping_sub(4) as u16);
+                    }
+                }
+            }
+            return Ok(());
+        }
+
+        // System/gate descriptor
+        let gate_descriptor = cs_descriptor;
+        let gate_selector = cs_selector;
+
+        // DPL checks
+        if gate_descriptor.dpl < cpl {
+            tracing::error!("call_protected_64: descriptor.dpl < CPL");
+            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+        }
+        if gate_descriptor.dpl < gate_selector.rpl {
+            tracing::error!("call_protected_64: descriptor.dpl < selector.rpl");
+            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+        }
+
+        // In long mode, only 386 call gates (type 0xC) are allowed
+        if gate_descriptor.r#type != 0xC {
+            tracing::error!(
+                "call_protected_64: gate type {:#x} unsupported in long mode",
+                gate_descriptor.r#type
+            );
+            return self.exception(Exception::Gp, cs_raw & 0xfffc);
+        }
+        if !gate_descriptor.p {
+            tracing::error!("call_protected_64: call gate not present");
+            return self.exception(Exception::Np, cs_raw & 0xfffc);
+        }
+
+        // call_gate64 implementation (inline from Bochs call_far.cc:504-629)
+        self.call_gate64(&gate_selector)
+    }
+
+    /// 64-bit call gate implementation.
+    /// Based on Bochs call_far.cc:504-629 call_gate64()
+    fn call_gate64(&mut self, gate_selector: &BxSelector) -> Result<()> {
+        use super::descriptor::{is_code_segment_non_conforming, is_data_segment};
+
+        tracing::debug!("call_gate64: CALL 64bit call gate");
+
+        let (dword1, dword2, dword3) = self.fetch_raw_descriptor_64(gate_selector)?;
+        let gate_descriptor = self.parse_descriptor(dword1, dword2)?;
+
+        let dest_selector = unsafe { gate_descriptor.u.gate.dest_selector };
+        if (dest_selector & 0xfffc) == 0 {
+            tracing::error!("call_gate64: selector in gate null");
+            return self.exception(Exception::Gp, 0);
+        }
+
+        let mut cs_selector = BxSelector::default();
+        parse_selector(dest_selector, &mut cs_selector);
+
+        let (dw1, dw2) = match self.fetch_raw_descriptor(&cs_selector) {
+            Ok(v) => v,
+            Err(_) => return self.exception(Exception::Gp, dest_selector & 0xfffc),
+        };
+        let mut cs_descriptor = self.parse_descriptor(dw1, dw2)?;
+
+        // Compute the full 64-bit RIP from the gate descriptor
+        let gate_offset_lo = unsafe { gate_descriptor.u.gate.dest_offset };
+        let new_rip = ((dword3 as u64) << 32) | (gate_offset_lo as u64);
+
+        // AR byte must indicate code segment, DPL <= CPL
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        if cs_descriptor.valid == 0
+            || !cs_descriptor.segment
+            || is_data_segment(cs_descriptor.r#type)
+            || cs_descriptor.dpl > cpl
+        {
+            tracing::error!("call_gate64: selected descriptor is not code");
+            return self.exception(Exception::Gp, dest_selector & 0xfffc);
+        }
+
+        // Must be a 64-bit code segment (L=1, D=0)
+        if !cs_descriptor.is_long64_segment() || unsafe { cs_descriptor.u.segment.d_b } {
+            tracing::error!("call_gate64: not 64-bit code segment in call gate 64");
+            return self.exception(Exception::Gp, dest_selector & 0xfffc);
+        }
+
+        // Code segment must be present
+        if !cs_descriptor.p {
+            tracing::error!("call_gate64: code segment not present");
+            return self.exception(Exception::Np, dest_selector & 0xfffc);
+        }
+
+        let old_cs = self.sregs[BxSegregs::Cs as usize].selector.value as u64;
+        let old_rip = self.rip();
+
+        // CALL GATE TO MORE PRIVILEGE
+        if is_code_segment_non_conforming(cs_descriptor.r#type) && cs_descriptor.dpl < cpl {
+            tracing::debug!("CALL GATE64 TO MORE PRIVILEGE LEVEL");
+
+            let rsp_for_cpl_x = self.get_rsp_from_tss(cs_descriptor.dpl)?;
+            let old_ss = self.sregs[BxSegregs::Ss as usize].selector.value as u64;
+            let old_rsp = self.rsp();
+
+            // Push old stack long pointer onto new stack
+            self.write_new_stack_qword_64(
+                rsp_for_cpl_x.wrapping_sub(8),
+                cs_descriptor.dpl,
+                old_ss,
+            )?;
+            self.write_new_stack_qword_64(
+                rsp_for_cpl_x.wrapping_sub(16),
+                cs_descriptor.dpl,
+                old_rsp,
+            )?;
+            // Push long pointer to return address onto new stack
+            self.write_new_stack_qword_64(
+                rsp_for_cpl_x.wrapping_sub(24),
+                cs_descriptor.dpl,
+                old_cs,
+            )?;
+            self.write_new_stack_qword_64(
+                rsp_for_cpl_x.wrapping_sub(32),
+                cs_descriptor.dpl,
+                old_rip,
+            )?;
+            let new_rsp = rsp_for_cpl_x.wrapping_sub(32);
+
+            // Load CS:RIP (guaranteed to be in 64 bit mode)
+            let dest_dpl = cs_descriptor.dpl;
+            self.branch_far(&mut cs_selector, &mut cs_descriptor, new_rip, dest_dpl)?;
+
+            // Set up null SS descriptor
+            self.load_null_selector(BxSegregs::Ss, dest_dpl as u16);
+
+            self.set_rsp(new_rsp);
+        } else {
+            // CALL GATE64 TO SAME PRIVILEGE
+            tracing::debug!("CALL GATE64 TO SAME PRIVILEGE");
+
+            // Push to 64-bit stack
+            self.write_new_stack_qword_64(self.rsp().wrapping_sub(8), cpl, old_cs)?;
+            self.write_new_stack_qword_64(self.rsp().wrapping_sub(16), cpl, old_rip)?;
+
+            // Load CS:RIP (guaranteed to be in 64 bit mode)
+            self.branch_far(&mut cs_selector, &mut cs_descriptor, new_rip, cpl)?;
+
+            self.set_rsp(self.rsp().wrapping_sub(16));
+        }
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // 64-bit long mode: return_protected_64
+    // Based on Bochs ret_far.cc:29-268 return_protected() with long mode paths
+    // =========================================================================
+
+    /// Protected mode far return for 64-bit mode.
+    /// Based on Bochs ret_far.cc return_protected() with all X86_64 paths.
+    pub(super) fn return_protected_64(
+        &mut self,
+        instr: &super::decoder::Instruction,
+        pop_bytes: u16,
+    ) -> Result<()> {
+        let temp_rsp: u64 = if self.long64_mode() {
+            self.rsp()
+        } else if unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b } {
+            self.esp() as u64
+        } else {
+            self.sp() as u64
+        };
+
+        let (raw_cs_selector, return_rip, stack_param_offset): (u16, u64, u64) =
+            if instr.os64_l() != 0 {
+                let cs = self.stack_read_qword(temp_rsp.wrapping_add(8)) as u16;
+                let rip = self.stack_read_qword(temp_rsp);
+                (cs, rip, 16)
+            } else if instr.os32_l() != 0 {
+                // Bochs ret_far.cc:66-68: CS at temp_RSP+4, RIP at temp_RSP+0
+                let cs = self.stack_read_dword((temp_rsp as u32).wrapping_add(4))? as u16;
+                let rip = self.stack_read_dword(temp_rsp as u32)? as u64;
+                (cs, rip, 8)
+            } else {
+                let cs = self.stack_read_word((temp_rsp as u32).wrapping_add(2))?;
+                let rip = self.stack_read_word(temp_rsp as u32)? as u64;
+                (cs, rip, 4)
+            };
+
+        if (raw_cs_selector & 0xfffc) == 0 {
+            tracing::error!("return_protected_64: CS selector null");
+            return self.exception(Exception::Gp, 0);
+        }
+
+        let mut cs_selector = BxSelector::default();
+        parse_selector(raw_cs_selector, &mut cs_selector);
+
+        let (dword1, dword2) = match self.fetch_raw_descriptor(&cs_selector) {
+            Ok(v) => v,
+            Err(_) => return self.exception(Exception::Gp, raw_cs_selector & 0xfffc),
+        };
+        let mut cs_descriptor = self.parse_descriptor(dword1, dword2)?;
+
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        if cs_selector.rpl < cpl {
+            tracing::error!("return_protected_64: CS.rpl < CPL");
+            return self.exception(Exception::Gp, raw_cs_selector & 0xfffc);
+        }
+
+        // check_cs validates code segment, DPL, and presence
+        self.check_cs(&cs_descriptor, raw_cs_selector, 0, cs_selector.rpl)?;
+
+        // RETURN TO SAME PRIVILEGE LEVEL
+        if cs_selector.rpl == cpl {
+            tracing::debug!("return_protected_64: return to SAME PRIVILEGE LEVEL");
+
+            self.branch_far(&mut cs_selector, &mut cs_descriptor, return_rip, cpl)?;
+
+            if self.long64_mode() {
+                self.set_rsp(
+                    self.rsp()
+                        .wrapping_add(stack_param_offset)
+                        .wrapping_add(pop_bytes as u64),
+                );
+            } else if unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b } {
+                let val = self
+                    .esp()
+                    .wrapping_add(stack_param_offset as u32)
+                    .wrapping_add(pop_bytes as u32);
+                self.set_esp(val);
+            } else {
+                let val = self
+                    .sp()
+                    .wrapping_add(stack_param_offset as u16)
+                    .wrapping_add(pop_bytes);
+                self.set_sp(val);
+            }
+        } else {
+            // RETURN TO OUTER PRIVILEGE LEVEL
+            tracing::debug!("return_protected_64: return to OUTER PRIVILEGE LEVEL");
+
+            let (raw_ss_selector, return_rsp): (u16, u64) = if instr.os64_l() != 0 {
+                let ss = self
+                    .stack_read_qword(temp_rsp.wrapping_add(24).wrapping_add(pop_bytes as u64))
+                    as u16;
+                let rsp =
+                    self.stack_read_qword(temp_rsp.wrapping_add(16).wrapping_add(pop_bytes as u64));
+                (ss, rsp)
+            } else if instr.os32_l() != 0 {
+                let ss = self.stack_read_word(
+                    (temp_rsp as u32)
+                        .wrapping_add(12)
+                        .wrapping_add(pop_bytes as u32),
+                )?;
+                let rsp = self.stack_read_dword(
+                    (temp_rsp as u32)
+                        .wrapping_add(8)
+                        .wrapping_add(pop_bytes as u32),
+                )? as u64;
+                (ss, rsp)
+            } else {
+                let ss = self.stack_read_word(
+                    (temp_rsp as u32)
+                        .wrapping_add(6)
+                        .wrapping_add(pop_bytes as u32),
+                )?;
+                let rsp = self.stack_read_word(
+                    (temp_rsp as u32)
+                        .wrapping_add(4)
+                        .wrapping_add(pop_bytes as u32),
+                )? as u64;
+                (ss, rsp)
+            };
+
+            let mut ss_selector = BxSelector::default();
+            parse_selector(raw_ss_selector, &mut ss_selector);
+
+            let mut ss_descriptor = BxDescriptor::default();
+
+            if (raw_ss_selector & 0xfffc) == 0 {
+                // Null SS is allowed in long mode if it's a 64-bit code segment
+                // and not returning to ring 3
+                if self.long_mode() {
+                    if !cs_descriptor.is_long64_segment() || cs_selector.rpl == 3 {
+                        tracing::error!("return_protected_64: SS selector null");
+                        return self.exception(Exception::Gp, 0);
+                    }
+                } else {
+                    tracing::error!("return_protected_64: SS selector null");
+                    return self.exception(Exception::Gp, 0);
+                }
+            } else {
+                let (ss_dw1, ss_dw2) = match self.fetch_raw_descriptor(&ss_selector) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return self.exception(Exception::Gp, raw_ss_selector & 0xfffc);
+                    }
+                };
+                ss_descriptor = self.parse_descriptor(ss_dw1, ss_dw2)?;
+
+                if ss_selector.rpl != cs_selector.rpl {
+                    tracing::error!("return_protected_64: ss.rpl != cs.rpl");
+                    return self.exception(Exception::Gp, raw_ss_selector & 0xfffc);
+                }
+                if ss_descriptor.valid == 0
+                    || !ss_descriptor.segment
+                    || ss_descriptor.r#type >= 8 // code segment
+                    || (ss_descriptor.r#type & 2) == 0
+                // not writable
+                {
+                    tracing::error!("return_protected_64: SS AR byte not writable data");
+                    return self.exception(Exception::Gp, raw_ss_selector & 0xfffc);
+                }
+                if ss_descriptor.dpl != cs_selector.rpl {
+                    tracing::error!("return_protected_64: SS.dpl != cs.rpl");
+                    return self.exception(Exception::Gp, raw_ss_selector & 0xfffc);
+                }
+                if !ss_descriptor.p {
+                    tracing::error!("return_protected_64: ss.present == 0");
+                    return self.exception(Exception::Ss, raw_ss_selector & 0xfffc);
+                }
+            }
+
+            // Load new CS
+            let cs_rpl = cs_selector.rpl;
+            self.branch_far(&mut cs_selector, &mut cs_descriptor, return_rip, cs_rpl)?;
+
+            if (raw_ss_selector & 0xfffc) != 0 {
+                // Load SS:RSP from stack
+                self.load_ss(&mut ss_selector, &mut ss_descriptor, cs_rpl)?;
+            } else {
+                // In 64-bit mode with null SS
+                self.load_null_selector(BxSegregs::Ss, raw_ss_selector);
+            }
+
+            if self.long64_mode() {
+                self.set_rsp(return_rsp.wrapping_add(pop_bytes as u64));
+            } else if unsafe { ss_descriptor.u.segment.d_b } {
+                self.set_esp((return_rsp as u32).wrapping_add(pop_bytes as u32));
+            } else {
+                self.set_sp((return_rsp as u16).wrapping_add(pop_bytes));
+            }
+
+            // Validate segment registers for privilege change
+            self.validate_seg_regs();
+        }
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // 64-bit long mode: long_iret
+    // Based on Bochs iret.cc:346-617 long_iret()
+    // =========================================================================
+
+    /// Long mode IRET implementation.
+    /// Based on Bochs iret.cc:348-616 long_iret()
+    pub(super) fn long_iret(&mut self, instr: &super::decoder::Instruction) -> Result<()> {
+        use super::eflags::EFlags;
+
+        tracing::debug!("LONG MODE IRET");
+
+        if self.eflags.contains(EFlags::NT) {
+            tracing::error!("iret64: return from nested task in x86-64 mode!");
+            return self.exception(Exception::Gp, 0);
+        }
+
+        // Determine temp_RSP based on mode
+        let temp_rsp: u64 = if self.long64_mode() {
+            self.rsp()
+        } else if unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b } {
+            self.esp() as u64
+        } else {
+            self.sp() as u64
+        };
+
+        // Read RIP, CS, EFLAGS from stack based on operand size
+        let (new_eflags, raw_cs_selector, new_rip, top_nbytes_same): (u32, u16, u64, u64) =
+            if instr.os64_l() != 0 {
+                let eflags = self.stack_read_qword(temp_rsp.wrapping_add(16)) as u32;
+                let cs = self.stack_read_qword(temp_rsp.wrapping_add(8)) as u16;
+                let rip = self.stack_read_qword(temp_rsp);
+                (eflags, cs, rip, 24)
+            } else if instr.os32_l() != 0 {
+                let eflags = self.stack_read_dword((temp_rsp as u32).wrapping_add(8))?;
+                let cs = self.stack_read_dword((temp_rsp as u32).wrapping_add(4))? as u16;
+                let rip = self.stack_read_dword(temp_rsp as u32)? as u64;
+                (eflags, cs, rip, 12)
+            } else {
+                let eflags = self.stack_read_word((temp_rsp as u32).wrapping_add(4))? as u32;
+                let cs = self.stack_read_word((temp_rsp as u32).wrapping_add(2))?;
+                let rip = self.stack_read_word(temp_rsp as u32)? as u64;
+                (eflags, cs, rip, 6)
+            };
+
+        // Ignore VM flag in long mode
+        let new_eflags = new_eflags & !EFlags::VM.bits();
+
+        let mut cs_selector = BxSelector::default();
+        parse_selector(raw_cs_selector, &mut cs_selector);
+
+        // Return CS selector must be non-null
+        if (raw_cs_selector & 0xfffc) == 0 {
+            tracing::error!("iret64: return CS selector null");
+            return self.exception(Exception::Gp, 0);
+        }
+
+        // Fetch and parse CS descriptor
+        let (dword1, dword2) = match self.fetch_raw_descriptor(&cs_selector) {
+            Ok(v) => v,
+            Err(_) => return self.exception(Exception::Gp, raw_cs_selector & 0xfffc),
+        };
+        let mut cs_descriptor = self.parse_descriptor(dword1, dword2)?;
+
+        // Return CS selector RPL must be >= CPL
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        if cs_selector.rpl < cpl {
+            tracing::error!("iret64: return selector RPL < CPL");
+            return self.exception(Exception::Gp, raw_cs_selector & 0xfffc);
+        }
+
+        // Check code-segment descriptor
+        self.check_cs(&cs_descriptor, raw_cs_selector, 0, cs_selector.rpl)?;
+
+        // INTERRUPT RETURN TO SAME PRIVILEGE LEVEL (only when not os64)
+        if cs_selector.rpl == cpl && instr.os64_l() == 0 {
+            tracing::debug!("LONG MODE INTERRUPT RETURN TO SAME PRIVILEGE LEVEL");
+
+            // Load CS:RIP from stack
+            self.branch_far(&mut cs_selector, &mut cs_descriptor, new_rip, cpl)?;
+
+            // Compute change mask for EFLAGS
+            let mut change_mask = EFlags::OSZAPC
+                .union(EFlags::TF)
+                .union(EFlags::DF)
+                .union(EFlags::NT)
+                .union(EFlags::RF)
+                .union(EFlags::ID)
+                .union(EFlags::AC);
+            let iopl = self.eflags.iopl();
+            if cpl <= iopl {
+                change_mask = change_mask.union(EFlags::IF_);
+            }
+            if cpl == 0 {
+                change_mask = change_mask
+                    .union(EFlags::VIP)
+                    .union(EFlags::VIF)
+                    .union(EFlags::IOPL_MASK);
+            }
+
+            let mut change_mask_val = change_mask.bits();
+            if instr.os32_l() == 0 {
+                // 16 bit
+                change_mask_val &= 0xffff;
+            }
+
+            self.write_eflags(new_eflags, change_mask_val);
+
+            // We are NOT in 64-bit mode for this path
+            if unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b } {
+                self.set_esp(self.esp().wrapping_add(top_nbytes_same as u32));
+            } else {
+                self.set_sp(self.sp().wrapping_add(top_nbytes_same as u16));
+            }
+        } else {
+            // INTERRUPT RETURN TO OUTER PRIVILEGE LEVEL or 64-BIT MODE
+            tracing::debug!("LONG MODE INTERRUPT RETURN TO OUTER PRIVILEGE LEVEL or 64 BIT MODE");
+
+            // Read SS and RSP from stack
+            let (raw_ss_selector, new_rsp): (u16, u64) = if instr.os64_l() != 0 {
+                let ss = self.stack_read_qword(temp_rsp.wrapping_add(32)) as u16;
+                let rsp = self.stack_read_qword(temp_rsp.wrapping_add(24));
+                (ss, rsp)
+            } else if instr.os32_l() != 0 {
+                let ss = self.stack_read_dword((temp_rsp as u32).wrapping_add(16))? as u16;
+                let rsp = self.stack_read_dword((temp_rsp as u32).wrapping_add(12))? as u64;
+                (ss, rsp)
+            } else {
+                let ss = self.stack_read_word((temp_rsp as u32).wrapping_add(8))?;
+                let rsp = self.stack_read_word((temp_rsp as u32).wrapping_add(6))? as u64;
+                (ss, rsp)
+            };
+
+            let mut ss_selector = BxSelector::default();
+            let mut ss_descriptor = BxDescriptor::default();
+
+            if (raw_ss_selector & 0xfffc) == 0 {
+                if !cs_descriptor.is_long64_segment() || cs_selector.rpl == 3 {
+                    tracing::error!("iret64: SS selector null");
+                    return self.exception(Exception::Gp, 0);
+                }
+            } else {
+                parse_selector(raw_ss_selector, &mut ss_selector);
+
+                if ss_selector.rpl != cs_selector.rpl {
+                    tracing::error!("iret64: SS.rpl != CS.rpl");
+                    return self.exception(Exception::Gp, raw_ss_selector & 0xfffc);
+                }
+
+                let (ss_dw1, ss_dw2) = match self.fetch_raw_descriptor(&ss_selector) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return self.exception(Exception::Gp, raw_ss_selector & 0xfffc);
+                    }
+                };
+                ss_descriptor = self.parse_descriptor(ss_dw1, ss_dw2)?;
+
+                if ss_descriptor.valid == 0
+                    || !ss_descriptor.segment
+                    || ss_descriptor.r#type >= 8 // code segment
+                    || (ss_descriptor.r#type & 2) == 0
+                // not writable
+                {
+                    tracing::error!("iret64: SS AR byte not writable or code segment");
+                    return self.exception(Exception::Gp, raw_ss_selector & 0xfffc);
+                }
+                if ss_descriptor.dpl != cs_selector.rpl {
+                    tracing::error!("iret64: SS.dpl != CS selector RPL");
+                    return self.exception(Exception::Gp, raw_ss_selector & 0xfffc);
+                }
+                if !ss_descriptor.p {
+                    tracing::error!("iret64: SS not present!");
+                    return self.exception(Exception::Np, raw_ss_selector & 0xfffc);
+                }
+            }
+
+            let prev_cpl = cpl;
+
+            // Compute change mask for EFLAGS
+            let mut change_mask = EFlags::OSZAPC
+                .union(EFlags::TF)
+                .union(EFlags::DF)
+                .union(EFlags::NT)
+                .union(EFlags::RF)
+                .union(EFlags::ID)
+                .union(EFlags::AC);
+            let iopl = self.eflags.iopl();
+            if prev_cpl <= iopl {
+                change_mask = change_mask.union(EFlags::IF_);
+            }
+            if prev_cpl == 0 {
+                change_mask = change_mask
+                    .union(EFlags::VIP)
+                    .union(EFlags::VIF)
+                    .union(EFlags::IOPL_MASK);
+            }
+
+            let mut change_mask_val = change_mask.bits();
+            if instr.os32_l() == 0 && instr.os64_l() == 0 {
+                // 16 bit
+                change_mask_val &= 0xffff;
+            }
+
+            // Set CPL to the RPL of the return CS selector
+            let cs_rpl = cs_selector.rpl;
+            self.branch_far(&mut cs_selector, &mut cs_descriptor, new_rip, cs_rpl)?;
+
+            // Write EFLAGS
+            self.write_eflags(new_eflags, change_mask_val);
+
+            if (raw_ss_selector & 0xfffc) != 0 {
+                // Load SS:RSP from stack
+                self.load_ss(&mut ss_selector, &mut ss_descriptor, cs_rpl)?;
+            } else {
+                // We are in 64-bit mode with null SS
+                self.load_null_selector(BxSegregs::Ss, raw_ss_selector);
+            }
+
+            if self.long64_mode() {
+                self.set_rsp(new_rsp);
+            } else if unsafe { ss_descriptor.u.segment.d_b } {
+                self.set_esp(new_rsp as u32);
+            } else {
+                self.set_sp(new_rsp as u16);
+            }
+
+            if prev_cpl != self.sregs[BxSegregs::Cs as usize].selector.rpl {
+                self.validate_seg_regs();
+            }
+        }
+
+        Ok(())
     }
 }

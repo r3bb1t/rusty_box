@@ -2444,6 +2444,20 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.device_manager.keyboard.send_scancode(scancode);
     }
 
+    /// Send a string as PS/2 Set 2 scancodes (make + break for each character).
+    ///
+    /// Useful for headless testing — inject "root\n" to type at a login prompt.
+    /// Each character is converted to its scancode sequence including shift
+    /// modifier when needed.
+    pub fn send_string(&mut self, text: &str) {
+        for ch in text.chars() {
+            let scancodes = crate::gui::keymap::char_to_scancode_sequence(ch);
+            for &sc in &scancodes {
+                self.device_manager.keyboard.send_scancode(sc);
+            }
+        }
+    }
+
     /// Force VGA to generate an initial update (call before first `update_display`).
     pub fn force_vga_update(&mut self) {
         self.device_manager.vga.force_initial_update();
@@ -2496,6 +2510,45 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.device_manager.vga.graphics_regs[6]
     }
 
+    /// Get CR3 (page directory base register) for page table walks.
+    pub fn get_cr3(&self) -> u64 {
+        self.cpu.cr3
+    }
+
+    /// Get EIP for diagnostics.
+    pub fn get_eip(&self) -> u32 {
+        self.cpu.eip()
+    }
+
+    /// Get segment register info: (selector, base, limit, valid_flags).
+    pub fn get_seg_info(&self, seg_idx: usize) -> (u16, u64, u32, u32) {
+        if seg_idx < 6 {
+            let selector = self.cpu.sregs[seg_idx].selector.value;
+            let valid = self.cpu.sregs[seg_idx].cache.valid;
+            // Access union fields through unsafe
+            let base = unsafe { self.cpu.sregs[seg_idx].cache.u.segment.base };
+            let limit = unsafe { self.cpu.sregs[seg_idx].cache.u.segment.limit_scaled };
+            (selector, base, limit, valid)
+        } else {
+            (0, 0, 0, 0)
+        }
+    }
+
+    /// Get EAX/EBX/ECX/EDX for diagnostics.
+    pub fn get_gpr32(&self, reg: usize) -> u32 {
+        match reg {
+            0 => self.cpu.eax(),
+            1 => self.cpu.ecx(),
+            2 => self.cpu.edx(),
+            3 => self.cpu.ebx(),
+            4 => self.cpu.esp(),
+            5 => self.cpu.ebp(),
+            6 => self.cpu.esi(),
+            7 => self.cpu.edi(),
+            _ => 0,
+        }
+    }
+
     /// Get the activity state string.
     pub fn get_activity_str(&self) -> &'static str {
         match self.cpu.activity_state {
@@ -2503,6 +2556,42 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             crate::cpu::cpu::CpuActivityState::Hlt => "hlt",
             crate::cpu::cpu::CpuActivityState::Shutdown => "shutdown",
             _ => "other",
+        }
+    }
+
+    /// Get DTLB entry info for a given linear address.
+    /// Returns (lpf, ppf, access_bits, host_page_addr) for the TLB slot
+    /// that would be used for a dword read at `laddr`.
+    pub fn get_dtlb_info(&self, laddr: u64) -> (u64, u64, u32, u64) {
+        let idx = self.cpu.dtlb.get_index_of(laddr, 3);
+        let entry = &self.cpu.dtlb.entries[idx];
+        (entry.lpf, entry.ppf, entry.access_bits, entry.host_page_addr as u64)
+    }
+
+    /// Get user_pl flag (true = CPL==3).
+    pub fn get_user_pl(&self) -> bool {
+        self.cpu.user_pl
+    }
+
+    /// Get mem_host_base pointer value for diagnostics.
+    pub fn get_mem_host_base(&self) -> u64 {
+        self.cpu.mem_host_base as u64
+    }
+
+    /// Get mem_host_len for diagnostics.
+    pub fn get_mem_host_len(&self) -> usize {
+        self.cpu.mem_host_len
+    }
+
+    /// Read a physical dword directly from host memory (bypassing TLB/paging).
+    /// Returns None if address is out of range.
+    pub fn read_phys_dword(&self, paddr: u64) -> Option<u32> {
+        let addr = paddr as usize;
+        let host_base = self.cpu.mem_host_base;
+        if !host_base.is_null() && addr + 4 <= self.cpu.mem_host_len {
+            Some(unsafe { (host_base.add(addr) as *const u32).read_unaligned() })
+        } else {
+            None
         }
     }
 }
