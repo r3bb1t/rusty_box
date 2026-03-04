@@ -1007,6 +1007,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::BsrGdEd => self.bsr_gd_ed(instr),
             Opcode::BsfGwEw => self.bsf_gw_ew(instr),
             Opcode::BsrGwEw => self.bsr_gw_ew(instr),
+            Opcode::PopcntGdEd => self.popcnt_gd_ed(instr),
+            Opcode::PopcntGwEw => self.popcnt_gw_ew(instr),
+            Opcode::LzcntGdEd => self.lzcnt_gd_ed(instr),
+            Opcode::LzcntGwEw => self.lzcnt_gw_ew(instr),
+            Opcode::TzcntGdEd => self.tzcnt_gd_ed(instr),
+            Opcode::TzcntGwEw => self.tzcnt_gw_ew(instr),
+            Opcode::Crc32GdEb => self.crc32_gd_eb(instr),
+            Opcode::Crc32GdEd => self.crc32_gd_ed(instr),
+            Opcode::Crc32GdEw => self.crc32_gd_ew(instr),
+            Opcode::MovbeGdMd => self.movbe_gd_md(instr),
+            Opcode::MovbeMdGd => self.movbe_md_gd(instr),
+            Opcode::MovbeGwMw => self.movbe_gw_mw(instr),
+            Opcode::MovbeMwGw => self.movbe_mw_gw(instr),
 
             // =========================================================================
             // Multiplication and Division instructions
