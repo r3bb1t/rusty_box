@@ -144,6 +144,101 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
+    // MONITOR — Setup monitor address for MWAIT (opcode 0F 01 C8)
+    // Bochs: proc_ctrl.cc MONITOR instruction
+    // =========================================================================
+
+    pub(super) fn monitor(
+        &mut self,
+        _instr: &super::decoder::Instruction,
+    ) -> crate::cpu::Result<()> {
+        // MONITOR sets up an address range for MWAIT to monitor.
+        // For our emulator, this is a NOP — we don't actually implement
+        // cache-line monitoring. MWAIT will just act like HLT.
+        tracing::trace!("MONITOR: NOP (address monitoring not implemented)");
+        Ok(())
+    }
+
+    // =========================================================================
+    // MWAIT — Monitor Wait (opcode 0F 01 C9)
+    // Bochs: proc_ctrl.cc MWAIT instruction
+    // =========================================================================
+
+    pub(super) fn mwait(
+        &mut self,
+        instr: &super::decoder::Instruction,
+    ) -> crate::cpu::Result<()> {
+        // MWAIT waits for a monitored write or interrupt.
+        // We treat it as equivalent to HLT — stop until interrupt.
+        tracing::trace!("MWAIT: treated as HLT");
+        self.hlt(instr)
+    }
+
+    // =========================================================================
+    // CLAC — Clear AC Flag (SMAP, opcode 0F 01 CA)
+    // =========================================================================
+
+    pub(super) fn clac(
+        &mut self,
+        _instr: &super::decoder::Instruction,
+    ) -> crate::cpu::Result<()> {
+        self.clear_ac();
+        Ok(())
+    }
+
+    // =========================================================================
+    // STAC — Set AC Flag (SMAP, opcode 0F 01 CB)
+    // =========================================================================
+
+    pub(super) fn stac(
+        &mut self,
+        _instr: &super::decoder::Instruction,
+    ) -> crate::cpu::Result<()> {
+        self.assert_ac();
+        Ok(())
+    }
+
+    // =========================================================================
+    // CLFLUSH — Cache Line Flush (opcode 0F AE /7)
+    // =========================================================================
+
+    pub(super) fn clflush(
+        &mut self,
+        _instr: &super::decoder::Instruction,
+    ) -> crate::cpu::Result<()> {
+        // NOP — no cache to flush
+        Ok(())
+    }
+
+    // =========================================================================
+    // RDTSCP — Read Time Stamp Counter and Processor ID (opcode 0F 01 F9)
+    // Bochs: proc_ctrl.cc RDTSCP
+    // =========================================================================
+
+    pub(super) fn rdtscp(
+        &mut self,
+        _instr: &super::decoder::Instruction,
+    ) -> crate::cpu::Result<()> {
+        // Check CR4.TSD — if set, RDTSCP is only allowed at CPL=0
+        if self.cr4.tsd() {
+            let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+                .selector
+                .rpl;
+            if cpl != 0 {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+        }
+
+        let ticks = self.get_tsc(self.icount);
+        self.set_rax((ticks & 0xFFFF_FFFF) as u64);
+        self.set_rdx((ticks >> 32) as u64);
+        // ECX = IA32_TSC_AUX MSR (processor ID) — return 0
+        self.set_rcx(0);
+
+        Ok(())
+    }
+
+    // =========================================================================
     // RDTSC — Read Time Stamp Counter (opcode 0F 31)
     // Matches Bochs proc_ctrl.cc BX_CPU_C::RDTSC
     // =========================================================================

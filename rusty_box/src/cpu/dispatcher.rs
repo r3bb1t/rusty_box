@@ -1287,6 +1287,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 // These variants require compaction support — stub as #UD for now
                 self.exception(super::cpu::Exception::Ud, 0)
             }
+            Opcode::Monitor | Opcode::Monitorx => self.monitor(instr),
+            Opcode::Mwait | Opcode::Mwaitx => self.mwait(instr),
+            Opcode::Clac => self.clac(instr),
+            Opcode::Stac => self.stac(instr),
+            Opcode::Clflush | Opcode::Clflushopt => self.clflush(instr),
+            Opcode::Rdtscp => self.rdtscp(instr),
 
             // =========================================================================
             // Shift/Rotate instructions
