@@ -36,7 +36,11 @@ use super::{
 
 pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
 
-const BX_DTLB_SIZE: usize = 2048;
+// Bochs uses 2048 DTLB / 1024 ITLB (direct-mapped). Real CPUs have much
+// larger set-associative TLBs (Intel Skylake: 1536 4K + 32 2M/4M data entries).
+// 4096 entries reduce direct-mapped eviction pressure during Linux kernel
+// startup where boot page tables overlap with decompressed kernel data.
+const BX_DTLB_SIZE: usize = 4096;
 const BX_ITLB_SIZE: usize = 1024;
 
 use super::avx::amx::AMX;
@@ -2226,6 +2230,19 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         let fetch_ptr_option = if tlb_hit {
             self.p_addr_fetch_page = tlb_ppf;
+            // Bochs populates ITLB from DTLB, so whenever ITLB has an entry
+            // the DTLB also had it (though it may have been evicted since).
+            // Ensure the DTLB still has this page — if evicted, re-populate
+            // via a page walk. This is critical during kernel startup where
+            // boot page tables overlap with decompressed kernel data: the
+            // DTLB must cache translations so data accesses don't walk
+            // through corrupted page table entries.
+            {
+                let dtlb_lpf = self.dtlb.get_entry_of(laddr, 0).lpf;
+                if dtlb_lpf != lpf {
+                    let _ = self.translate_data_read(laddr);
+                }
+            }
             Some(tlb_host_addr)
         } else {
             // TLB miss - need to walk page tables
@@ -2255,6 +2272,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         p_addr,
                         self.p_addr_fetch_page
                     );
+                    // Bochs behaviour: ITLB miss page walk populates BOTH DTLB
+                    // and ITLB. The DTLB entry ensures that subsequent data
+                    // accesses to the same page as code hit the DTLB without
+                    // re-walking the page tables. This is critical during Linux
+                    // kernel startup where boot page tables overlap with the
+                    // decompressed kernel's page table symbols — the TLB must
+                    // shield data accesses from the corrupted boot page tables
+                    // until CR3 is switched.
+                    let _ = self.translate_data_read(laddr);
                     None
                 }
                 Err(e) => {

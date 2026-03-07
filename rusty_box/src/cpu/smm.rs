@@ -644,7 +644,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Update CPU mode based on restored CR0/EFLAGS
         self.handle_cpu_mode_change();
         self.handle_alignment_check();
-        self.user_pl = self.sregs[BxSegregs::Cs as usize].selector.rpl == 3;
+        self.update_fetch_mode_mask();
     }
 
     // ========================================================================
@@ -721,6 +721,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let mut dummy_stamp_table = super::icache::BxPageWriteStampTable {
                 fine_granularity_mapping: &mut dummy_mapping,
             };
+            // SMM state save write — physical RAM write cannot meaningfully fail
             let _ = mem.write_physical_page(
                 &[cpu_ref],
                 &mut dummy_stamp_table,

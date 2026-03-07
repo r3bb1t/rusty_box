@@ -10,6 +10,7 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
+    descriptor::SegTypeBits,
     eflags::EFlags,
     Result,
 };
@@ -44,7 +45,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.gdtr.base = base;
         self.gdtr.limit = limit;
-        tracing::trace!("LGDT: base={:#010x}, limit={:#06x}", base, limit);
         Ok(())
     }
 
@@ -269,7 +269,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Non-throwing fetch_raw_descriptor2 — returns None on failure
     /// Based on BX_CPU_C::fetch_raw_descriptor2 in segment_ctrl_pro.cc:570-596
     fn fetch_raw_descriptor2_nt(
-        &self,
+        &mut self,
         selector: &super::descriptor::BxSelector,
     ) -> Option<(u32, u32)> {
         let index = selector.index as u64;
@@ -356,8 +356,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if descriptor.segment {
             // Normal code/data segment
             // Conforming code segments ignore DPL
-            let is_code = (descriptor.r#type & 0x8) != 0;
-            let is_conforming = (descriptor.r#type & 0x4) != 0;
+            let is_code = SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::CODE);
+            let is_conforming = SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::CONFORMING);
             if !(is_code && is_conforming) {
                 if descriptor.dpl < cpl || descriptor.dpl < selector.rpl {
                     self.eflags.remove(EFlags::ZF);
@@ -548,12 +548,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
-        let is_code = (descriptor.r#type & 0x8) != 0;
+        let is_code = SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::CODE);
 
         if is_code {
             // Code segment: readable conforming segments ignore DPL
-            let is_conforming = (descriptor.r#type & 0x4) != 0;
-            let is_readable = (descriptor.r#type & 0x2) != 0;
+            let is_conforming = SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::CONFORMING);
+            let is_readable = SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::READABLE);
             if is_conforming && is_readable {
                 tracing::debug!("VERR: conforming readable code, OK");
                 self.eflags.insert(EFlags::ZF);
@@ -628,7 +628,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         };
 
         // System segment or code segment → inaccessible for write
-        let is_code = (descriptor.r#type & 0x8) != 0;
+        let is_code = SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::CODE);
         if !descriptor.segment || is_code {
             tracing::debug!("VERW: system seg or code");
             self.eflags.remove(EFlags::ZF);
@@ -642,7 +642,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
-        let is_writable = (descriptor.r#type & 0x2) != 0;
+        let is_writable = SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::READABLE);
 
         if is_writable {
             if descriptor.dpl < cpl || descriptor.dpl < selector.rpl {
@@ -655,6 +655,121 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::debug!("VERW: data seg not writable");
             self.eflags.remove(EFlags::ZF);
         }
+        Ok(())
+    }
+
+    // =========================================================================
+    // LGDT/LIDT/SGDT/SIDT — 64-bit mode variants
+    // Matching Bochs protect_ctrl.cc LGDT64_Ms / LIDT64_Ms / SGDT64_Ms / SIDT64_Ms
+    // In 64-bit mode: base is 8 bytes (not 4), no 24-bit truncation
+    // =========================================================================
+
+    /// LGDT64 - Load GDT in 64-bit mode (10-byte pseudo-descriptor)
+    /// Bochs protect_ctrl.cc LGDT64_Ms — uses system_read (paging-aware)
+    pub fn lgdt_op64_ms(&mut self, instr: &Instruction) -> Result<()> {
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        if cpl != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        let eaddr = self.resolve_addr64(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let laddr = self.get_laddr64(seg as usize, eaddr);
+        let limit = self.system_read_word(laddr)?;
+        let base = self.system_read_qword(laddr.wrapping_add(2))?;
+        if !self.is_canonical(base) {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        self.gdtr.limit = limit;
+        self.gdtr.base = base;
+        Ok(())
+    }
+
+    /// LIDT64 - Load IDT in 64-bit mode (10-byte pseudo-descriptor)
+    /// Bochs protect_ctrl.cc LIDT64_Ms — uses system_read (paging-aware)
+    pub fn lidt_op64_ms(&mut self, instr: &Instruction) -> Result<()> {
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        if cpl != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        let eaddr = self.resolve_addr64(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let laddr = self.get_laddr64(seg as usize, eaddr);
+        let limit = self.system_read_word(laddr)?;
+        let base = self.system_read_qword(laddr.wrapping_add(2))?;
+        if !self.is_canonical(base) {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        self.idtr.limit = limit;
+        self.idtr.base = base;
+        Ok(())
+    }
+
+    /// SGDT64 - Store GDT in 64-bit mode (10-byte pseudo-descriptor)
+    /// Bochs protect_ctrl.cc SGDT64_Ms — uses system_write (paging-aware)
+    pub fn sgdt_op64_ms(&mut self, instr: &Instruction) -> Result<()> {
+        if self.cr4.umip() {
+            let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+            if cpl != 0 {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+        }
+        let eaddr = self.resolve_addr64(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let laddr = self.get_laddr64(seg as usize, eaddr);
+        self.system_write_word(laddr, self.gdtr.limit)?;
+        self.system_write_qword(laddr.wrapping_add(2), self.gdtr.base)?;
+        Ok(())
+    }
+
+    /// SIDT64 - Store IDT in 64-bit mode (10-byte pseudo-descriptor)
+    /// Bochs protect_ctrl.cc SIDT64_Ms — uses system_write (paging-aware)
+    pub fn sidt_op64_ms(&mut self, instr: &Instruction) -> Result<()> {
+        if self.cr4.umip() {
+            let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+            if cpl != 0 {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+        }
+        let eaddr = self.resolve_addr64(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let laddr = self.get_laddr64(seg as usize, eaddr);
+        self.system_write_word(laddr, self.idtr.limit)?;
+        self.system_write_qword(laddr.wrapping_add(2), self.idtr.base)?;
+        Ok(())
+    }
+
+    // =========================================================================
+    // LSS/LFS/LGS — 64-bit mode far pointer load
+    // Matching Bochs protect_ctrl.cc LSS_GqMp / LFS_GqMp / LGS_GqMp
+    // =========================================================================
+
+    pub fn lss_gq_mp(&mut self, instr: &Instruction) -> Result<()> {
+        self.load_far_pointer64(instr, BxSegregs::Ss)
+    }
+
+    pub fn lfs_gq_mp(&mut self, instr: &Instruction) -> Result<()> {
+        self.load_far_pointer64(instr, BxSegregs::Fs)
+    }
+
+    pub fn lgs_gq_mp(&mut self, instr: &Instruction) -> Result<()> {
+        self.load_far_pointer64(instr, BxSegregs::Gs)
+    }
+
+    fn load_far_pointer64(
+        &mut self,
+        instr: &Instruction,
+        target_seg: BxSegregs,
+    ) -> Result<()> {
+        let eaddr = self.resolve_addr64(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let laddr = self.get_laddr64(seg as usize, eaddr);
+
+        // Read 64-bit offset + 16-bit selector
+        let offset = self.mem_read_qword(laddr);
+        let selector = self.mem_read_word(laddr.wrapping_add(8));
+
+        self.load_seg_reg(target_seg, selector)?;
+        self.set_gpr64(instr.dst() as usize, offset);
         Ok(())
     }
 }

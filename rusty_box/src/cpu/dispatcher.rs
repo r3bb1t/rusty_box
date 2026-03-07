@@ -305,7 +305,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // =========================================================================
             // FAR JMP
             // =========================================================================
-            Opcode::JmpfAp => self.jmpf_ap(instr),
+            Opcode::JmpfAp => {
+                tracing::debug!("DISPATCH JmpfAp: RIP={:#x} CS={:#x}", self.prev_rip, unsafe { self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value });
+                self.jmpf_ap(instr)
+            }
 
             // =========================================================================
             // Flag manipulation instructions
@@ -398,6 +401,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Cld => self.cld(instr),
             Opcode::Std => self.std_(instr),
             Opcode::Nop => Ok(()),
+            Opcode::Pause => Ok(()), // PAUSE hint — no-op in non-VMX
 
             // =========================================================================
             // I/O port instructions
@@ -1016,6 +1020,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Crc32GdEb => self.crc32_gd_eb(instr),
             Opcode::Crc32GdEd => self.crc32_gd_ed(instr),
             Opcode::Crc32GdEw => self.crc32_gd_ew(instr),
+            Opcode::Crc32GdEq => self.crc32_gd_eq(instr),
             Opcode::MovbeGdMd => self.movbe_gd_md(instr),
             Opcode::MovbeMdGd => self.movbe_md_gd(instr),
             Opcode::MovbeGwMw => self.movbe_gw_mw(instr),
@@ -1181,18 +1186,34 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::AddGqEq => self.add_gq_eq(instr),
             Opcode::AddEqId => self.add_eq_id(instr),
             Opcode::AddEqsIb => self.add_eqs_ib(instr),
+            Opcode::AddRaxid => {
+                self.add_rax_id(instr);
+                Ok(())
+            }
             Opcode::AdcEqGq => self.adc_eq_gq(instr),
             Opcode::AdcGqEq => self.adc_gq_eq(instr),
             Opcode::AdcEqId => self.adc_eq_id(instr),
             Opcode::AdcEqsIb => self.adc_eqs_ib(instr),
+            Opcode::AdcRaxid => {
+                self.adc_rax_id(instr);
+                Ok(())
+            }
             Opcode::SubEqGq => self.sub_eq_gq(instr),
-            Opcode::SubGqEq => self.sub_gq_eq(instr),
+            Opcode::SubGqEq | Opcode::SubGqEqZeroIdiom => self.sub_gq_eq(instr),
             Opcode::SubEqId => self.sub_eq_id(instr),
             Opcode::SubEqsIb => self.sub_eqs_ib(instr),
+            Opcode::SubRaxid => {
+                self.sub_rax_id(instr);
+                Ok(())
+            }
             Opcode::SbbEqGq => self.sbb_eq_gq(instr),
             Opcode::SbbGqEq => self.sbb_gq_eq(instr),
             Opcode::SbbEqId => self.sbb_eq_id(instr),
             Opcode::SbbEqsIb => self.sbb_eqs_ib(instr),
+            Opcode::SbbRaxid => {
+                self.sbb_rax_id(instr);
+                Ok(())
+            }
             Opcode::NegEq => self.neg_eq(instr),
             Opcode::IncEq => self.inc_eq(instr),
             Opcode::DecEq => self.dec_eq(instr),
@@ -1215,22 +1236,42 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::XorGqEq | Opcode::XorGqEqZeroIdiom => self.xor_gq_eq(instr),
             Opcode::XorEqId => self.xor_eq_id(instr),
             Opcode::XorEqsIb => self.xor_eq_id(instr),
+            Opcode::XorRaxid => {
+                self.xor_rax_id(instr);
+                Ok(())
+            }
             Opcode::OrEqGq => self.or_eq_gq(instr),
             Opcode::OrGqEq => self.or_gq_eq(instr),
             Opcode::OrEqId => self.or_eq_id(instr),
             Opcode::OrEqsIb => self.or_eq_id(instr),
+            Opcode::OrRaxid => {
+                self.or_rax_id(instr);
+                Ok(())
+            }
             Opcode::AndEqGq => self.and_eq_gq(instr),
             Opcode::AndGqEq => self.and_gq_eq(instr),
             Opcode::AndEqId => self.and_eq_id(instr),
             Opcode::AndEqsIb => self.and_eq_id(instr),
+            Opcode::AndRaxid => {
+                self.and_rax_id(instr);
+                Ok(())
+            }
             Opcode::NotEq => self.not_eq(instr),
             Opcode::TestEqGq => self.test_eq_gq(instr),
             Opcode::TestEqId => self.test_eq_id(instr),
             Opcode::TestEqsIb => self.test_eq_id(instr),
+            Opcode::TestRaxid => {
+                self.test_rax_id(instr);
+                Ok(())
+            }
             Opcode::CmpEqGq => self.cmp_eq_gq(instr),
             Opcode::CmpGqEq => self.cmp_gq_eq(instr),
             Opcode::CmpEqId => self.cmp_eq_id(instr),
             Opcode::CmpEqsIb => self.cmp_eqs_ib(instr),
+            Opcode::CmpRaxid => {
+                self.cmp_rax_id(instr);
+                Ok(())
+            }
             Opcode::SubEqGqZeroIdiom => {
                 // Zero idiom: SUB r64, r64 where dst==src — zero the register
                 self.zero_idiom_gq_r(instr);
@@ -1280,31 +1321,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // =========================================================================
             // 64-bit data transfer (data_xfer64.rs)
             // =========================================================================
-            Opcode::MovEqId => {
-                self.mov_eq_id(instr);
-                Ok(())
-            }
+            Opcode::MovEqId => self.mov_eq_id(instr),
             Opcode::XchgEqGq => self.xchg_eq_gq(instr),
-            Opcode::MovsxGqEb => {
-                self.movsx_gq_eb(instr);
+            Opcode::XchgRrxRax => {
+                self.xchg_rrx_rax(instr);
                 Ok(())
             }
-            Opcode::MovsxGqEw => {
-                self.movsx_gq_ew(instr);
-                Ok(())
-            }
-            Opcode::MovsxdGqEd => {
-                self.movsxd_gq_ed(instr);
-                Ok(())
-            }
-            Opcode::MovzxGqEb => {
-                self.movzx_gq_eb(instr);
-                Ok(())
-            }
-            Opcode::MovzxGqEw => {
-                self.movzx_gq_ew(instr);
-                Ok(())
-            }
+            Opcode::MovsxGqEb => self.movsx_gq_eb(instr),
+            Opcode::MovsxGqEw => self.movsx_gq_ew(instr),
+            Opcode::MovsxdGqEd => self.movsxd_gq_ed(instr),
+            Opcode::MovzxGqEb => self.movzx_gq_eb(instr),
+            Opcode::MovzxGqEw => self.movzx_gq_ew(instr),
             Opcode::MovRrxiq => {
                 self.mov_rrxiq(instr);
                 Ok(())
@@ -1315,18 +1342,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // =========================================================================
             Opcode::PushEq => self.push_eq(instr),
             Opcode::PopEq => self.pop_eq(instr),
-            Opcode::PushfFq => {
-                self.pushf_fq(instr);
-                Ok(())
-            }
-            Opcode::PopfFq => {
-                self.popf_fq(instr);
-                Ok(())
-            }
-            Opcode::PushOp64Id => {
-                self.push_iq(instr);
-                Ok(())
-            }
+            Opcode::PushfFq => self.pushf_fq(instr),
+            Opcode::PopfFq => self.popf_fq(instr),
+            Opcode::PushOp64Id => self.push_iq(instr),
+            Opcode::PushOp64SIb => self.push_op64_sib(instr),
+            Opcode::PushOp64Sw => self.push_op64_sw(instr),
+            Opcode::PopOp64Sw => self.pop_op64_sw(instr),
 
             // =========================================================================
             // 64-bit BSWAP
@@ -1340,87 +1361,42 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // 64-bit control transfer instructions
             // =========================================================================
             Opcode::CallJq => self.call_jq(instr),
-            Opcode::CallEq => self.call_eq_r(instr),
+            Opcode::CallEq => self.call_eq(instr),
             Opcode::CallfOp64Ep => self.call64_ep(instr),
-            Opcode::JmpJq => self.jmp_jq(instr),
-            Opcode::JmpEq => self.jmp_eq_r(instr),
+            Opcode::JmpJq | Opcode::JmpJbq => self.jmp_jq(instr),
+            Opcode::JmpEq => self.jmp_eq(instr),
             Opcode::JmpfOp64Ep => self.jmp64_ep(instr),
+            Opcode::RetOp64 => self.retnear64_iw(instr), // Bochs: RetOp64 uses same handler (iw=0)
             Opcode::RetOp64Iw => self.retnear64_iw(instr),
             Opcode::RetfOp64 => self.retfar64(instr),
             Opcode::RetfOp64Iw => self.retfar64_iw(instr),
             Opcode::IretOp64 => self.iret64(instr),
-            Opcode::JrcxzJbq => {
-                self.jrcxz_jb(instr);
-                Ok(())
-            }
+            Opcode::LeaveOp64 => self.leave64(instr),
+            Opcode::JrcxzJbq => self.jrcxz_jb(instr),
+            Opcode::LoopJbq => self.loop64_jb(instr),
+            Opcode::LoopeJbq => self.loope64_jb(instr),
+            Opcode::LoopneJbq => self.loopne64_jb(instr),
 
             // =========================================================================
-            // Conditional jumps with 64-bit displacement (Jq variants)
+            // Conditional jumps — 64-bit near (Jq) and short (Jbq) variants
+            // Jbq uses same handler as Jq: decoder pre-decodes byte displacement
             // =========================================================================
-            Opcode::JoJq => {
-                self.jo_jq(instr);
-                Ok(())
-            }
-            Opcode::JnoJq => {
-                self.jno_jq(instr);
-                Ok(())
-            }
-            Opcode::JbJq => {
-                self.jb_jq(instr);
-                Ok(())
-            }
-            Opcode::JnbJq => {
-                self.jnb_jq(instr);
-                Ok(())
-            }
-            Opcode::JzJq => {
-                self.jz_jq(instr);
-                Ok(())
-            }
-            Opcode::JnzJq => {
-                self.jnz_jq(instr);
-                Ok(())
-            }
-            Opcode::JbeJq => {
-                self.jbe_jq(instr);
-                Ok(())
-            }
-            Opcode::JnbeJq => {
-                self.jnbe_jq(instr);
-                Ok(())
-            }
-            Opcode::JsJq => {
-                self.js_jq(instr);
-                Ok(())
-            }
-            Opcode::JnsJq => {
-                self.jns_jq(instr);
-                Ok(())
-            }
-            Opcode::JpJq => {
-                self.jp_jq(instr);
-                Ok(())
-            }
-            Opcode::JnpJq => {
-                self.jnp_jq(instr);
-                Ok(())
-            }
-            Opcode::JlJq => {
-                self.jl_jq(instr);
-                Ok(())
-            }
-            Opcode::JnlJq => {
-                self.jnl_jq(instr);
-                Ok(())
-            }
-            Opcode::JleJq => {
-                self.jle_jq(instr);
-                Ok(())
-            }
-            Opcode::JnleJq => {
-                self.jnle_jq(instr);
-                Ok(())
-            }
+            Opcode::JoJq | Opcode::JoJbq => self.jo_jq(instr),
+            Opcode::JnoJq | Opcode::JnoJbq => self.jno_jq(instr),
+            Opcode::JbJq | Opcode::JbJbq => self.jb_jq(instr),
+            Opcode::JnbJq | Opcode::JnbJbq => self.jnb_jq(instr),
+            Opcode::JzJq | Opcode::JzJbq => self.jz_jq(instr),
+            Opcode::JnzJq | Opcode::JnzJbq => self.jnz_jq(instr),
+            Opcode::JbeJq | Opcode::JbeJbq => self.jbe_jq(instr),
+            Opcode::JnbeJq | Opcode::JnbeJbq => self.jnbe_jq(instr),
+            Opcode::JsJq | Opcode::JsJbq => self.js_jq(instr),
+            Opcode::JnsJq | Opcode::JnsJbq => self.jns_jq(instr),
+            Opcode::JpJq | Opcode::JpJbq => self.jp_jq(instr),
+            Opcode::JnpJq | Opcode::JnpJbq => self.jnp_jq(instr),
+            Opcode::JlJq | Opcode::JlJbq => self.jl_jq(instr),
+            Opcode::JnlJq | Opcode::JnlJbq => self.jnl_jq(instr),
+            Opcode::JleJq | Opcode::JleJbq => self.jle_jq(instr),
+            Opcode::JnleJq | Opcode::JnleJbq => self.jnle_jq(instr),
 
             // =========================================================================
             // System instructions
@@ -1444,6 +1420,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::LfsGdMp => self.lfs_gd_mp(instr),
             Opcode::LgsGwMp => self.lgs_gw_mp(instr),
             Opcode::LgsGdMp => self.lgs_gd_mp(instr),
+            Opcode::LssGqMp => self.lss_gq_mp(instr),
+            Opcode::LfsGqMp => self.lfs_gq_mp(instr),
+            Opcode::LgsGqMp => self.lgs_gq_mp(instr),
 
             Opcode::Cpuid => {
                 self.cpuid(instr);
@@ -1472,6 +1451,77 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Clflush | Opcode::Clflushopt => self.clflush(instr),
             Opcode::Rdtscp => self.rdtscp(instr),
             Opcode::Swapgs => self.swapgs(instr),
+
+            // FSGSBASE — Read/Write FS/GS base registers (proc_ctrl.rs)
+            Opcode::RdfsbaseEd => self.rdfsbase_ed(instr),
+            Opcode::RdfsbaseEq => self.rdfsbase_eq(instr),
+            Opcode::RdgsbaseEd => self.rdgsbase_ed(instr),
+            Opcode::RdgsbaseEq => self.rdgsbase_eq(instr),
+            Opcode::WrfsbaseEd => self.wrfsbase_ed(instr),
+            Opcode::WrfsbaseEq => self.wrfsbase_eq(instr),
+            Opcode::WrgsbaseEd => self.wrgsbase_ed(instr),
+            Opcode::WrgsbaseEq => self.wrgsbase_eq(instr),
+
+            // =========================================================================
+            // 64-bit CR/DR moves
+            // =========================================================================
+            Opcode::MovRqCr0 => self.mov_rq_cr0(instr),
+            Opcode::MovRqCr2 => self.mov_rq_cr2(instr),
+            Opcode::MovRqCr3 => self.mov_rq_cr3(instr),
+            Opcode::MovRqCr4 => self.mov_rq_cr4(instr),
+            // 64-bit MOV CRn, Rq — reuse 32-bit handlers (CRs are effectively 32-bit)
+            Opcode::MovCr0rq => { self.mov_cr0_rd(instr)?; Ok(()) },
+            Opcode::MovCr2rq => { self.mov_cr2_rd(instr)?; Ok(()) },
+            Opcode::MovCr3rq => { self.mov_cr3_rd(instr)?; Ok(()) },
+            Opcode::MovCr4rq => { self.mov_cr4_rd(instr)?; Ok(()) },
+            Opcode::MovRqDq => self.mov_rq_dq(instr),
+            Opcode::MovDqRq => self.mov_dq_rq(instr),
+
+            // =========================================================================
+            // 64-bit LGDT/LIDT/SGDT/SIDT
+            // =========================================================================
+            Opcode::SgdtOp64Ms => self.sgdt_op64_ms(instr),
+            Opcode::SidtOp64Ms => self.sidt_op64_ms(instr),
+            Opcode::LgdtOp64Ms => self.lgdt_op64_ms(instr),
+            Opcode::LidtOp64Ms => self.lidt_op64_ms(instr),
+
+            // =========================================================================
+            // 64-bit BT/BTS/BTR/BTC (bit test) + BSF/BSR
+            // =========================================================================
+            Opcode::BtEqGq => self.bt_eq_gq(instr),
+            Opcode::BtsEqGq => self.bts_eq_gq(instr),
+            Opcode::BtrEqGq => self.btr_eq_gq(instr),
+            Opcode::BtcEqGq => self.btc_eq_gq(instr),
+            Opcode::BtEqIb => self.bt_eq_ib(instr),
+            Opcode::BtsEqIb => self.bts_eq_ib(instr),
+            Opcode::BtrEqIb => self.btr_eq_ib(instr),
+            Opcode::BtcEqIb => self.btc_eq_ib(instr),
+            Opcode::BsfGqEq => self.bsf_gq_eq(instr),
+            Opcode::BsrGqEq => self.bsr_gq_eq(instr),
+            Opcode::PopcntGqEq => self.popcnt_gq_eq(instr),
+            Opcode::LzcntGqEq => self.lzcnt_gq_eq(instr),
+            Opcode::TzcntGqEq => self.tzcnt_gq_eq(instr),
+
+            // =========================================================================
+            // 64-bit MOV moffs
+            // =========================================================================
+            Opcode::MovAloq => self.mov_aloq(instr),
+            Opcode::MovOqAl => self.mov_oq_al(instr),
+            Opcode::MovAxoq => self.mov_ax_oq(instr),
+            Opcode::MovOqAx => self.mov_oq_ax(instr),
+            Opcode::MovEaxoq => self.mov_eax_oq(instr),
+            Opcode::MovOqEax => self.mov_oq_eax(instr),
+            Opcode::MovRaxoq => self.mov_rax_oq(instr),
+            Opcode::MovOqRax => self.mov_oq_rax(instr),
+
+            // =========================================================================
+            // 64-bit string operations
+            // =========================================================================
+            Opcode::RepMovsqYqXq => self.movsq_dispatch(instr),
+            Opcode::RepStosqYqRax => self.stosq_dispatch(instr),
+            Opcode::RepLodsqRaxxq => self.lodsq_dispatch(instr),
+            Opcode::RepCmpsqXqYq => self.cmpsq_dispatch(instr),
+            Opcode::RepScasqRaxyq => self.scasq_dispatch(instr),
 
             // =========================================================================
             // Shift/Rotate instructions
@@ -1824,14 +1874,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 Ok(())
             }
             Opcode::Xlat => {
-                self.xlat(instr);
-                Ok(())
+                self.xlat(instr)
             }
-            Opcode::Lahf => {
+            Opcode::Lahf | Opcode::LahfLm => {
                 self.lahf(instr);
                 Ok(())
             }
-            Opcode::Sahf => {
+            Opcode::Sahf | Opcode::SahfLm => {
                 self.sahf(instr);
                 Ok(())
             }
@@ -1840,22 +1889,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // =========================================================================
             // Data transfer (64-bit) instructions
             // =========================================================================
-            Opcode::MovOp64GdEd => {
-                self.mov64_gd_ed_m(instr);
-                Ok(())
-            }
-            Opcode::MovOp64EdGd => {
-                self.mov64_ed_gd_m(instr);
-                Ok(())
-            }
-            Opcode::MovEqGq => {
-                self.mov_eq_gq(instr);
-                Ok(())
-            }
-            Opcode::MovGqEq => {
-                self.mov_gq_eq(instr);
-                Ok(())
-            }
+            Opcode::MovOp64GdEd => self.mov64_gd_ed_m(instr),
+            Opcode::MovOp64EdGd => self.mov64_ed_gd_m(instr),
+            Opcode::MovEqGq => self.mov_eq_gq(instr),
+            Opcode::MovGqEq => self.mov_gq_eq(instr),
             Opcode::LeaGqM => {
                 self.lea_gq_m(instr);
                 Ok(())
@@ -1900,72 +1937,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::CmovnleGdEd => self.cmovnle_gd_ed(instr),
 
             // =========================================================================
-            // CMOVcc (Conditional Move) instructions - 64-bit
+            // CMOVcc (Conditional Move) instructions - 64-bit (unified: register + memory)
             // =========================================================================
-            Opcode::CmovoGqEq => {
-                self.cmovo_gq_eq_r(instr);
-                Ok(())
-            }
-            Opcode::CmovnoGqEq => {
-                self.cmovno_gq_eq_r(instr);
-                Ok(())
-            }
-            Opcode::CmovbGqEq => {
-                self.cmovb_gq_eq_r(instr);
-                Ok(())
-            }
-            Opcode::CmovnbGqEq => {
-                self.cmovnb_gq_eq_r(instr);
-                Ok(())
-            }
-            Opcode::CmovzGqEq => {
-                self.cmovz_gq_eq_r(instr);
-                Ok(())
-            }
-            Opcode::CmovnzGqEq => {
-                self.cmovnz_gq_eq_r(instr);
-                Ok(())
-            }
-            Opcode::CmovbeGqEq => {
-                self.cmovbe_gq_eq_r(instr);
-                Ok(())
-            }
-            Opcode::CmovnbeGqEq => {
-                self.cmovnbe_gq_eq_r(instr);
-                Ok(())
-            }
-            Opcode::CmovsGqEq => {
-                self.cmovs_gq_eq_r(instr);
-                Ok(())
-            }
-            Opcode::CmovnsGqEq => {
-                self.cmovns_gq_eq_r(instr);
-                Ok(())
-            }
-            Opcode::CmovpGqEq => {
-                self.cmovp_gq_eq_r(instr);
-                Ok(())
-            }
-            Opcode::CmovnpGqEq => {
-                self.cmovnp_gq_eq_r(instr);
-                Ok(())
-            }
-            Opcode::CmovlGqEq => {
-                self.cmovl_gq_eq_r(instr);
-                Ok(())
-            }
-            Opcode::CmovnlGqEq => {
-                self.cmovnl_gq_eq_r(instr);
-                Ok(())
-            }
-            Opcode::CmovleGqEq => {
-                self.cmovle_gq_eq_r(instr);
-                Ok(())
-            }
-            Opcode::CmovnleGqEq => {
-                self.cmovnle_gq_eq_r(instr);
-                Ok(())
-            }
+            Opcode::CmovoGqEq => self.cmovo_gq_eq(instr),
+            Opcode::CmovnoGqEq => self.cmovno_gq_eq(instr),
+            Opcode::CmovbGqEq => self.cmovb_gq_eq(instr),
+            Opcode::CmovnbGqEq => self.cmovnb_gq_eq(instr),
+            Opcode::CmovzGqEq => self.cmovz_gq_eq(instr),
+            Opcode::CmovnzGqEq => self.cmovnz_gq_eq(instr),
+            Opcode::CmovbeGqEq => self.cmovbe_gq_eq(instr),
+            Opcode::CmovnbeGqEq => self.cmovnbe_gq_eq(instr),
+            Opcode::CmovsGqEq => self.cmovs_gq_eq(instr),
+            Opcode::CmovnsGqEq => self.cmovns_gq_eq(instr),
+            Opcode::CmovpGqEq => self.cmovp_gq_eq(instr),
+            Opcode::CmovnpGqEq => self.cmovnp_gq_eq(instr),
+            Opcode::CmovlGqEq => self.cmovl_gq_eq(instr),
+            Opcode::CmovnlGqEq => self.cmovnl_gq_eq(instr),
+            Opcode::CmovleGqEq => self.cmovle_gq_eq(instr),
+            Opcode::CmovnleGqEq => self.cmovnle_gq_eq(instr),
 
             // =========================================================================
             // BCD (Binary Coded Decimal) instructions
@@ -2470,6 +2459,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::MovntpdMpdVpd => self.movntpd_mpd_vpd(instr),
             Opcode::MovntdqMdqVdq => self.movntdq_mdq_vdq(instr),
             Opcode::MovntiOp32MdGd => self.movnti_md_gd(instr),
+            Opcode::MovntiOp64MdGd => self.movnti_op64_md_gd(instr),
+            Opcode::MovntiMqGq => self.movnti_mq_gq(instr),
 
             // Extract sign bits to GPR (register only)
             Opcode::MovmskpsGdUps => self.movmskps_gd_ups(instr),
@@ -2509,6 +2500,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // MMX ↔ SSE transfer
             Opcode::Movdq2qPqUdq => self.movdq2q_pq_udq(instr),
             Opcode::Movq2dqVdqQq => self.movq2dq_vdq_qq(instr),
+
+            // MOVQ xmm ↔ r/m64 (66 REX.W 0F 6E / 66 REX.W 0F 7E)
+            Opcode::MovqVdqEq => self.movq_vdq_eq(instr),
+            Opcode::MovqEqVq => self.movq_eq_vq(instr),
 
             // SSE3 duplicate moves
             Opcode::MovddupVpdWq => {
@@ -2598,6 +2593,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Cvtsd2siGdWsd => self.cvtsd2si_gd_wsd(instr),
             Opcode::Cvttss2siGdWss => self.cvttss2si_gd_wss(instr),
             Opcode::Cvttsd2siGdWsd => self.cvttsd2si_gd_wsd(instr),
+            // 64-bit integer ↔ float conversions (REX.W forms)
+            Opcode::Cvtsi2ssVssEq => self.cvtsi2ss_vss_eq(instr),
+            Opcode::Cvtsi2sdVsdEq => self.cvtsi2sd_vsd_eq(instr),
+            Opcode::Cvttss2siGqWss => self.cvttss2si_gq_wss(instr),
+            Opcode::Cvttsd2siGqWsd => self.cvttsd2si_gq_wsd(instr),
+            Opcode::Cvtss2siGqWss => self.cvtss2si_gq_wss(instr),
+            Opcode::Cvtsd2siGqWsd => self.cvtsd2si_gq_wsd(instr),
             Opcode::Cvtps2pdVpdWps => self.cvtps2pd_vpd_wps(instr),
             Opcode::Cvtpd2psVpsWpd => self.cvtpd2ps_vps_wpd(instr),
             Opcode::Cvtss2sdVsdWss => self.cvtss2sd_vsd_wss(instr),
@@ -2718,6 +2720,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::MaskmovdquVdqUdq => self.maskmovdqu_vdq_udq(instr),
 
             // =========================================================================
+            // SSSE3 128-bit Packed Integer (sse.rs)
+            // =========================================================================
+            Opcode::PshufbVdqWdq => self.pshufb_vdq_wdq(instr),
+            Opcode::PmaddubswVdqWdq => self.pmaddubsw_vdq_wdq(instr),
+            Opcode::PsignbVdqWdq => self.psignb_vdq_wdq(instr),
+            Opcode::PsignwVdqWdq => self.psignw_vdq_wdq(instr),
+            Opcode::PsigndVdqWdq => self.psignd_vdq_wdq(instr),
+            Opcode::PalignrVdqWdqIb => self.palignr_vdq_wdq_ib(instr),
+
+            // =========================================================================
+            // SSE4.1 128-bit Packed Integer (sse.rs)
+            // =========================================================================
+            Opcode::PblendvbVdqWdq => self.pblendvb_vdq_wdq(instr),
+            Opcode::PtestVdqWdq => self.ptest_vdq_wdq(instr),
+            Opcode::PmuldqVdqWdq => self.pmuldq_vdq_wdq(instr),
+            Opcode::PminudVdqWdq => self.pminud_vdq_wdq(instr),
+            Opcode::PmaxudVdqWdq => self.pmaxud_vdq_wdq(instr),
+            Opcode::PmulldVdqWdq => self.pmulld_vdq_wdq(instr),
+            Opcode::PblendwVdqWdqIb => self.pblendw_vdq_wdq_ib(instr),
+
+            // =========================================================================
             // SSE4.1 Sign/Zero Extend (sse_move.rs)
             // =========================================================================
             Opcode::PmovsxbwVdqWq => {
@@ -2805,6 +2828,95 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
             }
 
+            // =========================================================================
+            // RDRAND / RDSEED (rdrand.rs — matching Bochs rdrand.cc)
+            // =========================================================================
+            Opcode::RdrandEw => self.rdrand_ew(instr),
+            Opcode::RdrandEd => self.rdrand_ed(instr),
+            Opcode::RdrandEq => self.rdrand_eq(instr),
+            Opcode::RdseedEw => self.rdseed_ew(instr),
+            Opcode::RdseedEd => self.rdseed_ed(instr),
+            Opcode::RdseedEq => self.rdseed_eq(instr),
+
+            // =========================================================================
+            // BMI1 (bmi32.rs / bmi64.rs — matching Bochs bmi32.cc / bmi64.cc)
+            // =========================================================================
+            Opcode::AndnGdBdEd => self.andn_gd_bd_ed(instr),
+            Opcode::AndnGqBqEq => self.andn_gq_bq_eq(instr),
+            Opcode::BlsiBdEd => self.blsi_bd_ed(instr),
+            Opcode::BlsiBqEq => self.blsi_bq_eq(instr),
+            Opcode::BlsmskBdEd => self.blsmsk_bd_ed(instr),
+            Opcode::BlsmskBqEq => self.blsmsk_bq_eq(instr),
+            Opcode::BlsrBdEd => self.blsr_bd_ed(instr),
+            Opcode::BlsrBqEq => self.blsr_bq_eq(instr),
+            Opcode::BextrGdEdBd => self.bextr_gd_ed_bd(instr),
+            Opcode::BextrGqEqBq => self.bextr_gq_eq_bq(instr),
+
+            // =========================================================================
+            // BMI2 (bmi32.rs / bmi64.rs — matching Bochs bmi32.cc / bmi64.cc)
+            // =========================================================================
+            Opcode::MulxGdBdEd => self.mulx_gd_bd_ed(instr),
+            Opcode::MulxGqBqEq => self.mulx_gq_bq_eq(instr),
+            Opcode::RorxGdEdIb => self.rorx_gd_ed_ib(instr),
+            Opcode::RorxGqEqIb => self.rorx_gq_eq_ib(instr),
+            Opcode::ShlxGdEdBd => self.shlx_gd_ed_bd(instr),
+            Opcode::ShlxGqEqBq => self.shlx_gq_eq_bq(instr),
+            Opcode::ShrxGdEdBd => self.shrx_gd_ed_bd(instr),
+            Opcode::ShrxGqEqBq => self.shrx_gq_eq_bq(instr),
+            Opcode::SarxGdEdBd => self.sarx_gd_ed_bd(instr),
+            Opcode::SarxGqEqBq => self.sarx_gq_eq_bq(instr),
+            Opcode::BzhiGdBdEd => self.bzhi_gd_bd_ed(instr),
+            Opcode::BzhiGqBqEq => self.bzhi_gq_bq_eq(instr),
+            Opcode::PextGdBdEd => self.pext_gd_bd_ed(instr),
+            Opcode::PextGqBqEq => self.pext_gq_bq_eq(instr),
+            Opcode::PdepGdBdEd => self.pdep_gd_bd_ed(instr),
+            Opcode::PdepGqBqEq => self.pdep_gq_bq_eq(instr),
+
+            // =========================================================================
+            // ADX (bmi32.rs / bmi64.rs — matching Bochs bmi32.cc / bmi64.cc)
+            // =========================================================================
+            Opcode::AdcxGdEd => self.adcx_gd_ed(instr),
+            Opcode::AdoxGdEd => self.adox_gd_ed(instr),
+            Opcode::AdcxGqEq => self.adcx_gq_eq(instr),
+            Opcode::AdoxGqEq => self.adox_gq_eq(instr),
+
+            // =========================================================================
+            // AES-NI + PCLMULQDQ (aes.rs — matching Bochs aes.cc)
+            // =========================================================================
+            Opcode::AesimcVdqWdq => self.aesimc_vdq_wdq(instr),
+            Opcode::AesencVdqWdq => self.aesenc_vdq_wdq(instr),
+            Opcode::AesenclastVdqWdq => self.aesenclast_vdq_wdq(instr),
+            Opcode::AesdecVdqWdq => self.aesdec_vdq_wdq(instr),
+            Opcode::AesdeclastVdqWdq => self.aesdeclast_vdq_wdq(instr),
+            Opcode::AeskeygenassistVdqWdqIb => self.aeskeygenassist_vdq_wdq_ib(instr),
+            Opcode::PclmulqdqVdqWdqIb => self.pclmulqdq_vdq_wdq_ib(instr),
+
+            // =========================================================================
+            // GFNI — GF(2) polynomial instructions (gf2.rs — matching Bochs gf2.cc)
+            // =========================================================================
+            Opcode::Gf2p8affineqbVdqWdqIb => self.gf2p8affineqb_vdq_wdq_ib(instr),
+            Opcode::Gf2p8affineinvqbVdqWdqIb => self.gf2p8affineinvqb_vdq_wdq_ib(instr),
+            Opcode::Gf2p8mulbVdqWdq => self.gf2p8mulb_vdq_wdq(instr),
+
+            // =========================================================================
+            // SHA-NI (sha.rs — matching Bochs sha.cc)
+            // =========================================================================
+            Opcode::Sha1nexteVdqWdq => self.sha1nexte_vdq_wdq(instr),
+            Opcode::Sha1msg1VdqWdq => self.sha1msg1_vdq_wdq(instr),
+            Opcode::Sha1msg2VdqWdq => self.sha1msg2_vdq_wdq(instr),
+            Opcode::Sha256rnds2VdqWdq => self.sha256rnds2_vdq_wdq(instr),
+            Opcode::Sha256msg1VdqWdq => self.sha256msg1_vdq_wdq(instr),
+            Opcode::Sha256msg2VdqWdq => self.sha256msg2_vdq_wdq(instr),
+            Opcode::Sha1rnds4VdqWdqIb => self.sha1rnds4_vdq_wdq_ib(instr),
+
+            // =========================================================================
+            // SSE4.2 String Operations (sse_string.rs — matching Bochs sse_string.cc)
+            // =========================================================================
+            Opcode::PcmpestrmVdqWdqIb => self.pcmpestrm_vdq_wdq_ib(instr),
+            Opcode::PcmpestriVdqWdqIb => self.pcmpestri_vdq_wdq_ib(instr),
+            Opcode::PcmpistrmVdqWdqIb => self.pcmpistrm_vdq_wdq_ib(instr),
+            Opcode::PcmpistriVdqWdqIb => self.pcmpistri_vdq_wdq_ib(instr),
+
             // End-of-trace sentinel (matching C++ BxEndTrace).
             // Sets STOP_TRACE so the inner loop breaks at the async_event check.
             Opcode::InsertedOpcode => {
@@ -2813,7 +2925,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
 
             _ => {
-                tracing::error!("Unimplemented opcode: {:?}", instr.get_ia_opcode());
+                self.diag_ia_error_count += 1;
+                self.diag_ia_error_last_rip = self.prev_rip;
+                tracing::error!("Unimplemented opcode: {:?} at RIP={:#x}", instr.get_ia_opcode(), self.prev_rip);
                 Err(crate::cpu::CpuError::UnimplementedOpcode {
                     opcode: format!("{:?}", instr.get_ia_opcode()),
                 })

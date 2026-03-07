@@ -10,8 +10,27 @@
 
 use core::ffi::c_void;
 
+use thiserror::Error;
+
 use crate::config::BxPhyAddress;
 use crate::cpu::ResetReason;
+
+/// Errors from PC system timer operations.
+///
+/// These correspond to `BX_PANIC()` calls in Bochs pc_system.cc.
+#[derive(Error, Debug)]
+pub enum PcSystemError {
+    #[error("timer index {0} out of bounds (max {BX_MAX_TIMERS})")]
+    TimerIndexOutOfBounds(usize),
+    #[error("timer {0} is not in use")]
+    TimerNotInUse(usize),
+    #[error("cannot modify null timer (index 0)")]
+    NullTimerModification,
+    #[error("no free timer slots available (max {BX_MAX_TIMERS})")]
+    NoFreeTimerSlots,
+    #[error("cannot unregister active timer {0} — deactivate first")]
+    TimerStillActive(usize),
+}
 
 /// Maximum length for timer ID strings
 const BX_MAX_TIMER_ID_LEN: usize = 32;
@@ -19,8 +38,16 @@ const BX_MAX_TIMER_ID_LEN: usize = 32;
 /// Maximum number of timers per PC system instance
 const BX_MAX_TIMERS: usize = 64;
 
-/// Default null timer interval (in ticks)
-const NULL_TIMER_INTERVAL: u64 = 100000;
+/// Default null timer interval (in ticks).
+/// Bochs uses 0xFFFFFFFF (u32::MAX). We use u64::MAX so the null timer
+/// effectively never fires, matching Bochs behavior where it just serves
+/// as a sentinel to keep the timer array non-empty.
+const NULL_TIMER_INTERVAL: u64 = u64::MAX;
+
+/// Minimum allowable timer period in ticks.
+/// Bochs pc_system.cc:37 — prevents ridiculously low timer frequencies
+/// when IPS is set too low.
+const MIN_ALLOWABLE_TIMER_PERIOD: u64 = 1;
 
 /// Timer handler function type
 pub type BxTimerHandlerT = fn(this_ptr: *mut c_void);
@@ -212,6 +239,20 @@ impl BxPcSystemC {
         self.ticks_total
     }
 
+    /// Convert ticks to microseconds using IPS setting.
+    ///
+    /// Corresponds to `bx_pc_system_c::time_usec()` in Bochs (pc_system.cc:462).
+    pub fn time_usec(&self) -> u64 {
+        ((self.ticks_total as f64) / self.m_ips) as u64
+    }
+
+    /// Convert ticks to nanoseconds using IPS setting.
+    ///
+    /// Corresponds to `bx_pc_system_c::time_nsec()` in Bochs (pc_system.cc:467).
+    pub fn time_nsec(&self) -> u64 {
+        ((self.ticks_total as f64) / self.m_ips * 1000.0) as u64
+    }
+
     /// Set the Hardware Request (DMA) line
     pub fn set_hrq(&mut self, value: bool) {
         self.hrq = value;
@@ -253,9 +294,24 @@ impl BxPcSystemC {
         }
     }
 
-    /// Register a new timer
+    /// Validate a timer index (must be in range, in use, and not null timer).
+    fn validate_timer_index(&self, timer_index: usize) -> Result<(), PcSystemError> {
+        if timer_index >= BX_MAX_TIMERS {
+            return Err(PcSystemError::TimerIndexOutOfBounds(timer_index));
+        }
+        if timer_index == 0 {
+            return Err(PcSystemError::NullTimerModification);
+        }
+        if !self.timers[timer_index].in_use {
+            return Err(PcSystemError::TimerNotInUse(timer_index));
+        }
+        Ok(())
+    }
+
+    /// Register a new timer with period in ticks.
     ///
-    /// Returns the timer index on success
+    /// Corresponds to `bx_pc_system_c::register_timer_ticks()` in Bochs (pc_system.cc:262).
+    /// Returns the timer index on success, or `PcSystemError::NoFreeTimerSlots` if full.
     pub fn register_timer(
         &mut self,
         handler: BxTimerHandlerT,
@@ -264,9 +320,13 @@ impl BxPcSystemC {
         continuous: bool,
         active: bool,
         id: &str,
-    ) -> Option<usize> {
-        // Find a free timer slot
-        for i in 0..BX_MAX_TIMERS {
+    ) -> Result<usize, PcSystemError> {
+        // Enforce minimum timer period (Bochs pc_system.cc:269)
+        let period = period.max(MIN_ALLOWABLE_TIMER_PERIOD);
+
+        // Search for free timer slot (i = 0 is reserved for NullTimer)
+        // Bochs pc_system.cc:276
+        for i in 1..BX_MAX_TIMERS {
             if !self.timers[i].in_use {
                 self.timers[i].in_use = true;
                 self.timers[i].period = period;
@@ -287,29 +347,137 @@ impl BxPcSystemC {
                 }
 
                 tracing::debug!("Registered timer {} with id '{}'", i, id);
-                return Some(i);
+                return Ok(i);
             }
         }
 
-        tracing::error!("No free timer slots available");
-        None
+        Err(PcSystemError::NoFreeTimerSlots)
     }
 
-    /// Activate a timer
-    pub fn activate_timer(&mut self, timer_index: usize, period: u64, continuous: bool) {
-        if timer_index < BX_MAX_TIMERS && self.timers[timer_index].in_use {
-            self.timers[timer_index].period = period;
-            self.timers[timer_index].time_to_fire = self.ticks_total + period;
-            self.timers[timer_index].active = true;
-            self.timers[timer_index].continuous = continuous;
-        }
+    /// Register a new timer with period in microseconds.
+    ///
+    /// Corresponds to `bx_pc_system_c::register_timer()` in Bochs (pc_system.cc:253).
+    /// Converts microseconds to ticks using IPS setting, then delegates to register_timer.
+    pub fn register_timer_usec(
+        &mut self,
+        handler: BxTimerHandlerT,
+        param: *mut c_void,
+        useconds: u32,
+        continuous: bool,
+        active: bool,
+        id: &str,
+    ) -> Result<usize, PcSystemError> {
+        // Convert useconds to number of ticks (Bochs pc_system.cc:257)
+        let ticks = (f64::from(useconds) * self.m_ips) as u64;
+        self.register_timer(handler, param, ticks, continuous, active, id)
     }
 
-    /// Deactivate a timer
-    pub fn deactivate_timer(&mut self, timer_index: usize) {
-        if timer_index < BX_MAX_TIMERS && self.timers[timer_index].in_use {
-            self.timers[timer_index].active = false;
+    /// Activate a timer with period in ticks.
+    ///
+    /// Corresponds to `bx_pc_system_c::activate_timer_ticks()` in Bochs (pc_system.cc:474).
+    pub fn activate_timer(
+        &mut self,
+        timer_index: usize,
+        period: u64,
+        continuous: bool,
+    ) -> Result<(), PcSystemError> {
+        self.validate_timer_index(timer_index)?;
+        // Enforce minimum timer period (Bochs pc_system.cc:488)
+        let period = period.max(MIN_ALLOWABLE_TIMER_PERIOD);
+        self.timers[timer_index].period = period;
+        self.timers[timer_index].time_to_fire = self.ticks_total + period;
+        self.timers[timer_index].active = true;
+        self.timers[timer_index].continuous = continuous;
+        Ok(())
+    }
+
+    /// Activate a timer with period in microseconds.
+    ///
+    /// Corresponds to `bx_pc_system_c::activate_timer()` in Bochs (pc_system.cc:508).
+    /// If `useconds == 0`, reuses the timer's existing period.
+    pub fn activate_timer_usec(
+        &mut self,
+        timer_index: usize,
+        useconds: u32,
+        continuous: bool,
+    ) -> Result<(), PcSystemError> {
+        self.validate_timer_index(timer_index)?;
+        let ticks = if useconds == 0 {
+            self.timers[timer_index].period
+        } else {
+            // Convert useconds to ticks (Bochs pc_system.cc:525)
+            let t = (f64::from(useconds) * self.m_ips) as u64;
+            t.max(MIN_ALLOWABLE_TIMER_PERIOD)
+        };
+        self.activate_timer(timer_index, ticks, continuous)
+    }
+
+    /// Activate a timer with period in nanoseconds.
+    ///
+    /// Corresponds to `bx_pc_system_c::activate_timer_nsec()` in Bochs (pc_system.cc:539).
+    /// If `nseconds == 0`, reuses the timer's existing period.
+    pub fn activate_timer_nsec(
+        &mut self,
+        timer_index: usize,
+        nseconds: u64,
+        continuous: bool,
+    ) -> Result<(), PcSystemError> {
+        self.validate_timer_index(timer_index)?;
+        let ticks = if nseconds == 0 {
+            self.timers[timer_index].period
+        } else {
+            // Convert nseconds to ticks (Bochs pc_system.cc:549)
+            let t = ((nseconds as f64) * self.m_ips / 1000.0) as u64;
+            t.max(MIN_ALLOWABLE_TIMER_PERIOD)
+        };
+        self.activate_timer(timer_index, ticks, continuous)
+    }
+
+    /// Deactivate a timer.
+    ///
+    /// Corresponds to `bx_pc_system_c::deactivate_timer()` in Bochs (pc_system.cc:563).
+    pub fn deactivate_timer(&mut self, timer_index: usize) -> Result<(), PcSystemError> {
+        self.validate_timer_index(timer_index)?;
+        self.timers[timer_index].active = false;
+        Ok(())
+    }
+
+    /// Unregister a timer, freeing its slot for reuse.
+    ///
+    /// Corresponds to `bx_pc_system_c::unregisterTimer()` in Bochs (pc_system.cc:575).
+    /// The timer must be deactivated first.
+    pub fn unregister_timer(&mut self, timer_index: usize) -> Result<(), PcSystemError> {
+        self.validate_timer_index(timer_index)?;
+        if self.timers[timer_index].active {
+            return Err(PcSystemError::TimerStillActive(timer_index));
         }
+        self.timers[timer_index].in_use = false;
+        self.timers[timer_index].period = u64::MAX;
+        self.timers[timer_index].time_to_fire = u64::MAX;
+        self.timers[timer_index].continuous = false;
+        self.timers[timer_index].handler = None;
+        self.timers[timer_index].param = core::ptr::null_mut();
+        self.timers[timer_index].id = [0; BX_MAX_TIMER_ID_LEN];
+
+        if timer_index == self.num_timers - 1 {
+            self.num_timers -= 1;
+        }
+        Ok(())
+    }
+
+    /// Set a timer's user parameter.
+    ///
+    /// Corresponds to `bx_pc_system_c::setTimerParam()` in Bochs (pc_system.cc:605).
+    pub fn set_timer_param(
+        &mut self,
+        timer_index: usize,
+        param: *mut c_void,
+    ) -> Result<(), PcSystemError> {
+        if timer_index >= self.num_timers {
+            return Err(PcSystemError::TimerIndexOutOfBounds(timer_index));
+        }
+        self.timers[timer_index].param = param;
+        Ok(())
     }
 
     /// Null timer handler (does nothing, just maintains timing)
@@ -352,8 +520,9 @@ mod tests {
     #[test]
     fn test_new_pc_system() {
         let pc = BxPcSystemC::new();
-        assert!(pc.enable_a20);
-        assert_eq!(pc.a20_mask, 0xFFFF_FFFF_FFFF_FFFFu64);
+        // A20 starts DISABLED at boot (8086 compat)
+        assert!(!pc.enable_a20);
+        assert_eq!(pc.a20_mask, 0xFFFF_FFFF_FFEF_FFFFu64);
         assert_eq!(pc.num_timers, 1); // null timer
     }
 
@@ -361,36 +530,130 @@ mod tests {
     fn test_a20_control() {
         let mut pc = BxPcSystemC::new();
 
-        // Initially enabled
-        assert!(pc.get_enable_a20());
-
-        // Disable A20
-        pc.set_enable_a20(false);
+        // Initially disabled
         assert!(!pc.get_enable_a20());
-        assert_eq!(pc.a20_mask, 0xFFFF_FFFF_FFEF_FFFFu64);
 
-        // Test address masking
+        // Test address masking with A20 disabled (default)
         let addr: u64 = 0x0010_0000; // 1MB mark (bit 20 set)
         let masked = pc.a20_addr(addr);
         assert_eq!(masked, 0x0000_0000); // Bit 20 should be masked off
 
-        // Re-enable A20
+        // Enable A20
         pc.set_enable_a20(true);
+        assert!(pc.get_enable_a20());
+        assert_eq!(pc.a20_mask, 0xFFFF_FFFF_FFFF_FFFFu64);
         let masked = pc.a20_addr(addr);
         assert_eq!(masked, 0x0010_0000); // No masking
+
+        // Disable A20 again
+        pc.set_enable_a20(false);
+        assert!(!pc.get_enable_a20());
+        assert_eq!(pc.a20_mask, 0xFFFF_FFFF_FFEF_FFFFu64);
     }
 
     #[test]
     fn test_multiple_instances() {
         let mut pc1 = BxPcSystemC::new();
-        let mut pc2 = BxPcSystemC::new();
+        let pc2 = BxPcSystemC::new();
 
         // Modify pc1
         pc1.set_enable_a20(false);
         pc1.tick(1000);
 
-        // pc2 should be unaffected
-        assert!(pc2.get_enable_a20());
+        // pc2 should be unaffected — A20 starts disabled for both
+        assert!(!pc2.get_enable_a20());
         assert_eq!(pc2.time_ticks(), 0);
+    }
+
+    fn dummy_handler(_: *mut c_void) {}
+
+    #[test]
+    fn test_timer_registration() {
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(15_000_000); // 15 MIPS
+
+        // Register a timer — should get slot 1 (slot 0 is null timer)
+        let idx = pc.register_timer(
+            dummy_handler,
+            core::ptr::null_mut(),
+            1000,
+            true,
+            true,
+            "test_timer",
+        ).unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(pc.num_timers, 2);
+    }
+
+    #[test]
+    fn test_timer_usec_conversion() {
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(15_000_000); // 15 MIPS → m_ips = 15.0
+
+        // 1000 usec at 15 MIPS = 15000 ticks
+        let idx = pc.register_timer_usec(
+            dummy_handler,
+            core::ptr::null_mut(),
+            1000,
+            true,
+            true,
+            "usec_timer",
+        ).unwrap();
+        assert_eq!(idx, 1);
+        assert_eq!(pc.timers[1].period, 15000);
+    }
+
+    #[test]
+    fn test_time_usec_nsec() {
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(10_000_000); // 10 MIPS → m_ips = 10.0
+
+        pc.tick(10_000_000); // 10M ticks = 1 second at 10 MIPS
+        assert_eq!(pc.time_usec(), 1_000_000); // 1 second in microseconds
+        assert_eq!(pc.time_nsec(), 1_000_000_000); // 1 second in nanoseconds
+    }
+
+    #[test]
+    fn test_timer_fire_and_deactivate() {
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(1_000_000); // 1 MIPS
+
+        let idx = pc.register_timer(
+            dummy_handler,
+            core::ptr::null_mut(),
+            100,
+            false, // one-shot
+            true,
+            "oneshot",
+        ).unwrap();
+
+        // Not yet time to fire
+        pc.tick(50);
+        pc.check_timers();
+        assert!(pc.timers[idx].active);
+
+        // Now fire
+        pc.tick(50);
+        pc.check_timers();
+        assert!(!pc.timers[idx].active); // one-shot deactivated
+    }
+
+    #[test]
+    fn test_unregister_timer() {
+        let mut pc = BxPcSystemC::new();
+        let idx = pc.register_timer(
+            dummy_handler,
+            core::ptr::null_mut(),
+            1000,
+            true,
+            false, // inactive
+            "unreg",
+        ).unwrap();
+
+        pc.unregister_timer(idx).unwrap();
+        assert!(!pc.timers[idx].in_use);
+
+        // Can't unregister null timer
+        assert!(pc.unregister_timer(0).is_err());
     }
 }

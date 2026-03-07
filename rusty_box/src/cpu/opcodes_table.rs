@@ -89,25 +89,31 @@ bitflags! {
     /// They are checked against OpFlags to determine if an instruction can be executed
     /// or if an error handler should be assigned instead.
     /// Matching C++ definitions in cpu.h:5455-5462
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub(super) struct FetchModeMask: u32 {
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub(crate) struct FetchModeMask: u32 {
+        /// CS.D_B — 32-bit default operand/address size
+        const D_B = 1 << 0;
+
+        /// Long64 mode active (CS.L=1 in long mode)
+        const LONG64 = 1 << 1;
+
         /// FPU/MMX available
-        const FETCH_MODE_FPU_MMX_OK = 1 << 2;
+        const FPU_MMX_OK = 1 << 2;
 
         /// SSE available (CPU_LEVEL >= 6)
-        const FETCH_MODE_SSE_OK = 1 << 3;
+        const SSE_OK = 1 << 3;
 
         /// AVX available (BX_SUPPORT_AVX)
-        const FETCH_MODE_AVX_OK = 1 << 4;
+        const AVX_OK = 1 << 4;
 
         /// Opmask available (BX_SUPPORT_EVEX)
-        const FETCH_MODE_OPMASK_OK = 1 << 5;
+        const OPMASK_OK = 1 << 5;
 
         /// EVEX available (BX_SUPPORT_EVEX)
-        const FETCH_MODE_EVEX_OK = 1 << 6;
+        const EVEX_OK = 1 << 6;
 
         /// AMX available (BX_SUPPORT_AMX)
-        const FETCH_MODE_AMX_OK = 1 << 7;
+        const AMX_OK = 1 << 7;
     }
 }
 
@@ -456,7 +462,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
     ) -> Result<()> {
         // CMP r/m8, imm8 - implemented inline in execute_instruction
         let dst = instr.meta_data[0] as usize;
-        let op1 = cpu.get_gpr8(dst);
+        let op1 = cpu.read_8bit_regx(dst, instr.extend8bit_l());
         let op2 = instr.ib();
         let result = op1.wrapping_sub(op2);
         cpu.update_flags_sub8(op1, op2, result);
@@ -852,14 +858,12 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
     }
 
     // Wrapper functions for flag manipulation
-    fn cli_wrapper<I: BxCpuIdTrait>(cpu: &mut BxCpuC<'_, I>, _instr: &Instruction) -> Result<()> {
-        cpu.eflags.remove(super::eflags::EFlags::IF_);
-        Ok(())
+    fn cli_wrapper<I: BxCpuIdTrait>(cpu: &mut BxCpuC<'_, I>, instr: &Instruction) -> Result<()> {
+        cpu.cli(instr)
     }
 
-    fn sti_wrapper<I: BxCpuIdTrait>(cpu: &mut BxCpuC<'_, I>, _instr: &Instruction) -> Result<()> {
-        cpu.eflags.insert(super::eflags::EFlags::IF_);
-        Ok(())
+    fn sti_wrapper<I: BxCpuIdTrait>(cpu: &mut BxCpuC<'_, I>, instr: &Instruction) -> Result<()> {
+        cpu.sti(instr)
     }
 
     fn cld_wrapper<I: BxCpuIdTrait>(cpu: &mut BxCpuC<'_, I>, _instr: &Instruction) -> Result<()> {
@@ -1017,11 +1021,11 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         // or if the 32-bit value is significantly different from 16-bit, use 32-bit
         if instr.ilen() >= 6 && offset32 != offset16 {
             // 32-bit far jump
-            tracing::trace!("FAR JMP 32 to {:04x}:{:08x}", segment, offset32);
+            tracing::debug!("JmpfAp(w): FAR JMP 32-BIT to {:04x}:{:08x}", segment, offset32);
             cpu.jmp_far32(instr, segment, offset32)?;
         } else {
             // 16-bit far jump
-            tracing::trace!("FAR JMP 16 to {:04x}:{:04x}", segment, offset16);
+            tracing::debug!("JmpfAp(w): FAR JMP 16-BIT to {:04x}:{:04x}", segment, offset16);
             cpu.jmp_far16(instr, segment, offset16 as u16)?;
         }
 

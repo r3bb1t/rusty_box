@@ -52,7 +52,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1_64, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1_64, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let op2_64 = self.get_gpr64(instr.src() as usize);
         let result = op1_64 ^ op2_64;
 
@@ -96,7 +96,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op2_64 = self.read_linear_qword(seg, laddr);
+        let op2_64 = self.read_linear_qword(seg, laddr)?;
         let dst = instr.dst() as usize;
         let op1_64 = self.get_gpr64(dst);
         let result = op1_64 ^ op2_64;
@@ -121,7 +121,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1_64, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1_64, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let result = op1_64 ^ op2_64;
 
         self.write_rmw_linear_qword(rmw_laddr, result);
@@ -168,7 +168,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1_64, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1_64, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let result = op1_64 | op2_64;
 
         self.write_rmw_linear_qword(rmw_laddr, result);
@@ -210,7 +210,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1_64, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1_64, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let op2_64 = self.get_gpr64(instr.src() as usize);
         let result = op1_64 | op2_64;
 
@@ -254,7 +254,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op2_64 = self.read_linear_qword(seg, laddr);
+        let op2_64 = self.read_linear_qword(seg, laddr)?;
         let dst = instr.dst() as usize;
         let op1_64 = self.get_gpr64(dst);
         let result = op1_64 | op2_64;
@@ -282,7 +282,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1_64, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1_64, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let op2_64 = self.get_gpr64(instr.src() as usize);
         let result = op1_64 & op2_64;
 
@@ -326,7 +326,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op2_64 = self.read_linear_qword(seg, laddr);
+        let op2_64 = self.read_linear_qword(seg, laddr)?;
         let dst = instr.dst() as usize;
         let op1_64 = self.get_gpr64(dst);
         let result = op1_64 & op2_64;
@@ -351,7 +351,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1_64, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1_64, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let result = op1_64 & op2_64;
 
         self.write_rmw_linear_qword(rmw_laddr, result);
@@ -397,7 +397,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1_64, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1_64, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let result = !op1_64;
 
         self.write_rmw_linear_qword(rmw_laddr, result);
@@ -451,7 +451,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op1_64 = self.read_linear_qword(seg, laddr);
+        let op1_64 = self.read_linear_qword(seg, laddr)?;
         // In Bochs TEST_EqGqM, src() is the register operand
         let op2_64 = self.get_gpr64(instr.src() as usize);
         let result = op1_64 & op2_64;
@@ -492,7 +492,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op1_64 = self.read_linear_qword(seg, laddr);
+        let op1_64 = self.read_linear_qword(seg, laddr)?;
         let op2_64 = instr.id() as i32 as u64; // sign-extend imm32 to 64 bits
         let result = op1_64 & op2_64;
 
@@ -537,6 +537,47 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op1.wrapping_sub(op2);
         self.update_flags_sub64(op1, op2, result);
         tracing::trace!("CMP RAX, imm64: {:#018x} - {:#018x}", op1, op2);
+    }
+
+    // =========================================================================
+    // Accumulator-immediate forms (RAX, imm32 sign-extended to 64)
+    // =========================================================================
+
+    /// OR RAX, imm32 (sign-extended to 64) — Bochs OR_RAXId → OR_EqIdR
+    /// Accumulator form: hardcodes RAX as destination (decoder stores rm != 0).
+    pub(super) fn or_rax_id(&mut self, instr: &Instruction) {
+        let op1 = self.get_gpr64(0); // RAX
+        let op2 = instr.id() as i32 as u64; // sign-extend imm32 to 64 bits
+        let result = op1 | op2;
+        self.set_gpr64(0, result);
+        self.set_flags_oszapc_logic_64(result);
+    }
+
+    /// AND RAX, imm32 (sign-extended to 64) — Bochs AND_RAXId → AND_EqIdR
+    pub(super) fn and_rax_id(&mut self, instr: &Instruction) {
+        let op1 = self.get_gpr64(0); // RAX
+        let op2 = instr.id() as i32 as u64; // sign-extend imm32 to 64 bits
+        let result = op1 & op2;
+        self.set_gpr64(0, result);
+        self.set_flags_oszapc_logic_64(result);
+    }
+
+    /// XOR RAX, imm32 (sign-extended to 64) — Bochs XOR_RAXId → XOR_EqIdR
+    pub(super) fn xor_rax_id(&mut self, instr: &Instruction) {
+        let op1 = self.get_gpr64(0); // RAX
+        let op2 = instr.id() as i32 as u64; // sign-extend imm32 to 64 bits
+        let result = op1 ^ op2;
+        self.set_gpr64(0, result);
+        self.set_flags_oszapc_logic_64(result);
+    }
+
+    /// TEST RAX, imm32 (sign-extended to 64) — Bochs TEST_RAXId → TEST_EqIdR
+    /// No writeback — sets flags only.
+    pub(super) fn test_rax_id(&mut self, instr: &Instruction) {
+        let op1 = self.get_gpr64(0); // RAX
+        let op2 = instr.id() as i32 as u64; // sign-extend imm32 to 64 bits
+        let result = op1 & op2;
+        self.set_flags_oszapc_logic_64(result);
     }
 
     // =========================================================================

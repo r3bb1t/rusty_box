@@ -57,6 +57,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         self.eflags.remove(EFlags::IF_);
+        // Bochs flag_ctrl.cc:101: handleInterruptMaskChange() after clearing IF
+        self.handle_interrupt_mask_change();
         Ok(())
     }
 
@@ -101,6 +103,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !self.eflags.contains(EFlags::IF_) {
             self.eflags.insert(EFlags::IF_);
             self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS);
+            // Bochs flag_ctrl.cc:150: handleInterruptMaskChange() after setting IF
+            self.handle_interrupt_mask_change();
         }
 
         Ok(())

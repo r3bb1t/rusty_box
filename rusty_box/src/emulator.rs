@@ -282,10 +282,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 false, // active=false
                 "lapic",
             );
-            if let Some(handle) = timer_handle {
-                let lapic = unsafe { &mut *lapic_ptr };
-                lapic.timer_handle = Some(handle);
-                tracing::debug!("LAPIC timer registered with handle {}", handle);
+            match timer_handle {
+                Ok(handle) => {
+                    let lapic = unsafe { &mut *lapic_ptr };
+                    lapic.timer_handle = Some(handle);
+                    tracing::debug!("LAPIC timer registered with handle {}", handle);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to register LAPIC timer: {}", e);
+                }
             }
         }
 
@@ -434,10 +439,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 false, // active=false
                 "lapic",
             );
-            if let Some(handle) = timer_handle {
-                let lapic = unsafe { &mut *lapic_ptr };
-                lapic.timer_handle = Some(handle);
-                tracing::debug!("LAPIC timer registered with handle {}", handle);
+            match timer_handle {
+                Ok(handle) => {
+                    let lapic = unsafe { &mut *lapic_ptr };
+                    lapic.timer_handle = Some(handle);
+                    tracing::debug!("LAPIC timer registered with handle {}", handle);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to register LAPIC timer: {}", e);
+                }
             }
         }
 
@@ -805,6 +815,19 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             .attach_disk(channel, drive, path, cylinders, heads, spt)
     }
 
+    /// Attach a CD-ROM ISO image to a channel/drive (requires std feature)
+    #[cfg(feature = "std")]
+    pub fn attach_cdrom(
+        &mut self,
+        channel: usize,
+        drive: usize,
+        path: &str,
+    ) -> std::io::Result<()> {
+        self.device_manager
+            .harddrv
+            .attach_cdrom_image(channel, drive, path)
+    }
+
     /// Check if an interrupt is pending
     pub fn has_interrupt(&self) -> bool {
         self.device_manager.has_interrupt()
@@ -876,6 +899,229 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.device_manager
             .cmos
             .set_boot_sequence(first, second, third);
+    }
+
+    /// Set up direct Linux kernel boot, bypassing BIOS entirely.
+    ///
+    /// Loads a bzImage kernel and optional initramfs into memory, sets up
+    /// the Linux boot protocol "zero page" (boot_params), configures CPU
+    /// for 32-bit protected mode, and points EIP at the kernel entry.
+    ///
+    /// This is equivalent to QEMU's `-kernel` / `-initrd` / `-append` options.
+    ///
+    /// # Arguments
+    /// * `bzimage` - Raw bzImage kernel file contents
+    /// * `initramfs` - Optional initramfs/initrd file contents
+    /// * `cmdline` - Kernel command line string
+    ///
+    /// # Memory Layout
+    /// * 0x1000: GDT (4 entries)
+    /// * 0x10000: boot_params (4096 bytes)
+    /// * 0x11000: command line (up to 2048 bytes)
+    /// * 0x100000: protected-mode kernel
+    /// * High memory: initramfs (if provided)
+    pub fn setup_direct_linux_boot(
+        &mut self,
+        bzimage: &[u8],
+        initramfs: Option<&[u8]>,
+        cmdline: &str,
+    ) -> Result<()> {
+        // Validate bzImage header
+        if bzimage.len() < 0x264 {
+            return Err(crate::Error::Cpu(crate::cpu::CpuError::UnimplementedOpcode {
+                opcode: "bzImage too small".into(),
+            }));
+        }
+        if bzimage[0x1FE] != 0x55 || bzimage[0x1FF] != 0xAA {
+            return Err(crate::Error::Cpu(crate::cpu::CpuError::UnimplementedOpcode {
+                opcode: "Invalid bzImage boot signature".into(),
+            }));
+        }
+        let header_magic = u32::from_le_bytes([
+            bzimage[0x202], bzimage[0x203], bzimage[0x204], bzimage[0x205],
+        ]);
+        if header_magic != 0x53726448 {
+            // "HdrS"
+            return Err(crate::Error::Cpu(crate::cpu::CpuError::UnimplementedOpcode {
+                opcode: "Invalid bzImage header magic".into(),
+            }));
+        }
+        let boot_version = u16::from_le_bytes([bzimage[0x206], bzimage[0x207]]);
+        if boot_version < 0x0204 {
+            return Err(crate::Error::Cpu(crate::cpu::CpuError::UnimplementedOpcode {
+                opcode: alloc::format!("Boot protocol {}.{} too old (need >= 2.04)",
+                    boot_version >> 8, boot_version & 0xFF),
+            }));
+        }
+
+        // Parse bzImage header
+        let setup_sects = if bzimage[0x1F1] == 0 { 4 } else { bzimage[0x1F1] as usize };
+        let setup_size = (setup_sects + 1) * 512;
+        let pm_kernel = &bzimage[setup_size..];
+
+        let code32_start = u32::from_le_bytes([
+            bzimage[0x214], bzimage[0x215], bzimage[0x216], bzimage[0x217],
+        ]);
+
+        tracing::info!(
+            "bzImage: protocol {}.{}, setup={}B, kernel={}B, entry={:#x}",
+            boot_version >> 8, boot_version & 0xFF,
+            setup_size, pm_kernel.len(), code32_start
+        );
+
+        // =====================================================================
+        // Write GDT at 0x1000
+        // =====================================================================
+        const GDT_ADDR: u64 = 0x1000;
+        let gdt: [u64; 4] = [
+            0x0000000000000000, // Entry 0: null
+            0x0000000000000000, // Entry 1: null (reserved)
+            0x00CF9A000000FFFF, // Entry 2 (sel 0x10): 32-bit code, base=0, limit=4GB
+            0x00CF92000000FFFF, // Entry 3 (sel 0x18): 32-bit data, base=0, limit=4GB
+        ];
+        let mut gdt_bytes = [0u8; 32];
+        for (i, &entry) in gdt.iter().enumerate() {
+            gdt_bytes[i * 8..(i + 1) * 8].copy_from_slice(&entry.to_le_bytes());
+        }
+        self.memory.load_RAM(&gdt_bytes, GDT_ADDR)?;
+
+        // =====================================================================
+        // Write boot_params (zero page) at 0x10000
+        // =====================================================================
+        const BOOT_PARAMS_ADDR: u64 = 0x10000;
+        const CMDLINE_ADDR: u64 = 0x11000;
+        let mut boot_params = [0u8; 4096];
+
+        // Copy setup header from bzImage (offsets 0x1F1 to 0x268)
+        let hdr_start = 0x1F1;
+        let hdr_end = core::cmp::min(0x268, bzimage.len());
+        boot_params[hdr_start..hdr_end].copy_from_slice(&bzimage[hdr_start..hdr_end]);
+
+        // type_of_loader = 0xFF (unknown bootloader)
+        boot_params[0x210] = 0xFF;
+
+        // loadflags: set LOADED_HIGH (bit 0), keep CAN_USE_HEAP (bit 7)
+        boot_params[0x211] |= 0x01; // LOADED_HIGH
+
+        // cmd_line_ptr = physical address of command line
+        boot_params[0x228..0x22C]
+            .copy_from_slice(&(CMDLINE_ADDR as u32).to_le_bytes());
+
+        // heap_end_ptr: relative to setup header start (unused for direct boot)
+        boot_params[0x224..0x226].copy_from_slice(&0xFE00u16.to_le_bytes());
+
+        // screen_info: minimal text mode setup
+        boot_params[0x00] = 0;   // orig_x (cursor column)
+        boot_params[0x01] = 0;   // orig_y (cursor row)
+        boot_params[0x06] = 80;  // orig_video_cols
+        boot_params[0x07] = 25;  // orig_video_lines (at offset 0x07 for 2.x)
+        boot_params[0x0F] = 16;  // orig_video_points (font height)
+        // orig_video_mode = 3 (80x25 color text)
+        boot_params[0x0E] = 0x03;
+        // orig_video_isVGA = 1
+        boot_params[0x0D] = 0x01;
+
+        // vid_mode at 0x1FA (in setup header, but also used by kernel)
+        boot_params[0x1FA..0x1FC].copy_from_slice(&0xFFFFu16.to_le_bytes()); // NORMAL_VGA
+
+        // =====================================================================
+        // Set up initramfs if provided
+        // =====================================================================
+        let kernel_end = code32_start as u64 + pm_kernel.len() as u64;
+        // Align initramfs to page boundary, well above kernel decompression area
+        let init_size = u32::from_le_bytes([
+            bzimage[0x260], bzimage[0x261], bzimage[0x262], bzimage[0x263],
+        ]) as u64;
+        let initrd_load_addr = core::cmp::max(
+            kernel_end,
+            code32_start as u64 + init_size,
+        );
+        // Align to 4KB
+        let initrd_load_addr = (initrd_load_addr + 0xFFF) & !0xFFF;
+
+        if let Some(initrd_data) = initramfs {
+            tracing::info!(
+                "Loading initramfs ({} bytes) at {:#x}",
+                initrd_data.len(), initrd_load_addr
+            );
+            self.memory.load_RAM(initrd_data, initrd_load_addr)?;
+
+            // ramdisk_image = physical address
+            boot_params[0x218..0x21C]
+                .copy_from_slice(&(initrd_load_addr as u32).to_le_bytes());
+            // ramdisk_size
+            boot_params[0x21C..0x220]
+                .copy_from_slice(&(initrd_data.len() as u32).to_le_bytes());
+        }
+
+        // =====================================================================
+        // E820 memory map
+        // =====================================================================
+        let ram_size = self.config.guest_memory_size as u64;
+        let e820_base = 0x2D0; // offset in boot_params
+        let mut e820_idx = 0;
+
+        // Helper to write an e820 entry (20 bytes each)
+        let mut write_e820 = |bp: &mut [u8], addr: u64, size: u64, etype: u32| {
+            let off = e820_base + e820_idx * 20;
+            bp[off..off + 8].copy_from_slice(&addr.to_le_bytes());
+            bp[off + 8..off + 16].copy_from_slice(&size.to_le_bytes());
+            bp[off + 16..off + 20].copy_from_slice(&etype.to_le_bytes());
+            e820_idx += 1;
+        };
+
+        // Entry 1: 0 - 0x9FC00 (conventional memory, ~639KB)
+        write_e820(&mut boot_params, 0, 0x9FC00, 1);
+        // Entry 2: 0x9FC00 - 0xA0000 (reserved, EBDA)
+        write_e820(&mut boot_params, 0x9FC00, 0x400, 2);
+        // Entry 3: 0xF0000 - 0x100000 (reserved, BIOS)
+        write_e820(&mut boot_params, 0xF0000, 0x10000, 2);
+        // Entry 4: 0x100000 - top of RAM (usable extended memory)
+        if ram_size > 0x100000 {
+            write_e820(&mut boot_params, 0x100000, ram_size - 0x100000, 1);
+        }
+
+        // e820_entries count at offset 0x1E8
+        boot_params[0x1E8] = e820_idx as u8;
+
+        // Write boot_params to memory
+        self.memory.load_RAM(&boot_params, BOOT_PARAMS_ADDR)?;
+
+        // =====================================================================
+        // Write command line
+        // =====================================================================
+        let cmdline_bytes = cmdline.as_bytes();
+        let cmdline_len = core::cmp::min(cmdline_bytes.len(), 2047);
+        let mut cmdline_buf = alloc::vec![0u8; cmdline_len + 1]; // null-terminated
+        cmdline_buf[..cmdline_len].copy_from_slice(&cmdline_bytes[..cmdline_len]);
+        self.memory.load_RAM(&cmdline_buf, CMDLINE_ADDR)?;
+        tracing::info!("Command line: {}", cmdline);
+
+        // =====================================================================
+        // Load protected-mode kernel at code32_start
+        // =====================================================================
+        tracing::info!(
+            "Loading kernel ({} bytes) at {:#x}",
+            pm_kernel.len(), code32_start
+        );
+        self.memory.load_RAM(pm_kernel, code32_start as u64)?;
+
+        // =====================================================================
+        // Configure CPU for protected mode
+        // =====================================================================
+        self.cpu.setup_for_direct_boot(GDT_ADDR);
+
+        // Set entry point and registers
+        self.cpu.set_rip(code32_start as u64);
+        self.cpu.set_rsp(0x20000); // Temporary stack (kernel sets its own early)
+        self.cpu.set_rsi(BOOT_PARAMS_ADDR); // ESI = pointer to boot_params
+
+        tracing::info!(
+            "Direct boot ready: EIP={:#x}, ESI={:#x}, ESP={:#x}",
+            code32_start, BOOT_PARAMS_ADDR, 0x20000u32
+        );
+
+        Ok(())
     }
 
     /// Run emulator interactively with GUI event handling
@@ -958,6 +1204,17 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             // 2. Execute CPU instructions in batches
             let batch_size = (max_instructions - instructions_executed).min(INSTRUCTION_BATCH_SIZE);
             let batch_start_time = std::time::Instant::now();
+            // PRE-BATCH diagnostic: print batch number, activity state, and elapsed
+            static BATCH_NUM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+            let bn = BATCH_NUM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if bn >= 500 && bn < 505 {
+                tracing::debug!("[PRE-BATCH #{}] total={}k RIP={:#010x} activity={:?}",
+                    bn, instructions_executed/1000, self.cpu.rip(), self.cpu.activity_state);
+            }
+            // Wall-clock watchdog: spawn thread to detect if cpu_loop_n hangs >5s
+            let batch_rip = self.cpu.rip();
+            let batch_mode = self.cpu.get_cpu_mode();
+            let batch_ie = instructions_executed;
             // Use unsafe to work around lifetime issues - the memory borrow is safe because
             // we control the lifetime and the CPU doesn't outlive the memory
             let result = unsafe {
@@ -968,9 +1225,54 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     .cpu_loop_n_with_io(mem_extended, &[], batch_size, io_ptr)
             };
 
+            // Post-batch timing check
+            let batch_wall_time = batch_start_time.elapsed();
+            if batch_wall_time.as_secs() >= 5 {
+                tracing::warn!(
+                    "[BATCH-HANG] batch #{} took {:?}! RIP before={:#x} mode={} instr_so_far={}k",
+                    bn, batch_wall_time, batch_rip, batch_mode, batch_ie / 1000,
+                );
+            }
+            // Detailed batch result logging (phase 2 starts around batch ~555)
+            if bn >= 550 && bn < 600 {
+                tracing::debug!(
+                    "[BATCH#{}] wall={:?} total={}k RIP={:#x} activity={:?}",
+                    bn, batch_wall_time, batch_ie / 1000,
+                    self.cpu.rip(), self.cpu.activity_state
+                );
+            }
+
             let should_update_gui = match result {
                 Ok(executed) => {
                     instructions_executed += executed;
+
+                    // Milestone progress print every 500K instructions
+                    if instructions_executed % 500_000 < INSTRUCTION_BATCH_SIZE {
+                        tracing::debug!(
+                            "[{}k instr] RIP={:#010x} CS={:#06x} mode={} batch_returned={} activity={:?}",
+                            instructions_executed / 1000,
+                            self.cpu.rip(),
+                            self.cpu.get_cs_selector(),
+                            self.cpu.get_cpu_mode(),
+                            executed,
+                            self.cpu.activity_state,
+                        );
+                    }
+                    // Detect zero-return batches (HLT or stuck)
+                    if executed == 0 {
+                        static ZERO_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+                        let zc = ZERO_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if zc < 5 || zc % 10000 == 0 {
+                            tracing::debug!(
+                                "[ZERO-BATCH #{}] RIP={:#010x} CS={:#06x} activity={:?} async_event={}",
+                                zc,
+                                self.cpu.rip(),
+                                self.cpu.get_cs_selector(),
+                                self.cpu.activity_state,
+                                self.cpu.async_event,
+                            );
+                        }
+                    }
 
                     // Batch timing: log when a batch takes >50ms (indicating perf cliff)
                     let batch_elapsed = batch_start_time.elapsed();
@@ -1066,8 +1368,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             } else {
                                 0
                             };
-                            tracing::debug!(
-                                "BIOS stuck at RIP={:#x} after {}k instructions, last I/O read: port={:#06x} value={:#x}, CS={:#06x} mode={}, BP={:#06x} AX={:#06x} [BP+2]={:#06x} [BP+4]={:#06x} [BP+6]={:#06x}",
+                            tracing::error!(
+                                "STUCK at RIP={:#x} after {}k instructions, last I/O read: port={:#06x} value={:#x}, CS={:#06x} mode={}, BP={:#06x} AX={:#06x} [BP+2]={:#06x} [BP+4]={:#06x} [BP+6]={:#06x}",
                                 current_rip,
                                 instructions_executed / 1000,
                                 self.devices.last_io_read_port,
@@ -1085,7 +1387,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                         .iter()
                                         .map(|b| format!("{:02x}", b))
                                         .collect();
-                                    tracing::debug!(
+                                    tracing::error!(
                                         "Code at RIP={:#x}: {}",
                                         current_rip,
                                         bytes.join(" ")
@@ -1109,7 +1411,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     }
                                 }
                                 // Also dump all general registers + CR0
-                                tracing::debug!(
+                                tracing::error!(
                                     "Regs: EAX={:#010x} EBX={:#010x} ECX={:#010x} EDX={:#010x} ESI={:#010x} EDI={:#010x} ESP={:#010x} EBP={:#010x} CR0={:#010x}",
                                     self.cpu.eax(), self.cpu.ebx(), self.cpu.ecx(), self.cpu.edx(),
                                     self.cpu.esi(), self.cpu.edi(), self.cpu.esp(), self.cpu.ebp(),
@@ -1592,17 +1894,22 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             //
                             // Without a GUI (headless): spin at full speed; the caller injects
                             // periodic keystrokes to keep the screen alive.
-                            let hlt_sync = self.gui.is_some() && self.cpu.get_cpu_mode() != 0;
+                            let hlt_sync = self.gui.as_ref().map_or(false, |g| !g.is_headless())
+                                && self.cpu.get_cpu_mode() != 0;
                             let hlt_real_start = if hlt_sync {
                                 Some(std::time::Instant::now())
                             } else {
                                 None
                             };
                             let mut hlt_usec = 0u64;
+                            // Headless mode: use larger tick steps (1ms vs 10µs) to reduce
+                            // iteration count from 20K to 200 per HLT cycle. PIT fires at
+                            // ~55ms, so we need ~55 iterations instead of ~5500.
+                            let hlt_step_usec: u64 = if hlt_sync { 10 } else { 1000 };
                             // Tick increment per HLT iteration: approximate bus ticks from IPS
-                            let hlt_tick_increment = (self.config.ips as u64 * 10) / 1_000_000;
+                            let hlt_tick_increment = (self.config.ips as u64 * hlt_step_usec) / 1_000_000;
                             while !self.has_interrupt() && hlt_usec < 200_000 {
-                                self.tick_devices(10);
+                                self.tick_devices(hlt_step_usec);
                                 // Also drive pc_system timers (LAPIC timer)
                                 self.pc_system.tick(hlt_tick_increment.max(1));
                                 self.pc_system.check_timers();
@@ -1618,14 +1925,22 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     if lapic.timer_deactivate_request {
                                         lapic.timer_deactivate_request = false;
                                         if let Some(handle) = lapic.timer_handle {
-                                            self.pc_system.deactivate_timer(handle);
+                                            if let Err(e) = self.pc_system.deactivate_timer(handle) {
+                                                tracing::error!("LAPIC deactivate_timer: {}", e);
+                                            }
                                         }
                                     }
                                     if let Some(period) = lapic.timer_activate_request.take() {
                                         if let Some(handle) = lapic.timer_handle {
-                                            self.pc_system.activate_timer(handle, period, false);
+                                            if let Err(e) = self.pc_system.activate_timer(handle, period, false) {
+                                                tracing::error!("LAPIC activate_timer: {}", e);
+                                            }
                                         }
                                         lapic.set_ticks_initial(self.pc_system.time_ticks());
+                                    }
+                                    // Forward EOI broadcast from LAPIC to I/O APIC
+                                    if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
+                                        self.device_manager.ioapic.receive_eoi(eoi_vec);
                                     }
                                     // LAPIC interrupt can also break the HLT spin
                                     if lapic.intr {
@@ -1633,7 +1948,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                         break;
                                     }
                                 }
-                                hlt_usec += 10;
+                                hlt_usec += hlt_step_usec;
                             }
                             if let Some(start) = hlt_real_start {
                                 let real_elapsed_us = start.elapsed().as_micros() as u64;
@@ -1688,16 +2003,26 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         if lapic.timer_deactivate_request {
                             lapic.timer_deactivate_request = false;
                             if let Some(handle) = lapic.timer_handle {
-                                self.pc_system.deactivate_timer(handle);
+                                if let Err(e) = self.pc_system.deactivate_timer(handle) {
+                                    tracing::error!("LAPIC deactivate_timer: {}", e);
+                                }
                             }
                         }
 
                         // Process pending timer activation (Bochs: activate_timer_ticks)
                         if let Some(period) = lapic.timer_activate_request.take() {
                             if let Some(handle) = lapic.timer_handle {
-                                self.pc_system.activate_timer(handle, period, false);
+                                if let Err(e) = self.pc_system.activate_timer(handle, period, false) {
+                                    tracing::error!("LAPIC activate_timer: {}", e);
+                                }
                             }
                             lapic.set_ticks_initial(self.pc_system.time_ticks());
+                        }
+
+                        // Forward EOI broadcast from LAPIC to I/O APIC for level-triggered
+                        // Bochs: apic_bus_broadcast_eoi(vec) → ioapic.receive_eoi(vec)
+                        if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
+                            self.device_manager.ioapic.receive_eoi(eoi_vec);
                         }
 
                         // Signal pending LAPIC interrupt to CPU event system
@@ -2172,7 +2497,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     mips,
                     self.cpu.rip(),
                     self.cpu.get_cs_selector(),
-                    self.cpu.get_cpu_mode(),
+                    self.get_cpu_mode_str(),
                 );
             }
 
@@ -2234,12 +2559,16 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     if lapic.timer_deactivate_request {
                         lapic.timer_deactivate_request = false;
                         if let Some(handle) = lapic.timer_handle {
-                            self.pc_system.deactivate_timer(handle);
+                            if let Err(e) = self.pc_system.deactivate_timer(handle) {
+                                tracing::error!("LAPIC deactivate_timer: {}", e);
+                            }
                         }
                     }
                     if let Some(period) = lapic.timer_activate_request.take() {
                         if let Some(handle) = lapic.timer_handle {
-                            self.pc_system.activate_timer(handle, period, false);
+                            if let Err(e) = self.pc_system.activate_timer(handle, period, false) {
+                                tracing::error!("LAPIC activate_timer: {}", e);
+                            }
                         }
                         lapic.set_ticks_initial(self.pc_system.time_ticks());
                     }

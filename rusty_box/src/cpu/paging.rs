@@ -13,23 +13,89 @@ use crate::{
     memory::BxMemC,
 };
 
-// Page fault error code bits
-const ERROR_NOT_PRESENT: u32 = 0x00;
-const ERROR_PROTECTION: u32 = 0x01;
-const ERROR_WRITE_ACCESS: u32 = 0x02;
-const ERROR_USER_ACCESS: u32 = 0x04;
-const ERROR_RESERVED: u32 = 0x08;
-const ERROR_CODE_ACCESS: u32 = 0x10;
+use bitflags::bitflags;
 
-// Combined access bits
-const BX_COMBINED_ACCESS_WRITE: u32 = 0x2;
-const BX_COMBINED_ACCESS_USER: u32 = 0x4;
+bitflags! {
+    /// Page fault error code bits (Bochs paging.cc).
+    /// Combined to build the error code pushed on #PF exceptions.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct PageFaultError: u32 {
+        /// Page not present (bit 0 clear)
+        const NOT_PRESENT  = 0x00;
+        /// Protection violation (bit 0 set)
+        const PROTECTION   = 0x01;
+        /// Caused by a write access (bit 1)
+        const WRITE_ACCESS = 0x02;
+        /// User-mode access (bit 2)
+        const USER_ACCESS  = 0x04;
+        /// Reserved bit violation (bit 3)
+        const RESERVED     = 0x08;
+        /// Instruction fetch (bit 4, NX violation)
+        const CODE_ACCESS  = 0x10;
+    }
+}
 
-// DTLB access permission bits (matching Bochs tlb.h)
-const TLB_SYS_READ_OK: u32 = 0x01;
-const TLB_USER_READ_OK: u32 = 0x02;
-const TLB_SYS_WRITE_OK: u32 = 0x04;
-const TLB_USER_WRITE_OK: u32 = 0x08;
+bitflags! {
+    /// Combined page access permission bits (Bochs paging.cc).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct CombinedAccess: u32 {
+        const WRITE = 0x2;
+        const USER  = 0x4;
+    }
+}
+
+bitflags! {
+    /// DTLB access permission bits (matching Bochs tlb.h).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct TlbAccess: u32 {
+        const SYS_READ_OK   = 0x01;
+        const USER_READ_OK  = 0x02;
+        const SYS_WRITE_OK  = 0x04;
+        const USER_WRITE_OK = 0x08;
+    }
+}
+
+bitflags! {
+    /// Page table entry flag bits (used in both 32-bit and 64-bit page table entries).
+    /// Based on Bochs paging.cc PTE/PDE bit definitions.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct PteBits: u64 {
+        /// Present bit (bit 0)
+        const PRESENT  = 0x01;
+        /// Read/Write bit (bit 1): 0=read-only, 1=read-write
+        const RW       = 0x02;
+        /// User/Supervisor bit (bit 2): 0=supervisor, 1=user
+        const US       = 0x04;
+        /// Page-level Write Through (bit 3)
+        const PWT      = 0x08;
+        /// Page-level Cache Disable (bit 4)
+        const PCD      = 0x10;
+        /// Accessed bit (bit 5)
+        const ACCESSED = 0x20;
+        /// Dirty bit (bit 6)
+        const DIRTY    = 0x40;
+        /// Page Size bit (bit 7): 1=large page (4MB/2MB/1GB)
+        const PS       = 0x80;
+    }
+}
+
+impl PteBits {
+    /// Wrap a raw page table entry value for flag operations.
+    /// Retains all bits (address + flags) — safe to call `.bits()` later.
+    #[inline(always)]
+    pub fn from_raw(raw: u64) -> Self {
+        Self::from_bits_retain(raw)
+    }
+}
+
+/// 32-bit aliases for use in legacy (non-PAE) paging with u32 page entries.
+mod pte_bits32 {
+    use super::PteBits;
+    pub const PRESENT: u32  = PteBits::PRESENT.bits() as u32;
+    pub const ACCESSED: u32 = PteBits::ACCESSED.bits() as u32;
+    pub const DIRTY: u32    = PteBits::DIRTY.bits() as u32;
+    pub const PS: u32       = PteBits::PS.bits() as u32;
+}
 
 // Paging level constants (matching Bochs paging.cc:542-548)
 const BX_LEVEL_PTE: usize = 0;
@@ -190,7 +256,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cr3 = self.cr3;
         let mut ppf = (cr3 & BX_CR3_PAGING_MASK) as u32;
 
-        let mut combined_access = BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER;
+        let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut entry_addr = [0u64; 2];
         let mut entry = [0u32; 2];
 
@@ -201,7 +267,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         entry[BX_LEVEL_PDE] = self.read_physical_dword(entry_addr[BX_LEVEL_PDE], mem)?;
 
         // Check present bit
-        if (entry[BX_LEVEL_PDE] & 0x1) == 0 {
+        if (entry[BX_LEVEL_PDE] & pte_bits32::PRESENT) == 0 {
             tracing::debug!("PDE not present: PDE={:#010x}", entry[BX_LEVEL_PDE]);
             // Set CR2 and raise page fault exception
             // Note: We can't modify self here, so we'll return an error that the caller will convert
@@ -214,7 +280,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         ppf = entry[BX_LEVEL_PDE] & 0xFFFFF000;
 
         // Check for 4MB page (PSE bit in PDE, only if CR4.PSE enabled)
-        if (entry[BX_LEVEL_PDE] & 0x80) != 0 && self.cr4.pse() {
+        if (entry[BX_LEVEL_PDE] & pte_bits32::PS) != 0 && self.cr4.pse() {
             // Bochs paging.cc: check reserved bits in PSE PDE
             if (entry[BX_LEVEL_PDE] & PAGING_PDE4M_RESERVED_BITS) != 0 {
                 tracing::debug!(
@@ -227,7 +293,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
             // 4MB page — permission check using combined access from PDE only
             let combined =
-                entry[BX_LEVEL_PDE] & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+                entry[BX_LEVEL_PDE] & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
             let is_write = matches!(rw, MemoryAccessType::Write);
             let priv_index =
                 ((self.cr0.wp() as u32) << 4) | ((user as u32) << 3) | combined | (is_write as u32);
@@ -242,7 +308,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 ));
             }
             // Set Accessed + Dirty bits on PDE (PDE is the leaf for 4MB pages)
-            let needed = 0x20 | if is_write { 0x40 } else { 0 };
+            let needed = pte_bits32::ACCESSED | if is_write { pte_bits32::DIRTY } else { 0 };
             if entry[BX_LEVEL_PDE] & needed != needed {
                 entry[BX_LEVEL_PDE] |= needed;
                 self.write_physical_dword(
@@ -264,7 +330,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         entry[BX_LEVEL_PTE] = self.read_physical_dword(entry_addr[BX_LEVEL_PTE], mem)?;
 
         // Check present bit
-        if (entry[BX_LEVEL_PTE] & 0x1) == 0 {
+        if (entry[BX_LEVEL_PTE] & pte_bits32::PRESENT) == 0 {
             tracing::debug!("PTE not present: PTE={:#010x}", entry[BX_LEVEL_PTE]);
             // Set CR2 and raise page fault exception
             return Err(super::CpuError::Memory(
@@ -280,7 +346,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let is_write = matches!(rw, MemoryAccessType::Write);
         let priv_index = ((self.cr0.wp() as u32) << 4)
             | ((user as u32) << 3)
-            | (combined_access & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER))
+            | (combined_access & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits()))
             | (is_write as u32);
 
         if PRIV_CHECK[priv_index as usize] == 0 {
@@ -324,8 +390,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     ) -> Result<()> {
         // Update PDE accessed bit if needed (when accessing PTE)
         if leaf == BX_LEVEL_PTE {
-            if (entry[BX_LEVEL_PDE] & 0x20) == 0 {
-                entry[BX_LEVEL_PDE] |= 0x20;
+            if (entry[BX_LEVEL_PDE] & pte_bits32::ACCESSED) == 0 {
+                entry[BX_LEVEL_PDE] |= pte_bits32::ACCESSED;
                 self.write_physical_dword(
                     entry_addr[BX_LEVEL_PDE],
                     entry[BX_LEVEL_PDE],
@@ -336,11 +402,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Update PTE accessed/dirty bits
-        let set_dirty = write && (entry[leaf] & 0x40) == 0;
-        if (entry[leaf] & 0x20) == 0 || set_dirty {
-            entry[leaf] |= 0x20; // Set accessed bit
+        let set_dirty = write && (entry[leaf] & pte_bits32::DIRTY) == 0;
+        if (entry[leaf] & pte_bits32::ACCESSED) == 0 || set_dirty {
+            entry[leaf] |= pte_bits32::ACCESSED; // Set accessed bit
             if set_dirty {
-                entry[leaf] |= 0x40; // Set dirty bit
+                entry[leaf] |= pte_bits32::DIRTY; // Set dirty bit
             }
             self.write_physical_dword(entry_addr[leaf], entry[leaf], mem, page_write_stamp_table)?;
         }
@@ -402,12 +468,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let mut error_code = match &e {
                     super::CpuError::Memory(
                         crate::memory::MemoryError::PageProtectionViolation,
-                    ) => ERROR_PROTECTION | ((user as u32) << 2) | ((is_write as u32) << 1),
-                    _ => ERROR_NOT_PRESENT | ((user as u32) << 2) | ((is_write as u32) << 1),
+                    ) => PageFaultError::PROTECTION.bits() | ((user as u32) << 2) | ((is_write as u32) << 1),
+                    _ => PageFaultError::NOT_PRESENT.bits() | ((user as u32) << 2) | ((is_write as u32) << 1),
                 };
                 // Set I/D bit for execute access when PAE+NXE is enabled
                 if is_execute && self.cr4.pae() && self.efer.nxe() {
-                    error_code |= ERROR_CODE_ACCESS;
+                    error_code |= PageFaultError::CODE_ACCESS.bits();
                 }
 
                 // Raise page fault exception (based on page_fault function in paging.cc:539)
@@ -431,7 +497,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         mem: &mut BxMemC,
         _page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
     ) -> Result<BxPhyAddress> {
-        let mut combined_access = BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER;
+        let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
 
         let mut reserved = PAGING_LEGACY_PAE_RESERVED_BITS;
@@ -441,16 +507,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // ---- PDPTE from cache ----
         let pdpte_index = ((laddr >> 30) & 0x3) as usize;
-        let pdpte = self.pdptrcache.entry[pdpte_index];
-        if pdpte & 0x1 == 0 {
+        let pdpte = PteBits::from_raw(self.pdptrcache.entry[pdpte_index]);
+        if !pdpte.contains(PteBits::PRESENT) {
             return Err(super::CpuError::Memory(
                 crate::memory::MemoryError::PageNotPresent,
             ));
         }
-        let mut ppf = pdpte & 0x000F_FFFF_FFFF_F000;
+        let mut ppf = pdpte.bits() & 0x000F_FFFF_FFFF_F000;
 
         let mut entry_addr = [0u64; 2];
-        let mut entry = [0u64; 2];
+        let mut entry = [PteBits::empty(); 2];
 
         // ---- PDE ----
         entry_addr[BX_LEVEL_PDE] = ppf + (((laddr >> 21) & 0x1FF) << 3);
@@ -467,35 +533,35 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
             }
         };
-        entry[BX_LEVEL_PDE] = pde_bytes;
+        entry[BX_LEVEL_PDE] = PteBits::from_raw(pde_bytes);
 
-        if entry[BX_LEVEL_PDE] & 0x1 == 0 {
+        if !entry[BX_LEVEL_PDE].contains(PteBits::PRESENT) {
             return Err(super::CpuError::Memory(
                 crate::memory::MemoryError::PageNotPresent,
             ));
         }
-        if entry[BX_LEVEL_PDE] & reserved != 0 {
+        if entry[BX_LEVEL_PDE].bits() & reserved != 0 {
             return Err(super::CpuError::Memory(
                 crate::memory::MemoryError::PageProtectionViolation,
             ));
         }
-        if entry[BX_LEVEL_PDE] & PAGE_DIRECTORY_NX_BIT != 0 {
+        if entry[BX_LEVEL_PDE].bits() & PAGE_DIRECTORY_NX_BIT != 0 {
             nx_page = true;
         }
 
-        ppf = entry[BX_LEVEL_PDE] & 0x000F_FFFF_FFFF_F000;
+        ppf = entry[BX_LEVEL_PDE].bits() & 0x000F_FFFF_FFFF_F000;
 
         // ---- 2MB large page ----
-        if entry[BX_LEVEL_PDE] & 0x80 != 0 {
-            if entry[BX_LEVEL_PDE] & PAGING_PAE_PDE2M_RESERVED_BITS != 0 {
+        if entry[BX_LEVEL_PDE].contains(PteBits::PS) {
+            if entry[BX_LEVEL_PDE].bits() & PAGING_PAE_PDE2M_RESERVED_BITS != 0 {
                 return Err(super::CpuError::Memory(
                     crate::memory::MemoryError::PageProtectionViolation,
                 ));
             }
-            ppf = entry[BX_LEVEL_PDE] & 0x000F_FFFF_FFE0_0000;
+            ppf = entry[BX_LEVEL_PDE].bits() & 0x000F_FFFF_FFE0_0000;
 
             combined_access &=
-                (entry[BX_LEVEL_PDE] as u32) & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+                (entry[BX_LEVEL_PDE].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
             let is_write = matches!(rw, MemoryAccessType::Write);
             let is_execute = matches!(rw, MemoryAccessType::Execute);
             let priv_index = ((self.cr0.wp() as u32) << 4)
@@ -508,13 +574,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 ));
             }
 
+            // SMEP check for 2MB page (Bochs paging.cc:740-743)
+            if is_execute
+                && self.cr4.smep()
+                && !user
+                && (combined_access & CombinedAccess::USER.bits()) != 0
+            {
+                return Err(super::CpuError::Memory(
+                    crate::memory::MemoryError::PageProtectionViolation,
+                ));
+            }
+
             // A/D bits
-            let needed = 0x20u64 | if is_write { 0x40 } else { 0 };
-            if entry[BX_LEVEL_PDE] & needed != needed {
-                entry[BX_LEVEL_PDE] |= needed;
-                let data = entry[BX_LEVEL_PDE].to_le_bytes();
+            let needed = PteBits::ACCESSED | if is_write { PteBits::DIRTY } else { PteBits::empty() };
+            if !entry[BX_LEVEL_PDE].contains(needed) {
+                entry[BX_LEVEL_PDE].insert(needed);
+                let data = entry[BX_LEVEL_PDE].bits().to_le_bytes();
                 let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
                 let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+                // A/D bit update on page table entry — write to physical RAM cannot meaningfully fail
                 let _ = mem.write_physical_page(
                     &[cpu_ref],
                     _page_write_stamp_table,
@@ -526,7 +604,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(ppf | (laddr & 0x1FFFFF));
         }
 
-        combined_access &= entry[BX_LEVEL_PDE] as u32;
+        combined_access &= entry[BX_LEVEL_PDE].bits() as u32;
 
         // ---- PTE ----
         entry_addr[BX_LEVEL_PTE] = ppf + (((laddr >> 12) & 0x1FF) << 3);
@@ -543,24 +621,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
             }
         };
-        entry[BX_LEVEL_PTE] = pte_bytes;
+        entry[BX_LEVEL_PTE] = PteBits::from_raw(pte_bytes);
 
-        if entry[BX_LEVEL_PTE] & 0x1 == 0 {
+        if !entry[BX_LEVEL_PTE].contains(PteBits::PRESENT) {
             return Err(super::CpuError::Memory(
                 crate::memory::MemoryError::PageNotPresent,
             ));
         }
-        if entry[BX_LEVEL_PTE] & reserved != 0 {
+        if entry[BX_LEVEL_PTE].bits() & reserved != 0 {
             return Err(super::CpuError::Memory(
                 crate::memory::MemoryError::PageProtectionViolation,
             ));
         }
-        if entry[BX_LEVEL_PTE] & PAGE_DIRECTORY_NX_BIT != 0 {
+        if entry[BX_LEVEL_PTE].bits() & PAGE_DIRECTORY_NX_BIT != 0 {
             nx_page = true;
         }
 
         combined_access &=
-            (entry[BX_LEVEL_PTE] as u32) & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+            (entry[BX_LEVEL_PTE].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
         let is_write = matches!(rw, MemoryAccessType::Write);
         let is_execute = matches!(rw, MemoryAccessType::Execute);
         let priv_index = ((self.cr0.wp() as u32) << 4)
@@ -573,10 +651,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             ));
         }
 
+        // SMEP check: supervisor cannot execute from user page (Bochs paging.cc:740-743)
+        if is_execute
+            && self.cr4.smep()
+            && !user
+            && (combined_access & CombinedAccess::USER.bits()) != 0
+        {
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageProtectionViolation,
+            ));
+        }
+
         // A/D bits — PDE gets A, PTE gets A+D
-        if entry[BX_LEVEL_PDE] & 0x20 == 0 {
-            entry[BX_LEVEL_PDE] |= 0x20;
-            let data = entry[BX_LEVEL_PDE].to_le_bytes();
+        if !entry[BX_LEVEL_PDE].contains(PteBits::ACCESSED) {
+            entry[BX_LEVEL_PDE].insert(PteBits::ACCESSED);
+            let data = entry[BX_LEVEL_PDE].bits().to_le_bytes();
             let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
             let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
             let _ = mem.write_physical_page(
@@ -587,10 +676,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 &mut data.clone(),
             );
         }
-        let pte_needed = 0x20u64 | if is_write { 0x40 } else { 0 };
-        if entry[BX_LEVEL_PTE] & pte_needed != pte_needed {
-            entry[BX_LEVEL_PTE] |= pte_needed;
-            let data = entry[BX_LEVEL_PTE].to_le_bytes();
+        let pte_needed = PteBits::ACCESSED | if is_write { PteBits::DIRTY } else { PteBits::empty() };
+        if !entry[BX_LEVEL_PTE].contains(pte_needed) {
+            entry[BX_LEVEL_PTE].insert(pte_needed);
+            let data = entry[BX_LEVEL_PTE].bits().to_le_bytes();
             let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
             let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
             let _ = mem.write_physical_page(
@@ -602,7 +691,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             );
         }
 
-        ppf = entry[BX_LEVEL_PTE] & 0x000F_FFFF_FFFF_F000;
+        ppf = entry[BX_LEVEL_PTE].bits() & 0x000F_FFFF_FFFF_F000;
         Ok(ppf | (laddr & 0xFFF))
     }
 
@@ -616,7 +705,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         mem: &mut BxMemC,
         _page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
     ) -> Result<BxPhyAddress> {
-        let mut combined_access = BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER;
+        let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
 
         let mut reserved = PAGING_PAE_PHY_RESERVED_BITS;
@@ -633,12 +722,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut offset_mask = ((1u64 << self.linaddr_width as u64) - 1) as u64;
 
         let mut entry_addr = [0u64; 5];
-        let mut entry = [0u64; 5];
+        let mut entry = [PteBits::empty(); 5];
         let mut leaf = start_leaf;
         let mut lpf_mask = 0xFFFu32;
 
         loop {
-            entry_addr[leaf] = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0x1FF) * 8;
+            // Bochs paging.cc: entry_addr[leaf] = ppf + ((laddr >> (9 + 9*leaf)) & 0xff8);
+            // The & 0xFF8 mask extracts bits 11:3 of shifted value = 9-bit index * 8
+            entry_addr[leaf] = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8);
 
             let entry_val = {
                 let mut buf = [0u8; 8];
@@ -653,38 +744,63 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     }
                 }
             };
-            entry[leaf] = entry_val;
+            entry[leaf] = PteBits::from_raw(entry_val);
 
             offset_mask >>= 9;
             let curr_entry = entry[leaf];
 
-            if curr_entry & 0x1 == 0 {
+            // Trace prefetch path long mode walks — first few + crash area
+            if leaf == start_leaf {
+                static LOGGED_SLOW: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                let count = LOGGED_SLOW.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if count < 5 || (self.icount >= 1849200 && self.icount <= 1849220) {
+                    tracing::error!(
+                        "LM_SLOW: icount={} leaf={} laddr={:#x} entry_addr={:#x} entry={:#018x} CR3={:#x}",
+                        self.icount, leaf, laddr, entry_addr[leaf], curr_entry.bits(), self.cr3
+                    );
+                }
+            }
+
+            if !curr_entry.contains(PteBits::PRESENT) {
+                if self.icount >= 1849000 && self.icount <= 1850000 {
+                    tracing::error!(
+                        "LM_WALK: NOT PRESENT leaf={} laddr={:#x} entry_addr={:#x} entry={:#018x} CR3={:#x}",
+                        leaf, laddr, entry_addr[leaf], curr_entry.bits(), self.cr3
+                    );
+                }
                 return Err(super::CpuError::Memory(
                     crate::memory::MemoryError::PageNotPresent,
                 ));
             }
-            if curr_entry & reserved != 0 {
+            if curr_entry.bits() & reserved != 0 {
+                if self.icount >= 1849000 && self.icount <= 1850000 {
+                    tracing::error!(
+                        "LM_WALK: RESERVED leaf={} laddr={:#x} entry_addr={:#x} entry={:#018x} reserved_mask={:#018x} bad_bits={:#018x} CR3={:#x}",
+                        leaf, laddr, entry_addr[leaf], curr_entry.bits(), reserved,
+                        curr_entry.bits() & reserved, self.cr3
+                    );
+                }
                 return Err(super::CpuError::Memory(
                     crate::memory::MemoryError::PageProtectionViolation,
                 ));
             }
             // PS at PML4/PML5 is reserved
-            if curr_entry & 0x80 != 0 && leaf > BX_LEVEL_PDPTE {
+            if curr_entry.contains(PteBits::PS) && leaf > BX_LEVEL_PDPTE {
                 return Err(super::CpuError::Memory(
                     crate::memory::MemoryError::PageProtectionViolation,
                 ));
             }
-            if curr_entry & PAGE_DIRECTORY_NX_BIT != 0 {
+            if curr_entry.bits() & PAGE_DIRECTORY_NX_BIT != 0 {
                 nx_page = true;
             }
 
-            ppf = curr_entry & 0x000F_FFFF_FFFF_F000;
+            ppf = curr_entry.bits() & 0x000F_FFFF_FFFF_F000;
 
             if leaf == BX_LEVEL_PTE {
                 break;
             }
 
-            if curr_entry & 0x80 != 0 {
+            if curr_entry.contains(PteBits::PS) {
                 ppf &= 0x000F_FFFF_FFFF_E000;
                 if ppf & offset_mask != 0 {
                     return Err(super::CpuError::Memory(
@@ -695,13 +811,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 break;
             }
 
-            combined_access &= curr_entry as u32;
+            combined_access &= curr_entry.bits() as u32;
             leaf -= 1;
         }
 
         // Leaf permission check
         combined_access &=
-            (entry[leaf] as u32) & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+            (entry[leaf].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
         let is_write = matches!(rw, MemoryAccessType::Write);
         let is_execute = matches!(rw, MemoryAccessType::Execute);
         let priv_index = ((self.cr0.wp() as u32) << 4)
@@ -714,13 +830,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             ));
         }
 
+        // SMEP check: supervisor cannot execute from user page (Bochs paging.cc:740-743)
+        if is_execute
+            && self.cr4.smep()
+            && !user
+            && (combined_access & CombinedAccess::USER.bits()) != 0
+        {
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageProtectionViolation,
+            ));
+        }
+
         // A/D bits
         for level in (leaf + 1..=start_leaf).rev() {
-            if entry[level] & 0x20 == 0 {
-                entry[level] |= 0x20;
-                let data = entry[level].to_le_bytes();
+            if !entry[level].contains(PteBits::ACCESSED) {
+                entry[level].insert(PteBits::ACCESSED);
+                let data = entry[level].bits().to_le_bytes();
                 let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
                 let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+                // A/D bit update on page table entry — write to physical RAM cannot meaningfully fail
                 let _ = mem.write_physical_page(
                     &[cpu_ref],
                     _page_write_stamp_table,
@@ -730,10 +858,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 );
             }
         }
-        let leaf_needed = 0x20u64 | if is_write { 0x40 } else { 0 };
-        if entry[leaf] & leaf_needed != leaf_needed {
-            entry[leaf] |= leaf_needed;
-            let data = entry[leaf].to_le_bytes();
+        let leaf_needed = PteBits::ACCESSED | if is_write { PteBits::DIRTY } else { PteBits::empty() };
+        if !entry[leaf].contains(leaf_needed) {
+            entry[leaf].insert(leaf_needed);
+            let data = entry[leaf].bits().to_le_bytes();
             let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
             let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
             let _ = mem.write_physical_page(
@@ -787,31 +915,29 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let pde_addr = ppf as u64 + (pde_index * 4) as u64;
         let pde = self.page_walk_read_dword(pde_addr);
 
-        if (pde & 0x1) == 0 {
+        if (pde & pte_bits32::PRESENT) == 0 {
             tracing::debug!(
                 "system_write page walk: PDE not present at {:#x}, laddr={:#x}",
                 pde_addr,
                 laddr
             );
-            return Err(super::CpuError::Memory(
-                crate::memory::MemoryError::PageNotPresent,
-            ));
+            self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, false, true)?;
+            return Err(super::CpuError::CpuLoopRestart);
         }
 
         // Check for 4MB page (PSE)
-        if (pde & 0x80) != 0 && self.cr4.pse() {
+        if (pde & pte_bits32::PS) != 0 && self.cr4.pse() {
             // Bochs paging.cc: check reserved bits in PSE PDE
             if (pde & PAGING_PDE4M_RESERVED_BITS) != 0 {
                 tracing::debug!(
                     "system_write PSE PDE4M: reserved bit set: PDE={:#010x}",
                     pde
                 );
-                return Err(super::CpuError::Memory(
-                    crate::memory::MemoryError::PageNotPresent,
-                ));
+                self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, false, true)?;
+                return Err(super::CpuError::CpuLoopRestart);
             }
             // Set Accessed + Dirty bits on PDE for 4MB page
-            let needed = 0x20 | 0x40; // A + D for write
+            let needed = pte_bits32::ACCESSED | pte_bits32::DIRTY;
             if pde & needed != needed {
                 self.page_walk_write_dword(pde_addr, pde | needed);
             }
@@ -826,24 +952,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let pte_addr = pt_base + (pte_index * 4) as u64;
         let pte = self.page_walk_read_dword(pte_addr);
 
-        if (pte & 0x1) == 0 {
+        if (pte & pte_bits32::PRESENT) == 0 {
             tracing::debug!(
                 "system_write page walk: PTE not present at {:#x}, laddr={:#x}",
                 pte_addr,
                 laddr
             );
-            return Err(super::CpuError::Memory(
-                crate::memory::MemoryError::PageNotPresent,
-            ));
+            self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, false, true)?;
+            return Err(super::CpuError::CpuLoopRestart);
         }
 
         // Set Accessed bit on PDE if needed
-        if pde & 0x20 == 0 {
-            self.page_walk_write_dword(pde_addr, pde | 0x20);
+        if pde & pte_bits32::ACCESSED == 0 {
+            self.page_walk_write_dword(pde_addr, pde | pte_bits32::ACCESSED);
         }
 
         // Set Accessed + Dirty bits on PTE for write
-        let pte_needed = 0x20 | 0x40; // A + D
+        let pte_needed = pte_bits32::ACCESSED | pte_bits32::DIRTY;
         if pte & pte_needed != pte_needed {
             self.page_walk_write_dword(pte_addr, pte | pte_needed);
         }
@@ -857,62 +982,58 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn translate_linear_system_write_pae(&mut self, laddr: BxAddress) -> Result<BxPhyAddress> {
         // PDPTE from cache
         let pdpte_index = ((laddr >> 30) & 0x3) as usize;
-        let pdpte = self.pdptrcache.entry[pdpte_index];
-        if pdpte & 0x1 == 0 {
-            return Err(super::CpuError::Memory(
-                crate::memory::MemoryError::PageNotPresent,
-            ));
+        let pdpte = PteBits::from_raw(self.pdptrcache.entry[pdpte_index]);
+        if !pdpte.contains(PteBits::PRESENT) {
+            self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, false, true)?;
+            return Err(super::CpuError::CpuLoopRestart);
         }
-        let mut ppf = pdpte & 0x000F_FFFF_FFFF_F000;
+        let mut ppf = pdpte.bits() & 0x000F_FFFF_FFFF_F000;
 
         // PDE
         let pde_addr = ppf + (((laddr >> 21) & 0x1FF) << 3);
-        let mut pde = self.page_walk_read_qword(pde_addr);
-        if pde & 0x1 == 0 {
-            return Err(super::CpuError::Memory(
-                crate::memory::MemoryError::PageNotPresent,
-            ));
+        let mut pde = PteBits::from_raw(self.page_walk_read_qword(pde_addr));
+        if !pde.contains(PteBits::PRESENT) {
+            self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, false, true)?;
+            return Err(super::CpuError::CpuLoopRestart);
         }
-        ppf = pde & 0x000F_FFFF_FFFF_F000;
+        ppf = pde.bits() & 0x000F_FFFF_FFFF_F000;
 
         // 2MB page
-        if pde & 0x80 != 0 {
-            if pde & PAGING_PAE_PDE2M_RESERVED_BITS != 0 {
-                return Err(super::CpuError::Memory(
-                    crate::memory::MemoryError::PageNotPresent,
-                ));
+        if pde.contains(PteBits::PS) {
+            if pde.bits() & PAGING_PAE_PDE2M_RESERVED_BITS != 0 {
+                self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, false, true)?;
+                return Err(super::CpuError::CpuLoopRestart);
             }
-            let needed = 0x20u64 | 0x40;
-            if pde & needed != needed {
-                pde |= needed;
-                self.page_walk_write_qword(pde_addr, pde);
+            let needed = PteBits::ACCESSED | PteBits::DIRTY;
+            if !pde.contains(needed) {
+                pde.insert(needed);
+                self.page_walk_write_qword(pde_addr, pde.bits());
             }
-            ppf = pde & 0x000F_FFFF_FFE0_0000;
+            ppf = pde.bits() & 0x000F_FFFF_FFE0_0000;
             return Ok((ppf | (laddr & 0x1FFFFF)) & self.a20_mask);
         }
 
         // PTE
         let pte_addr = ppf + (((laddr >> 12) & 0x1FF) << 3);
-        let mut pte = self.page_walk_read_qword(pte_addr);
-        if pte & 0x1 == 0 {
-            return Err(super::CpuError::Memory(
-                crate::memory::MemoryError::PageNotPresent,
-            ));
+        let mut pte = PteBits::from_raw(self.page_walk_read_qword(pte_addr));
+        if !pte.contains(PteBits::PRESENT) {
+            self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, false, true)?;
+            return Err(super::CpuError::CpuLoopRestart);
         }
 
         // A bit on PDE
-        if pde & 0x20 == 0 {
-            pde |= 0x20;
-            self.page_walk_write_qword(pde_addr, pde);
+        if !pde.contains(PteBits::ACCESSED) {
+            pde.insert(PteBits::ACCESSED);
+            self.page_walk_write_qword(pde_addr, pde.bits());
         }
         // A+D on PTE
-        let pte_needed = 0x20u64 | 0x40;
-        if pte & pte_needed != pte_needed {
-            pte |= pte_needed;
-            self.page_walk_write_qword(pte_addr, pte);
+        let pte_needed = PteBits::ACCESSED | PteBits::DIRTY;
+        if !pte.contains(pte_needed) {
+            pte.insert(pte_needed);
+            self.page_walk_write_qword(pte_addr, pte.bits());
         }
 
-        ppf = pte & 0x000F_FFFF_FFFF_F000;
+        ppf = pte.bits() & 0x000F_FFFF_FFFF_F000;
         Ok((ppf | (laddr & 0xFFF)) & self.a20_mask)
     }
 
@@ -930,33 +1051,32 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut offset_mask = ((1u64 << self.linaddr_width as u64) - 1) as u64;
 
         let mut entry_addr = [0u64; 5];
-        let mut entry = [0u64; 5];
+        let mut entry = [PteBits::empty(); 5];
         let mut leaf = start_leaf;
 
         loop {
-            entry_addr[leaf] = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0x1FF) * 8;
-            entry[leaf] = self.page_walk_read_qword(entry_addr[leaf]);
+            entry_addr[leaf] = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8);
+            entry[leaf] = PteBits::from_raw(self.page_walk_read_qword(entry_addr[leaf]));
 
             offset_mask >>= 9;
 
-            if entry[leaf] & 0x1 == 0 {
-                return Err(super::CpuError::Memory(
-                    crate::memory::MemoryError::PageNotPresent,
-                ));
+            if !entry[leaf].contains(PteBits::PRESENT) {
+                // Deliver #PF so double-fault detection works during exception delivery
+                self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, false, true)?;
+                return Err(super::CpuError::CpuLoopRestart);
             }
 
-            ppf = entry[leaf] & 0x000F_FFFF_FFFF_F000;
+            ppf = entry[leaf].bits() & 0x000F_FFFF_FFFF_F000;
 
             if leaf == BX_LEVEL_PTE {
                 break;
             }
 
-            if entry[leaf] & 0x80 != 0 {
+            if entry[leaf].contains(PteBits::PS) {
                 ppf &= 0x000F_FFFF_FFFF_E000;
                 if ppf & offset_mask != 0 {
-                    return Err(super::CpuError::Memory(
-                        crate::memory::MemoryError::PageNotPresent,
-                    ));
+                    self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, false, true)?;
+                    return Err(super::CpuError::CpuLoopRestart);
                 }
                 break;
             }
@@ -966,15 +1086,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // A/D bits — non-leaf get A, leaf gets A+D
         for level in (leaf + 1..=start_leaf).rev() {
-            if entry[level] & 0x20 == 0 {
-                entry[level] |= 0x20;
-                self.page_walk_write_qword(entry_addr[level], entry[level]);
+            if !entry[level].contains(PteBits::ACCESSED) {
+                entry[level].insert(PteBits::ACCESSED);
+                self.page_walk_write_qword(entry_addr[level], entry[level].bits());
             }
         }
-        let leaf_needed = 0x20u64 | 0x40;
-        if entry[leaf] & leaf_needed != leaf_needed {
-            entry[leaf] |= leaf_needed;
-            self.page_walk_write_qword(entry_addr[leaf], entry[leaf]);
+        let leaf_needed = PteBits::ACCESSED | PteBits::DIRTY;
+        if !entry[leaf].contains(leaf_needed) {
+            entry[leaf].insert(leaf_needed);
+            self.page_walk_write_qword(entry_addr[leaf], entry[leaf].bits());
         }
 
         let paddr = ppf | (laddr & offset_mask);
@@ -1014,7 +1134,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let pde_addr = ppf as u64 + (pde_index * 4) as u64;
         let pde = self.page_walk_read_dword_ro(pde_addr);
 
-        if (pde & 0x1) == 0 {
+        if (pde & pte_bits32::PRESENT) == 0 {
             tracing::debug!(
                 "system_read page walk: PDE not present at {:#x}, laddr={:#x}",
                 pde_addr,
@@ -1026,7 +1146,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Check for 4MB page (PSE)
-        if (pde & 0x80) != 0 && self.cr4.pse() {
+        if (pde & pte_bits32::PS) != 0 && self.cr4.pse() {
             let ppf_4m = (pde & 0xFFC00000) as u64;
             let offset = laddr & 0x3FFFFF;
             return Ok((ppf_4m | offset) & self.a20_mask);
@@ -1038,7 +1158,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let pte_addr = pt_base + (pte_index * 4) as u64;
         let pte = self.page_walk_read_dword_ro(pte_addr);
 
-        if (pte & 0x1) == 0 {
+        if (pte & pte_bits32::PRESENT) == 0 {
             tracing::debug!(
                 "system_read page walk: PTE not present at {:#x}, laddr={:#x}",
                 pte_addr,
@@ -1057,37 +1177,37 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// PAE paging system read translation (read-only, no A/D updates).
     fn translate_linear_system_read_pae(&self, laddr: BxAddress) -> Result<BxPhyAddress> {
         let pdpte_index = ((laddr >> 30) & 0x3) as usize;
-        let pdpte = self.pdptrcache.entry[pdpte_index];
-        if pdpte & 0x1 == 0 {
+        let pdpte = PteBits::from_raw(self.pdptrcache.entry[pdpte_index]);
+        if !pdpte.contains(PteBits::PRESENT) {
             return Err(super::CpuError::Memory(
                 crate::memory::MemoryError::PageNotPresent,
             ));
         }
-        let ppf = pdpte & 0x000F_FFFF_FFFF_F000;
+        let ppf = pdpte.bits() & 0x000F_FFFF_FFFF_F000;
 
         let pde_addr = ppf + (((laddr >> 21) & 0x1FF) << 3);
-        let pde = self.page_walk_read_qword(pde_addr);
-        if pde & 0x1 == 0 {
+        let pde = PteBits::from_raw(self.page_walk_read_qword(pde_addr));
+        if !pde.contains(PteBits::PRESENT) {
             return Err(super::CpuError::Memory(
                 crate::memory::MemoryError::PageNotPresent,
             ));
         }
 
-        if pde & 0x80 != 0 {
-            let ppf_2m = pde & 0x000F_FFFF_FFE0_0000;
+        if pde.contains(PteBits::PS) {
+            let ppf_2m = pde.bits() & 0x000F_FFFF_FFE0_0000;
             return Ok((ppf_2m | (laddr & 0x1FFFFF)) & self.a20_mask);
         }
 
-        let ppf = pde & 0x000F_FFFF_FFFF_F000;
+        let ppf = pde.bits() & 0x000F_FFFF_FFFF_F000;
         let pte_addr = ppf + (((laddr >> 12) & 0x1FF) << 3);
-        let pte = self.page_walk_read_qword(pte_addr);
-        if pte & 0x1 == 0 {
+        let pte = PteBits::from_raw(self.page_walk_read_qword(pte_addr));
+        if !pte.contains(PteBits::PRESENT) {
             return Err(super::CpuError::Memory(
                 crate::memory::MemoryError::PageNotPresent,
             ));
         }
 
-        let page_base = pte & 0x000F_FFFF_FFFF_F000;
+        let page_base = pte.bits() & 0x000F_FFFF_FFFF_F000;
         Ok((page_base | (laddr & 0xFFF)) & self.a20_mask)
     }
 
@@ -1103,24 +1223,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut leaf = start_leaf;
 
         loop {
-            let entry_addr = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0x1FF) * 8;
-            let entry = self.page_walk_read_qword(entry_addr);
+            let entry_addr = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8);
+            let entry = PteBits::from_raw(self.page_walk_read_qword(entry_addr));
 
             offset_mask >>= 9;
 
-            if entry & 0x1 == 0 {
+            if !entry.contains(PteBits::PRESENT) {
                 return Err(super::CpuError::Memory(
                     crate::memory::MemoryError::PageNotPresent,
                 ));
             }
 
-            ppf = entry & 0x000F_FFFF_FFFF_F000;
+            ppf = entry.bits() & 0x000F_FFFF_FFFF_F000;
 
             if leaf == BX_LEVEL_PTE {
                 break;
             }
 
-            if entry & 0x80 != 0 {
+            if entry.contains(PteBits::PS) {
                 ppf &= 0x000F_FFFF_FFFF_E000;
                 break;
             }
@@ -1139,9 +1259,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Deliver a #PF exception.
+    #[track_caller]
     fn page_fault(&mut self, fault: u32, laddr: u64, user: bool, is_write: bool) -> Result<()> {
         self.cr2 = laddr;
         let error_code = fault | ((user as u32) << 2) | ((is_write as u32) << 1);
+        if self.icount >= 1849100 && self.icount <= 1849300 {
+            let caller = core::panic::Location::caller();
+            tracing::error!(
+                "PF_DELIVER: err={:#x} laddr={:#x} CR3={:#x} user={} write={} caller={}:{}",
+                error_code, laddr, self.cr3, user, is_write, caller.file(), caller.line()
+            );
+        }
         self.exception(super::cpu::Exception::Pf, error_code as u16)
     }
 
@@ -1181,23 +1309,48 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // ---- DTLB lookup ----
         // Compute which access bit we need:
-        //   read  + supervisor(0) → bit 0 (TLB_SYS_READ_OK)
-        //   read  + user(1)       → bit 1 (TLB_USER_READ_OK)
-        //   write + supervisor(0) → bit 2 (TLB_SYS_WRITE_OK)
-        //   write + user(1)       → bit 3 (TLB_USER_WRITE_OK)
+        //   read  + supervisor(0) → bit 0 (TlbAccess::SYS_READ_OK.bits())
+        //   read  + user(1)       → bit 1 (TlbAccess::USER_READ_OK.bits())
+        //   write + supervisor(0) → bit 2 (TlbAccess::SYS_WRITE_OK.bits())
+        //   write + user(1)       → bit 3 (TlbAccess::USER_WRITE_OK.bits())
         let needed_bit = 1u32 << (((is_write as u32) << 1) | (user as u32));
         {
             let tlb_entry = self.dtlb.get_entry_of(laddr, 0);
             if tlb_entry.lpf == lpf && (tlb_entry.access_bits & needed_bit) != 0 {
                 // TLB hit — return cached physical address directly.
                 let paddr = tlb_entry.ppf | (laddr & 0xFFF);
+                // WATCHPOINT: trace translations that land on PDPT
+                if paddr >= 0x35d3000 && paddr < 0x35d3008 && self.icount >= 1849200 {
+                    tracing::error!(
+                        "XLAT_TLB: laddr={:#x} → paddr={:#x} ppf={:#x} lpf_mask={:#x} icount={} RIP={:#x}",
+                        laddr, paddr, tlb_entry.ppf, tlb_entry.lpf_mask, self.icount, self.prev_rip
+                    );
+                }
                 return Ok(paddr);
+            }
+        }
+
+        // Trace slot 16 (page 0x10) misses + all misses in crash window
+        {
+            let slot = (lpf >> 12) as usize & (2048 - 1);
+            if (slot == 16 && self.icount >= 1849000) || (self.icount >= 1849400 && self.icount <= 1849425) {
+                tracing::error!(
+                    "DTLB_MISS: laddr={:#x} lpf={:#x} slot={} icount={} RIP={:#x} is_write={}",
+                    laddr, lpf, slot, self.icount, self.prev_rip, is_write
+                );
             }
         }
 
         // ---- DTLB miss — full page table walk ----
         let (paddr, combined_access, lpf_mask) = self.page_walk_for_dtlb(laddr, user, is_write)?;
         let paddr = self.apply_a20(paddr);
+        // WATCHPOINT: trace walk results that land on PDPT
+        if paddr >= 0x35d3000 && paddr < 0x35d3008 && self.icount >= 1849200 {
+            tracing::error!(
+                "XLAT_WALK: laddr={:#x} → paddr={:#x} lpf_mask={:#x} icount={} RIP={:#x}",
+                laddr, paddr, lpf_mask, self.icount, self.prev_rip
+            );
+        }
         let is_large_page = lpf_mask > 0xFFF;
 
         // ---- Populate DTLB entry ----
@@ -1207,10 +1360,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut access_bits = 0u32;
         // Check all 4 combinations: {sys_read, user_read, sys_write, user_write}
         for &(bit, u, w) in &[
-            (TLB_SYS_READ_OK, 0u32, 0u32),
-            (TLB_USER_READ_OK, 1, 0),
-            (TLB_SYS_WRITE_OK, 0, 1),
-            (TLB_USER_WRITE_OK, 1, 1),
+            (TlbAccess::SYS_READ_OK.bits(), 0u32, 0u32),
+            (TlbAccess::USER_READ_OK.bits(), 1, 0),
+            (TlbAccess::SYS_WRITE_OK.bits(), 0, 1),
+            (TlbAccess::USER_WRITE_OK.bits(), 1, 1),
         ] {
             let priv_index = (wp << 4) | (u << 3) | combined_access | w;
             if PRIV_CHECK[priv_index as usize] != 0 {
@@ -1226,7 +1379,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // For simplicity and correctness, only grant write TLB permission
         // when the current access is a write (dirty bit was just set).
         if !is_write {
-            access_bits &= !(TLB_SYS_WRITE_OK | TLB_USER_WRITE_OK);
+            access_bits &= !(TlbAccess::SYS_WRITE_OK.bits() | TlbAccess::USER_WRITE_OK.bits());
         }
 
         let ppf = paddr & 0xFFFF_F000;
@@ -1252,6 +1405,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         {
             let tlb_entry = self.dtlb.get_entry_of(laddr, 0);
+            // Trace evictions of slot 16 (page 0x10) near crash
+            if self.icount >= 1849000 {
+                let slot = (lpf >> 12) as usize & (2048 - 1);
+                if slot == 16 && lpf != tlb_entry.lpf {
+                    tracing::error!(
+                        "DTLB_EVICT slot=16: old_lpf={:#x} new_lpf={:#x} icount={} RIP={:#x}",
+                        tlb_entry.lpf, lpf, self.icount, self.prev_rip
+                    );
+                }
+            }
             tlb_entry.lpf = lpf;
             tlb_entry.ppf = ppf;
             tlb_entry.access_bits = access_bits;
@@ -1311,8 +1474,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Fast physical qword (64-bit) write for PAE/long mode A/D bit updates.
-    #[inline(always)]
     fn page_walk_write_qword(&mut self, paddr: u64, val: u64) {
+        // WATCHPOINT: detect A/D writes to PDPT
+        if paddr >= 0x35d3000 && paddr < 0x35d3008 {
+            tracing::error!(
+                "WATCHPOINT_PW: write to PDPT paddr={:#x} val={:#018x} icount={} RIP={:#x}",
+                paddr, val, self.icount, self.prev_rip
+            );
+        }
         let a20_addr = (paddr & self.a20_mask) as usize;
         let host_base = self.mem_host_base;
         if !host_base.is_null() && a20_addr + 8 <= self.mem_host_len {
@@ -1367,28 +1536,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let pde_addr = (self.cr3 & BX_CR3_PAGING_MASK) | (((laddr >> 22) & 0x3FF) << 2);
         let pde = self.page_walk_read_dword(pde_addr);
 
-        if pde & 0x1 == 0 {
-            self.page_fault(ERROR_NOT_PRESENT, laddr, user, is_write)?;
+        if pde & pte_bits32::PRESENT == 0 {
+            self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, user, is_write)?;
             return Err(super::CpuError::CpuLoopRestart);
         }
 
         // ---- 4 MB page (PSE) ----
-        if pde & 0x80 != 0 && self.cr4.pse() {
+        if pde & pte_bits32::PS != 0 && self.cr4.pse() {
             // Bochs paging.cc: check reserved bits in PSE PDE
             if (pde & PAGING_PDE4M_RESERVED_BITS) != 0 {
                 tracing::debug!("PSE PDE4M: reserved bit is set: PDE={:#010x}", pde);
-                self.page_fault(ERROR_RESERVED | ERROR_PROTECTION, laddr, user, is_write)?;
+                self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
-            let combined = pde & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+            let combined = pde & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
             let priv_index =
                 ((self.cr0.wp() as u32) << 4) | ((user as u32) << 3) | combined | (is_write as u32);
             if PRIV_CHECK[priv_index as usize] == 0 {
-                self.page_fault(ERROR_PROTECTION, laddr, user, is_write)?;
+                self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
             // Set A/D bits on the PDE.
-            let needed = 0x20 | if is_write { 0x40 } else { 0 };
+            let needed = pte_bits32::ACCESSED | if is_write { pte_bits32::DIRTY } else { 0 };
             if pde & needed != needed {
                 self.page_walk_write_dword(pde_addr, pde | needed);
             }
@@ -1400,25 +1569,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let pte_addr = (pde as u64 & 0xFFFF_F000) | (((laddr >> 12) & 0x3FF) << 2);
         let pte = self.page_walk_read_dword(pte_addr);
 
-        if pte & 0x1 == 0 {
-            self.page_fault(ERROR_NOT_PRESENT, laddr, user, is_write)?;
+        if pte & pte_bits32::PRESENT == 0 {
+            self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, user, is_write)?;
             return Err(super::CpuError::CpuLoopRestart);
         }
 
-        let combined = (pde & pte) & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+        let combined = (pde & pte) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
         let priv_index =
             ((self.cr0.wp() as u32) << 4) | ((user as u32) << 3) | combined | (is_write as u32);
         if PRIV_CHECK[priv_index as usize] == 0 {
-            self.page_fault(ERROR_PROTECTION, laddr, user, is_write)?;
+            self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
             return Err(super::CpuError::CpuLoopRestart);
         }
 
         // Set A bit on PDE if needed.
-        if pde & 0x20 == 0 {
-            self.page_walk_write_dword(pde_addr, pde | 0x20);
+        if pde & pte_bits32::ACCESSED == 0 {
+            self.page_walk_write_dword(pde_addr, pde | pte_bits32::ACCESSED);
         }
         // Set A/D bits on PTE.
-        let pte_needed = 0x20 | if is_write { 0x40 } else { 0 };
+        let pte_needed = pte_bits32::ACCESSED | if is_write { pte_bits32::DIRTY } else { 0 };
         if pte & pte_needed != pte_needed {
             self.page_walk_write_dword(pte_addr, pte | pte_needed);
         }
@@ -1435,7 +1604,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         user: bool,
         is_write: bool,
     ) -> Result<(u64, u32, u32)> {
-        let mut combined_access = BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER;
+        let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
 
         // Compute reserved bits mask — in legacy PAE, bits [62:52] are reserved.
@@ -1448,147 +1617,157 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // ---- PDPTE ----
         // In legacy PAE mode, PDPTRs are cached. Load from PDPTR_CACHE.
         let pdpte_index = ((laddr >> 30) & 0x3) as usize;
-        let pdpte = self.pdptrcache.entry[pdpte_index];
+        let pdpte = PteBits::from_raw(self.pdptrcache.entry[pdpte_index]);
 
-        if pdpte & 0x1 == 0 {
-            self.page_fault(ERROR_NOT_PRESENT, laddr, user, is_write)?;
+        if !pdpte.contains(PteBits::PRESENT) {
+            self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, user, is_write)?;
             return Err(super::CpuError::CpuLoopRestart);
         }
 
         // PDPTE reserved bit check is done at CR3 load time (CheckPDPTR),
         // but also verify here for safety.
-        if pdpte & PAGING_PAE_PDPTE_RESERVED_BITS != 0 {
-            tracing::debug!("PAE PDPTE: reserved bit set: {:#018x}", pdpte);
-            self.page_fault(ERROR_RESERVED | ERROR_PROTECTION, laddr, user, is_write)?;
+        if pdpte.bits() & PAGING_PAE_PDPTE_RESERVED_BITS != 0 {
+            tracing::debug!("PAE PDPTE: reserved bit set: {:#018x}", pdpte.bits());
+            self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
             return Err(super::CpuError::CpuLoopRestart);
         }
 
-        let mut ppf = pdpte & 0x000F_FFFF_FFFF_F000;
+        let mut ppf = pdpte.bits() & 0x000F_FFFF_FFFF_F000;
 
         // ---- PDE ----
         let mut entry_addr = [0u64; 2];
-        let mut entry = [0u64; 2];
+        let mut entry = [PteBits::empty(); 2];
 
-        entry_addr[BX_LEVEL_PDE] = ppf + (((laddr >> (9 + 9)) & 0x1FF) << 3);
-        entry[BX_LEVEL_PDE] = self.page_walk_read_qword(entry_addr[BX_LEVEL_PDE]);
+        // Bochs: ppf + ((laddr >> (9 + 9*1)) & 0xFF8) — extracts laddr bits 29:21 as byte offset
+        entry_addr[BX_LEVEL_PDE] = ppf + ((laddr >> 18) & 0xFF8);
+        entry[BX_LEVEL_PDE] = PteBits::from_raw(self.page_walk_read_qword(entry_addr[BX_LEVEL_PDE]));
 
         // Check present
-        if entry[BX_LEVEL_PDE] & 0x1 == 0 {
-            self.page_fault(ERROR_NOT_PRESENT, laddr, user, is_write)?;
+        if !entry[BX_LEVEL_PDE].contains(PteBits::PRESENT) {
+            self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, user, is_write)?;
             return Err(super::CpuError::CpuLoopRestart);
         }
 
         // Check reserved bits
-        if entry[BX_LEVEL_PDE] & reserved != 0 {
+        if entry[BX_LEVEL_PDE].bits() & reserved != 0 {
             tracing::debug!(
                 "PAE PDE: reserved bit set: {:#018x} (reserved mask: {:#018x})",
-                entry[BX_LEVEL_PDE],
-                entry[BX_LEVEL_PDE] & reserved
+                entry[BX_LEVEL_PDE].bits(),
+                entry[BX_LEVEL_PDE].bits() & reserved
             );
-            self.page_fault(ERROR_RESERVED | ERROR_PROTECTION, laddr, user, is_write)?;
+            self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
             return Err(super::CpuError::CpuLoopRestart);
         }
 
         // Check NX bit
-        if entry[BX_LEVEL_PDE] & PAGE_DIRECTORY_NX_BIT != 0 {
+        if entry[BX_LEVEL_PDE].bits() & PAGE_DIRECTORY_NX_BIT != 0 {
             nx_page = true;
         }
 
-        ppf = entry[BX_LEVEL_PDE] & 0x000F_FFFF_FFFF_F000;
+        ppf = entry[BX_LEVEL_PDE].bits() & 0x000F_FFFF_FFFF_F000;
 
         // ---- 2MB large page (PDE.PS=1) ----
         // In PAE mode, CR4.PSE is ignored — PS bit in PDE is always checked.
-        if entry[BX_LEVEL_PDE] & 0x80 != 0 {
+        if entry[BX_LEVEL_PDE].contains(PteBits::PS) {
             // Check 2MB PDE reserved bits (bits 20:13 must be zero)
-            if entry[BX_LEVEL_PDE] & PAGING_PAE_PDE2M_RESERVED_BITS != 0 {
-                tracing::debug!("PAE PDE2M: reserved bit set: {:#018x}", entry[BX_LEVEL_PDE]);
-                self.page_fault(ERROR_RESERVED | ERROR_PROTECTION, laddr, user, is_write)?;
+            if entry[BX_LEVEL_PDE].bits() & PAGING_PAE_PDE2M_RESERVED_BITS != 0 {
+                tracing::debug!("PAE PDE2M: reserved bit set: {:#018x}", entry[BX_LEVEL_PDE].bits());
+                self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
 
             // Physical page frame for 2MB page
-            ppf = entry[BX_LEVEL_PDE] & 0x000F_FFFF_FFE0_0000;
+            ppf = entry[BX_LEVEL_PDE].bits() & 0x000F_FFFF_FFE0_0000;
 
             // Leaf entry permission check
             combined_access &=
-                (entry[BX_LEVEL_PDE] as u32) & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+                (entry[BX_LEVEL_PDE].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
 
             let priv_index = ((self.cr0.wp() as u32) << 4)
                 | ((user as u32) << 3)
                 | combined_access
                 | (is_write as u32);
-            if PRIV_CHECK[priv_index as usize] == 0 || nx_page {
-                // NX page check: in PAE, NX violation causes #PF with ERROR_PROTECTION
-                // (for data accesses, NX doesn't apply — only for execute, which is not
-                // handled in this data-access path, but we check nx_page for completeness
-                // since Bochs does `if (!priv_check[priv_index] || (nx_page && rw == BX_EXECUTE))`)
-                // For data access, nx_page has no effect on permission.
-                if PRIV_CHECK[priv_index as usize] == 0 {
-                    self.page_fault(ERROR_PROTECTION, laddr, user, is_write)?;
+            if PRIV_CHECK[priv_index as usize] == 0 {
+                self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                return Err(super::CpuError::CpuLoopRestart);
+            }
+
+            // SMAP check for 2MB page
+            if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0 {
+                if self.get_ac() == 0 {
+                    self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                     return Err(super::CpuError::CpuLoopRestart);
                 }
             }
 
             // Update A/D bits on PDE (leaf for 2MB page)
-            let needed = 0x20u64 | if is_write { 0x40 } else { 0 };
-            if entry[BX_LEVEL_PDE] & needed != needed {
-                entry[BX_LEVEL_PDE] |= needed;
-                self.page_walk_write_qword(entry_addr[BX_LEVEL_PDE], entry[BX_LEVEL_PDE]);
+            let needed = PteBits::ACCESSED | if is_write { PteBits::DIRTY } else { PteBits::empty() };
+            if !entry[BX_LEVEL_PDE].contains(needed) {
+                entry[BX_LEVEL_PDE].insert(needed);
+                self.page_walk_write_qword(entry_addr[BX_LEVEL_PDE], entry[BX_LEVEL_PDE].bits());
             }
 
             let paddr = ppf | (laddr & 0x001F_FFFF);
             return Ok((paddr, combined_access, 0x1F_FFFF)); // 2MB lpf_mask
         }
 
-        combined_access &= entry[BX_LEVEL_PDE] as u32; // U/S and R/W from PDE
+        combined_access &= entry[BX_LEVEL_PDE].bits() as u32; // U/S and R/W from PDE
 
         // ---- PTE ----
         entry_addr[BX_LEVEL_PTE] = ppf + (((laddr >> 12) & 0x1FF) << 3);
-        entry[BX_LEVEL_PTE] = self.page_walk_read_qword(entry_addr[BX_LEVEL_PTE]);
+        entry[BX_LEVEL_PTE] = PteBits::from_raw(self.page_walk_read_qword(entry_addr[BX_LEVEL_PTE]));
 
         // Check present
-        if entry[BX_LEVEL_PTE] & 0x1 == 0 {
-            self.page_fault(ERROR_NOT_PRESENT, laddr, user, is_write)?;
+        if !entry[BX_LEVEL_PTE].contains(PteBits::PRESENT) {
+            self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, user, is_write)?;
             return Err(super::CpuError::CpuLoopRestart);
         }
 
         // Check reserved bits
-        if entry[BX_LEVEL_PTE] & reserved != 0 {
-            tracing::debug!("PAE PTE: reserved bit set: {:#018x}", entry[BX_LEVEL_PTE]);
-            self.page_fault(ERROR_RESERVED | ERROR_PROTECTION, laddr, user, is_write)?;
+        if entry[BX_LEVEL_PTE].bits() & reserved != 0 {
+            tracing::debug!("PAE PTE: reserved bit set: {:#018x}", entry[BX_LEVEL_PTE].bits());
+            self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
             return Err(super::CpuError::CpuLoopRestart);
         }
 
         // Check NX on PTE
-        if entry[BX_LEVEL_PTE] & PAGE_DIRECTORY_NX_BIT != 0 {
+        if entry[BX_LEVEL_PTE].bits() & PAGE_DIRECTORY_NX_BIT != 0 {
             nx_page = true;
         }
 
         // Leaf permission check
         combined_access &=
-            (entry[BX_LEVEL_PTE] as u32) & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+            (entry[BX_LEVEL_PTE].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
 
         let priv_index = ((self.cr0.wp() as u32) << 4)
             | ((user as u32) << 3)
             | combined_access
             | (is_write as u32);
         if PRIV_CHECK[priv_index as usize] == 0 {
-            self.page_fault(ERROR_PROTECTION, laddr, user, is_write)?;
+            self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
             return Err(super::CpuError::CpuLoopRestart);
         }
 
-        // Update A/D bits — PDE gets A bit, PTE gets A+D
-        if entry[BX_LEVEL_PDE] & 0x20 == 0 {
-            entry[BX_LEVEL_PDE] |= 0x20;
-            self.page_walk_write_qword(entry_addr[BX_LEVEL_PDE], entry[BX_LEVEL_PDE]);
-        }
-        let pte_needed = 0x20u64 | if is_write { 0x40 } else { 0 };
-        if entry[BX_LEVEL_PTE] & pte_needed != pte_needed {
-            entry[BX_LEVEL_PTE] |= pte_needed;
-            self.page_walk_write_qword(entry_addr[BX_LEVEL_PTE], entry[BX_LEVEL_PTE]);
+        // SMAP check: supervisor data access to user page when AC=0
+        if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0 {
+            if self.get_ac() == 0 {
+                self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                return Err(super::CpuError::CpuLoopRestart);
+            }
         }
 
-        ppf = entry[BX_LEVEL_PTE] & 0x000F_FFFF_FFFF_F000;
+        // Update A/D bits — PDE gets A bit, PTE gets A+D
+        if !entry[BX_LEVEL_PDE].contains(PteBits::ACCESSED) {
+            entry[BX_LEVEL_PDE].insert(PteBits::ACCESSED);
+            self.page_walk_write_qword(entry_addr[BX_LEVEL_PDE], entry[BX_LEVEL_PDE].bits());
+        }
+        let pte_needed = PteBits::ACCESSED | if is_write { PteBits::DIRTY } else { PteBits::empty() };
+        if !entry[BX_LEVEL_PTE].contains(pte_needed) {
+            entry[BX_LEVEL_PTE].insert(pte_needed);
+            self.page_walk_write_qword(entry_addr[BX_LEVEL_PTE], entry[BX_LEVEL_PTE].bits());
+        }
+
+        ppf = entry[BX_LEVEL_PTE].bits() & 0x000F_FFFF_FFFF_F000;
         let paddr = ppf | (laddr & 0xFFF);
         Ok((paddr, combined_access, 0xFFF)) // 4KB lpf_mask
     }
@@ -1601,7 +1780,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         user: bool,
         is_write: bool,
     ) -> Result<(u64, u32, u32)> {
-        let mut combined_access = BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER;
+        let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
 
         // Reserved bits: in long mode, bits [62:52] are ignored (NOT reserved).
@@ -1613,7 +1792,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let mut ppf = self.cr3 & BX_CR3_PAGING_MASK_PAE;
         let mut entry_addr = [0u64; 5];
-        let mut entry = [0u64; 5];
+        let mut entry = [PteBits::empty(); 5];
 
         // Determine start level: PML5 if LA57, otherwise PML4
         let start_leaf = if self.cr4.la57() {
@@ -1629,99 +1808,128 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut lpf_mask = 0xFFFu32;
 
         loop {
-            entry_addr[leaf] = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0x1FF) * 8;
-            entry[leaf] = self.page_walk_read_qword(entry_addr[leaf]);
+            entry_addr[leaf] = ppf + ((laddr >> (9 + 9 * leaf as u64)) & 0xFF8);
+            entry[leaf] = PteBits::from_raw(self.page_walk_read_qword(entry_addr[leaf]));
 
             offset_mask >>= 9;
 
             let curr_entry = entry[leaf];
 
+            // Alpine page walk trace — log FIRST few long mode walks plus the crash area
+            if self.icount <= 1849300 && leaf == start_leaf {
+                // Only log for the PML4 level (first level accessed) to see CR3 + first entry
+                static LOGGED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                let count = LOGGED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if count < 5 || self.icount >= 1849210 {
+                    tracing::error!(
+                        "LM_WALK: icount={} leaf={} laddr={:#x} ppf={:#x} entry_addr={:#x} entry={:#018x} CR3={:#x}",
+                        self.icount, leaf, laddr, ppf, entry_addr[leaf], curr_entry.bits(), self.cr3
+                    );
+                }
+            }
+            // Also log PDPTE level near crash
+            if self.icount >= 1849210 && self.icount <= 1849220 && leaf == BX_LEVEL_PDPTE {
+                tracing::error!(
+                    "LM_PDPTE: icount={} laddr={:#x} entry_addr={:#x} entry={:#018x} ppf_from_pml4={:#x}",
+                    self.icount, laddr, entry_addr[leaf], curr_entry.bits(), ppf
+                );
+            }
+
             // Check present
-            if curr_entry & 0x1 == 0 {
-                self.page_fault(ERROR_NOT_PRESENT, laddr, user, is_write)?;
+            if !curr_entry.contains(PteBits::PRESENT) {
+                self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, user, is_write)?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
 
             // Check reserved bits
-            if curr_entry & reserved != 0 {
+            if curr_entry.bits() & reserved != 0 {
                 tracing::debug!(
                     "Long mode level {}: reserved bit set: {:#018x}",
                     leaf,
-                    curr_entry
+                    curr_entry.bits()
                 );
-                self.page_fault(ERROR_RESERVED | ERROR_PROTECTION, laddr, user, is_write)?;
+                self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
 
             // PS bit at invalid level (only PDE level 1 and PDPTE level 2 with 1G support)
-            if curr_entry & 0x80 != 0 {
+            if curr_entry.contains(PteBits::PS) {
                 // PS bit set — valid only at BX_LEVEL_PDE (2MB) and BX_LEVEL_PDPTE (1GB)
                 if leaf > BX_LEVEL_PDPTE {
                     // PS at PML4 or PML5 level is reserved
-                    self.page_fault(ERROR_RESERVED | ERROR_PROTECTION, laddr, user, is_write)?;
+                    self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                     return Err(super::CpuError::CpuLoopRestart);
                 }
             }
 
             // Check NX
-            if curr_entry & PAGE_DIRECTORY_NX_BIT != 0 {
+            if curr_entry.bits() & PAGE_DIRECTORY_NX_BIT != 0 {
                 nx_page = true;
             }
 
-            ppf = curr_entry & 0x000F_FFFF_FFFF_F000;
+            ppf = curr_entry.bits() & 0x000F_FFFF_FFFF_F000;
 
             if leaf == BX_LEVEL_PTE {
                 break;
             }
 
             // Large page?
-            if curr_entry & 0x80 != 0 {
+            if curr_entry.contains(PteBits::PS) {
                 ppf &= 0x000F_FFFF_FFFF_E000; // clear bit 12 for large pages
                 if ppf & offset_mask != 0 {
-                    tracing::debug!(
-                        "Long mode level {}: reserved bits in large page frame: {:#018x}",
-                        leaf,
-                        curr_entry
-                    );
-                    self.page_fault(ERROR_RESERVED | ERROR_PROTECTION, laddr, user, is_write)?;
+                    if self.icount >= 1849100 && self.icount <= 1849300 {
+                        tracing::error!(
+                            "LM_LARGE_RSVD: leaf={} laddr={:#x} entry={:#018x} ppf={:#018x} offset_mask={:#018x} bad={:#018x} CR3={:#x}",
+                            leaf, laddr, curr_entry.bits(), ppf, offset_mask, ppf & offset_mask, self.cr3
+                        );
+                    }
+                    self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                     return Err(super::CpuError::CpuLoopRestart);
                 }
                 lpf_mask = offset_mask as u32;
                 break;
             }
 
-            combined_access &= curr_entry as u32; // Accumulate U/S and R/W from non-leaf entries
+            combined_access &= curr_entry.bits() as u32; // Accumulate U/S and R/W from non-leaf entries
             leaf -= 1;
         }
 
         // Leaf entry permission check
         combined_access &=
-            (entry[leaf] as u32) & (BX_COMBINED_ACCESS_WRITE | BX_COMBINED_ACCESS_USER);
+            (entry[leaf].bits() as u32) & (CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits());
 
         let priv_index = ((self.cr0.wp() as u32) << 4)
             | ((user as u32) << 3)
             | combined_access
             | (is_write as u32);
         if PRIV_CHECK[priv_index as usize] == 0 {
-            self.page_fault(ERROR_PROTECTION, laddr, user, is_write)?;
+            self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
             return Err(super::CpuError::CpuLoopRestart);
         }
 
-        // SMEP check: supervisor cannot execute from user page
-        // (not applicable for data access, handled by translate_linear for execute)
+        // SMEP check: not applicable for data access (handled by translate_linear for execute)
+
+        // SMAP check: supervisor data access to user page when AC=0
+        // Bochs paging.cc:740-749
+        if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0 {
+            if self.get_ac() == 0 {
+                self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
+                return Err(super::CpuError::CpuLoopRestart);
+            }
+        }
 
         // Update A/D bits for all levels
         // Non-leaf levels get A bit, leaf gets A+D
         for level in (leaf + 1..=start_leaf).rev() {
-            if entry[level] & 0x20 == 0 {
-                entry[level] |= 0x20;
-                self.page_walk_write_qword(entry_addr[level], entry[level]);
+            if !entry[level].contains(PteBits::ACCESSED) {
+                entry[level].insert(PteBits::ACCESSED);
+                self.page_walk_write_qword(entry_addr[level], entry[level].bits());
             }
         }
-        let leaf_needed = 0x20u64 | if is_write { 0x40 } else { 0 };
-        if entry[leaf] & leaf_needed != leaf_needed {
-            entry[leaf] |= leaf_needed;
-            self.page_walk_write_qword(entry_addr[leaf], entry[leaf]);
+        let leaf_needed = PteBits::ACCESSED | if is_write { PteBits::DIRTY } else { PteBits::empty() };
+        if !entry[leaf].contains(leaf_needed) {
+            entry[leaf].insert(leaf_needed);
+            self.page_walk_write_qword(entry_addr[leaf], entry[leaf].bits());
         }
 
         let paddr = ppf | (laddr & lpf_mask as u64);

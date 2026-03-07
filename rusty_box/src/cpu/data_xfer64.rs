@@ -4,7 +4,7 @@
 //! Copyright (C) 2001-2018 The Bochs Project
 
 use crate::cpu::decoder::{BxSegregs, Instruction};
-use crate::cpu::{BxCpuC, BxCpuIdTrait};
+use crate::cpu::{BxCpuC, BxCpuIdTrait, Result};
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
@@ -23,12 +23,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r32, r/m32 (memory form, 64-bit addressing)
     /// Matching C++ data_xfer64.cc:36-43 MOV64_GdEdM
-    pub fn mov64_gd_ed_m(&mut self, instr: &Instruction) {
+    pub fn mov64_gd_ed_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, eaddr);
-        let val32 = self.read_linear_dword(seg, laddr);
+        let val32 = self.read_virtual_dword_64(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr32(dst_reg, val32);
@@ -39,19 +37,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             eaddr,
             val32
         );
+        Ok(())
     }
 
     /// MOV r/m32, r32 (memory form, 64-bit addressing)
     /// Matching C++ data_xfer64.cc:45-52 MOV64_EdGdM
-    pub fn mov64_ed_gd_m(&mut self, instr: &Instruction) {
+    pub fn mov64_ed_gd_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, eaddr);
         let src_reg = instr.src() as usize;
         let val32 = self.get_gpr32(src_reg);
 
-        self.write_linear_dword(seg, laddr, val32);
+        self.write_virtual_dword_64(seg, eaddr, val32)?;
         tracing::trace!(
             "MOV64 mem: [{:?}:{:#x}] = reg{} ({:#010x})",
             seg,
@@ -59,19 +56,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             src_reg,
             val32
         );
+        Ok(())
     }
 
     /// MOV r/m64, r64 (memory form)
     /// Matching C++ data_xfer64.cc:54-61 MOV_EqGqM
-    pub fn mov_eq_gq_m(&mut self, instr: &Instruction) {
+    pub fn mov_eq_gq_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, eaddr);
         let src_reg = instr.src() as usize;
         let val64 = self.get_gpr64(src_reg);
 
-        self.write_linear_qword(seg, laddr, val64);
+        self.write_virtual_qword_64(seg, eaddr, val64)?;
         tracing::trace!(
             "MOV64 mem: [{:?}:{:#x}] = reg{} ({:#018x})",
             seg,
@@ -79,32 +75,32 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             src_reg,
             val64
         );
+        Ok(())
     }
 
     /// MOV r/m64, r64 (stack form)
     /// Matching C++ data_xfer64.cc:63-70 MOV64S_EqGqM
-    pub fn mov64s_eq_gq_m(&mut self, instr: &Instruction) {
+    pub fn mov64s_eq_gq_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let src_reg = instr.src() as usize;
         let val64 = self.get_gpr64(src_reg);
 
-        self.stack_write_qword(eaddr, val64);
+        self.stack_write_qword_64(eaddr, val64)?;
         tracing::trace!(
             "MOV64 stack: [{:#x}] = reg{} ({:#018x})",
             eaddr,
             src_reg,
             val64
         );
+        Ok(())
     }
 
     /// MOV r64, r/m64 (memory form)
     /// Matching C++ data_xfer64.cc:72-80 MOV_GqEqM
-    pub fn mov_gq_eq_m(&mut self, instr: &Instruction) {
+    pub fn mov_gq_eq_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, eaddr);
-        let val64 = self.read_linear_qword(seg, laddr);
+        let val64 = self.read_virtual_qword_64(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr64(dst_reg, val64);
@@ -115,13 +111,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             eaddr,
             val64
         );
+        Ok(())
     }
 
     /// MOV r64, r/m64 (stack form)
     /// Matching C++ data_xfer64.cc:82-89 MOV64S_GqEqM
-    pub fn mov64s_gq_eq_m(&mut self, instr: &Instruction) {
+    pub fn mov64s_gq_eq_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
-        let val64 = self.stack_read_qword(eaddr);
+        let val64 = self.stack_read_qword_64(eaddr)?;
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr64(dst_reg, val64);
@@ -131,6 +128,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             eaddr,
             val64
         );
+        Ok(())
     }
 
     /// MOV r64, r64 (register form)
@@ -156,59 +154,53 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV AL, moffs64
     /// Matching C++ data_xfer64.cc:107-112 MOV_ALOq
-    pub fn mov_aloq(&mut self, instr: &Instruction) {
+    pub fn mov_aloq(&mut self, instr: &Instruction) -> Result<()> {
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, instr.iq());
-        let val8 = self.read_linear_byte(seg, laddr);
+        let val8 = self.read_virtual_byte_64(seg, instr.iq())?;
 
         self.set_gpr8(0, val8); // AL
         tracing::trace!("MOV AL, [{:?}:{:#018x}] = {:#04x}", seg, instr.iq(), val8);
+        Ok(())
     }
 
     /// MOV moffs64, AL
     /// Matching C++ data_xfer64.cc:114-119 MOV_OqAL
-    pub fn mov_oq_al(&mut self, instr: &Instruction) {
+    pub fn mov_oq_al(&mut self, instr: &Instruction) -> Result<()> {
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, instr.iq());
         let val8 = self.get_gpr8(0); // AL
 
-        self.write_linear_byte(seg, laddr, val8);
+        self.write_virtual_byte_64(seg, instr.iq(), val8)?;
         tracing::trace!("MOV [{:?}:{:#018x}], AL = {:#04x}", seg, instr.iq(), val8);
+        Ok(())
     }
 
     /// MOV AX, moffs64
     /// Matching C++ data_xfer64.cc:121-126 MOV_AXOq
-    pub fn mov_ax_oq(&mut self, instr: &Instruction) {
+    pub fn mov_ax_oq(&mut self, instr: &Instruction) -> Result<()> {
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, instr.iq());
-        let val16 = self.read_linear_word(seg, laddr);
+        let val16 = self.read_virtual_word_64(seg, instr.iq())?;
 
         self.set_gpr16(0, val16); // AX
         tracing::trace!("MOV AX, [{:?}:{:#018x}] = {:#06x}", seg, instr.iq(), val16);
+        Ok(())
     }
 
     /// MOV moffs64, AX
     /// Matching C++ data_xfer64.cc:128-133 MOV_OqAX
-    pub fn mov_oq_ax(&mut self, instr: &Instruction) {
+    pub fn mov_oq_ax(&mut self, instr: &Instruction) -> Result<()> {
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, instr.iq());
         let val16 = self.get_gpr16(0); // AX
 
-        self.write_linear_word(seg, laddr, val16);
+        self.write_virtual_word_64(seg, instr.iq(), val16)?;
         tracing::trace!("MOV [{:?}:{:#018x}], AX = {:#06x}", seg, instr.iq(), val16);
+        Ok(())
     }
 
     /// MOV EAX, moffs64
     /// Matching C++ data_xfer64.cc:135-140 MOV_EAXOq
-    pub fn mov_eax_oq(&mut self, instr: &Instruction) {
+    pub fn mov_eax_oq(&mut self, instr: &Instruction) -> Result<()> {
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, instr.iq());
-        let val32 = self.read_linear_dword(seg, laddr);
+        let val32 = self.read_virtual_dword_64(seg, instr.iq())?;
 
         self.set_gpr32(0, val32); // EAX
         tracing::trace!(
@@ -217,32 +209,30 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             instr.iq(),
             val32
         );
+        Ok(())
     }
 
     /// MOV moffs64, EAX
     /// Matching C++ data_xfer64.cc:142-147 MOV_OqEAX
-    pub fn mov_oq_eax(&mut self, instr: &Instruction) {
+    pub fn mov_oq_eax(&mut self, instr: &Instruction) -> Result<()> {
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, instr.iq());
         let val32 = self.get_gpr32(0); // EAX
 
-        self.write_linear_dword(seg, laddr, val32);
+        self.write_virtual_dword_64(seg, instr.iq(), val32)?;
         tracing::trace!(
             "MOV [{:?}:{:#018x}], EAX = {:#010x}",
             seg,
             instr.iq(),
             val32
         );
+        Ok(())
     }
 
     /// MOV RAX, moffs64
     /// Matching C++ data_xfer64.cc:149-154 MOV_RAXOq
-    pub fn mov_rax_oq(&mut self, instr: &Instruction) {
+    pub fn mov_rax_oq(&mut self, instr: &Instruction) -> Result<()> {
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, instr.iq());
-        let val64 = self.read_linear_qword(seg, laddr);
+        let val64 = self.read_virtual_qword_64(seg, instr.iq())?;
 
         self.set_gpr64(0, val64); // RAX
         tracing::trace!(
@@ -251,36 +241,35 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             instr.iq(),
             val64
         );
+        Ok(())
     }
 
     /// MOV moffs64, RAX
     /// Matching C++ data_xfer64.cc:156-161 MOV_OqRAX
-    pub fn mov_oq_rax(&mut self, instr: &Instruction) {
+    pub fn mov_oq_rax(&mut self, instr: &Instruction) -> Result<()> {
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, instr.iq());
         let val64 = self.get_gpr64(0); // RAX
 
-        self.write_linear_qword(seg, laddr, val64);
+        self.write_virtual_qword_64(seg, instr.iq(), val64)?;
         tracing::trace!(
             "MOV [{:?}:{:#018x}], RAX = {:#018x}",
             seg,
             instr.iq(),
             val64
         );
+        Ok(())
     }
 
     /// MOV r/m64, imm32 (sign-extended to 64-bit) (memory form)
     /// Matching C++ data_xfer64.cc:163-172 MOV_EqIdM
-    pub fn mov_eq_id_m(&mut self, instr: &Instruction) {
+    pub fn mov_eq_id_m(&mut self, instr: &Instruction) -> Result<()> {
         let op_64 = instr.id() as i32 as u64; // sign extend imm32 to 64-bit
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, eaddr);
 
-        self.write_linear_qword(seg, laddr, op_64);
+        self.write_virtual_qword_64(seg, eaddr, op_64)?;
         tracing::trace!("MOV64 mem: [{:?}:{:#x}] = {:#018x}", seg, eaddr, op_64);
+        Ok(())
     }
 
     /// MOV r64, imm32 (sign-extended to 64-bit) (register form)
@@ -300,12 +289,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVZX r64, r/m8 (memory form)
     /// Matching C++ data_xfer64.cc:182-192 MOVZX_GqEbM
     /// Zero extend byte op2 into qword op1
-    pub fn movzx_gq_eb_m(&mut self, instr: &Instruction) {
+    pub fn movzx_gq_eb_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op2_8 = self.read_linear_byte(seg, laddr);
+        let op2_8 = self.read_virtual_byte_64(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr64(dst_reg, op2_8 as u64);
@@ -316,6 +303,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             eaddr,
             op2_8
         );
+        Ok(())
     }
 
     /// MOVZX r64, r8 (register form)
@@ -334,12 +322,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVZX r64, r/m16 (memory form)
     /// Matching C++ data_xfer64.cc:204-214 MOVZX_GqEwM
     /// Zero extend word op2 into qword op1
-    pub fn movzx_gq_ew_m(&mut self, instr: &Instruction) {
+    pub fn movzx_gq_ew_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op2_16 = self.read_linear_word(seg, laddr);
+        let op2_16 = self.read_virtual_word_64(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr64(dst_reg, op2_16 as u64);
@@ -350,6 +336,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             eaddr,
             op2_16
         );
+        Ok(())
     }
 
     /// MOVZX r64, r16 (register form)
@@ -371,12 +358,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVSX r64, r/m8 (memory form)
     /// Matching C++ data_xfer64.cc:226-236 MOVSX_GqEbM
     /// Sign extend byte op2 into qword op1
-    pub fn movsx_gq_eb_m(&mut self, instr: &Instruction) {
+    pub fn movsx_gq_eb_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op2_8 = self.read_linear_byte(seg, laddr);
+        let op2_8 = self.read_virtual_byte_64(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let val64 = (op2_8 as i8 as i64) as u64; // sign extend byte to qword
 
@@ -389,6 +374,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op2_8,
             val64
         );
+        Ok(())
     }
 
     /// MOVSX r64, r8 (register form)
@@ -414,12 +400,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVSX r64, r/m16 (memory form)
     /// Matching C++ data_xfer64.cc:248-258 MOVSX_GqEwM
     /// Sign extend word op2 into qword op1
-    pub fn movsx_gq_ew_m(&mut self, instr: &Instruction) {
+    pub fn movsx_gq_ew_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op2_16 = self.read_linear_word(seg, laddr);
+        let op2_16 = self.read_virtual_word_64(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let val64 = (op2_16 as i16 as i64) as u64; // sign extend word to qword
 
@@ -432,6 +416,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op2_16,
             val64
         );
+        Ok(())
     }
 
     /// MOVSX r64, r16 (register form)
@@ -456,12 +441,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVSX r64, r/m32 (memory form)
     /// Matching C++ data_xfer64.cc:270-280 MOVSX_GqEdM
     /// Sign extend dword op2 into qword op1
-    pub fn movsx_gq_ed_m(&mut self, instr: &Instruction) {
+    pub fn movsx_gq_ed_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op2_32 = self.read_linear_dword(seg, laddr);
+        let op2_32 = self.read_virtual_dword_64(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let val64 = (op2_32 as i32 as i64) as u64; // sign extend dword to qword
 
@@ -474,6 +457,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op2_32,
             val64
         );
+        Ok(())
     }
 
     /// MOVSX r64, r32 (register form)
@@ -501,17 +485,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XCHG r/m64, r64 (memory form)
     /// Matching C++ data_xfer64.cc:292-300 XCHG_EqGqM
-    /// Note: always locked (read_RMW_linear_qword)
-    pub fn xchg_eq_gq_m(&mut self, instr: &Instruction) {
+    /// Note: always locked (read_RMW_virtual_qword)
+    pub fn xchg_eq_gq_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1_64, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr); // always locked
+        let op1_64 = self.read_rmw_virtual_qword_64(seg, eaddr)?;
         let src_reg = instr.src() as usize;
         let op2_64 = self.get_gpr64(src_reg);
 
-        self.write_rmw_linear_qword(rmw_laddr, op2_64);
+        self.write_rmw_virtual_qword_back_64(op2_64);
         self.set_gpr64(src_reg, op1_64);
         tracing::trace!(
             "XCHG64 mem: [{:?}:{:#x}]={:#018x} <-> reg{}={:#018x}",
@@ -521,6 +503,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             src_reg,
             op1_64
         );
+        Ok(())
     }
 
     /// XCHG r64, r64 (register form)
@@ -540,6 +523,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             src_reg,
             op1_64
         );
+    }
+
+    /// XCHG r64, RAX — opcode 0x90+rd with REX.W
+    /// Bochs: XCHG_RRXRax
+    pub fn xchg_rrx_rax(&mut self, instr: &Instruction) {
+        let reg = instr.dst() as usize;
+        let val_rax = self.rax();
+        let val_reg = self.get_gpr64(reg);
+        self.set_rax(val_reg);
+        self.set_gpr64(reg, val_rax);
     }
 
     // =========================================================================
@@ -730,81 +723,183 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Unified dispatchers (mod_c0 routing for register vs memory)
     // =========================================================================
 
-    pub fn mov_eq_gq(&mut self, instr: &Instruction) {
+    pub fn mov_eq_gq(&mut self, instr: &Instruction) -> Result<()> {
         if instr.mod_c0() {
-            // Register form: MOV r64, r64 - use the same register form
             let src = instr.src() as usize;
             let dst = instr.dst() as usize;
             self.set_gpr64(dst, self.get_gpr64(src));
+            Ok(())
         } else {
-            self.mov_eq_gq_m(instr);
+            self.mov_eq_gq_m(instr)
         }
     }
 
-    pub fn mov_gq_eq(&mut self, instr: &Instruction) {
+    pub fn mov_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
         if instr.mod_c0() {
             self.mov_gq_eq_r(instr);
+            Ok(())
         } else {
-            self.mov_gq_eq_m(instr);
+            self.mov_gq_eq_m(instr)
         }
     }
 
-    pub fn mov_eq_id(&mut self, instr: &Instruction) {
+    pub fn mov_eq_id(&mut self, instr: &Instruction) -> Result<()> {
         if instr.mod_c0() {
             self.mov_eq_id_r(instr);
+            Ok(())
         } else {
-            self.mov_eq_id_m(instr);
+            self.mov_eq_id_m(instr)
         }
     }
 
-    pub fn xchg_eq_gq(&mut self, instr: &Instruction) -> super::Result<()> {
+    pub fn xchg_eq_gq(&mut self, instr: &Instruction) -> Result<()> {
         if instr.mod_c0() {
             self.xchg_eq_gq_r(instr);
             Ok(())
         } else {
-            self.xchg_eq_gq_m(instr);
-            Ok(())
+            self.xchg_eq_gq_m(instr)
         }
     }
 
-    pub fn movsx_gq_eb(&mut self, instr: &Instruction) {
+    pub fn movsx_gq_eb(&mut self, instr: &Instruction) -> Result<()> {
         if instr.mod_c0() {
             self.movsx_gq_eb_r(instr);
+            Ok(())
         } else {
-            self.movsx_gq_eb_m(instr);
+            self.movsx_gq_eb_m(instr)
         }
     }
 
-    pub fn movsx_gq_ew(&mut self, instr: &Instruction) {
+    pub fn movsx_gq_ew(&mut self, instr: &Instruction) -> Result<()> {
         if instr.mod_c0() {
             self.movsx_gq_ew_r(instr);
+            Ok(())
         } else {
-            self.movsx_gq_ew_m(instr);
+            self.movsx_gq_ew_m(instr)
         }
     }
 
-    pub fn movsxd_gq_ed(&mut self, instr: &Instruction) {
+    pub fn movsxd_gq_ed(&mut self, instr: &Instruction) -> Result<()> {
         if instr.mod_c0() {
             self.movsx_gq_ed_r(instr);
+            Ok(())
         } else {
-            self.movsx_gq_ed_m(instr);
+            self.movsx_gq_ed_m(instr)
         }
     }
 
-    pub fn movzx_gq_eb(&mut self, instr: &Instruction) {
+    pub fn movzx_gq_eb(&mut self, instr: &Instruction) -> Result<()> {
         if instr.mod_c0() {
             self.movzx_gq_eb_r(instr);
+            Ok(())
         } else {
-            self.movzx_gq_eb_m(instr);
+            self.movzx_gq_eb_m(instr)
         }
     }
 
-    pub fn movzx_gq_ew(&mut self, instr: &Instruction) {
+    pub fn movzx_gq_ew(&mut self, instr: &Instruction) -> Result<()> {
         if instr.mod_c0() {
             self.movzx_gq_ew_r(instr);
+            Ok(())
         } else {
-            self.movzx_gq_ew_m(instr);
+            self.movzx_gq_ew_m(instr)
         }
+    }
+
+    // =========================================================================
+    // CMOVcc unified dispatchers (64-bit) - handle both register and memory forms
+    // For memory form: always read the value, then conditionally write
+    // =========================================================================
+
+    fn cmov_read_src64(&mut self, instr: &Instruction) -> Result<u64> {
+        if instr.mod_c0() {
+            Ok(self.get_gpr64(instr.src() as usize))
+        } else {
+            let eaddr = self.resolve_addr64(instr);
+            let seg = BxSegregs::from(instr.seg());
+            self.read_virtual_qword_64(seg, eaddr)
+        }
+    }
+
+    pub fn cmovo_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let val = self.cmov_read_src64(instr)?;
+        if self.get_of() { self.set_gpr64(instr.dst() as usize, val); }
+        Ok(())
+    }
+    pub fn cmovno_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let val = self.cmov_read_src64(instr)?;
+        if !self.get_of() { self.set_gpr64(instr.dst() as usize, val); }
+        Ok(())
+    }
+    pub fn cmovb_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let val = self.cmov_read_src64(instr)?;
+        if self.get_cf() { self.set_gpr64(instr.dst() as usize, val); }
+        Ok(())
+    }
+    pub fn cmovnb_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let val = self.cmov_read_src64(instr)?;
+        if !self.get_cf() { self.set_gpr64(instr.dst() as usize, val); }
+        Ok(())
+    }
+    pub fn cmovz_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let val = self.cmov_read_src64(instr)?;
+        if self.get_zf() { self.set_gpr64(instr.dst() as usize, val); }
+        Ok(())
+    }
+    pub fn cmovnz_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let val = self.cmov_read_src64(instr)?;
+        if !self.get_zf() { self.set_gpr64(instr.dst() as usize, val); }
+        Ok(())
+    }
+    pub fn cmovbe_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let val = self.cmov_read_src64(instr)?;
+        if self.get_cf() || self.get_zf() { self.set_gpr64(instr.dst() as usize, val); }
+        Ok(())
+    }
+    pub fn cmovnbe_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let val = self.cmov_read_src64(instr)?;
+        if !self.get_cf() && !self.get_zf() { self.set_gpr64(instr.dst() as usize, val); }
+        Ok(())
+    }
+    pub fn cmovs_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let val = self.cmov_read_src64(instr)?;
+        if self.get_sf() { self.set_gpr64(instr.dst() as usize, val); }
+        Ok(())
+    }
+    pub fn cmovns_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let val = self.cmov_read_src64(instr)?;
+        if !self.get_sf() { self.set_gpr64(instr.dst() as usize, val); }
+        Ok(())
+    }
+    pub fn cmovp_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let val = self.cmov_read_src64(instr)?;
+        if self.get_pf() { self.set_gpr64(instr.dst() as usize, val); }
+        Ok(())
+    }
+    pub fn cmovnp_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let val = self.cmov_read_src64(instr)?;
+        if !self.get_pf() { self.set_gpr64(instr.dst() as usize, val); }
+        Ok(())
+    }
+    pub fn cmovl_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let val = self.cmov_read_src64(instr)?;
+        if self.get_sf() != self.get_of() { self.set_gpr64(instr.dst() as usize, val); }
+        Ok(())
+    }
+    pub fn cmovnl_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let val = self.cmov_read_src64(instr)?;
+        if self.get_sf() == self.get_of() { self.set_gpr64(instr.dst() as usize, val); }
+        Ok(())
+    }
+    pub fn cmovle_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let val = self.cmov_read_src64(instr)?;
+        if self.get_zf() || (self.get_sf() != self.get_of()) { self.set_gpr64(instr.dst() as usize, val); }
+        Ok(())
+    }
+    pub fn cmovnle_gq_eq(&mut self, instr: &Instruction) -> Result<()> {
+        let val = self.cmov_read_src64(instr)?;
+        if !self.get_zf() && (self.get_sf() == self.get_of()) { self.set_gpr64(instr.dst() as usize, val); }
+        Ok(())
     }
 
     // =========================================================================
@@ -816,8 +911,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Made pub(crate) so it can be accessed from ctrl_xfer64.rs
     pub(crate) fn resolve_addr64(&self, instr: &Instruction) -> u64 {
         // Calculate: base + (index << scale) + displacement
+        // base_reg: 0-15 = GPR, 16 = RIP (for RIP-relative), 19 = NIL (no base)
+        // gen_reg[16] holds RIP (already advanced by ilen before execution),
+        // gen_reg[19] = NIL register (always 0).
+        // Matching Bochs: ResolveModrm reads gen_reg[base] directly.
         let base_reg = instr.sib_base() as usize;
-        let mut eaddr = if base_reg < 16 {
+        let mut eaddr = if base_reg < self.gen_reg.len() {
             self.get_gpr64(base_reg)
         } else {
             0
@@ -841,42 +940,4 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // read_8bit_regx is defined in logical8.rs to avoid duplicate definitions
-
-    /// Read byte from linear address (matches read_linear_byte)
-    fn read_linear_byte(&self, _seg: BxSegregs, laddr: u64) -> u8 {
-        self.mem_read_byte(laddr)
-    }
-
-    /// Read dword from linear address (matches read_linear_dword)
-    fn read_linear_dword(&self, _seg: BxSegregs, laddr: u64) -> u32 {
-        self.mem_read_dword(laddr)
-    }
-
-    /// Write byte to linear address (matches write_linear_byte)
-    fn write_linear_byte(&mut self, _seg: BxSegregs, laddr: u64, val: u8) {
-        self.mem_write_byte(laddr, val);
-    }
-
-    /// Write dword to linear address (matches write_linear_dword)
-    fn write_linear_dword(&mut self, _seg: BxSegregs, laddr: u64, val: u32) {
-        self.mem_write_dword(laddr, val);
-    }
-
-    /// Write qword to linear address (matches write_linear_qword)
-    fn write_linear_qword(&mut self, _seg: BxSegregs, laddr: u64, val: u64) {
-        self.mem_write_qword(laddr, val);
-    }
-
-    /// Read-Modify-Write: Read qword, return it and linear address for write back
-    /// Matching read_RMW_linear_qword
-    pub(super) fn read_rmw_linear_qword(&mut self, _seg: BxSegregs, laddr: u64) -> (u64, u64) {
-        let val = self.mem_read_qword(laddr);
-        (val, laddr)
-    }
-
-    /// Write qword to linear address (for RMW operations)
-    /// Matching write_RMW_linear_qword
-    pub(super) fn write_rmw_linear_qword(&mut self, laddr: u64, val: u64) {
-        self.mem_write_qword(laddr, val);
-    }
 }

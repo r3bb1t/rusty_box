@@ -615,7 +615,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         page_write_stamp_table: &mut BxPageWriteStampTable,
     ) -> Result<BxICacheEntry> {
         // Get entry index first to avoid borrow conflicts
-        let entry_idx = BxICache::hash(p_addr, self.fetch_mode_mask.into()) as usize;
+        let entry_idx = BxICache::hash(p_addr, self.fetch_mode_mask.bits().into()) as usize;
 
         // Matching C++ icache.cc:106-107 - use eip_biased directly
         // Safety check: ensure eip_biased is within bounds (defensive programming)
@@ -1151,7 +1151,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // TODO: Check if debugger is active - should assert !debugger_active
 
         // Find entry in cache
-        let cache_entry_idx = BxICache::hash(p_addr, self.fetch_mode_mask.into()) as usize;
+        let cache_entry_idx = BxICache::hash(p_addr, self.fetch_mode_mask.bits().into()) as usize;
 
         // Extract cached entry info without holding borrow
         // Check if entry exists and matches (matching C++ line 226-228: if (e != NULL))

@@ -431,12 +431,11 @@ fn run_dlxlinux() -> Result<()> {
     // time close to real time, so the console blank timer fires correctly at ~600s.
     // Override with MAX_INSTRUCTIONS env var:
     //   MAX_INSTRUCTIONS=132865710   → stop at first kernel HLT (ATA/IRQ diagnostics)
-    //   MAX_INSTRUCTIONS=200000000   → headless diagnostic run after HLT
-    //   MAX_INSTRUCTIONS=500000000   → headless run trying to reach login (default)
+    //   MAX_INSTRUCTIONS=135000000   → headless regression test (reaches login prompt)
     let max_instructions: u64 = std::env::var("MAX_INSTRUCTIONS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(500_000_000);
+        .unwrap_or(135_000_000);
 
     // PS/2 Set 2 scancodes for "root\n". Break code = 0xF0 prefix + make code.
     // 'r'=0x2D, 'o'=0x44, 't'=0x2C, Enter=0x5A

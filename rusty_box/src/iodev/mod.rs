@@ -334,7 +334,7 @@ impl BxDevicesC {
                 address,
                 value as u8 as char
             );
-            const PORT_E9_CAPACITY: usize = 4096;
+            const PORT_E9_CAPACITY: usize = 65536;
             if self.port_e9_output.len() >= PORT_E9_CAPACITY {
                 self.port_e9_output.pop_front();
             }

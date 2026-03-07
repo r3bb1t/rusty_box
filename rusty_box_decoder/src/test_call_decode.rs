@@ -1,7 +1,6 @@
 #[cfg(test)]
 mod test_call_decode {
     use crate::fetchdecode32::fetch_decode32;
-    use crate::ia_opcodes::Opcode;
 
     #[test]
     fn test_call_eax_length() {

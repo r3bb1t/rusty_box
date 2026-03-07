@@ -16,7 +16,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ---- 8-bit read/write helpers for shift instructions ----
     fn shift_read8(&mut self, instr: &Instruction) -> super::Result<(u8, Option<()>)> {
         if instr.mod_c0() {
-            Ok((self.get_gpr8(instr.dst() as usize), None))
+            Ok((self.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l()), None))
         } else {
             let eaddr = self.resolve_addr32(instr);
             let seg = BxSegregs::from(instr.seg());
@@ -28,7 +28,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if let Some(_) = paddr {
             self.write_rmw_linear_byte(result);
         } else {
-            self.set_gpr8(instr.dst() as usize, result);
+            self.write_8bit_regx(instr.dst() as usize, instr.extend8bit_l(), result);
         }
     }
 

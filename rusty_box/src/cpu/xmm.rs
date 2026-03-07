@@ -5,7 +5,7 @@
 
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
-pub(super) const MXCSR_RESET: u32 = 0x0000_1F80; // All exceptions masked, round-nearest
+pub(super) const MXCSR_RESET: u32 = Mxcsr::RESET.bits();
 pub(super) const MXCSR_MASK: u32 = 0x0000_FFBF; // Valid bits mask (no bit 6 DAZ on older CPUs)
 
 // ============================================================================
@@ -130,54 +130,127 @@ pub type BxPackedAvxRegister = BxPackedZmmRegister;
 // MXCSR — SSE control/status register
 // ============================================================================
 
-/// MXCSR bit definitions (matching Bochs)
-pub(super) const MXCSR_IE: u32 = 1 << 0; // Invalid operation exception
-pub(super) const MXCSR_DE: u32 = 1 << 1; // Denormal exception
-pub(super) const MXCSR_ZE: u32 = 1 << 2; // Zero-divide exception
-pub(super) const MXCSR_OE: u32 = 1 << 3; // Overflow exception
-pub(super) const MXCSR_UE: u32 = 1 << 4; // Underflow exception
-pub(super) const MXCSR_PE: u32 = 1 << 5; // Precision exception
-pub(super) const MXCSR_DAZ: u32 = 1 << 6; // Denormals Are Zeros
-pub(super) const MXCSR_IM: u32 = 1 << 7; // Invalid operation mask
-pub(super) const MXCSR_DM: u32 = 1 << 8; // Denormal mask
-pub(super) const MXCSR_ZM: u32 = 1 << 9; // Zero-divide mask
-pub(super) const MXCSR_OM: u32 = 1 << 10; // Overflow mask
-pub(super) const MXCSR_UM: u32 = 1 << 11; // Underflow mask
-pub(super) const MXCSR_PM: u32 = 1 << 12; // Precision mask
-pub(super) const MXCSR_RC: u32 = 0x6000; // Rounding control (bits 13-14)
-pub(super) const MXCSR_FZ: u32 = 1 << 15; // Flush to Zero
+bitflags::bitflags! {
+    /// MXCSR — SSE/AVX control and status register (matching Bochs)
+    ///
+    /// Lower 6 bits are sticky exception flags (set by hardware on exception).
+    /// Bits 7-12 are the corresponding exception masks (1 = masked / suppressed).
+    /// Bit 6 = DAZ (Denormals Are Zeros), bit 15 = FZ (Flush to Zero),
+    /// bits 13-14 = rounding control.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct Mxcsr: u32 {
+        /// Invalid-operation exception flag
+        const IE  = 1 << 0;
+        /// Denormal-operand exception flag
+        const DE  = 1 << 1;
+        /// Zero-divide exception flag
+        const ZE  = 1 << 2;
+        /// Overflow exception flag
+        const OE  = 1 << 3;
+        /// Underflow exception flag
+        const UE  = 1 << 4;
+        /// Precision (inexact) exception flag
+        const PE  = 1 << 5;
+        /// Denormals-Are-Zeros mode
+        const DAZ = 1 << 6;
+        /// Invalid-operation exception mask
+        const IM  = 1 << 7;
+        /// Denormal-operand exception mask
+        const DM  = 1 << 8;
+        /// Zero-divide exception mask
+        const ZM  = 1 << 9;
+        /// Overflow exception mask
+        const OM  = 1 << 10;
+        /// Underflow exception mask
+        const UM  = 1 << 11;
+        /// Precision exception mask
+        const PM  = 1 << 12;
+        /// Rounding-control bit 0 (bits 13-14 together)
+        const RC0 = 1 << 13;
+        /// Rounding-control bit 1
+        const RC1 = 1 << 14;
+        /// Flush-to-Zero mode
+        const FZ  = 1 << 15;
+    }
+}
 
+impl Mxcsr {
+    /// Both rounding-control bits (mask = 0x6000)
+    pub const RC_MASK: Mxcsr = Self::RC0.union(Self::RC1);
+
+    /// All exception mask bits (IM|DM|ZM|OM|UM|PM)
+    pub const ALL_MASKS: Mxcsr = Self::IM
+        .union(Self::DM)
+        .union(Self::ZM)
+        .union(Self::OM)
+        .union(Self::UM)
+        .union(Self::PM);
+
+    /// Reset value: all exceptions masked, round-to-nearest (= 0x1F80)
+    pub const RESET: Mxcsr = Self::ALL_MASKS;
+
+    /// Get rounding control mode (0=nearest, 1=down, 2=up, 3=truncate)
+    #[inline]
+    pub const fn rounding_mode(self) -> u8 {
+        ((self.bits() >> 13) & 3) as u8
+    }
+}
+
+// ---- Backward-compat wrapper (existing code uses BxMxcsr { mxcsr: u32 }) ----
 #[derive(Debug, Default, Clone, Copy)]
 pub struct BxMxcsr {
     pub(crate) mxcsr: u32,
 }
 
 impl BxMxcsr {
+    /// Get the typed Mxcsr bitflags view
+    #[inline]
+    pub fn flags(&self) -> Mxcsr {
+        Mxcsr::from_bits_retain(self.mxcsr)
+    }
+
     /// Get rounding control mode (0=nearest, 1=down, 2=up, 3=truncate)
     #[inline]
     pub fn rounding_mode(&self) -> u8 {
-        ((self.mxcsr >> 13) & 3) as u8
+        self.flags().rounding_mode()
     }
 
     /// Check if Flush-to-Zero is enabled
     #[inline]
     pub fn flush_to_zero(&self) -> bool {
-        (self.mxcsr & MXCSR_FZ) != 0
+        self.flags().contains(Mxcsr::FZ)
     }
 
     /// Check if Denormals-Are-Zeros is enabled
     #[inline]
     pub fn daz(&self) -> bool {
-        (self.mxcsr & MXCSR_DAZ) != 0
+        self.flags().contains(Mxcsr::DAZ)
     }
 
     /// Check if an exception is masked
     #[inline]
     pub fn is_masked(&self, exception_bit: u32) -> bool {
-        // Mask bits are 6 positions above the exception flag bits
+        // Mask bits are 7 positions above the exception flag bits
         (self.mxcsr & (exception_bit << 7)) != 0
     }
 }
+
+// ---- Backward-compat constants (prefer Mxcsr::<NAME> in new code) ----
+pub(super) const MXCSR_IE: u32 = Mxcsr::IE.bits();
+pub(super) const MXCSR_DE: u32 = Mxcsr::DE.bits();
+pub(super) const MXCSR_ZE: u32 = Mxcsr::ZE.bits();
+pub(super) const MXCSR_OE: u32 = Mxcsr::OE.bits();
+pub(super) const MXCSR_UE: u32 = Mxcsr::UE.bits();
+pub(super) const MXCSR_PE: u32 = Mxcsr::PE.bits();
+pub(super) const MXCSR_DAZ: u32 = Mxcsr::DAZ.bits();
+pub(super) const MXCSR_IM: u32 = Mxcsr::IM.bits();
+pub(super) const MXCSR_DM: u32 = Mxcsr::DM.bits();
+pub(super) const MXCSR_ZM: u32 = Mxcsr::ZM.bits();
+pub(super) const MXCSR_OM: u32 = Mxcsr::OM.bits();
+pub(super) const MXCSR_UM: u32 = Mxcsr::UM.bits();
+pub(super) const MXCSR_PM: u32 = Mxcsr::PM.bits();
+pub(super) const MXCSR_RC: u32 = Mxcsr::RC_MASK.bits();
+pub(super) const MXCSR_FZ: u32 = Mxcsr::FZ.bits();
 
 // ============================================================================
 // CPU helper methods for XMM register access

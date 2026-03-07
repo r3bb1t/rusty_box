@@ -588,13 +588,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// LOOP rel8 - Decrement CX/ECX, jump if not zero
+    /// Bochs ctrl_xfer16.cc:615-623: counter must NOT be written back before
+    /// branch_near16 is known to succeed (exception safety).
     pub fn loop16_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         let as32l = instr.as32_l() != 0;
 
         if as32l {
-            let ecx = self.get_gpr32(1);
-            let count = ecx.wrapping_sub(1);
-            self.set_gpr32(1, count);
+            let count = self.get_gpr32(1).wrapping_sub(1);
 
             if count != 0 {
                 let disp = instr.ib() as i8;
@@ -603,10 +603,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.branch_near16(new_ip)?;
                 tracing::trace!("LOOP taken (32-bit): IP = {:#06x}, ECX = {}", new_ip, count);
             }
+
+            self.set_gpr32(1, count);
         } else {
-            let cx = self.get_gpr16(1);
-            let count = cx.wrapping_sub(1);
-            self.set_gpr16(1, count);
+            let count = self.get_gpr16(1).wrapping_sub(1);
 
             if count != 0 {
                 let disp = instr.ib() as i8;
@@ -615,29 +615,30 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.branch_near16(new_ip)?;
                 tracing::trace!("LOOP taken (16-bit): IP = {:#06x}, CX = {}", new_ip, count);
             }
+
+            self.set_gpr16(1, count);
         }
         Ok(())
     }
 
     /// LOOPE/LOOPZ rel8 - Decrement CX/ECX, jump if not zero and ZF=1
+    /// Counter written after branch attempt (exception safety, matching Bochs).
     pub fn loope16_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         let as32l = instr.as32_l() != 0;
 
         if as32l {
-            let ecx = self.get_gpr32(1);
-            let count = ecx.wrapping_sub(1);
+            let count = self.get_gpr32(1).wrapping_sub(1);
+
+            if count != 0 && self.get_zf() {
+                let disp = instr.ib() as i8;
+                let ip = self.get_ip();
+                let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
+                self.branch_near16(new_ip)?;
+            }
+
             self.set_gpr32(1, count);
-
-            if count != 0 && self.get_zf() {
-                let disp = instr.ib() as i8;
-                let ip = self.get_ip();
-                let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-                self.branch_near16(new_ip)?;
-            }
         } else {
-            let cx = self.get_gpr16(1);
-            let count = cx.wrapping_sub(1);
-            self.set_gpr16(1, count);
+            let count = self.get_gpr16(1).wrapping_sub(1);
 
             if count != 0 && self.get_zf() {
                 let disp = instr.ib() as i8;
@@ -645,29 +646,30 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
                 self.branch_near16(new_ip)?;
             }
+
+            self.set_gpr16(1, count);
         }
         Ok(())
     }
 
     /// LOOPNE/LOOPNZ rel8 - Decrement CX/ECX, jump if not zero and ZF=0
+    /// Counter written after branch attempt (exception safety, matching Bochs).
     pub fn loopne16_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         let as32l = instr.as32_l() != 0;
 
         if as32l {
-            let ecx = self.get_gpr32(1);
-            let count = ecx.wrapping_sub(1);
+            let count = self.get_gpr32(1).wrapping_sub(1);
+
+            if count != 0 && !self.get_zf() {
+                let disp = instr.ib() as i8;
+                let ip = self.get_ip();
+                let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
+                self.branch_near16(new_ip)?;
+            }
+
             self.set_gpr32(1, count);
-
-            if count != 0 && !self.get_zf() {
-                let disp = instr.ib() as i8;
-                let ip = self.get_ip();
-                let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
-                self.branch_near16(new_ip)?;
-            }
         } else {
-            let cx = self.get_gpr16(1);
-            let count = cx.wrapping_sub(1);
-            self.set_gpr16(1, count);
+            let count = self.get_gpr16(1).wrapping_sub(1);
 
             if count != 0 && !self.get_zf() {
                 let disp = instr.ib() as i8;
@@ -675,6 +677,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
                 self.branch_near16(new_ip)?;
             }
+
+            self.set_gpr16(1, count);
         }
         Ok(())
     }
@@ -742,11 +746,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
-        if !self.real_mode() {
-            // Protected mode - use jump_protected
+        if self.protected_mode() {
+            // Protected mode (includes long modes) - use jump_protected
             self.jump_protected(cs_raw, disp16 as u64)?;
         } else {
-            // Real mode
+            // Real mode or V8086 mode
             let limit = self.get_segment_limit(BxSegregs::Cs);
             if (disp16 as u32) > limit {
                 tracing::error!(
@@ -776,10 +780,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
-        if !self.real_mode() {
+        if self.protected_mode() {
             return self.call_protected(cs_raw, disp16 as u32, false);
         } else {
-            // Real mode
+            // Real mode or V8086 mode
             let limit = self.get_segment_limit(BxSegregs::Cs);
             if (disp16 as u32) > limit {
                 tracing::error!(
@@ -881,10 +885,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
-        if !self.real_mode() {
+        if self.protected_mode() {
             return self.return_protected(0, false);
         } else {
-            // Real mode
+            // Real mode or V8086 mode
             let ip = self.pop_16()?;
             let cs_raw = self.pop_16()?;
 
@@ -896,11 +900,26 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     ip,
                     limit
                 );
-                return Err(CpuError::BadVector {
-                    vector: Exception::Gp,
-                    error_code: 0,
-                });
+                return self.exception(Exception::Gp, 0);
             }
+
+            // ISOLINUX __farcall diagnostic: log RM RETF targets
+            // Log first 20, then only non-VGA-BIOS targets (not c000:0147)
+            let is_vga = cs_raw == 0xC000 && ip == 0x0147;
+            // For Alpine debugging: log AH=09 (char write) from VGA BIOS
+            let is_char_write = is_vga && self.ah() == 0x09;
+            if self.diag_retf16_count < 20 || !is_vga || is_char_write {
+                if self.diag_retf16_count < 2000 {
+                    tracing::warn!(
+                        "RETF16 #{}: -> {:04x}:{:04x} AH={:02x} AL={:02x} DL={:02x} BX={:04x} CX={:04x} icount={}",
+                        self.diag_retf16_count,
+                        cs_raw, ip, self.ah(), self.al(), self.dl(),
+                        self.bx() as u16, self.cx() as u16,
+                        self.icount
+                    );
+                }
+            }
+            self.diag_retf16_count += 1;
 
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
             self.set_eip(ip as u32);
@@ -918,12 +937,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
-        let imm16 = instr.iw() as i16;
+        let imm16 = instr.iw();
 
-        if !self.real_mode() {
-            return self.return_protected(imm16 as u16, false);
+        if self.protected_mode() {
+            return self.return_protected(imm16, false);
         } else {
-            // Real mode
+            // Real mode or V8086 mode
             let ip = self.pop_16()?;
             let cs_raw = self.pop_16()?;
 

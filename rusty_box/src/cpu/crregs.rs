@@ -754,18 +754,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let old_cr0 = self.cr0.get32();
 
         // Bochs check_CR0(): PG without PE is illegal, NW without CD is illegal
-        if (val_32 & (1 << 31)) != 0 && (val_32 & 1) == 0 {
-            // PG=1, PE=0 → #GP(0)
+        let new_cr0 = BxCr0::from_bits_retain(val_32);
+        if new_cr0.contains(BxCr0::PG) && !new_cr0.contains(BxCr0::PE) {
             tracing::debug!("MOV CR0: PG=1 without PE=1, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
-        if (val_32 & (1 << 29)) != 0 && (val_32 & (1 << 30)) == 0 {
-            // NW=1, CD=0 → #GP(0)
+        if new_cr0.contains(BxCr0::NW) && !new_cr0.contains(BxCr0::CD) {
             tracing::debug!("MOV CR0: NW=1 without CD=1, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
-        let pg = (val_32 >> 31) & 1 != 0;
+        let pg = new_cr0.contains(BxCr0::PG);
 
         // Bochs crregs.cc:1055-1092 — Long mode activation/deactivation
         // When enabling paging (PG: 0→1) with EFER.LME=1: activate long mode
@@ -813,19 +812,121 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Bochs SetCR0() (crregs.cc): mask reserved bits for CPU level 6
-        let val_32 = val_32 & 0xe005003f;
+        let cr0_allowed = BxCr0::PG | BxCr0::CD | BxCr0::NW | BxCr0::AM | BxCr0::WP
+            | BxCr0::NE | BxCr0::ET | BxCr0::TS | BxCr0::EM | BxCr0::MP | BxCr0::PE;
+        let val_32 = val_32 & cr0_allowed.bits();
+
+        // Bochs crregs.cc:1131-1136 — PDPTR check when enabling paging with PAE
+        if pg && self.cr4.pae() && !self.long_mode() {
+            self.load_pdptrs();
+        }
+
+        // Track PM↔RM transitions for diagnostics
+        let old_pe = BxCr0::from_bits_retain(old_cr0).contains(BxCr0::PE);
+        let new_pe = BxCr0::from_bits_retain(val_32).contains(BxCr0::PE);
+        if old_pe && !new_pe {
+            self.diag_pm_to_rm_count += 1;
+            // Log first 10 and then every 1000th to avoid flooding
+            let n = self.diag_pm_to_rm_count;
+            if n <= 10 || n % 1000 == 0 {
+                tracing::warn!(
+                    "PM→RM #{}: EBX={:#010x} prev_RIP={:#x} icount={}",
+                    n, self.ebx(), self.prev_rip, self.icount
+                );
+            }
+            // Dump ALL PM→RM bounces (farcall AND intcall) to see complete picture
+            if (self.ebx() == 0x84A7 || self.ebx() == 0x8662) && (self.ebx() == 0x84A7 || n <= 30 || (n <= 200 && n % 10 == 0) || n % 5000 == 0) {
+                // RM stack pointer is at [0x38B8] (4 bytes: SP, SS)
+                let rm_sp = self.system_read_word(0x38B8).unwrap_or(0) as u64;
+                let rm_ss = self.system_read_word(0x38BA).unwrap_or(0) as u64;
+                let rm_stack_phys = (rm_ss << 4) + rm_sp;
+                // Stack layout (pushed by PM setup code):
+                // [SP+0]:  GS (2)
+                // [SP+2]:  FS (2)
+                // [SP+4]:  ES (2)
+                // [SP+6]:  DS (2)
+                // [SP+8]:  PUSHAD: EDI(4),ESI(4),EBP(4),ESP(4),EBX(4),EDX(4),ECX(4),EAX(4)
+                // [SP+40]: EFLAGS (4)
+                // [SP+44]: RETF IP (2)
+                // [SP+46]: RETF CS (2)
+                let retf_ip = self.system_read_word(rm_stack_phys + 44).unwrap_or(0xFFFF);
+                let retf_cs = self.system_read_word(rm_stack_phys + 46).unwrap_or(0xFFFF);
+                // PUSHAD order (from SP+8): EDI(+8),ESI(+12),EBP(+16),ESP(+20),EBX(+24),EDX(+28),ECX(+32),EAX(+36)
+                let edi = self.system_read_dword(rm_stack_phys + 8).unwrap_or(0);
+                let esi = self.system_read_dword(rm_stack_phys + 12).unwrap_or(0);
+                let eax = self.system_read_dword(rm_stack_phys + 36).unwrap_or(0);
+                let ecx = self.system_read_dword(rm_stack_phys + 32).unwrap_or(0);
+                let edx = self.system_read_dword(rm_stack_phys + 28).unwrap_or(0);
+                let ebx = self.system_read_dword(rm_stack_phys + 24).unwrap_or(0);
+                // For __intcall (EBX=0x84A7): ESI = INT vector, retaddr should be 0x8523
+                // For __farcall (EBX=0x8662): RETF CS:IP = BIOS handler address
+                if self.ebx() == 0x84A7 {
+                    // __intcall: dump raw stack bytes to determine layout
+                    let mut hex = alloc::string::String::with_capacity(256);
+                    use core::fmt::Write;
+                    for i in 0u64..64 {
+                        let b = self.system_read_byte(rm_stack_phys + i).unwrap_or(0);
+                        let _ = write!(hex, "{:02x} ", b);
+                    }
+                    tracing::warn!(
+                        "__intcall #{}: SS:SP={:04x}:{:04x} (phys={:#x}) icount={}",
+                        n, rm_ss, rm_sp, rm_stack_phys, self.icount
+                    );
+                    tracing::warn!(
+                        "__intcall #{} raw stack[0..63]: {}",
+                        n, hex
+                    );
+                } else {
+                    tracing::warn!(
+                        "__farcall #{}: RETF→{:04x}:{:04x} AH={:02x} AL={:02x} EDI={:08x} ESI={:08x} icount={}",
+                        n, retf_cs, retf_ip, (eax >> 8) & 0xFF, eax & 0xFF, edi, esi, self.icount
+                    );
+                }
+            }
+            // One-shot: dump BIOS INT 13h routing info
+            if n == 2 {
+                // Read INT 13h IVT entry
+                let int13_off = self.system_read_word(0x4C).unwrap_or(0);
+                let int13_seg = self.system_read_word(0x4E).unwrap_or(0);
+                let int13_phys = ((int13_seg as u64) << 4) + int13_off as u64;
+                tracing::warn!(
+                    "INT 13h IVT: {:04x}:{:04x} (phys {:#x})",
+                    int13_seg, int13_off, int13_phys
+                );
+                // Dump first 32 bytes at INT 13h handler to see routing
+                let mut hex = alloc::string::String::with_capacity(128);
+                for i in 0u64..32 {
+                    let b = self.system_read_byte(int13_phys + i).unwrap_or(0);
+                    use core::fmt::Write;
+                    let _ = write!(hex, "{:02x} ", b);
+                }
+                tracing::warn!("INT13h handler first 32B: {}", hex);
+            }
+        } else if !old_pe && new_pe {
+            self.diag_rm_to_pm_count += 1;
+        }
 
         self.cr0.set32(val_32);
 
-        // Bochs: TLB flush if PG, PE, or WP changed
-        if (old_cr0 & 0x80010001) != (val_32 & 0x80010001) {
+        // Bochs SetCR0 (crregs.cc:1142-1163): call individual handlers in order,
+        // NOT handleCpuContextChange (which is heavier with unconditional TLB flush)
+        self.handle_alignment_check(); // crregs.cc:1142
+        self.handle_cpu_mode_change(); // crregs.cc:1145
+        self.handle_fpu_mmx_mode_change(); // crregs.cc:1147
+        self.handle_sse_mode_change(); // crregs.cc:1150
+        self.handle_avx_mode_change(); // crregs.cc:1153
+
+        // Bochs: TLB flush if PG, PE, or WP changed (crregs.cc:1158)
+        let tlb_relevant = BxCr0::PG | BxCr0::WP | BxCr0::PE;
+        if (old_cr0 & tlb_relevant.bits()) != (val_32 & tlb_relevant.bits()) {
             self.tlb_flush();
         }
 
-        // Match Bochs handleCpuModeChange + handleAlignmentCheck
-        self.handle_cpu_context_change();
+        // Bochs: updateFetchModeMask() called inside handleCpuModeChange (proc_ctrl.cc:402)
+        // Ensures icache hash discriminator is updated for 16-bit vs 32-bit mode
+        self.update_fetch_mode_mask();
 
-        tracing::trace!(
+        tracing::debug!(
             "MOV CR0, r32: {:#010x} -> {:#010x} (PE={}, PG={}, LMA={})",
             old_cr0,
             val_32,
@@ -857,6 +958,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             self.get_gpr32(src) as u64
         };
+        tracing::error!("CR3_WRITE: old={:#x} new={:#x} icount={} RIP={:#x}", self.cr3, val, self.icount, self.prev_rip);
         self.cr3 = val;
 
         // In PAE mode (but not long mode), validate and cache PDPTE entries.
@@ -957,7 +1059,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.cr0.set32(cr0_val);
 
         // TLB flush if PG, PE, or WP changed (Bochs crregs.cc:1158)
-        if (old_cr0 & 0x80010001) != (cr0_val & 0x80010001) {
+        let tlb_relevant = BxCr0::PG | BxCr0::WP | BxCr0::PE;
+        if (old_cr0 & tlb_relevant.bits()) != (cr0_val & tlb_relevant.bits()) {
             self.tlb_flush();
         }
 
@@ -1157,5 +1260,53 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         allow
+    }
+
+    // =========================================================================
+    // MOV Rq, CRn — 64-bit CR reads (long mode)
+    // Matching Bochs crregs.cc MOV_RqCR0 / MOV_RqCR2 / MOV_RqCR3 / MOV_RqCR4
+    // =========================================================================
+
+    pub fn mov_rq_cr0(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        let val = self.cr0.get32() as u64;
+        self.set_gpr64(instr.src() as usize, val);
+        Ok(())
+    }
+
+    pub fn mov_rq_cr2(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        self.set_gpr64(instr.src() as usize, self.cr2);
+        Ok(())
+    }
+
+    pub fn mov_rq_cr3(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        self.set_gpr64(instr.src() as usize, self.cr3);
+        Ok(())
+    }
+
+    pub fn mov_rq_cr4(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        let val = self.cr4.get32() as u64;
+        self.set_gpr64(instr.src() as usize, val);
+        Ok(())
+    }
+
+    // =========================================================================
+    // MOV Rq, DRn / MOV DRn, Rq — 64-bit DR reads/writes (long mode)
+    // Matching Bochs crregs.cc MOV_RqDq / MOV_DqRq
+    // =========================================================================
+
+    pub fn mov_rq_dq(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        // Reuse 32-bit handler which already reads DR correctly
+        self.mov_rd_dd(instr)
+    }
+
+    pub fn mov_dq_rq(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        // Reuse 32-bit handler which already writes DR correctly
+        self.mov_dd_rd(instr)
     }
 }

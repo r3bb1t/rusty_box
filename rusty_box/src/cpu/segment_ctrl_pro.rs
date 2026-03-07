@@ -22,7 +22,7 @@ pub fn parse_selector(raw_selector: u16, selector: &mut BxSelector) {
 impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     /// Fetch raw descriptor from GDT or LDT
     /// Based on BX_CPU_C::fetch_raw_descriptor in segment_ctrl_pro.cc:536
-    pub(super) fn fetch_raw_descriptor(&self, selector: &BxSelector) -> Result<(u32, u32)> {
+    pub(super) fn fetch_raw_descriptor(&mut self, selector: &BxSelector) -> Result<(u32, u32)> {
         let index = selector.index as u32;
         let offset: BxAddress;
 
@@ -31,14 +31,15 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             let index_offset = (index as u32) * 8 + 7;
             if index_offset > self.gdtr.limit as u32 {
                 tracing::debug!(
-                    "fetch_raw_descriptor: GDT: index ({}) {} > limit ({})",
+                    "fetch_raw_descriptor: GDT: index ({}) {} > limit ({}) GDTR.base={:#x}",
                     index_offset,
                     index,
-                    self.gdtr.limit
+                    self.gdtr.limit,
+                    self.gdtr.base
                 );
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
-                    error_code: 0,
+                    error_code: (selector.value & 0xfffc) as u16,
                 });
             }
             offset = self.gdtr.base + (index as u64 * 8);
@@ -48,7 +49,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 tracing::debug!("fetch_raw_descriptor: LDTR.valid=0");
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
-                    error_code: 0,
+                    error_code: (selector.value & 0xfffc) as u16,
                 });
             }
             let ldt_limit = unsafe { self.ldtr.cache.u.segment.limit_scaled };
@@ -62,7 +63,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 );
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
-                    error_code: 0,
+                    error_code: (selector.value & 0xfffc) as u16,
                 });
             }
             offset = unsafe { self.ldtr.cache.u.segment.base } + (index as u64 * 8);
@@ -200,7 +201,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
     /// Get SS and ESP from TSS for given privilege level
     /// Based on BX_CPU_C::get_SS_ESP_from_TSS in tasking.cc:887
-    pub(super) fn get_ss_esp_from_tss(&self, pl: u8) -> Result<(u16, u32)> {
+    pub(super) fn get_ss_esp_from_tss(&mut self, pl: u8) -> Result<(u16, u32)> {
         // Check if TR is valid
         if self.tr.cache.valid == 0 {
             tracing::error!("get_ss_esp_from_tss: TR.cache invalid");
@@ -288,7 +289,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     /// Fetch 16-byte (128-bit) raw descriptor from GDT/LDT for 64-bit system descriptors.
     /// Returns (dword1, dword2, dword3) where dword3 is the upper 32 bits of the 64-bit base.
     /// Based on BX_CPU_C::fetch_raw_descriptor_64 in segment_ctrl_pro.cc:599
-    pub(super) fn fetch_raw_descriptor_64(&self, selector: &BxSelector) -> Result<(u32, u32, u32)> {
+    pub(super) fn fetch_raw_descriptor_64(&mut self, selector: &BxSelector) -> Result<(u32, u32, u32)> {
         let index = selector.index as u32;
         let offset: u64;
 
@@ -483,6 +484,17 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             return self.exception(Exception::Gp, cs_raw & 0xfffc);
         }
 
+        // Bochs ctrl_xfer_pro.cc:39-44 — L+D_B both set is invalid in long mode
+        if self.long_mode() {
+            if unsafe { descriptor.u.segment.l && descriptor.u.segment.d_b } {
+                tracing::error!(
+                    "check_cs({:#06x}): Both CS.L and CS.D_B bits enabled!",
+                    cs_raw
+                );
+                return self.exception(Exception::Gp, cs_raw & 0xfffc);
+            }
+        }
+
         // Non-conforming code segment: DPL must = CPL
         if is_code_segment_non_conforming(descriptor.r#type) {
             if descriptor.dpl != check_cpl {
@@ -554,8 +566,18 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             self.sregs[BxSegregs::Cs as usize].selector.rpl
         );
 
-        // Update user privilege level flag (Bochs cpu.h:5501)
-        self.user_pl = cpl == 3;
+        // Bochs ctrl_xfer_pro.cc:100-103 — handleCpuModeChange() in long mode
+        // Updates cpu_mode (Long64 vs LongCompat) based on CS.L bit
+        if self.long_mode() {
+            self.handle_cpu_mode_change();
+        }
+
+        // Bochs ctrl_xfer_pro.cc:105 — updateFetchModeMask() after CS load.
+        // Updates icache hash (d_b, long64) and user_pl.
+        self.update_fetch_mode_mask();
+
+        // Bochs ctrl_xfer_pro.cc:108 — handleAlignmentCheck() after CS load.
+        self.handle_alignment_check();
 
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;
@@ -615,26 +637,31 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
         // Selector must not be null
         if (cs_raw & 0xFFFC) == 0 {
-            tracing::error!("jump_protected: cs == 0");
-            return Err(super::error::CpuError::BadVector {
-                vector: Exception::Gp,
-                error_code: 0,
-            });
+            tracing::debug!("jump_protected: null selector cs={:#06x}", cs_raw);
+            return self.exception(Exception::Gp, 0);
         }
 
         // Parse selector
         let mut selector = BxSelector::default();
         parse_selector(cs_raw, &mut selector);
 
-        tracing::info!(
-            "jump_protected: selector index={}, ti={}, rpl={}",
+        tracing::debug!(
+            "jump_protected: selector index={}, ti={}, rpl={}, GDTR base={:#010x} limit={:#06x}",
             selector.index,
             selector.ti,
-            selector.rpl
+            selector.rpl,
+            self.gdtr.base,
+            self.gdtr.limit
         );
 
         // Fetch descriptor from GDT/LDT
-        let (dword1, dword2) = self.fetch_raw_descriptor(&selector)?;
+        let (dword1, dword2) = match self.fetch_raw_descriptor(&selector) {
+            Ok(v) => v,
+            Err(super::error::CpuError::BadVector { vector, error_code }) => {
+                return self.exception(vector, error_code);
+            }
+            Err(e) => return Err(e),
+        };
         let mut descriptor = self.parse_descriptor(dword1, dword2)?;
 
         tracing::info!("jump_protected: descriptor segment={}, type={:#x}, dpl={}, p={}, base={:#010x}, limit={:#010x}",
@@ -744,12 +771,22 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 let mut selector = BxSelector::default();
                 parse_selector(new_value, &mut selector);
 
-                // Null selector check
+                let err_code = new_value & 0xFFFC;
+
+                // Null selector check — Bochs segment_ctrl_pro.cc:41-46
                 if (new_value & 0xfffc) == 0 {
+                    // Bochs: long64 mode allows null SS when CPL != 3 and RPL == CPL
+                    if self.long64_mode() {
+                        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+                        if cpl != 3 && selector.rpl == cpl {
+                            self.load_null_selector(seg, new_value);
+                            return Ok(());
+                        }
+                    }
                     tracing::error!("load_seg_reg(SS): loading null selector");
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Gp,
-                        error_code: 0,
+                        error_code: err_code,
                     });
                 }
 
@@ -762,7 +799,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     tracing::error!("load_seg_reg(SS): rpl != CPL");
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Gp,
-                        error_code: 0,
+                        error_code: err_code,
                     });
                 }
 
@@ -772,7 +809,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     tracing::error!("load_seg_reg(SS): valid bit cleared");
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Gp,
-                        error_code: 0,
+                        error_code: err_code,
                     });
                 }
 
@@ -785,7 +822,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     tracing::error!("load_seg_reg(SS): not writable data segment");
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Gp,
-                        error_code: 0,
+                        error_code: err_code,
                     });
                 }
 
@@ -794,7 +831,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     tracing::error!("load_seg_reg(SS): dpl != CPL");
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Gp,
-                        error_code: 0,
+                        error_code: err_code,
                     });
                 }
 
@@ -803,7 +840,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     tracing::error!("load_seg_reg(SS): not present");
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Ss,
-                        error_code: 0,
+                        error_code: err_code,
                     });
                 }
 
@@ -836,6 +873,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
                 let (dword1, dword2) = self.fetch_raw_descriptor(&selector)?;
                 let mut descriptor = self.parse_descriptor(dword1, dword2)?;
+                let err_code = new_value & 0xFFFC;
 
                 if descriptor.valid == 0 {
                     tracing::error!(
@@ -845,7 +883,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     );
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Gp,
-                        error_code: 0,
+                        error_code: err_code,
                     });
                 }
 
@@ -860,7 +898,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     );
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Gp,
-                        error_code: 0,
+                        error_code: err_code,
                     });
                 }
 
@@ -877,7 +915,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                         );
                         return Err(super::error::CpuError::BadVector {
                             vector: Exception::Gp,
-                            error_code: 0,
+                            error_code: err_code,
                         });
                     }
                 }
@@ -891,7 +929,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     );
                     return Err(super::error::CpuError::BadVector {
                         vector: Exception::Np,
-                        error_code: 0,
+                        error_code: err_code,
                     });
                 }
 
@@ -941,12 +979,13 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         self.sregs[seg_idx].cache.segment = true; // Data/code segment
         self.sregs[seg_idx].cache.r#type = 0;
 
-        // Zero segment descriptor fields
+        // Zero segment descriptor fields — Bochs segment_ctrl_pro.cc:227-234
         unsafe {
             self.sregs[seg_idx].cache.u.segment.base = 0;
             self.sregs[seg_idx].cache.u.segment.limit_scaled = 0;
             self.sregs[seg_idx].cache.u.segment.g = false;
             self.sregs[seg_idx].cache.u.segment.d_b = false;
+            self.sregs[seg_idx].cache.u.segment.l = false;
             self.sregs[seg_idx].cache.u.segment.avl = false;
         }
 
@@ -1006,10 +1045,18 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         // Fetch descriptor from GDT
-        let (dword1, dword2) = self.fetch_raw_descriptor(&selector)?;
+        // In long mode, system descriptors are 16 bytes (Bochs protect_ctrl.cc:434)
+        let mut dword3 = 0u32;
+        let (dword1, dword2) = if self.long64_mode() {
+            let (d1, d2, d3) = self.fetch_raw_descriptor_64(&selector)?;
+            dword3 = d3;
+            (d1, d2)
+        } else {
+            self.fetch_raw_descriptor(&selector)?
+        };
 
         // Parse descriptor
-        let descriptor = self.parse_descriptor(dword1, dword2)?;
+        let mut descriptor = self.parse_descriptor(dword1, dword2)?;
 
         // Check if it's an LDT descriptor
         if descriptor.valid == 0
@@ -1026,6 +1073,19 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             tracing::error!("LLDT: LDT descriptor not present!");
             self.exception(Exception::Np, raw_selector & 0xfffc)?;
             return Ok(());
+        }
+
+        // In long mode, extend base to 64 bits and check canonical
+        // Bochs protect_ctrl.cc:460-468
+        if self.long64_mode() {
+            unsafe {
+                descriptor.u.segment.base |= (dword3 as u64) << 32;
+            }
+            if !self.is_canonical(unsafe { descriptor.u.segment.base }) {
+                tracing::error!("LLDT: non-canonical LDT descriptor base!");
+                self.exception(Exception::Gp, raw_selector & 0xfffc)?;
+                return Ok(());
+            }
         }
 
         // Load LDTR
@@ -1085,7 +1145,15 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         // Fetch descriptor from GDT
-        let (dword1, dword2) = self.fetch_raw_descriptor(&selector)?;
+        // In long mode, system descriptors are 16 bytes (Bochs protect_ctrl.cc:535)
+        let mut dword3 = 0u32;
+        let (dword1, dword2) = if self.long64_mode() {
+            let (d1, d2, d3) = self.fetch_raw_descriptor_64(&selector)?;
+            dword3 = d3;
+            (d1, d2)
+        } else {
+            self.fetch_raw_descriptor(&selector)?
+        };
 
         // Parse descriptor
         let mut descriptor = self.parse_descriptor(dword1, dword2)?;
@@ -1105,11 +1173,33 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             return Ok(());
         }
 
+        // In long mode, must be 386 TSS (Bochs protect_ctrl.cc:556-559)
+        if self.long_mode()
+            && tss_type != SystemAndGateDescriptorEnum::BxSysSegmentAvail386Tss as u8
+        {
+            tracing::error!("LTR: doesn't point to an available TSS386 descriptor in long mode!");
+            self.exception(Exception::Gp, raw_selector & 0xfffc)?;
+            return Ok(());
+        }
+
         // Check if present
         if !descriptor.p {
             tracing::error!("LTR: TSS descriptor not present!");
             self.exception(Exception::Np, raw_selector & 0xfffc)?;
             return Ok(());
+        }
+
+        // In long mode, extend base to 64 bits and check canonical
+        // Bochs protect_ctrl.cc:569-577
+        if self.long64_mode() {
+            unsafe {
+                descriptor.u.segment.base |= (dword3 as u64) << 32;
+            }
+            if !self.is_canonical(unsafe { descriptor.u.segment.base }) {
+                tracing::error!("LTR: non-canonical TSS descriptor base!");
+                self.exception(Exception::Gp, raw_selector & 0xfffc)?;
+                return Ok(());
+            }
         }
 
         // Mark TSS as busy in the descriptor
@@ -2288,8 +2378,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
         let (raw_cs_selector, return_rip, stack_param_offset): (u16, u64, u64) =
             if instr.os64_l() != 0 {
-                let cs = self.stack_read_qword(temp_rsp.wrapping_add(8)) as u16;
-                let rip = self.stack_read_qword(temp_rsp);
+                let cs = self.stack_read_qword(temp_rsp.wrapping_add(8))? as u16;
+                let rip = self.stack_read_qword(temp_rsp)?;
                 (cs, rip, 16)
             } else if instr.os32_l() != 0 {
                 // Bochs ret_far.cc:66-68: CS at temp_RSP+4, RIP at temp_RSP+0
@@ -2356,10 +2446,10 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
             let (raw_ss_selector, return_rsp): (u16, u64) = if instr.os64_l() != 0 {
                 let ss = self
-                    .stack_read_qword(temp_rsp.wrapping_add(24).wrapping_add(pop_bytes as u64))
+                    .stack_read_qword(temp_rsp.wrapping_add(24).wrapping_add(pop_bytes as u64))?
                     as u16;
                 let rsp =
-                    self.stack_read_qword(temp_rsp.wrapping_add(16).wrapping_add(pop_bytes as u64));
+                    self.stack_read_qword(temp_rsp.wrapping_add(16).wrapping_add(pop_bytes as u64))?;
                 (ss, rsp)
             } else if instr.os32_l() != 0 {
                 let ss = self.stack_read_word(
@@ -2492,9 +2582,9 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         // Read RIP, CS, EFLAGS from stack based on operand size
         let (new_eflags, raw_cs_selector, new_rip, top_nbytes_same): (u32, u16, u64, u64) =
             if instr.os64_l() != 0 {
-                let eflags = self.stack_read_qword(temp_rsp.wrapping_add(16)) as u32;
-                let cs = self.stack_read_qword(temp_rsp.wrapping_add(8)) as u16;
-                let rip = self.stack_read_qword(temp_rsp);
+                let eflags = self.stack_read_qword(temp_rsp.wrapping_add(16))? as u32;
+                let cs = self.stack_read_qword(temp_rsp.wrapping_add(8))? as u16;
+                let rip = self.stack_read_qword(temp_rsp)?;
                 (eflags, cs, rip, 24)
             } else if instr.os32_l() != 0 {
                 let eflags = self.stack_read_dword((temp_rsp as u32).wrapping_add(8))?;
@@ -2583,8 +2673,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
             // Read SS and RSP from stack
             let (raw_ss_selector, new_rsp): (u16, u64) = if instr.os64_l() != 0 {
-                let ss = self.stack_read_qword(temp_rsp.wrapping_add(32)) as u16;
-                let rsp = self.stack_read_qword(temp_rsp.wrapping_add(24));
+                let ss = self.stack_read_qword(temp_rsp.wrapping_add(32))? as u16;
+                let rsp = self.stack_read_qword(temp_rsp.wrapping_add(24))?;
                 (ss, rsp)
             } else if instr.os32_l() != 0 {
                 let ss = self.stack_read_dword((temp_rsp as u32).wrapping_add(16))? as u16;

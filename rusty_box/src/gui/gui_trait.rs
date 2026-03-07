@@ -128,6 +128,12 @@ pub trait BxGui: Send + Sync {
         0
     }
 
+    /// Returns true if this is a headless (no display) GUI.
+    /// Used to skip real-time HLT synchronization in headless mode.
+    fn is_headless(&self) -> bool {
+        false
+    }
+
     /// Handle a signal
     fn sighandler(&mut self, _sig: i32) {
         // Default: no-op

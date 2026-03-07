@@ -726,25 +726,40 @@ impl DeviceManager {
             // interrupt delivery).
             self.pic.lower_irq(0);
             self.pic.raise_irq(0);
+            // Route through I/O APIC as well (Bochs: DEV_ioapic_set_irq_level)
+            // IRQ0 is remapped to IOAPIC pin 2 inside set_irq_level()
+            #[cfg(feature = "bx_support_apic")]
+            {
+                self.ioapic.set_irq_level(0, false);
+                self.ioapic.set_irq_level(0, true);
+            }
             self.diag_irq0_latched += 1;
         }
 
         // CMOS: process IRQ8 lower BEFORE raise (from REG_STAT_C read)
         if self.cmos.check_irq8_lower() {
             self.pic.lower_irq(8);
+            #[cfg(feature = "bx_support_apic")]
+            self.ioapic.set_irq_level(8, false);
         }
         self.cmos.tick(usec);
         if self.cmos.check_irq8() {
             self.pic.raise_irq(8);
+            #[cfg(feature = "bx_support_apic")]
+            self.ioapic.set_irq_level(8, true);
         }
 
         // Keyboard: process IRQ lower requests BEFORE raises (matching Bochs
         // DEV_pic_lower_irq() calls in port 0x60 read handler, keyboard.cc:315/340)
         if self.keyboard.check_irq1_lower() {
             self.pic.lower_irq(1);
+            #[cfg(feature = "bx_support_apic")]
+            self.ioapic.set_irq_level(1, false);
         }
         if self.keyboard.check_irq12_lower() {
             self.pic.lower_irq(12);
+            #[cfg(feature = "bx_support_apic")]
+            self.ioapic.set_irq_level(12, false);
         }
 
         // Keyboard periodic: transfer internal buffers → output buffer,
@@ -752,15 +767,22 @@ impl DeviceManager {
         let kbd_irq = self.keyboard.periodic(usec as u32);
         if kbd_irq & 0x01 != 0 {
             self.pic.raise_irq(1);
+            #[cfg(feature = "bx_support_apic")]
+            self.ioapic.set_irq_level(1, true);
         }
         if kbd_irq & 0x02 != 0 {
             self.pic.raise_irq(12);
+            #[cfg(feature = "bx_support_apic")]
+            self.ioapic.set_irq_level(12, true);
         }
 
         // Hard drive IRQ14/15 — level-based, matching Bochs direct PIC calls.
         // On every tick, sync the PIC IRQ lines to the ATA interrupt_pending state.
         // This avoids the one-shot race where status register polling would
         // lower the IRQ before the CPU could acknowledge it.
+        #[cfg(feature = "bx_support_apic")]
+        self.harddrv.update_irq_lines_with_ioapic(&mut self.pic, &mut self.ioapic);
+        #[cfg(not(feature = "bx_support_apic"))]
         self.harddrv.update_irq_lines(&mut self.pic);
 
         // ACPI PM timer: tick and sync IRQ 9 (SCI) to PIC
@@ -769,8 +791,12 @@ impl DeviceManager {
             self.acpi.tick(usec);
             if self.acpi.irq9_level {
                 self.pic.raise_irq(9);
+                #[cfg(feature = "bx_support_apic")]
+                self.ioapic.set_irq_level(9, true);
             } else {
                 self.pic.lower_irq(9);
+                #[cfg(feature = "bx_support_apic")]
+                self.ioapic.set_irq_level(9, false);
             }
         }
 
@@ -803,7 +829,7 @@ impl DeviceManager {
     /// Get PIC diagnostic string
     pub fn pic_diag(&self) -> String {
         format!(
-            "ISR={:#04x} IRR={:#04x} IMR={:#04x} int_pin={} irq_in[0]={} master_offset={:#04x} slave_offset={:#04x}",
+            "ISR={:#04x} IRR={:#04x} IMR={:#04x} int_pin={} irq_in[0]={} master_offset={:#04x} slave_offset={:#04x} master_auto_eoi={} slave_auto_eoi={} master_edge_level={:#04x} slave_edge_level={:#04x}",
             self.pic.master.isr,
             self.pic.master.irr,
             self.pic.master.imr,
@@ -811,6 +837,27 @@ impl DeviceManager {
             self.pic.master.irq_in[0],
             self.pic.master.interrupt_offset,
             self.pic.slave.interrupt_offset,
+            self.pic.master.auto_eoi,
+            self.pic.slave.auto_eoi,
+            self.pic.master.edge_level,
+            self.pic.slave.edge_level,
+        )
+    }
+
+    /// Drain serial port TX output for diagnostics
+    pub fn drain_serial_tx(&mut self, port_index: usize) -> impl Iterator<Item = u8> + '_ {
+        self.serial.drain_tx_output(port_index)
+    }
+
+    /// Get keyboard diagnostic info
+    pub fn kbd_diag(&self) -> (u64, u8, bool, bool, bool, bool) {
+        (
+            self.keyboard.diag_port60_read_count,
+            self.keyboard.diag_port60_last_value,
+            self.keyboard.kbd_controller.kbd_clock_enabled,
+            self.keyboard.kbd_internal_buffer.scanning_enabled,
+            self.keyboard.kbd_controller.scancodes_translate,
+            self.keyboard.kbd_controller.outb,
         )
     }
 

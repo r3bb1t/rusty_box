@@ -735,7 +735,13 @@ impl BxSerialC {
                             } else {
                                 // "Transmit" immediately — we're an emulator
                                 let s = &mut self.ports[port_idx];
-                                s.tx_output.push_back(s.tsrbuffer);
+                                // Temporary: log serial TX for ISOLINUX debugging
+                                let ch = s.tsrbuffer;
+                                if port_idx == 0 {
+                                    tracing::warn!("SERIAL_TX: {:02x} '{}'", ch,
+                                        if ch >= 0x20 && ch < 0x7F { ch as char } else { '.' });
+                                }
+                                s.tx_output.push_back(ch);
                                 s.line_status.tsr_empty = true;
                             }
                         } else {

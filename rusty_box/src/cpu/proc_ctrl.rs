@@ -13,10 +13,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.handle_cpu_mode_change();
 
-        // FPU/SSE/AVX mode changes not needed for 32-bit Linux 1.3.89
-        // handleFpuMmxModeChange();
-        // handleSseModeChange();
-        // handleAvxModeChange();
+        self.handle_fpu_mmx_mode_change();
+        self.handle_sse_mode_change();
+        self.handle_avx_mode_change();
+
+        // Bochs calls updateFetchModeMask() after every CS reload and mode change.
+        // This updates the icache hash discriminator so 16-bit and 32-bit decoded
+        // traces at the same physical address don't collide.
+        self.update_fetch_mode_mask();
     }
 
     /// Update cpu_mode based on CR0.PE, EFLAGS.VM, EFER.LMA, CS.L
@@ -65,15 +69,48 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
             } else {
                 self.cpu_mode = CpuMode::Ia32Real;
-                // Bochs proc_ctrl.cc:393 — CS segment in real mode allows full access
+                // Bochs proc_ctrl.cc:393-398 — CS segment in real mode allows full access
                 unsafe {
                     let seg = &mut self.sregs[super::decoder::BxSegregs::Cs as usize];
-                    seg.cache.p = true; // present
-                    seg.cache.u.segment.d_b = false; // 16-bit default
-                    seg.cache.r#type = 3; // DATA_READ_WRITE_ACCESSED
-                    seg.selector.rpl = 0; // CPL = 0
+                    seg.cache.p = true; // present (Bochs line 394)
+                    seg.cache.segment = true; // data/code segment (Bochs line 395)
+                    seg.cache.r#type = 3; // DATA_READ_WRITE_ACCESSED (Bochs line 396)
+                    // Note: Bochs does NOT set d_b here — the CS descriptor cache
+                    // retains its previous d_b setting. This is important for
+                    // "big real mode" / "unreal mode" where d_b=1 allows >64K access.
+                    seg.selector.rpl = 0; // CPL = 0 (Bochs line 398)
                 }
             }
+        }
+    }
+
+    // Bochs proc_ctrl.cc:453-461 — update FPU/MMX permission based on CR0.EM, CR0.TS
+    pub(super) fn handle_fpu_mmx_mode_change(&mut self) {
+        use super::opcodes_table::FetchModeMask;
+        if self.cr0.em() || self.cr0.ts() {
+            self.fetch_mode_mask.remove(FetchModeMask::FPU_MMX_OK);
+        } else {
+            self.fetch_mode_mask.insert(FetchModeMask::FPU_MMX_OK);
+        }
+    }
+
+    // Bochs proc_ctrl.cc:487-500 — update SSE permission based on CR0.TS, CR0.EM, CR4.OSFXSR
+    pub(super) fn handle_sse_mode_change(&mut self) {
+        use super::opcodes_table::FetchModeMask;
+        if self.cr0.ts() || self.cr0.em() || !self.cr4.osfxsr() {
+            self.fetch_mode_mask.remove(FetchModeMask::SSE_OK);
+        } else {
+            self.fetch_mode_mask.insert(FetchModeMask::SSE_OK);
+        }
+    }
+
+    // Bochs proc_ctrl.cc:516-544 — update AVX permission
+    pub(super) fn handle_avx_mode_change(&mut self) {
+        use super::opcodes_table::FetchModeMask;
+        if self.cr0.ts() || !self.protected_mode() || !self.cr4.osxsave() {
+            self.fetch_mode_mask.remove(FetchModeMask::AVX_OK);
+        } else {
+            self.fetch_mode_mask.insert(FetchModeMask::AVX_OK);
         }
     }
 
@@ -89,6 +126,35 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             self.alignment_check_mask = 0;
         }
+    }
+
+    /// Update fetchModeMask — must be called every time CS.L / CS.D_B /
+    /// CR0.PE / CR0.TS / CR0.EM / CR4.OSFXSR / CR4.OSXSAVE changes.
+    /// Bochs cpu.h:5490-5507 updateFetchModeMask()
+    #[inline]
+    pub(super) fn update_fetch_mode_mask(&mut self) {
+        use super::cpu::CpuMode;
+        use super::opcodes_table::FetchModeMask;
+
+        // Bochs: fetchModeMask = cpu_state_use_ok | (long64<<1) | d_b
+        let d_b = unsafe {
+            self.sregs[super::decoder::BxSegregs::Cs as usize]
+                .cache
+                .u
+                .segment
+                .d_b
+        };
+        let long64 = self.cpu_mode == CpuMode::Long64;
+
+        // Keep FPU/SSE/AVX readiness (bits 2-7), update D_B and LONG64 (bits 0-1)
+        self.fetch_mode_mask.set(FetchModeMask::D_B, d_b);
+        self.fetch_mode_mask.set(FetchModeMask::LONG64, long64);
+
+        // Bochs cpu.h:5501-5502 — also update user_pl
+        self.user_pl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl
+            == 3;
     }
 
     /// Get the Time Stamp Counter value
@@ -133,7 +199,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::debug!("INVD: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
+        // Bochs proc_ctrl.cc:263: flushICaches() — invalidate instruction cache
         self.invalidate_prefetch_q();
+        self.i_cache.flush_all();
         Ok(())
     }
 
@@ -148,9 +216,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr32(instr);
         let laddr = self.get_laddr32(seg as usize, eaddr);
+        // Bochs paging.cc TLB_invlpg: invalidate prefetch, stack cache, TLB entries
+        self.invalidate_prefetch_q();
+        self.invalidate_stack_cache();
         self.dtlb.invlpg(laddr.into());
         self.itlb.invlpg(laddr.into());
-        self.invalidate_prefetch_q();
         tracing::trace!("INVLPG: laddr={:#x}", laddr);
         Ok(())
     }
@@ -297,6 +367,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     pub(super) fn clac(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
+        // Bochs flag_ctrl.cc:402-407: CPL must be 0, else #UD
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
+        if cpl != 0 {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
         self.clear_ac();
         Ok(())
     }
@@ -306,6 +383,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     pub(super) fn stac(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
+        // Bochs flag_ctrl.cc:418-423: CPL must be 0, else #UD
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .selector
+            .rpl;
+        if cpl != 0 {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
         self.assert_ac();
         Ok(())
     }
@@ -344,8 +428,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let ticks = self.get_tsc(self.icount);
         self.set_rax((ticks & 0xFFFF_FFFF) as u64);
         self.set_rdx((ticks >> 32) as u64);
-        // ECX = IA32_TSC_AUX MSR (processor ID) — return 0
-        self.set_rcx(0);
+        // ECX = IA32_TSC_AUX MSR (processor ID) — Bochs proc_ctrl.cc:834
+        self.set_rcx(self.msr.tsc_aux as u64);
 
         Ok(())
     }
@@ -680,6 +764,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub(super) fn fxsave(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         use super::decoder::BxSegregs;
+
+        // Bochs sse_move.cc:164-165: check CR0.EM or CR0.TS → #NM
+        if self.cr0.em() || self.cr0.ts() {
+            return self.exception(super::cpu::Exception::Nm, 0);
+        }
+
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
 
@@ -752,6 +842,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub(super) fn fxrstor(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         use super::decoder::BxSegregs;
+
+        // Bochs sse_move.cc:164-165: check CR0.EM or CR0.TS → #NM
+        if self.cr0.em() || self.cr0.ts() {
+            return self.exception(super::cpu::Exception::Nm, 0);
+        }
+
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
 
@@ -936,7 +1032,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.handle_cpu_mode_change();
         self.alignment_check_mask = 0;
-        self.user_pl = false;
+        // Bochs proc_ctrl.cc:921 — updateFetchModeMask() after CS reload
+        self.update_fetch_mode_mask();
 
         // Load SS: flat data segment, DPL=0 (Bochs proc_ctrl.cc:928-943)
         let ss_idx = BxSegregs::Ss as usize;
@@ -1053,7 +1150,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.handle_cpu_mode_change();
         self.handle_alignment_check();
-        self.user_pl = true;
+        // Bochs proc_ctrl.cc:1041 — updateFetchModeMask() after CS reload
+        self.update_fetch_mode_mask();
 
         // SS = (sysenter_cs_msr + (os64 ? 40 : 24)) | 3 (Bochs proc_ctrl.cc:1046-1061)
         let ss_offset: u32 = if instr.os64_l() != 0 { 40 } else { 24 };
@@ -1101,6 +1199,114 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_segment_base(super::decoder::BxSegregs::Gs, kernel_gs);
         self.msr.kernelgsbase = gs_base;
         tracing::trace!("SWAPGS: GS.base={:#018x} <-> KernelGSbase={:#018x}", gs_base, kernel_gs);
+        Ok(())
+    }
+
+    // ========================================================================
+    // RDFSBASE/RDGSBASE/WRFSBASE/WRGSBASE — Read/Write FS/GS Base (FSGSBASE)
+    // Bochs: proc_ctrl.cc RDFSBASE/RDGSBASE/WRFSBASE/WRGSBASE
+    // Requires: 64-bit mode + CR4.FSGSBASE
+    // ========================================================================
+
+    pub(super) fn rdfsbase_ed(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        if !self.long64_mode() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if !self.cr4.fsgsbase() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        let fsbase = self.get_segment_base(super::decoder::BxSegregs::Fs);
+        self.set_gpr32(instr.dst().into(), fsbase as u32);
+        Ok(())
+    }
+
+    pub(super) fn rdfsbase_eq(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        if !self.long64_mode() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if !self.cr4.fsgsbase() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        let fsbase = self.get_segment_base(super::decoder::BxSegregs::Fs);
+        self.set_gpr64(instr.dst() as usize, fsbase);
+        Ok(())
+    }
+
+    pub(super) fn rdgsbase_ed(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        if !self.long64_mode() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if !self.cr4.fsgsbase() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        let gsbase = self.get_segment_base(super::decoder::BxSegregs::Gs);
+        self.set_gpr32(instr.dst().into(), gsbase as u32);
+        Ok(())
+    }
+
+    pub(super) fn rdgsbase_eq(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        if !self.long64_mode() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if !self.cr4.fsgsbase() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        let gsbase = self.get_segment_base(super::decoder::BxSegregs::Gs);
+        self.set_gpr64(instr.dst() as usize, gsbase);
+        Ok(())
+    }
+
+    pub(super) fn wrfsbase_ed(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        if !self.long64_mode() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if !self.cr4.fsgsbase() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        let val = self.get_gpr32(instr.src1().into()) as u64;
+        self.set_segment_base(super::decoder::BxSegregs::Fs, val);
+        Ok(())
+    }
+
+    pub(super) fn wrfsbase_eq(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        if !self.long64_mode() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if !self.cr4.fsgsbase() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        let val = self.get_gpr64(instr.src1() as usize);
+        if !self.is_canonical(val) {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        self.set_segment_base(super::decoder::BxSegregs::Fs, val);
+        Ok(())
+    }
+
+    pub(super) fn wrgsbase_ed(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        if !self.long64_mode() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if !self.cr4.fsgsbase() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        let val = self.get_gpr32(instr.src1().into()) as u64;
+        self.set_segment_base(super::decoder::BxSegregs::Gs, val);
+        Ok(())
+    }
+
+    pub(super) fn wrgsbase_eq(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        if !self.long64_mode() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if !self.cr4.fsgsbase() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        let val = self.get_gpr64(instr.src1() as usize);
+        if !self.is_canonical(val) {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        self.set_segment_base(super::decoder::BxSegregs::Gs, val);
         Ok(())
     }
 
@@ -1161,7 +1367,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             self.handle_cpu_mode_change();
             self.alignment_check_mask = 0;
-            self.user_pl = false;
+            // Bochs proc_ctrl.cc:1175 — updateFetchModeMask() after CS reload
+            self.update_fetch_mode_mask();
 
             // SS: flat data, DPL=0 (Bochs proc_ctrl.cc:1131-1144)
             super::segment_ctrl_pro::parse_selector(
@@ -1213,7 +1420,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             self.handle_cpu_mode_change();
             self.alignment_check_mask = 0;
-            self.user_pl = false;
+            // Bochs proc_ctrl.cc:1328 — updateFetchModeMask() after CS reload
+            self.update_fetch_mode_mask();
 
             // SS: flat data, DPL=0 (Bochs proc_ctrl.cc:1182-1197)
             super::segment_ctrl_pro::parse_selector(
@@ -1324,7 +1532,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             self.handle_cpu_mode_change();
             self.handle_alignment_check();
-            self.user_pl = true;
+            // Bochs — updateFetchModeMask() after CS reload
+            self.update_fetch_mode_mask();
 
             // SS: (star >> 48) + 8) | 3 (Bochs proc_ctrl.cc:1296-1304)
             super::segment_ctrl_pro::parse_selector(
@@ -1361,7 +1570,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             self.handle_cpu_mode_change();
             self.handle_alignment_check();
-            self.user_pl = true;
+            // Bochs — updateFetchModeMask() after CS reload
+            self.update_fetch_mode_mask();
 
             // SS: (star >> 48) + 8) | 3 (Bochs proc_ctrl.cc:1333-1340)
             super::segment_ctrl_pro::parse_selector(
@@ -1376,6 +1586,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             // Restore IF, set RIP from ECX (Bochs proc_ctrl.cc:1342-1343)
             self.eflags.insert(super::eflags::EFlags::IF_);
+            self.handle_interrupt_mask_change();
             self.set_rip(self.ecx() as u64);
         }
 

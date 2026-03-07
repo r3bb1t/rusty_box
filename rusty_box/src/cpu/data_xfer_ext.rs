@@ -29,9 +29,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LEA r32, m - Load effective address into 32-bit register
+    /// In 64-bit mode, uses 64-bit address calculation then truncates to 32 bits
+    /// Matching Bochs data_xfer32.cc LEA_GdM
     pub fn lea_gd_m(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = if self.long64_mode() {
+            self.resolve_addr64(instr) as u32
+        } else {
+            self.resolve_addr32(instr)
+        };
         self.set_gpr32(dst, eaddr);
         tracing::trace!("LEA32: reg{} = {:#010x}", dst, eaddr);
     }
@@ -44,10 +50,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn xchg_eb_gb(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let src = instr.meta_data[1] as usize;
-        let val_dst = self.get_gpr8(dst);
-        let val_src = self.get_gpr8(src);
-        self.set_gpr8(dst, val_src);
-        self.set_gpr8(src, val_dst);
+        let ext = instr.extend8bit_l();
+        let val_dst = self.read_8bit_regx(dst, ext);
+        let val_src = self.read_8bit_regx(src, ext);
+        self.write_8bit_regx(dst, ext, val_src);
+        self.write_8bit_regx(src, ext, val_dst);
         tracing::trace!(
             "XCHG8: reg{}={:#04x} <-> reg{}={:#04x}",
             dst,
@@ -162,9 +169,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg_val = self.sregs[src_seg].selector.value;
 
         if instr.mod_c0() {
-            // Register form: MOV r16, sreg
+            // Register form: MOV r16/r32, sreg
+            // Bochs data_xfer16.cc:77-82: os32L → 32-bit zero-extended write
             let dst = instr.meta_data[0] as usize;
-            self.set_gpr16(dst, seg_val);
+            if instr.os32_l() != 0 {
+                self.set_gpr32(dst, seg_val as u32);
+            } else {
+                self.set_gpr16(dst, seg_val);
+            }
             tracing::trace!("MOV: reg{} = seg{} ({:#06x})", dst, src_seg, seg_val);
         } else {
             // Memory form: MOV [mem], sreg
@@ -276,16 +288,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // XLAT - Table Lookup Translation
     // =========================================================================
 
-    /// XLAT - Translate byte (AL = [BX+AL])
-    pub fn xlat(&mut self, _instr: &Instruction) {
-        let bx = self.ebx();
-        let al = self.al() as u32;
-        let eaddr = bx.wrapping_add(al);
-
-        if let Ok(new_al) = self.read_virtual_byte(BxSegregs::Ds, eaddr) {
-            self.set_al(new_al);
-            tracing::trace!("XLAT: [BX+AL] = [{:#x}+{:#x}] = {:#04x}", bx, al, new_al);
-        }
+    /// XLAT - Translate byte (AL = [seg:BX+AL])
+    /// Based on Bochs data_xfer8.cc XLAT (lines 84-97)
+    pub fn xlat(&mut self, instr: &Instruction) -> super::Result<()> {
+        let seg = BxSegregs::from(instr.seg());
+        let al = self.al() as u64;
+        let new_al = if instr.as64_l() != 0 {
+            let laddr = self.get_laddr64(seg as usize, self.rbx().wrapping_add(al));
+            self.read_virtual_byte_at_laddr(laddr)?
+        } else {
+            // asize_mask: 0xFFFF for 16-bit, 0xFFFFFFFF for 32-bit address size
+            let mask = if instr.as32_l() != 0 { 0xFFFF_FFFFu32 } else { 0xFFFF };
+            let eaddr = self.ebx().wrapping_add(al as u32) & mask;
+            self.read_virtual_byte(seg, eaddr)?
+        };
+        self.set_al(new_al);
+        Ok(())
     }
 
     // =========================================================================
@@ -296,7 +314,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn lahf(&mut self, _instr: &Instruction) {
         let flags = (self.eflags.bits() & 0xFF) as u8;
         // AH = SF:ZF:0:AF:0:PF:1:CF (bits 7,6,4,2,0 from flags, bit 1 always 1)
-        let ah = (flags & 0xD5) | 0x02;
+        let lahf_mask = EFlags::LAHF_MASK.bits() as u8;
+        let ah = (flags & lahf_mask) | EFlags::R1.bits() as u8;
         self.set_ah(ah);
         tracing::trace!("LAHF: AH = {:#04x}", ah);
     }
@@ -304,8 +323,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// SAHF - Store AH into Flags
     pub fn sahf(&mut self, _instr: &Instruction) {
         let ah = self.ah();
-        // Only modify SF, ZF, AF, PF, CF (bits 7,6,4,2,0)
-        self.eflags = EFlags::from_bits_retain((self.eflags.bits() & !0xD5) | ((ah as u32) & 0xD5));
+        // Only modify SF, ZF, AF, PF, CF (LAHF_MASK bits)
+        let mask = EFlags::LAHF_MASK.bits();
+        self.eflags = EFlags::from_bits_retain((self.eflags.bits() & !mask) | ((ah as u32) & mask));
         tracing::trace!("SAHF: flags = {:#010x}", self.eflags.bits());
     }
 
@@ -326,7 +346,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn mov_rb_ib(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let imm = instr.ib();
-        self.set_gpr8(dst, imm);
+        self.write_8bit_regx(dst, instr.extend8bit_l(), imm);
         tracing::trace!("MOV: reg{} = {:#04x}", dst, imm);
     }
 
@@ -356,16 +376,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn mov_gb_eb_r(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let src = instr.meta_data[1] as usize;
-        let val = self.get_gpr8(src);
-        self.set_gpr8(dst, val);
+        let ext = instr.extend8bit_l();
+        let val = self.read_8bit_regx(src, ext);
+        self.write_8bit_regx(dst, ext, val);
         tracing::trace!("MOV8: reg{} = reg{} ({:#04x})", dst, src, val);
     }
 
     /// MOV r/m8, r8 (register to register)
     /// Opcode 0x88: 8-bit does NOT match decoder swap — meta_data[0]=nnn=source, meta_data[1]=rm=dest
     pub fn mov_eb_gb_r(&mut self, instr: &Instruction) {
-        let val = self.get_gpr8(instr.meta_data[0] as usize); // nnn = source
-        self.set_gpr8(instr.meta_data[1] as usize, val); // rm = destination
+        let ext = instr.extend8bit_l();
+        let val = self.read_8bit_regx(instr.meta_data[0] as usize, ext); // nnn = source
+        self.write_8bit_regx(instr.meta_data[1] as usize, ext, val); // rm = destination
         tracing::trace!(
             "MOV8: reg{} = reg{} ({:#04x})",
             instr.meta_data[1],
@@ -483,7 +505,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn movzx_gd_eb(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let src = instr.meta_data[1] as usize;
-        let val = self.get_gpr8(src) as u32;
+        let val = self.read_8bit_regx(src, instr.extend8bit_l()) as u32;
         self.set_gpr32(dst, val);
     }
 
@@ -509,7 +531,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn movsx_gd_eb_legacy(&mut self, instr: &Instruction) {
         let dst = instr.meta_data[0] as usize;
         let src = instr.meta_data[1] as usize;
-        let val = self.get_gpr8(src) as i8 as i32 as u32;
+        let val = self.read_8bit_regx(src, instr.extend8bit_l()) as i8 as i32 as u32;
         self.set_gpr32(dst, val);
     }
 

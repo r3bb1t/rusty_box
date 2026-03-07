@@ -139,6 +139,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         match gate_type_enum {
             SystemAndGateDescriptorEnum::BxTaskGate => {
                 // Task switch via Task Gate (matches original lines 341-381)
+                // Bochs returns immediately after task_switch — no flag clearing
                 let raw_tss_selector = unsafe { gate_descriptor.u.task_gate.tss_selector };
                 let mut tss_selector = BxSelector::default();
                 parse_selector(raw_tss_selector, &mut tss_selector);
@@ -170,6 +171,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     push_error,
                     error_code as u32,
                 )?;
+                // Bochs returns here — task_switch handles all flags
+                return Ok(());
             }
             SystemAndGateDescriptorEnum::Bx286InterruptGate
             | SystemAndGateDescriptorEnum::Bx286TrapGate
@@ -188,10 +191,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        // if interrupt gate then set IF to 0
+        // if interrupt gate then set IF to 0 (Bochs exception.cc:716-722)
+        // Only reached for interrupt/trap gates — task gate returns early above
         if (gate_descriptor.r#type & 1) == 0 {
             // even is int-gate
             self.eflags.remove(EFlags::IF_);
+            self.handle_interrupt_mask_change();
         }
         self.eflags.remove(EFlags::TF);
         self.eflags.remove(EFlags::NT);
@@ -866,6 +871,263 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[BxSegregs::Es as usize].cache.valid = 0;
             self.sregs[BxSegregs::Es as usize].selector.value = 0;
         }
+
+        Ok(())
+    }
+
+    /// Handle interrupt in long mode via 16-byte IDT entries.
+    /// Based on BX_CPU_C::long_mode_int in exception.cc:44-281
+    pub(super) fn long_mode_int(
+        &mut self,
+        vector: u8,
+        soft_int: bool,
+        push_error: bool,
+        error_code: u16,
+    ) -> Result<()> {
+        let idt_error_code = (vector as u16) * 8 + 2;
+
+        // interrupt vector must be within IDT table limits (16-byte entries)
+        // else #GP(vector*8 + 2 + EXT)
+        if (vector as u64 * 16 + 15) > self.idtr.limit as u64 {
+            tracing::error!(
+                "long_mode_int(): vector must be within IDT table limits, IDT.limit = {:#x}",
+                self.idtr.limit
+            );
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+                error_code: idt_error_code,
+            });
+        }
+
+        // Read 16-byte IDT entry (two qwords)
+        let desctmp1 = self.system_read_qword(self.idtr.base + vector as u64 * 16)?;
+        let desctmp2 = self.system_read_qword(self.idtr.base + vector as u64 * 16 + 8)?;
+
+        // Bochs exception.cc:59-62 — extended attributes DWORD4 TYPE must be 0
+        if desctmp2 & 0x00001F00_00000000u64 != 0 {
+            tracing::error!("long_mode_int(): IDT entry extended attributes DWORD4 TYPE != 0");
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+                error_code: idt_error_code,
+            });
+        }
+
+        let dword1 = desctmp1 as u32;
+        let dword2 = (desctmp1 >> 32) as u32;
+        let dword3 = desctmp2 as u32;
+
+        let gate_descriptor = self.parse_descriptor(dword1, dword2)?;
+
+        if gate_descriptor.valid == 0 || gate_descriptor.segment {
+            tracing::error!("long_mode_int(): gate descriptor is not valid sys seg");
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+                error_code: idt_error_code,
+            });
+        }
+
+        // Must be 386 interrupt gate (0xE) or trap gate (0xF)
+        // No task gates or 286 gates in long mode
+        if gate_descriptor.r#type != 0xE && gate_descriptor.r#type != 0xF {
+            tracing::error!(
+                "long_mode_int(): unsupported gate type {:#x}",
+                gate_descriptor.r#type
+            );
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+                error_code: idt_error_code,
+            });
+        }
+
+        // if software interrupt, then gate descriptor DPL must be >= CPL
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        if soft_int && gate_descriptor.dpl < cpl {
+            tracing::error!("long_mode_int(): soft_int && gate.dpl < CPL");
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+                error_code: idt_error_code,
+            });
+        }
+
+        // Gate must be present
+        if !gate_descriptor.p {
+            tracing::error!("long_mode_int(): gate.p == 0");
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Np,
+                error_code: idt_error_code,
+            });
+        }
+
+        let gate_dest_selector = unsafe { gate_descriptor.u.gate.dest_selector };
+        // 64-bit offset: low 16 bits from gate dword1, high 16 from gate dword2, upper 32 from dword3
+        let gate_dest_offset = ((dword3 as u64) << 32)
+            | (unsafe { gate_descriptor.u.gate.dest_offset } as u64);
+
+        // IST (Interrupt Stack Table) index from gate param_count bits 0-2
+        let ist = (unsafe { gate_descriptor.u.gate.param_count } & 0x7) as u8;
+
+        // CS selector must be non-null
+        if (gate_dest_selector & 0xfffc) == 0 {
+            tracing::error!("long_mode_int(): selector null");
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+                error_code: 0,
+            });
+        }
+
+        let mut cs_selector = BxSelector::default();
+        parse_selector(gate_dest_selector, &mut cs_selector);
+
+        let cs_err_code = cs_selector.value & 0xfffc;
+        let (cs_dword1, cs_dword2) = match self.fetch_raw_descriptor(&cs_selector) {
+            Ok(v) => v,
+            Err(_) => {
+                return Err(super::error::CpuError::BadVector {
+                    vector: Exception::Gp,
+                    error_code: cs_err_code,
+                })
+            }
+        };
+        let cs_descriptor = self.parse_descriptor(cs_dword1, cs_dword2).map_err(|_| {
+            super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+                error_code: cs_err_code,
+            }
+        })?;
+
+        // Must be a valid code segment with DPL <= CPL
+        if cs_descriptor.valid == 0
+            || !cs_descriptor.segment
+            || super::descriptor::is_data_segment(cs_descriptor.r#type)
+            || cs_descriptor.dpl > cpl
+        {
+            tracing::error!("long_mode_int(): not accessible or not code segment");
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+                error_code: cs_err_code,
+            });
+        }
+
+        // Must be a 64-bit segment (L=1, D_B=0)
+        if unsafe { !cs_descriptor.u.segment.l } || unsafe { cs_descriptor.u.segment.d_b } {
+            tracing::error!("long_mode_int(): must be 64 bit segment");
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+                error_code: cs_err_code,
+            });
+        }
+
+        // Segment must be present
+        if !cs_descriptor.p {
+            tracing::error!("long_mode_int(): segment not present");
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Np,
+                error_code: cs_err_code,
+            });
+        }
+
+        let old_cs = self.sregs[BxSegregs::Cs as usize].selector.value as u64;
+        let old_rip = self.rip();
+        let old_ss = self.sregs[BxSegregs::Ss as usize].selector.value as u64;
+        let old_rsp = self.rsp();
+
+        let rsp_for_cpl_x;
+
+        if super::descriptor::is_code_segment_non_conforming(cs_descriptor.r#type)
+            && cs_descriptor.dpl < cpl
+        {
+            // INTERRUPT TO INNER PRIVILEGE
+            tracing::debug!("long_mode_int(): INTERRUPT TO INNER PRIVILEGE");
+
+            if ist > 0 {
+                tracing::debug!("long_mode_int(): trap to IST, vector = {}", ist);
+                rsp_for_cpl_x = self.get_rsp_from_tss(ist + 3)?;
+            } else {
+                rsp_for_cpl_x = self.get_rsp_from_tss(cs_descriptor.dpl)?;
+            }
+
+            // Align stack to 16 bytes
+            let mut rsp = rsp_for_cpl_x & !0xF;
+
+            // Push old stack, flags, return address onto new stack
+            self.write_new_stack_qword_64(rsp - 8, cs_descriptor.dpl, old_ss)?;
+            self.write_new_stack_qword_64(rsp - 16, cs_descriptor.dpl, old_rsp)?;
+            self.write_new_stack_qword_64(rsp - 24, cs_descriptor.dpl, self.eflags.bits() as u64)?;
+            self.write_new_stack_qword_64(rsp - 32, cs_descriptor.dpl, old_cs)?;
+            self.write_new_stack_qword_64(rsp - 40, cs_descriptor.dpl, old_rip)?;
+            rsp -= 40;
+
+            if push_error {
+                rsp -= 8;
+                self.write_new_stack_qword_64(rsp, cs_descriptor.dpl, error_code as u64)?;
+            }
+
+            // Load CS:RIP (guaranteed 64-bit mode)
+            let mut cs_sel = cs_selector.clone();
+            let mut cs_desc = cs_descriptor.clone();
+            self.branch_far(&mut cs_sel, &mut cs_desc, gate_dest_offset, cs_descriptor.dpl)?;
+
+            // Set up null SS descriptor
+            self.load_null_selector(BxSegregs::Ss, cs_descriptor.dpl as u16);
+
+            self.set_rsp(rsp);
+        } else if super::descriptor::is_code_segment_conforming(cs_descriptor.r#type)
+            || cs_descriptor.dpl == cpl
+        {
+            // INTERRUPT TO SAME PRIVILEGE LEVEL
+            tracing::debug!("long_mode_int(): INTERRUPT TO SAME PRIVILEGE");
+
+            if ist > 0 {
+                tracing::debug!("long_mode_int(): trap to IST, vector = {}", ist);
+                rsp_for_cpl_x = self.get_rsp_from_tss(ist + 3)?;
+            } else {
+                rsp_for_cpl_x = old_rsp;
+            }
+
+            // Align stack to 16 bytes
+            let mut rsp = rsp_for_cpl_x & !0xF;
+
+            // Push SS, RSP, RFLAGS, CS, RIP
+            self.write_new_stack_qword_64(rsp - 8, cs_descriptor.dpl, old_ss)?;
+            self.write_new_stack_qword_64(rsp - 16, cs_descriptor.dpl, old_rsp)?;
+            self.write_new_stack_qword_64(rsp - 24, cs_descriptor.dpl, self.eflags.bits() as u64)?;
+            self.write_new_stack_qword_64(rsp - 32, cs_descriptor.dpl, old_cs)?;
+            self.write_new_stack_qword_64(rsp - 40, cs_descriptor.dpl, old_rip)?;
+            rsp -= 40;
+
+            if push_error {
+                rsp -= 8;
+                self.write_new_stack_qword_64(rsp, cs_descriptor.dpl, error_code as u64)?;
+            }
+
+            // set the RPL field of CS to CPL
+            let mut cs_sel = cs_selector.clone();
+            let mut cs_desc = cs_descriptor.clone();
+            self.branch_far(&mut cs_sel, &mut cs_desc, gate_dest_offset, cpl)?;
+
+            self.set_rsp(rsp);
+        } else {
+            tracing::error!(
+                "long_mode_int(): bad descriptor type {:#x} (CS.DPL={} CPL={})",
+                cs_descriptor.r#type,
+                cs_descriptor.dpl,
+                cpl
+            );
+            return Err(super::error::CpuError::BadVector {
+                vector: Exception::Gp,
+                error_code: cs_err_code,
+            });
+        }
+
+        // if interrupt gate then set IF to 0
+        if (gate_descriptor.r#type & 1) == 0 {
+            self.eflags.remove(EFlags::IF_);
+            self.handle_interrupt_mask_change();
+        }
+        self.eflags.remove(EFlags::TF);
+        // VM is clear in long mode (already 0)
+        self.eflags.remove(EFlags::RF);
+        self.eflags.remove(EFlags::NT);
 
         Ok(())
     }

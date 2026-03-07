@@ -17,7 +17,12 @@ use super::BxSegregs;
 use super::fetchdecode_opmap::*;
 use super::fetchdecode_opmap_0f38::BxOpcodeTable0F38;
 use super::fetchdecode_opmap_0f3a::BxOpcodeTable0F3A;
-use super::fetchdecode_x87::BX3_DNOW_OPCODE;
+use super::fetchdecode_x87::{
+    BX3_DNOW_OPCODE, BX_OPCODE_INFO_FLOATING_POINT_D8, BX_OPCODE_INFO_FLOATING_POINT_D9,
+    BX_OPCODE_INFO_FLOATING_POINT_DA, BX_OPCODE_INFO_FLOATING_POINT_DB,
+    BX_OPCODE_INFO_FLOATING_POINT_DC, BX_OPCODE_INFO_FLOATING_POINT_DD,
+    BX_OPCODE_INFO_FLOATING_POINT_DE, BX_OPCODE_INFO_FLOATING_POINT_DF,
+};
 
 // Metadata array indices
 #[allow(dead_code)]
@@ -46,6 +51,7 @@ const AS32_OFFSET: u32 = 20;
 const SSE_PREFIX_OFFSET: u32 = 18;
 const MODC0_OFFSET: u32 = 16;
 const IS64_OFFSET: u32 = 15;
+const SRC_EQ_DST_OFFSET: u32 = 7;
 const RRR_OFFSET: u32 = 4;
 const NNN_OFFSET: u32 = 0;
 
@@ -274,6 +280,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     let mut nnn: u32 = (b1 >> 3) & 0x7;
     let mut rm: u32 = b1 & 0x7;
+    let mut modrm_byte: u8 = 0; // full modrm byte, used for x87 FPU escape
 
     // REX.B extends register encoded in opcode low bits for non-ModRM opcodes
     // (PUSH r64, POP r64, MOV r64/imm, XCHG r64/RAX, BSWAP, INC/DEC)
@@ -287,6 +294,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         }
 
         let modrm = bytes[pos];
+        modrm_byte = modrm;
         pos += 1;
 
         let mod_field = (modrm >> 6) & 0x3;
@@ -301,8 +309,12 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             rm |= 8;
         } // REX.B
 
-        if mod_field == 3 {
-            // Register mode
+        // MOV CR/DR (0F 20-23) always treat as register form regardless of mod field
+        // Matching Bochs decoder_creg64 which calls assertModC0()
+        let force_modc0 = opcode_map == 1 && matches!(b1 & 0xFF, 0x20..=0x23);
+
+        if mod_field == 3 || force_modc0 {
+            // Register mode (or forced register for MOV CR/DR)
             metainfo1_bits |= MetaInfoFlags::ModC0.bits();
         } else {
             // Memory mode
@@ -550,22 +562,64 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     let as64 = (metainfo1_bits & MetaInfoFlags::As64.bits()) != 0;
     let as32 = (metainfo1_bits & MetaInfoFlags::As32.bits()) != 0;
 
-    // Only include nnn/rm in decmask if instruction has ModRM
-    // For instructions without ModRM, the nnn/rm values derived from opcode bits
-    // shouldn't affect opcode table lookup
-    let decmask: u32 = (if os64 { 1 } else { 0 } << OS64_OFFSET)
+    // Bochs always includes nnn/rm in decmask, for both ModRM and non-ModRM opcodes.
+    // For non-ModRM, nnn/rm come from opcode bits; for ModRM, from the ModRM byte.
+    let mut decmask: u32 = (if os64 { 1 } else { 0 } << OS64_OFFSET)
         | (if os32 { 1 } else { 0 } << OS32_OFFSET)
         | (if as64 { 1 } else { 0 } << AS64_OFFSET)
         | (if as32 { 1 } else { 0 } << AS32_OFFSET)
         | ((sse_prefix as u32) << SSE_PREFIX_OFFSET)
         | (if mod_c0 { 1 } else { 0 } << MODC0_OFFSET)
         | (1 << IS64_OFFSET) // 64-bit mode
-        | if needs_modrm { ((rm & 0x7) << RRR_OFFSET) | ((nnn & 0x7) << NNN_OFFSET) } else { 0 };
+        | ((nnn & 0x7) << NNN_OFFSET)
+        | ((rm & 0x7) << RRR_OFFSET);
+    // SRC_EQ_DST: Bochs sets this for zero-idiom detection (XOR reg,reg; SUB reg,reg)
+    // Bochs uses full nnn == rm comparison (not masked to 3 bits) — prevents false positives
+    // for register pairs like RAX/R8 where (nnn & 0x7) == (rm & 0x7) but nnn != rm
+    if mod_c0 && nnn == rm {
+        decmask |= 1 << SRC_EQ_DST_OFFSET;
+    }
 
     // Look up opcode from tables
-    if opcode_map == 4 {
+    if opcode_map == 0 && (b1 >= 0xD8 && b1 <= 0xDF) {
+        // x87 FPU escape opcodes — use dedicated FPU opcode tables
+        // Matching Bochs decoder64_fp_escape() in fetchdecode64.cc
+        let fpu_table = match b1 {
+            0xD8 => &BX_OPCODE_INFO_FLOATING_POINT_D8,
+            0xD9 => &BX_OPCODE_INFO_FLOATING_POINT_D9,
+            0xDA => &BX_OPCODE_INFO_FLOATING_POINT_DA,
+            0xDB => &BX_OPCODE_INFO_FLOATING_POINT_DB,
+            0xDC => &BX_OPCODE_INFO_FLOATING_POINT_DC,
+            0xDD => &BX_OPCODE_INFO_FLOATING_POINT_DD,
+            0xDE => &BX_OPCODE_INFO_FLOATING_POINT_DE,
+            _ => &BX_OPCODE_INFO_FLOATING_POINT_DF, // 0xDF
+        };
+        let fpu_index = if mod_c0 {
+            // Register form: index = (modrm & 0x3F) + 8
+            ((modrm_byte & 0x3F) as usize) + 8
+        } else {
+            // Memory form: index = nnn (0-7)
+            (nnn & 0x7) as usize
+        };
+        instr.meta_info.ia_opcode = fpu_table[fpu_index];
+        // Store foo: (modrm | (escape_byte << 8)) & 0x7FF — for x87 FPU handler context
+        let foo_val = ((modrm_byte as u16) | ((b1 as u16) << 8)) & 0x7FF;
+        instr.modrm_form.operand_data.id = foo_val as u32;
+    } else if opcode_map == 4 {
         // 3DNow! instruction: use suffix to look up opcode directly
         instr.meta_info.ia_opcode = BX3_DNOW_OPCODE[dnow_suffix as usize];
+    } else if opcode_map == 0 && b1 == 0x90 {
+        // Special NOP/PAUSE/XCHG handling (Bochs decoder64_nop)
+        if (rex_prefix & 0x01) != 0 {
+            // REX.B set: actual XCHG R8, RAX — use normal table
+            instr.meta_info.ia_opcode = lookup_opcode_64(b1, opcode_map, decmask, nnn);
+        } else if sse_prefix == 2 {
+            // F3 prefix → PAUSE
+            instr.meta_info.ia_opcode = Opcode::Pause;
+        } else {
+            // Bare 0x90 → NOP
+            instr.meta_info.ia_opcode = Opcode::Nop;
+        }
     } else {
         instr.meta_info.ia_opcode = lookup_opcode_64(b1, opcode_map, decmask, nnn);
     }
@@ -837,7 +891,14 @@ const fn get_opcode_table_0f_64(b2: u8) -> &'static [u64] {
         0x16 => &BxOpcodeTable0F16,
         0x17 => &BxOpcodeTable0F17,
         0x18 => &BxOpcodeTable0F18,
+        // Multi-byte NOPs (0F 19-1F) — Bochs uses BxOpcodeTableMultiByteNOP
+        0x19 => &BxOpcodeTableMultiByteNOP,
+        0x1A => &BxOpcodeTableMultiByteNOP,
+        0x1B => &BxOpcodeTableMultiByteNOP,
+        0x1C => &BxOpcodeTableMultiByteNOP,
+        0x1D => &BxOpcodeTableMultiByteNOP,
         0x1E => &BxOpcodeTable0F1E,
+        0x1F => &BxOpcodeTableMultiByteNOP,
         0x20 => &BxOpcodeTable0F20_64,
         0x21 => &BxOpcodeTable0F21_64,
         0x22 => &BxOpcodeTable0F22_64,
@@ -873,6 +934,54 @@ const fn get_opcode_table_0f_64(b2: u8) -> &'static [u64] {
         0x4D => &BxOpcodeTable0F4D,
         0x4E => &BxOpcodeTable0F4E,
         0x4F => &BxOpcodeTable0F4F,
+        // SSE data movement, arithmetic, comparison, shuffle (0F 50-7F)
+        0x50 => &BxOpcodeTable0F50,
+        0x51 => &BxOpcodeTable0F51,
+        0x52 => &BxOpcodeTable0F52,
+        0x53 => &BxOpcodeTable0F53,
+        0x54 => &BxOpcodeTable0F54,
+        0x55 => &BxOpcodeTable0F55,
+        0x56 => &BxOpcodeTable0F56,
+        0x57 => &BxOpcodeTable0F57,
+        0x58 => &BxOpcodeTable0F58,
+        0x59 => &BxOpcodeTable0F59,
+        0x5A => &BxOpcodeTable0F5A,
+        0x5B => &BxOpcodeTable0F5B,
+        0x5C => &BxOpcodeTable0F5C,
+        0x5D => &BxOpcodeTable0F5D,
+        0x5E => &BxOpcodeTable0F5E,
+        0x5F => &BxOpcodeTable0F5F,
+        0x60 => &BxOpcodeTable0F60,
+        0x61 => &BxOpcodeTable0F61,
+        0x62 => &BxOpcodeTable0F62,
+        0x63 => &BxOpcodeTable0F63,
+        0x64 => &BxOpcodeTable0F64,
+        0x65 => &BxOpcodeTable0F65,
+        0x66 => &BxOpcodeTable0F66,
+        0x67 => &BxOpcodeTable0F67,
+        0x68 => &BxOpcodeTable0F68,
+        0x69 => &BxOpcodeTable0F69,
+        0x6A => &BxOpcodeTable0F6A,
+        0x6B => &BxOpcodeTable0F6B,
+        0x6C => &BxOpcodeTable0F6C,
+        0x6D => &BxOpcodeTable0F6D,
+        0x6E => &BxOpcodeTable0F6E,
+        0x6F => &BxOpcodeTable0F6F,
+        0x70 => &BxOpcodeTable0F70,
+        0x71 => &BxOpcodeTable0F71,
+        0x72 => &BxOpcodeTable0F72,
+        0x73 => &BxOpcodeTable0F73,
+        0x74 => &BxOpcodeTable0F74,
+        0x75 => &BxOpcodeTable0F75,
+        0x76 => &BxOpcodeTable0F76,
+        0x77 => &BxOpcodeTable0F77,
+        0x78 => &BxOpcodeTable0F78,
+        0x79 => &BxOpcodeTable0F79,
+        // 0x7A, 0x7B are UD in Bochs
+        0x7C => &BxOpcodeTable0F7C,
+        0x7D => &BxOpcodeTable0F7D,
+        0x7E => &BxOpcodeTable0F7E,
+        0x7F => &BxOpcodeTable0F7F,
         0x80 => &BxOpcodeTable0F80_64,
         0x81 => &BxOpcodeTable0F81_64,
         0x82 => &BxOpcodeTable0F82_64,
@@ -944,6 +1053,54 @@ const fn get_opcode_table_0f_64(b2: u8) -> &'static [u64] {
         0xC6 => &BxOpcodeTable0FC6,
         0xC7 => &BxOpcodeTable0FC7,
         0xC8..=0xCF => &BxOpcodeTable0FC8x0FCF,
+        // SSE/MMX data operations (0F D0-FE)
+        0xD0 => &BxOpcodeTable0FD0,
+        0xD1 => &BxOpcodeTable0FD1,
+        0xD2 => &BxOpcodeTable0FD2,
+        0xD3 => &BxOpcodeTable0FD3,
+        0xD4 => &BxOpcodeTable0FD4,
+        0xD5 => &BxOpcodeTable0FD5,
+        0xD6 => &BxOpcodeTable0FD6,
+        0xD7 => &BxOpcodeTable0FD7,
+        0xD8 => &BxOpcodeTable0FD8,
+        0xD9 => &BxOpcodeTable0FD9,
+        0xDA => &BxOpcodeTable0FDA,
+        0xDB => &BxOpcodeTable0FDB,
+        0xDC => &BxOpcodeTable0FDC,
+        0xDD => &BxOpcodeTable0FDD,
+        0xDE => &BxOpcodeTable0FDE,
+        0xDF => &BxOpcodeTable0FDF,
+        0xE0 => &BxOpcodeTable0FE0,
+        0xE1 => &BxOpcodeTable0FE1,
+        0xE2 => &BxOpcodeTable0FE2,
+        0xE3 => &BxOpcodeTable0FE3,
+        0xE4 => &BxOpcodeTable0FE4,
+        0xE5 => &BxOpcodeTable0FE5,
+        0xE6 => &BxOpcodeTable0FE6,
+        0xE7 => &BxOpcodeTable0FE7,
+        0xE8 => &BxOpcodeTable0FE8,
+        0xE9 => &BxOpcodeTable0FE9,
+        0xEA => &BxOpcodeTable0FEA,
+        0xEB => &BxOpcodeTable0FEB,
+        0xEC => &BxOpcodeTable0FEC,
+        0xED => &BxOpcodeTable0FED,
+        0xEE => &BxOpcodeTable0FEE,
+        0xEF => &BxOpcodeTable0FEF,
+        0xF0 => &BxOpcodeTable0FF0,
+        0xF1 => &BxOpcodeTable0FF1,
+        0xF2 => &BxOpcodeTable0FF2,
+        0xF3 => &BxOpcodeTable0FF3,
+        0xF4 => &BxOpcodeTable0FF4,
+        0xF5 => &BxOpcodeTable0FF5,
+        0xF6 => &BxOpcodeTable0FF6,
+        0xF7 => &BxOpcodeTable0FF7,
+        0xF8 => &BxOpcodeTable0FF8,
+        0xF9 => &BxOpcodeTable0FF9,
+        0xFA => &BxOpcodeTable0FFA,
+        0xFB => &BxOpcodeTable0FFB,
+        0xFC => &BxOpcodeTable0FFC,
+        0xFD => &BxOpcodeTable0FFD,
+        0xFE => &BxOpcodeTable0FFE,
         0xFF => &BxOpcodeTable0FFF,
         _ => &[],
     }
@@ -1133,12 +1290,10 @@ mod tests {
 
     #[test]
     fn test_nop() {
-        // 0x90 is actually XCHG EAX,EAX which is the NOP encoding
-        // In 64-bit mode with no REX.W, operand size is 32-bit
+        // 0x90 is NOP (Bochs decoder64_nop returns NOP for bare 0x90)
         let i = fetch_decode64(&[0x90]).unwrap();
         assert_eq!(i.ilen(), 1);
-        // XchgErxEax is the 32-bit XCHG EAX,r32 - NOP is encoded as XCHG EAX,EAX
-        assert_eq!(i.get_ia_opcode(), Opcode::XchgErxEax);
+        assert_eq!(i.get_ia_opcode(), Opcode::Nop);
     }
 
     #[test]
@@ -1292,7 +1447,7 @@ mod tests {
         let runtime_address = 0x007FFFFFFF400000;
         let instructions = const_disassemble_sequence_64bit(&data, runtime_address);
 
-        for (_, instruction) in instructions {
+        for (_, instruction) in &instructions {
             tracing::info!(
                 "{:?} {} {} {:#x?}",
                 instruction.get_ia_opcode(),
@@ -1306,10 +1461,10 @@ mod tests {
     fn const_disassemble_sequence_64bit(
         data: &[u8],
         runtime_address: u64,
-    ) -> alloc::vec::Vec<(u64, Instruction)> {
+    ) -> Vec<(u64, Instruction)> {
         let mut offset = 0;
         let mut current_address = runtime_address;
-        let mut instructions = alloc::vec::Vec::new();
+        let mut instructions = Vec::new();
 
         while offset < data.len() {
             let remaining = &data[offset..];
@@ -1380,6 +1535,48 @@ mod tests {
             assert_eq!(instr.get_ia_opcode(), Opcode::MovSwEw);
             assert_eq!(instr.meta_data[0], seg); // Destination segment register
         }
+    }
+
+    /// Test x87 FPU escape opcodes (D8-DF) decode correctly in 64-bit mode
+    #[test]
+    fn test_fpu_escape_64() {
+        // D8 C0 = FADD ST(0), ST(0) — register form (mod=11, modrm & 0x3F = 0x00, index = 0+8 = 8)
+        let i = fetch_decode64(&[0xD8, 0xC0]).unwrap();
+        assert_eq!(i.ilen(), 2);
+        assert_eq!(i.get_ia_opcode(), Opcode::FaddSt0Stj);
+
+        // D9 E8 = FLD1 — register form (mod=11, modrm & 0x3F = 0x28, index = 0x28+8 = 48)
+        let i = fetch_decode64(&[0xD9, 0xE8]).unwrap();
+        assert_eq!(i.ilen(), 2);
+        assert_eq!(i.get_ia_opcode(), Opcode::FLD1);
+
+        // DD 05 00 00 00 00 = FLD QWORD [RIP+0] — memory form (mod=00, nnn=0)
+        let i = fetch_decode64(&[0xDD, 0x05, 0x00, 0x00, 0x00, 0x00]).unwrap();
+        assert_eq!(i.ilen(), 6);
+        assert_eq!(i.get_ia_opcode(), Opcode::FldDoubleReal);
+
+        // DE C1 = FADDP ST(1), ST(0) — register form
+        let i = fetch_decode64(&[0xDE, 0xC1]).unwrap();
+        assert_eq!(i.ilen(), 2);
+        assert_eq!(i.get_ia_opcode(), Opcode::FaddpStiSt0);
+
+        // Verify foo field: (modrm | (escape_byte << 8)) & 0x7FF
+        let i = fetch_decode64(&[0xD8, 0xC0]).unwrap();
+        let expected_foo = ((0xC0u16) | (0xD8u16 << 8)) & 0x7FF;
+        assert_eq!(i.id() as u16, expected_foo);
+    }
+
+    /// Test MOV CR/DR forces ModC0 in 64-bit mode
+    #[test]
+    fn test_mov_cr_force_modc0() {
+        // 0F 20 C0 = MOV RAX, CR0 (mod=11, nnn=0, rm=0)
+        let i = fetch_decode64(&[0x0F, 0x20, 0xC0]).unwrap();
+        assert_eq!(i.ilen(), 3);
+        assert!(i.mod_c0());
+
+        // 0F 20 00 = MOV RAX, CR0 with mod=00 (should still be treated as register)
+        let i = fetch_decode64(&[0x0F, 0x20, 0x00]).unwrap();
+        assert!(i.mod_c0(), "MOV CR should force ModC0 even with mod=00");
     }
 
     /// Test that invalid segment registers (6-7) are rejected with InvalidSegmentRegister error

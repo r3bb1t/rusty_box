@@ -90,14 +90,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// IN EAX, imm8 - Input dword from immediate port to EAX
-    /// Bochs io.cc:111-138
+    /// Bochs io.cc:111-138 — writes RAX (zero-extends to 64-bit)
     pub fn in_eax_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         if !self.allow_io(port, 4)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let value = self.port_in(port, 4);
-        self.set_eax(value);
+        self.set_rax(value as u64);
         tracing::trace!("IN EAX, {:#x} -> {:#x}", port, value);
         Ok(())
     }
@@ -168,14 +168,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// IN EAX, DX - Input dword from port DX to EAX
-    /// Bochs io.cc:290-319
+    /// Bochs io.cc:290-319 — writes RAX (zero-extends to 64-bit)
     pub fn in_eax_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 4)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let value = self.port_in(port, 4);
-        self.set_eax(value);
+        self.set_rax(value as u64);
         tracing::trace!("IN EAX, DX ({:#x}) -> {:#x}", port, value);
         Ok(())
     }
@@ -280,6 +280,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ---- INS: 32-bit address mode (EDI/ECX, ES segment) ----
 
     /// INSB - Input byte from port DX to ES:EDI (32-bit address mode)
+    /// Bochs io.cc INSB32_YbDX: writes RDI = EDI ± 1 (clears upper 32 bits)
     fn insb32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 1)? {
@@ -289,14 +290,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let value = self.port_in(port, 1) as u8;
         self.write_virtual_byte(BxSegregs::Es, edi, value)?;
         if self.get_df() {
-            self.set_edi(self.edi().wrapping_sub(1));
+            self.set_rdi(edi.wrapping_sub(1) as u64);
         } else {
-            self.set_edi(self.edi().wrapping_add(1));
+            self.set_rdi(edi.wrapping_add(1) as u64);
         }
         Ok(())
     }
 
     /// INSW - Input word from port DX to ES:EDI (32-bit address mode)
+    /// Bochs io.cc INSW32_YwDX: writes RDI = EDI ± 2
     fn insw32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 2)? {
@@ -306,14 +308,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let value = self.port_in(port, 2) as u16;
         self.write_virtual_word(BxSegregs::Es, edi, value)?;
         if self.get_df() {
-            self.set_edi(self.edi().wrapping_sub(2));
+            self.set_rdi(edi.wrapping_sub(2) as u64);
         } else {
-            self.set_edi(self.edi().wrapping_add(2));
+            self.set_rdi(edi.wrapping_add(2) as u64);
         }
         Ok(())
     }
 
     /// INSD - Input dword from port DX to ES:EDI (32-bit address mode)
+    /// Bochs io.cc INSD32_YdDX: writes RDI = EDI ± 4
     fn insd32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 4)? {
@@ -323,9 +326,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let value = self.port_in(port, 4);
         self.write_virtual_dword(BxSegregs::Es, edi, value)?;
         if self.get_df() {
-            self.set_edi(self.edi().wrapping_sub(4));
+            self.set_rdi(edi.wrapping_sub(4) as u64);
         } else {
-            self.set_edi(self.edi().wrapping_add(4));
+            self.set_rdi(edi.wrapping_add(4) as u64);
         }
         Ok(())
     }
@@ -390,6 +393,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ---- OUTS: 32-bit address mode (ESI/ECX, segment-overridable) ----
 
     /// OUTSB - Output byte from seg:ESI to port DX (32-bit address mode)
+    /// Bochs io.cc OUTSB32_DXXb: writes RSI = ESI ± 1 (clears upper 32 bits)
     fn outsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 1)? {
@@ -400,14 +404,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let value = self.read_virtual_byte(seg, esi)?;
         self.port_out(port, value as u32, 1);
         if self.get_df() {
-            self.set_esi(self.esi().wrapping_sub(1));
+            self.set_rsi(esi.wrapping_sub(1) as u64);
         } else {
-            self.set_esi(self.esi().wrapping_add(1));
+            self.set_rsi(esi.wrapping_add(1) as u64);
         }
         Ok(())
     }
 
     /// OUTSW - Output word from seg:ESI to port DX (32-bit address mode)
+    /// Bochs io.cc OUTSW32_DXXw: writes RSI = ESI ± 2
     fn outsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 2)? {
@@ -418,14 +423,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let value = self.read_virtual_word(seg, esi)?;
         self.port_out(port, value as u32, 2);
         if self.get_df() {
-            self.set_esi(self.esi().wrapping_sub(2));
+            self.set_rsi(esi.wrapping_sub(2) as u64);
         } else {
-            self.set_esi(self.esi().wrapping_add(2));
+            self.set_rsi(esi.wrapping_add(2) as u64);
         }
         Ok(())
     }
 
     /// OUTSD - Output dword from seg:ESI to port DX (32-bit address mode)
+    /// Bochs io.cc OUTSD32_DXXd: writes RSI = ESI ± 4
     fn outsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 4)? {
@@ -436,9 +442,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let value = self.read_virtual_dword(seg, esi)?;
         self.port_out(port, value, 4);
         if self.get_df() {
-            self.set_esi(self.esi().wrapping_sub(4));
+            self.set_rsi(esi.wrapping_sub(4) as u64);
         } else {
-            self.set_esi(self.esi().wrapping_add(4));
+            self.set_rsi(esi.wrapping_add(4) as u64);
         }
         Ok(())
     }
@@ -583,19 +589,206 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
+    // ---- INS: 64-bit address mode (RDI/RCX, ES segment) ----
+    // Bochs io.cc INSB64_YbDX / INSW64_YwDX / INSD64_YdDX
+
+    /// INSB - Input byte from port DX to ES:RDI (64-bit address mode)
+    fn insb64(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let port = self.dx();
+        if !self.allow_io(port, 1)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        let rdi = self.rdi();
+        let laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+        let value = self.port_in(port, 1) as u8;
+        self.write_virtual_byte_at_laddr(laddr, value)?;
+        if self.get_df() {
+            self.set_rdi(rdi.wrapping_sub(1));
+        } else {
+            self.set_rdi(rdi.wrapping_add(1));
+        }
+        Ok(())
+    }
+
+    /// INSW - Input word from port DX to ES:RDI (64-bit address mode)
+    fn insw64(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let port = self.dx();
+        if !self.allow_io(port, 2)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        let rdi = self.rdi();
+        let laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+        let value = self.port_in(port, 2) as u16;
+        self.mem_write_word(laddr, value);
+        if self.get_df() {
+            self.set_rdi(rdi.wrapping_sub(2));
+        } else {
+            self.set_rdi(rdi.wrapping_add(2));
+        }
+        Ok(())
+    }
+
+    /// INSD - Input dword from port DX to ES:RDI (64-bit address mode)
+    fn insd64(&mut self, _instr: &Instruction) -> super::Result<()> {
+        let port = self.dx();
+        if !self.allow_io(port, 4)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        let rdi = self.rdi();
+        let laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+        let value = self.port_in(port, 4);
+        self.mem_write_dword(laddr, value);
+        if self.get_df() {
+            self.set_rdi(rdi.wrapping_sub(4));
+        } else {
+            self.set_rdi(rdi.wrapping_add(4));
+        }
+        Ok(())
+    }
+
+    // ---- OUTS: 64-bit address mode (RSI/RCX, segment-overridable) ----
+    // Bochs io.cc OUTSB64_DXXb / OUTSW64_DXXw / OUTSD64_DXXd
+
+    /// OUTSB - Output byte from seg:RSI to port DX (64-bit address mode)
+    fn outsb64(&mut self, instr: &Instruction) -> super::Result<()> {
+        let port = self.dx();
+        if !self.allow_io(port, 1)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        let seg = BxSegregs::from(instr.seg());
+        let rsi = self.rsi();
+        let laddr = self.get_laddr64(seg as usize, rsi);
+        let value = self.read_virtual_byte_at_laddr(laddr)?;
+        self.port_out(port, value as u32, 1);
+        if self.get_df() {
+            self.set_rsi(rsi.wrapping_sub(1));
+        } else {
+            self.set_rsi(rsi.wrapping_add(1));
+        }
+        Ok(())
+    }
+
+    /// OUTSW - Output word from seg:RSI to port DX (64-bit address mode)
+    fn outsw64(&mut self, instr: &Instruction) -> super::Result<()> {
+        let port = self.dx();
+        if !self.allow_io(port, 2)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        let seg = BxSegregs::from(instr.seg());
+        let rsi = self.rsi();
+        let laddr = self.get_laddr64(seg as usize, rsi);
+        let value = self.mem_read_word(laddr);
+        self.port_out(port, value as u32, 2);
+        if self.get_df() {
+            self.set_rsi(rsi.wrapping_sub(2));
+        } else {
+            self.set_rsi(rsi.wrapping_add(2));
+        }
+        Ok(())
+    }
+
+    /// OUTSD - Output dword from seg:RSI to port DX (64-bit address mode)
+    fn outsd64(&mut self, instr: &Instruction) -> super::Result<()> {
+        let port = self.dx();
+        if !self.allow_io(port, 4)? {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        let seg = BxSegregs::from(instr.seg());
+        let rsi = self.rsi();
+        let laddr = self.get_laddr64(seg as usize, rsi);
+        let value = self.mem_read_dword(laddr);
+        self.port_out(port, value, 4);
+        if self.get_df() {
+            self.set_rsi(rsi.wrapping_sub(4));
+        } else {
+            self.set_rsi(rsi.wrapping_add(4));
+        }
+        Ok(())
+    }
+
+    // ---- REP INS: 64-bit address mode ----
+
+    fn rep_insb64(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut rcx = self.rcx();
+        while rcx != 0 {
+            self.insb64(instr)?;
+            rcx -= 1;
+            self.set_rcx(rcx);
+        }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
+    }
+
+    fn rep_insw64(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut rcx = self.rcx();
+        while rcx != 0 {
+            self.insw64(instr)?;
+            rcx -= 1;
+            self.set_rcx(rcx);
+        }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
+    }
+
+    fn rep_insd64(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut rcx = self.rcx();
+        while rcx != 0 {
+            self.insd64(instr)?;
+            rcx -= 1;
+            self.set_rcx(rcx);
+        }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
+    }
+
+    // ---- REP OUTS: 64-bit address mode ----
+
+    fn rep_outsb64(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut rcx = self.rcx();
+        while rcx != 0 {
+            self.outsb64(instr)?;
+            rcx -= 1;
+            self.set_rcx(rcx);
+        }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
+    }
+
+    fn rep_outsw64(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut rcx = self.rcx();
+        while rcx != 0 {
+            self.outsw64(instr)?;
+            rcx -= 1;
+            self.set_rcx(rcx);
+        }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
+    }
+
+    fn rep_outsd64(&mut self, instr: &Instruction) -> super::Result<()> {
+        let mut rcx = self.rcx();
+        while rcx != 0 {
+            self.outsd64(instr)?;
+            rcx -= 1;
+            self.set_rcx(rcx);
+        }
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+        Ok(())
+    }
+
     // ========================================================================
     // Unified INS/OUTS dispatch methods
     // ========================================================================
 
-    /// INSB dispatch - selects 16/32-bit address mode and REP/non-REP form
+    /// INSB dispatch - selects 16/32/64-bit address mode and REP/non-REP form
+    /// Bochs io.cc REP_INSB_YbDX: checks as64L, as32L, then 16-bit
     pub fn insb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.as32_l() != 0 {
-            if instr.lock_rep_used_value() != 0 {
-                self.rep_insb32(instr)?;
-            } else {
-                self.insb32(instr)?;
-            }
-        } else if instr.lock_rep_used_value() != 0 {
+        let rep = instr.lock_rep_used_value() != 0;
+        if instr.as64_l() != 0 {
+            if rep { self.rep_insb64(instr)?; } else { self.insb64(instr)?; }
+        } else if instr.as32_l() != 0 {
+            if rep { self.rep_insb32(instr)?; } else { self.insb32(instr)?; }
+        } else if rep {
             self.rep_insb16(instr)?;
         } else {
             self.insb16(instr)?;
@@ -603,15 +796,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// INSW dispatch - selects 16/32-bit address mode and REP/non-REP form
+    /// INSW dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     pub fn insw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.as32_l() != 0 {
-            if instr.lock_rep_used_value() != 0 {
-                self.rep_insw32(instr)?;
-            } else {
-                self.insw32(instr)?;
-            }
-        } else if instr.lock_rep_used_value() != 0 {
+        let rep = instr.lock_rep_used_value() != 0;
+        if instr.as64_l() != 0 {
+            if rep { self.rep_insw64(instr)?; } else { self.insw64(instr)?; }
+        } else if instr.as32_l() != 0 {
+            if rep { self.rep_insw32(instr)?; } else { self.insw32(instr)?; }
+        } else if rep {
             self.rep_insw16(instr)?;
         } else {
             self.insw16(instr)?;
@@ -619,15 +811,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// INSD dispatch - selects 16/32-bit address mode and REP/non-REP form
+    /// INSD dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     pub fn insd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.as32_l() != 0 {
-            if instr.lock_rep_used_value() != 0 {
-                self.rep_insd32(instr)?;
-            } else {
-                self.insd32(instr)?;
-            }
-        } else if instr.lock_rep_used_value() != 0 {
+        let rep = instr.lock_rep_used_value() != 0;
+        if instr.as64_l() != 0 {
+            if rep { self.rep_insd64(instr)?; } else { self.insd64(instr)?; }
+        } else if instr.as32_l() != 0 {
+            if rep { self.rep_insd32(instr)?; } else { self.insd32(instr)?; }
+        } else if rep {
             self.rep_insd16(instr)?;
         } else {
             self.insd16(instr)?;
@@ -635,15 +826,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// OUTSB dispatch - selects 16/32-bit address mode and REP/non-REP form
+    /// OUTSB dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     pub fn outsb_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.as32_l() != 0 {
-            if instr.lock_rep_used_value() != 0 {
-                self.rep_outsb32(instr)?;
-            } else {
-                self.outsb32(instr)?;
-            }
-        } else if instr.lock_rep_used_value() != 0 {
+        let rep = instr.lock_rep_used_value() != 0;
+        if instr.as64_l() != 0 {
+            if rep { self.rep_outsb64(instr)?; } else { self.outsb64(instr)?; }
+        } else if instr.as32_l() != 0 {
+            if rep { self.rep_outsb32(instr)?; } else { self.outsb32(instr)?; }
+        } else if rep {
             self.rep_outsb16(instr)?;
         } else {
             self.outsb16(instr)?;
@@ -651,15 +841,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// OUTSW dispatch - selects 16/32-bit address mode and REP/non-REP form
+    /// OUTSW dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     pub fn outsw_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.as32_l() != 0 {
-            if instr.lock_rep_used_value() != 0 {
-                self.rep_outsw32(instr)?;
-            } else {
-                self.outsw32(instr)?;
-            }
-        } else if instr.lock_rep_used_value() != 0 {
+        let rep = instr.lock_rep_used_value() != 0;
+        if instr.as64_l() != 0 {
+            if rep { self.rep_outsw64(instr)?; } else { self.outsw64(instr)?; }
+        } else if instr.as32_l() != 0 {
+            if rep { self.rep_outsw32(instr)?; } else { self.outsw32(instr)?; }
+        } else if rep {
             self.rep_outsw16(instr)?;
         } else {
             self.outsw16(instr)?;
@@ -667,15 +856,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// OUTSD dispatch - selects 16/32-bit address mode and REP/non-REP form
+    /// OUTSD dispatch - selects 16/32/64-bit address mode and REP/non-REP form
     pub fn outsd_dispatch(&mut self, instr: &Instruction) -> super::Result<()> {
-        if instr.as32_l() != 0 {
-            if instr.lock_rep_used_value() != 0 {
-                self.rep_outsd32(instr)?;
-            } else {
-                self.outsd32(instr)?;
-            }
-        } else if instr.lock_rep_used_value() != 0 {
+        let rep = instr.lock_rep_used_value() != 0;
+        if instr.as64_l() != 0 {
+            if rep { self.rep_outsd64(instr)?; } else { self.outsd64(instr)?; }
+        } else if instr.as32_l() != 0 {
+            if rep { self.rep_outsd32(instr)?; } else { self.outsd32(instr)?; }
+        } else if rep {
             self.rep_outsd16(instr)?;
         } else {
             self.outsd16(instr)?;

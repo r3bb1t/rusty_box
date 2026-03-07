@@ -18,45 +18,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Push a 64-bit value onto the stack
     /// Based on BX_CPU_C::push_64 in stack.h (64-bit mode)
-    pub fn push_64(&mut self, value: u64) {
-        // In 64-bit mode, stack is always 64-bit
+    pub fn push_64(&mut self, value: u64) -> super::Result<()> {
         let rsp = self.rsp();
         let new_rsp = rsp.wrapping_sub(8);
-        self.stack_write_qword(new_rsp, value);
+        self.stack_write_qword_64(new_rsp, value)?;
         self.set_rsp(new_rsp);
         tracing::trace!("PUSH64: value {:#x} written to stack", value);
+        Ok(())
     }
 
     /// Pop a 64-bit value from the stack
     /// Based on BX_CPU_C::pop_64 in stack.h (64-bit mode)
-    pub fn pop_64(&mut self) -> u64 {
-        // In 64-bit mode, stack is always 64-bit
+    pub fn pop_64(&mut self) -> super::Result<u64> {
         let rsp = self.rsp();
-        let value = self.stack_read_qword(rsp);
+        let value = self.stack_read_qword_64(rsp)?;
         self.set_rsp(rsp.wrapping_add(8));
         tracing::trace!("POP64: value {:#x} read from stack", value);
-        value
-    }
-
-    // =========================================================================
-    // 64-bit stack memory access functions
-    // Based on Bochs stack.cc
-    // =========================================================================
-
-    /// Write a 64-bit value to stack at given offset (SS:offset)
-    pub(super) fn stack_write_qword(&mut self, offset: u64, value: u64) {
-        // Get linear address from SS:offset
-        let laddr = self.get_laddr64(BxSegregs::Ss as usize, offset);
-        // Write through memory subsystem
-        self.mem_write_qword(laddr, value);
-    }
-
-    /// Read a 64-bit value from stack at given offset (SS:offset)
-    pub(super) fn stack_read_qword(&self, offset: u64) -> u64 {
-        // Get linear address from SS:offset
-        let laddr = self.get_laddr64(BxSegregs::Ss as usize, offset);
-        // Read through memory subsystem
-        self.mem_read_qword(laddr)
+        Ok(value)
     }
 
     // =========================================================================
@@ -66,20 +44,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// PUSH r64 - Push 64-bit register
     /// Based on Bochs stack64.cc PUSH_EqR
-    pub fn push_eq_r(&mut self, instr: &Instruction) {
+    pub fn push_eq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let dst = instr.dst() as usize;
         let value = self.get_gpr64(dst);
-        self.push_64(value);
+        self.push_64(value)?;
         tracing::trace!("PUSH r64 (reg {}): {:#018x}", dst, value);
+        Ok(())
     }
 
     /// PUSH imm64 (sign-extended from 32-bit)
     /// Based on Bochs stack64.cc PUSH_Iq
-    pub fn push_iq(&mut self, instr: &Instruction) {
-        // Sign extend 32-bit immediate to 64-bit
+    pub fn push_iq(&mut self, instr: &Instruction) -> super::Result<()> {
         let value = instr.id() as i32 as i64 as u64;
-        self.push_64(value);
+        self.push_64(value)?;
         tracing::trace!("PUSH imm64: {:#018x}", value);
+        Ok(())
     }
 
     // =========================================================================
@@ -89,11 +68,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// POP r64 - Pop into 64-bit register
     /// Based on Bochs stack64.cc POP_EqR
-    pub fn pop_eq_r(&mut self, instr: &Instruction) {
+    pub fn pop_eq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         let dst = instr.dst() as usize;
-        let value = self.pop_64();
+        let value = self.pop_64()?;
         self.set_gpr64(dst, value);
         tracing::trace!("POP r64 (reg {}): {:#018x}", dst, value);
+        Ok(())
     }
 
     /// PUSH m64 - Push 64-bit value from memory
@@ -101,30 +81,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn push_eq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = crate::cpu::decoder::BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, eaddr);
-        let val64 = self.mem_read_qword(laddr);
-        self.push_64(val64);
+        let val64 = self.read_virtual_qword_64(seg, eaddr)?;
+        self.push_64(val64)?;
         Ok(())
     }
 
     /// POP m64 - Pop into 64-bit memory location
     /// Based on Bochs stack64.cc POP_EqM
     pub fn pop_eq_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let val64 = self.pop_64();
+        let val64 = self.pop_64()?;
         let eaddr = self.resolve_addr64(instr);
         let seg = crate::cpu::decoder::BxSegregs::from(instr.seg());
-        let seg_idx = seg as usize;
-        let laddr = self.get_laddr64(seg_idx, eaddr);
-        self.mem_write_qword(laddr, val64);
+        self.write_virtual_qword_64(seg, eaddr, val64)?;
         Ok(())
     }
 
     /// PUSH r/m64 - Unified dispatch based on mod_c0()
     pub fn push_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
-            self.push_eq_r(instr);
-            Ok(())
+            self.push_eq_r(instr)
         } else {
             self.push_eq_m(instr)
         }
@@ -133,8 +108,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// POP r/m64 - Unified dispatch based on mod_c0()
     pub fn pop_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
-            self.pop_eq_r(instr);
-            Ok(())
+            self.pop_eq_r(instr)
         } else {
             self.pop_eq_m(instr)
         }
@@ -146,24 +120,83 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// PUSHFQ - Push flags (64-bit)
-    pub fn pushf_fq(&mut self, _instr: &Instruction) {
+    pub fn pushf_fq(&mut self, _instr: &Instruction) -> super::Result<()> {
         // VM & RF flags cleared in image stored on the stack
         let flags = (self.eflags.bits() & 0x00FCFFFF) as u64;
-        self.push_64(flags);
+        self.push_64(flags)?;
         tracing::trace!("PUSHFQ: {:#018x}", flags);
+        Ok(())
     }
 
     /// POPFQ - Pop flags (64-bit)
-    pub fn popf_fq(&mut self, _instr: &Instruction) {
-        let flags = self.pop_64();
+    /// Based on Bochs flag_ctrl.cc POPF_Fq (lines 357-385)
+    pub fn popf_fq(&mut self, _instr: &Instruction) -> super::Result<()> {
+        // Base changeMask: OSZAPC + TF + DF + NT + RF + AC + ID
+        let mut change_mask = EFlags::OSZAPC
+            .union(EFlags::TF)
+            .union(EFlags::DF)
+            .union(EFlags::NT)
+            .union(EFlags::RF)
+            .union(EFlags::AC)
+            .union(EFlags::ID);
 
         // RF is always zero after POPF
-        // VM, VIP, VIF are unaffected
-        const CHANGE_MASK: u32 = 0x00244FD5;
+        let eflags32 = (self.pop_64()? as u32) & !EFlags::RF.bits();
 
-        self.eflags = EFlags::from_bits_retain(
-            (self.eflags.bits() & !CHANGE_MASK) | ((flags as u32) & CHANGE_MASK),
-        );
-        tracing::trace!("POPFQ: {:#018x}", flags);
+        let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+        if cpl == 0 {
+            change_mask = change_mask.union(EFlags::IOPL_MASK);
+        }
+        if cpl <= self.eflags.iopl() {
+            change_mask = change_mask.union(EFlags::IF_);
+        }
+
+        // VIF, VIP, VM are unaffected
+        self.write_eflags(eflags32, change_mask.bits());
+        Ok(())
+    }
+
+    // =========================================================================
+    // LEAVE (64-bit)
+    // Based on Bochs stack64.cc LEAVE64
+    // =========================================================================
+
+    /// LEAVE64 - High Level Procedure Exit (64-bit)
+    /// Matching C++ stack64.cc LEAVE64
+    pub fn leave64(&mut self, _instr: &Instruction) -> super::Result<()> {
+        // RSP = RBP, then POP RBP
+        let rbp = self.get_gpr64(5); // RBP
+        let value = self.stack_read_qword_64(rbp)?;
+        self.set_gpr64(4, rbp.wrapping_add(8)); // RSP = RBP + 8
+        self.set_gpr64(5, value); // RBP = [old RBP]
+        Ok(())
+    }
+
+    // =========================================================================
+    // PUSH/POP segment selectors (64-bit)
+    // Based on Bochs stack64.cc PUSH_Op64_Sw / POP_Op64_Sw
+    // =========================================================================
+
+    /// PUSH segment selector (64-bit) — pushes 16-bit selector zero-extended to 64 bits
+    pub fn push_op64_sw(&mut self, instr: &Instruction) -> super::Result<()> {
+        let seg_idx = instr.src() as usize;
+        let selector = self.sregs[seg_idx].selector.value as u64;
+        self.push_64(selector)?;
+        Ok(())
+    }
+
+    /// POP segment selector (64-bit) — pops 64-bit value, loads low 16 bits as selector
+    pub fn pop_op64_sw(&mut self, instr: &Instruction) -> super::Result<()> {
+        let selector_64 = self.pop_64()?;
+        let seg_idx = BxSegregs::from(instr.dst());
+        self.load_seg_reg(seg_idx, selector_64 as u16)?;
+        Ok(())
+    }
+
+    /// PUSH imm8 sign-extended to 64-bit
+    /// Matching Bochs PUSH_Op64_sIb — same as push_iq, imm is already sign-extended by decoder
+    pub fn push_op64_sib(&mut self, instr: &Instruction) -> super::Result<()> {
+        let imm = instr.id() as i32 as u64;
+        self.push_64(imm)
     }
 }

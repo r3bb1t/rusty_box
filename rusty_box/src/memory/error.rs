@@ -24,6 +24,8 @@ pub enum MemoryError {
     #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
     #[error("FATAL ERROR: Could not write at {0:x} in overflow file! {1}")]
     FailedToWriteToOverflowFIle(usize, std::io::Error),
+    #[error("Internal memory error: {0}")]
+    Internal(&'static str),
 
     #[error("Tried to write monitored page at addr: {0:x}")]
     WriteMonitoredPage(usize),

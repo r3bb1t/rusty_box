@@ -56,7 +56,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             .filter(|feature| config.cpu_exclude_features.contains(feature))
             .collect();
 
-        self.svm_extensions_bitmask = self.cpuid.get_svm_extensions_bitmask();
+        // Populate ISA extensions bitmask from CPUID model — matches Bochs init.cc:196
+        self.ia_extensions_bitmask = self.cpuid.get_isa_extensions_bitmask();
+
+        // Populate VMX/SVM bitmasks — matches Bochs init.cc:199-203
+        self.vmx_extensions_bitmask = self.cpuid.get_vmx_extensions_bitmask();
         self.svm_extensions_bitmask = self.cpuid.get_svm_extensions_bitmask();
 
         // Note: sanity_checks() is called separately after initialize() to match original Bochs
@@ -480,12 +484,115 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub(super) fn handle_interrupt_mask_change(&mut self) {
         // Based on Bochs flag_ctrl_pro.cc:122-177 handleInterruptMaskChange
-        // When IF transitions to 1, signal BX_EVENT_PENDING_INTR so the CPU
-        // checks for pending external interrupts at the next boundary.
-        // This matches Bochs which calls signal_event(BX_EVENT_PENDING_INTR).
+        //
+        // Bochs uses event_mask to gate interrupt delivery: when IF=0,
+        // BX_EVENT_PENDING_INTR is added to event_mask (masked), so the
+        // event stays in pending_event but is_unmasked_event_pending()
+        // returns false. When IF=1, the event is unmasked, and if it was
+        // pending, async_event is set to trigger delivery at next boundary.
         if self.eflags.contains(super::eflags::EFlags::IF_) {
-            self.signal_event(0); // 0 = BX_EVENT_PENDING_INTR bit position
+            // EFLAGS.IF was set — unmask external interrupt events
+            // Bochs flag_ctrl_pro.cc:126-129: unmask both PIC and LAPIC events
+            self.unmask_event(
+                Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR,
+            );
+        } else {
+            // EFLAGS.IF was cleared — mask external interrupt events
+            // Bochs flag_ctrl_pro.cc:170-175: mask both PIC and LAPIC events
+            self.mask_event(
+                Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR,
+            );
         }
+    }
+
+    /// Configure CPU for direct Linux kernel boot (bypassing BIOS).
+    ///
+    /// Sets up 32-bit protected mode with flat segments, matching what the
+    /// Linux kernel's startup_32 entry point expects:
+    /// - CR0.PE = 1 (protected mode)
+    /// - CS = flat 32-bit code (selector 0x10)
+    /// - DS = ES = FS = GS = SS = flat 32-bit data (selector 0x18)
+    /// - GDT loaded with null + code + data entries
+    /// - A20 enabled
+    /// - Interrupts disabled
+    ///
+    /// After calling this, set ESP and ESI (boot_params pointer), then
+    /// set RIP to the kernel entry point (code32_start, usually 0x100000).
+    pub fn setup_for_direct_boot(&mut self, gdt_addr: u64) {
+        // Set CR0: PE (protected mode) + ET (x87 extension type)
+        self.cr0.set32(0x00000011);
+
+        // Clear EFER (no long mode yet — kernel enables it itself)
+        self.efer.set32(0);
+
+        // Interrupts disabled, direction flag clear
+        self.eflags = EFlags::from_bits_retain(0x2); // Bit 1 always set
+
+        // Set up GDTR to point to GDT in memory
+        self.gdtr.base = gdt_addr;
+        self.gdtr.limit = 0x1F; // 4 entries × 8 bytes - 1 = 31
+
+        // IDT: keep limit large enough that vector lookups don't #GP.
+        // Entries will be null (zeroed RAM), but that's OK — the kernel
+        // sets up its own IDT before enabling interrupts.
+        self.idtr.base = 0;
+        self.idtr.limit = 0xFFFF;
+
+        // CS: selector 0x10 = GDT entry 2 (flat 32-bit code)
+        let cs = BxSegregs::Cs as usize;
+        parse_selector(0x0010, &mut self.sregs[cs].selector);
+        self.sregs[cs].cache.valid = SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK;
+        self.sregs[cs].cache.p = true;
+        self.sregs[cs].cache.dpl = 0;
+        self.sregs[cs].cache.segment = true;
+        self.sregs[cs].cache.r#type =
+            BxDataAndCodeDescriptorEnum::CodeExecReadAccessed as u8;
+        self.sregs[cs].cache.u.segment.base = 0;
+        self.sregs[cs].cache.u.segment.limit_scaled = 0xFFFFFFFF;
+        self.sregs[cs].cache.u.segment.g = true;  // page granular
+        self.sregs[cs].cache.u.segment.d_b = true; // 32-bit
+        self.sregs[cs].cache.u.segment.l = false;  // not 64-bit
+        self.sregs[cs].cache.u.segment.avl = false;
+
+        // DS/ES/FS/GS/SS: selector 0x18 = GDT entry 3 (flat 32-bit data)
+        let data_segs = [
+            BxSegregs::Ds as usize,
+            BxSegregs::Es as usize,
+            BxSegregs::Fs as usize,
+            BxSegregs::Gs as usize,
+            BxSegregs::Ss as usize,
+        ];
+        for &seg_idx in &data_segs {
+            parse_selector(0x0018, &mut self.sregs[seg_idx].selector);
+            self.sregs[seg_idx].cache.valid = SEG_VALID_CACHE | SEG_ACCESS_ROK | SEG_ACCESS_WOK;
+            self.sregs[seg_idx].cache.p = true;
+            self.sregs[seg_idx].cache.dpl = 0;
+            self.sregs[seg_idx].cache.segment = true;
+            self.sregs[seg_idx].cache.r#type =
+                BxDataAndCodeDescriptorEnum::DataReadWriteAccessed as u8;
+            self.sregs[seg_idx].cache.u.segment.base = 0;
+            self.sregs[seg_idx].cache.u.segment.limit_scaled = 0xFFFFFFFF;
+            self.sregs[seg_idx].cache.u.segment.g = true;
+            self.sregs[seg_idx].cache.u.segment.d_b = true;
+            self.sregs[seg_idx].cache.u.segment.l = false;
+            self.sregs[seg_idx].cache.u.segment.avl = false;
+        }
+
+        // CPU mode = protected (kernel transitions to long mode itself)
+        self.cpu_mode = CpuMode::Ia32Protected;
+
+        // Update fetch mode mask for 32-bit mode
+        self.fetch_mode_mask
+            .set(super::opcodes_table::FetchModeMask::D_B, true);
+        self.fetch_mode_mask
+            .remove(super::opcodes_table::FetchModeMask::LONG64);
+
+        // Mask external interrupts (IF=0)
+        self.mask_event(
+            Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR,
+        );
+
+        info!("CPU configured for direct Linux boot (32-bit protected mode)");
     }
 
     fn init_statistics(&mut self) {

@@ -12,6 +12,12 @@ pub trait BxCpuIdTrait: core::fmt::Debug {
 
     fn get_cpu_extensions(&self, _extensions: &[u32]) {}
 
+    /// Returns the ISA extensions bitmask for this CPU model.
+    /// Matches Bochs cpuid.cc enable_cpu_extension() calls in each model's constructor.
+    fn get_isa_extensions_bitmask(&self) -> [u32; BX_ISA_EXTENSIONS_ARRAY_SIZE] {
+        [0; BX_ISA_EXTENSIONS_ARRAY_SIZE]
+    }
+
     fn get_vmx_extensions_bitmask(&self) -> Option<VMXExtensions>;
     fn get_svm_extensions_bitmask(&self) -> Option<SVMExtensions>;
 

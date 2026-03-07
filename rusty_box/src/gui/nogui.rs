@@ -110,4 +110,8 @@ impl BxGui for NoGui {
         self.display_mode = mode;
         tracing::debug!("NoGUI: Display mode changed to {:?}", mode);
     }
+
+    fn is_headless(&self) -> bool {
+        true
+    }
 }

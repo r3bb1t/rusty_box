@@ -72,8 +72,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
             }
 
-            // Protected mode (or V86 non-redirected): dispatch through IDT
-            match self.protected_mode_int(vector, soft_int, push_error, error_code) {
+            // Long mode: dispatch through 16-byte IDT entries
+            // Protected mode (or V86 non-redirected): dispatch through 8-byte IDT entries
+            let delivery_result = if self.long_mode() {
+                self.long_mode_int(vector, soft_int, push_error, error_code)
+            } else {
+                self.protected_mode_int(vector, soft_int, push_error, error_code)
+            };
+            match delivery_result {
                 Ok(()) => {}
                 Err(super::error::CpuError::BadVector {
                     vector: new_vector,
@@ -252,41 +258,65 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// IRET - Return from interrupt (16-bit operand size)
-    /// Based on Bochs ctrl_xfer16.cc IRET16
+    /// Based on Bochs ctrl_xfer16.cc IRET16 (lines 520-590)
     pub fn iret16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        // Invalidate prefetch queue at entry (Bochs ctrl_xfer16.cc:541)
+        // Invalidate prefetch queue at entry (Bochs ctrl_xfer16.cc:524)
         self.invalidate_prefetch_q();
 
-        // V8086 mode dispatch (Bochs ctrl_xfer16.cc:545-547)
-        // Must be checked BEFORE protected_mode() since V86 is neither real nor protected
-        if self.v8086_mode() {
-            return self.iret16_stack_return_from_v86();
-        }
+        // Unmask NMI on every IRET (Bochs ctrl_xfer16.cc:542)
+        self.unmask_event(Self::BX_EVENT_NMI);
+
+        // RSP_SPECULATIVE before all mode branches (Bochs ctrl_xfer16.cc:552)
+        self.speculative_rsp = true;
+        self.prev_rsp = self.esp() as u64;
 
         // Protected mode dispatch (Bochs ctrl_xfer16.cc:554)
+        // Bochs checks protected_mode() first, which includes protected+long modes
+        // but NOT V8086. V8086 is handled inside iret_protected via
+        // iret16_stack_return_from_v86.
         if self.protected_mode() {
             return self.iret_protected_16();
         }
 
-        // RSP_SPECULATIVE (Bochs ctrl_xfer16.cc:552)
-        self.speculative_rsp = true;
-        self.prev_rsp = self.esp() as u64;
+        // V8086 mode IRET (Bochs ctrl_xfer16.cc:558-561)
+        if self.v8086_mode() {
+            return self.iret16_stack_return_from_v86();
+        }
 
         // Real mode: Pop IP, CS, FLAGS from stack
         let new_ip = self.pop_16()?;
         let new_cs = self.pop_16()?;
         let new_flags = self.pop_16()?;
 
-        // Load CS with new selector (real mode load_seg_reg)
-        let cs_index = BxSegregs::Cs as usize;
-        self.sregs[cs_index].selector.value = new_cs;
-        self.sregs[cs_index].selector.rpl = 0; // real mode RPL = 0
-        unsafe {
-            self.sregs[cs_index].cache.u.segment.base = (new_cs as u64) << 4;
+        // Trace IRET from BIOS INT 13h handler during ISOLINUX window
+        // The INT 13h wrapper at 0x7F0D calls INT 13h; IRET returns to 0x7F0F
+        if self.icount > 1_768_000 && self.icount < 1_772_000 {
+            let cs_val = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
+            if cs_val == 0xF000 {
+                let cf = new_flags & 1;
+                tracing::warn!(
+                    "IRET from BIOS: CS:IP={:04x}:{:04x} → {:04x}:{:04x} FLAGS={:04x} CF={} AH={:#04x} icount={}",
+                    cs_val, self.rip() as u16, new_cs, new_ip, new_flags, cf, self.ah(), self.icount
+                );
+            }
         }
 
-        // Set IP
-        self.set_ip(new_ip);
+        // CS limit check (Bochs ctrl_xfer16.cc:568-571)
+        let limit = self.get_segment_limit(BxSegregs::Cs);
+        if (new_ip as u32) > limit {
+            tracing::error!(
+                "iret16: offset {:#06x} outside of CS limits {:#010x}",
+                new_ip,
+                limit
+            );
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Load CS with load_seg_reg (Bochs ctrl_xfer16.cc:573)
+        self.load_seg_reg_real_mode(BxSegregs::Cs, new_cs);
+
+        // Set IP (Bochs ctrl_xfer16.cc:574)
+        self.set_eip(new_ip as u32);
 
         // write_flags with change_IOPL=true, change_IF=true (Bochs ctrl_xfer16.cc:575)
         self.write_flags(new_flags, true, true);
@@ -304,40 +334,48 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// IRET - Return from interrupt (32-bit operand size)
-    /// Based on Bochs ctrl_xfer32.cc IRET32
+    /// Based on Bochs ctrl_xfer32.cc IRET32 (lines 540-612)
     pub fn iret32(&mut self, _instr: &Instruction) -> super::Result<()> {
-        // Invalidate prefetch queue at entry (Bochs ctrl_xfer32.cc:563)
+        // Invalidate prefetch queue at entry (Bochs ctrl_xfer32.cc:546)
         self.invalidate_prefetch_q();
 
-        // V8086 mode dispatch (Bochs ctrl_xfer32.cc:565-567)
-        // Must be checked BEFORE protected_mode() since V86 is neither real nor protected
-        if self.v8086_mode() {
-            return self.iret32_stack_return_from_v86();
-        }
+        // Unmask NMI on every IRET (Bochs ctrl_xfer32.cc:564)
+        self.unmask_event(Self::BX_EVENT_NMI);
 
-        // Protected mode dispatch (Bochs ctrl_xfer32.cc:574)
+        // RSP_SPECULATIVE before all mode branches (Bochs ctrl_xfer32.cc:574)
+        self.speculative_rsp = true;
+        self.prev_rsp = self.esp() as u64;
+
+        // Protected mode dispatch (Bochs ctrl_xfer32.cc:576)
         if self.protected_mode() {
             return self.iret_protected();
         }
 
-        // RSP_SPECULATIVE (Bochs ctrl_xfer32.cc:574)
-        self.speculative_rsp = true;
-        self.prev_rsp = self.esp() as u64;
+        // V8086 mode IRET (Bochs ctrl_xfer32.cc:580-583)
+        if self.v8086_mode() {
+            return self.iret32_stack_return_from_v86();
+        }
 
         // Real mode: Pop EIP, CS, EFLAGS from stack
         let new_eip = self.pop_32()?;
         let new_cs = self.pop_32()? as u16;
         let new_eflags = self.pop_32()?;
 
-        // Load CS with new selector (real mode load_seg_reg)
-        let cs_index = BxSegregs::Cs as usize;
-        self.sregs[cs_index].selector.value = new_cs;
-        self.sregs[cs_index].selector.rpl = 0; // real mode RPL = 0
-        unsafe {
-            self.sregs[cs_index].cache.u.segment.base = (new_cs as u64) << 4;
+        // CS limit check (Bochs ctrl_xfer32.cc:589-593)
+        let limit = self.get_segment_limit(BxSegregs::Cs);
+        if new_eip > limit {
+            tracing::error!(
+                "iret32: offset {:#010x} outside of CS limits {:#010x}",
+                new_eip,
+                limit
+            );
+            return self.exception(super::cpu::Exception::Gp, 0);
         }
 
-        // Set EIP
+        // Load CS with load_seg_reg (Bochs ctrl_xfer32.cc:595)
+        self.load_seg_reg_real_mode(BxSegregs::Cs, new_cs);
+
+        // Set EIP (Bochs ctrl_xfer32.cc:596)
         self.set_eip(new_eip);
 
         // writeEFlags with VIF, VIP, VM unchanged (Bochs ctrl_xfer32.cc:597)
@@ -854,6 +892,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Bochs exception.cc:754-759: clear IF, TF, AC, RF
         self.eflags
             .remove(EFlags::IF_ | EFlags::TF | EFlags::AC | EFlags::RF);
+        self.handle_interrupt_mask_change();
 
         // Invalidate prefetch
         self.eip_fetch_ptr = None;
@@ -897,6 +936,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::warn!("HLT: CPU halted with IF=0 (interrupts disabled) - CPU will be stuck!");
         }
 
+        // Capture first HLT in protected mode (for ISOLINUX debugging)
+        if !self.diag_first_pm_hlt_captured && self.protected_mode() {
+            self.diag_first_pm_hlt_captured = true;
+            self.diag_first_pm_hlt_icount = self.icount;
+            self.diag_first_pm_hlt_rip = self.eip();
+            self.diag_first_pm_hlt_regs = [
+                self.eax(), self.ecx(), self.edx(), self.ebx(),
+                self.esp(), self.ebp(), self.esi(), self.edi(),
+            ];
+            self.diag_first_pm_hlt_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
+            self.diag_first_pm_hlt_ss = self.sregs[BxSegregs::Ss as usize].selector.value;
+            self.diag_first_pm_hlt_eflags = self.eflags.bits();
+            // Read 16 dwords from stack
+            let esp = self.esp();
+            for i in 0..16u32 {
+                self.diag_first_pm_hlt_stack[i as usize] = self
+                    .stack_read_dword(esp.wrapping_add(i * 4))
+                    .unwrap_or(0xDEADDEAD);
+            }
+        }
+
         // Set activity state to halted (matches Bochs enter_sleep_state)
         self.activity_state = CpuActivityState::Hlt;
 
@@ -910,6 +970,54 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
+    /// XSAVE state component sizes and offsets (Bochs crregs.h:254-282)
+    /// Index: XCR0 bit number. (len, offset) for each component.
+    const XSAVE_COMPONENTS: [(u32, u32); 10] = [
+        (160, 0),      // 0: FPU (x87)
+        (256, 160),    // 1: SSE (XMM)
+        (256, 576),    // 2: YMM (AVX)
+        (0, 0),        // 3: BNDREGS (deprecated MPX)
+        (0, 0),        // 4: BNDCFG (deprecated MPX)
+        (64, 1088),    // 5: OPMASK (AVX-512)
+        (512, 1152),   // 6: ZMM_HI256 (AVX-512)
+        (1024, 1664),  // 7: HI_ZMM (AVX-512)
+        (0, 0),        // 8: PT (Processor Trace, not implemented)
+        (8, 2688),     // 9: PKRU
+    ];
+
+    /// Compute max XSAVE area size for given feature bitmap (standard layout).
+    /// Bochs cpuid.cc:180-190 xsave_max_size_required_by_features()
+    fn xsave_max_size_for_features(&self, features: u32) -> u32 {
+        // Legacy area (x87 + SSE header) is always 576 bytes minimum
+        let mut max_size: u32 = 576;
+        for n in 2..Self::XSAVE_COMPONENTS.len() {
+            if features & (1 << n) != 0 {
+                let (len, offset) = Self::XSAVE_COMPONENTS[n];
+                if len > 0 {
+                    let end = offset + len;
+                    if end > max_size {
+                        max_size = end;
+                    }
+                }
+            }
+        }
+        max_size
+    }
+
+    /// Compute XSAVE area size for compacted (XSAVEC/XSAVES) layout.
+    /// Bochs cpuid.cc:192-204 xsave_max_size_required_by_xsaves_features()
+    fn xsave_compacted_size_for_features(&self, features: u32) -> u32 {
+        // Legacy area + XSAVE header = 576
+        let mut max_size: u32 = 576;
+        for n in 2..Self::XSAVE_COMPONENTS.len() {
+            if features & (1 << n) != 0 {
+                let (len, _) = Self::XSAVE_COMPONENTS[n];
+                max_size += len;
+            }
+        }
+        max_size
+    }
+
     /// CPUID - CPU Identification
     /// Original: bochs/cpu/proc_ctrl.cc:101-131
     /// Returns CPU identification and feature information in EAX, EBX, ECX, EDX
@@ -918,11 +1026,69 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let function = self.eax();
         let sub_function = self.ecx();
 
-        let (eax, ebx, ecx, edx) = self.cpuid.get_cpuid_leaf(function, sub_function);
-        self.set_eax(eax);
-        self.set_ebx(ebx);
-        self.set_ecx(ecx);
-        self.set_edx(edx);
+        let (mut eax, mut ebx, mut ecx, mut edx) =
+            self.cpuid.get_cpuid_leaf(function, sub_function);
+
+        // Dynamic fixups — Bochs computes these from CPU state at runtime.
+        // Our static trait returns base values; we patch them here.
+        match function {
+            0x00000001 => {
+                // ECX bit 27 (OSXSAVE): only set if CR4.OSXSAVE is enabled
+                // Bochs cpuid.cc:586-588
+                if !self.cr4.osxsave() {
+                    ecx &= !(1 << 27); // clear OSXSAVE
+                }
+
+                // EDX bit 9 (APIC): only set if APIC is globally enabled
+                // Bochs cpuid.cc:651-657
+                if self.lapic.get_mode() == super::apic::ApicMode::GloballyDisabled {
+                    edx &= !(1 << 9); // clear APIC feature bit
+                }
+            }
+            0x0000000D => {
+                if sub_function == 0 {
+                    // Subleaf 0: EAX = xcr0_suppmask, ECX = max size for all features
+                    // EBX = max size for currently enabled features (current xcr0)
+                    // Bochs cpuid.cc:216-224
+                    eax = self.xcr0_suppmask;
+                    ebx = self.xsave_max_size_for_features(self.xcr0.get32());
+                    ecx = self.xsave_max_size_for_features(self.xcr0_suppmask);
+                } else if sub_function == 1 {
+                    // Subleaf 1 EBX: size for XSAVES (XCR0 | IA32_XSS)
+                    // Bochs cpuid.cc:244-245
+                    ebx = self.xsave_compacted_size_for_features(
+                        self.xcr0.get32() | (self.msr.ia32_xss as u32),
+                    );
+                    ecx = self.ia32_xss_suppmask;
+                } else if sub_function >= 2 && sub_function < 19 {
+                    // Per-component sub-leaves: check if component is supported
+                    let support_mask = self.xcr0_suppmask | self.ia32_xss_suppmask;
+                    if support_mask & (1 << sub_function) == 0 {
+                        eax = 0;
+                        ebx = 0;
+                        ecx = 0;
+                        edx = 0;
+                    } else {
+                        // ECX bit 0: managed via IA32_XSS (not XCR0)
+                        ecx = u32::from(self.ia32_xss_suppmask & (1 << sub_function) != 0);
+                    }
+                }
+            }
+            0x80000001 => {
+                // EDX bit 11 (SYSCALL/SYSRET): only in long mode
+                // Bochs cpuid.cc:860-861
+                if self.long64_mode() {
+                    edx |= 1 << 11; // BX_CPUID_EXT1_EDX_SYSCALL_SYSRET
+                }
+            }
+            _ => {}
+        }
+
+        // Bochs proc_ctrl.cc:124-127: RAX = leaf.eax (writes 64-bit, zero-extending)
+        self.set_rax(eax as u64);
+        self.set_rbx(ebx as u64);
+        self.set_rcx(ecx as u64);
+        self.set_rdx(edx as u64);
 
         tracing::trace!(
             "CPUID(EAX={:#x}, ECX={:#x}): -> EAX={:#x}, EBX={:#x}, ECX={:#x}, EDX={:#x}",

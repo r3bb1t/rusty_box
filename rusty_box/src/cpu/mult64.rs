@@ -57,7 +57,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op2 = self.read_linear_qword(seg, laddr);
+        let op2 = self.read_linear_qword(seg, laddr)?;
 
         let product_128 = (op1 as u128) * (op2 as u128);
         let product_64l = product_128 as u64;
@@ -130,7 +130,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op2 = self.read_linear_qword(seg, laddr) as i64;
+        let op2 = self.read_linear_qword(seg, laddr)? as i64;
 
         let product_128 = (op1 as i128) * (op2 as i128);
         let product_64l = product_128 as u64;
@@ -206,7 +206,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op2 = self.read_linear_qword(seg, laddr);
+        let op2 = self.read_linear_qword(seg, laddr)?;
 
         if op2 == 0 {
             return self.exception(Exception::De, 0);
@@ -306,7 +306,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op2 = self.read_linear_qword(seg, laddr) as i64;
+        let op2 = self.read_linear_qword(seg, laddr)? as i64;
 
         if op2 == 0 {
             return self.exception(Exception::De, 0);
@@ -375,7 +375,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op2 = self.read_linear_qword(seg, laddr) as i64;
+        let op2 = self.read_linear_qword(seg, laddr)? as i64;
 
         let product_128 = (op1 as i128) * (op2 as i128);
         let product_64l = product_128 as u64;
@@ -447,7 +447,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op1 = self.read_linear_qword(seg, laddr) as i64;
+        let op1 = self.read_linear_qword(seg, laddr)? as i64;
         let op2 = instr.id() as i32 as i64;
 
         let product_128 = (op1 as i128) * (op2 as i128);
@@ -522,7 +522,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op1 = self.read_linear_qword(seg, laddr) as i64;
+        let op1 = self.read_linear_qword(seg, laddr)? as i64;
         let op2 = instr.ib() as i8 as i64;
 
         let product_128 = (op1 as i128) * (op2 as i128);

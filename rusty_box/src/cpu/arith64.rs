@@ -170,7 +170,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let op2 = self.get_gpr64(instr.src() as usize);
         let sum = op1.wrapping_add(op2);
         self.write_rmw_linear_qword(rmw_laddr, sum);
@@ -194,7 +194,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let op1 = self.get_gpr64(instr.dst() as usize);
-        let op2 = self.read_linear_qword(seg, laddr);
+        let op2 = self.read_linear_qword(seg, laddr)?;
         let sum = op1.wrapping_add(op2);
         self.set_gpr64(instr.dst() as usize, sum);
         self.update_flags_add64(op1, op2, sum);
@@ -208,7 +208,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let op2 = instr.id() as i32 as i64 as u64; // sign-extend 32-bit imm to 64 bits
         let sum = op1.wrapping_add(op2);
         self.write_rmw_linear_qword(rmw_laddr, sum);
@@ -236,7 +236,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let op2 = self.get_gpr64(instr.src() as usize);
         let cf = self.get_cf() as u64;
         let sum = op1.wrapping_add(op2).wrapping_add(cf);
@@ -262,7 +262,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let op1 = self.get_gpr64(instr.dst() as usize);
-        let op2 = self.read_linear_qword(seg, laddr);
+        let op2 = self.read_linear_qword(seg, laddr)?;
         let cf = self.get_cf() as u64;
         let sum = op1.wrapping_add(op2).wrapping_add(cf);
         self.set_gpr64(instr.dst() as usize, sum);
@@ -276,7 +276,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let op2 = instr.id() as i32 as i64 as u64;
         let cf = self.get_cf() as u64;
         let sum = op1.wrapping_add(op2).wrapping_add(cf);
@@ -306,7 +306,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let op2 = self.get_gpr64(instr.src() as usize);
         let cf = self.get_cf() as u64;
         // Bochs: diff = op1 - (op2 + CF)
@@ -333,7 +333,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let op1 = self.get_gpr64(instr.dst() as usize);
-        let op2 = self.read_linear_qword(seg, laddr);
+        let op2 = self.read_linear_qword(seg, laddr)?;
         let cf = self.get_cf() as u64;
         let diff = op1.wrapping_sub(op2.wrapping_add(cf));
         self.set_gpr64(instr.dst() as usize, diff);
@@ -347,7 +347,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let op2 = instr.id() as i32 as i64 as u64;
         let cf = self.get_cf() as u64;
         let diff = op1.wrapping_sub(op2.wrapping_add(cf));
@@ -377,7 +377,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let op2 = self.get_gpr64(instr.src() as usize);
         let diff = op1.wrapping_sub(op2);
         self.write_rmw_linear_qword(rmw_laddr, diff);
@@ -401,7 +401,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let op1 = self.get_gpr64(instr.dst() as usize);
-        let op2 = self.read_linear_qword(seg, laddr);
+        let op2 = self.read_linear_qword(seg, laddr)?;
         let diff = op1.wrapping_sub(op2);
         self.set_gpr64(instr.dst() as usize, diff);
         self.update_flags_sub64(op1, op2, diff);
@@ -414,7 +414,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let op2 = instr.id() as i32 as i64 as u64;
         let diff = op1.wrapping_sub(op2);
         self.write_rmw_linear_qword(rmw_laddr, diff);
@@ -442,7 +442,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op1 = self.read_linear_qword(seg, laddr);
+        let op1 = self.read_linear_qword(seg, laddr)?;
         let op2 = self.get_gpr64(instr.src() as usize);
         let diff = op1.wrapping_sub(op2);
         self.update_flags_sub64(op1, op2, diff);
@@ -464,7 +464,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let op1 = self.get_gpr64(instr.dst() as usize);
-        let op2 = self.read_linear_qword(seg, laddr);
+        let op2 = self.read_linear_qword(seg, laddr)?;
         let diff = op1.wrapping_sub(op2);
         self.update_flags_sub64(op1, op2, diff);
         Ok(())
@@ -476,7 +476,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let op1 = self.read_linear_qword(seg, laddr);
+        let op1 = self.read_linear_qword(seg, laddr)?;
         let op2 = instr.id() as i32 as i64 as u64;
         let diff = op1.wrapping_sub(op2);
         self.update_flags_sub64(op1, op2, diff);
@@ -504,7 +504,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1_orig, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1_orig, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let result = 0u64.wrapping_sub(op1_orig);
         self.write_rmw_linear_qword(rmw_laddr, result);
         // Bochs: SET_FLAGS_OSZAPC_SUB_64(0, -op1_64, op1_64)
@@ -533,7 +533,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let result = op1.wrapping_add(1);
         self.write_rmw_linear_qword(rmw_laddr, result);
         // Bochs: SET_FLAGS_OSZAP_ADD_64(op1_64 - 1, 0, op1_64)
@@ -563,7 +563,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let result = op1.wrapping_sub(1);
         self.write_rmw_linear_qword(rmw_laddr, result);
         // Bochs: SET_FLAGS_OSZAP_SUB_64(op1_64 + 1, 0, op1_64)
@@ -593,7 +593,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let op2 = self.get_gpr64(instr.src() as usize);
         let sum = op1.wrapping_add(op2);
         self.write_rmw_linear_qword(rmw_laddr, sum);
@@ -627,7 +627,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
-        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+        let (op1, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
         let rax = self.get_gpr64(0); // RAX = index 0
         let diff = rax.wrapping_sub(op1);
         self.update_flags_sub64(rax, op1, diff);
@@ -678,8 +678,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // read_RMW_linear_dqword_aligned_64 returns hi, lo
         // (hi = [laddr+8], lo = [laddr])
-        let (op1_lo, rmw_laddr_lo) = self.read_rmw_linear_qword(seg, laddr);
-        let op1_hi = self.read_linear_qword(seg, laddr.wrapping_add(8));
+        let (op1_lo, rmw_laddr_lo) = self.read_rmw_linear_qword(seg, laddr)?;
+        let op1_hi = self.read_linear_qword(seg, laddr.wrapping_add(8))?;
 
         let rax = self.get_gpr64(0); // RAX
         let rdx = self.get_gpr64(2); // RDX
@@ -729,6 +729,49 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             0
         };
         self.set_gpr64(2, rdx); // RDX
+    }
+
+    // =========================================================================
+    // Accumulator-immediate forms (RAX, imm32 sign-extended to 64)
+    // =========================================================================
+
+    /// ADD RAX, imm32 (sign-extended to 64) — Bochs ADD_RAXId → ADD_EqIdR
+    /// Accumulator form: hardcodes RAX as destination (decoder stores rm != 0).
+    pub fn add_rax_id(&mut self, instr: &Instruction) {
+        let op1 = self.get_gpr64(0); // RAX
+        let op2 = instr.id() as i32 as i64 as u64;
+        let sum = op1.wrapping_add(op2);
+        self.set_gpr64(0, sum);
+        self.update_flags_add64(op1, op2, sum);
+    }
+
+    /// ADC RAX, imm32 (sign-extended to 64) — Bochs ADC_RAXId → ADC_EqIdR
+    pub fn adc_rax_id(&mut self, instr: &Instruction) {
+        let op1 = self.get_gpr64(0); // RAX
+        let op2 = instr.id() as i32 as i64 as u64;
+        let cf = self.get_cf() as u64;
+        let sum = op1.wrapping_add(op2).wrapping_add(cf);
+        self.set_gpr64(0, sum);
+        self.update_flags_add64(op1, op2, sum);
+    }
+
+    /// SBB RAX, imm32 (sign-extended to 64) — Bochs SBB_RAXId → SBB_EqIdR
+    pub fn sbb_rax_id(&mut self, instr: &Instruction) {
+        let op1 = self.get_gpr64(0); // RAX
+        let op2 = instr.id() as i32 as i64 as u64;
+        let cf = self.get_cf() as u64;
+        let diff = op1.wrapping_sub(op2.wrapping_add(cf));
+        self.set_gpr64(0, diff);
+        self.update_flags_sub64(op1, op2, diff);
+    }
+
+    /// SUB RAX, imm32 (sign-extended to 64) — Bochs SUB_RAXId → SUB_EqIdR
+    pub fn sub_rax_id(&mut self, instr: &Instruction) {
+        let op1 = self.get_gpr64(0); // RAX
+        let op2 = instr.id() as i32 as i64 as u64;
+        let diff = op1.wrapping_sub(op2);
+        self.set_gpr64(0, diff);
+        self.update_flags_sub64(op1, op2, diff);
     }
 
     // =========================================================================

@@ -111,11 +111,69 @@ impl Default for Descriptor {
     }
 }
 
-pub(super) const SEG_VALID_CACHE: u32 = 0x01;
-pub(super) const SEG_ACCESS_ROK: u32 = 0x02;
-pub(super) const SEG_ACCESS_WOK: u32 = 0x04;
-pub(super) const SEG_ACCESS_ROK4_G: u32 = 0x08;
-pub(super) const SEG_ACCESS_WOK4_G: u32 = 0x10;
+bitflags::bitflags! {
+    /// Segment cache validity and access-permission flags.
+    ///
+    /// Cached in `BxDescriptor::valid` — set during segment load and
+    /// checked on every memory access to avoid re-parsing the descriptor.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct SegAccess: u32 {
+        /// Descriptor cache entry is populated and valid
+        const VALID      = 0x01;
+        /// Read access allowed (segment-limit check passed)
+        const ROK        = 0x02;
+        /// Write access allowed (segment-limit check passed)
+        const WOK        = 0x04;
+        /// Read access allowed with 4 GB granularity (page-granular shortcut)
+        const ROK4G      = 0x08;
+        /// Write access allowed with 4 GB granularity (page-granular shortcut)
+        const WOK4G      = 0x10;
+        /// All read/write + granularity bits (convenience combo)
+        const ALL_ACCESS = Self::ROK.bits() | Self::WOK.bits()
+                         | Self::ROK4G.bits() | Self::WOK4G.bits();
+    }
+}
+
+// ---- Backward-compat aliases (prefer SegAccess::<NAME> in new code) ----
+pub(super) const SEG_VALID_CACHE: u32   = SegAccess::VALID.bits();
+pub(super) const SEG_ACCESS_ROK: u32    = SegAccess::ROK.bits();
+pub(super) const SEG_ACCESS_WOK: u32    = SegAccess::WOK.bits();
+pub(super) const SEG_ACCESS_ROK4_G: u32 = SegAccess::ROK4G.bits();
+pub(super) const SEG_ACCESS_WOK4_G: u32 = SegAccess::WOK4G.bits();
+
+bitflags::bitflags! {
+    /// Access-rights byte of a segment descriptor (byte 5 of the 8-byte entry).
+    ///
+    /// Layout: `P | DPL(2) | S | TYPE(4)`
+    ///  - P (bit 7): segment present
+    ///  - DPL (bits 5-6): descriptor privilege level (0-3)
+    ///  - S (bit 4): 1 = code/data segment, 0 = system/gate descriptor
+    ///  - TYPE (bits 0-3): segment type (see `SegTypeBits`)
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct AccessRights: u8 {
+        /// Bit 7 — Present
+        const PRESENT  = 0x80;
+        /// Bit 6 — DPL high bit
+        const DPL_HI   = 0x40;
+        /// Bit 5 — DPL low bit
+        const DPL_LO   = 0x20;
+        /// Bit 4 — Segment (1 = code/data, 0 = system/gate)
+        const SEGMENT  = 0x10;
+        /// Bits 0-3 — Type field (see SegTypeBits)
+        const TYPE_MASK = 0x0F;
+    }
+}
+
+impl AccessRights {
+    /// Both DPL bits combined (mask = 0x60)
+    pub const DPL_MASK: AccessRights = Self::DPL_HI.union(Self::DPL_LO);
+
+    /// Extract DPL value (0-3) from the access rights byte
+    #[inline]
+    pub const fn dpl(self) -> u8 {
+        (self.bits() >> 5) & 0x03
+    }
+}
 
 #[derive(Default, Clone)]
 pub(crate) struct BxDescriptor {
@@ -157,36 +215,71 @@ impl BxDescriptor {
     /// Get Access Rights byte from descriptor
     /// Based on get_ar_byte in segment_ctrl_pro.cc:380
     pub(super) fn get_ar_byte(&self) -> u8 {
-        let mut ar_byte = 0;
-        if self.p {
-            ar_byte |= 0x80;
-        }
-        ar_byte |= (self.dpl & 0x03) << 5;
-        if self.segment {
-            ar_byte |= 0x10;
-        }
-        ar_byte |= self.r#type & 0x0f;
-        ar_byte
+        let mut ar = AccessRights::empty();
+        if self.p { ar |= AccessRights::PRESENT; }
+        ar |= AccessRights::from_bits_retain(((self.dpl & 0x03) << 5) | if self.segment { AccessRights::SEGMENT.bits() } else { 0 });
+        ar |= AccessRights::from_bits_retain(self.r#type & 0x0F);
+        ar.bits()
     }
 
     /// Set Access Rights byte in descriptor
     /// Based on set_ar_byte in segment_ctrl_pro.cc:395
     pub(super) fn set_ar_byte(&mut self, ar_byte: u8) {
-        self.p = (ar_byte & 0x80) != 0;
+        let ar = AccessRights::from_bits_retain(ar_byte);
+        self.p = ar.contains(AccessRights::PRESENT);
         self.dpl = (ar_byte >> 5) & 0x03;
-        self.segment = (ar_byte & 0x10) != 0;
-        self.r#type = ar_byte & 0x0f;
+        self.segment = ar.contains(AccessRights::SEGMENT);
+        self.r#type = ar_byte & 0x0F;
     }
 }
 
-// Define constants for segment types
-const BX_SEGMENT_CODE: u8 = 0x8;
-const BX_SEGMENT_DATA_EXPAND_DOWN: u8 = 0x4;
-const BX_SEGMENT_CODE_CONFORMING: u8 = 0x4;
-const BX_SEGMENT_DATA_WRITE: u8 = 0x2;
-const BX_SEGMENT_CODE_READ: u8 = 0x2;
-const BX_SEGMENT_ACCESSED: u8 = 0x1;
+bitflags::bitflags! {
+    /// Segment descriptor type-field bits (low nibble of the access byte).
+    ///
+    /// For **code** segments bit 3 is set; for **data** segments it is clear.
+    /// Bit 2 has different meaning depending on code vs data:
+    ///   - Code: conforming (1 = conforming, 0 = non-conforming)
+    ///   - Data: expand-down (1 = expand-down, 0 = expand-up)
+    /// Bit 1:
+    ///   - Code: readable (1 = readable, 0 = execute-only)
+    ///   - Data: writable (1 = writable, 0 = read-only)
+    /// Bit 0: accessed (set by CPU on first access)
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct SegTypeBits: u8 {
+        /// Bit 3 — code segment flag (1 = code, 0 = data)
+        const CODE       = 0x8;
+        /// Bit 2 — conforming (code) / expand-down (data)
+        const CONFORMING = 0x4;
+        /// Bit 2 alias for data segments
+        const EXPAND_DOWN = 0x4;
+        /// Bit 1 — readable (code) / writable (data)
+        const READABLE   = 0x2;
+        /// Bit 1 alias for data segments
+        const WRITABLE   = 0x2;
+        /// Bit 0 — accessed (set by CPU on segment load)
+        const ACCESSED   = 0x1;
+    }
+}
 
+impl SegTypeBits {
+    /// Wrap a raw type nibble value
+    #[inline]
+    pub const fn from_raw(ty: u8) -> Self {
+        Self::from_bits_retain(ty & 0x0F)
+    }
+}
+
+// Convenience free functions (matching original Bochs BX_SEGMENT_* macros)
+#[inline] pub fn is_code_segment(ty: u8) -> bool              { SegTypeBits::from_raw(ty).contains(SegTypeBits::CODE) }
+#[inline] pub fn is_data_segment(ty: u8) -> bool              { !is_code_segment(ty) }
+#[inline] pub fn is_code_segment_conforming(ty: u8) -> bool   { SegTypeBits::from_raw(ty).contains(SegTypeBits::CONFORMING) }
+#[inline] pub fn is_code_segment_non_conforming(ty: u8) -> bool { !is_code_segment_conforming(ty) }
+#[inline] pub fn is_data_segment_expand_down(ty: u8) -> bool  { SegTypeBits::from_raw(ty).contains(SegTypeBits::EXPAND_DOWN) }
+#[inline] pub fn is_code_segment_readable(ty: u8) -> bool     { SegTypeBits::from_raw(ty).contains(SegTypeBits::READABLE) }
+#[inline] pub fn is_data_segment_writable(ty: u8) -> bool     { SegTypeBits::from_raw(ty).contains(SegTypeBits::WRITABLE) }
+#[inline] pub fn is_segment_accessed(ty: u8) -> bool          { SegTypeBits::from_raw(ty).contains(SegTypeBits::ACCESSED) }
+
+// Keep the SegmentType enum for backward compat with existing match-based code
 #[derive(Debug)]
 pub enum SegmentType {
     Code,
@@ -197,86 +290,28 @@ pub enum SegmentType {
     Accessed,
 }
 
-// Hack since i can't assign values in definition
 impl From<SegmentType> for u8 {
     fn from(value: SegmentType) -> Self {
         match value {
-            SegmentType::Code => 0x8,           // 8
-            SegmentType::DataExpandDown => 0x4, // 4
-            SegmentType::CodeConforming => 0x4, // 4 (this will be handled in checks)
-            SegmentType::DataWrite => 0x2,      // 2
-            SegmentType::CodeRead => 0x2,       // 2 (this will be handled in checks)
-            SegmentType::Accessed => 0x1,       // 1
+            SegmentType::Code => SegTypeBits::CODE.bits(),
+            SegmentType::DataExpandDown => SegTypeBits::EXPAND_DOWN.bits(),
+            SegmentType::CodeConforming => SegTypeBits::CONFORMING.bits(),
+            SegmentType::DataWrite => SegTypeBits::WRITABLE.bits(),
+            SegmentType::CodeRead => SegTypeBits::READABLE.bits(),
+            SegmentType::Accessed => SegTypeBits::ACCESSED.bits(),
         }
     }
 }
 
 impl SegmentType {
-    pub fn is_code_segment(ty: u8) -> bool {
-        ty & u8::from(SegmentType::Code) != 0
-    }
-
-    pub fn is_code_segment_conforming(ty: u8) -> bool {
-        ty & u8::from(SegmentType::CodeConforming) != 0
-    }
-
-    pub fn is_data_segment_expand_down(ty: u8) -> bool {
-        ty & u8::from(SegmentType::DataExpandDown) != 0
-    }
-
-    pub fn is_code_segment_readable(ty: u8) -> bool {
-        ty & u8::from(SegmentType::CodeRead) != 0
-    }
-
-    pub fn is_data_segment_writable(ty: u8) -> bool {
-        ty & u8::from(SegmentType::DataWrite) != 0
-    }
-
-    pub fn is_segment_accessed(ty: u8) -> bool {
-        ty & u8::from(SegmentType::Accessed) != 0
-    }
-
-    // New methods based on the provided macros
-    pub fn is_data_segment(ty: u8) -> bool {
-        !Self::is_code_segment(ty)
-    }
-
-    pub fn is_code_segment_non_conforming(ty: u8) -> bool {
-        !Self::is_code_segment_conforming(ty)
-    }
-}
-
-pub fn is_code_segment(type_: u8) -> bool {
-    type_ & BX_SEGMENT_CODE != 0
-}
-
-pub fn is_code_segment_conforming(type_: u8) -> bool {
-    type_ & BX_SEGMENT_CODE_CONFORMING != 0
-}
-
-pub fn is_data_segment_expand_down(type_: u8) -> bool {
-    type_ & BX_SEGMENT_DATA_EXPAND_DOWN != 0
-}
-
-pub fn is_code_segment_readable(type_: u8) -> bool {
-    type_ & BX_SEGMENT_CODE_READ != 0
-}
-
-pub fn is_data_segment_writable(type_: u8) -> bool {
-    type_ & BX_SEGMENT_DATA_WRITE != 0
-}
-
-pub fn is_segment_accessed(type_: u8) -> bool {
-    type_ & BX_SEGMENT_ACCESSED != 0
-}
-
-// New functions based on the provided macros
-pub fn is_data_segment(type_: u8) -> bool {
-    !is_code_segment(type_)
-}
-
-pub fn is_code_segment_non_conforming(type_: u8) -> bool {
-    !is_code_segment_conforming(type_)
+    pub fn is_code_segment(ty: u8) -> bool { is_code_segment(ty) }
+    pub fn is_code_segment_conforming(ty: u8) -> bool { is_code_segment_conforming(ty) }
+    pub fn is_data_segment_expand_down(ty: u8) -> bool { is_data_segment_expand_down(ty) }
+    pub fn is_code_segment_readable(ty: u8) -> bool { is_code_segment_readable(ty) }
+    pub fn is_data_segment_writable(ty: u8) -> bool { is_data_segment_writable(ty) }
+    pub fn is_segment_accessed(ty: u8) -> bool { is_segment_accessed(ty) }
+    pub fn is_data_segment(ty: u8) -> bool { is_data_segment(ty) }
+    pub fn is_code_segment_non_conforming(ty: u8) -> bool { is_code_segment_non_conforming(ty) }
 }
 
 #[derive(Debug, Clone, Default)]

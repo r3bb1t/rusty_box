@@ -543,6 +543,10 @@ pub struct BxKeyboardC {
     /// IRQ1 lower pending — set when port 0x60 read clears keyboard output buffer.
     /// Bochs calls DEV_pic_lower_irq(1) immediately; we defer to tick().
     pub(crate) irq1_lower_pending: bool,
+    /// Diagnostic: count of port 0x60 reads (keyboard data reads)
+    pub(crate) diag_port60_read_count: u64,
+    /// Diagnostic: last value returned from port 0x60
+    pub(crate) diag_port60_last_value: u8,
     /// IRQ12 lower pending — set when port 0x60 read clears mouse output buffer.
     /// Bochs calls DEV_pic_lower_irq(12) immediately; we defer to tick().
     pub(crate) irq12_lower_pending: bool,
@@ -633,6 +637,8 @@ impl BxKeyboardC {
             a20_enabled: true,
             a20_change_pending: false,
             irq1_lower_pending: false,
+            diag_port60_read_count: 0,
+            diag_port60_last_value: 0,
             irq12_lower_pending: false,
             kbd_initialized: false,
             scancode_escaped: false,
@@ -703,6 +709,7 @@ impl BxKeyboardC {
 
     /// Port 0x60 read — keyboard.cc:292-348
     fn read_port_60(&mut self) -> u32 {
+        self.diag_port60_read_count += 1;
         if self.kbd_controller.auxb {
             // Mouse byte available
             let val = self.kbd_controller.aux_output_buffer;
@@ -754,15 +761,18 @@ impl BxKeyboardC {
             // Bochs keyboard.cc:340: DEV_pic_lower_irq(1)
             self.irq1_lower_pending = true;
             self.activate_timer();
+            self.diag_port60_last_value = val;
             tracing::debug!("Keyboard: Read port 0x60 [kbd] = {:#04x}", val);
             val as u32
         } else {
             // Nothing ready — return last value
+            let val = self.kbd_controller.kbd_output_buffer;
+            self.diag_port60_last_value = val;
             tracing::debug!(
                 "Keyboard: Read port 0x60 (outb empty) = {:#04x}",
-                self.kbd_controller.kbd_output_buffer
+                val
             );
-            self.kbd_controller.kbd_output_buffer as u32
+            val as u32
         }
     }
 

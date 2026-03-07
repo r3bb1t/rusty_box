@@ -100,6 +100,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn jmp_ed_r(&mut self, instr: &Instruction) -> Result<()> {
         let dst = instr.dst() as usize;
         let new_eip = self.get_gpr32(dst);
+        if new_eip > 0x1000_0000 {
+            tracing::debug!("JMP r32: EIP={:#010x} from RIP={:#010x} reg={}", new_eip, self.prev_rip, dst);
+        }
         self.branch_near32(new_eip)?;
         tracing::trace!("JMP r32: EIP = {:#010x}", new_eip);
         Ok(())
@@ -111,6 +114,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr32(instr);
         let seg = BxSegregs::from(instr.seg());
         let new_eip = self.read_virtual_dword(seg, eaddr)?;
+        if new_eip > 0x1000_0000 {
+            tracing::debug!("JMP m32: [{:?}:{:#010x}] -> EIP={:#010x} from RIP={:#010x}", seg, eaddr, new_eip, self.prev_rip);
+        }
         self.branch_near32(new_eip)?;
         tracing::trace!(
             "JMP m32: [{:?}:{:#010x}] -> EIP = {:#010x}",
@@ -170,6 +176,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let new_eip = self.read_virtual_dword(seg, eaddr)?;
         let eip = self.eip();
 
+        if new_eip > 0x1000_0000 {
+            tracing::debug!("CALL m32: [{:?}:{:#010x}] -> EIP={:#010x} from RIP={:#010x}", seg, eaddr, new_eip, self.prev_rip);
+        }
         self.push_32(eip)?;
         self.branch_near32(new_eip)?;
         tracing::trace!(
@@ -198,6 +207,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// RET near - Return from procedure (32-bit)
     pub fn ret_near32(&mut self, _instr: &Instruction) -> Result<()> {
         let return_eip = self.pop_32()?;
+        if return_eip > 0x1000_0000 {
+            tracing::debug!("RET32: return_eip={:#010x} from RIP={:#010x} ESP={:#010x}", return_eip, self.prev_rip, self.get_gpr32(4));
+        }
         self.branch_near32(return_eip)?;
         Ok(())
     }
@@ -445,48 +457,63 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// LOOP32 rel8 - Decrement ECX, jump if not zero (32-bit mode)
-    /// Matching C++ ctrl_xfer32.cc (similar to LOOP16_Jb but 32-bit)
+    /// LOOP32 rel8 — Bochs ctrl_xfer32.cc:733-748
+    /// Decrements ECX or CX (based on as32L), jumps if nonzero.
     pub fn loop32_jb(&mut self, instr: &Instruction) -> Result<()> {
-        let ecx = self.get_gpr32(1);
-        let count = ecx.wrapping_sub(1);
-        self.set_gpr32(1, count);
-
-        if count != 0 {
-            let disp = instr.ib() as i8;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp as i32) as u32;
-            self.branch_near32(new_eip)?;
-            tracing::trace!("LOOP32 taken: EIP = {:#010x}, ECX = {}", new_eip, count);
+        if instr.as32_l() != 0 {
+            let count = self.ecx().wrapping_sub(1);
+            self.set_ecx(count);
+            if count != 0 {
+                let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32;
+                self.branch_near32(new_eip)?;
+            }
+        } else {
+            let count = self.cx().wrapping_sub(1);
+            self.set_cx(count);
+            if count != 0 {
+                let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32;
+                self.branch_near32(new_eip)?;
+            }
         }
         Ok(())
     }
 
-    /// LOOPE32/LOOPZ32 rel8 - Decrement ECX, jump if not zero and ZF=1 (32-bit mode)
+    /// LOOPE32/LOOPZ32 rel8 — Bochs ctrl_xfer32.cc:750-766
     pub fn loope32_jb(&mut self, instr: &Instruction) -> Result<()> {
-        let ecx = self.get_gpr32(1);
-        let count = ecx.wrapping_sub(1);
-        self.set_gpr32(1, count);
-
-        if count != 0 && self.get_zf() {
-            let disp = instr.ib() as i8;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp as i32) as u32;
-            self.branch_near32(new_eip)?;
+        if instr.as32_l() != 0 {
+            let count = self.ecx().wrapping_sub(1);
+            self.set_ecx(count);
+            if count != 0 && self.get_zf() {
+                let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32;
+                self.branch_near32(new_eip)?;
+            }
+        } else {
+            let count = self.cx().wrapping_sub(1);
+            self.set_cx(count);
+            if count != 0 && self.get_zf() {
+                let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32;
+                self.branch_near32(new_eip)?;
+            }
         }
         Ok(())
     }
 
-    /// LOOPNE32/LOOPNZ32 rel8 - Decrement ECX, jump if not zero and ZF=0 (32-bit mode)
+    /// LOOPNE32/LOOPNZ32 rel8 — Bochs ctrl_xfer32.cc:768-784
     pub fn loopne32_jb(&mut self, instr: &Instruction) -> Result<()> {
-        let ecx = self.get_gpr32(1);
-        let count = ecx.wrapping_sub(1);
-        self.set_gpr32(1, count);
-
-        if count != 0 && !self.get_zf() {
-            let disp = instr.ib() as i8;
-            let eip = self.eip();
-            let new_eip = (eip as i32).wrapping_add(disp as i32) as u32;
-            self.branch_near32(new_eip)?;
+        if instr.as32_l() != 0 {
+            let count = self.ecx().wrapping_sub(1);
+            self.set_ecx(count);
+            if count != 0 && !self.get_zf() {
+                let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32;
+                self.branch_near32(new_eip)?;
+            }
+        } else {
+            let count = self.cx().wrapping_sub(1);
+            self.set_cx(count);
+            if count != 0 && !self.get_zf() {
+                let new_eip = (self.eip() as i32).wrapping_add(instr.ib() as i8 as i32) as u32;
+                self.branch_near32(new_eip)?;
+            }
         }
         Ok(())
     }
@@ -514,7 +541,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // "Support for big real mode"
         // Only set these fields in v8086 mode
         if !self.real_mode() {
-            // v8086 mode
+            // v8086 mode — Bochs segment_ctrl_pro.cc:194-209
             self.sregs[seg_idx].cache.r#type = 3; // DATA_READ_WRITE_ACCESSED
             self.sregs[seg_idx].cache.dpl = 3;
             unsafe {
@@ -522,11 +549,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.sregs[seg_idx].cache.u.segment.g = false;
                 self.sregs[seg_idx].cache.u.segment.d_b = false;
                 self.sregs[seg_idx].cache.u.segment.avl = false;
+                self.sregs[seg_idx].cache.u.segment.l = false; // Bochs line 194
             }
         }
 
         if seg as usize == BxSegregs::Cs as usize {
             self.invalidate_prefetch_q();
+            // Bochs: updateFetchModeMask() updates icache hash + user_pl
+            self.update_fetch_mode_mask();
             self.handle_alignment_check();
         }
 
@@ -551,11 +581,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
-        if !self.real_mode() {
-            // Protected mode: use jump_protected
+        if self.protected_mode() {
+            // Protected mode (includes long modes): use jump_protected
             self.jump_protected(cs_raw, disp32 as u64)?;
         } else {
-            // Real mode
+            // Real mode or V8086 mode
             let limit = self.get_segment_limit(BxSegregs::Cs);
             if disp32 > limit {
                 tracing::error!(
@@ -585,10 +615,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
-        if !self.real_mode() {
+        if self.protected_mode() {
             return self.call_protected(cs_raw, disp32, true);
         } else {
-            // Real mode
+            // Real mode or V8086 mode
             let limit = self.get_segment_limit(BxSegregs::Cs);
             if disp32 > limit {
                 tracing::error!(
@@ -696,10 +726,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
-        if !self.real_mode() {
+        if self.protected_mode() {
             return self.return_protected(0, true);
         } else {
-            // Real mode - pop EIP and CS (32-bit pop, MSW discarded for CS)
+            // Real mode or V8086 mode - pop EIP and CS (32-bit pop, MSW discarded for CS)
             let eip = self.pop_32()?;
             let cs_raw = self.pop_32()? as u16; // 32-bit pop, MSW discarded
 
@@ -733,12 +763,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
-        let imm16 = instr.iw() as i16;
+        let imm16 = instr.iw();
 
-        if !self.real_mode() {
-            return self.return_protected(imm16 as u16, true);
+        if self.protected_mode() {
+            return self.return_protected(imm16, true);
         } else {
-            // Real mode - pop EIP and CS (32-bit pop, MSW discarded for CS)
+            // Real mode or V8086 mode - pop EIP and CS (32-bit pop, MSW discarded for CS)
             let eip = self.pop_32()?;
             let cs_raw = self.pop_32()? as u16; // 32-bit pop, MSW discarded
 
@@ -759,7 +789,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
             self.set_eip(eip);
 
-            // Pop additional bytes from stack
+            // Pop additional bytes from stack (unsigned addition)
             let ss_d_b = self.get_segment_d_b(BxSegregs::Ss);
             if ss_d_b {
                 let esp = self.get_gpr32(4);

@@ -1,6 +1,14 @@
 // cpu/cpudb/intel/corei7_skylake-x.cc
 
 use crate::cpu::cpuid::BxCpuIdTrait;
+use crate::cpu::decoder::{features::X86Feature, BX_ISA_EXTENSIONS_ARRAY_SIZE};
+
+/// Set a feature bit in the ISA extensions bitmask.
+/// Mirrors Bochs bx_cpuid_t::enable_cpu_extension().
+fn enable_extension(bitmask: &mut [u32; BX_ISA_EXTENSIONS_ARRAY_SIZE], feature: X86Feature) {
+    let idx = feature as usize;
+    bitmask[idx / 32] |= 1 << (idx % 32);
+}
 
 #[derive(Debug)]
 pub struct Corei7SkylakeX {}
@@ -50,6 +58,78 @@ impl BxCpuIdTrait for Corei7SkylakeX {
         Self {}
     }
 
+    /// Returns ISA extensions bitmask for Skylake-X.
+    /// Matches Bochs corei7_skylake-x.cc constructor lines 42-109.
+    fn get_isa_extensions_bitmask(&self) -> [u32; BX_ISA_EXTENSIONS_ARRAY_SIZE] {
+        let mut b = [0u32; BX_ISA_EXTENSIONS_ARRAY_SIZE];
+        // Bochs base class: BX_ISA_386 always enabled
+        enable_extension(&mut b, X86Feature::Isa386);
+        // corei7_skylake-x.cc:42-109
+        enable_extension(&mut b, X86Feature::IsaX87);
+        enable_extension(&mut b, X86Feature::Isa486);
+        enable_extension(&mut b, X86Feature::IsaPENTIUM);
+        enable_extension(&mut b, X86Feature::IsaP6);
+        enable_extension(&mut b, X86Feature::IsaMMX);
+        enable_extension(&mut b, X86Feature::IsaSYSENTER_SYSEXIT);
+        enable_extension(&mut b, X86Feature::IsaCLFLUSH);
+        enable_extension(&mut b, X86Feature::IsaDEBUG_EXTENSIONS);
+        enable_extension(&mut b, X86Feature::IsaVME);
+        enable_extension(&mut b, X86Feature::IsaPSE);
+        enable_extension(&mut b, X86Feature::IsaPAE);
+        enable_extension(&mut b, X86Feature::IsaPGE);
+        enable_extension(&mut b, X86Feature::IsaMTRR);
+        enable_extension(&mut b, X86Feature::IsaPAT);
+        enable_extension(&mut b, X86Feature::IsaXAPIC);
+        enable_extension(&mut b, X86Feature::IsaX2APIC);
+        enable_extension(&mut b, X86Feature::IsaLONG_MODE);
+        enable_extension(&mut b, X86Feature::IsaLM_LAHF_SAHF);
+        enable_extension(&mut b, X86Feature::IsaCMPXCHG16B);
+        enable_extension(&mut b, X86Feature::IsaNX);
+        enable_extension(&mut b, X86Feature::Isa1G_PAGES);
+        enable_extension(&mut b, X86Feature::IsaPCID);
+        enable_extension(&mut b, X86Feature::IsaTSC_ADJUST);
+        enable_extension(&mut b, X86Feature::IsaTSC_DEADLINE);
+        enable_extension(&mut b, X86Feature::IsaSSE);
+        enable_extension(&mut b, X86Feature::IsaSSE2);
+        enable_extension(&mut b, X86Feature::IsaSSE3);
+        enable_extension(&mut b, X86Feature::IsaSSSE3);
+        enable_extension(&mut b, X86Feature::IsaSSE4_1);
+        enable_extension(&mut b, X86Feature::IsaSSE4_2);
+        enable_extension(&mut b, X86Feature::IsaPOPCNT);
+        enable_extension(&mut b, X86Feature::IsaMONITOR_MWAIT);
+        enable_extension(&mut b, X86Feature::IsaVMX);
+        enable_extension(&mut b, X86Feature::IsaRDTSCP);
+        enable_extension(&mut b, X86Feature::IsaXSAVE);
+        enable_extension(&mut b, X86Feature::IsaXSAVEOPT);
+        enable_extension(&mut b, X86Feature::IsaXSAVEC);
+        enable_extension(&mut b, X86Feature::IsaXSAVES);
+        enable_extension(&mut b, X86Feature::IsaAES_PCLMULQDQ);
+        enable_extension(&mut b, X86Feature::IsaMOVBE);
+        enable_extension(&mut b, X86Feature::IsaAVX);
+        enable_extension(&mut b, X86Feature::IsaAVX_F16C);
+        enable_extension(&mut b, X86Feature::IsaAVX2);
+        enable_extension(&mut b, X86Feature::IsaAVX_FMA);
+        enable_extension(&mut b, X86Feature::IsaLZCNT);
+        enable_extension(&mut b, X86Feature::IsaBMI1);
+        enable_extension(&mut b, X86Feature::IsaBMI2);
+        enable_extension(&mut b, X86Feature::IsaFSGSBASE);
+        enable_extension(&mut b, X86Feature::IsaINVPCID);
+        enable_extension(&mut b, X86Feature::IsaSMEP);
+        enable_extension(&mut b, X86Feature::IsaRDRAND);
+        enable_extension(&mut b, X86Feature::IsaFCS_FDS_DEPRECATION);
+        enable_extension(&mut b, X86Feature::IsaRDSEED);
+        enable_extension(&mut b, X86Feature::IsaADX);
+        enable_extension(&mut b, X86Feature::IsaSMAP);
+        enable_extension(&mut b, X86Feature::IsaFDP_DEPRECATION);
+        enable_extension(&mut b, X86Feature::IsaAVX512);
+        enable_extension(&mut b, X86Feature::IsaAVX512_DQ);
+        enable_extension(&mut b, X86Feature::IsaAVX512_CD);
+        enable_extension(&mut b, X86Feature::IsaAVX512_BW);
+        enable_extension(&mut b, X86Feature::IsaCLFLUSHOPT);
+        enable_extension(&mut b, X86Feature::IsaCLWB);
+        b
+    }
+
     /// CPUID leaf data matching hardware values from corei7_skylake-x.txt (Logical CPU #0).
     /// Reference: cpp_orig/bochs/cpu/cpudb/intel/corei7_skylake-x.cc
     ///
@@ -89,15 +169,44 @@ impl BxCpuIdTrait for Corei7SkylakeX {
                     _ => (0, 0, 0, 0),
                 }
             }
+            0x00000005 => (
+                // MONITOR/MWAIT Leaf — Bochs cpuid.cc:86-118
+                // Skylake passes edx_power_states = 0x00002020
+                64,         // EAX: smallest monitor-line size (cache line = 64)
+                64,         // EBX: largest monitor-line size (cache line = 64)
+                0x00000003, // ECX: extensions supported (bit 0) + interrupt break-event (bit 1)
+                0x00002020, // EDX: C0/C1 sub-states
+            ),
             0x00000006 => (0x00000075, 0x00000002, 0x00000009, 0x00000000), // Thermal/Power
             0x00000007 => {
                 // Structured Extended Feature Flags — sub-leaf in ECX
+                // Bochs corei7_skylake-x.cc:445-493 + cpuid.cc:964-1082
+                // Only advertise features that Bochs enables for Skylake-X
                 match ecx {
                     0 => (
                         0x00000000, // max sub-leaf
-                        0xD39FFFFB, // EBX: FSGSBASE,TSC_ADJ,BMI1,AVX2,FDP_DEP,SMEP,BMI2,
-                        //      ERMS,INVPCID,FCS_FDS,AVX512F,AVX512DQ,RDSEED,ADX,
-                        //      SMAP,AVX512CD,CLFLUSHOPT,CLWB,AVX512BW,AVX512VL
+                        // EBX: Bochs-matching dynamic value for Skylake-X ISA extensions:
+                        // bit 0:  FSGSBASE
+                        // bit 1:  TSC_ADJUST
+                        // bit 3:  BMI1
+                        // bit 5:  AVX2
+                        // bit 6:  FDP_DEPRECATION
+                        // bit 7:  SMEP
+                        // bit 8:  BMI2
+                        // bit 9:  ERMS (enhanced REP MOVSB/STOSB)
+                        // bit 10: INVPCID
+                        // bit 13: FCS/FDS deprecation
+                        // bit 16: AVX512F
+                        // bit 17: AVX512DQ
+                        // bit 18: RDSEED
+                        // bit 19: ADX
+                        // bit 20: SMAP
+                        // bit 23: CLFLUSHOPT
+                        // bit 24: CLWB
+                        // bit 28: AVX512CD
+                        // bit 30: AVX512BW
+                        // bit 31: AVX512VL
+                        0xD19F27EB,
                         0x00000000, // ECX
                         0x00000000, // EDX
                     ),
@@ -105,6 +214,66 @@ impl BxCpuIdTrait for Corei7SkylakeX {
                 }
             }
             0x0000000A => (0x07300404, 0x00000000, 0x00000000, 0x00000603), // Perf monitoring
+            0x0000000B => {
+                // Extended Topology Enumeration — Bochs cpuid.cc:163-177
+                match ecx {
+                    0 => (
+                        0x00000001, // EAX: bits to shift for next level (SMT=1)
+                        0x00000001, // EBX: logical procs at this level
+                        0x00000100, // ECX: level number=0, type=SMT(1)
+                        0x00000000, // EDX: x2APIC ID (filled dynamically)
+                    ),
+                    1 => (
+                        0x00000000, // EAX: bits to shift
+                        0x00000001, // EBX: logical procs at this level
+                        0x00000201, // ECX: level number=1, type=Core(2)
+                        0x00000000, // EDX: x2APIC ID
+                    ),
+                    _ => (0, 0, 0, 0),
+                }
+            }
+            0x0000000D => {
+                // XSAVE state — Bochs cpuid.cc:206-268
+                // Subleaf 0: XCR0 valid bits + max sizes
+                // NOTE: EAX (xcr0_suppmask) and EBX (size for current XCR0) are
+                // fixed up dynamically in cpuid() handler using CPU state.
+                // Static values here use xcr0_suppmask=0xE7 (FPU+SSE+YMM+OPMASK+ZMM_HI256+HI_ZMM)
+                match ecx {
+                    0 => (
+                        0x000000E7, // EAX: xcr0_suppmask (overridden dynamically)
+                        0x00000240, // EBX: max size for current xcr0 (576 = 0x240 for x87+SSE; overridden dynamically)
+                        0x00000A80, // ECX: max size for all features = 2688 (0xA80)
+                        0x00000000, // EDX: xcr0 upper 32 bits
+                    ),
+                    1 => (
+                        // XSAVEOPT(bit 0) + compaction(bit 1) + XGETBV ECX=1(bit 2) + XSAVES(bit 3)
+                        0x0000000F, // EAX: XSAVEOPT + XSAVEC + XGETBV_ECX1 + XSAVES
+                        0x00000000, // EBX: size of XSAVE area for XCRO|XSS
+                        0x00000000, // ECX: IA32_XSS lower supported bits
+                        0x00000000, // EDX: IA32_XSS upper supported bits
+                    ),
+                    // Per-component sub-leaves: (len, offset, flags, 0)
+                    2 => (256, 576, 0, 0),    // YMM state: len=256, offset=576
+                    5 => (64, 1088, 0, 0),    // OPMASK: len=64, offset=1088
+                    6 => (512, 1152, 0, 0),   // ZMM_HI256: len=512, offset=1152
+                    7 => (1024, 1664, 0, 0),  // HI_ZMM: len=1024, offset=1664
+                    _ => (0, 0, 0, 0),
+                }
+            }
+            0x00000015 => (
+                // TSC/Crystal Clock Info — Bochs corei7_skylake-x.cc:196
+                0x00000002, // EAX: denominator
+                0x00000124, // EBX: numerator
+                0x00000000, // ECX: nominal frequency (0 = not enumerated)
+                0x00000000,
+            ),
+            0x00000016 => (
+                // Processor Frequency Info — Bochs corei7_skylake-x.cc:200
+                0x00000DAC, // EAX: base frequency (MHz) = 3500
+                0x00000FA0, // EBX: max frequency (MHz) = 4000
+                0x00000064, // ECX: bus (reference) frequency (MHz) = 100
+                0x00000000,
+            ),
             // Extended CPUID Information
             0x80000000 => (
                 0x80000008, // Max extended leaf
@@ -130,10 +299,26 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             0x80000008 => (
                 // [7:0]=36 phys addr bits (4GB emulator), [15:8]=48 virt addr bits
                 // Hardware has 46 phys bits; we use 36 to match our 4GB address space
-                0x00003024, 0x00000000, 0x00000000, 0x00000000,
+                0x00003024,
+                // EBX: bit 9 = WBNOINVD (Bochs cpuid.cc:1497-1498 sets for long mode CPUs)
+                0x00000200,
+                0x00000000,
+                0x00000000,
             ),
-            // All other leaves return zeros
-            _ => (0, 0, 0, 0),
+            // Bochs corei7_skylake-x.cc:198-201: default case falls through
+            // to leaf 0x16 (Processor Frequency). This matches real hardware behavior
+            // where unknown standard leaves return the last valid leaf's data.
+            // Extended leaves > max_ext_leaf return zeros (handled by check below).
+            _ => {
+                if eax >= 0x80000000 && eax > 0x80000008 {
+                    (0, 0, 0, 0) // beyond max extended leaf
+                } else if eax > 0x00000016 && eax < 0x80000000 {
+                    // Beyond max standard leaf — Bochs returns leaf 0x16 data
+                    (0x00000DAC, 0x00000FA0, 0x00000064, 0x00000000)
+                } else {
+                    (0, 0, 0, 0) // reserved/unhandled standard leaves
+                }
+            }
         }
     }
 }

@@ -266,6 +266,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 // Clear IF or VIF depending on IOPL (vm8086.cc:251-254)
                 if self.eflags.iopl() == 3 {
                     self.eflags.remove(EFlags::IF_);
+                    self.handle_interrupt_mask_change();
                 } else {
                     self.eflags.remove(EFlags::VIF);
                 }

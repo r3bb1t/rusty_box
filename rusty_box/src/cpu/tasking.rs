@@ -517,10 +517,8 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 return self.exception(Exception::Ts, raw_cs_selector & 0xfffc);
             }
 
-            // updateFetchModeMask equivalent (Bochs cpu.h:5501): set user_pl from CS.RPL
-            // Must be done after CS selector+cache are fully set and save_cpl restored
-            self.user_pl = cs_selector.rpl == 3;
-            // Update fetch mode after CS reload (Bochs tasking.cc:756)
+            // Bochs tasking.cc:756 — updateFetchModeMask() after CS reload
+            self.update_fetch_mode_mask();
             self.invalidate_prefetch_q();
             // Alignment check depends on new CPL (Bochs tasking.cc:759)
             self.handle_alignment_check();

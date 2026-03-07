@@ -302,7 +302,7 @@ pub enum X86FeatureName {
 }
 
 /// segment register encoding
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BxSegregs {
     Es = 0,
     Cs = 1,

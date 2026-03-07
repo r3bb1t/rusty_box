@@ -366,8 +366,12 @@ pub const fn fetch_decode32_inplace(
         nnn = ((modrm >> 3) & 0x7) as u32;
         rm = (modrm & 0x7) as u32;
 
-        if mod_field == 3 {
-            // Register mode
+        // MOV CR/DR (0F 20-26) always treat as register form regardless of mod field
+        // Matching Bochs decoder_creg32 which calls assertModC0()
+        let force_modc0 = opcode_map == 1 && matches!(b1 & 0xFF, 0x20..=0x26);
+
+        if mod_field == 3 || force_modc0 {
+            // Register mode (or forced register for MOV CR/DR)
             metainfo1_bits |= MetaInfoFlags::ModC0.bits();
         } else {
             // Memory mode - depends on address size
@@ -739,6 +743,15 @@ pub const fn fetch_decode32_inplace(
     } else if opcode_map == 4 {
         // 3DNow! instruction: use suffix to look up opcode directly
         instr.meta_info.ia_opcode = BX3_DNOW_OPCODE[dnow_suffix as usize];
+    } else if opcode_map == 0 && b1 == 0x90 {
+        // Special NOP/PAUSE handling (Bochs decoder32_nop)
+        if sse_prefix == 2 {
+            // F3 prefix → PAUSE
+            instr.meta_info.ia_opcode = Opcode::Pause;
+        } else {
+            // Bare 0x90 → NOP
+            instr.meta_info.ia_opcode = Opcode::Nop;
+        }
     } else {
         instr.meta_info.ia_opcode = lookup_opcode_32(b1, opcode_map, decmask, nnn);
     }
@@ -1080,6 +1093,54 @@ const fn get_opcode_table_0f_32(b2: u8) -> &'static [u64] {
         0x4D => &BxOpcodeTable0F4D,
         0x4E => &BxOpcodeTable0F4E,
         0x4F => &BxOpcodeTable0F4F,
+        // SSE data movement, arithmetic, comparison, shuffle (0F 50-7F)
+        0x50 => &BxOpcodeTable0F50,
+        0x51 => &BxOpcodeTable0F51,
+        0x52 => &BxOpcodeTable0F52,
+        0x53 => &BxOpcodeTable0F53,
+        0x54 => &BxOpcodeTable0F54,
+        0x55 => &BxOpcodeTable0F55,
+        0x56 => &BxOpcodeTable0F56,
+        0x57 => &BxOpcodeTable0F57,
+        0x58 => &BxOpcodeTable0F58,
+        0x59 => &BxOpcodeTable0F59,
+        0x5A => &BxOpcodeTable0F5A,
+        0x5B => &BxOpcodeTable0F5B,
+        0x5C => &BxOpcodeTable0F5C,
+        0x5D => &BxOpcodeTable0F5D,
+        0x5E => &BxOpcodeTable0F5E,
+        0x5F => &BxOpcodeTable0F5F,
+        0x60 => &BxOpcodeTable0F60,
+        0x61 => &BxOpcodeTable0F61,
+        0x62 => &BxOpcodeTable0F62,
+        0x63 => &BxOpcodeTable0F63,
+        0x64 => &BxOpcodeTable0F64,
+        0x65 => &BxOpcodeTable0F65,
+        0x66 => &BxOpcodeTable0F66,
+        0x67 => &BxOpcodeTable0F67,
+        0x68 => &BxOpcodeTable0F68,
+        0x69 => &BxOpcodeTable0F69,
+        0x6A => &BxOpcodeTable0F6A,
+        0x6B => &BxOpcodeTable0F6B,
+        0x6C => &BxOpcodeTable0F6C,
+        0x6D => &BxOpcodeTable0F6D,
+        0x6E => &BxOpcodeTable0F6E,
+        0x6F => &BxOpcodeTable0F6F,
+        0x70 => &BxOpcodeTable0F70,
+        0x71 => &BxOpcodeTable0F71,
+        0x72 => &BxOpcodeTable0F72,
+        0x73 => &BxOpcodeTable0F73,
+        0x74 => &BxOpcodeTable0F74,
+        0x75 => &BxOpcodeTable0F75,
+        0x76 => &BxOpcodeTable0F76,
+        0x77 => &BxOpcodeTable0F77,
+        0x78 => &BxOpcodeTable0F78,
+        0x79 => &BxOpcodeTable0F79,
+        // 0x7A, 0x7B are UD in Bochs
+        0x7C => &BxOpcodeTable0F7C,
+        0x7D => &BxOpcodeTable0F7D,
+        0x7E => &BxOpcodeTable0F7E,
+        0x7F => &BxOpcodeTable0F7F,
         0x80 => &BxOpcodeTable0F80_32,
         0x81 => &BxOpcodeTable0F81_32,
         0x82 => &BxOpcodeTable0F82_32,
@@ -1151,6 +1212,54 @@ const fn get_opcode_table_0f_32(b2: u8) -> &'static [u64] {
         0xC6 => &BxOpcodeTable0FC6,
         0xC7 => &BxOpcodeTable0FC7,
         0xC8..=0xCF => &BxOpcodeTable0FC8x0FCF,
+        // SSE/MMX data operations (0F D0-FE)
+        0xD0 => &BxOpcodeTable0FD0,
+        0xD1 => &BxOpcodeTable0FD1,
+        0xD2 => &BxOpcodeTable0FD2,
+        0xD3 => &BxOpcodeTable0FD3,
+        0xD4 => &BxOpcodeTable0FD4,
+        0xD5 => &BxOpcodeTable0FD5,
+        0xD6 => &BxOpcodeTable0FD6,
+        0xD7 => &BxOpcodeTable0FD7,
+        0xD8 => &BxOpcodeTable0FD8,
+        0xD9 => &BxOpcodeTable0FD9,
+        0xDA => &BxOpcodeTable0FDA,
+        0xDB => &BxOpcodeTable0FDB,
+        0xDC => &BxOpcodeTable0FDC,
+        0xDD => &BxOpcodeTable0FDD,
+        0xDE => &BxOpcodeTable0FDE,
+        0xDF => &BxOpcodeTable0FDF,
+        0xE0 => &BxOpcodeTable0FE0,
+        0xE1 => &BxOpcodeTable0FE1,
+        0xE2 => &BxOpcodeTable0FE2,
+        0xE3 => &BxOpcodeTable0FE3,
+        0xE4 => &BxOpcodeTable0FE4,
+        0xE5 => &BxOpcodeTable0FE5,
+        0xE6 => &BxOpcodeTable0FE6,
+        0xE7 => &BxOpcodeTable0FE7,
+        0xE8 => &BxOpcodeTable0FE8,
+        0xE9 => &BxOpcodeTable0FE9,
+        0xEA => &BxOpcodeTable0FEA,
+        0xEB => &BxOpcodeTable0FEB,
+        0xEC => &BxOpcodeTable0FEC,
+        0xED => &BxOpcodeTable0FED,
+        0xEE => &BxOpcodeTable0FEE,
+        0xEF => &BxOpcodeTable0FEF,
+        0xF0 => &BxOpcodeTable0FF0,
+        0xF1 => &BxOpcodeTable0FF1,
+        0xF2 => &BxOpcodeTable0FF2,
+        0xF3 => &BxOpcodeTable0FF3,
+        0xF4 => &BxOpcodeTable0FF4,
+        0xF5 => &BxOpcodeTable0FF5,
+        0xF6 => &BxOpcodeTable0FF6,
+        0xF7 => &BxOpcodeTable0FF7,
+        0xF8 => &BxOpcodeTable0FF8,
+        0xF9 => &BxOpcodeTable0FF9,
+        0xFA => &BxOpcodeTable0FFA,
+        0xFB => &BxOpcodeTable0FFB,
+        0xFC => &BxOpcodeTable0FFC,
+        0xFD => &BxOpcodeTable0FFD,
+        0xFE => &BxOpcodeTable0FFE,
         0xFF => &BxOpcodeTable0FFF,
         _ => &[],
     }
@@ -1350,11 +1459,10 @@ mod tests {
 
     #[test]
     fn test_nop() {
-        // 0x90 is actually XCHG EAX,EAX which is the NOP encoding
+        // 0x90 is NOP (Bochs decoder32_nop returns NOP for bare 0x90)
         let i = fetch_decode32(&[0x90], true).unwrap();
         assert_eq!(i.ilen(), 1);
-        // In 32-bit mode, this returns the XCHG opcode from the table
-        assert_eq!(i.get_ia_opcode(), Opcode::XchgErxEax);
+        assert_eq!(i.get_ia_opcode(), Opcode::Nop);
     }
 
     #[test]

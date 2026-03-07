@@ -242,6 +242,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // error_code: if exception generates and error, push this error code
     #[track_caller]
     pub(super) fn exception(&mut self, vector: Exception, mut error_code: u16) -> Result<()> {
+        // Track exception counts for diagnostics
+        let vec_idx = vector as usize;
+        if vec_idx < 32 {
+            self.diag_exception_counts[vec_idx] += 1;
+        }
+        // Alpine boot debug: trace first exception near the stuck point
+        if self.icount >= 1849000 && self.icount <= 1849300 {
+            let caller = core::panic::Location::caller();
+            tracing::error!(
+                "ALPINE_EXC: vec={:?} err={:#x} RIP={:#x} prev_RIP={:#x} icount={} caller={}:{}",
+                vector,
+                error_code,
+                self.rip(),
+                self.prev_rip,
+                self.icount,
+                caller.file(),
+                caller.line(),
+            );
+        }
         // Log the caller site for #GP to identify spurious exceptions during debugging
         if vector == Exception::Gp && !self.real_mode() {
             let caller = core::panic::Location::caller();
@@ -316,6 +335,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
+        // Bochs exception.cc:1025-1033 — commit debug_trap into DR6 on #DB
+        if vector == Exception::Db {
+            self.dr6 = super::crregs::BxDr6::from_bits_retain(
+                (self.dr6.bits() & 0xFFFF6FF0) | (self.debug_trap & 0x0000E00F),
+            );
+            self.dr7.set_gd(0);
+        }
+
         // Bochs: EXT = 1 for exceptions.
         self.ext = true;
 
@@ -374,10 +401,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         self.rip(), self.icount);
                 }
             }
-            // If protected_mode_int returns a BadVector error, it means delivery caused
+            // Dispatch to long_mode_int or protected_mode_int based on CPU mode.
+            // If delivery returns a BadVector error, it means delivery caused
             // another exception (like IDT entry invalid → #GP). Handle it like Bochs does:
             // call exception() recursively so double-fault detection runs normally.
-            match self.protected_mode_int(vector_u8, false, push_error, error_code) {
+            let delivery_result = if self.long_mode() {
+                self.long_mode_int(vector_u8, false, push_error, error_code)
+            } else {
+                self.protected_mode_int(vector_u8, false, push_error, error_code)
+            };
+            match delivery_result {
                 Ok(()) => {}
                 Err(super::error::CpuError::BadVector {
                     vector: new_vector,
@@ -393,6 +426,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         self.icount
                     );
                     return self.exception(new_vector, new_error_code);
+                }
+                Err(super::error::CpuError::Memory(
+                    crate::memory::MemoryError::PageNotPresent,
+                )) => {
+                    // Exception delivery hit an unmapped page — escalate to #DF
+                    tracing::debug!("Exception delivery: PageNotPresent for vec={:?} CR3={:#x} — escalating to #DF", vector, self.cr3);
+                    return self.exception(Exception::Df, 0);
                 }
                 Err(e) => return Err(e),
             }

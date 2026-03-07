@@ -3,8 +3,6 @@
 //! Based on Bochs stack32.cc
 //! Copyright (C) 2001-2018 The Bochs Project
 
-use alloc::vec::Vec;
-
 use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, eflags::EFlags};
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -74,150 +72,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Pops a 16-bit selector from stack (advancing ESP by 4) and loads it into segment register
     pub fn pop32_sw(&mut self, instr: &Instruction) -> Result<(), super::error::CpuError> {
         use crate::cpu::decoder::BxSegregs;
-        use crate::cpu::segment_ctrl_pro::parse_selector;
 
-        // Pop 16-bit selector from stack
-        // In 32-bit mode, ESP advances by 4 even though only 2 bytes are used
-        let selector_value = self.stack_read_word(self.esp())? as u16;
+        // Bochs POP32_Sw: pop 32-bit value, use low 16 bits as selector
+        let val32 = self.pop_32()?;
+        let selector_value = val32 as u16;
+        let seg = BxSegregs::from(instr.dst());
 
-        // Get destination segment register from instruction
-        let seg_idx = instr.dst() as usize;
-        let seg = BxSegregs::from(seg_idx as u8);
-
-        // Load segment register
-        // Original Bochs: load_seg_reg(&BX_CPU_THIS_PTR sregs[i->dst()], selector);
-        let in_real_mode = self.real_mode();
-
-        if in_real_mode {
-            // Real mode: simple base = selector << 4
-            self.load_seg_reg_real_mode(seg, selector_value);
-        } else {
-            // Protected mode: check for NULL selector first
-            // Based on Bochs segment_ctrl_pro.cc:40,108 - check (new_value & 0xfffc) == 0
-            let is_null_selector = (selector_value & 0xfffc) == 0;
-
-            if is_null_selector {
-                // NULL selector handling
-                if seg_idx == BxSegregs::Ss as usize {
-                    // SS cannot be NULL in protected mode (except 64-bit mode with special conditions)
-                    // Bochs segment_ctrl_pro.cc:48-49
-                    tracing::debug!("POP SS: loading NULL selector in protected mode - #GP");
-                    self.exception(super::cpu::Exception::Gp, 0)?;
-                    return Ok(());
-                } else {
-                    // DS/ES/FS/GS can be NULL - just invalidate the segment
-                    // Based on Bochs load_null_selector() in segment_ctrl_pro.cc:212-234
-                    tracing::debug!("POP seg{}: loading NULL selector (allowed)", seg_idx);
-                    self.load_null_selector(seg, selector_value);
-                }
-            } else {
-                // Non-NULL selector: fetch descriptor and load
-                let mut selector = super::descriptor::BxSelector::default();
-                parse_selector(selector_value, &mut selector);
-
-                let fetch_result = self.fetch_raw_descriptor(&selector);
-                if fetch_result.is_err() {
-                    let ss_base =
-                        unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.base };
-                    let laddr = ss_base + self.esp() as u64;
-                    // Try to translate and show what's at the stack
-                    let paddr = self.translate_data_read(laddr).unwrap_or(0xDEAD);
-                    tracing::warn!("POP32_Sw: fetch_raw_descriptor FAILED for selector={:#06x} (index={}, TI={}), seg_idx={}, icount={}",
-                        selector_value, selector.index, selector.ti, seg_idx, self.icount);
-                    tracing::warn!(
-                        "  ESP={:#x} SS.base={:#x} laddr={:#x} paddr={:#x}",
-                        self.esp(),
-                        ss_base,
-                        laddr,
-                        paddr
-                    );
-                    tracing::warn!(
-                        "  GDTR.base={:#x} GDTR.limit={:#x} CR3={:#x}",
-                        self.gdtr.base,
-                        self.gdtr.limit,
-                        self.cr3
-                    );
-                    // Dump stack dwords around ESP
-                    let esp = self.esp();
-                    for i in 0..8u32 {
-                        let offset = esp.wrapping_add(i * 4);
-                        let la = ss_base + offset as u64;
-                        if let Ok(pa) = self.translate_data_read(la) {
-                            let val = self.mem_read_dword(pa);
-                            tracing::warn!(
-                                "  Stack[ESP+{:#x}] = {:#010x}  (laddr={:#x} paddr={:#x})",
-                                i * 4,
-                                val,
-                                la,
-                                pa
-                            );
-                        }
-                    }
-                    // Also show previous ESP entries (what was popped before)
-                    for i in 1..5u32 {
-                        let offset = esp.wrapping_sub(i * 4);
-                        let la = ss_base + offset as u64;
-                        if let Ok(pa) = self.translate_data_read(la) {
-                            let val = self.mem_read_dword(pa);
-                            tracing::warn!(
-                                "  Stack[ESP-{:#x}] = {:#010x}  (laddr={:#x} paddr={:#x})",
-                                i * 4,
-                                val,
-                                la,
-                                pa
-                            );
-                        }
-                    }
-                    // Dump code bytes near the failing instruction
-                    let cs_base =
-                        unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
-                    let code_vaddr = cs_base + self.eip() as u64;
-                    // Read 32 bytes before and 16 bytes after
-                    let mut code_bytes = Vec::new();
-                    for i in 0..48u64 {
-                        let va = code_vaddr.wrapping_sub(32).wrapping_add(i);
-                        if let Ok(pa) = self.translate_data_read(va) {
-                            code_bytes.push(self.mem_read_byte(pa));
-                        } else {
-                            code_bytes.push(0xCC);
-                        }
-                    }
-                    tracing::warn!(
-                        "  Code at CS:EIP-32 to CS:EIP+16 (EIP={:#x}, CS.base={:#x}):",
-                        self.eip(),
-                        cs_base
-                    );
-                    tracing::warn!("  {:02x?}", &code_bytes);
-                }
-                let (dword1, dword2) = fetch_result?;
-                let mut descriptor = self.parse_descriptor(dword1, dword2)?;
-
-                if seg_idx == BxSegregs::Ss as usize {
-                    // Load SS with proper checks and D/B bit
-                    // CPL = Current Privilege Level = CS.selector.rpl
-                    let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
-
-                    self.load_ss(&mut selector, &mut descriptor, cpl)?;
-                } else {
-                    // For other segments, just copy the descriptor
-                    // TODO: Implement full load_seg_reg for DS, ES, FS, GS
-                    self.sregs[seg as usize].selector = selector;
-                    self.sregs[seg as usize].cache = descriptor;
-                    self.sregs[seg as usize].cache.valid = super::descriptor::SEG_VALID_CACHE;
-                }
-            }
-        }
-
-        // Advance ESP by 4 (32-bit operand size, even though selector is 16-bit)
-        self.set_esp(self.esp().wrapping_add(4));
+        self.load_seg_reg(seg, selector_value)?;
 
         // POP SS inhibits interrupts until next instruction boundary
         // (Bochs stack32.cc:102-108)
-        if seg_idx == BxSegregs::Ss as usize {
+        if seg == BxSegregs::Ss {
             self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
         }
 
-        tracing::trace!("POP seg{}: selector={:#06x}", seg_idx, selector_value);
         Ok(())
     }
 

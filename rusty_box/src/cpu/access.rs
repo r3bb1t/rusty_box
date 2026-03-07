@@ -776,48 +776,62 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // These bypass segment checks and operate on raw linear addresses at
     // CPL=0 (supervisor).  They still go through paging translation.
 
+    /// Translate a system-level linear address to physical using the DTLB.
+    /// Falls back to a raw page walk if paging is disabled or in non-long mode.
+    /// In long mode, routes through translate_data_access so the DTLB is
+    /// populated — matching Bochs where access_read_linear always uses the TLB.
+    fn translate_system_read_via_dtlb(&mut self, laddr: BxAddress) -> Result<u64> {
+        if self.cr0.pg() && self.long_mode() {
+            // In long mode, use the DTLB path (supervisor read).
+            // Temporarily force supervisor access so user_pl doesn't interfere.
+            let saved_user_pl = self.user_pl;
+            self.user_pl = false;
+            let result = self.translate_data_read(laddr);
+            self.user_pl = saved_user_pl;
+            result
+        } else {
+            self.translate_linear_system_read(laddr)
+        }
+    }
+
     /// Read a byte from a system (linear) address.
     /// Bochs: system_read_byte (access.cc)
-    pub(super) fn system_read_byte(&self, laddr: BxAddress) -> Result<u8> {
-        let paddr = self.translate_linear_system_read(laddr)?;
+    pub(super) fn system_read_byte(&mut self, laddr: BxAddress) -> Result<u8> {
+        let paddr = self.translate_system_read_via_dtlb(laddr)?;
         Ok(self.mem_read_byte(paddr))
     }
 
     /// Read a word from a system (linear) address with cross-page handling.
     /// Bochs: system_read_word (access.cc)
-    pub(super) fn system_read_word(&self, laddr: BxAddress) -> Result<u16> {
+    pub(super) fn system_read_word(&mut self, laddr: BxAddress) -> Result<u16> {
         let page_offset = laddr & 0xFFF;
         let laddr_mask = if self.long_mode() { 0xFFFF_FFFF_FFFF_FFFF } else { 0xFFFF_FFFF };
         if page_offset + 2 <= 0x1000 {
-            let paddr = self.translate_linear_system_read(laddr)?;
+            let paddr = self.translate_system_read_via_dtlb(laddr)?;
             Ok(self.mem_read_word(paddr))
         } else {
-            let b0 = {
-                let p = self.translate_linear_system_read(laddr)?;
-                self.mem_read_byte(p)
-            };
-            let b1 = {
-                let laddr2 = (laddr & 0xFFFF_F000).wrapping_add(0x1000) & laddr_mask;
-                let p = self.translate_linear_system_read(laddr2)?;
-                self.mem_read_byte(p)
-            };
+            let p0 = self.translate_system_read_via_dtlb(laddr)?;
+            let b0 = self.mem_read_byte(p0);
+            let laddr2 = (laddr & 0xFFFF_F000).wrapping_add(0x1000) & laddr_mask;
+            let p1 = self.translate_system_read_via_dtlb(laddr2)?;
+            let b1 = self.mem_read_byte(p1);
             Ok(u16::from_le_bytes([b0, b1]))
         }
     }
 
     /// Read a dword from a system (linear) address with cross-page handling.
     /// Bochs: system_read_dword (access.cc)
-    pub(super) fn system_read_dword(&self, laddr: BxAddress) -> Result<u32> {
+    pub(super) fn system_read_dword(&mut self, laddr: BxAddress) -> Result<u32> {
         let page_offset = laddr & 0xFFF;
         let laddr_mask = if self.long_mode() { 0xFFFF_FFFF_FFFF_FFFF } else { 0xFFFF_FFFF };
         if page_offset + 4 <= 0x1000 {
-            let paddr = self.translate_linear_system_read(laddr)?;
+            let paddr = self.translate_system_read_via_dtlb(laddr)?;
             Ok(self.mem_read_dword(paddr))
         } else {
             let mut buf = [0u8; 4];
             for i in 0..4u64 {
                 let la = (laddr.wrapping_add(i)) & laddr_mask;
-                let pa = self.translate_linear_system_read(la)?;
+                let pa = self.translate_system_read_via_dtlb(la)?;
                 buf[i as usize] = self.mem_read_byte(pa);
             }
             Ok(u32::from_le_bytes(buf))
@@ -826,17 +840,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Read a qword from a system (linear) address with cross-page handling.
     /// Bochs: system_read_qword (access.cc)
-    pub(super) fn system_read_qword(&self, laddr: BxAddress) -> Result<u64> {
+    pub(super) fn system_read_qword(&mut self, laddr: BxAddress) -> Result<u64> {
         let page_offset = laddr & 0xFFF;
         let laddr_mask = if self.long_mode() { 0xFFFF_FFFF_FFFF_FFFF } else { 0xFFFF_FFFF };
         if page_offset + 8 <= 0x1000 {
-            let paddr = self.translate_linear_system_read(laddr)?;
+            let paddr = self.translate_system_read_via_dtlb(laddr)?;
             Ok(self.mem_read_qword(paddr))
         } else {
             let mut buf = [0u8; 8];
             for i in 0..8u64 {
                 let la = (laddr.wrapping_add(i)) & laddr_mask;
-                let pa = self.translate_linear_system_read(la)?;
+                let pa = self.translate_system_read_via_dtlb(la)?;
                 buf[i as usize] = self.mem_read_byte(pa);
             }
             Ok(u64::from_le_bytes(buf))
@@ -1015,6 +1029,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(crate) fn write_virtual_byte_64(&mut self, seg: BxSegregs, offset: u64, val: u8) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
         let paddr = self.translate_data_write(laddr)?;
+        self.i_cache.smc_write_check(paddr, 1);
         self.mem_write_byte(paddr, val);
         Ok(())
     }
@@ -1027,12 +1042,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let page_offset = laddr & 0xFFF;
         if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
+            self.i_cache.smc_write_check(paddr, 2);
             self.mem_write_word(paddr, val);
         } else {
             let bytes = val.to_le_bytes();
             let p0 = self.translate_data_write(laddr)?;
+            self.i_cache.smc_write_check(p0, 1);
             self.mem_write_byte(p0, bytes[0]);
             let p1 = self.translate_data_write(laddr.wrapping_add(1))?;
+            self.i_cache.smc_write_check(p1, 1);
             self.mem_write_byte(p1, bytes[1]);
         }
         Ok(())
@@ -1046,11 +1064,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let page_offset = laddr & 0xFFF;
         if page_offset + 4 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
+            self.i_cache.smc_write_check(paddr, 4);
             self.mem_write_dword(paddr, val);
         } else {
             let bytes = val.to_le_bytes();
             for i in 0..4u64 {
                 let p = self.translate_data_write(laddr.wrapping_add(i))?;
+                self.i_cache.smc_write_check(p, 1);
                 self.mem_write_byte(p, bytes[i as usize]);
             }
         }
@@ -1065,11 +1085,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let page_offset = laddr & 0xFFF;
         if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
+            self.i_cache.smc_write_check(paddr, 8);
             self.mem_write_qword(paddr, val);
         } else {
             let bytes = val.to_le_bytes();
             for i in 0..8u64 {
                 let p = self.translate_data_write(laddr.wrapping_add(i))?;
+                self.i_cache.smc_write_check(p, 1);
                 self.mem_write_byte(p, bytes[i as usize]);
             }
         }

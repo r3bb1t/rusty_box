@@ -998,6 +998,132 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // ========================================================================
+    // Conversions: Int64 to Float (64-bit mode)
+    // Bochs: CVTSI2SS_VssEq, CVTSI2SD_VsdEq
+    // ========================================================================
+
+    /// CVTSI2SS — Convert Int64 to Scalar Single-Precision (64-bit mode)
+    pub(super) fn cvtsi2ss_vss_eq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op2 = if instr.mod_c0() {
+            self.get_gpr64(instr.src1() as usize) as i64
+        } else {
+            let eaddr = self.resolve_addr64(instr);
+            let seg = BxSegregs::from(instr.seg());
+            self.read_virtual_qword_64(seg, eaddr)? as i64
+        };
+        let mut result = self.read_xmm_reg(instr.dst());
+        unsafe {
+            result.xmm32f[0] = op2 as f32;
+        }
+        self.write_xmm_reg_lo128(instr.dst(), result);
+        Ok(())
+    }
+
+    /// CVTSI2SD — Convert Int64 to Scalar Double-Precision (64-bit mode)
+    pub(super) fn cvtsi2sd_vsd_eq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op2 = if instr.mod_c0() {
+            self.get_gpr64(instr.src1() as usize) as i64
+        } else {
+            let eaddr = self.resolve_addr64(instr);
+            let seg = BxSegregs::from(instr.seg());
+            self.read_virtual_qword_64(seg, eaddr)? as i64
+        };
+        let mut result = self.read_xmm_reg(instr.dst());
+        unsafe {
+            result.xmm64f[0] = op2 as f64;
+        }
+        self.write_xmm_reg_lo128(instr.dst(), result);
+        Ok(())
+    }
+
+    // ========================================================================
+    // Conversions: Float to Int64 (64-bit mode)
+    // Bochs: CVTTSS2SI_GqWss, CVTTSD2SI_GqWsd, CVTSS2SI_GqWss, CVTSD2SI_GqWsd
+    // ========================================================================
+
+    /// CVTTSS2SI — Convert Scalar Single-Precision to Int64 (truncate, 64-bit mode)
+    pub(super) fn cvttss2si_gq_wss(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.sse_pfp_read_op2_ss(instr)?;
+        let result =
+            if op.is_nan() || op.is_infinite() || op > i64::MAX as f32 || op < i64::MIN as f32 {
+                0x8000_0000_0000_0000u64
+            } else {
+                (op as i64) as u64
+            };
+        self.set_gpr64(instr.dst() as usize, result);
+        Ok(())
+    }
+
+    /// CVTTSD2SI — Convert Scalar Double-Precision to Int64 (truncate, 64-bit mode)
+    pub(super) fn cvttsd2si_gq_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.sse_pfp_read_op2_sd(instr)?;
+        let result =
+            if op.is_nan() || op.is_infinite() || op > i64::MAX as f64 || op < i64::MIN as f64 {
+                0x8000_0000_0000_0000u64
+            } else {
+                (op as i64) as u64
+            };
+        self.set_gpr64(instr.dst() as usize, result);
+        Ok(())
+    }
+
+    /// CVTSS2SI — Convert Scalar Single-Precision to Int64 (MXCSR rounding, 64-bit mode)
+    pub(super) fn cvtss2si_gq_wss(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.sse_pfp_read_op2_ss(instr)?;
+        let result =
+            if op.is_nan() || op.is_infinite() || op > i64::MAX as f32 || op < i64::MIN as f32 {
+                0x8000_0000_0000_0000u64
+            } else {
+                #[cfg(not(feature = "no_std"))]
+                {
+                    (op.round_ties_even() as i64) as u64
+                }
+                #[cfg(feature = "no_std")]
+                {
+                    let rounded = if op >= 0.0 {
+                        (op + 0.5) as i64
+                    } else {
+                        (op - 0.5) as i64
+                    };
+                    rounded as u64
+                }
+            };
+        self.set_gpr64(instr.dst() as usize, result);
+        Ok(())
+    }
+
+    /// CVTSD2SI — Convert Scalar Double-Precision to Int64 (MXCSR rounding, 64-bit mode)
+    pub(super) fn cvtsd2si_gq_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.sse_pfp_read_op2_sd(instr)?;
+        let result =
+            if op.is_nan() || op.is_infinite() || op > i64::MAX as f64 || op < i64::MIN as f64 {
+                0x8000_0000_0000_0000u64
+            } else {
+                #[cfg(not(feature = "no_std"))]
+                {
+                    (op.round_ties_even() as i64) as u64
+                }
+                #[cfg(feature = "no_std")]
+                {
+                    let rounded = if op >= 0.0 {
+                        (op + 0.5) as i64
+                    } else {
+                        (op - 0.5) as i64
+                    };
+                    rounded as u64
+                }
+            };
+        self.set_gpr64(instr.dst() as usize, result);
+        Ok(())
+    }
+
+    // ========================================================================
     // Conversions: Float precision conversions
     // Bochs: CVTPS2PD, CVTPD2PS, CVTSS2SD, CVTSD2SS
     // ========================================================================

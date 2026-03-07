@@ -11,6 +11,9 @@ pub enum Error {
     Memory(#[from] crate::memory::MemoryError),
 
     #[error(transparent)]
+    PcSystem(#[from] crate::pc_system::PcSystemError),
+
+    #[error(transparent)]
     Infallible(#[from] core::convert::Infallible),
 
     #[error(transparent)]

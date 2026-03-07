@@ -59,6 +59,52 @@ const LVT_MASKS: [u32; LVT_ENTRY_COUNT] = [
     0x000117FF, // CMCI:    same as THERMAL
 ];
 
+bitflags::bitflags! {
+    /// LVT (Local Vector Table) entry bits — common across all LVT entries.
+    ///
+    /// Each LVT register is 32 bits; the bit layout varies slightly per entry
+    /// but the bits below are shared by all.
+    #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+    pub struct LvtBits: u32 {
+        /// Bits 0-7: interrupt vector number
+        const VECTOR_MASK       = 0x0000_00FF;
+        /// Bits 8-10: delivery mode (0=fixed, 2=SMI, 4=NMI, 5=INIT, 7=ExtINT)
+        const DELIVERY_MODE     = 0x0000_0700;
+        /// Bit 12: delivery status (read-only; 0=idle, 1=send pending)
+        const DELIVERY_STATUS   = 0x0000_1000;
+        /// Bit 13: input pin polarity (LINT only; 0=active high, 1=active low)
+        const PIN_POLARITY      = 0x0000_2000;
+        /// Bit 14: remote IRR (LINT level-trigger only; read-only)
+        const REMOTE_IRR        = 0x0000_4000;
+        /// Bit 15: trigger mode (LINT only; 0=edge, 1=level)
+        const TRIGGER_MODE      = 0x0000_8000;
+        /// Bit 16: mask — 1 = interrupt inhibited, 0 = allowed
+        const MASKED            = 0x0001_0000;
+        /// Bits 17-18: timer mode (timer LVT only; 0=oneshot, 1=periodic, 2=tsc-deadline)
+        const TIMER_MODE        = 0x0006_0000;
+    }
+}
+
+impl LvtBits {
+    /// Wrap a raw u32 LVT register value.
+    #[inline(always)]
+    pub fn from_raw(raw: u32) -> Self {
+        Self::from_bits_retain(raw)
+    }
+
+    /// Get the interrupt vector (bits 0-7).
+    #[inline(always)]
+    pub fn vector(self) -> u8 {
+        (self.bits() & 0xFF) as u8
+    }
+
+    /// Get the timer mode field (bits 17-18): 0=oneshot, 1=periodic, 2=tsc-deadline.
+    #[inline(always)]
+    pub fn timer_mode_field(self) -> u32 {
+        (self.bits() >> 17) & 0x3
+    }
+}
+
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 /// APIC destination identifier
@@ -258,7 +304,7 @@ pub struct BxLocalApic {
     icr_lo: u32,
 
     /// Local vector table entries [Timer, Thermal, Perfmon, LINT0, LINT1, Error, CMCI]
-    lvt: [u32; LVT_ENTRY_COUNT],
+    lvt: [LvtBits; LVT_ENTRY_COUNT],
     /// Initial timer count (reload value for periodic mode)
     timer_initial: u32,
     /// Current timer count
@@ -302,6 +348,11 @@ pub struct BxLocalApic {
     /// Queue of pending IPI deliveries that need APIC bus routing.
     /// Filled by send_ipi() for shorthand 0/2/3, drained by emulator loop.
     pub(crate) pending_ipi: Option<PendingIpi>,
+
+    /// Pending EOI broadcast vector for level-triggered interrupts.
+    /// Set by receive_eoi()/receive_seoi() when TMR bit is set.
+    /// Drained by emulator loop to call ioapic.receive_eoi(vector).
+    pub(crate) pending_eoi_vector: Option<u8>,
 
     /// Flag set by timer handler callback to indicate the timer has fired.
     /// The emulator loop should call periodic() when this is set.
@@ -348,7 +399,7 @@ impl Default for BxLocalApic {
             shadow_error_status: 0,
             icr_hi: 0,
             icr_lo: 0,
-            lvt: [0x10000; LVT_ENTRY_COUNT], // all masked
+            lvt: [LvtBits::MASKED; LVT_ENTRY_COUNT], // all masked
             timer_initial: 0,
             timer_current: 0,
             ticks_initial: 0,
@@ -366,6 +417,7 @@ impl Default for BxLocalApic {
             mwaitx_timer_active: false,
             intr: false,
             pending_ipi: None,
+            pending_eoi_vector: None,
             timer_fired: false,
             timer_activate_request: None,
             timer_deactivate_request: false,
@@ -553,11 +605,11 @@ impl BxLocalApic {
             // LVT Timer, Thermal, Perfmon, LINT0, LINT1, Error (apic.cc:435-445)
             0x320 | 0x330 | 0x340 | 0x350 | 0x360 | 0x370 => {
                 let index = ((apic_reg - 0x320) >> 4) as usize;
-                data = self.lvt[index];
+                data = self.lvt[index].bits();
             }
             // LVT CMCI (apic.cc:446-448)
             0x2F0 => {
-                data = self.lvt[LocalVectorTableEntry::Cmci as usize];
+                data = self.lvt[LocalVectorTableEntry::Cmci as usize].bits();
             }
             // Timer initial count (apic.cc:449-451)
             0x380 => {
@@ -761,11 +813,11 @@ impl BxLocalApic {
         }
 
         // Apply LVT mask for this entry
-        self.lvt[lvt_entry] = value & LVT_MASKS[lvt_entry];
+        self.lvt[lvt_entry] = LvtBits::from_raw(value & LVT_MASKS[lvt_entry]);
 
         // If APIC software-disabled, force mask bit (apic.cc:648-650)
         if !self.software_enabled {
-            self.lvt[lvt_entry] |= 0x10000;
+            self.lvt[lvt_entry].insert(LvtBits::MASKED);
         }
     }
 
@@ -863,7 +915,7 @@ impl BxLocalApic {
 
         if !self.software_enabled {
             for entry in &mut self.lvt {
-                *entry |= 0x10000; // mask all LVT
+                entry.insert(LvtBits::MASKED); // mask all LVT
             }
         }
     }
@@ -885,10 +937,9 @@ impl BxLocalApic {
                 Self::clear_vector(&mut self.isr, vec_u32);
                 if Self::get_vector(&self.tmr, vec_u32) {
                     // Level-triggered: broadcast EOI to I/O APIC
-                    // The emulator loop handles this via ioapic.receive_eoi(vec)
+                    // Bochs apic.cc:730-732: apic_bus_broadcast_eoi(vec)
+                    self.pending_eoi_vector = Some(vec as u8);
                     Self::clear_vector(&mut self.tmr, vec_u32);
-                    // Mark that EOI broadcast is needed (handled by emulator)
-                    debug!("EOI broadcast needed for vector {:#04x}", vec);
                 }
                 self.service_local_apic();
             }
@@ -908,6 +959,9 @@ impl BxLocalApic {
             debug!("local apic received SEOI for vector {:#04x}", vec);
             Self::clear_vector(&mut self.isr, vec_u32);
             if Self::get_vector(&self.tmr, vec_u32) {
+                // Level-triggered: broadcast EOI to I/O APIC
+                // Bochs apic.cc:753: apic_bus_broadcast_eoi(vec)
+                self.pending_eoi_vector = Some(vec);
                 Self::clear_vector(&mut self.tmr, vec_u32);
             }
             self.service_local_apic();
@@ -1206,14 +1260,14 @@ impl BxLocalApic {
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
 
         // If timer is not masked, trigger interrupt (apic.cc:1045-1050)
-        if (timervec & 0x10000) == 0 {
-            self.trigger_irq((timervec & 0xFF) as u8, APIC_EDGE_TRIGGERED, false);
+        if !timervec.contains(LvtBits::MASKED) {
+            self.trigger_irq(timervec.vector(), APIC_EDGE_TRIGGERED, false);
         } else {
             debug!("local apic timer LVT masked");
         }
 
         // Check timer mode (apic.cc:1053-1068)
-        if (timervec & 0x20000) != 0 {
+        if timervec.timer_mode_field() == 1 {
             // Periodic mode — reload timer values
             self.timer_current = self.timer_initial;
             self.timer_active = true;
@@ -1253,7 +1307,7 @@ impl BxLocalApic {
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
 
         // In TSC-deadline mode, writes to initial time count are ignored (apic.cc:1087)
-        if (timervec & 0x40000) != 0 {
+        if timervec.timer_mode_field() == 2 {
             return;
         }
 
@@ -1285,7 +1339,7 @@ impl BxLocalApic {
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
 
         // In TSC-deadline mode, current timer count always reads 0 (apic.cc:1118)
-        if (timervec & 0x40000) != 0 {
+        if timervec.timer_mode_field() == 2 {
             return 0;
         }
 
@@ -1323,7 +1377,7 @@ impl BxLocalApic {
 
     /// Check if the timer is in periodic mode (LVT timer bit 17 set).
     pub(crate) fn timer_is_periodic(&self) -> bool {
-        (self.lvt[LocalVectorTableEntry::Timer as usize] & 0x20000) != 0
+        self.lvt[LocalVectorTableEntry::Timer as usize].timer_mode_field() == 1
     }
 
     // ─── TSC-Deadline timer ──────────────────────────────────────────────
@@ -1333,7 +1387,7 @@ impl BxLocalApic {
     #[allow(dead_code)]
     pub(crate) fn set_tsc_deadline(&mut self, deadline: u64) {
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
-        if (timervec & 0x40000) == 0 {
+        if timervec.timer_mode_field() != 2 {
             error!("APIC: TSC-Deadline timer is disabled");
             return;
         }
@@ -1358,7 +1412,7 @@ impl BxLocalApic {
     #[allow(dead_code)]
     pub(crate) fn get_tsc_deadline(&self) -> u64 {
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
-        if (timervec & 0x40000) == 0 {
+        if timervec.timer_mode_field() != 2 {
             return 0;
         }
         self.ticks_initial
@@ -1433,7 +1487,7 @@ impl BxLocalApic {
         self.timer_activate_request = None;
 
         for i in 0..LVT_ENTRY_COUNT {
-            self.lvt[i] = 0x10000; // all masked
+            self.lvt[i] = LvtBits::MASKED; // all masked
         }
 
         self.spurious_vector = 0xFF;
@@ -1451,6 +1505,7 @@ impl BxLocalApic {
         self.xapic_ext = 0;
         self.intr = false;
         self.pending_ipi = None;
+        self.pending_eoi_vector = None;
         self.timer_fired = false;
     }
 
@@ -1563,7 +1618,7 @@ mod tests {
             assert_eq!(lapic.ier[i], 0xFFFFFFFF);
         }
         for i in 0..LVT_ENTRY_COUNT {
-            assert_eq!(lapic.lvt[i], 0x10000); // all masked
+            assert_eq!(lapic.lvt[i], LvtBits::MASKED); // all masked
         }
     }
 
@@ -1739,10 +1794,10 @@ mod tests {
         assert!(lapic.focus_disable);
 
         // Disable — all LVT should be masked
-        lapic.lvt[0] = 0x00000030; // unmask timer
+        lapic.lvt[0] = LvtBits::from_raw(0x00000030); // unmask timer
         lapic.write_spurious_interrupt_register(0x0FF); // disable
         assert!(!lapic.software_enabled);
-        assert_eq!(lapic.lvt[0] & 0x10000, 0x10000); // masked
+        assert!(lapic.lvt[0].contains(LvtBits::MASKED)); // masked
     }
 
     #[test]
@@ -1754,11 +1809,11 @@ mod tests {
         // TSC-Deadline not supported, so bit 18 (0x40000) is cleared first.
         // Result: 0x000710FF & !0x40000 = 0x000310FF
         lapic.set_lvt_entry(0x320, 0xFFFF_FFFF);
-        assert_eq!(lapic.lvt[0], 0x000310FF);
+        assert_eq!(lapic.lvt[0].bits(), 0x000310FF);
 
         // Write LINT0 LVT
         lapic.set_lvt_entry(0x350, 0xFFFF_FFFF);
-        assert_eq!(lapic.lvt[3], 0x0001F7FF);
+        assert_eq!(lapic.lvt[3].bits(), 0x0001F7FF);
     }
 
     #[test]

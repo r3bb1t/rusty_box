@@ -32,10 +32,10 @@ fn disassemble_sequence(
     data: &[u8],
     runtime_address: u64,
     is_32: bool,
-) -> std::vec::Vec<(u64, Instruction)> {
+) -> Vec<(u64, Instruction)> {
     let mut offset = 0;
     let mut current_address = runtime_address;
-    let mut instructions = std::vec::Vec::new();
+    let mut instructions = Vec::new();
 
     while offset < data.len() {
         let remaining = &data[offset..];
@@ -280,10 +280,10 @@ fn disassemble_sequence_64bit(
     data: &[u8],
     runtime_address: u64,
     _is_32: bool,
-) -> std::vec::Vec<(u64, Instruction)> {
+) -> Vec<(u64, Instruction)> {
     let mut offset = 0;
     let mut current_address = runtime_address;
-    let mut instructions = std::vec::Vec::new();
+    let mut instructions = Vec::new();
 
     while offset < data.len() {
         let remaining = &data[offset..];
@@ -437,9 +437,9 @@ fn test_rex_b_extends_rm() {
     // 41 89 C0 = MOV R8D, EAX (REX.B extends rm from 0 to 8)
     let i = fetch_decode64(&[0x41, 0x89, 0xC0]).unwrap();
     assert_eq!(i.ilen(), 3);
-    // The rm field (src1) should be extended by REX.B
-    // rm is stored in src1/meta_data[1]
-    assert_eq!(i.src1(), 8, "rm (src1) should be extended to R8 by REX.B");
+    // 0x89 is in Ed,Gd branch: DST=rm, SRC1=nnn
+    // REX.B extends rm, so dst should be R8 (8)
+    assert_eq!(i.dst(), 8, "rm (dst) should be extended to R8 by REX.B");
 }
 
 #[test]
@@ -449,9 +449,9 @@ fn test_rex_r_extends_nnn() {
     // 44 89 C0 = MOV EAX, R8D (REX.R extends reg from 0 to 8)
     let i = fetch_decode64(&[0x44, 0x89, 0xC0]).unwrap();
     assert_eq!(i.ilen(), 3);
-    // The nnn field (dst) should be extended by REX.R
-    // nnn is stored in dst/meta_data[0]
-    assert_eq!(i.dst(), 8, "nnn (dst) should be extended to R8 by REX.R");
+    // 0x89 is in Ed,Gd branch: DST=rm, SRC1=nnn
+    // REX.R extends nnn, so src1 should be R8 (8)
+    assert_eq!(i.src1(), 8, "nnn (src1) should be extended to R8 by REX.R");
 }
 
 #[test]
@@ -478,7 +478,7 @@ fn test_rip_relative_addressing() {
     // ModRM 05 = 00 000 101 (mod=0, reg=0=EAX, rm=5=RIP-relative in 64-bit)
     let i = fetch_decode64(&[0x8B, 0x05, 0x78, 0x56, 0x34, 0x12]).unwrap();
     assert_eq!(i.ilen(), 6);
-    assert_eq!(i.sib_base(), 17, "Base should be BX_64BIT_REG_RIP (17)");
+    assert_eq!(i.sib_base(), 16, "Base should be BX_64BIT_REG_RIP (16)");
     assert_eq!(i.modrm_form.displacement.displ32u(), 0x12345678);
 }
 
@@ -488,7 +488,7 @@ fn test_rip_relative_with_rex() {
     // MOV RAX, [RIP+0x10]: 48 8B 05 10 00 00 00
     let i = fetch_decode64(&[0x48, 0x8B, 0x05, 0x10, 0x00, 0x00, 0x00]).unwrap();
     assert_eq!(i.ilen(), 7);
-    assert_eq!(i.sib_base(), 17, "Base should be BX_64BIT_REG_RIP (17)");
+    assert_eq!(i.sib_base(), 16, "Base should be BX_64BIT_REG_RIP (16)");
     assert_eq!(i.modrm_form.displacement.displ32u(), 0x10);
     assert_ne!(i.os64_l(), 0, "Should have 64-bit operand size");
 }

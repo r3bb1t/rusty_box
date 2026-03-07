@@ -21,7 +21,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let seg = BxSegregs::from(instr.seg());
             let seg_idx = seg as usize;
             let laddr = self.get_laddr64(seg_idx, eaddr);
-            let (val, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr);
+            let (val, rmw_laddr) = self.read_rmw_linear_qword(seg, laddr)?;
             Ok((val, Some(rmw_laddr)))
         }
     }

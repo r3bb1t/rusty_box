@@ -20,6 +20,7 @@ use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
+    eflags::EFlags,
     xmm::BxPackedXmmRegister,
 };
 
@@ -1514,6 +1515,309 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
             }
         }
+        Ok(())
+    }
+
+    // ========================================================================
+    // SSSE3 128-bit packed integer (matching Bochs sse.cc / simd_int.h)
+    // ========================================================================
+
+    /// PSHUFB VdqWdq (66 0F 38 00) - Packed Shuffle Bytes (128-bit)
+    /// Bochs: PSHUFB_VdqWdqR / xmm_pshufb (simd_int.h:337)
+    pub(super) fn pshufb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+
+        let mut result = BxPackedXmmRegister::default();
+        unsafe {
+            for n in 0..16usize {
+                let mask = op2.xmmubyte[n];
+                if mask & 0x80 != 0 {
+                    result.xmmubyte[n] = 0;
+                } else {
+                    result.xmmubyte[n] = op1.xmmubyte[(mask & 0xf) as usize];
+                }
+            }
+        }
+        self.write_xmm_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    /// PMADDUBSW VdqWdq (66 0F 38 04) - Multiply Unsigned/Signed Bytes, Add Pairs (128-bit)
+    /// Bochs: HANDLE_SSE_2OP<xmm_pmaddubsw> / simd_int.h:997
+    pub(super) fn pmaddubsw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+
+        let mut result = op1;
+        unsafe {
+            for n in 0..8usize {
+                let temp = (op1.xmmubyte[n * 2] as i32) * (op2.xmm_sbyte[n * 2] as i32)
+                    + (op1.xmmubyte[n * 2 + 1] as i32) * (op2.xmm_sbyte[n * 2 + 1] as i32);
+                result.xmm16s[n] = saturate_dword_s_to_word_s(temp);
+            }
+        }
+        self.write_xmm_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    /// PSIGNB VdqWdq (66 0F 38 08) - Negate/Zero/Keep Bytes Based on Sign (128-bit)
+    /// Bochs: HANDLE_SSE_2OP<xmm_psignb> / simd_int.h:429
+    pub(super) fn psignb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+
+        let mut result = op1;
+        unsafe {
+            for n in 0..16usize {
+                let sign = (op2.xmm_sbyte[n] > 0) as i32 - (op2.xmm_sbyte[n] < 0) as i32;
+                result.xmm_sbyte[n] = ((op1.xmm_sbyte[n] as i32) * sign) as i8;
+            }
+        }
+        self.write_xmm_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    /// PSIGNW VdqWdq (66 0F 38 09) - Negate/Zero/Keep Words Based on Sign (128-bit)
+    /// Bochs: HANDLE_SSE_2OP<xmm_psignw> / simd_int.h:437
+    pub(super) fn psignw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+
+        let mut result = op1;
+        unsafe {
+            for n in 0..8usize {
+                let sign = (op2.xmm16s[n] > 0) as i32 - (op2.xmm16s[n] < 0) as i32;
+                result.xmm16s[n] = ((op1.xmm16s[n] as i32) * sign) as i16;
+            }
+        }
+        self.write_xmm_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    /// PSIGND VdqWdq (66 0F 38 0A) - Negate/Zero/Keep Dwords Based on Sign (128-bit)
+    /// Bochs: HANDLE_SSE_2OP<xmm_psignd> / simd_int.h:445
+    pub(super) fn psignd_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+
+        let mut result = op1;
+        unsafe {
+            for n in 0..4usize {
+                let sign = (op2.xmm32s[n] > 0) as i64 - (op2.xmm32s[n] < 0) as i64;
+                result.xmm32s[n] = ((op1.xmm32s[n] as i64) * sign) as i32;
+            }
+        }
+        self.write_xmm_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    /// PALIGNR VdqWdqIb (66 0F 3A 0F) - Packed Align Right (128-bit)
+    /// Bochs: PALIGNR_VdqWdqIbR / xmm_palignr (simd_int.h:1424)
+    pub(super) fn palignr_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+        let shift = instr.ib();
+
+        // result = [op1:op2] >> (shift * 8)
+        // op1 is high, op2 is low in the concatenated 256-bit value
+        let mut result = op2;
+        if shift >= 32 {
+            // All zeros
+            result = BxPackedXmmRegister::default();
+        } else if shift >= 16 {
+            // Only op1 bits remain, shifted right
+            result = op1;
+            let bit_shift = ((shift - 16) as u64) * 8;
+            if bit_shift >= 128 {
+                result = BxPackedXmmRegister::default();
+            } else if bit_shift >= 64 {
+                let s = bit_shift - 64;
+                unsafe {
+                    result.xmm64u[0] = if s < 64 { result.xmm64u[1] >> s } else { 0 };
+                    result.xmm64u[1] = 0;
+                }
+            } else if bit_shift > 0 {
+                unsafe {
+                    result.xmm64u[0] = (result.xmm64u[0] >> bit_shift)
+                        | (result.xmm64u[1] << (64 - bit_shift));
+                    result.xmm64u[1] >>= bit_shift;
+                }
+            }
+        } else if shift > 0 {
+            let bit_shift = (shift as u64) * 8;
+            if bit_shift > 64 {
+                let s = bit_shift - 64;
+                unsafe {
+                    result.xmm64u[0] =
+                        (op2.xmm64u[1] >> s) | (op1.xmm64u[0] << (64 - s));
+                    result.xmm64u[1] =
+                        (op1.xmm64u[0] >> s) | (op1.xmm64u[1] << (64 - s));
+                }
+            } else if bit_shift == 64 {
+                unsafe {
+                    result.xmm64u[0] = op2.xmm64u[1];
+                    result.xmm64u[1] = op1.xmm64u[0];
+                }
+            } else {
+                // bit_shift < 64 and > 0
+                unsafe {
+                    result.xmm64u[0] = (op2.xmm64u[0] >> bit_shift)
+                        | (op2.xmm64u[1] << (64 - bit_shift));
+                    result.xmm64u[1] = (op2.xmm64u[1] >> bit_shift)
+                        | (op1.xmm64u[0] << (64 - bit_shift));
+                }
+            }
+        }
+        // shift == 0: result = op2 (already set)
+
+        self.write_xmm_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    // ========================================================================
+    // SSE4.1 128-bit packed integer (matching Bochs sse.cc / simd_int.h)
+    // ========================================================================
+
+    /// PBLENDVB VdqWdq (66 0F 38 10) - Variable Blend Packed Bytes
+    /// Bochs: PBLENDVB_VdqWdqR / xmm_pblendvb (simd_int.h:674)
+    /// Implicit mask register: XMM0
+    pub(super) fn pblendvb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+        let mask = self.read_xmm_reg(0); // XMM0 is implicit mask
+
+        unsafe {
+            for n in 0..16usize {
+                if mask.xmm_sbyte[n] < 0 {
+                    op1.xmmubyte[n] = op2.xmmubyte[n];
+                }
+            }
+        }
+        self.write_xmm_reg(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// PTEST VdqWdq (66 0F 38 17) - Logical Compare
+    /// Bochs: PTEST_VdqWdqR (sse.cc:69)
+    /// Sets ZF if (op2 AND op1) == 0, CF if (op2 AND NOT op1) == 0
+    pub(super) fn ptest_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+
+        // Clear OF, SF, AF, ZF, PF, CF
+        self.eflags
+            .remove(EFlags::OF | EFlags::SF | EFlags::AF | EFlags::ZF | EFlags::PF | EFlags::CF);
+
+        unsafe {
+            if (op2.xmm64u[0] & op1.xmm64u[0]) == 0
+                && (op2.xmm64u[1] & op1.xmm64u[1]) == 0
+            {
+                self.eflags.insert(EFlags::ZF);
+            }
+
+            if (op2.xmm64u[0] & !op1.xmm64u[0]) == 0
+                && (op2.xmm64u[1] & !op1.xmm64u[1]) == 0
+            {
+                self.eflags.insert(EFlags::CF);
+            }
+        }
+        Ok(())
+    }
+
+    /// PMULDQ VdqWdq (66 0F 38 28) - Multiply Packed Signed Dword to Qword
+    /// Bochs: HANDLE_SSE_2OP<xmm_pmuldq> / simd_int.h:976
+    pub(super) fn pmuldq_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+
+        let mut result = BxPackedXmmRegister::default();
+        unsafe {
+            result.xmm64s[0] = (op1.xmm32s[0] as i64) * (op2.xmm32s[0] as i64);
+            result.xmm64s[1] = (op1.xmm32s[2] as i64) * (op2.xmm32s[2] as i64);
+        }
+        self.write_xmm_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    /// PMINUD VdqWdq (66 0F 38 3B) - Minimum of Packed Unsigned Dwords
+    /// Bochs: HANDLE_SSE_2OP<xmm_pminud> / simd_int.h:94
+    pub(super) fn pminud_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+
+        unsafe {
+            for n in 0..4usize {
+                if op2.xmm32u[n] < op1.xmm32u[n] {
+                    op1.xmm32u[n] = op2.xmm32u[n];
+                }
+            }
+        }
+        self.write_xmm_reg(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// PMAXUD VdqWdq (66 0F 38 3F) - Maximum of Packed Unsigned Dwords
+    /// Bochs: HANDLE_SSE_2OP<xmm_pmaxud> / simd_int.h:150
+    pub(super) fn pmaxud_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+
+        unsafe {
+            for n in 0..4usize {
+                if op2.xmm32u[n] > op1.xmm32u[n] {
+                    op1.xmm32u[n] = op2.xmm32u[n];
+                }
+            }
+        }
+        self.write_xmm_reg(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// PMULLD VdqWdq (66 0F 38 40) - Multiply Packed Signed Dword, Low Result
+    /// Bochs: HANDLE_SSE_2OP<xmm_pmulld> / simd_int.h:962
+    pub(super) fn pmulld_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+
+        unsafe {
+            for n in 0..4usize {
+                op1.xmm32s[n] = op1.xmm32s[n].wrapping_mul(op2.xmm32s[n]);
+            }
+        }
+        self.write_xmm_reg(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// PBLENDW VdqWdqIb (66 0F 3A 0E) - Blend Packed Words
+    /// Bochs: PBLENDW_VdqWdqIbR / xmm_pblendw (simd_int.h:578)
+    pub(super) fn pblendw_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+        let mut mask = instr.ib() as u32;
+
+        unsafe {
+            for n in 0..8usize {
+                if mask & 1 != 0 {
+                    op1.xmm16u[n] = op2.xmm16u[n];
+                }
+                mask >>= 1;
+            }
+        }
+        self.write_xmm_reg(instr.dst(), op1);
         Ok(())
     }
 }

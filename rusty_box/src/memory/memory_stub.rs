@@ -160,7 +160,8 @@ impl BxMemoryStubC {
     #[cfg(all(feature = "std", feature = "bx_large_ram_file"))]
     fn read_block(&self, block: usize) -> Result<()> {
         let block_address = block * self.block_size;
-        let chosen_block = self.block_by_index(block).unwrap();
+        let chosen_block = self.block_by_index(block)
+            .ok_or(MemoryError::Internal("block_by_index returned None during read"))?;
         let overflow_file = self.overflow_file_mut();
 
         overflow_file.seek(SeekFrom::Start(block_address.try_into()?))?;
@@ -229,9 +230,9 @@ impl BxMemoryStubC {
                     .seek(SeekFrom::Start(address as u64))
                     .map_err(|e| MemoryError::CantSeekToAddressOverflowFile(address, e))?;
 
-                // TODO: Don't unwrap
                 overflow_file
-                    .write_all(self.block_by_index(self.next_swapout_idx.get()).unwrap())
+                    .write_all(self.block_by_index(self.next_swapout_idx.get())
+                        .ok_or(MemoryError::Internal("block_by_index returned None during swap-out"))?)
                     .map_err(|e| MemoryError::FailedToWriteToOverflowFIle(address, e))?;
 
                 // Mark swapped out block
@@ -283,8 +284,9 @@ impl BxMemoryStubC {
 
         while len > 0 {
             if a20_addr < self.len.try_into()? {
-                // TODO: Check if its really index 0
-                buf[buf_offset] = *self.get_vector(a20_addr, cpus)?.first().unwrap();
+                buf[buf_offset] = *self.get_vector(a20_addr, cpus)?
+                    .first()
+                    .ok_or(MemoryError::Internal("get_vector returned empty slice"))?;
             } else if cfg!(feature = "bx_phy_address_long") && a20_addr > 0xffffffff {
                 buf[buf_offset] = 0xff;
                 ret = false;

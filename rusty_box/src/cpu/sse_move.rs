@@ -552,6 +552,71 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // ========================================================================
+    // MOVNTI — Non-temporal store 64-bit mode variants
+    // ========================================================================
+
+    /// MOVNTI Op64 — mem32 = GPR32 (non-temporal hint, 64-bit addressing)
+    pub(super) fn movnti_op64_md_gd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr64(instr);
+        let val = self.get_gpr32(instr.src1().into());
+        self.write_virtual_dword_64(seg, eaddr, val)?;
+        Ok(())
+    }
+
+    /// MOVNTI — mem64 = GPR64 (non-temporal hint, 64-bit)
+    pub(super) fn movnti_mq_gq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr64(instr);
+        let val = self.get_gpr64(instr.src1() as usize);
+        self.write_virtual_qword_64(seg, eaddr, val)?;
+        Ok(())
+    }
+
+    // ========================================================================
+    // MOVQ xmm ↔ r/m64 (66 REX.W 0F 6E, 66 REX.W 0F 7E)
+    //
+    // 64-bit mode only: transfer 64-bit integer between XMM and GPR/memory.
+    // ========================================================================
+
+    /// MOVQ xmm, r/m64 — Load 64-bit integer into XMM low qword, zero upper
+    /// Bochs: MOVQ_VdqEq (66 REX.W 0F 6E)
+    pub(super) fn movq_vdq_eq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let val = if instr.mod_c0() {
+            self.get_gpr64(instr.src1() as usize)
+        } else {
+            let eaddr = self.resolve_addr64(instr);
+            let seg = BxSegregs::from(instr.seg());
+            self.read_virtual_qword_64(seg, eaddr)?
+        };
+        let mut op = BxPackedXmmRegister::default();
+        unsafe {
+            op.xmm64u[0] = val;
+            op.xmm64u[1] = 0;
+        }
+        self.write_xmm_reg_lo128(instr.dst(), op);
+        Ok(())
+    }
+
+    /// MOVQ r/m64, xmm — Store XMM low qword to GPR or memory
+    /// Bochs: MOVQ_EqVq (66 REX.W 0F 7E)
+    pub(super) fn movq_eq_vq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let val = self.xmm_lo_qword(instr.src1());
+        if instr.mod_c0() {
+            self.set_gpr64(instr.dst() as usize, val);
+        } else {
+            let eaddr = self.resolve_addr64(instr);
+            let seg = BxSegregs::from(instr.seg());
+            self.write_virtual_qword_64(seg, eaddr, val)?;
+        }
+        Ok(())
+    }
+
+    // ========================================================================
     // Note: LDMXCSR and STMXCSR are implemented in proc_ctrl.rs
     // ========================================================================
 

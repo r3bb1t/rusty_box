@@ -91,14 +91,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// POP Sw - Pop into segment register
     /// Based on Bochs stack16.cc POP16_Sw
     pub fn pop16_sw(&mut self, instr: &Instruction) -> super::Result<()> {
-        let dst = instr.dst() as usize;
-        let value = self.pop_16()?;
+        let selector_value = self.pop_16()?;
+        let seg = super::decoder::BxSegregs::from(instr.dst());
 
-        // Load segment register (simplified for real mode)
-        super::segment_ctrl_pro::parse_selector(value, &mut self.sregs[dst].selector);
-        self.sregs[dst].cache.u.segment.base = (value as u64) << 4;
+        self.load_seg_reg(seg, selector_value)?;
 
-        tracing::trace!("POP Sw (seg {}): {:#06x}", dst, value);
+        // SS interrupt inhibition: Bochs stack16.cc:66-69
+        if seg == super::decoder::BxSegregs::Ss {
+            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
+        }
+
         Ok(())
     }
 
@@ -323,18 +325,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// POP Sw (16-bit opsize) - Pop into segment register from meta_data[0]
-    /// Used by the PopOp16Sw opcode (real mode path)
+    /// Used by the PopOp16Sw opcode
     pub fn pop_op16_sw(&mut self, instr: &Instruction) -> super::Result<()> {
-        let seg = instr.meta_data[0] as usize;
-        let val = self.pop_16()?;
-        // Don't allow loading CS
-        if seg != super::decoder::BxSegregs::Cs as usize {
-            super::segment_ctrl_pro::parse_selector(val, &mut self.sregs[seg].selector);
-            unsafe {
-                self.sregs[seg].cache.u.segment.base = (val as u64) << 4;
-            }
+        let selector_value = self.pop_16()?;
+        let seg = super::decoder::BxSegregs::from(instr.meta_data[0]);
+
+        self.load_seg_reg(seg, selector_value)?;
+
+        if seg == super::decoder::BxSegregs::Ss {
+            self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
         }
-        tracing::trace!("POP16 Sw (seg {}): {:#06x}", seg, val);
+
         Ok(())
     }
 
