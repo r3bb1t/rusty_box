@@ -209,37 +209,47 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     // setters for 32 bit general registers
+    // Bochs BX_WRITE_32BIT_REGZ: zero-extends to 64 bits (clears hrx)
+    // Required by x86-64 architecture: 32-bit writes zero-extend to 64-bit
     #[inline]
     pub fn set_eax(&mut self, val: u32) {
-        self.gen_reg[0].dword.erx = val
+        self.gen_reg[0].dword.erx = val;
+        self.gen_reg[0].dword.hrx = 0;
     }
     #[inline]
     pub fn set_ecx(&mut self, val: u32) {
-        self.gen_reg[1].dword.erx = val
+        self.gen_reg[1].dword.erx = val;
+        self.gen_reg[1].dword.hrx = 0;
     }
     #[inline]
     pub fn set_edx(&mut self, val: u32) {
-        self.gen_reg[2].dword.erx = val
+        self.gen_reg[2].dword.erx = val;
+        self.gen_reg[2].dword.hrx = 0;
     }
     #[inline]
     pub fn set_ebx(&mut self, val: u32) {
-        self.gen_reg[3].dword.erx = val
+        self.gen_reg[3].dword.erx = val;
+        self.gen_reg[3].dword.hrx = 0;
     }
     #[inline]
     pub fn set_esp(&mut self, val: u32) {
-        self.gen_reg[4].dword.erx = val
+        self.gen_reg[4].dword.erx = val;
+        self.gen_reg[4].dword.hrx = 0;
     }
     #[inline]
     pub fn set_ebp(&mut self, val: u32) {
-        self.gen_reg[5].dword.erx = val
+        self.gen_reg[5].dword.erx = val;
+        self.gen_reg[5].dword.hrx = 0;
     }
     #[inline]
     pub fn set_esi(&mut self, val: u32) {
-        self.gen_reg[6].dword.erx = val
+        self.gen_reg[6].dword.erx = val;
+        self.gen_reg[6].dword.hrx = 0;
     }
     #[inline]
     pub fn set_edi(&mut self, val: u32) {
-        self.gen_reg[7].dword.erx = val
+        self.gen_reg[7].dword.erx = val;
+        self.gen_reg[7].dword.hrx = 0;
     }
 
     // access to 32 bit instruction pointer
@@ -473,22 +483,22 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.gen_reg[BX_TMP_REGISTER].rrx = val
     }
 
-    // access to 64 bit MSR registers
+    // access to 64 bit MSR registers (FS.BASE / GS.BASE)
     #[inline]
     pub fn msr_fsbase(&self) -> u64 {
-        unsafe { &self.gen_reg[BxSegregs::Fs as usize].rrx }.to_owned()
+        unsafe { self.sregs[BxSegregs::Fs as usize].cache.u.segment.base }
     }
     #[inline]
     pub fn set_msr_fsbase(&mut self, val: u64) {
-        self.gen_reg[BxSegregs::Fs as usize].rrx = val
+        unsafe { self.sregs[BxSegregs::Fs as usize].cache.u.segment.base = val }
     }
     #[inline]
     pub fn msr_gsbase(&self) -> u64 {
-        unsafe { &self.gen_reg[BxSegregs::Gs as usize].rrx }.to_owned()
+        unsafe { self.sregs[BxSegregs::Gs as usize].cache.u.segment.base }
     }
     #[inline]
     pub fn set_msr_gsbase(&mut self, val: u64) {
-        self.gen_reg[BxSegregs::Gs as usize].rrx = val
+        unsafe { self.sregs[BxSegregs::Gs as usize].cache.u.segment.base = val }
     }
 
     // =========================================================================
@@ -646,6 +656,101 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             self.diag_hae_intr_if_blocked,
             self.diag_hae_intr_no_pic,
             self.diag_hae_intr_pic_empty,
+        )
+    }
+
+    /// Get exception counts by vector (0=DE, 6=UD, 13=GP, 14=PF)
+    pub fn get_exception_diag(&self) -> &[u64; 32] {
+        &self.diag_exception_counts
+    }
+
+    /// Get IaError (unimplemented opcode) diagnostics
+    pub fn get_ia_error_diag(&self) -> (u64, u64) {
+        (self.diag_ia_error_count, self.diag_ia_error_last_rip)
+    }
+
+    /// Get interrupt acknowledge vector counts
+    pub fn get_iac_vectors(&self) -> &[u64; 256] {
+        &self.diag_iac_vectors
+    }
+
+    /// Get inject_external_interrupt diagnostics
+    pub fn get_inject_ext_intr_diag(&self) -> (u64, &[u64; 256]) {
+        (self.diag_inject_ext_intr_count, &self.diag_inject_ext_intr_vectors)
+    }
+
+    /// Get software INT (INT nn) vector histogram
+    pub fn get_soft_int_vectors(&self) -> &[u64; 256] {
+        &self.diag_soft_int_vectors
+    }
+
+    /// Get software INT vector histogram for late calls (after BIOS POST, icount > 2M)
+    pub fn get_soft_int_vectors_late(&self) -> &[u64; 256] {
+        &self.diag_soft_int_vectors_late
+    }
+
+    /// Get INT 10h AH subfunction histogram (late calls only)
+    pub fn get_int10h_ah_hist(&self) -> &[u64; 256] {
+        &self.diag_int10h_ah_hist
+    }
+
+    /// Get TTY characters written via INT 10h AH=0Eh
+    pub fn get_int10h_tty_chars(&self) -> &[u8] {
+        &self.diag_int10h_tty_chars[..self.diag_int10h_tty_count]
+    }
+
+    /// Get first HLT in PM diagnostic data
+    /// Returns (captured, icount, rip, cs, ss, eflags, regs[8], stack[16])
+    pub fn get_first_pm_hlt(&self) -> Option<(u64, u32, u16, u16, u32, [u32; 8], [u32; 16])> {
+        if self.diag_first_pm_hlt_captured {
+            Some((
+                self.diag_first_pm_hlt_icount,
+                self.diag_first_pm_hlt_rip,
+                self.diag_first_pm_hlt_cs,
+                self.diag_first_pm_hlt_ss,
+                self.diag_first_pm_hlt_eflags,
+                self.diag_first_pm_hlt_regs,
+                self.diag_first_pm_hlt_stack,
+            ))
+        } else {
+            None
+        }
+    }
+
+    /// Get PM↔RM transition counts
+    pub fn get_pm_rm_transition_counts(&self) -> (u64, u64) {
+        (self.diag_pm_to_rm_count, self.diag_rm_to_pm_count)
+    }
+
+    /// Set up address hit tracking. Provide up to 8 (addr, 0) pairs.
+    pub fn set_addr_hit_watches(&mut self, watches: &[(u32, u64)]) {
+        for (i, &(addr, count)) in watches.iter().enumerate().take(8) {
+            self.diag_addr_hits[i] = (addr, count);
+        }
+    }
+
+    /// Get address hit counters
+    pub fn get_addr_hits(&self) -> &[(u32, u64); 8] {
+        &self.diag_addr_hits
+    }
+
+    /// Check and count address hits (call from cpu_loop hot path)
+    #[inline(always)]
+    pub(crate) fn check_addr_hits(&mut self, rip: u32) {
+        for entry in self.diag_addr_hits.iter_mut() {
+            if entry.0 != 0 && entry.0 == rip {
+                entry.1 += 1;
+            }
+        }
+    }
+
+    /// Get INT 10h icount range (first, last) and TTY icount range
+    pub fn get_int10h_icount_range(&self) -> (u64, u64, u64, u64) {
+        (
+            self.diag_int10h_first_icount,
+            self.diag_int10h_last_icount,
+            self.diag_int10h_tty_first_icount,
+            self.diag_int10h_tty_last_icount,
         )
     }
 }

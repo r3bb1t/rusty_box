@@ -16,13 +16,18 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-03-04):**
-- ✅ **DLX Linux boots to interactive bash shell!** Full boot: BIOS POST → LILO → kernel → init → `dlx login: root` → `dlx:~#`
+**Current Status (2026-03-07):**
+- ✅ **DLX Linux boots to interactive bash shell!** Full boot: BIOS POST → LILO → kernel → init → `dlx login: root` → `dlx:~#` (200M instructions sufficient)
+- ✅ **Alpine Linux enters 64-bit long mode!** Direct kernel boot reaches long mode (mode=4, CR0=0x80050033). Stuck at RIP=0x35aef46 (page table mapping function returning 0). Session 28 audit found multiple 64-bit decoder/accessor bugs (see below) that likely cause this.
+- ⚠️ **Session 28 audit: 6 CRITICAL + 16 HIGH unfixed bugs found** by 10 parallel agents. Top Alpine blockers: SSE prefix F2/F3 swapped, get_gpr32 returns 0 for R8-R15, REX.B not applied to non-ModRM opcodes, 0x67 prefix clears As32. See Session 28 in Major Bug Fixes.
+- ✅ **64-bit paging bypass FIXED (session 26)**: ALL 64-bit memory access functions were bypassing page table walks, passing linear addresses directly to physical memory. Since long mode requires paging (CR0.PG=1), once the kernel sets up its own page tables, every 64-bit memory access hit wrong physical addresses. Fixed ~137 call sites across 9 files. See detailed fix list below.
+- ✅ **REX byte register mapping fix**: Two-bug fix enabling correct SPL/BPL/SIL/DIL access in 64-bit mode. Decoder stored `rex_prefix = b & 0x0F` (bare REX 0x40 → 0 → Extend8bit never set). Register accessor mapped indices 4-7 to AH/CH/DH/BH regardless of REX. Both fixed — Alpine kernel memset now writes correct values to page tables.
 - ✅ **Full 64-bit instruction set**: arith64, logical64, shift64, mult64 all implemented and dispatched (~110 new opcodes)
 - ✅ **Long mode activation**: EFER MSR handling, handle_cpu_mode_change for Long64/LongCompat, CR0/CR3 long mode writes
 - ✅ **64-bit MSRs**: STAR, LSTAR, CSTAR, FMASK, FSBASE, GSBASE, KERNELGSBASE, TSC_AUX + SWAPGS instruction
 - ✅ **64-bit data transfer**: MOV/MOVSX/MOVSXD/MOVZX/XCHG/LEA/CMOV all 64-bit forms
 - ✅ **64-bit stack ops**: PUSH/POP r/m64, PUSHFQ/POPFQ, PUSH imm64
+- ✅ **Decoder audit Ed,Gd convention fix (session 28)**: `(b1 & 0x0F) == 0x01/0x09` pattern for single-byte opcodes also caught two-byte opcodes (0F xx) — swapped DST/SRC for CMOVno/ns, SQRTPS, MULPS, PUNPCK*, PSRLW, PSRAW, PSLLW, PSUBW, etc. Fixed with `b1 < 0x100` guard + explicit two-byte matches. Also fixed 64-bit LEAVE/INS/OUTS missing from no-ModRM list.
 - ✅ **SHRD/SHLD decoder fix**: Opcodes 0F A4/A5/AC/AD were in wrong decoder branch (ELSE instead of Ed,Gd). Operands were swapped — result went to wrong register. Fixed ext2 "directory #12 contains a hole" errors that blocked login.
 - ✅ All control/debug register types converted to bitflags (BxCr0, BxCr4, BxEfer, BxDr6, BxDr7)
 - ✅ CPU-level feature gates removed — APIC, MONITOR/MWAIT, MEMTYPE, AMX, PKEYS, EVEX, SSE, AVX, VMX, SVM always compiled
@@ -253,7 +258,9 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ### Next Steps
 1. ~~**Reach DLX Linux `dlx login:` prompt**~~ — **DONE** (2026-03-03). Full boot to login prompt achieved.
 2. ~~**Interactive login**~~ — **DONE** (2026-03-04). SHRD/SHLD decoder fix resolved ext2 "directory #12 contains a hole" errors. `root` login → `dlx:~#` bash shell works.
-3. **Boot Alpine Linux** — Target modern Linux kernel. Requires SSE2, APIC, ACPI, PCI (Phases 1-7 of parity plan).
+3. **Boot Alpine Linux** — **IN PROGRESS** (2026-03-07). Session 28 audit found the root causes:
+   - **Direct kernel boot**: Enters 64-bit mode but stuck at RIP=0x35aef46. Audit found 6 CRITICAL bugs: (a) SSE prefix F2/F3 swapped → wrong SSE opcodes, (b) get_gpr32 returns 0 for R8D-R15D → all extended register reads broken, (c) REX.B not applied for non-ModRM → PUSH/POP/MOV R8-R15 wrong, (d) 0x67 prefix clears As32 → 16-bit addressing, (e) msr_fsbase/gsbase read wrong data, (f) 8-bit handlers ignore REX in CMP/TEST/AND/OR/NOT. Plus ~16 HIGH bugs in access.rs and decoder. Fix priority: C1-C3 first (trivial), then H1-H4.
+   - **ISOLINUX path**: El Torito boot works, ISOLINUX 6.04 loads + enters PM, but init_func table is empty → iso_init never called. See `docs/ISOLINUX_DEBUG.md`.
 4. **Fix `ide2 at 0x1e8` phantom** — PCI PIIX IDE BAR misconfiguration causes kernel to probe a non-existent 3rd IDE channel
 5. ~~**Fix LDT triple fault**~~ — FIXED: root cause was INT using IVT in PM + XCHG mod_c0 bug
 6. ~~**Fix vsprintf**~~ — FIXED: ADD AL,Ib (opcode 0x04) operated on AH, breaking vsprintf's jump table index computation
@@ -271,7 +278,7 @@ The kernel first enters HLT idle at **exactly instruction 132,865,700**. Key not
 ### Quick Debug Commands
 
 **Key instruction count milestones — use the minimum needed:**
-- `500_000_000` — full boot to `dlx login:` prompt (default). Takes ~15-25 seconds at ~20 MIPS.
+- `200_000_000` — full boot to `dlx login:` prompt (default). Takes ~8-10 seconds at ~20 MIPS.
 - `132_865_710` — kernel first HLT threshold + 10; diagnostics print at run end. Use for ATA/IRQ debugging.
 - `2_000_000` — BIOS POST only (fast check, VGA text visible)
 
@@ -279,7 +286,7 @@ The kernel first enters HLT idle at **exactly instruction 132,865,700**. Key not
 # Build release binary
 cargo build --release --example dlxlinux --features std
 
-# Run headless — full boot to login prompt (default 500M instructions)
+# Run headless — full boot to login prompt (default 200M instructions)
 RUSTY_BOX_HEADLESS=1 ./target/release/examples/dlxlinux.exe
 
 # Run with GUI (egui)
@@ -290,6 +297,7 @@ RUST_LOG=debug RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=500000 ./target/release/exa
 ```
 
 ### Progress Metrics
+- ✅ REX byte register mapping: bare REX (0x40) now correctly enables SPL/BPL/SIL/DIL — Alpine kernel enters 64-bit mode
 - ✅ All major decoder bugs fixed (Group 1 opcodes, segment defaults, execute1/execute2)
 - ✅ Protected mode transition works (far jump, GDT, segment loading)
 - ✅ rombios32_init completes fully (ram_probe, cpu_probe, setup_mtrr, smp_probe, PCI init)
@@ -607,6 +615,51 @@ The decoder fails to account for immediate bytes in TEST instructions (opcodes 0
 **Status:** Fully implemented — real mode IVT, protected mode IDT, double/triple fault chain, recursive exception delivery all working. DLX Linux boots to login with full exception handling.
 
 ### Major Bug Fixes (Historical)
+
+**Session 28 (2026-03-07) — Full decoder/accessor/struct audit (10 agents + manual)**
+
+*Manual fixes applied:*
+0. **FIXED: Ed,Gd convention mask too broad** (`fetchdecode32.rs:565`, `fetchdecode64.rs:431`): `(b1 & 0x0F) == 0x01/0x09` caught two-byte opcodes. Added `b1 < 0x100` guard + explicit two-byte matches.
+0. **FIXED: 64-bit LEAVE (0xC9) missing from no-ModRM list** (`fetchdecode64.rs:960`).
+0. **FIXED: 64-bit INS/OUTS (0x6C-0x6F) missing from no-ModRM list** (`fetchdecode64.rs:955`).
+
+*Agent-discovered CRITICAL unfixed bugs:*
+0. **SSE prefix F2/F3 SWAPPED** (`fetchdecode32.rs:253-262`, `fetchdecode64.rs:161-172`): Rust assigns F2→2, F3→3. Bochs uses `(b1&3)^1`: F2→3, F3→2. All F2/F3-differentiated SSE instructions decode to wrong opcode (MOVSS↔MOVSD etc.). Fix: swap values. Note: lock_rep_used in metainfo1 is correct, only sse_prefix is wrong.
+0. **get_gpr32() returns 0 for R8D-R15D** (`cpu.rs:1801-1813`): Match on 0-7, `_=>0`. 249 call sites silently get 0 for extended registers in 64-bit mode. Fix: `unsafe { self.gen_reg[idx].dword.erx }`.
+0. **REX.B not applied for non-ModRM 64-bit opcodes** (`fetchdecode64.rs:274-295`): REX.B only inside `if needs_modrm`. PUSH/POP/MOV/XCHG R8-R15 use wrong register. Fix: add `if !needs_modrm && (rex_prefix & 0x01) != 0 { rm |= 8; }`.
+
+*Agent-discovered HIGH unfixed bugs:*
+0. **0x67 prefix clears As32+As64 instead of just As64** (`fetchdecode64.rs:148-152`): Produces 16-bit addressing in 64-bit mode. Fix: only clear As64.
+0. **msr_fsbase()/msr_gsbase() read GPR not segment base** (`cpu_getters_and_setters.rs:488-502`): `gen_reg[4]`=RSP not FS base. Dead code currently.
+0. **Missing ~95 SSE opcode tables** (0F 50-7F, 0F D0-FE): Blocks all SSE instruction execution.
+0. **System read/write cross-page truncate 64-bit addresses** (`access.rs` 6 locations): `& 0xFFFF_FFFF` mask.
+0. **64-bit writes skip SMC check** (`access.rs:1009-1071`): No `smc_write_check()` after `translate_data_write`.
+0. **8-bit handlers use get_gpr8 not read_8bit_regx** (`logical8.rs`, `data_xfer32.rs`): Wrong REX register mapping for CMP/TEST/AND/OR/NOT/MOVZX 8-bit register forms.
+0. **XOP prefix check missing mod=11 validation** (`fetchdecode32.rs:302-308`): False-detects XOP when it's POP [mem].
+0. **FEMMS (0F 0E) / UD0 (0F FF) wrongly require ModRM** in both decoders.
+0. **NOP/PAUSE (0x90) not special-cased**: PAUSE instruction not decoded; bare NOP decodes as XCHG EAX,EAX (which zero-extends RAX in 64-bit mode).
+0. **Non-ModRM opcodes excluded from decmask NNN/RRR fields** (64-bit decoder): Always include nnn/rm.
+0. **Missing SRC_EQ_DST bit in decmask** (both decoders): Zero-idiom opcodes never match.
+0. **UD64 opcodes (PUSH ES, DAA, etc.) decode as valid** in 64-bit decoder: 21 opcodes should return IaError.
+0. **Group 3 (F6/F7) immediate check uses REX-extended nnn**: Should mask `nnn & 7`.
+0. **Logic operations don't clear AF** (`LOGIC_MASK` missing AF): Bochs clears AF for AND/OR/XOR/TEST.
+0. **64-bit TLB fast path missing** (`access.rs:942-1071`): All 64-bit accesses do full page walk (performance).
+
+See `memory/audit-session28-full.md` for complete findings from all 10 agents.
+
+**Session 26 (2026-03-07) — Fix 64-bit paging bypass + missing opcodes**
+0. **64-bit paging bypass — ALL memory access (access.rs, 9 files)**: Every 64-bit memory access function passed linear addresses directly to physical memory via `mem_read_*/mem_write_*`, bypassing page table walks entirely. In long mode (CR0.PG=1), linear addresses must be translated through 4-level page tables. Root cause: helper functions `read_linear_qword`, `read_rmw_linear_qword`, `write_rmw_linear_qword`, `stack_read_qword`, `stack_write_qword` were thin wrappers around `mem_read_qword`/`mem_write_qword` (physical access) instead of going through `translate_data_read`/`translate_data_write`. Fix: Added proper paging-aware 64-bit access functions in `access.rs` (`read_virtual_qword_64`, `write_virtual_qword_64`, `read_rmw_virtual_qword_64`, `write_rmw_virtual_qword_back_64`, `stack_read_qword_64`, `stack_write_qword_64`) with cross-page boundary handling and address_xlation caching for RMW. Replaced bypass wrappers with paging-enabled versions that accept pre-computed linear addresses (`read_linear_qword`, `read_rmw_linear_qword`, `write_rmw_linear_qword`, `stack_read_qword`, `stack_write_qword`). Updated ~137 call sites: data_xfer64.rs, ctrl_xfer64.rs, stack64.rs (full rewrite to use new functions), arith64.rs, logical64.rs, shift64.rs, mult64.rs (added `?` propagation), bit64.rs (replaced direct `mem_*` calls with `read/write_virtual_qword_64`), string.rs (qword string ops), segment_ctrl_pro.rs (64-bit stack reads), crc32.rs.
+0. **LEA GdM 64-bit mode fix** (`data_xfer_ext.rs`): `lea_gd_m()` always used `resolve_addr32()`. In 64-bit mode with 32-bit operand size (LEA r32, [rip+disp32]), the address should be computed with `resolve_addr64()` then truncated to 32 bits. Fixed to check `long64_mode()` and use the correct resolver.
+0. **Missing dispatcher: SubGqEqZeroIdiom** (`dispatcher.rs`): SUB r64,r64 zero idiom had no dispatcher entry. Mapped to existing `sub_gq_eq` handler alongside `SubGqEq`.
+0. **XCHG r64, RAX** (`data_xfer64.rs`): Added `xchg_rrx_rax()` handler for opcode 0x90+rd with REX.W (XchgRrxRax). Simple register swap.
+0. **Dispatcher return type cascade** (`dispatcher.rs`): ~38 dispatcher entries wrapped functions returning `Result<()>` with `{ self.fn(instr); Ok(()) }`, silently discarding page fault errors. Fixed all to propagate `?` or call directly: 64-bit data xfer (MOV/MOVSX/MOVZX/LEA/XCHG), stack ops (PUSHFQ/POPFQ/PUSH imm), MOV moffs64, and all 16 CMOVcc 64-bit dispatchers.
+0. **Investigation: LPF mask latent bug** (`paging.rs`, `access.rs`): `translate_data_access` and 32-bit TLB fast paths use `0xFFFF_F000` as LPF mask, which is only 32-bit wide (`0x0000_0000_FFFF_F000` as u64). In 64-bit mode this zeroes upper 32 address bits, causing TLB aliasing. Not currently blocking because new 64-bit access functions bypass inline TLB and go through `translate_data_read/write` directly. The ITLB (instruction fetch) correctly uses `lpf_of()` with full 64-bit `LPF_MASK`. Fix deferred — will need updating when adding TLB fast path to 64-bit access functions.
+0. **Investigation: 64-bit word/dword string ops bypass** (`string.rs`): Word-width (`movsw64`, `stosw64`, etc.) and dword-width (`movsd64`, `stosd64`, etc.) 64-bit string ops also bypass paging via `mem_read_word`/`mem_write_dword`. Only byte-width ops correctly use `read_virtual_byte_at_laddr`. Qword ops fixed in this session. Word/dword fix deferred.
+0. **Remaining missing opcodes identified**: LahfLm/SahfLm, MovqVdqEq/MovqEqVq, FSGSBASE (8 opcodes), float↔int64 conversions (6 opcodes), MovntiMqGq. Implementations deferred — will add as Alpine boot hits them.
+
+**Session 25 (2026-03-06) — Alpine kernel enters 64-bit long mode**
+0. **REX byte register mapping — decoder** (`fetchdecode64.rs:178`): `rex_prefix = b & 0x0F` stored only the low nibble. For bare REX (0x40, no R/X/B/W bits), this produced 0, so the `if rex_prefix != 0` check failed and `Extend8bit` was never set. Bare REX still enables SPL/BPL/SIL/DIL mapping. Fixed: `rex_prefix = b` (store full byte). REX bit tests (`& 0x04`, `& 0x01`, `& 0x08`) still work since they test low nibble bits.
+0. **REX byte register mapping — accessor** (`logical8.rs:131-158`): `read_8bit_regx`/`write_8bit_regx` called `get_gpr8(idx)` which maps indices 4-7 to high bytes (AH/CH/DH/BH) unconditionally. With REX, indices 4-7 should map to SPL/BPL/SIL/DIL (low byte of RSP/RBP/RSI/RDI). Fixed: directly access `gen_reg[reg_idx].word.byte.rl` when `extend8bit_l != 0`. Symptom: Alpine kernel memset wrote 0x20 (DH) instead of 0x00 (SIL) to page table memory, corrupting PDPTE entries → triple fault.
 
 **Session 13 (2026-03-04) — DLX Linux boots to interactive bash shell**
 0. **SHRD/SHLD decoder convention** (`fetchdecode32.rs`): Opcodes 0F A4/A5 (SHLD) and 0F AC/AD (SHRD) were in the ELSE decoder branch, making `dst()=nnn` and `src1()=rm`. The implementations expected Ed,Gd convention (`dst()=rm`, `src1()=nnn`). This swapped operands: the shift result went to the wrong register. Root cause of ext2 "directory #12 contains a hole" errors — the kernel's `block = f_pos >> block_size_bits` (using SHRD) never actually shifted the destination register, so block was always the raw f_pos value. Fixed by adding SHRD/SHLD opcodes to the Ed,Gd branch.

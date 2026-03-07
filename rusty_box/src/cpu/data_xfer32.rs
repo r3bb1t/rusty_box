@@ -194,8 +194,8 @@ pub fn MOVZX_GdEb<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
     let dst_reg = instr.meta_data[0] as usize;
     let src_reg = instr.meta_data[1] as usize;
 
-    // Read 8-bit operand (handles both memory and register based on decoder metadata)
-    let op2_8 = cpu.get_gpr8(src_reg);
+    // Read 8-bit operand — REX-aware (SPL/BPL/SIL/DIL when REX present)
+    let op2_8 = cpu.read_8bit_regx(src_reg, instr.extend8bit_l());
 
     // Zero extend byte op2 into dword op1
     cpu.set_gpr32(dst_reg, op2_8 as u32);

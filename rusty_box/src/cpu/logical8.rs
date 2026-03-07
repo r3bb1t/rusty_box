@@ -129,10 +129,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// Read 8-bit register with extend8bitL support (matches BX_READ_8BIT_REGx)
+    ///
+    /// Bochs macro: ext ? gen_reg[index].rl : (index<4 ? gen_reg[index].rl : gen_reg[index-4].rh)
+    /// When REX present (extend8bit_l != 0): indices 4-7 = SPL/BPL/SIL/DIL (low byte of RSP-RDI)
+    /// Without REX: indices 4-7 = AH/CH/DH/BH (high byte of RAX-RBX)
     pub fn read_8bit_regx(&self, reg_idx: usize, extend8bit_l: u8) -> u8 {
         if extend8bit_l != 0 || (reg_idx & 4) == 0 {
-            self.get_gpr8(reg_idx)
+            // REX present OR index 0-3: low byte of gen_reg[index]
+            unsafe { self.gen_reg[reg_idx].word.byte.rl }
         } else {
+            // No REX, index 4-7: high byte of gen_reg[index-4] (AH/CH/DH/BH)
             let reg16_idx = reg_idx & 0x3;
             (self.get_gpr16(reg16_idx) >> 8) as u8
         }
@@ -141,8 +147,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Write 8-bit register with extend8bitL support (matches BX_WRITE_8BIT_REGx)
     pub fn write_8bit_regx(&mut self, reg_idx: usize, extend8bit_l: u8, val: u8) {
         if extend8bit_l != 0 || (reg_idx & 4) == 0 {
-            self.set_gpr8(reg_idx, val);
+            // REX present OR index 0-3: low byte of gen_reg[index]
+            unsafe { self.gen_reg[reg_idx].word.byte.rl = val; }
         } else {
+            // No REX, index 4-7: high byte of gen_reg[index-4] (AH/CH/DH/BH)
             let reg16_idx = reg_idx & 0x3;
             let current = self.get_gpr16(reg16_idx);
             let new_val = (current & 0x00FF) | ((val as u16) << 8);
@@ -203,8 +211,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn cmp_gb_eb_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let src = instr.src() as usize;
-        let op1 = self.get_gpr8(dst);
-        let op2 = self.get_gpr8(src);
+        let extend8bit_l = instr.extend8bit_l();
+        let op1 = self.read_8bit_regx(dst, extend8bit_l);
+        let op2 = self.read_8bit_regx(src, extend8bit_l);
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_8(op1, op2, result);
         tracing::trace!("CMP r8, r8: {:#04x} - {:#04x} = {:#04x}", op1, op2, result);
@@ -273,8 +282,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn test_eb_gb_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let src = instr.src() as usize;
-        let op1 = self.get_gpr8(dst);
-        let op2 = self.get_gpr8(src);
+        let extend8bit_l = instr.extend8bit_l();
+        let op1 = self.read_8bit_regx(dst, extend8bit_l);
+        let op2 = self.read_8bit_regx(src, extend8bit_l);
         let result = op1 & op2;
         self.set_flags_oszapc_logic_8(result);
         tracing::trace!("TEST r8, r8: {:#04x} & {:#04x} = {:#04x}", op1, op2, result);
@@ -309,10 +319,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn and_gb_eb_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let src = instr.src() as usize;
-        let op1 = self.get_gpr8(dst);
-        let op2 = self.get_gpr8(src);
+        let extend8bit_l = instr.extend8bit_l();
+        let op1 = self.read_8bit_regx(dst, extend8bit_l);
+        let op2 = self.read_8bit_regx(src, extend8bit_l);
         let result = op1 & op2;
-        self.set_gpr8(dst, result);
+        self.write_8bit_regx(dst, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
         tracing::trace!("AND r8, r8: {:#04x} & {:#04x} = {:#04x}", op1, op2, result);
     }
@@ -369,10 +380,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn or_gb_eb_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let src = instr.src() as usize;
-        let op1 = self.get_gpr8(dst);
-        let op2 = self.get_gpr8(src);
+        let extend8bit_l = instr.extend8bit_l();
+        let op1 = self.read_8bit_regx(dst, extend8bit_l);
+        let op2 = self.read_8bit_regx(src, extend8bit_l);
         let result = op1 | op2;
-        self.set_gpr8(dst, result);
+        self.write_8bit_regx(dst, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
     }
 
@@ -405,8 +417,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// NOT r8
     pub fn not_eb_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
-        let op1 = self.get_gpr8(dst);
-        self.set_gpr8(dst, !op1);
+        let extend8bit_l = instr.extend8bit_l();
+        let op1 = self.read_8bit_regx(dst, extend8bit_l);
+        self.write_8bit_regx(dst, extend8bit_l, !op1);
         // NOT does not affect flags
     }
 
@@ -693,8 +706,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// CMP_EbGbR: CMP r/m8, r8 (register form)
     /// Opcode 0x38: reg (dst()) = second operand, rm (src()) = first operand
     pub fn cmp_eb_gb_r(&mut self, instr: &Instruction) {
-        let op1 = self.get_gpr8(instr.src() as usize); // rm = first operand
-        let op2 = self.get_gpr8(instr.dst() as usize); // reg = second operand
+        let extend8bit_l = instr.extend8bit_l();
+        let op1 = self.read_8bit_regx(instr.src() as usize, extend8bit_l); // rm = first operand
+        let op2 = self.read_8bit_regx(instr.dst() as usize, extend8bit_l); // reg = second operand
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_8(op1, op2, result);
     }
@@ -702,11 +716,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// CMP_EbIbR: CMP r/m8, imm8 (register form)
     /// Matches BX_CPU_C::CMP_EbIbR
     pub fn cmp_eb_ib_r(&mut self, instr: &Instruction) {
-        let op1 = self.get_gpr8(instr.dst() as usize);
+        let op1 = self.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
         let op2 = instr.ib();
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_8(op1, op2, result);
-        // vsprintf trace removed (using printk breakpoint instead)
     }
 
     // =========================================================================

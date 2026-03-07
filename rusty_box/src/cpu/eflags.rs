@@ -49,10 +49,12 @@ impl EFlags {
         .union(Self::PF)
         .union(Self::CF);
 
-    /// Logic operation flags: OF=0, SF, ZF, PF, CF=0 (AF undefined)
+    /// Logic operation flags: OF=0, SF, ZF, AF=0, PF, CF=0
+    /// Bochs clears AF for AND/OR/XOR/TEST (Intel: AF undefined, but Bochs zeros it)
     pub const LOGIC_MASK: EFlags = Self::OF
         .union(Self::SF)
         .union(Self::ZF)
+        .union(Self::AF)
         .union(Self::PF)
         .union(Self::CF);
 
@@ -99,6 +101,15 @@ impl EFlags {
 
     /// Arithmetic flags: CF|PF|AF|ZF|SF|OF = 0x08D5
     pub const ARITH_FLAGS: EFlags = Self::OSZAPC;
+
+    /// LAHF/SAHF mask: SF|ZF|AF|PF|CF = bits 7,6,4,2,0 = 0xD5
+    /// These are the status-flag bits transferred between AH and EFLAGS
+    /// by the LAHF and SAHF instructions.
+    pub const LAHF_MASK: EFlags = Self::SF
+        .union(Self::ZF)
+        .union(Self::AF)
+        .union(Self::PF)
+        .union(Self::CF);
 
     /// Get the IOPL value (0-3)
     #[inline]

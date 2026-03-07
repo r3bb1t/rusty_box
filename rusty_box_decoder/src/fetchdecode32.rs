@@ -252,13 +252,13 @@ pub const fn fetch_decode32_inplace(
             // REPNE/REPNZ
             0xF2 => {
                 metainfo1_bits = (metainfo1_bits & 0x3F) | (2 << 6);
-                sse_prefix = 2;
+                sse_prefix = 3; // Bochs: (0xF2 & 3) ^ 1 = 3 = SSE_PREFIX_F2
             }
 
             // REP/REPE/REPZ
             0xF3 => {
                 metainfo1_bits = (metainfo1_bits & 0x3F) | (3 << 6);
-                sse_prefix = 3;
+                sse_prefix = 2; // Bochs: (0xF3 & 3) ^ 1 = 2 = SSE_PREFIX_F3
             }
 
             _ => break,
@@ -300,8 +300,9 @@ pub const fn fetch_decode32_inplace(
     // The BOUND instruction requires ModRM, which will be handled below.
 
     if b1 == 0x8F {
-        // XOP prefix - check if it's actually XOP
-        if pos < max_len && (bytes[pos] & 0x1F) >= 8 {
+        // XOP prefix - check if it's actually XOP (Bochs: (modrm & 0xC8) == 0xC8)
+        // Must check mod=11 AND map>=8 to distinguish from POP [mem] (mod!=11)
+        if pos < max_len && (bytes[pos] & 0xC8) == 0xC8 {
             return Err(DecodeError::Decoder(
                 BxDecodeError::BxIllegalVexXopOpcodeMap,
             )); // XOP not fully supported in const
@@ -447,7 +448,8 @@ pub const fn fetch_decode32_inplace(
                     }
                     let disp = read_u16_le(bytes, pos);
                     pos += 2;
-                    instr.modrm_form.displacement.data32 = disp as u32;
+                    // Bochs sign-extends disp16: (Bit32s)(Bit16s) FetchWORD(iptr)
+                    instr.modrm_form.displacement.data32 = disp as i16 as i32 as u32;
                     instr.meta_data[BX_INSTR_METADATA_BASE] = 19; // BX_NIL_REGISTER
                 }
 
@@ -461,13 +463,13 @@ pub const fn fetch_decode32_inplace(
                     pos += 1;
                     instr.modrm_form.displacement.data32 = disp;
                 } else if mod_field == 2 {
-                    // disp16
+                    // disp16 — Bochs sign-extends: (Bit32s)(Bit16s) FetchWORD(iptr)
                     if pos + 2 > max_len {
                         return Err(DecodeError::DisplacementBufferUnderflow);
                     }
                     let disp = read_u16_le(bytes, pos);
                     pos += 2;
-                    instr.modrm_form.displacement.data32 = disp as u32;
+                    instr.modrm_form.displacement.data32 = disp as i16 as i32 as u32;
                 }
             }
         }
@@ -561,22 +563,23 @@ pub const fn fetch_decode32_inplace(
             // MOV Sw,Ew: nnn is destination (segment), rm is source (gpr)
             instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
             instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
-        } else if ((b1 & 0x0F) == 0x01)
-            || ((b1 & 0x0F) == 0x09)
+        } else if (b1 < 0x100 && ((b1 & 0x0F) == 0x01 || (b1 & 0x0F) == 0x09))
             || b1 == 0x89
+            // Two-byte Ed,Gd opcodes (DST=rm): Group 7, store-form SSE, MOV Rd/DRn, Groups 12-14
+            || matches!(b1, 0x101 | 0x111 | 0x121 | 0x129 | 0x171 | 0x172 | 0x173)
             // BT/BTS/BTR/BTC EdGd (0F A3/AB/B3/BB): rm=bit-field(dst), nnn=bit-index(src)
             || matches!(b1, 0x1A3 | 0x1AB | 0x1B3 | 0x1BB)
-            // 16-bit BT/BTS/BTR/BTC EwGw: same layout
-            // (decoded with os_32=false but same b1 values)
             // XADD EbGb (0F C0), XADD EdGd (0F C1): rm=dst, nnn=src
             // CMPXCHG EbGb (0F B0), CMPXCHG EdGd (0F B1): rm=dst, nnn=src
-            || matches!(b1, 0x1B0 | 0x1B1 | 0x1C0 | 0x1C1)
+            // MOVNTI Ed,Gd (0F C3): rm=mem(dst), nnn=gpr(src)
+            || matches!(b1, 0x1B0 | 0x1B1 | 0x1C0 | 0x1C1 | 0x1C3)
             // BT/BTS/BTR/BTC Ev,Ib (0F BA /4../7): rm=operand(dst), nnn=opcode-ext(src)
-            // Implementations use instr.dst() for Ev register form, so DST must be rm
             || b1 == 0x1BA
             // SHLD Ed,Gd,Ib/CL (0F A4/A5), SHRD Ed,Gd,Ib/CL (0F AC/AD):
             // rm=Ed=destination (shifted), nnn=Gd=source (provides bits)
             || matches!(b1, 0x1A4 | 0x1A5 | 0x1AC | 0x1AD)
+            // SETcc Eb (0F 90..9F): single-operand, rm=destination, nnn=opcode extension
+            || (b1 >= 0x190 && b1 <= 0x19F)
         {
             // Ed,Gd format: rm (Ed) is destination, nnn (Gd) is source
             // Examples: ADD Ed,Gd | SUB Ed,Gd | MOV Ed,Gd | BTS EdGd | XADD EbGb
@@ -1176,12 +1179,13 @@ const fn opcode_needs_modrm_32(b1: u32, map: u8) -> bool {
     } else if map == 1 {
         let opcode = (b1 & 0xFF) as u8;
         !matches!(opcode,
-            0x05..=0x09 | 0x0B |
+            0x05..=0x09 | 0x0B | 0x0E |
             0x30..=0x37 |
             0x77 |
             0x80..=0x8F |
             0xA0..=0xA2 | 0xA8..=0xAA |
-            0xC8..=0xCF
+            0xC8..=0xCF |
+            0xFF
         )
     } else {
         true

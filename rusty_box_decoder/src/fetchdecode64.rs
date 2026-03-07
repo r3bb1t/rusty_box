@@ -35,7 +35,7 @@ const BX_INSTR_METADATA_SCALE: usize = 7;
 
 // Register constants for clarity
 const BX_NIL_REGISTER: u8 = 19;
-const BX_64BIT_REG_RIP: u8 = 17;
+const BX_64BIT_REG_RIP: u8 = 16; // BX_GENERAL_REGISTERS = 16, matching Bochs
 const BX_NO_INDEX: u8 = 4;
 
 // Decoding mask bit offsets (from fetchdecode_generated.rs)
@@ -114,7 +114,9 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     let mut seg_override: u8 = 7; // 7 = none
 
     // === Phase 1: Parse legacy prefixes ===
-    // Per original C++: legacy prefixes reset any previously seen REX prefix
+    // Per Bochs fetchDecode64: REX prefixes do NOT break the prefix loop.
+    // A legacy prefix after REX resets rex_prefix to 0.
+    // Only a non-prefix byte breaks out.
     while pos < max_len {
         let b = bytes[pos];
         match b {
@@ -142,10 +144,11 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                 }
             }
 
-            // Address size override
+            // Address size override — only clear As64 (Bochs: clearAs64 only)
+            // Default 64-bit: As32=1, As64=1. With 0x67: As32=1, As64=0 (32-bit addressing)
+            // Clearing both would give asize()=0 (16-bit — invalid in 64-bit mode)
             0x67 => {
                 rex_prefix = 0;
-                metainfo1_bits &= !MetaInfoFlags::As32.bits();
                 metainfo1_bits &= !MetaInfoFlags::As64.bits();
             }
 
@@ -159,30 +162,40 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             0xF2 => {
                 rex_prefix = 0;
                 metainfo1_bits = (metainfo1_bits & 0x3F) | (2 << 6);
-                sse_prefix = 2;
+                sse_prefix = 3; // Bochs: (0xF2 & 3) ^ 1 = 3 = SSE_PREFIX_F2
             }
 
             // REP/REPE/REPZ (also SSE prefix)
             0xF3 => {
                 rex_prefix = 0;
                 metainfo1_bits = (metainfo1_bits & 0x3F) | (3 << 6);
-                sse_prefix = 3;
+                sse_prefix = 2; // Bochs: (0xF3 & 3) ^ 1 = 2 = SSE_PREFIX_F3
             }
 
             // REX prefixes (0x40-0x4F)
+            // Per Bochs: does NOT break, continues prefix loop (goto fetch_b1)
+            // A subsequent legacy prefix will reset rex_prefix to 0
+            // Store full byte (not b & 0x0F) so bare REX 0x40 is still non-zero.
+            // Bochs: rex_prefix = b; — ensures REX.none (0x40) enables Extend8bit.
             0x40..=0x4F => {
-                rex_prefix = b & 0x0F;
-                // REX.W sets 64-bit operand size
-                if (rex_prefix & 0x08) != 0 {
-                    metainfo1_bits |= MetaInfoFlags::Os64.bits();
-                }
-                pos += 1;
-                break;
+                rex_prefix = b;
             }
 
             _ => break,
         }
         pos += 1;
+    }
+
+    // Post-prefix REX processing (matches Bochs fetchDecode64:1476-1482)
+    // Must happen AFTER prefix loop so REX.W overrides any prior 0x66 prefix
+    if rex_prefix != 0 {
+        // assertExtend8bit: REX prefix enables extended 8-bit registers (SPL, BPL, SIL, DIL)
+        metainfo1_bits |= MetaInfoFlags::Extend8bit.bits();
+        if (rex_prefix & 0x08) != 0 {
+            // REX.W: assert BOTH Os64 AND Os32 (Bochs assertOs64 + assertOs32)
+            metainfo1_bits |= MetaInfoFlags::Os64.bits();
+            metainfo1_bits |= MetaInfoFlags::Os32.bits();
+        }
     }
 
     if pos >= max_len {
@@ -261,6 +274,12 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     let mut nnn: u32 = (b1 >> 3) & 0x7;
     let mut rm: u32 = b1 & 0x7;
+
+    // REX.B extends register encoded in opcode low bits for non-ModRM opcodes
+    // (PUSH r64, POP r64, MOV r64/imm, XCHG r64/RAX, BSWAP, INC/DEC)
+    if !needs_modrm && (rex_prefix & 0x01) != 0 {
+        rm |= 8;
+    }
 
     if needs_modrm {
         if pos >= max_len {
@@ -416,10 +435,26 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             // MOV Sw,Ew: nnn is destination (segment), rm is source (gpr)
             instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
             instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
-        } else if ((b1 & 0x0F) == 0x01) || ((b1 & 0x0F) == 0x09) || b1 == 0x89 {
-            // Ed,Gd format (opcodes 0x01, 0x09, 0x11, 0x19, 0x21, 0x29, 0x31, 0x89):
-            // rm (Ed) is destination, nnn (Gd) is source
-            // Examples: ADD Ed,Gd | SUB Ed,Gd | MOV Ed,Gd
+        } else if (b1 < 0x100 && ((b1 & 0x0F) == 0x01 || (b1 & 0x0F) == 0x09))
+            || b1 == 0x89
+            // Two-byte Ed,Gd opcodes (DST=rm): Group 7, store-form SSE, MOV Rd/DRn, Groups 12-14
+            || matches!(b1, 0x101 | 0x111 | 0x121 | 0x129 | 0x171 | 0x172 | 0x173)
+            // BT/BTS/BTR/BTC EdGd (0F A3/AB/B3/BB): rm=bit-field(dst), nnn=bit-index(src)
+            || matches!(b1, 0x1A3 | 0x1AB | 0x1B3 | 0x1BB)
+            // XADD EbGb (0F C0), XADD EdGd (0F C1): rm=dst, nnn=src
+            // CMPXCHG EbGb (0F B0), CMPXCHG EdGd (0F B1): rm=dst, nnn=src
+            // MOVNTI Ed,Gd (0F C3): rm=mem(dst), nnn=gpr(src)
+            || matches!(b1, 0x1B0 | 0x1B1 | 0x1C0 | 0x1C1 | 0x1C3)
+            // BT/BTS/BTR/BTC Ev,Ib (0F BA /4../7): rm=operand(dst), nnn=opcode-ext(src)
+            || b1 == 0x1BA
+            // SHLD Ed,Gd,Ib/CL (0F A4/A5), SHRD Ed,Gd,Ib/CL (0F AC/AD):
+            // rm=Ed=destination (shifted), nnn=Gd=source (provides bits)
+            || matches!(b1, 0x1A4 | 0x1A5 | 0x1AC | 0x1AD)
+            // SETcc Eb (0F 90..9F): single-operand, rm=destination, nnn=opcode extension
+            || (b1 >= 0x190 && b1 <= 0x19F)
+        {
+            // Ed,Gd format: rm (Ed) is destination, nnn (Gd) is source
+            // Examples: ADD Ed,Gd | SUB Ed,Gd | MOV Ed,Gd | BTS EdGd | XADD EbGb
             instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
             instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
         } else {
@@ -470,7 +505,19 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
         match imm_size {
             1 => {
-                instr.modrm_form.operand_data.id = bytes[pos] as u32;
+                let byte_val = bytes[pos];
+                // Sign-extend byte immediates that are used as 32-bit values via id():
+                // - Branch opcodes (0x70-0x7F, 0xE0-0xE3, 0xEB): relative displacements
+                // - 0x83 (Group 1 EqsIb): sign-extended imm8 to operand-size per Intel spec
+                // - 0x6A (PUSH imm8): sign-extended to operand size
+                // - 0x6B (IMUL r,r/m,imm8): sign-extended to operand size
+                let needs_sign_ext = opcode_map == 0
+                    && matches!(b1 as u8, 0x70..=0x7F | 0xE0..=0xE3 | 0xEB | 0x83 | 0x6A | 0x6B);
+                instr.modrm_form.operand_data.id = if needs_sign_ext {
+                    byte_val as i8 as i32 as u32
+                } else {
+                    byte_val as u32
+                };
                 pos += 1;
             }
             2 => {
@@ -913,12 +960,12 @@ const fn opcode_needs_modrm_64(b1: u32, map: u8) -> bool {
             0x06 | 0x07 | 0x0E | 0x16 | 0x17 | 0x1E | 0x1F |
             0x27 | 0x2F | 0x37 | 0x3F |
             0x40..=0x5F |
-            0x60..=0x62 | 0x68 | 0x6A |
+            0x60..=0x62 | 0x68 | 0x6A | 0x6C..=0x6F |
             0x70..=0x7F |
             0x90..=0x9F |
             0xA0..=0xAF |
             0xB0..=0xBF |
-            0xC2 | 0xC3 | 0xC8 | 0xCA | 0xCB | 0xCC..=0xCF |
+            0xC2 | 0xC3 | 0xC8 | 0xC9 | 0xCA | 0xCB | 0xCC..=0xCF |
             0xD4..=0xD7 |
             0xE0..=0xEF |
             0xF1 | 0xF4 | 0xF5 | 0xF8..=0xFD
@@ -927,12 +974,13 @@ const fn opcode_needs_modrm_64(b1: u32, map: u8) -> bool {
         // 0F map
         let opcode = (b1 & 0xFF) as u8;
         !matches!(opcode,
-            0x05..=0x09 | 0x0B |
+            0x05..=0x09 | 0x0B | 0x0E |
             0x30..=0x37 |
             0x77 |
             0x80..=0x8F |
             0xA0..=0xA2 | 0xA8..=0xAA |
-            0xC8..=0xCF
+            0xC8..=0xCF |
+            0xFF
         )
     } else {
         // 0F38, 0F3A maps always need ModRM
@@ -991,7 +1039,8 @@ const fn get_immediate_size_64(b1: u32, map: u8, _sse_prefix: u8, metainfo1: u8,
             // Group 3a (F6): TEST (nnn=0,1) has Ib, others have no immediate
             // Based on Bochs cpu/decoder/fetchdecode64.cc (fetchImmediate)
             0xF6 => {
-                if nnn == 0 || nnn == 1 {
+                // Mask to 3 bits: REX.R may extend nnn to 8+
+                if (nnn & 7) == 0 || (nnn & 7) == 1 {
                     1 // TEST r/m8, imm8
                 } else {
                     0 // NOT/NEG/MUL/IMUL/DIV/IDIV - no immediate
@@ -1000,7 +1049,7 @@ const fn get_immediate_size_64(b1: u32, map: u8, _sse_prefix: u8, metainfo1: u8,
 
             // Group 3b (F7): TEST (nnn=0,1) has Iv, others have no immediate
             0xF7 => {
-                if nnn == 0 || nnn == 1 {
+                if (nnn & 7) == 0 || (nnn & 7) == 1 {
                     if os64 {
                         4 // TEST r/m64, imm32 (sign-extended)
                     } else if os32 {
@@ -1257,10 +1306,10 @@ mod tests {
     fn const_disassemble_sequence_64bit(
         data: &[u8],
         runtime_address: u64,
-    ) -> std::vec::Vec<(u64, Instruction)> {
+    ) -> alloc::vec::Vec<(u64, Instruction)> {
         let mut offset = 0;
         let mut current_address = runtime_address;
-        let mut instructions = std::vec::Vec::new();
+        let mut instructions = alloc::vec::Vec::new();
 
         while offset < data.len() {
             let remaining = &data[offset..];

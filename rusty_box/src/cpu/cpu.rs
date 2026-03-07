@@ -275,7 +275,7 @@ pub(super) enum ExceptionClass {
     Abort = 2,
 }
 
-#[derive(Debug, Default, PartialEq)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, PartialOrd)]
 pub(super) enum CpuMode {
     #[default]
     Ia32Real = 0, // CR0.PE=0                |
@@ -539,11 +539,62 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(crate) perf_icache_miss: u64,
     pub(crate) perf_prefetch: u64,
 
+    // TEMPORARY: Alpine kernel stuck-point diagnostics
+    pub(crate) diag_alpine_trace: u32,
+    pub(crate) diag_alpine_trace2: u32,
+    pub(crate) diag_alpine_trace3: u32,
+
     // Diagnostic counters for handle_async_event interrupt delivery
     pub(crate) diag_hae_intr_delivered: u64,
     pub(crate) diag_hae_intr_if_blocked: u64,
     pub(crate) diag_hae_intr_no_pic: u64,
     pub(crate) diag_hae_intr_pic_empty: u64,
+
+    /// Exception counts by vector (0=DE, 6=UD, 13=GP, 14=PF, etc.)
+    pub(crate) diag_exception_counts: [u64; 32],
+    /// Count of IaError (decoder failures) encountered
+    pub(crate) diag_ia_error_count: u64,
+    /// RIP of last IaError
+    pub(crate) diag_ia_error_last_rip: u64,
+    /// Count of interrupt() calls by vector (0-255)
+    pub(crate) diag_iac_vectors: [u64; 256],
+    /// Count of inject_external_interrupt() calls (emulator-path delivery)
+    pub(crate) diag_inject_ext_intr_count: u64,
+    /// Vector histogram for inject_external_interrupt() calls
+    pub(crate) diag_inject_ext_intr_vectors: [u64; 256],
+    /// Software INT (INT nn) vector histogram — tracks BIOS calls via int_ib()
+    pub(crate) diag_soft_int_vectors: [u64; 256],
+    /// Software INT vector histogram for late calls (icount > 2M, after BIOS POST)
+    pub(crate) diag_soft_int_vectors_late: [u64; 256],
+    /// INT 10h AH subfunction histogram (late calls only)
+    pub(crate) diag_int10h_ah_hist: [u64; 256],
+    /// First 128 chars written via INT 10h AH=0Eh (TTY) — late calls only
+    pub(crate) diag_int10h_tty_chars: [u8; 128],
+    pub(crate) diag_int10h_tty_count: usize,
+    /// Instruction count of first and last INT 10h call (any AH)
+    pub(crate) diag_int10h_first_icount: u64,
+    pub(crate) diag_int10h_last_icount: u64,
+    /// Instruction count of first and last INT 10h AH=0Eh call
+    pub(crate) diag_int10h_tty_first_icount: u64,
+    pub(crate) diag_int10h_tty_last_icount: u64,
+    /// First HLT in PM capture: icount, EAX-EDI, ESP, EBP, CS, SS, EFLAGS
+    pub(crate) diag_first_pm_hlt_captured: bool,
+    pub(crate) diag_first_pm_hlt_icount: u64,
+    pub(crate) diag_first_pm_hlt_regs: [u32; 8], // EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
+    pub(crate) diag_first_pm_hlt_cs: u16,
+    pub(crate) diag_first_pm_hlt_ss: u16,
+    pub(crate) diag_first_pm_hlt_eflags: u32,
+    pub(crate) diag_first_pm_hlt_rip: u32,
+    /// Stack snapshot at first PM HLT (16 dwords from ESP)
+    pub(crate) diag_first_pm_hlt_stack: [u32; 16],
+    /// PM→RM transition count (CR0 PE: 1→0)
+    pub(crate) diag_pm_to_rm_count: u64,
+    /// RM→PM transition count (CR0 PE: 0→1)
+    pub(crate) diag_rm_to_pm_count: u64,
+    /// Real-mode RETF16 diagnostic counter
+    pub(super) diag_retf16_count: u64,
+    /// Address hit counters: [addr, count] pairs for tracking specific RIP values
+    pub(crate) diag_addr_hits: [(u32, u64); 8],
 
     // Boundaries of current code page, based on EIP
     pub(super) eip_page_bias: BxAddress,
@@ -605,7 +656,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     /// this structure should be aligned on a 32-byte boundary to be friendly
     /// with the host cache lines.
     pub(super) i_cache: BxICache,
-    pub(super) fetch_mode_mask: u32,
+    pub(super) fetch_mode_mask: super::opcodes_table::FetchModeMask,
 
     pub(super) address_xlation: AddressXlation,
 
@@ -664,8 +715,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) const BX_ASYNC_EVENT_SLEEP: u32 = 1;
 
     /// Event bit: external interrupt pending (PIC int_pin asserted).
-    /// Matches Bochs `BX_EVENT_PENDING_INTR`.
+    /// Bochs uses bit 10; we use bit 0 for internal consistency.
     pub(crate) const BX_EVENT_PENDING_INTR: u32 = 1 << 0;
+
+    /// Event bit: NMI pending/masked. Bochs cpu.h:1168 uses bit 0,
+    /// but we use bit 1 to avoid conflict with PENDING_INTR.
+    /// Masked on NMI delivery, unmasked on IRET.
+    pub(super) const BX_EVENT_NMI: u32 = 1 << 1;
+
+    /// Event bit: LAPIC interrupt pending.
+    /// Bochs cpu.h:1177 uses bit 11; we use bit 2.
+    pub(crate) const BX_EVENT_PENDING_LAPIC_INTR: u32 = 1 << 2;
 
     /// Returns a mutable raw pointer to the Local APIC for cross-module wiring.
     /// Used by emulator.rs to wire I/O APIC → LAPIC interrupt delivery.
@@ -700,9 +760,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.cpu_mode == CpuMode::Ia32Real
     }
 
-    /// Protected mode (NOT v8086) — matches Bochs BX_CPU_C::protected_mode()
+    /// Protected mode (NOT v8086, NOT real) — matches Bochs BX_CPU_C::protected_mode()
+    /// Bochs: cpu_mode >= BX_MODE_IA32_PROTECTED (includes Protected, LongCompat, Long64)
     pub(super) fn protected_mode(&self) -> bool {
-        self.cpu_mode == CpuMode::Ia32Protected
+        self.cpu_mode >= CpuMode::Ia32Protected
     }
 
     pub(super) fn bx_write_opmask(&mut self, index: usize, val_64: u64) {
@@ -1051,6 +1112,35 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.pending_event &= !(1 << event);
     }
 
+    /// Bochs `mask_event()`: add event bits to event_mask so they won't fire.
+    /// Used by handleInterruptMaskChange when IF is cleared — external
+    /// interrupts stay pending but are blocked until IF is re-enabled.
+    /// Matches Bochs cpu.h:1198
+    #[inline]
+    pub(crate) fn mask_event(&mut self, event_bits: u32) {
+        self.event_mask |= event_bits;
+    }
+
+    /// Bochs `unmask_event()`: remove event bits from event_mask.
+    /// When IF is set, PENDING_INTR is unmasked. If a pending event
+    /// exists, async_event is set to trigger delivery at next boundary.
+    /// Matches Bochs cpu.h:1200-1202
+    #[inline]
+    pub(crate) fn unmask_event(&mut self, event_bits: u32) {
+        self.event_mask &= !event_bits;
+        // If any of the newly-unmasked events are pending, force async check
+        if (self.pending_event & event_bits) != 0 {
+            self.async_event = 1;
+        }
+    }
+
+    /// Bochs `is_unmasked_event_pending()`: check if event is both pending
+    /// and not masked. Matches Bochs cpu.h:1212-1213
+    #[inline]
+    pub(crate) fn is_unmasked_event_pending(&self, event_bits: u32) -> bool {
+        (self.pending_event & !self.event_mask & event_bits) != 0
+    }
+
     #[inline]
     pub(crate) fn set_io_bus_ptr(&mut self, io: NonNull<crate::iodev::BxDevicesC>) {
         self.io_bus = Some(io);
@@ -1119,6 +1209,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Sets EXT=1, uses the unified interrupt() for proper inhibit_mask clearing,
     /// speculative_rsp, and BadVector recovery, then commits prev_rip.
     pub(crate) fn inject_external_interrupt(&mut self, vector: u8) -> Result<()> {
+        self.diag_inject_ext_intr_count += 1;
+        self.diag_inject_ext_intr_vectors[vector as usize] += 1;
+
         // Wake from halt/wait state.
         self.activity_state = CpuActivityState::Active;
         // Clear stop-trace and sleep sentinel so execution can resume.
@@ -1259,7 +1352,27 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             self.rip()
         );
 
+        let _last_diag_iteration = 0u64;
+        let mut outer_loop_count = 0u64;
         let result = 'cpu_loop: loop {
+            outer_loop_count += 1;
+            // Detect spinning: log every 100K outer-loop iterations
+            if outer_loop_count % 100_000 == 0 {
+                tracing::warn!(
+                    "[cpu_loop-spin] outer={} iter={}/{} RIP={:#010x} async={} activity={:?}",
+                    outer_loop_count,
+                    iteration,
+                    max_instructions,
+                    self.rip(),
+                    self.async_event,
+                    self.activity_state,
+                );
+                if outer_loop_count > 50_000_000 {
+                    tracing::error!("[cpu_loop] BAILOUT after {} outer loops", outer_loop_count);
+                    break Ok(iteration);
+                }
+            }
+
             // Safety limit - pause when instruction limit is reached
             // Use >= so each batch runs exactly max_instructions, not max_instructions+1.
             if iteration >= max_instructions {
@@ -1321,6 +1434,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
                         // Exception delivery during prefetch/fetch: restart decode (Bochs longjmp).
                         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
+                        // Count restarts to detect infinite prefetch-fault loops
+                        iteration += 1; // Count this as an instruction to prevent infinite loop
                         continue 'cpu_loop;
                     }
                     Err(e) => break 'cpu_loop Err(e),
@@ -1332,12 +1447,54 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             let is_real = self.real_mode();
 
+            let mut trace_iter = 0u64;
             'trace: loop {
+                trace_iter += 1;
                 // Bochs-style: pointer to mpool slot — no 24-byte copy per instruction.
                 // SAFETY: execute_instruction never writes to i_cache.mpool (only CPU registers
                 // and memory). serve_icache_miss is only called from get_icache_entry, not during
                 // instruction execution. So the mpool slot is stable for the duration of this call.
                 let i_ptr: *const Instruction = &raw const self.i_cache.mpool[instr_idx];
+
+                // Save pre-execution RIP for diagnostic address tracking
+                let pre_exec_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx as u32 };
+
+                // TEMPORARY: Dump the loop body code once
+                if pre_exec_rip == 0x035aef46 && self.diag_alpine_trace == 0 {
+                    self.diag_alpine_trace = 1;
+                    // Dump code from 0x35aeed1 (loop start) through 0x35aef48 (loop end)
+                    let mut code_buf = alloc::vec![0u8; 128]; // 0x35aeed1 to 0x35aef51
+                    for i in 0..code_buf.len() {
+                        let addr = 0x35aeed1u64 + i as u64;
+                        if let Ok(paddr) = self.translate_data_read(addr) {
+                            code_buf[i] = self.mem_read_byte(paddr);
+                        }
+                    }
+                    // Print first 64 bytes of loop body
+                    let hex1: alloc::string::String = code_buf[..64].iter().map(|b| alloc::format!("{:02x} ", b)).collect();
+                    let hex2: alloc::string::String = code_buf[64..].iter().map(|b| alloc::format!("{:02x} ", b)).collect();
+                    tracing::error!("[ALPINE-CODE] Loop body at 0x35aeed1: {}", hex1);
+                    tracing::error!("[ALPINE-CODE] Loop body at 0x35aef11: {}", hex2);
+                    tracing::error!(
+                        "[ALPINE-REGS] RAX={:#018x} RBX={:#018x} RCX={:#018x} RDX={:#018x} RSI={:#018x} RDI={:#018x} RSP={:#018x} RBP={:#018x} R8={:#018x} R9={:#018x} R10={:#018x} R11={:#018x} R12={:#018x} R13={:#018x} R14={:#018x} R15={:#018x} CR3={:#018x}",
+                        self.rax(), self.rbx(), self.rcx(), self.rdx(),
+                        self.rsi(), self.rdi(), self.rsp(), self.rbp(),
+                        self.r8(), self.r9(), self.r10(), self.r11(),
+                        self.r12(), self.r13(), self.r14(), self.r15(),
+                        self.cr3
+                    );
+                    // Dump stack
+                    let sp = self.rsp();
+                    let mut stack = [0u64; 8];
+                    for i in 0..8 {
+                        let addr = sp + (i as u64 * 8);
+                        stack[i] = self.translate_data_read(addr).map(|p| self.mem_read_qword(p)).unwrap_or(0xDEAD);
+                    }
+                    tracing::error!(
+                        "[ALPINE-STACK] RSP={:#018x}: {:#018x} {:#018x} {:#018x} {:#018x} {:#018x} {:#018x} {:#018x} {:#018x}",
+                        sp, stack[0], stack[1], stack[2], stack[3], stack[4], stack[5], stack[6], stack[7]
+                    );
+                }
 
                 // Matching C++ line 202: RIP += i->ilen();
                 // Advance RIP before execution (handlers may read RIP and expect it advanced)
@@ -1349,6 +1506,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
                 // Execute instruction (matching C++ BX_CPU_CALL_METHOD)
                 // SAFETY: i_ptr is valid for the lifetime of this loop iteration (see above).
+                let opcode = unsafe { (*i_ptr).get_ia_opcode() };
                 match self.execute_instruction(unsafe { &*i_ptr }) {
                     Ok(()) => {}
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
@@ -1359,6 +1517,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         iteration += 1;
                         self.prev_rip = self.rip() as u64;
                         self.speculative_rsp = false;
+                        // If triple fault set Shutdown, exit cleanly instead of restarting.
+                        if matches!(self.activity_state, CpuActivityState::Shutdown) {
+                            tracing::debug!("CPU shutdown — exiting cpu_loop");
+                            break 'cpu_loop Ok(iteration);
+                        }
                         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
                         continue 'cpu_loop;
                     }
@@ -1373,6 +1536,17 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.prev_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
                 self.icount += 1;
                 iteration += 1;
+
+                // Diagnostic address hit tracking (zero-cost when no watches set)
+                if self.diag_addr_hits[0].0 != 0 {
+                    self.check_addr_hits(pre_exec_rip);
+                }
+
+
+
+
+
+
 
                 // Check async events (matching C++ line 215: if (async_event) break;)
                 // When async_event is set (branch taken, exception, HLT, etc.), we MUST
@@ -1559,7 +1733,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Direct icache lookup without cloning BxICacheEntry.
         // We only need mpool_start_idx and tlen from the entry.
-        let hash_idx = BxICache::hash(p_addr, self.fetch_mode_mask.into()) as usize;
+        let hash_idx = BxICache::hash(p_addr, self.fetch_mode_mask.bits().into()) as usize;
         let entry = &self.i_cache.entry[hash_idx];
 
         // Check if entry matches and has valid instruction (matching C++ line 299)
@@ -1625,30 +1799,17 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     pub(super) fn get_gpr32(&self, idx: usize) -> u32 {
-        match idx {
-            0 => self.eax(),
-            1 => self.ecx(),
-            2 => self.edx(),
-            3 => self.ebx(),
-            4 => self.esp(),
-            5 => self.ebp(),
-            6 => self.esi(),
-            7 => self.edi(),
-            _ => 0,
-        }
+        // Must handle indices 0-15 (R8D-R15D via REX in 64-bit mode)
+        // Matches set_gpr32() which uses direct array access
+        unsafe { self.gen_reg[idx].dword.erx }
     }
 
+    /// Write 32-bit GPR with zero-extension to 64 bits (Bochs BX_WRITE_32BIT_REGZ)
+    /// Handles all 16 GPRs (0-7 = EAX-EDI, 8-15 = R8D-R15D)
     pub(super) fn set_gpr32(&mut self, idx: usize, val: u32) {
-        match idx {
-            0 => self.set_eax(val),
-            1 => self.set_ecx(val),
-            2 => self.set_edx(val),
-            3 => self.set_ebx(val),
-            4 => self.set_esp(val),
-            5 => self.set_ebp(val),
-            6 => self.set_esi(val),
-            7 => self.set_edi(val),
-            _ => (),
+        unsafe {
+            self.gen_reg[idx].dword.erx = val;
+            self.gen_reg[idx].dword.hrx = 0;
         }
     }
 
@@ -1942,7 +2103,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let page_offset;
 
         if self.long64_mode() {
-            if self.is_canonical_access(self.rip(), MemoryAccessType::Execute, self.user_pl()) {
+            if !self.is_canonical_access(self.rip(), MemoryAccessType::Execute, self.user_pl()) {
                 tracing::error!("prefetch: #GP(0): RIP crossed canonical boundary");
                 self.exception(Exception::Gp, 0)?;
             }
@@ -1958,7 +2119,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             if self.user_pl()
                 && self.get_vip() != 0
                 && self.get_vif() != 0
-                && self.cr4.pvi() | (self.v8086_mode() && self.cr4.vme())
+                && (self.cr4.pvi() || (self.v8086_mode() && self.cr4.vme()))
             {
                 tracing::error!("prefetch: inconsistent VME state");
                 self.exception(Exception::Gp, 0)?;
@@ -2028,6 +2189,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // Control was transferred - abort prefetch and let retry logic handle it
                 return Ok(());
             }
+
 
             // Only set eip_page_bias if limit check passed (matching C++ order)
             self.eip_page_bias = eip_page_bias_calc;
@@ -2476,7 +2638,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     pub(crate) fn assign_handler(
         &mut self,
         instr: &mut Instruction,
-        fetch_mode_mask: u32,
+        fetch_mode_mask: super::opcodes_table::FetchModeMask,
     ) -> Result<(bool, Option<InstructionHandler<I>>)> {
         use super::opcodes_table::{get_opcode_entry, FetchModeMask, OpFlags};
         use crate::cpu::decoder::Opcode;
@@ -2568,10 +2730,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Feature availability checks (matching lines 2086-2133)
         // These checks only assign error handlers if execute1 != BxError (matching C++ lines 2088, 2092, etc.)
-        let fetch_mode = FetchModeMask::from_bits_truncate(fetch_mode_mask);
-
         // Check FPU/MMX availability
-        if !fetch_mode.contains(FetchModeMask::FETCH_MODE_FPU_MMX_OK) {
+        if !fetch_mode_mask.contains(FetchModeMask::FPU_MMX_OK) {
             if op_flags.contains(OpFlags::PREPARE_FPU) {
                 // Matching C++ line 2088: only assign if execute1 != BxError
                 if !is_bx_error {
@@ -2593,7 +2753,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Check SSE availability (CPU_LEVEL >= 6)
         #[cfg(feature = "bx_support_sse")]
         {
-            if !fetch_mode.contains(FetchModeMask::FETCH_MODE_SSE_OK) {
+            if !fetch_mode_mask.contains(FetchModeMask::SSE_OK) {
                 if op_flags.contains(OpFlags::PREPARE_SSE) {
                     // Matching C++ line 2099: only assign if execute1 != BxError
                     if !is_bx_error {
@@ -2608,7 +2768,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Check AVX availability
         #[cfg(feature = "bx_support_avx")]
         {
-            if !fetch_mode.contains(FetchModeMask::FETCH_MODE_AVX_OK) {
+            if !fetch_mode_mask.contains(FetchModeMask::AVX_OK) {
                 if op_flags.contains(OpFlags::PREPARE_AVX) {
                     // Matching C++ line 2106: only assign if execute1 != BxError
                     if !is_bx_error {
@@ -2623,7 +2783,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Check OPMASK availability
         #[cfg(feature = "bx_support_evex")]
         {
-            if !fetch_mode.contains(FetchModeMask::FETCH_MODE_OPMASK_OK) {
+            if !fetch_mode_mask.contains(FetchModeMask::OPMASK_OK) {
                 if op_flags.contains(OpFlags::PREPARE_OPMASK) {
                     // Matching C++ line 2113: only assign if execute1 != BxError
                     if !is_bx_error {
@@ -2638,7 +2798,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Check EVEX availability
         #[cfg(feature = "bx_support_evex")]
         {
-            if !fetch_mode.contains(FetchModeMask::FETCH_MODE_EVEX_OK) {
+            if !fetch_mode_mask.contains(FetchModeMask::EVEX_OK) {
                 if op_flags.contains(OpFlags::PREPARE_EVEX) {
                     // Matching C++ line 2119: only assign if execute1 != BxError
                     if !is_bx_error {
@@ -2653,7 +2813,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Check AMX availability
         #[cfg(feature = "bx_support_amx")]
         {
-            if !fetch_mode.contains(FetchModeMask::FETCH_MODE_AMX_OK) {
+            if !fetch_mode_mask.contains(FetchModeMask::AMX_OK) {
                 if op_flags.contains(OpFlags::PREPARE_AMX) {
                     // Matching C++ line 2126: only assign if execute1 != BxError
                     if !is_bx_error {
