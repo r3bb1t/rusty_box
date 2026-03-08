@@ -503,6 +503,9 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                 | 0xFE
                 | 0xFF
         );
+        // Note: Two-byte groups (0x100=Group6, 0x1AE=Group15, 0x1C7=Group9) are NOT in
+        // is_group_opcode because their handlers were written for the default Gd,Ed convention
+        // (dst=nnn, src1=rm). Adding them here would swap operands and break the handlers.
 
         // Segment register move instructions: 8C (MOV Ew,Sw) and 8E (MOV Sw,Ew)
         // For 0x8C: nnn=segment (source), rm=gpr (destination) -> DST=rm, SRC1=nnn
@@ -524,6 +527,8 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             || b1 == 0x89
             // Two-byte Ed,Gd opcodes (DST=rm): Group 7, store-form SSE, MOV Rd/DRn, Groups 12-14
             || matches!(b1, 0x101 | 0x111 | 0x121 | 0x129 | 0x171 | 0x172 | 0x173)
+            // SSE store-form opcodes: dst=rm(memory), src=nnn(xmm/mmx)
+            || matches!(b1, 0x113 | 0x117 | 0x12B | 0x17E | 0x17F | 0x1E7)
             // BT/BTS/BTR/BTC EdGd (0F A3/AB/B3/BB): rm=bit-field(dst), nnn=bit-index(src)
             || matches!(b1, 0x1A3 | 0x1AB | 0x1B3 | 0x1BB)
             // XADD EbGb (0F C0), XADD EdGd (0F C1): rm=dst, nnn=src
@@ -608,6 +613,12 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             2 => {
                 instr.modrm_form.operand_data.id = read_u16_le(bytes, pos) as u32;
                 pos += 2;
+            }
+            3 => {
+                // ENTER: Iw (frame size) + Ib (nesting level)
+                instr.modrm_form.operand_data.id = read_u16_le(bytes, pos) as u32;
+                instr.modrm_form.displacement.data32 = bytes[pos + 2] as u32;
+                pos += 3;
             }
             4 => {
                 instr.modrm_form.operand_data.id = read_u32_le(bytes, pos);
