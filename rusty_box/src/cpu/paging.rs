@@ -8,7 +8,7 @@ use crate::{
     config::{BxAddress, BxPhyAddress},
     cpu::{
         rusty_box::MemoryAccessType,
-        tlb::{BxHostpageaddr, TLBEntry},
+        tlb::{BxHostpageaddr, LPF_MASK, TLBEntry},
     },
     memory::BxMemC,
 };
@@ -1305,7 +1305,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         let user = self.user_pl;
-        let lpf = laddr & 0xFFFF_F000; // linear page frame
+        let lpf = laddr & LPF_MASK; // linear page frame
 
         // ---- DTLB lookup ----
         // Compute which access bit we need:
@@ -1319,38 +1319,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if tlb_entry.lpf == lpf && (tlb_entry.access_bits & needed_bit) != 0 {
                 // TLB hit — return cached physical address directly.
                 let paddr = tlb_entry.ppf | (laddr & 0xFFF);
-                // WATCHPOINT: trace translations that land on PDPT
-                if paddr >= 0x35d3000 && paddr < 0x35d3008 && self.icount >= 1849200 {
-                    tracing::error!(
-                        "XLAT_TLB: laddr={:#x} → paddr={:#x} ppf={:#x} lpf_mask={:#x} icount={} RIP={:#x}",
-                        laddr, paddr, tlb_entry.ppf, tlb_entry.lpf_mask, self.icount, self.prev_rip
-                    );
-                }
                 return Ok(paddr);
-            }
-        }
-
-        // Trace slot 16 (page 0x10) misses + all misses in crash window
-        {
-            let slot = (lpf >> 12) as usize & (2048 - 1);
-            if (slot == 16 && self.icount >= 1849000) || (self.icount >= 1849400 && self.icount <= 1849425) {
-                tracing::error!(
-                    "DTLB_MISS: laddr={:#x} lpf={:#x} slot={} icount={} RIP={:#x} is_write={}",
-                    laddr, lpf, slot, self.icount, self.prev_rip, is_write
-                );
             }
         }
 
         // ---- DTLB miss — full page table walk ----
         let (paddr, combined_access, lpf_mask) = self.page_walk_for_dtlb(laddr, user, is_write)?;
         let paddr = self.apply_a20(paddr);
-        // WATCHPOINT: trace walk results that land on PDPT
-        if paddr >= 0x35d3000 && paddr < 0x35d3008 && self.icount >= 1849200 {
-            tracing::error!(
-                "XLAT_WALK: laddr={:#x} → paddr={:#x} lpf_mask={:#x} icount={} RIP={:#x}",
-                laddr, paddr, lpf_mask, self.icount, self.prev_rip
-            );
-        }
         let is_large_page = lpf_mask > 0xFFF;
 
         // ---- Populate DTLB entry ----
@@ -1382,7 +1357,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             access_bits &= !(TlbAccess::SYS_WRITE_OK.bits() | TlbAccess::USER_WRITE_OK.bits());
         }
 
-        let ppf = paddr & 0xFFFF_F000;
+        let ppf = paddr & LPF_MASK;
 
         // Pre-compute host page address before borrowing the TLB entry mutably.
         // Cache host pointer for direct memory access on future TLB hits.
@@ -1405,16 +1380,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         {
             let tlb_entry = self.dtlb.get_entry_of(laddr, 0);
-            // Trace evictions of slot 16 (page 0x10) near crash
-            if self.icount >= 1849000 {
-                let slot = (lpf >> 12) as usize & (2048 - 1);
-                if slot == 16 && lpf != tlb_entry.lpf {
-                    tracing::error!(
-                        "DTLB_EVICT slot=16: old_lpf={:#x} new_lpf={:#x} icount={} RIP={:#x}",
-                        tlb_entry.lpf, lpf, self.icount, self.prev_rip
-                    );
-                }
-            }
             tlb_entry.lpf = lpf;
             tlb_entry.ppf = ppf;
             tlb_entry.access_bits = access_bits;
@@ -1475,13 +1440,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Fast physical qword (64-bit) write for PAE/long mode A/D bit updates.
     fn page_walk_write_qword(&mut self, paddr: u64, val: u64) {
-        // WATCHPOINT: detect A/D writes to PDPT
-        if paddr >= 0x35d3000 && paddr < 0x35d3008 {
-            tracing::error!(
-                "WATCHPOINT_PW: write to PDPT paddr={:#x} val={:#018x} icount={} RIP={:#x}",
-                paddr, val, self.icount, self.prev_rip
-            );
-        }
         let a20_addr = (paddr & self.a20_mask) as usize;
         let host_base = self.mem_host_base;
         if !host_base.is_null() && a20_addr + 8 <= self.mem_host_len {

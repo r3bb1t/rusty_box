@@ -1306,13 +1306,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn mem_write_byte(&mut self, addr: u64, value: u8) {
         // Fast path: direct host pointer for plain RAM (bypass get_host_mem_addr).
         let a20_addr = (addr & self.a20_mask) as usize;
-        // WATCHPOINT: detect writes to PDPT at 0x35d3000-0x35d3007
-        if a20_addr >= 0x35d3000 && a20_addr < 0x35d3008 && self.icount >= 1849200 {
-            tracing::error!(
-                "WATCHPOINT: write to PDPT phys={:#x} val={:#04x} icount={} RIP={:#x} addr_arg={:#x}",
-                a20_addr, value, self.icount, self.prev_rip, addr
-            );
-        }
         let host_base = self.mem_host_base;
         if !host_base.is_null()
             && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr < self.mem_host_len))
@@ -1442,13 +1435,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn mem_write_dword(&mut self, addr: u64, value: u32) {
         // Fast path: direct host pointer for plain RAM
         let a20_addr = (addr & self.a20_mask) as usize;
-        // WATCHPOINT: detect dword writes to PDPT
-        if a20_addr >= 0x35d3000 && a20_addr < 0x35d3008 {
-            tracing::error!(
-                "WATCHPOINT_DW: write to PDPT phys={:#x} val={:#010x} icount={} RIP={:#x}",
-                a20_addr, value, self.icount, self.prev_rip
-            );
-        }
         let host_base = self.mem_host_base;
         if !host_base.is_null()
             && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr + 3 < self.mem_host_len))

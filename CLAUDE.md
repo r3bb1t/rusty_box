@@ -19,7 +19,10 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 **Current Status (2026-03-07):**
 - ✅ **DLX Linux boots to interactive bash shell!** Full boot: BIOS POST → LILO → kernel → init → `dlx login: root` → `dlx:~#` (200M instructions sufficient)
 - ✅ **Alpine Linux enters 64-bit long mode!** Direct kernel boot reaches long mode (mode=4, CR0=0x80050033). Stuck at RIP=0x35aef46 (page table mapping function returning 0). Session 28 audit found multiple 64-bit decoder/accessor bugs (see below) that likely cause this.
-- ⚠️ **Session 28 audit: 6 CRITICAL + 16 HIGH unfixed bugs found** by 10 parallel agents. Top Alpine blockers: SSE prefix F2/F3 swapped, get_gpr32 returns 0 for R8-R15, REX.B not applied to non-ModRM opcodes, 0x67 prefix clears As32. See Session 28 in Major Bug Fixes.
+- ✅ **Session 28-29 audit RESOLVED**: All 6 CRITICAL bugs resolved (3 already fixed, 1 not-a-bug, 2 confirmed fixed). Most HIGH bugs also confirmed fixed. Remaining unfixed: ~95 SSE opcode tables, decmask NNN/RRR fields, SRC_EQ_DST bit, UD64 opcodes, 64-bit TLB fast path (performance only).
+- ✅ **64-bit canonical address checks (session 30)**: All 10 `read/write_virtual_*_64` functions now check canonical addresses (Bochs access.cc:339/444). Non-canonical raises #GP(0) or #SS(0). Cross-page paths check last byte too.
+- ✅ **LPF mask 64-bit fix (session 30)**: `translate_data_access` used `0xFFFF_F000` (32-bit truncating) for lpf/ppf. Fixed to `LPF_MASK` (`0xFFFF_FFFF_FFFF_F000`). Was causing incorrect TLB lookups for 64-bit kernel virtual addresses.
+- ✅ **NOP/PAUSE wired in dispatcher**: Both decoded by decoder AND dispatched as no-ops.
 - ✅ **64-bit paging bypass FIXED (session 26)**: ALL 64-bit memory access functions were bypassing page table walks, passing linear addresses directly to physical memory. Since long mode requires paging (CR0.PG=1), once the kernel sets up its own page tables, every 64-bit memory access hit wrong physical addresses. Fixed ~137 call sites across 9 files. See detailed fix list below.
 - ✅ **REX byte register mapping fix**: Two-bug fix enabling correct SPL/BPL/SIL/DIL access in 64-bit mode. Decoder stored `rex_prefix = b & 0x0F` (bare REX 0x40 → 0 → Extend8bit never set). Register accessor mapped indices 4-7 to AH/CH/DH/BH regardless of REX. Both fixed — Alpine kernel memset now writes correct values to page tables.
 - ✅ **Full 64-bit instruction set**: arith64, logical64, shift64, mult64 all implemented and dispatched (~110 new opcodes)
@@ -623,27 +626,27 @@ The decoder fails to account for immediate bytes in TEST instructions (opcodes 0
 0. **FIXED: 64-bit LEAVE (0xC9) missing from no-ModRM list** (`fetchdecode64.rs:960`).
 0. **FIXED: 64-bit INS/OUTS (0x6C-0x6F) missing from no-ModRM list** (`fetchdecode64.rs:955`).
 
-*Agent-discovered CRITICAL unfixed bugs:*
-0. **SSE prefix F2/F3 SWAPPED** (`fetchdecode32.rs:253-262`, `fetchdecode64.rs:161-172`): Rust assigns F2→2, F3→3. Bochs uses `(b1&3)^1`: F2→3, F3→2. All F2/F3-differentiated SSE instructions decode to wrong opcode (MOVSS↔MOVSD etc.). Fix: swap values. Note: lock_rep_used in metainfo1 is correct, only sse_prefix is wrong.
-0. **get_gpr32() returns 0 for R8D-R15D** (`cpu.rs:1801-1813`): Match on 0-7, `_=>0`. 249 call sites silently get 0 for extended registers in 64-bit mode. Fix: `unsafe { self.gen_reg[idx].dword.erx }`.
-0. **REX.B not applied for non-ModRM 64-bit opcodes** (`fetchdecode64.rs:274-295`): REX.B only inside `if needs_modrm`. PUSH/POP/MOV/XCHG R8-R15 use wrong register. Fix: add `if !needs_modrm && (rex_prefix & 0x01) != 0 { rm |= 8; }`.
+*Agent-discovered CRITICAL bugs — ALL RESOLVED:*
+0. **NOT A BUG: SSE prefix F2/F3** — `PrefixF3=2, PrefixF2=3` matches Bochs `SSE_PREFIX_F3=2, SSE_PREFIX_F2=3` exactly. Original audit was wrong.
+0. **FIXED: get_gpr32() R8D-R15D** — already uses direct `gen_reg[idx]` array access.
+0. **FIXED: REX.B for non-ModRM** — already applied: `if !needs_modrm && (rex_prefix & 0x01) != 0 { rm |= 8; }`.
 
-*Agent-discovered HIGH unfixed bugs:*
-0. **0x67 prefix clears As32+As64 instead of just As64** (`fetchdecode64.rs:148-152`): Produces 16-bit addressing in 64-bit mode. Fix: only clear As64.
-0. **msr_fsbase()/msr_gsbase() read GPR not segment base** (`cpu_getters_and_setters.rs:488-502`): `gen_reg[4]`=RSP not FS base. Dead code currently.
+*Agent-discovered HIGH bugs — status:*
+0. **FIXED: 0x67 prefix** — already clears only As64.
+0. **FIXED: msr_fsbase()/msr_gsbase()** — already reads segment base correctly.
 0. **Missing ~95 SSE opcode tables** (0F 50-7F, 0F D0-FE): Blocks all SSE instruction execution.
-0. **System read/write cross-page truncate 64-bit addresses** (`access.rs` 6 locations): `& 0xFFFF_FFFF` mask.
-0. **64-bit writes skip SMC check** (`access.rs:1009-1071`): No `smc_write_check()` after `translate_data_write`.
-0. **8-bit handlers use get_gpr8 not read_8bit_regx** (`logical8.rs`, `data_xfer32.rs`): Wrong REX register mapping for CMP/TEST/AND/OR/NOT/MOVZX 8-bit register forms.
-0. **XOP prefix check missing mod=11 validation** (`fetchdecode32.rs:302-308`): False-detects XOP when it's POP [mem].
-0. **FEMMS (0F 0E) / UD0 (0F FF) wrongly require ModRM** in both decoders.
-0. **NOP/PAUSE (0x90) not special-cased**: PAUSE instruction not decoded; bare NOP decodes as XCHG EAX,EAX (which zero-extends RAX in 64-bit mode).
+0. **FIXED: System read/write 64-bit addresses** — already uses `long_mode()` mask.
+0. **FIXED: 64-bit writes SMC check** — already present in write functions.
+0. **FIXED: 8-bit REX handlers** — already use `read_8bit_regx`/`write_8bit_regx`.
+0. **FIXED: XOP mod=11 validation** — already checks mod field.
+0. **FIXED: FEMMS/UD0 no-ModRM** — already in no-ModRM list.
+0. **FIXED: NOP/PAUSE** — decoded by decoder AND wired in dispatcher (Nop → Ok(()), Pause → Ok(())).
 0. **Non-ModRM opcodes excluded from decmask NNN/RRR fields** (64-bit decoder): Always include nnn/rm.
 0. **Missing SRC_EQ_DST bit in decmask** (both decoders): Zero-idiom opcodes never match.
 0. **UD64 opcodes (PUSH ES, DAA, etc.) decode as valid** in 64-bit decoder: 21 opcodes should return IaError.
-0. **Group 3 (F6/F7) immediate check uses REX-extended nnn**: Should mask `nnn & 7`.
-0. **Logic operations don't clear AF** (`LOGIC_MASK` missing AF): Bochs clears AF for AND/OR/XOR/TEST.
-0. **64-bit TLB fast path missing** (`access.rs:942-1071`): All 64-bit accesses do full page walk (performance).
+0. **FIXED: Group 3 (F6/F7) nnn masking** — already masks `nnn & 7`.
+0. **FIXED: LOGIC_MASK AF** — already includes AF.
+0. **64-bit TLB fast path missing** (`access.rs`): All 64-bit accesses do full page walk (performance).
 
 See `memory/audit-session28-full.md` for complete findings from all 10 agents.
 

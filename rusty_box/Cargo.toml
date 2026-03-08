@@ -67,6 +67,11 @@ name = "dlxlinux_egui"
 path = "examples/gui/dlxlinux_egui.rs"
 required-features = ["std", "gui-egui"]
 
+[[example]]
+name = "rusty_box_egui"
+path = "examples/gui/rusty_box_egui.rs"
+required-features = ["std", "gui-egui"]
+
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

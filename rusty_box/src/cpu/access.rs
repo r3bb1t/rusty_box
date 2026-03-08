@@ -67,6 +67,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
+    /// Check canonical address for 64-bit data access.
+    /// Raises #GP(0) for non-stack segments, #SS(0) for SS.
+    /// Bochs: access_read_linear (access.cc:339) / access_write_linear (access.cc:444)
+    #[inline]
+    fn check_canonical_data(&mut self, seg: BxSegregs, laddr: u64, rw: MemoryAccessType) -> Result<()> {
+        if self.long64_mode() {
+            let user = self.user_pl;
+            if !self.is_canonical_access(laddr, rw, user) {
+                self.exception(Self::seg_exception(seg), 0)?;
+            }
+        }
+        Ok(())
+    }
+
     // ===== Segment validation checks (Bochs access.cc) =====
 
     /// Validate a segment for write access.
@@ -961,6 +975,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[inline]
     pub(crate) fn read_virtual_byte_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u8> {
         let laddr = self.get_laddr64(seg as usize, offset);
+        self.check_canonical_data(seg, laddr, MemoryAccessType::Read)?;
         let paddr = self.translate_data_read(laddr)?;
         Ok(self.mem_read_byte(paddr))
     }
@@ -970,11 +985,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[inline]
     pub(crate) fn read_virtual_word_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u16> {
         let laddr = self.get_laddr64(seg as usize, offset);
+        self.check_canonical_data(seg, laddr, MemoryAccessType::Read)?;
         let page_offset = laddr & 0xFFF;
         if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
             Ok(self.mem_read_word(paddr))
         } else {
+            self.check_canonical_data(seg, laddr.wrapping_add(1), MemoryAccessType::Read)?;
             let p0 = self.translate_data_read(laddr)?;
             let b0 = self.mem_read_byte(p0);
             let p1 = self.translate_data_read(laddr.wrapping_add(1))?;
@@ -988,11 +1005,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[inline]
     pub(crate) fn read_virtual_dword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u32> {
         let laddr = self.get_laddr64(seg as usize, offset);
+        self.check_canonical_data(seg, laddr, MemoryAccessType::Read)?;
         let page_offset = laddr & 0xFFF;
         if page_offset + 4 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
             Ok(self.mem_read_dword(paddr))
         } else {
+            self.check_canonical_data(seg, laddr.wrapping_add(3), MemoryAccessType::Read)?;
             let mut buf = [0u8; 4];
             for i in 0..4u64 {
                 let p = self.translate_data_read(laddr.wrapping_add(i))?;
@@ -1007,11 +1026,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[inline]
     pub(crate) fn read_virtual_qword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u64> {
         let laddr = self.get_laddr64(seg as usize, offset);
+        self.check_canonical_data(seg, laddr, MemoryAccessType::Read)?;
         let page_offset = laddr & 0xFFF;
         if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
             Ok(self.mem_read_qword(paddr))
         } else {
+            self.check_canonical_data(seg, laddr.wrapping_add(7), MemoryAccessType::Read)?;
             let mut buf = [0u8; 8];
             for i in 0..8u64 {
                 let p = self.translate_data_read(laddr.wrapping_add(i))?;
@@ -1028,6 +1049,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[inline]
     pub(crate) fn write_virtual_byte_64(&mut self, seg: BxSegregs, offset: u64, val: u8) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
+        self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
         let paddr = self.translate_data_write(laddr)?;
         self.i_cache.smc_write_check(paddr, 1);
         self.mem_write_byte(paddr, val);
@@ -1039,12 +1061,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[inline]
     pub(crate) fn write_virtual_word_64(&mut self, seg: BxSegregs, offset: u64, val: u16) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
+        self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
         let page_offset = laddr & 0xFFF;
         if page_offset + 2 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
             self.i_cache.smc_write_check(paddr, 2);
             self.mem_write_word(paddr, val);
         } else {
+            self.check_canonical_data(seg, laddr.wrapping_add(1), MemoryAccessType::Write)?;
             let bytes = val.to_le_bytes();
             let p0 = self.translate_data_write(laddr)?;
             self.i_cache.smc_write_check(p0, 1);
@@ -1061,12 +1085,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[inline]
     pub(crate) fn write_virtual_dword_64(&mut self, seg: BxSegregs, offset: u64, val: u32) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
+        self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
         let page_offset = laddr & 0xFFF;
         if page_offset + 4 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
             self.i_cache.smc_write_check(paddr, 4);
             self.mem_write_dword(paddr, val);
         } else {
+            self.check_canonical_data(seg, laddr.wrapping_add(3), MemoryAccessType::Write)?;
             let bytes = val.to_le_bytes();
             for i in 0..4u64 {
                 let p = self.translate_data_write(laddr.wrapping_add(i))?;
@@ -1082,12 +1108,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[inline]
     pub(crate) fn write_virtual_qword_64(&mut self, seg: BxSegregs, offset: u64, val: u64) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
+        self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
         let page_offset = laddr & 0xFFF;
         if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
             self.i_cache.smc_write_check(paddr, 8);
             self.mem_write_qword(paddr, val);
         } else {
+            self.check_canonical_data(seg, laddr.wrapping_add(7), MemoryAccessType::Write)?;
             let bytes = val.to_le_bytes();
             for i in 0..8u64 {
                 let p = self.translate_data_write(laddr.wrapping_add(i))?;
@@ -1104,6 +1132,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Bochs: read_RMW_virtual_qword_64
     pub(crate) fn read_rmw_virtual_qword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u64> {
         let laddr = self.get_laddr64(seg as usize, offset);
+        self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
         let page_offset = laddr & 0xFFF;
         if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
@@ -1112,6 +1141,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.address_xlation.paddress1 = paddr;
             Ok(data)
         } else {
+            self.check_canonical_data(seg, laddr.wrapping_add(7), MemoryAccessType::Write)?;
             let len1 = (0x1000 - page_offset) as u32;
             let len2 = 8 - len1;
             let p0 = self.translate_data_write(laddr)?;
