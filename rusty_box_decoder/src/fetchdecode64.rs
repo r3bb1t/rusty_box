@@ -43,6 +43,17 @@ const BX_NIL_REGISTER: u8 = 19;
 const BX_64BIT_REG_RIP: u8 = 16; // BX_GENERAL_REGISTERS = 16, matching Bochs
 const BX_NO_INDEX: u8 = 4;
 
+// Segment default tables for 64-bit mode (matching Bochs fetchdecode64.cc lines 45-81)
+// Index by base register (0-15). RSP(4)→SS, RBP(5)→SS in mod!=0; only RSP(4)→SS in mod==0
+const SREG_MOD0_BASE32_64: [u8; 16] = [
+    3, 3, 3, 3, 2, 3, 3, 3, // DS DS DS DS SS DS DS DS  (base 0-7)
+    3, 3, 3, 3, 3, 3, 3, 3, // DS DS DS DS DS DS DS DS  (base 8-15)
+];
+const SREG_MOD1OR2_BASE32_64: [u8; 16] = [
+    3, 3, 3, 3, 2, 2, 3, 3, // DS DS DS DS SS SS DS DS  (base 0-7)
+    3, 3, 3, 3, 3, 3, 3, 3, // DS DS DS DS DS DS DS DS  (base 8-15)
+];
+
 // Decoding mask bit offsets (from fetchdecode_generated.rs)
 const OS64_OFFSET: u32 = 23;
 const OS32_OFFSET: u32 = 22;
@@ -221,21 +232,28 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     // Check for VEX/EVEX/XOP prefixes
     if b1 == 0xC4 || b1 == 0xC5 {
-        // VEX prefix - simplified handling
-        if pos < max_len && (bytes[pos] & 0xC0) == 0xC0 {
-            // This is a VEX prefix (mod=11 check)
-            return Err(DecodeError::Decoder(
-                BxDecodeError::BxIllegalVexXopOpcodeMap,
-            )); // VEX not fully supported in const
-        }
+        // VEX prefix — in 64-bit mode, C4/C5 are always VEX (never LES/LDS)
+        // Bochs decoder_vex64 fully parses; we reject as unsupported
+        return Err(DecodeError::Decoder(
+            BxDecodeError::BxIllegalVexXopOpcodeMap,
+        ));
     }
 
     if b1 == 0x62 {
-        // EVEX prefix - simplified handling
-        if pos + 2 < max_len && (bytes[pos] & 0x0C) == 0 {
-            return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
-            // EVEX not fully supported in const
+        // In 64-bit mode, 0x62 is always EVEX (never BOUND)
+        // EVEX not fully supported — reject with appropriate error
+        return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
+    }
+
+    if b1 == 0x8F {
+        // XOP prefix check — in 64-bit mode, bit 3 of next byte distinguishes XOP from POP
+        // Bochs decoder_xop64: (*iptr & 0x08) != 0x08 → not XOP → decode as POP
+        if pos < max_len && (bytes[pos] & 0x08) == 0x08 {
+            return Err(DecodeError::Decoder(
+                BxDecodeError::BxIllegalVexXopOpcodeMap,
+            ));
         }
+        // If bit 3 not set, fall through to decode as POP r/m64
     }
 
     // Two-byte escape (0F xx)
@@ -272,6 +290,47 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         } else {
             b1 = 0x100 | (b2 as u32);
             opcode_map = 1;
+        }
+    }
+
+    // === Phase 2.5: Check for UD64 opcodes (invalid in 64-bit mode) ===
+    // Matching Bochs decoder_ud64 entries in decode64_descriptor table
+    if opcode_map == 0 {
+        let is_ud64 = matches!(
+            b1 as u8,
+            0x06 | 0x07       // PUSH/POP ES
+            | 0x0E            // PUSH CS
+            | 0x16 | 0x17     // PUSH/POP SS
+            | 0x1E | 0x1F     // PUSH/POP DS
+            | 0x27            // DAA
+            | 0x2F            // DAS
+            | 0x37            // AAA
+            | 0x3F            // AAS
+            | 0x60 | 0x61     // PUSHA/POPA
+            | 0x82            // alias of Group 1 Eb,Ib
+            | 0x9A            // CALL far ptr
+            | 0xCE            // INTO
+            | 0xD4 | 0xD5     // AAM/AAD
+            | 0xD6            // SALC/SETALC
+            | 0xEA            // JMP far ptr
+        );
+        if is_ud64 {
+            return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+        }
+    } else if opcode_map == 1 {
+        // Two-byte UD64 opcodes (0F xx)
+        let is_ud64_2byte = matches!(
+            b1 & 0xFF,
+            0x04 | 0x0A | 0x0C
+            | 0x24 | 0x25 | 0x26 | 0x27
+            | 0x36
+            | 0x39
+            | 0x3B | 0x3C | 0x3D | 0x3E | 0x3F
+            | 0x7A | 0x7B
+            | 0xA6 | 0xA7
+        );
+        if is_ud64_2byte {
+            return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
         }
     }
 
@@ -389,6 +448,20 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                 let disp = read_u32_le(bytes, pos);
                 pos += 4;
                 instr.modrm_form.displacement.data32 = disp;
+            }
+
+            // Apply segment default based on base register (Bochs sreg_mod0_base32 / sreg_mod1or2_base32)
+            // Only when no explicit segment override was specified
+            if seg_override >= 7 {
+                let base_for_seg = instr.meta_data[BX_INSTR_METADATA_BASE] as usize;
+                if base_for_seg < 16 {
+                    let default_seg = if mod_field == 0 {
+                        SREG_MOD0_BASE32_64[base_for_seg]
+                    } else {
+                        SREG_MOD1OR2_BASE32_64[base_for_seg]
+                    };
+                    instr.meta_data[BX_INSTR_METADATA_SEG] = default_seg;
+                }
             }
         }
     } else {
@@ -626,6 +699,13 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     // Check if opcode lookup failed
     if matches!(instr.meta_info.ia_opcode, Opcode::IaError) {
+        return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+    }
+
+    // Post-decode LOCK validation (Bochs fetchdecode64.cc:1470-1478)
+    // LOCK prefix on register operand (modC0) is always invalid → #UD
+    let has_lock = (metainfo1_bits >> 6) & 0x3 == 1;
+    if has_lock && mod_c0 {
         return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
     }
 
@@ -1577,6 +1657,62 @@ mod tests {
         // 0F 20 00 = MOV RAX, CR0 with mod=00 (should still be treated as register)
         let i = fetch_decode64(&[0x0F, 0x20, 0x00]).unwrap();
         assert!(i.mod_c0(), "MOV CR should force ModC0 even with mod=00");
+    }
+
+    /// Test UD64 opcodes are rejected in 64-bit mode
+    #[test]
+    fn test_ud64_opcodes() {
+        // PUSH ES (0x06) — invalid in 64-bit mode
+        assert!(fetch_decode64(&[0x06]).is_err());
+        // POP ES (0x07)
+        assert!(fetch_decode64(&[0x07]).is_err());
+        // PUSH CS (0x0E)
+        assert!(fetch_decode64(&[0x0E]).is_err());
+        // DAA (0x27)
+        assert!(fetch_decode64(&[0x27]).is_err());
+        // DAS (0x2F)
+        assert!(fetch_decode64(&[0x2F]).is_err());
+        // AAA (0x37)
+        assert!(fetch_decode64(&[0x37]).is_err());
+        // AAS (0x3F)
+        assert!(fetch_decode64(&[0x3F]).is_err());
+        // PUSHA (0x60)
+        assert!(fetch_decode64(&[0x60]).is_err());
+        // POPA (0x61)
+        assert!(fetch_decode64(&[0x61]).is_err());
+        // INTO (0xCE)
+        assert!(fetch_decode64(&[0xCE]).is_err());
+        // AAM (0xD4)
+        assert!(fetch_decode64(&[0xD4, 0x0A]).is_err());
+        // SALC (0xD6)
+        assert!(fetch_decode64(&[0xD6]).is_err());
+        // Two-byte: 0F 24 (invalid in 64-bit)
+        assert!(fetch_decode64(&[0x0F, 0x24, 0xC0]).is_err());
+    }
+
+    /// Test LOCK prefix validation
+    #[test]
+    fn test_lock_register_rejected() {
+        // LOCK ADD EAX, EBX (F0 01 D8) — LOCK on register form → #UD
+        assert!(fetch_decode64(&[0xF0, 0x01, 0xD8]).is_err());
+        // LOCK ADD [RAX], EBX (F0 01 18) — LOCK on memory form → OK
+        assert!(fetch_decode64(&[0xF0, 0x01, 0x18]).is_ok());
+    }
+
+    /// Test segment defaults for RSP/RBP base in 64-bit mode
+    #[test]
+    fn test_segment_defaults_64() {
+        // MOV EAX, [RSP] (8B 04 24) — SIB with base=RSP → SS
+        let i = fetch_decode64(&[0x8B, 0x04, 0x24]).unwrap();
+        assert_eq!(i.meta_data[4], 2); // SEG = SS
+
+        // MOV EAX, [RBP+0] (8B 45 00) — mod=1, base=RBP → SS
+        let i = fetch_decode64(&[0x8B, 0x45, 0x00]).unwrap();
+        assert_eq!(i.meta_data[4], 2); // SEG = SS
+
+        // MOV EAX, [RAX] (8B 00) — base=RAX → DS
+        let i = fetch_decode64(&[0x8B, 0x00]).unwrap();
+        assert_eq!(i.meta_data[4], 3); // SEG = DS
     }
 
     /// Test that invalid segment registers (6-7) are rejected with InvalidSegmentRegister error

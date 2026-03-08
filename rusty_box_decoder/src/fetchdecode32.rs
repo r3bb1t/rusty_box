@@ -761,6 +761,14 @@ pub const fn fetch_decode32_inplace(
         return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
     }
 
+    // Post-decode LOCK validation (Bochs fetchdecode32.cc:2014-2034)
+    // LOCK prefix on register operand (modC0) is always invalid → #UD
+    let has_lock = (metainfo1_bits >> 6) & 0x3 == 1;
+    let mod_c0 = (metainfo1_bits & MetaInfoFlags::ModC0.bits()) != 0;
+    if has_lock && mod_c0 {
+        return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
+    }
+
     Ok(())
 }
 
