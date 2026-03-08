@@ -1016,9 +1016,9 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         // Read selector from register or memory
+        // Group 6 (0F 00): dst()=rm (Bochs: i->dst())
         let raw_selector = if instr.mod_c0() {
-            let src = instr.src() as usize;
-            self.get_gpr16(src)
+            self.get_gpr16(instr.dst() as usize)
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr32(instr);
@@ -1117,9 +1117,9 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         // Read selector from register or memory
+        // Group 6 (0F 00): dst()=rm (Bochs: i->dst())
         let raw_selector = if instr.mod_c0() {
-            let src = instr.src() as usize;
-            self.get_gpr16(src)
+            self.get_gpr16(instr.dst() as usize)
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr32(instr);

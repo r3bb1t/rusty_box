@@ -1,5 +1,7 @@
 // Bochs port: names intentionally match C++ originals
 #![allow(non_snake_case, non_camel_case_types, non_upper_case_globals)]
+// Dead code is expected: many Bochs constants/enums are defined for completeness
+// but only used selectively. Unused variables/assignments occur in const fn decoders.
 #![allow(dead_code, unused_variables, unused_assignments)]
 
 pub mod error;
@@ -12,9 +14,9 @@ pub mod fetchdecode;
 pub mod fetchdecode32;
 pub mod fetchdecode64;
 pub mod fetchdecode_generated;
-pub mod fetchdecode_opmap;
-pub mod fetchdecode_opmap_0f38;
-pub mod fetchdecode_opmap_0f3a;
+pub(crate) mod fetchdecode_opmap;
+pub(crate) mod fetchdecode_opmap_0f38;
+pub(crate) mod fetchdecode_opmap_0f3a;
 pub mod instr;
 
 mod fetchdecode_x87;
@@ -335,97 +337,6 @@ impl From<u8> for BxSegregs {
             }
         }
     }
-}
-
-#[derive(Debug)]
-enum BxRegs8L {
-    Bx8bitRegAl,
-    Bx8bitRegCl,
-    Bx8bitRegDl,
-    Bx8bitRegBl,
-    Bx8bitRegSpl,
-    Bx8bitRegBpl,
-    Bx8bitRegSil,
-    Bx8bitRegDil,
-
-    Bx32bitRegR8,
-    Bx32bitRegR9,
-    Bx32bitRegR10,
-    Bx32bitRegR11,
-    Bx32bitRegR12,
-    Bx32bitRegR13,
-    Bx32bitRegR14,
-    Bx32bitRegR15,
-}
-
-#[derive(Debug)]
-enum BxRegs8H {
-    Ah,
-    Ch,
-    Dh,
-    Bh,
-}
-
-#[derive(Debug, Clone, Copy)]
-enum BxRegs16 {
-    Ax,
-    Cx,
-    Dx,
-    Bx,
-    Sp,
-    Bp,
-    Si,
-    Di,
-
-    R8,
-    R9,
-    R10,
-    R11,
-    R12,
-    R13,
-    R14,
-    R15,
-}
-
-#[derive(Debug)]
-enum BxRegs32 {
-    Eax,
-    Ecx,
-    Edx,
-    Ebx,
-    Esp,
-    Ebp,
-    Esi,
-    Edi,
-
-    R8,
-    R9,
-    R10,
-    R11,
-    R12,
-    R13,
-    R14,
-    R15,
-}
-
-#[derive(Debug)]
-enum BxRegs64 {
-    Rax,
-    Rcx,
-    Rdx,
-    Rbx,
-    Rsp,
-    Rbp,
-    Rsi,
-    Rdi,
-    R8,
-    R9,
-    R10,
-    R11,
-    R12,
-    R13,
-    R14,
-    R15,
 }
 
 pub const BX_GENERAL_REGISTERS: usize = 16;

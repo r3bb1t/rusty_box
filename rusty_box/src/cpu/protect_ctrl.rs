@@ -148,12 +148,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let val = self.ldtr.selector.value;
         if instr.mod_c0() {
-            // Register destination: for Group 6 (0F 00), decoder puts nnn in dst() and rm in src1()
-            // The actual register operand is rm = src1() (Bochs: i->dst() = rm)
+            // Register destination: Group 6 (0F 00) now uses group convention: dst()=rm
             if instr.os32_l() != 0 {
-                self.set_gpr32(instr.src1() as usize, val as u32);
+                self.set_gpr32(instr.dst() as usize, val as u32);
             } else {
-                self.set_gpr16(instr.src1() as usize, val);
+                self.set_gpr16(instr.dst() as usize, val);
             }
         } else {
             // Memory destination — always write 16-bit
@@ -210,12 +209,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let val = self.tr.selector.value;
         if instr.mod_c0() {
-            // Register destination: for Group 6 (0F 00), decoder puts nnn in dst() and rm in src1()
-            // The actual register operand is rm = src1() (Bochs: i->dst() = rm)
+            // Register destination: Group 6 (0F 00) now uses group convention: dst()=rm
             if instr.os32_l() != 0 {
-                self.set_gpr32(instr.src1() as usize, val as u32);
+                self.set_gpr32(instr.dst() as usize, val as u32);
             } else {
-                self.set_gpr16(instr.src1() as usize, val);
+                self.set_gpr16(instr.dst() as usize, val);
             }
         } else {
             // Memory destination — always write 16-bit
@@ -499,8 +497,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let raw_selector: u16;
         if instr.mod_c0() {
-            // Bochs protect_ctrl.cc:611: BX_READ_16BIT_REG(i->src())
-            raw_selector = self.get_gpr16(instr.src() as usize);
+            // Group 6 (0F 00): dst()=rm (Bochs: i->dst())
+            raw_selector = self.get_gpr16(instr.dst() as usize);
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr32(instr);
@@ -592,8 +590,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let raw_selector: u16;
         if instr.mod_c0() {
-            // Bochs protect_ctrl.cc:703: BX_READ_16BIT_REG(i->src())
-            raw_selector = self.get_gpr16(instr.src() as usize);
+            // Group 6 (0F 00): dst()=rm (Bochs: i->dst())
+            raw_selector = self.get_gpr16(instr.dst() as usize);
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr32(instr);

@@ -7,7 +7,7 @@
 use crate::instr_generated::Instruction;
 
 use super::error::{DecodeError, DecodeResult};
-use super::fetchdecode_generated::BxDecodeError;
+use super::fetchdecode_generated::{BxDecodeError, SsePrefix};
 use super::ia_opcodes::Opcode;
 use super::instr::MetaInfoFlags;
 use super::instr_generated::{BxInstructionMetaInfo, DisplacementData, ModRmForm, OperandData};
@@ -24,47 +24,36 @@ use super::fetchdecode_x87::{
     BX_OPCODE_INFO_FLOATING_POINT_DE, BX_OPCODE_INFO_FLOATING_POINT_DF,
 };
 
-// Metadata array indices
-#[allow(dead_code)]
-const BX_INSTR_METADATA_DST: usize = 0;
-#[allow(dead_code)]
-const BX_INSTR_METADATA_SRC1: usize = 1;
-#[allow(dead_code)]
-const BX_INSTR_METADATA_SRC2: usize = 2;
-#[allow(dead_code)]
-const BX_INSTR_METADATA_SRC3: usize = 3;
-const BX_INSTR_METADATA_SEG: usize = 4;
-const BX_INSTR_METADATA_BASE: usize = 5;
-const BX_INSTR_METADATA_INDEX: usize = 6;
-const BX_INSTR_METADATA_SCALE: usize = 7;
+// Metadata array indices — imported from instr_generated.rs
+use super::instr_generated::{
+    BX_INSTR_METADATA_BASE, BX_INSTR_METADATA_DST, BX_INSTR_METADATA_INDEX,
+    BX_INSTR_METADATA_SCALE, BX_INSTR_METADATA_SEG, BX_INSTR_METADATA_SRC1,
+};
 
 // Register constants for clarity
 const BX_NIL_REGISTER: u8 = 19;
 const BX_64BIT_REG_RIP: u8 = 16; // BX_GENERAL_REGISTERS = 16, matching Bochs
 const BX_NO_INDEX: u8 = 4;
 
+const DS: u8 = BxSegregs::Ds as u8;
+const SS: u8 = BxSegregs::Ss as u8;
+
 // Segment default tables for 64-bit mode (matching Bochs fetchdecode64.cc lines 45-81)
 // Index by base register (0-15). RSP(4)→SS, RBP(5)→SS in mod!=0; only RSP(4)→SS in mod==0
 const SREG_MOD0_BASE32_64: [u8; 16] = [
-    3, 3, 3, 3, 2, 3, 3, 3, // DS DS DS DS SS DS DS DS  (base 0-7)
-    3, 3, 3, 3, 3, 3, 3, 3, // DS DS DS DS DS DS DS DS  (base 8-15)
+    DS, DS, DS, DS, SS, DS, DS, DS, // base 0-7
+    DS, DS, DS, DS, DS, DS, DS, DS, // base 8-15
 ];
 const SREG_MOD1OR2_BASE32_64: [u8; 16] = [
-    3, 3, 3, 3, 2, 2, 3, 3, // DS DS DS DS SS SS DS DS  (base 0-7)
-    3, 3, 3, 3, 3, 3, 3, 3, // DS DS DS DS DS DS DS DS  (base 8-15)
+    DS, DS, DS, DS, SS, SS, DS, DS, // base 0-7
+    DS, DS, DS, DS, DS, DS, DS, DS, // base 8-15
 ];
 
-// Decoding mask bit offsets (from fetchdecode_generated.rs)
-const OS64_OFFSET: u32 = 23;
-const OS32_OFFSET: u32 = 22;
-const AS64_OFFSET: u32 = 21;
-const AS32_OFFSET: u32 = 20;
-const SSE_PREFIX_OFFSET: u32 = 18;
-const MODC0_OFFSET: u32 = 16;
-const IS64_OFFSET: u32 = 15;
-const SRC_EQ_DST_OFFSET: u32 = 7;
-const RRR_OFFSET: u32 = 4;
-const NNN_OFFSET: u32 = 0;
+// Decoding mask bit offsets — imported from fetchdecode_generated.rs
+use super::fetchdecode_generated::{
+    AS32_OFFSET, AS64_OFFSET, IS64_OFFSET, LOCK_PREFIX_OFFSET, MODC0_OFFSET, NNN_OFFSET,
+    OS32_OFFSET, OS64_OFFSET, RRR_OFFSET, SRC_EQ_DST_OFFSET, SSE_PREFIX_OFFSET,
+};
 
 /// Search opcode table for matching opcode
 const fn find_opcode_in_table(table: &[u64], decmask: u32) -> Opcode {
@@ -107,10 +96,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         meta_data: [0u8; 8],
         modrm_form: ModRmForm {
             operand_data: OperandData { id: 0 },
-            displacement: DisplacementData {
-                data32: 0,
-                data16: 0,
-            },
+            displacement: DisplacementData { data32: 0 },
         },
     };
 
@@ -127,7 +113,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     // REX prefix tracking
     let mut rex_prefix: u8 = 0;
-    let mut sse_prefix: u8 = 0; // 0=none, 1=66, 2=F2, 3=F3
+    let mut sse_prefix: u8 = SsePrefix::PrefixNone as u8;
     let mut seg_override: u8 = 7; // 7 = none
 
     // === Phase 1: Parse legacy prefixes ===
@@ -156,8 +142,8 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             0x66 => {
                 rex_prefix = 0;
                 metainfo1_bits &= !MetaInfoFlags::Os32.bits();
-                if sse_prefix == 0 {
-                    sse_prefix = 1;
+                if sse_prefix == SsePrefix::PrefixNone as u8 {
+                    sse_prefix = SsePrefix::Prefix66 as u8;
                 }
             }
 
@@ -179,14 +165,14 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             0xF2 => {
                 rex_prefix = 0;
                 metainfo1_bits = (metainfo1_bits & 0x3F) | (2 << 6);
-                sse_prefix = 3; // Bochs: (0xF2 & 3) ^ 1 = 3 = SSE_PREFIX_F2
+                sse_prefix = SsePrefix::PrefixF2 as u8;
             }
 
             // REP/REPE/REPZ (also SSE prefix)
             0xF3 => {
                 rex_prefix = 0;
                 metainfo1_bits = (metainfo1_bits & 0x3F) | (3 << 6);
-                sse_prefix = 2; // Bochs: (0xF3 & 3) ^ 1 = 2 = SSE_PREFIX_F3
+                sse_prefix = SsePrefix::PrefixF3 as u8;
             }
 
             // REX prefixes (0x40-0x4F)
@@ -502,10 +488,12 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                 | 0xF7
                 | 0xFE
                 | 0xFF
+                // Two-byte groups: dst=rm (operand), src1=nnn (opcode extension)
+                // Matches Bochs convention where group opcodes always put rm in dst()
+                | 0x100  // Group 6: SLDT/STR/LLDT/LTR/VERR/VERW (0F 00)
+                | 0x1AE  // Group 15: FXSAVE/FXRSTOR/LDMXCSR/STMXCSR/CLFLUSH (0F AE)
+                | 0x1C7  // Group 9: CMPXCHG8B/CMPXCHG16B (0F C7)
         );
-        // Note: Two-byte groups (0x100=Group6, 0x1AE=Group15, 0x1C7=Group9) are NOT in
-        // is_group_opcode because their handlers were written for the default Gd,Ed convention
-        // (dst=nnn, src1=rm). Adding them here would swap operands and break the handlers.
 
         // Segment register move instructions: 8C (MOV Ew,Sw) and 8E (MOV Sw,Ew)
         // For 0x8C: nnn=segment (source), rm=gpr (destination) -> DST=rm, SRC1=nnn
@@ -648,11 +636,13 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     // Bochs always includes nnn/rm in decmask, for both ModRM and non-ModRM opcodes.
     // For non-ModRM, nnn/rm come from opcode bits; for ModRM, from the ModRM byte.
+    let lock_rep_value = (metainfo1_bits >> 6) & 0x3;
     let mut decmask: u32 = (if os64 { 1 } else { 0 } << OS64_OFFSET)
         | (if os32 { 1 } else { 0 } << OS32_OFFSET)
         | (if as64 { 1 } else { 0 } << AS64_OFFSET)
         | (if as32 { 1 } else { 0 } << AS32_OFFSET)
         | ((sse_prefix as u32) << SSE_PREFIX_OFFSET)
+        | (if lock_rep_value == 1 { 1 } else { 0 } << LOCK_PREFIX_OFFSET)
         | (if mod_c0 { 1 } else { 0 } << MODC0_OFFSET)
         | (1 << IS64_OFFSET) // 64-bit mode
         | ((nnn & 0x7) << NNN_OFFSET)
@@ -697,7 +687,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         if (rex_prefix & 0x01) != 0 {
             // REX.B set: actual XCHG R8, RAX — use normal table
             instr.meta_info.ia_opcode = lookup_opcode_64(b1, opcode_map, decmask, nnn);
-        } else if sse_prefix == 2 {
+        } else if sse_prefix == SsePrefix::PrefixF3 as u8 {
             // F3 prefix → PAUSE
             instr.meta_info.ia_opcode = Opcode::Pause;
         } else {

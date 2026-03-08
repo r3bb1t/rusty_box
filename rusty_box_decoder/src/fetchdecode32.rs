@@ -7,7 +7,7 @@
 use crate::instr_generated::Instruction;
 
 use super::error::{DecodeError, DecodeResult};
-use super::fetchdecode_generated::BxDecodeError;
+use super::fetchdecode_generated::{BxDecodeError, SsePrefix};
 use super::ia_opcodes::Opcode;
 use super::instr::MetaInfoFlags;
 use super::instr_generated::{BxInstructionMetaInfo, DisplacementData, ModRmForm, OperandData};
@@ -24,14 +24,11 @@ use super::fetchdecode_x87::{
     BX_OPCODE_INFO_FLOATING_POINT_DE, BX_OPCODE_INFO_FLOATING_POINT_DF,
 };
 
-// Decoding mask bit offsets (from fetchdecode_generated.rs)
-const OS32_OFFSET: u32 = 22;
-const AS32_OFFSET: u32 = 20;
-const SSE_PREFIX_OFFSET: u32 = 18;
-const MODC0_OFFSET: u32 = 16;
-const SRC_EQ_DST_OFFSET: u32 = 7;
-const RRR_OFFSET: u32 = 4;
-const NNN_OFFSET: u32 = 0;
+// Decoding mask bit offsets — imported from fetchdecode_generated.rs
+use super::fetchdecode_generated::{
+    AS32_OFFSET, LOCK_PREFIX_OFFSET, MODC0_OFFSET, NNN_OFFSET, OS32_OFFSET, RRR_OFFSET,
+    SRC_EQ_DST_OFFSET, SSE_PREFIX_OFFSET,
+};
 
 /// Search opcode table for matching opcode
 const fn find_opcode_in_table(table: &[u64], decmask: u32) -> Opcode {
@@ -61,19 +58,11 @@ const fn find_opcode_in_table(table: &[u64], decmask: u32) -> Opcode {
     Opcode::IaError
 }
 
-// Metadata array indices
-#[allow(dead_code)]
-const BX_INSTR_METADATA_DST: usize = 0;
-#[allow(dead_code)]
-const BX_INSTR_METADATA_SRC1: usize = 1;
-#[allow(dead_code)]
-const BX_INSTR_METADATA_SRC2: usize = 2;
-#[allow(dead_code)]
-const BX_INSTR_METADATA_SRC3: usize = 3;
-const BX_INSTR_METADATA_SEG: usize = 4;
-const BX_INSTR_METADATA_BASE: usize = 5;
-const BX_INSTR_METADATA_INDEX: usize = 6;
-const BX_INSTR_METADATA_SCALE: usize = 7;
+// Metadata array indices — imported from instr_generated.rs
+use super::instr_generated::{
+    BX_INSTR_METADATA_BASE, BX_INSTR_METADATA_DST, BX_INSTR_METADATA_INDEX,
+    BX_INSTR_METADATA_SCALE, BX_INSTR_METADATA_SEG, BX_INSTR_METADATA_SRC1,
+};
 
 // Register constants for clarity
 const BX_NIL_REGISTER: u8 = 19;
@@ -103,57 +92,24 @@ const RESOLVE16_INDEX_REG: [u8; 8] = [
     4, // none
 ];
 
+const DS: u8 = BxSegregs::Ds as u8;
+const SS: u8 = BxSegregs::Ss as u8;
+
 // Default segment for 16-bit addressing, mod=00
 // Matching Bochs sreg_mod00_rm16 in fetchdecode32.cc:669-678
-const SREG_MOD00_RM16: [u8; 8] = [
-    3, // DS (BX+SI)
-    3, // DS (BX+DI)
-    2, // SS (BP+SI)
-    2, // SS (BP+DI)
-    3, // DS (SI)
-    3, // DS (DI)
-    3, // DS (disp16)
-    3, // DS (BX)
-];
+const SREG_MOD00_RM16: [u8; 8] = [DS, DS, SS, SS, DS, DS, DS, DS];
 
 // Default segment for 16-bit addressing, mod=01 or mod=10
 // Matching Bochs sreg_mod01or10_rm16 in fetchdecode32.cc:680-689
-const SREG_MOD01OR10_RM16: [u8; 8] = [
-    3, // DS (BX+SI+disp)
-    3, // DS (BX+DI+disp)
-    2, // SS (BP+SI+disp)
-    2, // SS (BP+DI+disp)
-    3, // DS (SI+disp)
-    3, // DS (DI+disp)
-    2, // SS (BP+disp)
-    3, // DS (BX+disp)
-];
+const SREG_MOD01OR10_RM16: [u8; 8] = [DS, DS, SS, SS, DS, DS, SS, DS];
 
 // Default segment for 32-bit addressing, mod=00
 // Matching Bochs sreg_mod0_base32 in fetchdecode32.cc:692-701
-const SREG_MOD0_BASE32: [u8; 8] = [
-    3, // DS (EAX)
-    3, // DS (ECX)
-    3, // DS (EDX)
-    3, // DS (EBX)
-    2, // SS (ESP via SIB)
-    3, // DS (disp32)
-    3, // DS (ESI)
-    3, // DS (EDI)
-];
+const SREG_MOD0_BASE32: [u8; 8] = [DS, DS, DS, DS, SS, DS, DS, DS];
 
 // Default segment for 32-bit addressing, mod=01 or mod=10
 // Matching Bochs sreg_mod1or2_base32 in fetchdecode32.cc:703-712
-const SREG_MOD1OR2_BASE32: [u8; 8] = [
-    3, // DS (EAX+disp)
-    3, // DS (ECX+disp)
-    3, // DS (EDX+disp)
-    3, // DS (EBX+disp)
-    2, // SS (ESP+disp)
-    2, // SS (EBP+disp)
-    3, // DS (ESI+disp)
-    3, // DS (EDI+disp)
-];
+const SREG_MOD1OR2_BASE32: [u8; 8] = [DS, DS, DS, DS, SS, SS, DS, DS];
 
 /// Const-compatible 32-bit/16-bit instruction decoder
 ///
@@ -183,10 +139,7 @@ pub const fn fetch_decode32_inplace(
         meta_data: [0u8; 8],
         modrm_form: ModRmForm {
             operand_data: OperandData { id: 0 },
-            displacement: DisplacementData {
-                data32: 0,
-                data16: 0,
-            },
+            displacement: DisplacementData { data32: 0 },
         },
     };
 
@@ -204,7 +157,7 @@ pub const fn fetch_decode32_inplace(
         0
     };
 
-    let mut sse_prefix: u8 = 0; // 0=none, 1=66, 2=F2, 3=F3
+    let mut sse_prefix: u8 = SsePrefix::PrefixNone as u8;
     let mut seg_override: u8 = 7; // 7 = none
     let mut os_32 = is_32;
     let mut as_32 = is_32;
@@ -224,8 +177,8 @@ pub const fn fetch_decode32_inplace(
             // Operand size override
             0x66 => {
                 os_32 = !is_32;
-                if sse_prefix == 0 {
-                    sse_prefix = 1;
+                if sse_prefix == SsePrefix::PrefixNone as u8 {
+                    sse_prefix = SsePrefix::Prefix66 as u8;
                 }
                 if os_32 {
                     metainfo1_bits |= MetaInfoFlags::Os32.bits();
@@ -252,13 +205,13 @@ pub const fn fetch_decode32_inplace(
             // REPNE/REPNZ
             0xF2 => {
                 metainfo1_bits = (metainfo1_bits & 0x3F) | (2 << 6);
-                sse_prefix = 3; // Bochs: (0xF2 & 3) ^ 1 = 3 = SSE_PREFIX_F2
+                sse_prefix = SsePrefix::PrefixF2 as u8;
             }
 
             // REP/REPE/REPZ
             0xF3 => {
                 metainfo1_bits = (metainfo1_bits & 0x3F) | (3 << 6);
-                sse_prefix = 2; // Bochs: (0xF3 & 3) ^ 1 = 2 = SSE_PREFIX_F3
+                sse_prefix = SsePrefix::PrefixF3 as u8;
             }
 
             _ => break,
@@ -549,10 +502,12 @@ pub const fn fetch_decode32_inplace(
                 | 0xF7
                 | 0xFE
                 | 0xFF
+                // Two-byte groups: dst=rm (operand), src1=nnn (opcode extension)
+                // Matches Bochs convention where group opcodes always put rm in dst()
+                | 0x100  // Group 6: SLDT/STR/LLDT/LTR/VERR/VERW (0F 00)
+                | 0x1AE  // Group 15: FXSAVE/FXRSTOR/LDMXCSR/STMXCSR/CLFLUSH (0F AE)
+                | 0x1C7  // Group 9: CMPXCHG8B/CMPXCHG16B (0F C7)
         );
-        // Note: Two-byte groups (0x100=Group6, 0x1AE=Group15, 0x1C7=Group9) are NOT in
-        // is_group_opcode because their handlers were written for the default Gd,Ed convention
-        // (dst=nnn, src1=rm). Adding them here would swap operands and break the handlers.
 
         // Segment register move instructions: 8C (MOV Ew,Sw) and 8E (MOV Sw,Ew)
         // For 0x8C: nnn=segment (source), rm=gpr (destination) -> DST=rm, SRC1=nnn
@@ -704,9 +659,11 @@ pub const fn fetch_decode32_inplace(
     // - decoder32 (no ModRM): decmask includes osize, asize, sse_prefix, MODC0, and SRC_EQ_DST_OFFSET if nnn==rm
     // - decoder32_modrm: decmask includes osize, asize, sse_prefix, MODC0, nnn, rm, and SRC_EQ_DST_OFFSET if mod_c0 && nnn==rm
     // No IS32_OFFSET bit in 32-bit mode decmask
+    let lock_rep_value = (metainfo1_bits >> 6) & 0x3;
     let decmask: u32 = (osize_val << OS32_OFFSET)
         | (asize_val << AS32_OFFSET)
         | ((sse_prefix as u32) << SSE_PREFIX_OFFSET)
+        | (if lock_rep_value == 1 { 1 } else { 0 } << LOCK_PREFIX_OFFSET)
         | (if mod_c0 { 1 } else { 0 } << MODC0_OFFSET)
         | if needs_modrm {
             (rm << RRR_OFFSET) | (nnn << NNN_OFFSET)
@@ -750,7 +707,7 @@ pub const fn fetch_decode32_inplace(
         instr.meta_info.ia_opcode = BX3_DNOW_OPCODE[dnow_suffix as usize];
     } else if opcode_map == 0 && b1 == 0x90 {
         // Special NOP/PAUSE handling (Bochs decoder32_nop)
-        if sse_prefix == 2 {
+        if sse_prefix == SsePrefix::PrefixF3 as u8 {
             // F3 prefix → PAUSE
             instr.meta_info.ia_opcode = Opcode::Pause;
         } else {
@@ -789,10 +746,7 @@ pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instructi
         meta_data: [0u8; 8],
         modrm_form: ModRmForm {
             operand_data: OperandData { id: 0 },
-            displacement: DisplacementData {
-                data32: 0,
-                data16: 0,
-            },
+            displacement: DisplacementData { data32: 0 },
         },
     };
     // Use match instead of ? — const_try is not yet stable

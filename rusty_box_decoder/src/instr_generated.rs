@@ -3,15 +3,17 @@ use core::fmt::Debug;
 use super::{ia_opcodes::Opcode, instr::MetaInfoFlags, BxSegregs};
 
 // Metadata array indices - matching original Bochs structure
-const BX_INSTR_METADATA_DST: usize = 0;
-const BX_INSTR_METADATA_SRC1: usize = 1;
-const BX_INSTR_METADATA_SRC2: usize = 2;
-const BX_INSTR_METADATA_SRC3: usize = 3;
+pub(crate) const BX_INSTR_METADATA_DST: usize = 0;
+pub(crate) const BX_INSTR_METADATA_SRC1: usize = 1;
+#[allow(dead_code)]
+pub(crate) const BX_INSTR_METADATA_SRC2: usize = 2;
+#[allow(dead_code)]
+pub(crate) const BX_INSTR_METADATA_SRC3: usize = 3;
 const BX_INSTR_METADATA_CET_SEGOVERRIDE: usize = 3; // share src3
-const BX_INSTR_METADATA_SEG: usize = 4;
-const BX_INSTR_METADATA_BASE: usize = 5;
-const BX_INSTR_METADATA_INDEX: usize = 6;
-const BX_INSTR_METADATA_SCALE: usize = 7;
+pub(crate) const BX_INSTR_METADATA_SEG: usize = 4;
+pub(crate) const BX_INSTR_METADATA_BASE: usize = 5;
+pub(crate) const BX_INSTR_METADATA_INDEX: usize = 6;
+pub(crate) const BX_INSTR_METADATA_SCALE: usize = 7;
 
 // MetaInfo1 bit flags - now using MetaInfoFlags from instr.rs
 // Keeping BX_LOCK_PREFIX_USED as it's used as a value (1), not a bit flag
@@ -99,8 +101,12 @@ impl OperandData {
 
     /// Access as u16[2] (Iw)
     #[inline]
-    pub fn iw(&self) -> [u16; 2] {
-        unsafe { core::mem::transmute(self.id) }
+    pub const fn iw(&self) -> [u16; 2] {
+        let bytes = self.id.to_ne_bytes();
+        [
+            u16::from_ne_bytes([bytes[0], bytes[1]]),
+            u16::from_ne_bytes([bytes[2], bytes[3]]),
+        ]
     }
 
     /// Access as u8[4] (Ib)
@@ -118,7 +124,9 @@ impl OperandData {
     /// Set as u16[2]
     #[inline]
     pub fn set_iw(&mut self, val: [u16; 2]) {
-        self.id = unsafe { core::mem::transmute::<[u16; 2], u32>(val) };
+        let b0 = val[0].to_ne_bytes();
+        let b1 = val[1].to_ne_bytes();
+        self.id = u32::from_ne_bytes([b0[0], b0[1], b1[0], b1[1]]);
     }
 
     /// Set as u8[4]
@@ -134,8 +142,6 @@ impl OperandData {
 pub struct DisplacementData {
     /// As u32 (displ32u or Id2)
     pub data32: u32,
-    /// As u16 (displ16u)
-    pub data16: u16,
 }
 
 impl Debug for DisplacementData {
@@ -151,10 +157,10 @@ impl Debug for DisplacementData {
 }
 
 impl DisplacementData {
-    /// Access as u16 (displ16u)
+    /// Access as u16 (displ16u) - derived from low 16 bits of data32
     #[inline]
     pub const fn displ16u(&self) -> u16 {
-        self.data16
+        self.data32 as u16
     }
 
     /// Access as u32 (displ32u)
@@ -171,20 +177,18 @@ impl DisplacementData {
 
     /// Access as u16[2] (Iw2)
     #[inline]
-    pub fn iw2(&self) -> [u16; 2] {
-        unsafe { core::mem::transmute(self.data32) }
+    pub const fn iw2(&self) -> [u16; 2] {
+        let bytes = self.data32.to_ne_bytes();
+        [
+            u16::from_ne_bytes([bytes[0], bytes[1]]),
+            u16::from_ne_bytes([bytes[2], bytes[3]]),
+        ]
     }
 
     /// Access as u8[4] (Ib2)
     #[inline]
     pub fn ib2(&self) -> [u8; 4] {
         u32::to_ne_bytes(self.data32)
-    }
-
-    /// Set as u16 (displ16u)
-    #[inline]
-    pub fn set_displ16u(&mut self, val: u16) {
-        self.data16 = val;
     }
 
     /// Set as u32 (displ32u)
