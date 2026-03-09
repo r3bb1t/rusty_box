@@ -37,8 +37,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movups_vps_wps_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val = self.read_virtual_xmmword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val = self.v_read_xmmword(seg, eaddr)?;
         self.write_xmm_reg_lo128(instr.dst(), val);
         Ok(())
     }
@@ -48,9 +48,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movups_wps_vps_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let val = self.read_xmm_reg(instr.src1());
-        self.write_virtual_xmmword(seg, eaddr, &val)?;
+        self.v_write_xmmword(seg, eaddr, &val)?;
         Ok(())
     }
 
@@ -104,8 +104,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movaps_vps_wps_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val = self.read_virtual_xmmword_aligned(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val = self.v_read_xmmword_aligned(seg, eaddr)?;
         self.write_xmm_reg_lo128(instr.dst(), val);
         Ok(())
     }
@@ -116,9 +116,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movaps_wps_vps_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let val = self.read_xmm_reg(instr.src1());
-        self.write_virtual_xmmword_aligned(seg, eaddr, &val)?;
+        self.v_write_xmmword_aligned(seg, eaddr, &val)?;
         Ok(())
     }
 
@@ -188,8 +188,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movss_vss_wss_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val32 = self.read_virtual_dword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val32 = self.v_read_dword(seg, eaddr)?;
 
         // Memory form: high 96 bits are zeroed
         let mut op = BxPackedXmmRegister::default();
@@ -217,9 +217,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movss_wss_vss_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let val = self.xmm_lo_dword(instr.src1());
-        self.write_virtual_dword(seg, eaddr, val)?;
+        self.v_write_dword(seg, eaddr, val)?;
         Ok(())
     }
 
@@ -245,8 +245,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movsd_vsd_wsd_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val64 = self.read_virtual_qword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val64 = self.v_read_qword(seg, eaddr)?;
 
         // Memory form: high 64 bits are zeroed
         let mut op = BxPackedXmmRegister::default();
@@ -271,9 +271,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movsd_wsd_vsd_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let val = self.xmm_lo_qword(instr.src1());
-        self.write_virtual_qword(seg, eaddr, val)?;
+        self.v_write_qword(seg, eaddr, val)?;
         Ok(())
     }
 
@@ -289,8 +289,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movlps_vps_mq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val64 = self.read_virtual_qword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val64 = self.v_read_qword(seg, eaddr)?;
         self.write_xmm_lo_qword(instr.dst(), val64);
         Ok(())
     }
@@ -306,9 +306,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movlps_mq_vps(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let val = self.xmm_lo_qword(instr.src1());
-        self.write_virtual_qword(seg, eaddr, val)?;
+        self.v_write_qword(seg, eaddr, val)?;
         Ok(())
     }
 
@@ -324,8 +324,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movhps_vps_mq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val64 = self.read_virtual_qword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val64 = self.v_read_qword(seg, eaddr)?;
         self.write_xmm_hi_qword(instr.dst(), val64);
         Ok(())
     }
@@ -341,9 +341,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movhps_mq_vps(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let val = self.xmm_hi_qword(instr.src1());
-        self.write_virtual_qword(seg, eaddr, val)?;
+        self.v_write_qword(seg, eaddr, val)?;
         Ok(())
     }
 
@@ -443,8 +443,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movd_vdq_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val32 = self.read_virtual_dword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val32 = self.v_read_dword(seg, eaddr)?;
         let mut op = BxPackedXmmRegister::default();
         unsafe {
             op.xmm64u[0] = val32 as u64;
@@ -467,9 +467,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movd_ed_vdq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let val = self.xmm_lo_dword(instr.src1());
-        self.write_virtual_dword(seg, eaddr, val)?;
+        self.v_write_dword(seg, eaddr, val)?;
         Ok(())
     }
 
@@ -497,8 +497,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movq_vq_wq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val64 = self.read_virtual_qword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val64 = self.v_read_qword(seg, eaddr)?;
         let mut op = BxPackedXmmRegister::default();
         unsafe {
             op.xmm64u[0] = val64;
@@ -527,9 +527,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movq_wq_vq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let val = self.xmm_lo_qword(instr.src1());
-        self.write_virtual_qword(seg, eaddr, val)?;
+        self.v_write_qword(seg, eaddr, val)?;
         Ok(())
     }
 
@@ -545,9 +545,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movnti_md_gd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let val = self.get_gpr32(instr.src1().into());
-        self.write_virtual_dword(seg, eaddr, val)?;
+        self.v_write_dword(seg, eaddr, val)?;
         Ok(())
     }
 
@@ -683,8 +683,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movddup_vpd_wq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val64 = self.read_virtual_qword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val64 = self.v_read_qword(seg, eaddr)?;
         let mut op = BxPackedXmmRegister::default();
         unsafe {
             op.xmm64u[0] = val64;
@@ -713,8 +713,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movsldup_vps_wps_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let mut op = self.read_virtual_xmmword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let mut op = self.v_read_xmmword(seg, eaddr)?;
         unsafe {
             op.xmm32u[1] = op.xmm32u[0];
             op.xmm32u[3] = op.xmm32u[2];
@@ -742,8 +742,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movshdup_vps_wps_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let mut op = self.read_virtual_xmmword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let mut op = self.v_read_xmmword(seg, eaddr)?;
         unsafe {
             op.xmm32u[0] = op.xmm32u[1];
             op.xmm32u[2] = op.xmm32u[3];
@@ -793,8 +793,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let op2 = self.read_virtual_xmmword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_xmmword(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmmubyte[0] = op1.xmmubyte[0];
@@ -843,8 +843,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let op2 = self.read_virtual_xmmword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_xmmword(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmm16u[0] = op1.xmm16u[0];
@@ -881,8 +881,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let op2 = self.read_virtual_xmmword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_xmmword(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmm32u[0] = op1.xmm32u[0];
@@ -913,8 +913,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let op2 = self.read_virtual_xmmword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_xmmword(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmm64u[0] = op1.xmm64u[0];
@@ -957,8 +957,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let op2 = self.read_virtual_xmmword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_xmmword(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmmubyte[0] = op1.xmmubyte[8];
@@ -1007,8 +1007,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let op2 = self.read_virtual_xmmword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_xmmword(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmm16u[0] = op1.xmm16u[4];
@@ -1045,8 +1045,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let op2 = self.read_virtual_xmmword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_xmmword(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmm32u[0] = op1.xmm32u[2];
@@ -1077,8 +1077,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let op2 = self.read_virtual_xmmword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let op2 = self.v_read_xmmword(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmm64u[0] = op1.xmm64u[1];
@@ -1120,8 +1120,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn pmovsxbw_vdq_wq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val64 = self.read_virtual_qword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val64 = self.v_read_qword(seg, eaddr)?;
         let src_bytes = val64.to_le_bytes();
         let mut result = BxPackedXmmRegister::default();
         unsafe {
@@ -1158,8 +1158,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn pmovsxwd_vdq_wq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val64 = self.read_virtual_qword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val64 = self.v_read_qword(seg, eaddr)?;
         let words = [
             val64 as u16,
             (val64 >> 16) as u16,
@@ -1195,8 +1195,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn pmovsxdq_vdq_wq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val64 = self.read_virtual_qword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val64 = self.v_read_qword(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmm64u[0] = (val64 as u32 as i32 as i64) as u64;
@@ -1231,8 +1231,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn pmovzxbw_vdq_wq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val64 = self.read_virtual_qword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val64 = self.v_read_qword(seg, eaddr)?;
         let src_bytes = val64.to_le_bytes();
         let mut result = BxPackedXmmRegister::default();
         unsafe {
@@ -1269,8 +1269,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn pmovzxwd_vdq_wq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val64 = self.read_virtual_qword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val64 = self.v_read_qword(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmm32u[0] = val64 as u16 as u32;
@@ -1300,8 +1300,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn pmovzxdq_vdq_wq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val64 = self.read_virtual_qword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val64 = self.v_read_qword(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmm64u[0] = val64 as u32 as u64;
@@ -1337,8 +1337,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn pmovsxbd_vdq_wd_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val32 = self.read_virtual_dword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val32 = self.v_read_dword(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmm32u[0] = (val32 as u8 as i8 as i32) as u32;
@@ -1369,8 +1369,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn pmovsxbq_vdq_ww_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val16 = self.read_virtual_word(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val16 = self.v_read_word(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmm64u[0] = (val16 as u8 as i8 as i64) as u64;
@@ -1398,8 +1398,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn pmovsxwq_vdq_wd_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val32 = self.read_virtual_dword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val32 = self.v_read_dword(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmm64u[0] = (val32 as u16 as i16 as i64) as u64;
@@ -1429,8 +1429,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn pmovzxbd_vdq_wd_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val32 = self.read_virtual_dword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val32 = self.v_read_dword(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmm32u[0] = val32 as u8 as u32;
@@ -1461,8 +1461,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn pmovzxbq_vdq_ww_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val16 = self.read_virtual_word(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val16 = self.v_read_word(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmm64u[0] = val16 as u8 as u64;
@@ -1490,8 +1490,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn pmovzxwq_vdq_wd_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val32 = self.read_virtual_dword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val32 = self.v_read_dword(seg, eaddr)?;
         let mut result = BxPackedXmmRegister::default();
         unsafe {
             result.xmm64u[0] = val32 as u16 as u64;

@@ -53,9 +53,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ mult16.cc:MUL_AXEwM
     pub fn mul_ax_ew_m(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.get_gpr16(0); // AX
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_word(seg, eaddr)?;
+        let op2 = self.v_read_word(seg, eaddr)?;
 
         let product_32 = (op1 as u32) * (op2 as u32);
         let product_16l = (product_32 & 0xFFFF) as u16;
@@ -123,9 +123,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ mult16.cc:IMUL_AXEwM
     pub fn imul_ax_ew_m(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.get_gpr16(0) as i16; // AX
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_word(seg, eaddr)? as i16;
+        let op2 = self.v_read_word(seg, eaddr)? as i16;
 
         let product_32 = (op1 as i32) * (op2 as i32);
         let product_16l = (product_32 & 0xFFFF) as u16;
@@ -197,9 +197,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// DIV r/m16 (memory form)
     /// Matching C++ mult16.cc:DIV_AXEwM
     pub fn div_ax_ew_m(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_word(seg, eaddr)?;
+        let op2 = self.v_read_word(seg, eaddr)?;
 
         if op2 == 0 {
             return self.exception(Exception::De, 0);
@@ -284,9 +284,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(Exception::De, 0);
         }
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_word(seg, eaddr)? as i16;
+        let op2 = self.v_read_word(seg, eaddr)? as i16;
 
         if op2 == 0 {
             return self.exception(Exception::De, 0);
@@ -345,9 +345,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         let op1 = self.get_gpr16(dst_reg) as i16;
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_word(seg, eaddr)? as i16;
+        let op2 = self.v_read_word(seg, eaddr)? as i16;
 
         let product_32 = (op1 as i32) * (op2 as i32);
         let result_16 = product_32 as i16;
@@ -407,9 +407,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn imul_gw_ew_iw_m(&mut self, instr: &Instruction) -> Result<()> {
         let dst_reg = instr.dst() as usize;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op1 = self.read_virtual_word(seg, eaddr)? as i16;
+        let op1 = self.v_read_word(seg, eaddr)? as i16;
         let op2 = instr.iw() as i16;
 
         let product_32 = (op1 as i32) * (op2 as i32);
@@ -469,9 +469,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn imul_gw_ew_sib_m(&mut self, instr: &Instruction) -> Result<()> {
         let dst_reg = instr.dst() as usize;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op1 = self.read_virtual_word(seg, eaddr)? as i16;
+        let op1 = self.v_read_word(seg, eaddr)? as i16;
         let op2 = instr.ib() as i8 as i16;
 
         let product_32 = (op1 as i32) * (op2 as i32);
@@ -568,5 +568,5 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Helper functions
     // =========================================================================
 
-    // Helper methods (resolve_addr32, read_virtual_word) are defined in logical16.rs to avoid duplicate definitions
+    // Helper methods (resolve_addr, v_read_word) are defined in logical16.rs to avoid duplicate definitions
 }

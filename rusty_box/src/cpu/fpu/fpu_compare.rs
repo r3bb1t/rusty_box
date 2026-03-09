@@ -168,9 +168,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let pop_stack = instr.get_ia_opcode() == Opcode::FcompSingleReal;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let load_reg = self.read_virtual_dword(seg, eaddr)?;
+        let load_reg = self.v_read_dword(seg, eaddr)?;
 
         self.fpu_update_last_instruction(instr);
 
@@ -227,11 +227,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let pop_stack = instr.get_ia_opcode() == Opcode::FcompDoubleReal;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
         // Read 64-bit float as two 32-bit halves (little-endian)
-        let lo = self.read_virtual_dword(seg, eaddr)? as u64;
-        let hi = self.read_virtual_dword(seg, eaddr.wrapping_add(4))? as u64;
+        let lo = self.v_read_dword(seg, eaddr)? as u64;
+        let hi = self.v_read_dword(seg, eaddr.wrapping_add(4))? as u64;
         let load_reg = lo | (hi << 32);
 
         self.fpu_update_last_instruction(instr);
@@ -289,9 +289,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let pop_stack = instr.get_ia_opcode() == Opcode::FicompWordInteger;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let load_reg = self.read_virtual_word(seg, eaddr)? as i16;
+        let load_reg = self.v_read_word(seg, eaddr)? as i16;
 
         self.fpu_update_last_instruction(instr);
 
@@ -345,9 +345,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let pop_stack = instr.get_ia_opcode() == Opcode::FicompDwordInteger;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let load_reg = self.read_virtual_dword(seg, eaddr)? as i32;
+        let load_reg = self.v_read_dword(seg, eaddr)? as i32;
 
         self.fpu_update_last_instruction(instr);
 

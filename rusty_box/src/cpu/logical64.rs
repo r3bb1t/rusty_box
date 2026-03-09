@@ -588,10 +588,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Store-direction: decoder swaps [0]=rm=DEST, [1]=nnn=SRC
     pub(super) fn xor_eq_gq(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
-            let op1 = self.get_gpr64(instr.meta_data[0] as usize);
-            let op2 = self.get_gpr64(instr.meta_data[1] as usize);
+            let op1 = self.get_gpr64(instr.operands.dst as usize);
+            let op2 = self.get_gpr64(instr.operands.src1 as usize);
             let result = op1 ^ op2;
-            self.set_gpr64(instr.meta_data[0] as usize, result);
+            self.set_gpr64(instr.operands.dst as usize, result);
             self.set_flags_oszapc_logic_64(result);
             Ok(())
         } else {
@@ -623,10 +623,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Store-direction: decoder swaps [0]=rm=DEST, [1]=nnn=SRC
     pub(super) fn or_eq_gq(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
-            let op1 = self.get_gpr64(instr.meta_data[0] as usize);
-            let op2 = self.get_gpr64(instr.meta_data[1] as usize);
+            let op1 = self.get_gpr64(instr.operands.dst as usize);
+            let op2 = self.get_gpr64(instr.operands.src1 as usize);
             let result = op1 | op2;
-            self.set_gpr64(instr.meta_data[0] as usize, result);
+            self.set_gpr64(instr.operands.dst as usize, result);
             self.set_flags_oszapc_logic_64(result);
             Ok(())
         } else {
@@ -658,10 +658,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Store-direction: decoder swaps [0]=rm=DEST, [1]=nnn=SRC
     pub(super) fn and_eq_gq(&mut self, instr: &Instruction) -> super::Result<()> {
         if instr.mod_c0() {
-            let op1 = self.get_gpr64(instr.meta_data[0] as usize);
-            let op2 = self.get_gpr64(instr.meta_data[1] as usize);
+            let op1 = self.get_gpr64(instr.operands.dst as usize);
+            let op2 = self.get_gpr64(instr.operands.src1 as usize);
             let result = op1 & op2;
-            self.set_gpr64(instr.meta_data[0] as usize, result);
+            self.set_gpr64(instr.operands.dst as usize, result);
             self.set_flags_oszapc_logic_64(result);
             Ok(())
         } else {
@@ -781,7 +781,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// ZERO_IDIOM_GqR: XOR r64, r64 where src==dst (zero idiom)
     /// Sets register to 0 and sets flags for zero result.
     pub(super) fn zero_idiom_gq_r(&mut self, instr: &Instruction) {
-        let dst = instr.meta_data[0] as usize;
+        let dst = instr.operands.dst as usize;
         self.set_gpr64(dst, 0);
         self.set_flags_oszapc_logic_64(0);
     }

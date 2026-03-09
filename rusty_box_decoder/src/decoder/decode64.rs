@@ -1,34 +1,28 @@
-//! Const-compatible 64-bit instruction decoder
+//! 64-bit instruction decoder (matching Bochs `fetchdecode64.cc`).
 //!
-//! This module provides a `const fn` instruction decoder for x86-64 mode
-//! that returns `BxInstruction` - the same structure used by
-//! the non-const decoder.
+//! Provides `fetch_decode64` — a `const fn` decoder for x86-64 long mode
+//! that produces an [`Instruction`].
 
-use crate::instr_generated::Instruction;
+use crate::instruction::{Instruction, InstructionFlags};
+use crate::error::{DecodeError, DecodeResult};
+use crate::opcode::Opcode;
+use crate::BxSegregs;
 
-use super::error::{DecodeError, DecodeResult};
-use super::fetchdecode_generated::{BxDecodeError, SsePrefix};
-use super::ia_opcodes::Opcode;
-use super::instr::MetaInfoFlags;
-use super::instr_generated::{BxInstructionMetaInfo, DisplacementData, ModRmForm, OperandData};
-use super::BxSegregs;
+use super::tables::{BxDecodeError, SsePrefix};
 
 // Import opcode tables
-use super::fetchdecode_opmap::*;
-use super::fetchdecode_opmap_0f38::BxOpcodeTable0F38;
-use super::fetchdecode_opmap_0f3a::BxOpcodeTable0F3A;
-use super::fetchdecode_x87::{
+use super::opmap::*;
+use super::opmap_0f38::BxOpcodeTable0F38;
+use super::opmap_0f3a::BxOpcodeTable0F3A;
+use super::x87::{
     BX3_DNOW_OPCODE, BX_OPCODE_INFO_FLOATING_POINT_D8, BX_OPCODE_INFO_FLOATING_POINT_D9,
     BX_OPCODE_INFO_FLOATING_POINT_DA, BX_OPCODE_INFO_FLOATING_POINT_DB,
     BX_OPCODE_INFO_FLOATING_POINT_DC, BX_OPCODE_INFO_FLOATING_POINT_DD,
     BX_OPCODE_INFO_FLOATING_POINT_DE, BX_OPCODE_INFO_FLOATING_POINT_DF,
 };
 
-// Metadata array indices — imported from instr_generated.rs
-use super::instr_generated::{
-    BX_INSTR_METADATA_BASE, BX_INSTR_METADATA_DST, BX_INSTR_METADATA_INDEX,
-    BX_INSTR_METADATA_SCALE, BX_INSTR_METADATA_SEG, BX_INSTR_METADATA_SRC1,
-};
+// Backward-compatible alias
+use InstructionFlags as MetaInfoFlags;
 
 // Register constants for clarity
 const BX_NIL_REGISTER: u8 = 19;
@@ -49,8 +43,8 @@ const SREG_MOD1OR2_BASE32_64: [u8; 16] = [
     DS, DS, DS, DS, DS, DS, DS, DS, // base 8-15
 ];
 
-// Decoding mask bit offsets — imported from fetchdecode_generated.rs
-use super::fetchdecode_generated::{
+// Decoding mask bit offsets
+use super::tables::{
     AS32_OFFSET, AS64_OFFSET, IS64_OFFSET, LOCK_PREFIX_OFFSET, MODC0_OFFSET, NNN_OFFSET,
     OS32_OFFSET, OS64_OFFSET, RRR_OFFSET, SRC_EQ_DST_OFFSET, SSE_PREFIX_OFFSET,
 };
@@ -81,23 +75,20 @@ const fn find_opcode_in_table(table: &[u64], decmask: u32) -> Opcode {
     Opcode::IaError
 }
 
-/// Const-compatible 64-bit instruction decoder
+/// Decode one x86-64 instruction from `bytes`.
 ///
-/// Decodes an x86-64 instruction and returns a `Result` containing either
-/// a `BxInstruction` struct on success, or a `DecodeError` on failure.
-/// This is the const fn equivalent of `fetch_decode64`.
+/// Returns an [`Instruction`] on success, or [`DecodeError`] on failure.
 pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     let mut instr = Instruction {
-        meta_info: BxInstructionMetaInfo {
-            ia_opcode: Opcode::IaError,
-            ilen: 0,
-            metainfo1: MetaInfoFlags::empty(),
+        opcode: Opcode::IaError,
+        length: 0,
+        flags: InstructionFlags::empty(),
+        operands: crate::instruction::Operands {
+            dst: 0, src1: 0, src2: 0, src3: 0,
+            segment: 0, base: 0, index: 0, scale: 0,
         },
-        meta_data: [0u8; 8],
-        modrm_form: ModRmForm {
-            operand_data: OperandData { id: 0 },
-            displacement: DisplacementData { data32: 0 },
-        },
+        immediate: 0,
+        displacement: 0,
     };
 
     if bytes.is_empty() {
@@ -207,9 +198,9 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     // Set segment override
     if seg_override < 7 {
-        instr.meta_data[BX_INSTR_METADATA_SEG] = seg_override;
+        instr.operands.segment = seg_override;
     } else {
-        instr.meta_data[BX_INSTR_METADATA_SEG] = BxSegregs::Ds as u8;
+        instr.operands.segment = BxSegregs::Ds as u8;
     }
 
     // === Phase 2: Parse opcode ===
@@ -385,9 +376,9 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                     base |= 8;
                 } // REX.B
 
-                instr.meta_data[BX_INSTR_METADATA_SCALE] = scale;
-                instr.meta_data[BX_INSTR_METADATA_INDEX] = index;
-                instr.meta_data[BX_INSTR_METADATA_BASE] = base;
+                instr.operands.scale = scale;
+                instr.operands.index = index;
+                instr.operands.base = base;
 
                 // Displacement for SIB
                 if mod_field == 0 && (base & 0x7) == 5 {
@@ -397,12 +388,12 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                     }
                     let disp = read_u32_le(bytes, pos);
                     pos += 4;
-                    instr.modrm_form.displacement.data32 = disp;
-                    instr.meta_data[BX_INSTR_METADATA_BASE] = BX_NIL_REGISTER;
+                    instr.displacement = disp;
+                    instr.operands.base = BX_NIL_REGISTER;
                 }
             } else {
-                instr.meta_data[BX_INSTR_METADATA_BASE] = (rm & 0xF) as u8;
-                instr.meta_data[BX_INSTR_METADATA_INDEX] = BX_NO_INDEX;
+                instr.operands.base = (rm & 0xF) as u8;
+                instr.operands.index = BX_NO_INDEX;
 
                 // Check for RIP-relative (mod=0, rm=5)
                 if mod_field == 0 && (rm & 0x7) == 5 {
@@ -412,8 +403,8 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                     }
                     let disp = read_u32_le(bytes, pos);
                     pos += 4;
-                    instr.modrm_form.displacement.data32 = disp;
-                    instr.meta_data[BX_INSTR_METADATA_BASE] = BX_64BIT_REG_RIP;
+                    instr.displacement = disp;
+                    instr.operands.base = BX_64BIT_REG_RIP;
                 }
             }
 
@@ -425,7 +416,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                 }
                 let disp = bytes[pos] as i8 as i32 as u32;
                 pos += 1;
-                instr.modrm_form.displacement.data32 = disp;
+                instr.displacement = disp;
             } else if mod_field == 2 {
                 // disp32
                 if pos + 4 > max_len {
@@ -433,20 +424,20 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                 }
                 let disp = read_u32_le(bytes, pos);
                 pos += 4;
-                instr.modrm_form.displacement.data32 = disp;
+                instr.displacement = disp;
             }
 
             // Apply segment default based on base register (Bochs sreg_mod0_base32 / sreg_mod1or2_base32)
             // Only when no explicit segment override was specified
             if seg_override >= 7 {
-                let base_for_seg = instr.meta_data[BX_INSTR_METADATA_BASE] as usize;
+                let base_for_seg = instr.operands.base as usize;
                 if base_for_seg < 16 {
                     let default_seg = if mod_field == 0 {
                         SREG_MOD0_BASE32_64[base_for_seg]
                     } else {
                         SREG_MOD1OR2_BASE32_64[base_for_seg]
                     };
-                    instr.meta_data[BX_INSTR_METADATA_SEG] = default_seg;
+                    instr.operands.segment = default_seg;
                 }
             }
         }
@@ -472,7 +463,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             });
         }
 
-        // Group opcodes: 80, 81, 83, C0, C1, D0-D3, F6, F7, FE, FF
+        // Group opcodes: 80, 81, 83, C0, C1, C6, C7, D0-D3, F6, F7, FE, FF
         // For these, nnn field is the opcode extension (which operation), rm is the operand
         let is_group_opcode = matches!(
             b1,
@@ -480,6 +471,8 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                 | 0x83
                 | 0xC0
                 | 0xC1
+                | 0xC6
+                | 0xC7
                 | 0xD0
                 | 0xD1
                 | 0xD2
@@ -501,16 +494,16 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
         if is_group_opcode {
             // Group opcodes: operand is in rm, opcode extension in nnn
-            instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
-            instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
+            instr.operands.dst = rm as u8;
+            instr.operands.src1 = nnn as u8;
         } else if b1 == 0x8C {
             // MOV Ew,Sw: rm is destination (gpr), nnn is source (segment)
-            instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
-            instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
+            instr.operands.dst = rm as u8;
+            instr.operands.src1 = nnn as u8;
         } else if b1 == 0x8E {
             // MOV Sw,Ew: nnn is destination (segment), rm is source (gpr)
-            instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
-            instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
+            instr.operands.dst = nnn as u8;
+            instr.operands.src1 = rm as u8;
         } else if (b1 < 0x100 && ((b1 & 0x0F) == 0x01 || (b1 & 0x0F) == 0x09))
             || b1 == 0x89
             // Two-byte Ed,Gd opcodes (DST=rm): Group 7, store-form SSE, MOV Rd/DRn, Groups 12-14
@@ -533,14 +526,14 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         {
             // Ed,Gd format: rm (Ed) is destination, nnn (Gd) is source
             // Examples: ADD Ed,Gd | SUB Ed,Gd | MOV Ed,Gd | BTS EdGd | XADD EbGb
-            instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
-            instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
+            instr.operands.dst = rm as u8;
+            instr.operands.src1 = nnn as u8;
         } else {
             // Gd,Ed format (opcodes 0x03, 0x0B, 0x13, 0x1B, 0x23, 0x2B, 0x33, 0x8B):
             // nnn (Gd) is destination, rm (Ed) is source
             // Examples: ADD Gd,Ed | SUB Gd,Ed | MOV Gd,Ed
-            instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
-            instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
+            instr.operands.dst = nnn as u8;
+            instr.operands.src1 = rm as u8;
         }
     } else {
         // Check if this is a segment push/pop opcode (uses nnn for segment)
@@ -552,12 +545,12 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
         if is_segment_push_pop {
             // Segment is in bits 3-5 (nnn)
-            instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
-            instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
+            instr.operands.dst = nnn as u8;
+            instr.operands.src1 = rm as u8;
         } else {
             // Most non-ModRM: register in bits 0-2 (rm)
-            instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
-            instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
+            instr.operands.dst = rm as u8;
+            instr.operands.src1 = nnn as u8;
         }
     }
 
@@ -591,7 +584,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                 // - 0x6B (IMUL r,r/m,imm8): sign-extended to operand size
                 let needs_sign_ext = opcode_map == 0
                     && matches!(b1 as u8, 0x70..=0x7F | 0xE0..=0xE3 | 0xEB | 0x83 | 0x6A | 0x6B);
-                instr.modrm_form.operand_data.id = if needs_sign_ext {
+                instr.immediate = if needs_sign_ext {
                     byte_val as i8 as i32 as u32
                 } else {
                     byte_val as u32
@@ -599,24 +592,24 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                 pos += 1;
             }
             2 => {
-                instr.modrm_form.operand_data.id = read_u16_le(bytes, pos) as u32;
+                instr.immediate = read_u16_le(bytes, pos) as u32;
                 pos += 2;
             }
             3 => {
                 // ENTER: Iw (frame size) + Ib (nesting level)
-                instr.modrm_form.operand_data.id = read_u16_le(bytes, pos) as u32;
-                instr.modrm_form.displacement.data32 = bytes[pos + 2] as u32;
+                instr.immediate = read_u16_le(bytes, pos) as u32;
+                instr.displacement = bytes[pos + 2] as u32;
                 pos += 3;
             }
             4 => {
-                instr.modrm_form.operand_data.id = read_u32_le(bytes, pos);
+                instr.immediate = read_u32_le(bytes, pos);
                 pos += 4;
             }
             8 => {
                 // 64-bit immediate (MOV reg, imm64)
                 // Store in displacement fields as we don't have iq field directly
-                instr.modrm_form.operand_data.id = read_u32_le(bytes, pos);
-                instr.modrm_form.displacement.data32 = read_u32_le(bytes, pos + 4);
+                instr.immediate = read_u32_le(bytes, pos);
+                instr.displacement = read_u32_le(bytes, pos + 4);
                 pos += 8;
             }
             _ => {}
@@ -624,8 +617,8 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     }
 
     // Finalize instruction
-    instr.meta_info.ilen = pos as u8;
-    instr.meta_info.metainfo1 = MetaInfoFlags::from_bits_retain(metainfo1_bits);
+    instr.length = pos as u8;
+    instr.flags = MetaInfoFlags::from_bits_retain(metainfo1_bits);
 
     // Build decmask for opcode lookup
     let mod_c0 = (metainfo1_bits & MetaInfoFlags::ModC0.bits()) != 0;
@@ -675,31 +668,31 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             // Memory form: index = nnn (0-7)
             (nnn & 0x7) as usize
         };
-        instr.meta_info.ia_opcode = fpu_table[fpu_index];
+        instr.opcode = fpu_table[fpu_index];
         // Store foo: (modrm | (escape_byte << 8)) & 0x7FF — for x87 FPU handler context
         let foo_val = ((modrm_byte as u16) | ((b1 as u16) << 8)) & 0x7FF;
-        instr.modrm_form.operand_data.id = foo_val as u32;
+        instr.immediate = foo_val as u32;
     } else if opcode_map == 4 {
         // 3DNow! instruction: use suffix to look up opcode directly
-        instr.meta_info.ia_opcode = BX3_DNOW_OPCODE[dnow_suffix as usize];
+        instr.opcode = BX3_DNOW_OPCODE[dnow_suffix as usize];
     } else if opcode_map == 0 && b1 == 0x90 {
         // Special NOP/PAUSE/XCHG handling (Bochs decoder64_nop)
         if (rex_prefix & 0x01) != 0 {
             // REX.B set: actual XCHG R8, RAX — use normal table
-            instr.meta_info.ia_opcode = lookup_opcode_64(b1, opcode_map, decmask, nnn);
+            instr.opcode = lookup_opcode_64(b1, opcode_map, decmask, nnn);
         } else if sse_prefix == SsePrefix::PrefixF3 as u8 {
             // F3 prefix → PAUSE
-            instr.meta_info.ia_opcode = Opcode::Pause;
+            instr.opcode = Opcode::Pause;
         } else {
             // Bare 0x90 → NOP
-            instr.meta_info.ia_opcode = Opcode::Nop;
+            instr.opcode = Opcode::Nop;
         }
     } else {
-        instr.meta_info.ia_opcode = lookup_opcode_64(b1, opcode_map, decmask, nnn);
+        instr.opcode = lookup_opcode_64(b1, opcode_map, decmask, nnn);
     }
 
     // Check if opcode lookup failed
-    if matches!(instr.meta_info.ia_opcode, Opcode::IaError) {
+    if matches!(instr.opcode, Opcode::IaError) {
         return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
     }
 
@@ -1423,21 +1416,21 @@ mod tests {
     fn test_disp8() {
         let i = fetch_decode64(&[0x8B, 0x43, 0x10]).unwrap(); // MOV EAX, [RBX+0x10]
         assert_eq!(i.ilen(), 3);
-        assert_eq!(i.modrm_form.displacement.displ32u(), 0x10);
+        assert_eq!(i.displacement, 0x10);
     }
 
     #[test]
     fn test_disp32() {
         let i = fetch_decode64(&[0x8B, 0x83, 0x78, 0x56, 0x34, 0x12]).unwrap();
         assert_eq!(i.ilen(), 6);
-        assert_eq!(i.modrm_form.displacement.displ32u(), 0x12345678);
+        assert_eq!(i.displacement, 0x12345678);
     }
 
     #[test]
     fn test_imm8() {
         let i = fetch_decode64(&[0x6A, 0x42]).unwrap(); // PUSH 0x42
         assert_eq!(i.ilen(), 2);
-        assert_eq!(i.modrm_form.operand_data.id(), 0x42);
+        assert_eq!(i.immediate, 0x42);
     }
 
     #[test]
@@ -1448,7 +1441,7 @@ mod tests {
         let i2 = fetch_decode64(&[0x68, 0x78, 0x56, 0x34, 0x12]); // PUSH 0x12345678
         tracing::info!("{i2:#x?}");
         assert_eq!(i.ilen(), 5);
-        assert_eq!(i.modrm_form.operand_data.id(), 0x12345678);
+        assert_eq!(i.immediate, 0x12345678);
     }
 
     #[test]
@@ -1461,7 +1454,7 @@ mod tests {
     fn test_jcc_rel32() {
         let i = fetch_decode64(&[0x0F, 0x84, 0x78, 0x56, 0x34, 0x12]).unwrap(); // JE
         assert_eq!(i.ilen(), 6);
-        assert_eq!(i.modrm_form.operand_data.id(), 0x12345678);
+        assert_eq!(i.immediate, 0x12345678);
     }
 
     #[test]
@@ -1469,7 +1462,7 @@ mod tests {
         let i = fetch_decode64(&[0xF0, 0x87, 0x03]).unwrap(); // LOCK XCHG
         assert_eq!(i.ilen(), 3);
         // Check raw bits - expect bit 6 set for LOCK
-        let bits = i.meta_info.metainfo1.bits();
+        let bits = i.flags.bits();
         assert_eq!(
             i.lock_rep_used_value(),
             1,
@@ -1555,7 +1548,7 @@ mod tests {
                 Err(_) => break,
             };
 
-            let length = decoded.meta_info.ilen as usize;
+            let length = decoded.length as usize;
 
             if length == 0 || offset + length > data.len() {
                 // Invalid instruction or out of bounds
@@ -1601,7 +1594,7 @@ mod tests {
             );
             let instr = result.unwrap();
             assert_eq!(instr.get_ia_opcode(), Opcode::MovEwSw);
-            assert_eq!(instr.meta_data[1], seg); // Source segment register
+            assert_eq!(instr.operands.src1, seg); // Source segment register
 
             // 0x8E: MOV Sreg, r/m16
             let bytes = vec![0x8E, modrm];
@@ -1614,7 +1607,7 @@ mod tests {
             );
             let instr = result.unwrap();
             assert_eq!(instr.get_ia_opcode(), Opcode::MovSwEw);
-            assert_eq!(instr.meta_data[0], seg); // Destination segment register
+            assert_eq!(instr.operands.dst, seg); // Destination segment register
         }
     }
 
@@ -1705,15 +1698,15 @@ mod tests {
     fn test_segment_defaults_64() {
         // MOV EAX, [RSP] (8B 04 24) — SIB with base=RSP → SS
         let i = fetch_decode64(&[0x8B, 0x04, 0x24]).unwrap();
-        assert_eq!(i.meta_data[4], 2); // SEG = SS
+        assert_eq!(i.operands.segment, 2); // SEG = SS
 
         // MOV EAX, [RBP+0] (8B 45 00) — mod=1, base=RBP → SS
         let i = fetch_decode64(&[0x8B, 0x45, 0x00]).unwrap();
-        assert_eq!(i.meta_data[4], 2); // SEG = SS
+        assert_eq!(i.operands.segment, 2); // SEG = SS
 
         // MOV EAX, [RAX] (8B 00) — base=RAX → DS
         let i = fetch_decode64(&[0x8B, 0x00]).unwrap();
-        assert_eq!(i.meta_data[4], 3); // SEG = DS
+        assert_eq!(i.operands.segment, 3); // SEG = DS
     }
 
     /// Test that invalid segment registers (6-7) are rejected with InvalidSegmentRegister error

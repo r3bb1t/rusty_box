@@ -18,9 +18,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = if instr.mod_c0() {
             self.get_gpr16(instr.src() as usize) as u32
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_word(seg, eaddr)? as u32
+            self.v_read_word(seg, eaddr)? as u32
         };
         if op2 == 0 {
             self.eflags.insert(EFlags::ZF);
@@ -41,9 +41,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = if instr.mod_c0() {
             self.get_gpr16(instr.src() as usize) as u32
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_word(seg, eaddr)? as u32
+            self.v_read_word(seg, eaddr)? as u32
         };
         if op2 == 0 {
             self.eflags.insert(EFlags::ZF);

@@ -234,7 +234,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let di = self.di() as u32;
         let value = self.port_in(port, 1) as u8;
-        self.write_virtual_byte(BxSegregs::Es, di, value)?;
+        self.v_write_byte(BxSegregs::Es, di, value)?;
         if self.get_df() {
             self.set_di(self.di().wrapping_sub(1));
         } else {
@@ -251,7 +251,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let di = self.di() as u32;
         let value = self.port_in(port, 2) as u16;
-        self.write_virtual_word(BxSegregs::Es, di, value)?;
+        self.v_write_word(BxSegregs::Es, di, value)?;
         if self.get_df() {
             self.set_di(self.di().wrapping_sub(2));
         } else {
@@ -268,7 +268,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let di = self.di() as u32;
         let value = self.port_in(port, 4);
-        self.write_virtual_dword(BxSegregs::Es, di, value)?;
+        self.v_write_dword(BxSegregs::Es, di, value)?;
         if self.get_df() {
             self.set_di(self.di().wrapping_sub(4));
         } else {
@@ -288,7 +288,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let edi = self.edi();
         let value = self.port_in(port, 1) as u8;
-        self.write_virtual_byte(BxSegregs::Es, edi, value)?;
+        self.v_write_byte(BxSegregs::Es, edi, value)?;
         if self.get_df() {
             self.set_rdi(edi.wrapping_sub(1) as u64);
         } else {
@@ -306,7 +306,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let edi = self.edi();
         let value = self.port_in(port, 2) as u16;
-        self.write_virtual_word(BxSegregs::Es, edi, value)?;
+        self.v_write_word(BxSegregs::Es, edi, value)?;
         if self.get_df() {
             self.set_rdi(edi.wrapping_sub(2) as u64);
         } else {
@@ -324,7 +324,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let edi = self.edi();
         let value = self.port_in(port, 4);
-        self.write_virtual_dword(BxSegregs::Es, edi, value)?;
+        self.v_write_dword(BxSegregs::Es, edi, value)?;
         if self.get_df() {
             self.set_rdi(edi.wrapping_sub(4) as u64);
         } else {
@@ -344,7 +344,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let seg = BxSegregs::from(instr.seg());
         let si = self.si() as u32;
-        let value = self.read_virtual_byte(seg, si)?;
+        let value = self.v_read_byte(seg, si)?;
         self.port_out(port, value as u32, 1);
         if self.get_df() {
             self.set_si(self.si().wrapping_sub(1));
@@ -362,7 +362,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let seg = BxSegregs::from(instr.seg());
         let si = self.si() as u32;
-        let value = self.read_virtual_word(seg, si)?;
+        let value = self.v_read_word(seg, si)?;
         self.port_out(port, value as u32, 2);
         if self.get_df() {
             self.set_si(self.si().wrapping_sub(2));
@@ -380,7 +380,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let seg = BxSegregs::from(instr.seg());
         let si = self.si() as u32;
-        let value = self.read_virtual_dword(seg, si)?;
+        let value = self.v_read_dword(seg, si)?;
         self.port_out(port, value, 4);
         if self.get_df() {
             self.set_si(self.si().wrapping_sub(4));
@@ -401,7 +401,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let seg = BxSegregs::from(instr.seg());
         let esi = self.esi();
-        let value = self.read_virtual_byte(seg, esi)?;
+        let value = self.v_read_byte(seg, esi)?;
         self.port_out(port, value as u32, 1);
         if self.get_df() {
             self.set_rsi(esi.wrapping_sub(1) as u64);
@@ -420,7 +420,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let seg = BxSegregs::from(instr.seg());
         let esi = self.esi();
-        let value = self.read_virtual_word(seg, esi)?;
+        let value = self.v_read_word(seg, esi)?;
         self.port_out(port, value as u32, 2);
         if self.get_df() {
             self.set_rsi(esi.wrapping_sub(2) as u64);
@@ -439,7 +439,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let seg = BxSegregs::from(instr.seg());
         let esi = self.esi();
-        let value = self.read_virtual_dword(seg, esi)?;
+        let value = self.v_read_dword(seg, esi)?;
         self.port_out(port, value, 4);
         if self.get_df() {
             self.set_rsi(esi.wrapping_sub(4) as u64);

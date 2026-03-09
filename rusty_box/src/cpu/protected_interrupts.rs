@@ -920,9 +920,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let gate_descriptor = self.parse_descriptor(dword1, dword2)?;
 
         if gate_descriptor.valid == 0 || gate_descriptor.segment {
-            tracing::debug!(
-                "long_mode_int(): gate descriptor is not valid sys seg: vector={} type={:#x}",
-                vector as u8, gate_descriptor.r#type
+            tracing::warn!(
+                "long_mode_int(): gate descriptor is not valid sys seg: vector={} type={:#x} dword1={:#010x} dword2={:#010x} dword3={:#010x} idt_addr={:#x} icount={}",
+                vector as u8, gate_descriptor.r#type, dword1, dword2, dword3, idt_entry_addr, self.icount
             );
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,

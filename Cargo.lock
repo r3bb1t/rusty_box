@@ -1923,8 +1923,6 @@ name = "rusty_box_decoder"
 version = "0.0.1"
 dependencies = [
  "bitflags 2.10.0",
- "byteorder",
- "thiserror 2.0.17",
  "tracing",
  "tracing-subscriber",
 ]

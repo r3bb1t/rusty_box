@@ -963,10 +963,23 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             bzimage[0x214], bzimage[0x215], bzimage[0x216], bzimage[0x217],
         ]);
 
+        // Read pref_address (protocol >= 2.10) and init_size for boot_params placement
+        let pref_address = if boot_version >= 0x020A {
+            u64::from_le_bytes([
+                bzimage[0x258], bzimage[0x259], bzimage[0x25A], bzimage[0x25B],
+                bzimage[0x25C], bzimage[0x25D], bzimage[0x25E], bzimage[0x25F],
+            ])
+        } else {
+            0 // Old kernels: use legacy boot_params address
+        };
+        let init_size = u32::from_le_bytes([
+            bzimage[0x260], bzimage[0x261], bzimage[0x262], bzimage[0x263],
+        ]) as u64;
+
         tracing::info!(
-            "bzImage: protocol {}.{}, setup={}B, kernel={}B, entry={:#x}",
+            "bzImage: protocol {}.{}, setup={}B, kernel={}B, entry={:#x}, pref={:#x}, init_size={:#x}",
             boot_version >> 8, boot_version & 0xFF,
-            setup_size, pm_kernel.len(), code32_start
+            setup_size, pm_kernel.len(), code32_start, pref_address, init_size
         );
 
         // =====================================================================
@@ -986,10 +999,24 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.memory.load_RAM(&gdt_bytes, GDT_ADDR)?;
 
         // =====================================================================
-        // Write boot_params (zero page) at 0x10000
+        // Write boot_params (zero page)
         // =====================================================================
-        const BOOT_PARAMS_ADDR: u64 = 0x10000;
-        const CMDLINE_ADDR: u64 = 0x11000;
+        // For modern 64-bit kernels (protocol >= 2.10 with pref_address), place
+        // boot_params within the kernel's identity-mapped range. The decompressed
+        // kernel's __startup_64 only identity-maps PD entries covering
+        // pref_address..pref_address+init_size. boot_params at 0x10000 is outside
+        // this range and causes #PF → triple fault if IDT is not yet set up.
+        // Place boot_params just past init_size (still within the last mapped 2MB PD entry).
+        let boot_params_addr = if pref_address > 0 && init_size > 0 {
+            (pref_address + init_size + 0xFFF) & !0xFFF
+        } else {
+            0x10000 // Legacy fallback for old kernels (e.g., DLX Linux 1.3.89)
+        };
+        let cmdline_addr = boot_params_addr + 0x1000;
+        tracing::info!(
+            "boot_params at {:#x}, cmdline at {:#x} (pref={:#x}, init_size={:#x})",
+            boot_params_addr, cmdline_addr, pref_address, init_size
+        );
         let mut boot_params = [0u8; 4096];
 
         // Copy setup header from bzImage (offsets 0x1F1 to 0x268)
@@ -1005,7 +1032,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
         // cmd_line_ptr = physical address of command line
         boot_params[0x228..0x22C]
-            .copy_from_slice(&(CMDLINE_ADDR as u32).to_le_bytes());
+            .copy_from_slice(&(cmdline_addr as u32).to_le_bytes());
 
         // heap_end_ptr: relative to setup header start (unused for direct boot)
         boot_params[0x224..0x226].copy_from_slice(&0xFE00u16.to_le_bytes());
@@ -1028,21 +1055,30 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Set up initramfs if provided
         // =====================================================================
         let kernel_end = code32_start as u64 + pm_kernel.len() as u64;
-        // Align initramfs to page boundary, well above kernel decompression area
-        let init_size = u32::from_le_bytes([
-            bzimage[0x260], bzimage[0x261], bzimage[0x262], bzimage[0x263],
-        ]) as u64;
-        let initrd_load_addr = core::cmp::max(
-            kernel_end,
-            code32_start as u64 + init_size,
-        );
-        // Align to 4KB
-        let initrd_load_addr = (initrd_load_addr + 0xFFF) & !0xFFF;
+
+        // initrd_addr_max from boot protocol (offset 0x22C) - max address kernel can handle
+        let initrd_addr_max = if boot_version >= 0x0203 {
+            u32::from_le_bytes([
+                bzimage[0x22C], bzimage[0x22D], bzimage[0x22E], bzimage[0x22F],
+            ]) as u64
+        } else {
+            0x37FFFFFF // Default for old protocols
+        };
 
         if let Some(initrd_data) = initramfs {
+            let ram_top = self.config.guest_memory_size as u64;
+            let max_addr = core::cmp::min(ram_top, initrd_addr_max + 1);
+
+            // Place initramfs at top of allowed memory (QEMU strategy)
+            // This prevents the kernel decompressor from overwriting the initramfs
+            let initrd_load_addr = (max_addr - initrd_data.len() as u64) & !0xFFF;
+
             tracing::info!(
-                "Loading initramfs ({} bytes) at {:#x}",
-                initrd_data.len(), initrd_load_addr
+                "BOOT LAYOUT: kernel={} bytes at {:#x}..{:#x}, init_size={:#x}, initrd={} bytes at {:#x}..{:#x}, RAM top={:#x}, initrd_addr_max={:#x}",
+                pm_kernel.len(), code32_start, kernel_end,
+                init_size,
+                initrd_data.len(), initrd_load_addr, initrd_load_addr + initrd_data.len() as u64,
+                ram_top, initrd_addr_max
             );
             self.memory.load_RAM(initrd_data, initrd_load_addr)?;
 
@@ -1085,7 +1121,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         boot_params[0x1E8] = e820_idx as u8;
 
         // Write boot_params to memory
-        self.memory.load_RAM(&boot_params, BOOT_PARAMS_ADDR)?;
+        self.memory.load_RAM(&boot_params, boot_params_addr)?;
 
         // =====================================================================
         // Write command line
@@ -1094,7 +1130,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         let cmdline_len = core::cmp::min(cmdline_bytes.len(), 2047);
         let mut cmdline_buf = alloc::vec![0u8; cmdline_len + 1]; // null-terminated
         cmdline_buf[..cmdline_len].copy_from_slice(&cmdline_bytes[..cmdline_len]);
-        self.memory.load_RAM(&cmdline_buf, CMDLINE_ADDR)?;
+        self.memory.load_RAM(&cmdline_buf, cmdline_addr)?;
         tracing::info!("Command line: {}", cmdline);
 
         // =====================================================================
@@ -1114,11 +1150,11 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Set entry point and registers
         self.cpu.set_rip(code32_start as u64);
         self.cpu.set_rsp(0x20000); // Temporary stack (kernel sets its own early)
-        self.cpu.set_rsi(BOOT_PARAMS_ADDR); // ESI = pointer to boot_params
+        self.cpu.set_rsi(boot_params_addr); // ESI = pointer to boot_params
 
         tracing::info!(
             "Direct boot ready: EIP={:#x}, ESI={:#x}, ESP={:#x}",
-            code32_start, BOOT_PARAMS_ADDR, 0x20000u32
+            code32_start, boot_params_addr, 0x20000u32
         );
 
         Ok(())
@@ -1917,6 +1953,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 {
                                     let lapic_ptr = self.cpu.lapic_ptr_mut();
                                     let lapic = unsafe { &mut *lapic_ptr };
+                                    // Update LAPIC's snapshot of system ticks
+                                    lapic.current_ticks = self.pc_system.time_ticks();
                                     if lapic.timer_fired {
                                         lapic.timer_fired = false;
                                         let current_ticks = self.pc_system.time_ticks();
@@ -1990,6 +2028,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     {
                         let lapic_ptr = self.cpu.lapic_ptr_mut();
                         let lapic = unsafe { &mut *lapic_ptr };
+
+                        // Update LAPIC's snapshot of system ticks for timer count reads
+                        lapic.current_ticks = self.pc_system.time_ticks();
 
                         // Process timer fire: call periodic() to trigger interrupt vector
                         // and set up next period (Bochs apic.cc:1029-1069)
@@ -2551,6 +2592,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 {
                     let lapic_ptr = self.cpu.lapic_ptr_mut();
                     let lapic = unsafe { &mut *lapic_ptr };
+                    // Update LAPIC's snapshot of system ticks
+                    lapic.current_ticks = self.pc_system.time_ticks();
                     if lapic.timer_fired {
                         lapic.timer_fired = false;
                         let current_ticks = self.pc_system.time_ticks();

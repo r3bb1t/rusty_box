@@ -586,6 +586,9 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(crate) diag_first_pm_hlt_rip: u32,
     /// Stack snapshot at first PM HLT (16 dwords from ESP)
     pub(crate) diag_first_pm_hlt_stack: [u32; 16],
+    /// RIP ring buffer for tracing last N instructions before HLT
+    pub(super) diag_rip_ring: [u64; 64],
+    pub(super) diag_rip_ring_idx: usize,
     /// PM→RM transition count (CR0 PE: 1→0)
     pub(crate) diag_pm_to_rm_count: u64,
     /// RM→PM transition count (CR0 PE: 0→1)
@@ -1474,6 +1477,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // SAFETY: i_ptr is valid for the lifetime of this loop iteration (see above).
                 let opcode = unsafe { (*i_ptr).get_ia_opcode() };
 
+
                 match self.execute_instruction(unsafe { &*i_ptr }) {
                     Ok(()) => {}
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
@@ -1502,6 +1506,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // Matching C++ line 204-206: prev_rip = RIP; icount++;
                 self.prev_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
                 self.icount += 1;
+
+                // Record RIP in ring buffer during kernel phase for HLT diagnosis
+                if self.icount > 622_000_000 && self.long64_mode() {
+                    self.diag_rip_ring[self.diag_rip_ring_idx & 63] = self.prev_rip;
+                    self.diag_rip_ring_idx += 1;
+                }
+
+
                 iteration += 1;
 
                 // Diagnostic address hit tracking (zero-cost when no watches set)

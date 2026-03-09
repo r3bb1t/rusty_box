@@ -310,10 +310,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             // Triple fault: 3rd exception with no resolution after #DF.
             if self.last_exception_type == ExceptionType::DoubleFault as u32 {
-                tracing::error!("TRIPLE FAULT at RIP={:#x} CS={:#x} vector={:?} error_code={:#x} icount={} CR0={:#x} CR3={:#x} IDTR.base={:#x} IDTR.limit={:#x}",
+                tracing::error!("TRIPLE FAULT at RIP={:#x} CS={:#x} vector={:?} error_code={:#x} icount={} CR0={:#x} CR3={:#x} CR2={:#x} IDTR.base={:#x} IDTR.limit={:#x}",
                     self.rip(), self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value,
                     vector, error_code, self.icount,
-                    self.cr0.get32(), self.cr3, self.idtr.base, self.idtr.limit);
+                    self.cr0.get32(), self.cr3, self.cr2, self.idtr.base, self.idtr.limit);
                 self.debug_puts(b"[TRIPLE_FAULT]\n");
                 self.activity_state = super::cpu::CpuActivityState::Shutdown;
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -339,6 +339,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if last < 3 && newt < 3 && !IS_EXCEPTION_OK[last][newt] {
                 tracing::error!("DOUBLE FAULT: 1st exception type={} 2nd={:?}(type={}) at RIP={:#x} error_code={:#x} icount={} CR2={:#x}",
                     last, vector, newt, self.rip(), error_code, self.icount, self.cr2);
+                tracing::error!("  RAX={:#018x} RBX={:#018x} RCX={:#018x} RDX={:#018x}",
+                    self.rax(), self.rbx(), self.rcx(), self.rdx());
+                tracing::error!("  RSI={:#018x} RDI={:#018x} RBP={:#018x} RSP={:#018x}",
+                    self.rsi(), self.rdi(), self.rbp(), self.rsp());
+                tracing::error!("  R8 ={:#018x} R9 ={:#018x} R10={:#018x} R11={:#018x}",
+                    self.r8(), self.r9(), self.r10(), self.r11());
+                tracing::error!("  R12={:#018x} R13={:#018x} R14={:#018x} R15={:#018x}",
+                    self.r12(), self.r13(), self.r14(), self.r15());
                 return self.exception(Exception::Df, 0);
             }
         }

@@ -12,9 +12,7 @@ path = "src/lib.rs"
 default = []
 
 [dependencies]
-thiserror.workspace = true
 bitflags.workspace = true
-byteorder.workspace = true
 
 [dev-dependencies]
 tracing-subscriber.workspace = true

@@ -2,8 +2,8 @@
 extern crate std;
 
 use crate::{
-    fetchdecode32::fetch_decode32, fetchdecode64::fetch_decode64, ia_opcodes::Opcode,
-    instr_generated::Instruction,
+    decoder::decode32::fetch_decode32, decoder::decode64::fetch_decode64, opcode::Opcode,
+    instruction::Instruction,
 };
 
 /// Initialize tracing for tests (similar to examples/init_and_run.rs)
@@ -19,7 +19,7 @@ fn init_tracing() {
 /// Format an instruction for display (similar to Zydis output)
 fn format_instruction(address: u64, instr: &Instruction) -> std::string::String {
     let opcode_name = std::format!("{:?}", instr.get_ia_opcode());
-    let length = instr.meta_info.ilen;
+    let length = instr.length;
 
     // Format address as 16 hex digits
     std::format!("{:016X}  {} (len={})", address, opcode_name, length)
@@ -42,7 +42,7 @@ fn disassemble_sequence(
 
         match fetch_decode32(remaining, is_32) {
             Ok(instr) => {
-                let length = instr.meta_info.ilen as usize;
+                let length = instr.length as usize;
 
                 if length == 0 || offset + length > data.len() {
                     // Invalid instruction or out of bounds
@@ -207,7 +207,7 @@ fn test_instruction_length_tracking() {
     init_tracing();
     let mut total_length = 0;
     for (addr, instr) in &instructions {
-        let length = instr.meta_info.ilen as usize;
+        let length = instr.length as usize;
         total_length += length;
         tracing::info!("{} (len={})", format_instruction(*addr, instr), length);
     }
@@ -271,7 +271,7 @@ fn test_jmp_imm() {
     let runtime_address = 0x007FFFFFFF400000;
     let jump_instruction = disassemble_sequence(&data, runtime_address, false)[0].1;
 
-    assert_eq!(jump_instruction.meta_info.ilen, 2);
+    assert_eq!(jump_instruction.length, 2);
     assert_eq!(jump_instruction.get_ia_opcode(), Opcode::JnbJbw);
     tracing::info!("{:#x?}", jump_instruction)
 }
@@ -290,7 +290,7 @@ fn disassemble_sequence_64bit(
 
         match fetch_decode64(remaining) {
             Ok(instr) => {
-                let length = instr.meta_info.ilen as usize;
+                let length = instr.length as usize;
 
                 if length == 0 || offset + length > data.len() {
                     // Invalid instruction or out of bounds
@@ -392,7 +392,7 @@ fn test_3dnow_with_memory_operand() {
     assert_eq!(i.ilen(), 5);
     assert_eq!(i.get_ia_opcode(), Opcode::Pi2fdPqQq);
     assert!(!i.mod_c0()); // Memory operand
-    assert_eq!(i.modrm_form.displacement.displ32u(), 0x10);
+    assert_eq!(i.displacement, 0x10);
 }
 
 #[test]
@@ -479,7 +479,7 @@ fn test_rip_relative_addressing() {
     let i = fetch_decode64(&[0x8B, 0x05, 0x78, 0x56, 0x34, 0x12]).unwrap();
     assert_eq!(i.ilen(), 6);
     assert_eq!(i.sib_base(), 16, "Base should be BX_64BIT_REG_RIP (16)");
-    assert_eq!(i.modrm_form.displacement.displ32u(), 0x12345678);
+    assert_eq!(i.displacement, 0x12345678);
 }
 
 #[test]
@@ -489,7 +489,7 @@ fn test_rip_relative_with_rex() {
     let i = fetch_decode64(&[0x48, 0x8B, 0x05, 0x10, 0x00, 0x00, 0x00]).unwrap();
     assert_eq!(i.ilen(), 7);
     assert_eq!(i.sib_base(), 16, "Base should be BX_64BIT_REG_RIP (16)");
-    assert_eq!(i.modrm_form.displacement.displ32u(), 0x10);
+    assert_eq!(i.displacement, 0x10);
     assert_ne!(i.os64_l(), 0, "Should have 64-bit operand size");
 }
 
@@ -506,5 +506,5 @@ fn test_not_rip_relative_in_32bit() {
         19,
         "Base should be BX_NIL_REGISTER (19) in 32-bit mode"
     );
-    assert_eq!(i.modrm_form.displacement.displ32u(), 0x12345678);
+    assert_eq!(i.displacement, 0x12345678);
 }

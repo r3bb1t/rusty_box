@@ -111,9 +111,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// JMP m32 - Indirect jump through memory (memory form)
     /// Matching Bochs ctrl_xfer32.cc JMP_EdM
     pub fn jmp_ed_m(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let new_eip = self.read_virtual_dword(seg, eaddr)?;
+        let new_eip = self.v_read_dword(seg, eaddr)?;
         if new_eip > 0x1000_0000 {
             tracing::debug!("JMP m32: [{:?}:{:#010x}] -> EIP={:#010x} from RIP={:#010x}", seg, eaddr, new_eip, self.prev_rip);
         }
@@ -171,9 +171,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// CALL m32 - Indirect call through memory (memory form)
     /// Matching Bochs ctrl_xfer32.cc CALL_EdM
     pub fn call_ed_m(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let new_eip = self.read_virtual_dword(seg, eaddr)?;
+        let new_eip = self.v_read_dword(seg, eaddr)?;
         let eip = self.eip();
 
         if new_eip > 0x1000_0000 {
@@ -663,12 +663,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ ctrl_xfer32.cc (similar to CALL16_Ep but 32-bit)
     pub fn call32_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Resolve effective address
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
 
         // Read offset and segment from memory
         let seg = BxSegregs::from(instr.seg());
-        let op1_32 = self.read_virtual_dword(seg, eaddr)?;
-        let cs_raw = self.read_virtual_word(
+        let op1_32 = self.v_read_dword(seg, eaddr)?;
+        let cs_raw = self.v_read_word(
             seg,
             (eaddr.wrapping_add(4))
                 & (if instr.as32_l() == 0 {
@@ -697,12 +697,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ ctrl_xfer32.cc (similar to JMP16_Ep but 32-bit)
     pub fn jmp32_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Resolve effective address
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
 
         // Read offset and segment from memory
         let seg = BxSegregs::from(instr.seg());
-        let op1_32 = self.read_virtual_dword(seg, eaddr)?;
-        let cs_raw = self.read_virtual_word(
+        let op1_32 = self.v_read_dword(seg, eaddr)?;
+        let cs_raw = self.v_read_word(
             seg,
             (eaddr.wrapping_add(4))
                 & (if instr.as32_l() == 0 {

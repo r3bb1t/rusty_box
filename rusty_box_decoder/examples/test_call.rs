@@ -1,4 +1,4 @@
-use rusty_box_decoder::fetchdecode32::fetch_decode32;
+use rusty_box_decoder::fetch_decode32;
 
 fn main() {
     // Test: FF D0 = CALL EAX (register indirect call)

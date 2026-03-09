@@ -126,6 +126,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn jmp_jq(&mut self, instr: &Instruction) -> Result<()> {
         let new_rip = self.rip().wrapping_add(instr.id() as i32 as u64);
 
+
         if !self.is_canonical(new_rip) {
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);

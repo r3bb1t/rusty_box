@@ -1,31 +1,28 @@
-//! Const-compatible 32-bit/16-bit instruction decoder
+//! 32-bit / 16-bit instruction decoder (matching Bochs `fetchdecode32.cc`).
 //!
-//! This module provides a `const fn` instruction decoder for x86 protected/real mode
-//! that returns `BxInstruction` - the same structure used by
-//! the non-const decoder.
+//! Provides `fetch_decode32` and `fetch_decode32_inplace` — both are `const fn`
+//! decoders for x86 protected/real mode that produce an [`Instruction`].
 
-use crate::instr_generated::Instruction;
+use crate::instruction::{Instruction, InstructionFlags};
+use crate::error::{DecodeError, DecodeResult};
+use crate::opcode::Opcode;
+use crate::BxSegregs;
 
-use super::error::{DecodeError, DecodeResult};
-use super::fetchdecode_generated::{BxDecodeError, SsePrefix};
-use super::ia_opcodes::Opcode;
-use super::instr::MetaInfoFlags;
-use super::instr_generated::{BxInstructionMetaInfo, DisplacementData, ModRmForm, OperandData};
-use super::BxSegregs;
+use super::tables::{BxDecodeError, SsePrefix};
 
 // Import opcode tables
-use super::fetchdecode_opmap::*;
-use super::fetchdecode_opmap_0f38::BxOpcodeTable0F38;
-use super::fetchdecode_opmap_0f3a::BxOpcodeTable0F3A;
-use super::fetchdecode_x87::{
+use super::opmap::*;
+use super::opmap_0f38::BxOpcodeTable0F38;
+use super::opmap_0f3a::BxOpcodeTable0F3A;
+use super::x87::{
     BX3_DNOW_OPCODE, BX_OPCODE_INFO_FLOATING_POINT_D8, BX_OPCODE_INFO_FLOATING_POINT_D9,
     BX_OPCODE_INFO_FLOATING_POINT_DA, BX_OPCODE_INFO_FLOATING_POINT_DB,
     BX_OPCODE_INFO_FLOATING_POINT_DC, BX_OPCODE_INFO_FLOATING_POINT_DD,
     BX_OPCODE_INFO_FLOATING_POINT_DE, BX_OPCODE_INFO_FLOATING_POINT_DF,
 };
 
-// Decoding mask bit offsets — imported from fetchdecode_generated.rs
-use super::fetchdecode_generated::{
+// Decoding mask bit offsets
+use super::tables::{
     AS32_OFFSET, LOCK_PREFIX_OFFSET, MODC0_OFFSET, NNN_OFFSET, OS32_OFFSET, RRR_OFFSET,
     SRC_EQ_DST_OFFSET, SSE_PREFIX_OFFSET,
 };
@@ -35,9 +32,6 @@ const fn find_opcode_in_table(table: &[u64], decmask: u32) -> Opcode {
     let mut i = 0;
     while i < table.len() {
         let entry = table[i];
-        // Match C++ exactly: Bit32u(op) & 0xFFFFFF and Bit32u(op >> 24)
-        // C++: Bit32u(op >> 24) truncates to 32 bits but doesn't mask to 24
-        // However, when comparing (opmsk & ignmsk), only the lower 24 bits matter
         let ignmsk = (entry & 0xFFFFFF) as u32;
         let opmsk = (entry >> 24) as u32;
 
@@ -46,9 +40,6 @@ const fn find_opcode_in_table(table: &[u64], decmask: u32) -> Opcode {
             return Opcode::from_u16_const(opcode_raw);
         }
 
-        // Check if this is the last opcode (sign bit set) - matches C++ do-while condition
-        // C++: while(Bit64s(op) > 0) means continue while sign bit is NOT set
-        // So we break when sign bit IS set (entry < 0)
         if (entry as i64) < 0 {
             break;
         }
@@ -58,38 +49,39 @@ const fn find_opcode_in_table(table: &[u64], decmask: u32) -> Opcode {
     Opcode::IaError
 }
 
-// Metadata array indices — imported from instr_generated.rs
-use super::instr_generated::{
-    BX_INSTR_METADATA_BASE, BX_INSTR_METADATA_DST, BX_INSTR_METADATA_INDEX,
-    BX_INSTR_METADATA_SCALE, BX_INSTR_METADATA_SEG, BX_INSTR_METADATA_SRC1,
-};
+// Backward-compatible aliases for MetaInfoFlags
+use InstructionFlags as MetaInfoFlags;
 
-// Register constants for clarity
+// 16-bit register indices — matching Bochs BX_16BIT_REG_* constants
+const BX_16BIT_REG_BX: u8 = 3;
+const BX_16BIT_REG_BP: u8 = 5;
+const BX_16BIT_REG_SI: u8 = 6;
+const BX_16BIT_REG_DI: u8 = 7;
 const BX_NIL_REGISTER: u8 = 19;
-const BX_NO_INDEX: u8 = 4;
+const BX_NO_INDEX: u8 = 4; // ESP index = no index in SIB
 
-// 16-bit addressing mode base registers
+// 16-bit addressing mode base registers — Bochs fetchdecode32.cc Resolve16BaseReg[]
 const RESOLVE16_BASE_REG: [u8; 8] = [
-    3, // BX
-    3, // BX
-    5, // BP
-    5, // BP
-    6, // SI
-    7, // DI
-    5, // BP
-    3, // BX
+    BX_16BIT_REG_BX,
+    BX_16BIT_REG_BX,
+    BX_16BIT_REG_BP,
+    BX_16BIT_REG_BP,
+    BX_16BIT_REG_SI,
+    BX_16BIT_REG_DI,
+    BX_16BIT_REG_BP,
+    BX_16BIT_REG_BX,
 ];
 
-// 16-bit addressing mode index registers (4 = no index)
+// 16-bit addressing mode index registers — Bochs fetchdecode32.cc Resolve16IndexReg[]
 const RESOLVE16_INDEX_REG: [u8; 8] = [
-    6, // SI
-    7, // DI
-    6, // SI
-    7, // DI
-    4, // none
-    4, // none
-    4, // none
-    4, // none
+    BX_16BIT_REG_SI,
+    BX_16BIT_REG_DI,
+    BX_16BIT_REG_SI,
+    BX_16BIT_REG_DI,
+    BX_NO_INDEX,
+    BX_NO_INDEX,
+    BX_NO_INDEX,
+    BX_NO_INDEX,
 ];
 
 const DS: u8 = BxSegregs::Ds as u8;
@@ -111,36 +103,26 @@ const SREG_MOD0_BASE32: [u8; 8] = [DS, DS, DS, DS, SS, DS, DS, DS];
 // Matching Bochs sreg_mod1or2_base32 in fetchdecode32.cc:703-712
 const SREG_MOD1OR2_BASE32: [u8; 8] = [DS, DS, DS, DS, SS, SS, DS, DS];
 
-/// Const-compatible 32-bit/16-bit instruction decoder
+/// In-place 32-bit/16-bit decoder — fills an existing [`Instruction`] slot.
 ///
-/// Decodes an x86 protected/real mode instruction and returns a `Result` containing either
-/// a `BxInstruction` struct on success, or a `DecodeError` on failure.
-/// This is the const fn equivalent of `fetch_decode32_chatgpt_generated_instr`.
-///
-/// # Arguments
-/// * `bytes` - The instruction bytes to decode
-/// * `is_32` - true for 32-bit mode, false for 16-bit mode
-/// Bochs-style in-place decode: fills an existing Instruction slot directly.
-/// This avoids creating a temporary struct and copying it to the destination,
-/// matching Bochs `fetchDecode32(BxInstruction_c *i, ...)` behavior.
-///
-/// Use this in the icache miss handler to write directly into `mpool[mpindex]`.
+/// Avoids creating a temporary and copying, matching
+/// Bochs `fetchDecode32(BxInstruction_c *i, ...)`.
+/// Prefer this over [`fetch_decode32`] in the icache miss handler.
 pub const fn fetch_decode32_inplace(
     bytes: &[u8],
     is_32: bool,
     instr: &mut Instruction,
 ) -> DecodeResult<()> {
     *instr = Instruction {
-        meta_info: BxInstructionMetaInfo {
-            ia_opcode: Opcode::IaError,
-            ilen: 0,
-            metainfo1: MetaInfoFlags::empty(),
+        opcode: Opcode::IaError,
+        length: 0,
+        flags: InstructionFlags::empty(),
+        operands: crate::instruction::Operands {
+            dst: 0, src1: 0, src2: 0, src3: 0,
+            segment: 0, base: 0, index: 0, scale: 0,
         },
-        meta_data: [0u8; 8],
-        modrm_form: ModRmForm {
-            operand_data: OperandData { id: 0 },
-            displacement: DisplacementData { data32: 0 },
-        },
+        immediate: 0,
+        displacement: 0,
     };
 
     if bytes.is_empty() {
@@ -225,9 +207,9 @@ pub const fn fetch_decode32_inplace(
 
     // Set segment override
     if seg_override < 7 {
-        instr.meta_data[BX_INSTR_METADATA_SEG] = seg_override;
+        instr.operands.segment = seg_override;
     } else {
-        instr.meta_data[BX_INSTR_METADATA_SEG] = BxSegregs::Ds as u8;
+        instr.operands.segment = BxSegregs::Ds as u8;
     }
 
     // === Phase 2: Parse opcode ===
@@ -344,9 +326,9 @@ pub const fn fetch_decode32_inplace(
                     let index = (sib >> 3) & 0x7;
                     let base = sib & 0x7;
 
-                    instr.meta_data[BX_INSTR_METADATA_SCALE] = scale;
-                    instr.meta_data[BX_INSTR_METADATA_INDEX] = index;
-                    instr.meta_data[BX_INSTR_METADATA_BASE] = base;
+                    instr.operands.scale = scale;
+                    instr.operands.index = index;
+                    instr.operands.base = base;
 
                     // Displacement for SIB with base=5 and mod=0
                     if mod_field == 0 && base == 5 {
@@ -355,12 +337,12 @@ pub const fn fetch_decode32_inplace(
                         }
                         let disp = read_u32_le(bytes, pos);
                         pos += 4;
-                        instr.modrm_form.displacement.data32 = disp;
-                        instr.meta_data[BX_INSTR_METADATA_BASE] = BX_NIL_REGISTER;
+                        instr.displacement = disp;
+                        instr.operands.base = BX_NIL_REGISTER;
                     }
                 } else {
-                    instr.meta_data[BX_INSTR_METADATA_BASE] = rm as u8;
-                    instr.meta_data[BX_INSTR_METADATA_INDEX] = BX_NO_INDEX;
+                    instr.operands.base = rm as u8;
+                    instr.operands.index = BX_NO_INDEX;
 
                     // [disp32] when mod=0, rm=5
                     if mod_field == 0 && rm == 5 {
@@ -369,8 +351,8 @@ pub const fn fetch_decode32_inplace(
                         }
                         let disp = read_u32_le(bytes, pos);
                         pos += 4;
-                        instr.modrm_form.displacement.data32 = disp;
-                        instr.meta_data[BX_INSTR_METADATA_BASE] = BX_NIL_REGISTER;
+                        instr.displacement = disp;
+                        instr.operands.base = BX_NIL_REGISTER;
                     }
                 }
 
@@ -382,7 +364,7 @@ pub const fn fetch_decode32_inplace(
                     }
                     let disp = bytes[pos] as i8 as i32 as u32;
                     pos += 1;
-                    instr.modrm_form.displacement.data32 = disp;
+                    instr.displacement = disp;
                 } else if mod_field == 2 {
                     // disp32
                     if pos + 4 > max_len {
@@ -390,13 +372,13 @@ pub const fn fetch_decode32_inplace(
                     }
                     let disp = read_u32_le(bytes, pos);
                     pos += 4;
-                    instr.modrm_form.displacement.data32 = disp;
+                    instr.displacement = disp;
                 }
             } else {
                 // 16-bit addressing - no SIB
-                instr.meta_data[BX_INSTR_METADATA_BASE] = RESOLVE16_BASE_REG[rm as usize];
-                instr.meta_data[BX_INSTR_METADATA_INDEX] = RESOLVE16_INDEX_REG[rm as usize];
-                instr.meta_data[BX_INSTR_METADATA_SCALE] = 0;
+                instr.operands.base = RESOLVE16_BASE_REG[rm as usize];
+                instr.operands.index = RESOLVE16_INDEX_REG[rm as usize];
+                instr.operands.scale = 0;
 
                 // [disp16] when mod=0, rm=6
                 if mod_field == 0 && rm == 6 {
@@ -406,8 +388,8 @@ pub const fn fetch_decode32_inplace(
                     let disp = read_u16_le(bytes, pos);
                     pos += 2;
                     // Bochs sign-extends disp16: (Bit32s)(Bit16s) FetchWORD(iptr)
-                    instr.modrm_form.displacement.data32 = disp as i16 as i32 as u32;
-                    instr.meta_data[BX_INSTR_METADATA_BASE] = 19; // BX_NIL_REGISTER
+                    instr.displacement = disp as i16 as i32 as u32;
+                    instr.operands.base = 19; // BX_NIL_REGISTER
                 }
 
                 // Handle displacement based on mod field
@@ -418,7 +400,7 @@ pub const fn fetch_decode32_inplace(
                     }
                     let disp = bytes[pos] as i8 as i32 as u32;
                     pos += 1;
-                    instr.modrm_form.displacement.data32 = disp;
+                    instr.displacement = disp;
                 } else if mod_field == 2 {
                     // disp16 — Bochs sign-extends: (Bit32s)(Bit16s) FetchWORD(iptr)
                     if pos + 2 > max_len {
@@ -426,7 +408,7 @@ pub const fn fetch_decode32_inplace(
                     }
                     let disp = read_u16_le(bytes, pos);
                     pos += 2;
-                    instr.modrm_form.displacement.data32 = disp as i16 as i32 as u32;
+                    instr.displacement = disp as i16 as i32 as u32;
                 }
             }
         }
@@ -446,11 +428,11 @@ pub const fn fetch_decode32_inplace(
                 } else {
                     SREG_MOD01OR10_RM16[rm as usize]
                 };
-                instr.meta_data[BX_INSTR_METADATA_SEG] = default_seg;
+                instr.operands.segment = default_seg;
             } else {
                 // 32-bit addressing mode
                 let base = if rm == 4 {
-                    instr.meta_data[BX_INSTR_METADATA_BASE]
+                    instr.operands.base
                 } else {
                     rm as u8
                 };
@@ -459,7 +441,7 @@ pub const fn fetch_decode32_inplace(
                 } else {
                     SREG_MOD1OR2_BASE32[base as usize & 7]
                 };
-                instr.meta_data[BX_INSTR_METADATA_SEG] = default_seg;
+                instr.operands.segment = default_seg;
             }
         }
     } else {
@@ -485,7 +467,7 @@ pub const fn fetch_decode32_inplace(
             });
         }
 
-        // Group opcodes: 80, 81, 83, C0, C1, D0-D3, F6, F7, FE, FF
+        // Group opcodes: 80, 81, 83, C0, C1, C6, C7, D0-D3, F6, F7, FE, FF
         // For these, nnn field is the opcode extension (which operation), rm is the operand
         let is_group_opcode = matches!(
             b1,
@@ -494,6 +476,8 @@ pub const fn fetch_decode32_inplace(
                 | 0x83
                 | 0xC0
                 | 0xC1
+                | 0xC6
+                | 0xC7
                 | 0xD0
                 | 0xD1
                 | 0xD2
@@ -515,16 +499,16 @@ pub const fn fetch_decode32_inplace(
 
         if is_group_opcode {
             // Group opcodes: operand is in rm, opcode extension in nnn
-            instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
-            instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
+            instr.operands.dst = rm as u8;
+            instr.operands.src1 = nnn as u8;
         } else if b1 == 0x8C {
             // MOV Ew,Sw: rm is destination (gpr), nnn is source (segment)
-            instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
-            instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
+            instr.operands.dst = rm as u8;
+            instr.operands.src1 = nnn as u8;
         } else if b1 == 0x8E {
             // MOV Sw,Ew: nnn is destination (segment), rm is source (gpr)
-            instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
-            instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
+            instr.operands.dst = nnn as u8;
+            instr.operands.src1 = rm as u8;
         } else if (b1 < 0x100 && ((b1 & 0x0F) == 0x01 || (b1 & 0x0F) == 0x09))
             || b1 == 0x89
             // Two-byte Ed,Gd opcodes (DST=rm): Group 7, store-form SSE, MOV Rd/DRn, Groups 12-14
@@ -547,14 +531,14 @@ pub const fn fetch_decode32_inplace(
         {
             // Ed,Gd format: rm (Ed) is destination, nnn (Gd) is source
             // Examples: ADD Ed,Gd | SUB Ed,Gd | MOV Ed,Gd | BTS EdGd | XADD EbGb
-            instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
-            instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
+            instr.operands.dst = rm as u8;
+            instr.operands.src1 = nnn as u8;
         } else {
             // Gd,Ed format (opcodes 0x03, 0x0B, 0x13, 0x1B, 0x23, 0x2B, 0x33, 0x8B):
             // nnn (Gd) is destination, rm (Ed) is source
             // Examples: ADD Gd,Ed | SUB Gd,Ed | MOV Gd,Ed
-            instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
-            instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
+            instr.operands.dst = nnn as u8;
+            instr.operands.src1 = rm as u8;
         }
     } else {
         // Check if this is a segment push/pop opcode (uses nnn for segment)
@@ -565,12 +549,12 @@ pub const fn fetch_decode32_inplace(
 
         if is_segment_push_pop {
             // Segment is in bits 3-5 (nnn)
-            instr.meta_data[BX_INSTR_METADATA_DST] = nnn as u8;
-            instr.meta_data[BX_INSTR_METADATA_SRC1] = rm as u8;
+            instr.operands.dst = nnn as u8;
+            instr.operands.src1 = rm as u8;
         } else {
             // Most non-ModRM: register in bits 0-2 (rm)
-            instr.meta_data[BX_INSTR_METADATA_DST] = rm as u8;
-            instr.meta_data[BX_INSTR_METADATA_SRC1] = nnn as u8;
+            instr.operands.dst = rm as u8;
+            instr.operands.src1 = nnn as u8;
         }
     }
 
@@ -603,7 +587,7 @@ pub const fn fetch_decode32_inplace(
                 //   dispatchers route *EdsIb opcodes to *EdId handlers that read id()
                 let needs_sign_ext = opcode_map == 0
                     && matches!(b1 as u8, 0x70..=0x7F | 0xE0..=0xE3 | 0xEB | 0x83 | 0x6A | 0x6B);
-                instr.modrm_form.operand_data.id = if needs_sign_ext {
+                instr.immediate = if needs_sign_ext {
                     byte_val as i8 as i32 as u32
                 } else {
                     byte_val as u32
@@ -611,13 +595,13 @@ pub const fn fetch_decode32_inplace(
                 pos += 1;
             }
             2 => {
-                instr.modrm_form.operand_data.id = read_u16_le(bytes, pos) as u32;
+                instr.immediate = read_u16_le(bytes, pos) as u32;
                 pos += 2;
             }
             3 => {
                 // ENTER: Iw + Ib
-                instr.modrm_form.operand_data.id = read_u16_le(bytes, pos) as u32;
-                instr.modrm_form.displacement.data32 = bytes[pos + 2] as u32;
+                instr.immediate = read_u16_le(bytes, pos) as u32;
+                instr.displacement = bytes[pos + 2] as u32;
                 pos += 3;
             }
             4 => {
@@ -625,18 +609,18 @@ pub const fn fetch_decode32_inplace(
                 let is_far_pointer = matches!(b1, 0x9A | 0xEA);
                 if is_far_pointer {
                     // Far pointer in 16-bit mode: Iw (offset) + Iw (segment)
-                    instr.modrm_form.operand_data.id = read_u16_le(bytes, pos) as u32;
-                    instr.modrm_form.displacement.data32 = read_u16_le(bytes, pos + 2) as u32;
+                    instr.immediate = read_u16_le(bytes, pos) as u32;
+                    instr.displacement = read_u16_le(bytes, pos + 2) as u32;
                 } else {
                     // Regular 4-byte immediate
-                    instr.modrm_form.operand_data.id = read_u32_le(bytes, pos);
+                    instr.immediate = read_u32_le(bytes, pos);
                 }
                 pos += 4;
             }
             6 => {
                 // Far pointer in 32-bit mode: Id (offset) + Iw (segment)
-                instr.modrm_form.operand_data.id = read_u32_le(bytes, pos);
-                instr.modrm_form.displacement.data32 = read_u16_le(bytes, pos + 4) as u32;
+                instr.immediate = read_u32_le(bytes, pos);
+                instr.displacement = read_u16_le(bytes, pos + 4) as u32;
                 pos += 6;
             }
             _ => {}
@@ -644,8 +628,8 @@ pub const fn fetch_decode32_inplace(
     }
 
     // Finalize instruction
-    instr.meta_info.ilen = pos as u8;
-    instr.meta_info.metainfo1 = MetaInfoFlags::from_bits_retain(metainfo1_bits);
+    instr.length = pos as u8;
+    instr.flags = MetaInfoFlags::from_bits_retain(metainfo1_bits);
 
     // Build decmask for opcode lookup
     // Match C++ implementation: decmask uses i->osize() and i->asize() which return actual values
@@ -697,29 +681,29 @@ pub const fn fetch_decode32_inplace(
             // Memory form: index = nnn (0-7)
             nnn as usize
         };
-        instr.meta_info.ia_opcode = fpu_table[fpu_index];
+        instr.opcode = fpu_table[fpu_index];
         // Store foo: (modrm | (escape_byte << 8)) & 0x7FF — for x87 FPU handler context
         // Can't call set_foo() in const fn, so set id directly (foo is in lower 16 bits of id)
         let foo_val = ((modrm_byte as u16) | ((b1 as u16) << 8)) & 0x7FF;
-        instr.modrm_form.operand_data.id = foo_val as u32;
+        instr.immediate = foo_val as u32;
     } else if opcode_map == 4 {
         // 3DNow! instruction: use suffix to look up opcode directly
-        instr.meta_info.ia_opcode = BX3_DNOW_OPCODE[dnow_suffix as usize];
+        instr.opcode = BX3_DNOW_OPCODE[dnow_suffix as usize];
     } else if opcode_map == 0 && b1 == 0x90 {
         // Special NOP/PAUSE handling (Bochs decoder32_nop)
         if sse_prefix == SsePrefix::PrefixF3 as u8 {
             // F3 prefix → PAUSE
-            instr.meta_info.ia_opcode = Opcode::Pause;
+            instr.opcode = Opcode::Pause;
         } else {
             // Bare 0x90 → NOP
-            instr.meta_info.ia_opcode = Opcode::Nop;
+            instr.opcode = Opcode::Nop;
         }
     } else {
-        instr.meta_info.ia_opcode = lookup_opcode_32(b1, opcode_map, decmask, nnn);
+        instr.opcode = lookup_opcode_32(b1, opcode_map, decmask, nnn);
     }
 
     // Check if opcode lookup failed
-    if matches!(instr.meta_info.ia_opcode, Opcode::IaError) {
+    if matches!(instr.opcode, Opcode::IaError) {
         return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
     }
 
@@ -738,16 +722,15 @@ pub const fn fetch_decode32_inplace(
 /// For runtime hot-path icache misses, prefer fetch_decode32_inplace to eliminate the copy.
 pub const fn fetch_decode32(bytes: &[u8], is_32: bool) -> DecodeResult<Instruction> {
     let mut instr = Instruction {
-        meta_info: BxInstructionMetaInfo {
-            ia_opcode: Opcode::IaError,
-            ilen: 0,
-            metainfo1: MetaInfoFlags::empty(),
+        opcode: Opcode::IaError,
+        length: 0,
+        flags: InstructionFlags::empty(),
+        operands: crate::instruction::Operands {
+            dst: 0, src1: 0, src2: 0, src3: 0,
+            segment: 0, base: 0, index: 0, scale: 0,
         },
-        meta_data: [0u8; 8],
-        modrm_form: ModRmForm {
-            operand_data: OperandData { id: 0 },
-            displacement: DisplacementData { data32: 0 },
-        },
+        immediate: 0,
+        displacement: 0,
     };
     // Use match instead of ? — const_try is not yet stable
     match fetch_decode32_inplace(bytes, is_32, &mut instr) {
@@ -1484,50 +1467,50 @@ mod tests {
     fn test_16bit_disp() {
         let i = fetch_decode32(&[0x8B, 0x06, 0x34, 0x12], false).unwrap(); // MOV AX, [0x1234]
         assert_eq!(i.ilen(), 4);
-        assert_eq!(i.modrm_form.displacement.displ32u(), 0x1234);
+        assert_eq!(i.displacement, 0x1234);
     }
 
     #[test]
     fn test_os_override_32() {
         let i = fetch_decode32(&[0x66, 0xB8, 0x01, 0x02], true).unwrap();
         assert_eq!(i.ilen(), 4);
-        assert_eq!(i.modrm_form.operand_data.id(), 0x0201);
+        assert_eq!(i.immediate, 0x0201);
     }
 
     #[test]
     fn test_os_override_16() {
         let i = fetch_decode32(&[0x66, 0xB8, 0x01, 0x02, 0x03, 0x04], false).unwrap();
         assert_eq!(i.ilen(), 6);
-        assert_eq!(i.modrm_form.operand_data.id(), 0x04030201);
+        assert_eq!(i.immediate, 0x04030201);
     }
 
     #[test]
     fn test_disp8() {
         let i = fetch_decode32(&[0x8B, 0x43, 0x10], true).unwrap(); // MOV EAX, [EBX+0x10]
         assert_eq!(i.ilen(), 3);
-        assert_eq!(i.modrm_form.displacement.displ32u(), 0x10);
+        assert_eq!(i.displacement, 0x10);
     }
 
     #[test]
     fn test_disp32() {
         let i = fetch_decode32(&[0x8B, 0x83, 0x78, 0x56, 0x34, 0x12], true).unwrap();
         assert_eq!(i.ilen(), 6);
-        assert_eq!(i.modrm_form.displacement.displ32u(), 0x12345678);
+        assert_eq!(i.displacement, 0x12345678);
     }
 
     #[test]
     fn test_imm32() {
         let i = fetch_decode32(&[0x68, 0x78, 0x56, 0x34, 0x12], true).unwrap();
         assert_eq!(i.ilen(), 5);
-        assert_eq!(i.modrm_form.operand_data.id(), 0x12345678);
+        assert_eq!(i.immediate, 0x12345678);
     }
 
     #[test]
     fn test_enter() {
         let i = fetch_decode32(&[0xC8, 0x10, 0x00, 0x01], true).unwrap(); // ENTER 0x10, 1
         assert_eq!(i.ilen(), 4);
-        assert_eq!(i.modrm_form.operand_data.id(), 0x10);
-        assert_eq!(i.modrm_form.displacement.displ32u(), 1);
+        assert_eq!(i.immediate, 0x10);
+        assert_eq!(i.displacement, 1);
     }
 
     #[test]
@@ -1568,8 +1551,8 @@ mod tests {
         let i = fetch_decode32(&[0xE6, 0x0d], false).unwrap(); // OUT 0x0D, AL
         assert_eq!(i.ilen(), 2);
         assert_eq!(i.get_ia_opcode(), Opcode::OutIbAl);
-        assert_eq!(i.modrm_form.operand_data.id(), 0x0d);
-        assert_eq!(i.modrm_form.displacement.displ32u(), 0x00);
+        assert_eq!(i.immediate, 0x0d);
+        assert_eq!(i.displacement, 0x00);
     }
 
     /// Test that valid segment registers (0-5) decode successfully for MOV Ew,Sw and MOV Sw,Ew
@@ -1590,7 +1573,7 @@ mod tests {
             );
             let instr = result.unwrap();
             assert_eq!(instr.get_ia_opcode(), Opcode::MovEwSw);
-            assert_eq!(instr.meta_data[1], seg); // Source segment register
+            assert_eq!(instr.operands.src1, seg); // Source segment register
 
             // 0x8E: MOV Sreg, r/m16
             let bytes = vec![0x8E, modrm];
@@ -1603,7 +1586,7 @@ mod tests {
             );
             let instr = result.unwrap();
             assert_eq!(instr.get_ia_opcode(), Opcode::MovSwEw);
-            assert_eq!(instr.meta_data[0], seg); // Destination segment register
+            assert_eq!(instr.operands.dst, seg); // Destination segment register
         }
     }
 

@@ -18,9 +18,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize)
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_dword(seg, eaddr)?
+            self.v_read_dword(seg, eaddr)?
         };
         if op2 == 0 {
             self.eflags.insert(EFlags::ZF);
@@ -39,9 +39,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize)
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_dword(seg, eaddr)?
+            self.v_read_dword(seg, eaddr)?
         };
         if op2 == 0 {
             self.eflags.insert(EFlags::ZF);
@@ -64,9 +64,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize)
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_dword(seg, eaddr)?
+            self.v_read_dword(seg, eaddr)?
         };
         let result = op2.count_ones();
         self.set_gpr32(instr.dst() as usize, result);
@@ -87,9 +87,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize) as u16
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_word(seg, eaddr)?
+            self.v_read_word(seg, eaddr)?
         };
         let result = op2.count_ones() as u16;
         // Write 16-bit result (preserve upper 16 bits)
@@ -116,9 +116,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize)
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_dword(seg, eaddr)?
+            self.v_read_dword(seg, eaddr)?
         };
         let result = op2.leading_zeros();
         self.set_gpr32(instr.dst() as usize, result);
@@ -144,9 +144,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize) as u16
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_word(seg, eaddr)?
+            self.v_read_word(seg, eaddr)?
         };
         let result = op2.leading_zeros() as u16;
         let dst = instr.dst() as usize;
@@ -177,9 +177,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize)
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_dword(seg, eaddr)?
+            self.v_read_dword(seg, eaddr)?
         };
         let result = op2.trailing_zeros();
         self.set_gpr32(instr.dst() as usize, result);
@@ -204,9 +204,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize) as u16
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_word(seg, eaddr)?
+            self.v_read_word(seg, eaddr)?
         };
         let result = op2.trailing_zeros() as u16;
         let dst = instr.dst() as usize;
@@ -237,9 +237,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize) as u8
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_byte(seg, eaddr)?
+            self.v_read_byte(seg, eaddr)?
         };
         let crc = self.get_gpr32(instr.dst() as usize);
         let result = crc32c_byte(crc, op2);
@@ -252,9 +252,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize)
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_dword(seg, eaddr)?
+            self.v_read_dword(seg, eaddr)?
         };
         let crc = self.get_gpr32(instr.dst() as usize);
         let result = crc32c_dword(crc, op2);
@@ -267,9 +267,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = if instr.mod_c0() {
             self.get_gpr32(instr.src() as usize) as u16
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_word(seg, eaddr)?
+            self.v_read_word(seg, eaddr)?
         };
         let crc = self.get_gpr32(instr.dst() as usize);
         let result = crc32c_word(crc, op2);
@@ -283,9 +283,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOVBE r32, m32 — load with byte swap
     pub fn movbe_gd_md(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let val = self.read_virtual_dword(seg, eaddr)?;
+        let val = self.v_read_dword(seg, eaddr)?;
         self.set_gpr32(instr.dst() as usize, val.swap_bytes());
         Ok(())
     }
@@ -294,17 +294,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Decoder 0F38: dst()=nnn=register, resolve_addr32=memory
     pub fn movbe_md_gd(&mut self, instr: &Instruction) -> super::Result<()> {
         let val = self.get_gpr32(instr.dst() as usize);
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        self.write_virtual_dword(seg, eaddr, val.swap_bytes())?;
+        self.v_write_dword(seg, eaddr, val.swap_bytes())?;
         Ok(())
     }
 
     /// MOVBE r16, m16 — load with byte swap (16-bit)
     pub fn movbe_gw_mw(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let val = self.read_virtual_word(seg, eaddr)?;
+        let val = self.v_read_word(seg, eaddr)?;
         let dst = instr.dst() as usize;
         let current = self.get_gpr32(dst);
         self.set_gpr32(dst, (current & 0xFFFF0000) | val.swap_bytes() as u32);
@@ -315,9 +315,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Decoder 0F38: dst()=nnn=register, resolve_addr32=memory
     pub fn movbe_mw_gw(&mut self, instr: &Instruction) -> super::Result<()> {
         let val = self.get_gpr32(instr.dst() as usize) as u16;
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        self.write_virtual_word(seg, eaddr, val.swap_bytes())?;
+        self.v_write_word(seg, eaddr, val.swap_bytes())?;
         Ok(())
     }
 }

@@ -67,66 +67,66 @@ impl BxCpuIdTrait for Corei7SkylakeX {
         // corei7_skylake-x.cc:42-109
         enable_extension(&mut b, X86Feature::IsaX87);
         enable_extension(&mut b, X86Feature::Isa486);
-        enable_extension(&mut b, X86Feature::IsaPENTIUM);
+        enable_extension(&mut b, X86Feature::IsaPentium);
         enable_extension(&mut b, X86Feature::IsaP6);
-        enable_extension(&mut b, X86Feature::IsaMMX);
-        enable_extension(&mut b, X86Feature::IsaSYSENTER_SYSEXIT);
-        enable_extension(&mut b, X86Feature::IsaCLFLUSH);
-        enable_extension(&mut b, X86Feature::IsaDEBUG_EXTENSIONS);
-        enable_extension(&mut b, X86Feature::IsaVME);
-        enable_extension(&mut b, X86Feature::IsaPSE);
-        enable_extension(&mut b, X86Feature::IsaPAE);
-        enable_extension(&mut b, X86Feature::IsaPGE);
-        enable_extension(&mut b, X86Feature::IsaMTRR);
-        enable_extension(&mut b, X86Feature::IsaPAT);
-        enable_extension(&mut b, X86Feature::IsaXAPIC);
-        enable_extension(&mut b, X86Feature::IsaX2APIC);
-        enable_extension(&mut b, X86Feature::IsaLONG_MODE);
-        enable_extension(&mut b, X86Feature::IsaLM_LAHF_SAHF);
-        enable_extension(&mut b, X86Feature::IsaCMPXCHG16B);
-        enable_extension(&mut b, X86Feature::IsaNX);
-        enable_extension(&mut b, X86Feature::Isa1G_PAGES);
-        enable_extension(&mut b, X86Feature::IsaPCID);
-        enable_extension(&mut b, X86Feature::IsaTSC_ADJUST);
-        enable_extension(&mut b, X86Feature::IsaTSC_DEADLINE);
-        enable_extension(&mut b, X86Feature::IsaSSE);
-        enable_extension(&mut b, X86Feature::IsaSSE2);
-        enable_extension(&mut b, X86Feature::IsaSSE3);
-        enable_extension(&mut b, X86Feature::IsaSSSE3);
-        enable_extension(&mut b, X86Feature::IsaSSE4_1);
-        enable_extension(&mut b, X86Feature::IsaSSE4_2);
-        enable_extension(&mut b, X86Feature::IsaPOPCNT);
-        enable_extension(&mut b, X86Feature::IsaMONITOR_MWAIT);
-        enable_extension(&mut b, X86Feature::IsaVMX);
-        enable_extension(&mut b, X86Feature::IsaRDTSCP);
-        enable_extension(&mut b, X86Feature::IsaXSAVE);
-        enable_extension(&mut b, X86Feature::IsaXSAVEOPT);
-        enable_extension(&mut b, X86Feature::IsaXSAVEC);
-        enable_extension(&mut b, X86Feature::IsaXSAVES);
-        enable_extension(&mut b, X86Feature::IsaAES_PCLMULQDQ);
-        enable_extension(&mut b, X86Feature::IsaMOVBE);
-        enable_extension(&mut b, X86Feature::IsaAVX);
-        enable_extension(&mut b, X86Feature::IsaAVX_F16C);
-        enable_extension(&mut b, X86Feature::IsaAVX2);
-        enable_extension(&mut b, X86Feature::IsaAVX_FMA);
-        enable_extension(&mut b, X86Feature::IsaLZCNT);
-        enable_extension(&mut b, X86Feature::IsaBMI1);
-        enable_extension(&mut b, X86Feature::IsaBMI2);
-        enable_extension(&mut b, X86Feature::IsaFSGSBASE);
-        enable_extension(&mut b, X86Feature::IsaINVPCID);
-        enable_extension(&mut b, X86Feature::IsaSMEP);
-        enable_extension(&mut b, X86Feature::IsaRDRAND);
-        enable_extension(&mut b, X86Feature::IsaFCS_FDS_DEPRECATION);
-        enable_extension(&mut b, X86Feature::IsaRDSEED);
-        enable_extension(&mut b, X86Feature::IsaADX);
-        enable_extension(&mut b, X86Feature::IsaSMAP);
-        enable_extension(&mut b, X86Feature::IsaFDP_DEPRECATION);
-        enable_extension(&mut b, X86Feature::IsaAVX512);
-        enable_extension(&mut b, X86Feature::IsaAVX512_DQ);
-        enable_extension(&mut b, X86Feature::IsaAVX512_CD);
-        enable_extension(&mut b, X86Feature::IsaAVX512_BW);
-        enable_extension(&mut b, X86Feature::IsaCLFLUSHOPT);
-        enable_extension(&mut b, X86Feature::IsaCLWB);
+        enable_extension(&mut b, X86Feature::IsaMmx);
+        enable_extension(&mut b, X86Feature::IsaSysenterSysexit);
+        enable_extension(&mut b, X86Feature::IsaClflush);
+        enable_extension(&mut b, X86Feature::IsaDebugExtensions);
+        enable_extension(&mut b, X86Feature::IsaVme);
+        enable_extension(&mut b, X86Feature::IsaPse);
+        enable_extension(&mut b, X86Feature::IsaPae);
+        enable_extension(&mut b, X86Feature::IsaPge);
+        enable_extension(&mut b, X86Feature::IsaMtrr);
+        enable_extension(&mut b, X86Feature::IsaPat);
+        enable_extension(&mut b, X86Feature::IsaXapic);
+        enable_extension(&mut b, X86Feature::IsaX2apic);
+        enable_extension(&mut b, X86Feature::IsaLongMode);
+        enable_extension(&mut b, X86Feature::IsaLmLahfSahf);
+        enable_extension(&mut b, X86Feature::IsaCmpxchg16b);
+        enable_extension(&mut b, X86Feature::IsaNx);
+        enable_extension(&mut b, X86Feature::Isa1gPages);
+        enable_extension(&mut b, X86Feature::IsaPcid);
+        enable_extension(&mut b, X86Feature::IsaTscAdjust);
+        enable_extension(&mut b, X86Feature::IsaTscDeadline);
+        enable_extension(&mut b, X86Feature::IsaSse);
+        enable_extension(&mut b, X86Feature::IsaSse2);
+        enable_extension(&mut b, X86Feature::IsaSse3);
+        enable_extension(&mut b, X86Feature::IsaSsse3);
+        enable_extension(&mut b, X86Feature::IsaSse4_1);
+        enable_extension(&mut b, X86Feature::IsaSse4_2);
+        enable_extension(&mut b, X86Feature::IsaPopcnt);
+        enable_extension(&mut b, X86Feature::IsaMonitorMwait);
+        enable_extension(&mut b, X86Feature::IsaVmx);
+        enable_extension(&mut b, X86Feature::IsaRdtscp);
+        enable_extension(&mut b, X86Feature::IsaXsave);
+        enable_extension(&mut b, X86Feature::IsaXsaveopt);
+        enable_extension(&mut b, X86Feature::IsaXsavec);
+        enable_extension(&mut b, X86Feature::IsaXsaves);
+        enable_extension(&mut b, X86Feature::IsaAesPclmulqdq);
+        enable_extension(&mut b, X86Feature::IsaMovbe);
+        enable_extension(&mut b, X86Feature::IsaAvx);
+        enable_extension(&mut b, X86Feature::IsaAvxF16c);
+        enable_extension(&mut b, X86Feature::IsaAvx2);
+        enable_extension(&mut b, X86Feature::IsaAvxFma);
+        enable_extension(&mut b, X86Feature::IsaLzcnt);
+        enable_extension(&mut b, X86Feature::IsaBmi1);
+        enable_extension(&mut b, X86Feature::IsaBmi2);
+        enable_extension(&mut b, X86Feature::IsaFsgsbase);
+        enable_extension(&mut b, X86Feature::IsaInvpcid);
+        enable_extension(&mut b, X86Feature::IsaSmep);
+        enable_extension(&mut b, X86Feature::IsaRdrand);
+        enable_extension(&mut b, X86Feature::IsaFcsFdsDeprecation);
+        enable_extension(&mut b, X86Feature::IsaRdseed);
+        enable_extension(&mut b, X86Feature::IsaAdx);
+        enable_extension(&mut b, X86Feature::IsaSmap);
+        enable_extension(&mut b, X86Feature::IsaFdpDeprecation);
+        enable_extension(&mut b, X86Feature::IsaAvx512);
+        enable_extension(&mut b, X86Feature::IsaAvx512Dq);
+        enable_extension(&mut b, X86Feature::IsaAvx512Cd);
+        enable_extension(&mut b, X86Feature::IsaAvx512Bw);
+        enable_extension(&mut b, X86Feature::IsaClflushopt);
+        enable_extension(&mut b, X86Feature::IsaClwb);
         b
     }
 
@@ -281,7 +281,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             ),
             0x80000001 => (
                 0x00000000, 0x00000000, 0x00000121, // ECX: LAHF64, LZCNT, PREFETCHW
-                0x2C100000, // EDX: NX, 1G-pages, RDTSCP, LM, SYSCALL
+                0x2C100000, // EDX: NX, RDTSCP, LM, 1G-pages, SYSCALL
             ),
             // Brand string: "Intel(R) Core(TM) i7-7800X CPU @ 3.50GHz"
             // Bytes are little-endian in each register (LSB = first char)

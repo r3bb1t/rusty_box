@@ -46,9 +46,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fldcw(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let cwd = self.read_virtual_word(seg, eaddr)?;
+        let cwd = self.v_read_word(seg, eaddr)?;
         self.the_i387.cwd = (cwd & !FPU_CW_RESERVED_BITS) | 0x0040;
 
         // Check for unmasked exceptions
@@ -66,9 +66,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cwd = self.the_i387.get_control_word();
 
         if !instr.mod_c0() {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.write_virtual_word(seg, eaddr, cwd)?;
+            self.v_write_word(seg, eaddr, cwd)?;
         }
 
         Ok(())
@@ -79,9 +79,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let swd = self.the_i387.get_status_word();
 
         if !instr.mod_c0() {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.write_virtual_word(seg, eaddr, swd)?;
+            self.v_write_word(seg, eaddr, swd)?;
         }
 
         Ok(())
@@ -125,8 +125,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fnsave(&mut self, instr: &Instruction) -> super::super::Result<()> {
         let offset = self.fpu_save_environment(instr)?;
         let seg = BxSegregs::from(instr.seg());
-        let asize_mask: u32 = if instr.as32_l() != 0 {
-            0xFFFFFFFF
+        let asize_mask: u64 = if self.long64_mode() {
+            0xFFFF_FFFF_FFFF_FFFF
+        } else if instr.as32_l() != 0 {
+            0xFFFF_FFFF
         } else {
             0xFFFF
         };
@@ -134,13 +136,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Save all 8 registers in stack order
         for n in 0..8i32 {
             let stn = self.read_fpu_reg(n);
-            let reg_offset = (offset.wrapping_add((n as u32) * 10)) & asize_mask;
+            let reg_offset = (offset.wrapping_add((n as u64) * 10)) & asize_mask;
             // Write 10-byte extended precision: 8-byte significand + 2-byte sign/exponent
             let lo = stn.signif as u32;
             let hi = (stn.signif >> 32) as u32;
-            self.write_virtual_dword(seg, reg_offset, lo)?;
-            self.write_virtual_dword(seg, reg_offset.wrapping_add(4) & asize_mask, hi)?;
-            self.write_virtual_word(seg, reg_offset.wrapping_add(8) & asize_mask, stn.sign_exp)?;
+            self.v_write_dword(seg, reg_offset, lo)?;
+            self.v_write_dword(seg, reg_offset.wrapping_add(4) & asize_mask, hi)?;
+            self.v_write_word(seg, reg_offset.wrapping_add(8) & asize_mask, stn.sign_exp)?;
         }
 
         // FNINIT after save
@@ -155,19 +157,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let offset = self.fpu_load_environment(instr)?;
         let seg = BxSegregs::from(instr.seg());
-        let asize_mask: u32 = if instr.as32_l() != 0 {
-            0xFFFFFFFF
+        let asize_mask: u64 = if self.long64_mode() {
+            0xFFFF_FFFF_FFFF_FFFF
+        } else if instr.as32_l() != 0 {
+            0xFFFF_FFFF
         } else {
             0xFFFF
         };
 
         // Read all 8 registers in stack order
         for n in 0..8i32 {
-            let reg_offset = (offset.wrapping_add((n as u32) * 10)) & asize_mask;
-            let lo = self.read_virtual_dword(seg, reg_offset)? as u64;
-            let hi = self.read_virtual_dword(seg, reg_offset.wrapping_add(4) & asize_mask)? as u64;
+            let reg_offset = (offset.wrapping_add((n as u64) * 10)) & asize_mask;
+            let lo = self.v_read_dword(seg, reg_offset)? as u64;
+            let hi = self.v_read_dword(seg, reg_offset.wrapping_add(4) & asize_mask)? as u64;
             let signif = lo | (hi << 32);
-            let sign_exp = self.read_virtual_word(seg, reg_offset.wrapping_add(8) & asize_mask)?;
+            let sign_exp = self.v_read_word(seg, reg_offset.wrapping_add(8) & asize_mask)?;
             let tmp = floatx80 { signif, sign_exp };
 
             let tag = if self.is_tag_empty(n) {
@@ -191,7 +195,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             || self.cpu_mode == CpuMode::Long64
     }
 
-    fn fpu_save_environment(&mut self, instr: &Instruction) -> super::super::Result<u32> {
+    fn fpu_save_environment(&mut self, instr: &Instruction) -> super::super::Result<u64> {
         // Update tags for non-empty registers
         for n in 0..8 {
             if !self.is_tag_empty(n) {
@@ -201,63 +205,65 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let asize_mask: u32 = if instr.as32_l() != 0 {
-            0xFFFFFFFF
+        let asize_mask: u64 = if self.long64_mode() {
+            0xFFFF_FFFF_FFFF_FFFF
+        } else if instr.as32_l() != 0 {
+            0xFFFF_FFFF
         } else {
             0xFFFF
         };
 
-        let offset: u32;
+        let offset: u64;
 
         if self.is_protected_mode() {
             if instr.os32_l() != 0 {
                 // Protected mode - 32 bit
                 let tmp = 0xFFFF0000u32 | self.the_i387.get_control_word() as u32;
-                self.write_virtual_dword(seg, eaddr, tmp)?;
+                self.v_write_dword(seg, eaddr, tmp)?;
                 let tmp = 0xFFFF0000u32 | self.the_i387.get_status_word() as u32;
-                self.write_virtual_dword(seg, eaddr.wrapping_add(0x04) & asize_mask, tmp)?;
+                self.v_write_dword(seg, eaddr.wrapping_add(0x04) & asize_mask, tmp)?;
                 let tmp = 0xFFFF0000u32 | self.the_i387.get_tag_word() as u32;
-                self.write_virtual_dword(seg, eaddr.wrapping_add(0x08) & asize_mask, tmp)?;
+                self.v_write_dword(seg, eaddr.wrapping_add(0x08) & asize_mask, tmp)?;
                 let tmp = self.the_i387.fip as u32;
-                self.write_virtual_dword(seg, eaddr.wrapping_add(0x0c) & asize_mask, tmp)?;
+                self.v_write_dword(seg, eaddr.wrapping_add(0x0c) & asize_mask, tmp)?;
                 let tmp = (self.the_i387.fcs as u32) | ((self.the_i387.foo as u32) << 16);
-                self.write_virtual_dword(seg, eaddr.wrapping_add(0x10) & asize_mask, tmp)?;
+                self.v_write_dword(seg, eaddr.wrapping_add(0x10) & asize_mask, tmp)?;
                 let tmp = self.the_i387.fdp as u32;
-                self.write_virtual_dword(seg, eaddr.wrapping_add(0x14) & asize_mask, tmp)?;
+                self.v_write_dword(seg, eaddr.wrapping_add(0x14) & asize_mask, tmp)?;
                 let tmp = 0xFFFF0000u32 | self.the_i387.fds as u32;
-                self.write_virtual_dword(seg, eaddr.wrapping_add(0x18) & asize_mask, tmp)?;
+                self.v_write_dword(seg, eaddr.wrapping_add(0x18) & asize_mask, tmp)?;
                 offset = 0x1c;
             } else {
                 // Protected mode - 16 bit
-                self.write_virtual_word(seg, eaddr, self.the_i387.get_control_word())?;
-                self.write_virtual_word(
+                self.v_write_word(seg, eaddr, self.the_i387.get_control_word())?;
+                self.v_write_word(
                     seg,
                     eaddr.wrapping_add(0x02) & asize_mask,
                     self.the_i387.get_status_word(),
                 )?;
-                self.write_virtual_word(
+                self.v_write_word(
                     seg,
                     eaddr.wrapping_add(0x04) & asize_mask,
                     self.the_i387.get_tag_word(),
                 )?;
-                self.write_virtual_word(
+                self.v_write_word(
                     seg,
                     eaddr.wrapping_add(0x06) & asize_mask,
                     (self.the_i387.fip & 0xFFFF) as u16,
                 )?;
-                self.write_virtual_word(
+                self.v_write_word(
                     seg,
                     eaddr.wrapping_add(0x08) & asize_mask,
                     self.the_i387.fcs,
                 )?;
-                self.write_virtual_word(
+                self.v_write_word(
                     seg,
                     eaddr.wrapping_add(0x0a) & asize_mask,
                     (self.the_i387.fdp & 0xFFFF) as u16,
                 )?;
-                self.write_virtual_word(
+                self.v_write_word(
                     seg,
                     eaddr.wrapping_add(0x0c) & asize_mask,
                     self.the_i387.fds,
@@ -271,47 +277,47 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             if instr.os32_l() != 0 {
                 let tmp = 0xFFFF0000u32 | self.the_i387.get_control_word() as u32;
-                self.write_virtual_dword(seg, eaddr, tmp)?;
+                self.v_write_dword(seg, eaddr, tmp)?;
                 let tmp = 0xFFFF0000u32 | self.the_i387.get_status_word() as u32;
-                self.write_virtual_dword(seg, eaddr.wrapping_add(0x04) & asize_mask, tmp)?;
+                self.v_write_dword(seg, eaddr.wrapping_add(0x04) & asize_mask, tmp)?;
                 let tmp = 0xFFFF0000u32 | self.the_i387.get_tag_word() as u32;
-                self.write_virtual_dword(seg, eaddr.wrapping_add(0x08) & asize_mask, tmp)?;
+                self.v_write_dword(seg, eaddr.wrapping_add(0x08) & asize_mask, tmp)?;
                 let tmp = 0xFFFF0000u32 | (fp_ip & 0xFFFF);
-                self.write_virtual_dword(seg, eaddr.wrapping_add(0x0c) & asize_mask, tmp)?;
+                self.v_write_dword(seg, eaddr.wrapping_add(0x0c) & asize_mask, tmp)?;
                 let tmp = ((fp_ip & 0xFFFF0000) >> 4) | self.the_i387.foo as u32;
-                self.write_virtual_dword(seg, eaddr.wrapping_add(0x10) & asize_mask, tmp)?;
+                self.v_write_dword(seg, eaddr.wrapping_add(0x10) & asize_mask, tmp)?;
                 let tmp = 0xFFFF0000u32 | (fp_dp & 0xFFFF);
-                self.write_virtual_dword(seg, eaddr.wrapping_add(0x14) & asize_mask, tmp)?;
+                self.v_write_dword(seg, eaddr.wrapping_add(0x14) & asize_mask, tmp)?;
                 let tmp = (fp_dp & 0xFFFF0000) >> 4;
-                self.write_virtual_dword(seg, eaddr.wrapping_add(0x18) & asize_mask, tmp)?;
+                self.v_write_dword(seg, eaddr.wrapping_add(0x18) & asize_mask, tmp)?;
                 offset = 0x1c;
             } else {
                 // Real mode - 16 bit
-                self.write_virtual_word(seg, eaddr, self.the_i387.get_control_word())?;
-                self.write_virtual_word(
+                self.v_write_word(seg, eaddr, self.the_i387.get_control_word())?;
+                self.v_write_word(
                     seg,
                     eaddr.wrapping_add(0x02) & asize_mask,
                     self.the_i387.get_status_word(),
                 )?;
-                self.write_virtual_word(
+                self.v_write_word(
                     seg,
                     eaddr.wrapping_add(0x04) & asize_mask,
                     self.the_i387.get_tag_word(),
                 )?;
-                self.write_virtual_word(
+                self.v_write_word(
                     seg,
                     eaddr.wrapping_add(0x06) & asize_mask,
                     (fp_ip & 0xFFFF) as u16,
                 )?;
                 let tmp = ((fp_ip & 0xF0000) >> 4) as u16 | self.the_i387.foo;
-                self.write_virtual_word(seg, eaddr.wrapping_add(0x08) & asize_mask, tmp)?;
-                self.write_virtual_word(
+                self.v_write_word(seg, eaddr.wrapping_add(0x08) & asize_mask, tmp)?;
+                self.v_write_word(
                     seg,
                     eaddr.wrapping_add(0x0a) & asize_mask,
                     (fp_dp & 0xFFFF) as u16,
                 )?;
                 let tmp = ((fp_dp & 0xF0000) >> 4) as u16;
-                self.write_virtual_word(seg, eaddr.wrapping_add(0x0c) & asize_mask, tmp)?;
+                self.v_write_word(seg, eaddr.wrapping_add(0x0c) & asize_mask, tmp)?;
                 offset = 0x0e;
             }
         }
@@ -319,53 +325,55 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(eaddr.wrapping_add(offset) & asize_mask)
     }
 
-    fn fpu_load_environment(&mut self, instr: &Instruction) -> super::super::Result<u32> {
-        let eaddr = self.resolve_addr32(instr);
+    fn fpu_load_environment(&mut self, instr: &Instruction) -> super::super::Result<u64> {
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let asize_mask: u32 = if instr.as32_l() != 0 {
-            0xFFFFFFFF
+        let asize_mask: u64 = if self.long64_mode() {
+            0xFFFF_FFFF_FFFF_FFFF
+        } else if instr.as32_l() != 0 {
+            0xFFFF_FFFF
         } else {
             0xFFFF
         };
 
-        let offset: u32;
+        let offset: u64;
 
         if self.is_protected_mode() {
             if instr.os32_l() != 0 {
                 // Protected mode - 32 bit
-                let tmp = self.read_virtual_dword(seg, eaddr.wrapping_add(0x18) & asize_mask)?;
+                let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x18) & asize_mask)?;
                 self.the_i387.fds = (tmp & 0xFFFF) as u16;
-                let tmp = self.read_virtual_dword(seg, eaddr.wrapping_add(0x14) & asize_mask)?;
+                let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x14) & asize_mask)?;
                 self.the_i387.fdp = tmp as u64;
-                let tmp = self.read_virtual_dword(seg, eaddr.wrapping_add(0x10) & asize_mask)?;
+                let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x10) & asize_mask)?;
                 self.the_i387.fcs = (tmp & 0xFFFF) as u16;
                 self.the_i387.foo = ((tmp >> 16) & 0x07FF) as u16;
-                let tmp = self.read_virtual_dword(seg, eaddr.wrapping_add(0x0c) & asize_mask)?;
+                let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x0c) & asize_mask)?;
                 self.the_i387.fip = tmp as u64;
-                let tmp = self.read_virtual_dword(seg, eaddr.wrapping_add(0x08) & asize_mask)?;
+                let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x08) & asize_mask)?;
                 self.the_i387.twd = (tmp & 0xFFFF) as u16;
-                let tmp = self.read_virtual_dword(seg, eaddr.wrapping_add(0x04) & asize_mask)?;
+                let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x04) & asize_mask)?;
                 self.the_i387.swd = (tmp & 0xFFFF) as u16;
                 self.the_i387.tos = ((tmp >> 11) & 0x7) as u8;
-                let tmp = self.read_virtual_dword(seg, eaddr)?;
+                let tmp = self.v_read_dword(seg, eaddr)?;
                 self.the_i387.cwd = (tmp & 0xFFFF) as u16;
                 offset = 0x1c;
             } else {
                 // Protected mode - 16 bit
-                let tmp = self.read_virtual_word(seg, eaddr.wrapping_add(0x0c) & asize_mask)?;
+                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x0c) & asize_mask)?;
                 self.the_i387.fds = tmp;
-                let tmp = self.read_virtual_word(seg, eaddr.wrapping_add(0x0a) & asize_mask)?;
+                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x0a) & asize_mask)?;
                 self.the_i387.fdp = tmp as u64;
-                let tmp = self.read_virtual_word(seg, eaddr.wrapping_add(0x08) & asize_mask)?;
+                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x08) & asize_mask)?;
                 self.the_i387.fcs = tmp;
-                let tmp = self.read_virtual_word(seg, eaddr.wrapping_add(0x06) & asize_mask)?;
+                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x06) & asize_mask)?;
                 self.the_i387.fip = tmp as u64;
-                let tmp = self.read_virtual_word(seg, eaddr.wrapping_add(0x04) & asize_mask)?;
+                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x04) & asize_mask)?;
                 self.the_i387.twd = tmp;
-                let tmp = self.read_virtual_word(seg, eaddr.wrapping_add(0x02) & asize_mask)?;
+                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x02) & asize_mask)?;
                 self.the_i387.swd = tmp;
                 self.the_i387.tos = ((tmp >> 11) & 0x7) as u8;
-                let tmp = self.read_virtual_word(seg, eaddr)?;
+                let tmp = self.v_read_word(seg, eaddr)?;
                 self.the_i387.cwd = tmp;
                 self.the_i387.foo = 0;
                 offset = 0x0e;
@@ -373,46 +381,46 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             // Real or V86 mode
             if instr.os32_l() != 0 {
-                let tmp = self.read_virtual_dword(seg, eaddr.wrapping_add(0x18) & asize_mask)?;
+                let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x18) & asize_mask)?;
                 let fp_dp_hi = (tmp & 0x0FFFF000) << 4;
-                let tmp = self.read_virtual_dword(seg, eaddr.wrapping_add(0x14) & asize_mask)?;
+                let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x14) & asize_mask)?;
                 let fp_dp = fp_dp_hi | (tmp & 0xFFFF);
                 self.the_i387.fdp = fp_dp as u64;
                 self.the_i387.fds = 0;
-                let tmp = self.read_virtual_dword(seg, eaddr.wrapping_add(0x10) & asize_mask)?;
+                let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x10) & asize_mask)?;
                 self.the_i387.foo = (tmp & 0x07FF) as u16;
                 let fp_ip_hi = (tmp & 0x0FFFF000) << 4;
-                let tmp = self.read_virtual_dword(seg, eaddr.wrapping_add(0x0c) & asize_mask)?;
+                let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x0c) & asize_mask)?;
                 let fp_ip = fp_ip_hi | (tmp & 0xFFFF);
                 self.the_i387.fip = fp_ip as u64;
                 self.the_i387.fcs = 0;
-                let tmp = self.read_virtual_dword(seg, eaddr.wrapping_add(0x08) & asize_mask)?;
+                let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x08) & asize_mask)?;
                 self.the_i387.twd = (tmp & 0xFFFF) as u16;
-                let tmp = self.read_virtual_dword(seg, eaddr.wrapping_add(0x04) & asize_mask)?;
+                let tmp = self.v_read_dword(seg, eaddr.wrapping_add(0x04) & asize_mask)?;
                 self.the_i387.swd = (tmp & 0xFFFF) as u16;
                 self.the_i387.tos = ((tmp >> 11) & 0x7) as u8;
-                let tmp = self.read_virtual_dword(seg, eaddr)?;
+                let tmp = self.v_read_dword(seg, eaddr)?;
                 self.the_i387.cwd = (tmp & 0xFFFF) as u16;
                 offset = 0x1c;
             } else {
                 // Real mode - 16 bit
-                let tmp = self.read_virtual_word(seg, eaddr.wrapping_add(0x0c) & asize_mask)?;
+                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x0c) & asize_mask)?;
                 let fp_dp_hi = ((tmp & 0xF000) as u32) << 4;
-                let tmp = self.read_virtual_word(seg, eaddr.wrapping_add(0x0a) & asize_mask)?;
+                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x0a) & asize_mask)?;
                 self.the_i387.fdp = (fp_dp_hi | tmp as u32) as u64;
                 self.the_i387.fds = 0;
-                let tmp = self.read_virtual_word(seg, eaddr.wrapping_add(0x08) & asize_mask)?;
+                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x08) & asize_mask)?;
                 self.the_i387.foo = tmp & 0x07FF;
                 let fp_ip_hi = ((tmp & 0xF000) as u32) << 4;
-                let tmp = self.read_virtual_word(seg, eaddr.wrapping_add(0x06) & asize_mask)?;
+                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x06) & asize_mask)?;
                 self.the_i387.fip = (fp_ip_hi | tmp as u32) as u64;
                 self.the_i387.fcs = 0;
-                let tmp = self.read_virtual_word(seg, eaddr.wrapping_add(0x04) & asize_mask)?;
+                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x04) & asize_mask)?;
                 self.the_i387.twd = tmp;
-                let tmp = self.read_virtual_word(seg, eaddr.wrapping_add(0x02) & asize_mask)?;
+                let tmp = self.v_read_word(seg, eaddr.wrapping_add(0x02) & asize_mask)?;
                 self.the_i387.swd = tmp;
                 self.the_i387.tos = ((tmp >> 11) & 0x7) as u8;
-                let tmp = self.read_virtual_word(seg, eaddr)?;
+                let tmp = self.v_read_word(seg, eaddr)?;
                 self.the_i387.cwd = tmp;
                 offset = 0x0e;
             }

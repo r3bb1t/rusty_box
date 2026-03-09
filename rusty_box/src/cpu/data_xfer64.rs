@@ -40,6 +40,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
+    /// MOV r32, r32 (register form, 64-bit mode)
+    /// Matching C++ data_xfer64.cc:54 MOV64_EdGdR — zero-extends to 64 bits
+    pub fn mov64_ed_gd_r(&mut self, instr: &Instruction) {
+        let val32 = self.get_gpr32(instr.src() as usize);
+        self.set_gpr32(instr.dst() as usize, val32);
+    }
+
+    /// MOV r32, r/m32 (register form, 64-bit addressing)
+    /// Matching C++ data_xfer64.cc:44 MOV64_GdEdR — zero-extends to 64 bits
+    pub fn mov64_gd_ed_r(&mut self, instr: &Instruction) {
+        let val32 = self.get_gpr32(instr.src() as usize);
+        self.set_gpr32(instr.dst() as usize, val32);
+    }
+
     /// MOV r/m32, r32 (memory form, 64-bit addressing)
     /// Matching C++ data_xfer64.cc:45-52 MOV64_EdGdM
     pub fn mov64_ed_gd_m(&mut self, instr: &Instruction) -> Result<()> {

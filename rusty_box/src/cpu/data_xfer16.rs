@@ -14,7 +14,7 @@ pub fn MOV_AXOd<I: BxCpuIdTrait>(
 ) -> Result<(), crate::cpu::CpuError> {
     let seg = BxSegregs::from(instr.seg());
     let offset = instr.id();
-    let val = cpu.read_virtual_word(seg, offset)?;
+    let val = cpu.v_read_word(seg, offset)?;
     cpu.set_ax(val);
     Ok(())
 }
@@ -29,6 +29,6 @@ pub fn MOV_OdAX<I: BxCpuIdTrait>(
 ) -> Result<(), crate::cpu::CpuError> {
     let seg = BxSegregs::from(instr.seg());
     let offset = instr.id();
-    cpu.write_virtual_word(seg, offset, cpu.ax())?;
+    cpu.v_write_word(seg, offset, cpu.ax())?;
     Ok(())
 }

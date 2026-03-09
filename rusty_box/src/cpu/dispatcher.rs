@@ -24,6 +24,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         #[allow(unused_imports)]
         use crate::cpu::data_xfer_ext;
 
+
         match instr.get_ia_opcode() {
             // =========================================================================
             // Data transfer (MOV) instructions - 32-bit
@@ -400,8 +401,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             Opcode::Cld => self.cld(instr),
             Opcode::Std => self.std_(instr),
-            Opcode::Nop => Ok(()),
-            Opcode::Pause => Ok(()), // PAUSE hint — no-op in non-VMX
+            Opcode::Nop => Ok(()), // NOP is architecturally defined as no-op (Bochs proc_ctrl.cc:68-74)
+            Opcode::Pause => self.pause(instr),
+            Opcode::Endbranch32 => self.endbranch32(instr),
+            Opcode::Endbranch64 => self.endbranch64(instr),
 
             // =========================================================================
             // I/O port instructions
@@ -1469,11 +1472,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::MovRqCr2 => self.mov_rq_cr2(instr),
             Opcode::MovRqCr3 => self.mov_rq_cr3(instr),
             Opcode::MovRqCr4 => self.mov_rq_cr4(instr),
-            // 64-bit MOV CRn, Rq — reuse 32-bit handlers (CRs are effectively 32-bit)
-            Opcode::MovCr0rq => { self.mov_cr0_rd(instr)?; Ok(()) },
-            Opcode::MovCr2rq => { self.mov_cr2_rd(instr)?; Ok(()) },
-            Opcode::MovCr3rq => { self.mov_cr3_rd(instr)?; Ok(()) },
-            Opcode::MovCr4rq => { self.mov_cr4_rd(instr)?; Ok(()) },
+            // 64-bit MOV CRn, Rq — proper 64-bit handlers (CR2 is full 64-bit, CR0/CR4 check upper bits)
+            Opcode::MovCr0rq => { self.mov_cr0_rq(instr)?; Ok(()) },
+            Opcode::MovCr2rq => { self.mov_cr2_rq(instr)?; Ok(()) },
+            Opcode::MovCr3rq => { self.mov_cr3_rd(instr)?; Ok(()) }, // CR3 already handles 64-bit
+            Opcode::MovCr4rq => { self.mov_cr4_rq(instr)?; Ok(()) },
             Opcode::MovRqDq => self.mov_rq_dq(instr),
             Opcode::MovDqRq => self.mov_dq_rq(instr),
 
@@ -1889,8 +1892,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // =========================================================================
             // Data transfer (64-bit) instructions
             // =========================================================================
-            Opcode::MovOp64GdEd => self.mov64_gd_ed_m(instr),
-            Opcode::MovOp64EdGd => self.mov64_ed_gd_m(instr),
+            Opcode::MovOp64GdEd => {
+                if instr.mod_c0() {
+                    self.mov64_gd_ed_r(instr);
+                    Ok(())
+                } else {
+                    self.mov64_gd_ed_m(instr)
+                }
+            }
+            Opcode::MovOp64EdGd => {
+                if instr.mod_c0() {
+                    self.mov64_ed_gd_r(instr);
+                    Ok(())
+                } else {
+                    self.mov64_ed_gd_m(instr)
+                }
+            }
             Opcode::MovEqGq => self.mov_eq_gq(instr),
             Opcode::MovGqEq => self.mov_gq_eq(instr),
             Opcode::LeaGqM => {

@@ -34,9 +34,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// INC r/m16 (memory form) — matches Bochs INC_EwM
     pub fn inc_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1 = self.read_rmw_virtual_word(seg, eaddr)?;
+        let op1 = self.v_read_rmw_word(seg, eaddr)?;
         let result = op1.wrapping_add(1);
         self.write_rmw_linear_word(result);
         self.set_flags_oszap_inc_16(result, op1);
@@ -45,9 +45,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// DEC r/m16 (memory form) — matches Bochs DEC_EwM
     pub fn dec_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1 = self.read_rmw_virtual_word(seg, eaddr)?;
+        let op1 = self.v_read_rmw_word(seg, eaddr)?;
         let result = op1.wrapping_sub(1);
         self.write_rmw_linear_word(result);
         self.set_flags_oszap_dec_16(result, op1);
@@ -102,10 +102,10 @@ pub fn ADC_GwEwM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
-    let op2_16 = cpu.read_virtual_word(seg, eaddr)?;
+    let op2_16 = cpu.v_read_word(seg, eaddr)?;
     let cf = cpu.get_cf() as u16;
     let sum_16 = op1_16.wrapping_add(op2_16).wrapping_add(cf);
 
@@ -133,7 +133,7 @@ pub fn ADD_EwIbR<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let dst = instr.meta_data[0] as usize;
+    let dst = instr.operands.dst as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = instr.ib() as i8 as i16 as u16;
     let result = op1.wrapping_add(op2);
@@ -150,9 +150,9 @@ pub fn ADD_EwIbM<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_word(seg, eaddr)?;
     let op2 = instr.ib() as i8 as i16 as u16;
     let result = op1.wrapping_add(op2);
     cpu.write_rmw_linear_word(result);
@@ -183,9 +183,9 @@ pub fn ADD_EwIwM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1_16 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op1_16 = cpu.v_read_rmw_word(seg, eaddr)?;
     let op2_16 = instr.iw();
     let sum_16 = op1_16.wrapping_add(op2_16);
     cpu.write_rmw_linear_word(sum_16);
@@ -224,9 +224,9 @@ pub fn ADD_EwGwM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1_16 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op1_16 = cpu.v_read_rmw_word(seg, eaddr)?;
     let op2_16 = cpu.get_gpr16(instr.src() as usize);
     let sum_16 = op1_16.wrapping_add(op2_16);
     cpu.write_rmw_linear_word(sum_16);
@@ -268,9 +268,9 @@ pub fn ADC_EwGwM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1_16 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op1_16 = cpu.v_read_rmw_word(seg, eaddr)?;
     let op2_16 = cpu.get_gpr16(instr.src() as usize);
     let cf = cpu.get_cf() as u16;
     let sum_16 = op1_16.wrapping_add(op2_16).wrapping_add(cf);
@@ -313,7 +313,7 @@ pub fn ADC_EwIbR<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let dst = instr.meta_data[0] as usize;
+    let dst = instr.operands.dst as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = instr.ib() as i8 as i16 as u16;
     let cf = cpu.get_cf() as u16;
@@ -331,9 +331,9 @@ pub fn ADC_EwIbM<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_word(seg, eaddr)?;
     let op2 = instr.ib() as i8 as i16 as u16;
     let cf = cpu.get_cf() as u16;
     let result = op1.wrapping_add(op2).wrapping_add(cf);
@@ -375,9 +375,9 @@ pub fn CMP_EwGwM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1_16 = cpu.read_virtual_word(seg, eaddr)?;
+    let op1_16 = cpu.v_read_word(seg, eaddr)?;
     let op2_16 = cpu.get_gpr16(instr.src() as usize);
     let result = op1_16.wrapping_sub(op2_16);
     cpu.update_flags_sub16(op1_16, op2_16, result);
@@ -420,10 +420,10 @@ pub fn ADD_GwEwM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
-    let op2_16 = cpu.read_virtual_word(seg, eaddr)?;
+    let op2_16 = cpu.v_read_word(seg, eaddr)?;
     let sum_16 = op1_16.wrapping_add(op2_16);
 
     cpu.set_gpr16(instr.dst() as usize, sum_16);
@@ -453,9 +453,9 @@ pub fn SUB_EwGwM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1_16 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op1_16 = cpu.v_read_rmw_word(seg, eaddr)?;
     let op2_16 = cpu.get_gpr16(instr.src() as usize);
     let diff_16 = op1_16.wrapping_sub(op2_16);
     cpu.write_rmw_linear_word(diff_16);
@@ -510,10 +510,10 @@ pub fn SUB_GwEwM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
-    let op2_16 = cpu.read_virtual_word(seg, eaddr)?;
+    let op2_16 = cpu.v_read_word(seg, eaddr)?;
     let diff_16 = op1_16.wrapping_sub(op2_16);
 
     cpu.set_gpr16(instr.dst() as usize, diff_16);
@@ -543,9 +543,9 @@ pub fn SBB_EwGwM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1_16 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op1_16 = cpu.v_read_rmw_word(seg, eaddr)?;
     let op2_16 = cpu.get_gpr16(instr.src() as usize);
     let cf = cpu.get_cf() as u16;
     let diff_16 = op1_16.wrapping_sub(op2_16).wrapping_sub(cf);
@@ -603,10 +603,10 @@ pub fn SBB_GwEwM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
-    let op2_16 = cpu.read_virtual_word(seg, eaddr)?;
+    let op2_16 = cpu.v_read_word(seg, eaddr)?;
     let cf = cpu.get_cf() as u16;
     let diff_16 = op1_16.wrapping_sub(op2_16).wrapping_sub(cf);
 
@@ -649,10 +649,10 @@ pub fn CMP_GwEwM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
-    let op2_16 = cpu.read_virtual_word(seg, eaddr)?;
+    let op2_16 = cpu.v_read_word(seg, eaddr)?;
     let diff_16 = op1_16.wrapping_sub(op2_16);
     cpu.update_flags_sub16(op1_16, op2_16, diff_16);
     Ok(())
@@ -725,9 +725,9 @@ pub fn SUB_EwIwM<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_word(seg, eaddr)?;
     let op2 = instr.iw();
     let result = op1.wrapping_sub(op2);
     cpu.write_rmw_linear_word(result);
@@ -752,7 +752,7 @@ pub fn SUB_EwIbR<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let dst = instr.meta_data[0] as usize;
+    let dst = instr.operands.dst as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = instr.ib() as i8 as i16 as u16;
     let result = op1.wrapping_sub(op2);
@@ -768,9 +768,9 @@ pub fn SUB_EwIbM<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_word(seg, eaddr)?;
     let op2 = instr.ib() as i8 as i16 as u16;
     let result = op1.wrapping_sub(op2);
     cpu.write_rmw_linear_word(result);
@@ -809,7 +809,7 @@ pub fn ADC_EwIwR<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let dst = instr.meta_data[0] as usize;
+    let dst = instr.operands.dst as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = instr.iw();
     let cf = cpu.get_cf() as u16;
@@ -824,9 +824,9 @@ pub fn ADC_EwIwM<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_word(seg, eaddr)?;
     let op2 = instr.iw();
     let cf = cpu.get_cf() as u16;
     let result = op1.wrapping_add(op2).wrapping_add(cf);
@@ -866,7 +866,7 @@ pub fn SBB_EwIwR<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let dst = instr.meta_data[0] as usize;
+    let dst = instr.operands.dst as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = instr.iw();
     let cf = cpu.get_cf() as u16;
@@ -881,9 +881,9 @@ pub fn SBB_EwIwM<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_word(seg, eaddr)?;
     let op2 = instr.iw();
     let cf = cpu.get_cf() as u16;
     let result = op1.wrapping_sub(op2).wrapping_sub(cf);
@@ -909,7 +909,7 @@ pub fn SBB_EwIbR<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let dst = instr.meta_data[0] as usize;
+    let dst = instr.operands.dst as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = instr.ib() as i8 as i16 as u16;
     let cf = cpu.get_cf() as u16;
@@ -924,9 +924,9 @@ pub fn SBB_EwIbM<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_word(seg, eaddr)?;
     let op2 = instr.ib() as i8 as i16 as u16;
     let cf = cpu.get_cf() as u16;
     let result = op1.wrapping_sub(op2).wrapping_sub(cf);
@@ -965,9 +965,9 @@ pub fn CMP_EwIwM<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_virtual_word(seg, eaddr)?;
+    let op1 = cpu.v_read_word(seg, eaddr)?;
     let op2 = instr.iw();
     let result = op1.wrapping_sub(op2);
     cpu.update_flags_sub16(op1, op2, result);
@@ -1012,9 +1012,9 @@ pub fn CMPXCHG_EwGw_M<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1_16 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op1_16 = cpu.v_read_rmw_word(seg, eaddr)?;
     let ax = cpu.ax();
     let diff_16 = ax.wrapping_sub(op1_16);
     cpu.update_flags_sub16(ax, op1_16, diff_16);
@@ -1052,9 +1052,9 @@ pub fn XADD_EwGw_M<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1_16 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+    let op1_16 = cpu.v_read_rmw_word(seg, eaddr)?;
     let op2_16 = cpu.get_gpr16(instr.src() as usize);
     let sum_16 = op1_16.wrapping_add(op2_16);
 
@@ -1116,9 +1116,9 @@ pub fn NEG_Ew<'c, I: BxCpuIdTrait>(
         cpu.update_flags_sub16(0, op1, result);
         Ok(())
     } else {
-        let eaddr = cpu.resolve_addr32(instr);
+        let eaddr = cpu.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1 = cpu.read_rmw_virtual_word(seg, eaddr)?;
+        let op1 = cpu.v_read_rmw_word(seg, eaddr)?;
         let result = 0u16.wrapping_sub(op1);
         cpu.write_rmw_linear_word(result);
         cpu.update_flags_sub16(0, op1, result);

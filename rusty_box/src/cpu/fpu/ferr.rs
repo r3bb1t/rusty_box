@@ -94,7 +94,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let seg_idx = instr.seg() as usize;
             self.the_i387.fds = self.sregs[seg_idx].selector.value;
             // Resolve the effective address that the instruction references.
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             self.the_i387.fdp = eaddr as u64;
         }
     }

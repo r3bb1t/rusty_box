@@ -1,138 +1,274 @@
-#[allow(non_camel_case_types)]
-#[derive(Debug)]
+//! ISA feature flags for CPU capability bitmask indexing.
+//!
+//! Matches Bochs `cpu/decoder/features.h`.
+
+/// x86 ISA feature enumeration used for CPU feature bitmask indexing.
+/// Variant order must match `X86FeatureName` in lib.rs exactly.
+/// Comments from Bochs `cpu/decoder/features.h`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum X86Feature {
-    Isa386,                   /* 386 or earlier instruction */
-    IsaX87,                   /* FPU (x87) instruction */
-    Isa486,                   /* 486 new instruction */
-    IsaPENTIUM,               /* Pentium new instruction */
-    IsaP6,                    /* P6 new instruction */
-    IsaMMX,                   /* MMX instruction */
-    Isa3DNOW,                 /* 3DNow! Instructions (AMD) */
-    Isa3DNOW_EXT,             /* 3DNow! Extensions (AMD) */
-    IsaDEBUG_EXTENSIONS,      /* Debug Extensions support */
-    IsaVME,                   /* VME support */
-    IsaPSE,                   /* PSE support */
-    IsaPAE,                   /* PAE support */
-    IsaPGE,                   /* Global Pages support */
-    IsaMTRR,                  /* MTRR support */
-    IsaPAT,                   /* PAT support */
-    IsaSYSCALL_SYSRET_LEGACY, /* SYSCALL/SYSRET in legacy mode (AMD) */
-    IsaSYSENTER_SYSEXIT,      /* SYSENTER/SYSEXIT instruction */
-    IsaCLFLUSH,               /* CLFLUSH instruction */
-    IsaCLFLUSHOPT,            /* CLFLUSHOPT instruction */
-    IsaCLWB,                  /* CLWB instruction */
-    IsaSSE,                   /* SSE  instruction */
-    IsaSSE2,                  /* SSE2 instruction */
-    IsaSSE3,                  /* SSE3 instruction */
-    IsaSSSE3,                 /* SSSE3 instruction */
-    IsaSSE4_1,                /* SSE4_1 instruction */
-    IsaSSE4_2,                /* SSE4_2 instruction */
-    IsaPOPCNT,                /* POPCNT instruction */
-    IsaMONITOR_MWAIT,         /* MONITOR/MWAIT instruction */
-    IsaWAITPKG,               /* TPAUSE/UMONITOR/UMWAIT instructions */
-    IsaMONITORLESS_MWAIT,     /* MONITOR-less MWAIT extension */
-    IsaMONITORX_MWAITX,       /* MONITORX/MWAITX instruction (AMD) */
-    IsaLONG_MODE,             /* Long Mode (x86-64) support */
-    IsaLM_LAHF_SAHF,          /* Long Mode LAHF/SAHF instruction */
-    IsaNX,                    /* No-Execute Pages support */
-    Isa1G_PAGES,              /* 1Gb pages support */
-    IsaCMPXCHG16B,            /* CMPXCHG16B instruction */
-    IsaRDTSCP,                /* RDTSCP instruction */
-    IsaFFXSR,                 /* EFER.FFXSR support (AMD) */
-    IsaXSAVE,                 /* XSAVE/XRSTOR extensions instruction */
-    IsaXSAVEOPT,              /* XSAVEOPT instruction */
-    IsaXSAVEC,                /* XSAVEC instruction */
-    IsaXSAVES,                /* XSAVES instruction */
-    IsaAES_PCLMULQDQ,         /* AES+PCLMULQDQ instructions */
-    IsaVAES_VPCLMULQDQ,       /* Wide vector versions of AES+PCLMULQDQ instructions */
-    IsaMOVBE,                 /* MOVBE instruction */
-    IsaFSGSBASE,              /* FS/GS BASE access instruction */
-    IsaAVX,                   /* AVX instruction */
-    IsaAVX2,                  /* AVX2 instruction */
-    IsaAVX_F16C,              /* AVX F16 convert instruction */
-    IsaAVX_FMA,               /* AVX FMA instruction */
-    IsaSSE4A,                 /* SSE4A instruction (AMD) */
-    IsaMISALIGNED_SSE,        /* Misaligned SSE (AMD) */
-    IsaALT_MOV_CR8,           /* LOCK CR0 access CR8 (AMD) */
-    IsaLZCNT,                 /* LZCNT instruction */
-    IsaBMI1,                  /* BMI1 instruction */
-    IsaBMI2,                  /* BMI2 instruction */
-    IsaFMA4,                  /* FMA4 instruction (AMD) */
-    IsaXOP,                   /* XOP instruction (AMD) */
-    IsaTBM,                   /* TBM instruction (AMD) */
-    IsaSVM,                   /* SVM instruction (AMD) */
-    IsaVMX,                   /* VMX instruction */
-    IsaSMX,                   /* SMX instruction */
-    IsaRDRAND,                /* RDRAND instruction */
-    IsaRDSEED,                /* RDSEED instruction */
-    IsaADX,                   /* ADCX/ADOX instruction */
-    IsaSMAP,                  /* SMAP support */
-    IsaSMEP,                  /* SMEP support */
-    IsaSHA,                   /* SHA instruction */
-    IsaSHA512,                /* SHA-512 instruction */
-    IsaGFNI,                  /* GFNI instruction */
-    IsaSM3,                   /* SM3 instruction */
-    IsaSM4,                   /* SM4 instruction */
-    IsaAVX_IFMA,              /* AVX encoded IFMA Instructions */
-    IsaAVX_VNNI,              /* AVX encoded VNNI Instructions */
-    IsaAVX_VNNI_INT8,         /* AVX encoded VNNI-INT8 Instructions */
-    IsaAVX_VNNI_INT16,        /* AVX encoded VNNI-INT16 Instructions */
-    IsaAVX_NE_CONVERT,        /* AVX-NE-CONVERT Instructions */
-    IsaAVX512,                /* AVX-512 instruction */
-    IsaAVX512_DQ,             /* AVX-512DQ instruction */
-    IsaAVX512_BW,             /* AVX-512 Byte/Word instruction */
-    IsaAVX512_CD,             /* AVX-512 Conflict Detection instruction */
-    //                             ,/* AVX-512 Sparse Prefetch instruction */
-    //                             ,/* AVX-512 Exponential/Reciprocal instruction */
-    IsaAVX512_VBMI,         /* AVX-512 VBMI : Vector Bit Manipulation Instructions */
-    IsaAVX512_VBMI2,        /* AVX-512 VBMI2 : Vector Bit Manipulation Instructions */
-    IsaAVX512_IFMA52,       /* AVX-512 IFMA52 Instructions */
-    IsaAVX512_VPOPCNTDQ,    /* AVX-512 VPOPCNTD/VPOPCNTQ Instructions */
-    IsaAVX512_VNNI,         /* AVX-512 VNNI Instructions */
-    IsaAVX512_BITALG,       /* AVX-512 BITALG Instructions */
-    IsaAVX512_VP2INTERSECT, /* AVX-512 VP2INTERSECT Instructions */
-    IsaAVX512_BF16,         /* AVX-512 BF16 Instructions */
-    IsaAVX512_FP16,         /* AVX-512 FP16 Instructions */
-    IsaAMX,                 /* AMX Instructions */
-    IsaAMX_INT8,            /* AMX-INT8 Instructions */
-    IsaAMX_BF16,            /* AMX-BF16 Instructions */
-    IsaAMX_FP16,            /* AMX-FP16 Instructions */
-    IsaAMX_TF32,            /* AMX-TF32 Instructions */
-    IsaAMX_COMPLEX,         /* AMX-COMPLEX Instructions */
-    IsaAMX_MOVRS,           /* AMX-MOVRS Instructions */
-    IsaAMX_AVX512,          /* AMX-AVX512 Instructions */
-    IsaAVX10_1,             /* AVX10.1 Instructions */
-    IsaAVX10_2,             /* AVX10.2 Instructions */
-    IsaAVX10_2_MOVRS,       /* AVX10.2 MOVRS Instructions */
-    IsaXAPIC,               /* XAPIC support */
-    IsaX2APIC,              /* X2APIC support */
-    IsaXAPIC_EXT,           /* XAPIC Extensions support (AMD) */
-    IsaPCID,                /* PCID support */
-    IsaINVPCID,             /* INVPCID instruction */
-    IsaTSC_ADJUST,          /* TSC-Adjust MSR */
-    IsaTSC_DEADLINE,        /* TSC-Deadline */
-    IsaFOPCODE_DEPRECATION, /* FOPCODE Deprecation - FOPCODE update on unmasked x87 exception only */
-    IsaFCS_FDS_DEPRECATION, /* FCS/FDS Deprecation */
-    IsaFDP_DEPRECATION,     /* FDP Deprecation - FDP update on unmasked x87 exception only */
-    IsaPKU,                 /* User-Mode Protection Keys */
-    IsaPKS,                 /* Supervisor-Mode Protection Keys */
-    IsaUMIP,                /* User-Mode Instructions Prevention */
-    IsaRDPID,               /* RDPID Support */
-    IsaTCE,                 /* Translation Cache Extensions (TCE) support (AMD) */
-    IsaCLZERO,              /* CLZERO instruction support (AMD) */
-    IsaSCA_MITIGATIONS,     /* Report SCA Mitigations in CPUID */
-    IsaCET,                 /* Control Flow Enforcement */
-    IsaWRMSRNS,             /* Non-Serializing version of WRMSR */
-    IsaMSR_IMM,             /* Immediate forms of RDMSR and WRMSRNS */
-    IsaCMPCCXADD,           /* CMPccXADD instructions */
-    IsaSERIALIZE,           /* SERIALIZE instruction */
-    IsaLASS,                /* Linear Address Space Separation support */
-    IsaLA57,                /* 57-bit Virtual Address and 5-level paging support */
-    IsaUINTR,               /* User Level Interrupts support */
-    IsaFLEXIBLE_UIRET,      /* Flexible UIRET support */
-    IsaMOVDIRI,             /* MOVDIRI instruction support */
-    IsaMOVDIR64B,           /* MOVDIR64B instruction support */
-    IsaMSRLIST,             /* RDMSRLIST/WRMSRLIST instructions support */
-    IsaRAO_INT,             /* RAO-INT instructions support */
-    IsaMOVRS,               /* MOVRS instructions support */
+    /// 386 or earlier instruction
+    Isa386,
+    /// FPU (x87) instruction
+    IsaX87,
+    /// 486 new instruction
+    Isa486,
+    /// Pentium new instruction
+    IsaPentium,
+    /// P6 new instruction
+    IsaP6,
+    /// MMX instruction
+    IsaMmx,
+    /// 3DNow! Instructions (AMD)
+    Isa3dnow,
+    /// 3DNow! Extensions (AMD)
+    Isa3dnowExt,
+    /// Debug Extensions support
+    IsaDebugExtensions,
+    /// VME support
+    IsaVme,
+    /// PSE support
+    IsaPse,
+    /// PAE support
+    IsaPae,
+    /// Global Pages support
+    IsaPge,
+    /// MTRR support
+    IsaMtrr,
+    /// PAT support
+    IsaPat,
+    /// SYSCALL/SYSRET in legacy mode (AMD)
+    IsaSyscallSysretLegacy,
+    /// SYSENTER/SYSEXIT instruction
+    IsaSysenterSysexit,
+    /// CLFLUSH instruction
+    IsaClflush,
+    /// CLFLUSHOPT instruction
+    IsaClflushopt,
+    /// CLWB instruction
+    IsaClwb,
+    /// SSE instruction
+    IsaSse,
+    /// SSE2 instruction
+    IsaSse2,
+    /// SSE3 instruction
+    IsaSse3,
+    /// SSSE3 instruction
+    IsaSsse3,
+    /// SSE4_1 instruction
+    IsaSse4_1,
+    /// SSE4_2 instruction
+    IsaSse4_2,
+    /// POPCNT instruction
+    IsaPopcnt,
+    /// MONITOR/MWAIT instruction
+    IsaMonitorMwait,
+    /// TPAUSE/UMONITOR/UMWAIT instructions
+    IsaWaitpkg,
+    /// MONITOR-less MWAIT extension
+    IsaMonitorlessMwait,
+    /// MONITORX/MWAITX instruction (AMD)
+    IsaMonitorxMwaitx,
+    /// Long Mode (x86-64) support
+    IsaLongMode,
+    /// Long Mode LAHF/SAHF instruction
+    IsaLmLahfSahf,
+    /// No-Execute Pages support
+    IsaNx,
+    /// 1Gb pages support
+    Isa1gPages,
+    /// CMPXCHG16B instruction
+    IsaCmpxchg16b,
+    /// RDTSCP instruction
+    IsaRdtscp,
+    /// EFER.FFXSR support (AMD)
+    IsaFfxsr,
+    /// XSAVE/XRSTOR extensions instruction
+    IsaXsave,
+    /// XSAVEOPT instruction
+    IsaXsaveopt,
+    /// XSAVEC instruction
+    IsaXsavec,
+    /// XSAVES instruction
+    IsaXsaves,
+    /// AES+PCLMULQDQ instructions
+    IsaAesPclmulqdq,
+    /// Wide vector versions of AES+PCLMULQDQ instructions
+    IsaVaesVpclmulqdq,
+    /// MOVBE instruction
+    IsaMovbe,
+    /// FS/GS BASE access instruction
+    IsaFsgsbase,
+    /// AVX instruction
+    IsaAvx,
+    /// AVX2 instruction
+    IsaAvx2,
+    /// AVX F16 convert instruction
+    IsaAvxF16c,
+    /// AVX FMA instruction
+    IsaAvxFma,
+    /// SSE4A instruction (AMD)
+    IsaSse4a,
+    /// Misaligned SSE (AMD)
+    IsaMisalignedSse,
+    /// LOCK CR0 access CR8 (AMD)
+    IsaAltMovCr8,
+    /// LZCNT instruction
+    IsaLzcnt,
+    /// BMI1 instruction
+    IsaBmi1,
+    /// BMI2 instruction
+    IsaBmi2,
+    /// FMA4 instruction (AMD)
+    IsaFma4,
+    /// XOP instruction (AMD)
+    IsaXop,
+    /// TBM instruction (AMD)
+    IsaTbm,
+    /// SVM instruction (AMD)
+    IsaSvm,
+    /// VMX instruction
+    IsaVmx,
+    /// SMX instruction
+    IsaSmx,
+    /// RDRAND instruction
+    IsaRdrand,
+    /// RDSEED instruction
+    IsaRdseed,
+    /// ADCX/ADOX instruction
+    IsaAdx,
+    /// SMAP support
+    IsaSmap,
+    /// SMEP support
+    IsaSmep,
+    /// SHA instruction
+    IsaSha,
+    /// SHA-512 instruction
+    IsaSha512,
+    /// GFNI instruction
+    IsaGfni,
+    /// SM3 instruction
+    IsaSm3,
+    /// SM4 instruction
+    IsaSm4,
+    /// AVX encoded IFMA Instructions
+    IsaAvxIfma,
+    /// AVX encoded VNNI Instructions
+    IsaAvxVnni,
+    /// AVX encoded VNNI-INT8 Instructions
+    IsaAvxVnniInt8,
+    /// AVX encoded VNNI-INT16 Instructions
+    IsaAvxVnniInt16,
+    /// AVX-NE-CONVERT Instructions
+    IsaAvxNeConvert,
+    /// AVX-512 instruction
+    IsaAvx512,
+    /// AVX-512DQ instruction
+    IsaAvx512Dq,
+    /// AVX-512 Byte/Word instruction
+    IsaAvx512Bw,
+    /// AVX-512 Conflict Detection instruction
+    IsaAvx512Cd,
+    /// AVX-512 VBMI: Vector Bit Manipulation Instructions
+    IsaAvx512Vbmi,
+    /// AVX-512 VBMI2: Vector Bit Manipulation Instructions
+    IsaAvx512Vbmi2,
+    /// AVX-512 IFMA52 Instructions
+    IsaAvx512Ifma52,
+    /// AVX-512 VPOPCNTD/VPOPCNTQ Instructions
+    IsaAvx512Vpopcntdq,
+    /// AVX-512 VNNI Instructions
+    IsaAvx512Vnni,
+    /// AVX-512 BITALG Instructions
+    IsaAvx512Bitalg,
+    /// AVX-512 VP2INTERSECT Instructions
+    IsaAvx512Vp2intersect,
+    /// AVX-512 BF16 Instructions
+    IsaAvx512Bf16,
+    /// AVX-512 FP16 Instructions
+    IsaAvx512Fp16,
+    /// AMX Instructions
+    IsaAmx,
+    /// AMX-INT8 Instructions
+    IsaAmxInt8,
+    /// AMX-BF16 Instructions
+    IsaAmxBf16,
+    /// AMX-FP16 Instructions
+    IsaAmxFp16,
+    /// AMX-TF32 Instructions
+    IsaAmxTf32,
+    /// AMX-COMPLEX Instructions
+    IsaAmxComplex,
+    /// AMX-MOVRS Instructions
+    IsaAmxMovrs,
+    /// AMX-AVX512 Instructions
+    IsaAmxAvx512,
+    /// AVX10.1 Instructions
+    IsaAvx10_1,
+    /// AVX10.2 Instructions
+    IsaAvx10_2,
+    /// AVX10.2 MOVRS Instructions
+    IsaAvx10_2Movrs,
+    /// XAPIC support
+    IsaXapic,
+    /// X2APIC support
+    IsaX2apic,
+    /// XAPIC Extensions support (AMD)
+    IsaXapicExt,
+    /// PCID support
+    IsaPcid,
+    /// INVPCID instruction
+    IsaInvpcid,
+    /// TSC-Adjust MSR
+    IsaTscAdjust,
+    /// TSC-Deadline
+    IsaTscDeadline,
+    /// FOPCODE Deprecation - FOPCODE update on unmasked x87 exception only
+    IsaFopcodeDeprecation,
+    /// FCS/FDS Deprecation
+    IsaFcsFdsDeprecation,
+    /// FDP Deprecation - FDP update on unmasked x87 exception only
+    IsaFdpDeprecation,
+    /// User-Mode Protection Keys
+    IsaPku,
+    /// Supervisor-Mode Protection Keys
+    IsaPks,
+    /// User-Mode Instructions Prevention
+    IsaUmip,
+    /// RDPID Support
+    IsaRdpid,
+    /// Translation Cache Extensions (TCE) support (AMD)
+    IsaTce,
+    /// CLZERO instruction support (AMD)
+    IsaClzero,
+    /// Report SCA Mitigations in CPUID
+    IsaScaMitigations,
+    /// Control Flow Enforcement
+    IsaCet,
+    /// Non-Serializing version of WRMSR
+    IsaWrmsrns,
+    /// Immediate forms of RDMSR and WRMSRNS
+    IsaMsrImm,
+    /// CMPccXADD instructions
+    IsaCmpccxadd,
+    /// SERIALIZE instruction
+    IsaSerialize,
+    /// Linear Address Space Separation support
+    IsaLass,
+    /// 57-bit Virtual Address and 5-level paging support
+    IsaLa57,
+    /// User Level Interrupts support
+    IsaUintr,
+    /// Flexible UIRET support
+    IsaFlexibleUiret,
+    /// MOVDIRI instruction support
+    IsaMovdiri,
+    /// MOVDIR64B instruction support
+    IsaMovdir64b,
+    /// RDMSRLIST/WRMSRLIST instructions support
+    IsaMsrlist,
+    /// RAO-INT instructions support
+    IsaRaoInt,
+    /// MOVRS instructions support
+    IsaMovrs,
 }

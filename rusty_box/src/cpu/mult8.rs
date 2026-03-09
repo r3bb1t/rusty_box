@@ -52,9 +52,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ mult8.cc:27-48 MUL_ALEbM
     pub fn mul_al_eb_m(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.get_gpr8(0); // AL
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_byte(seg, eaddr)?;
+        let op2 = self.v_read_byte(seg, eaddr)?;
 
         let product_16 = (op1 as u16) * (op2 as u16);
         let product_8l = (product_16 & 0xFF) as u8;
@@ -118,9 +118,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ mult8.cc:50-73 IMUL_ALEbM
     pub fn imul_al_eb_m(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.get_gpr8(0) as i8; // AL
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_byte(seg, eaddr)? as i8;
+        let op2 = self.v_read_byte(seg, eaddr)? as i8;
 
         let product_16 = (op1 as i16) * (op2 as i16);
         let product_8 = (product_16 & 0xFF) as u8;
@@ -186,9 +186,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// DIV r/m8 (memory form)
     /// Matching C++ mult8.cc:75-98 DIV_ALEbM
     pub fn div_al_eb_m(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_byte(seg, eaddr)?;
+        let op2 = self.v_read_byte(seg, eaddr)?;
 
         if op2 == 0 {
             return self.exception(Exception::De, 0);
@@ -270,9 +270,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(Exception::De, 0);
         }
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_byte(seg, eaddr)? as i8;
+        let op2 = self.v_read_byte(seg, eaddr)? as i8;
 
         if op2 == 0 {
             return self.exception(Exception::De, 0);
@@ -346,5 +346,5 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Helper functions
     // =========================================================================
 
-    // Helper methods (resolve_addr32, read_8bit_regx, read_virtual_byte) are defined in logical8.rs
+    // Helper methods (resolve_addr, read_8bit_regx, v_read_byte) are defined in logical8.rs
 }

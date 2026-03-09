@@ -1,4 +1,6 @@
-use super::ia_opcodes::Opcode;
+//! x87 FPU and 3DNow! opcode tables (matching Bochs `fetchdecode_x87.h`).
+
+use crate::opcode::Opcode;
 
 pub(super) const BX3_DNOW_OPCODE: [Opcode; 256] = [
     // 256 entries for 3DNow opcodes, by suffix

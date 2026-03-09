@@ -72,14 +72,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         #[cfg(feature = "bx_support_amx")]
         {
-            self.amx = if self.bx_cpuid_support_isa_extension(X86Feature::IsaAMX) {
+            self.amx = if self.bx_cpuid_support_isa_extension(X86Feature::IsaAmx) {
                 Some(AMX::default())
             } else {
                 None
             };
         }
 
-        self.vmcb = if self.bx_cpuid_support_isa_extension(X86Feature::IsaSVM) {
+        self.vmcb = if self.bx_cpuid_support_isa_extension(X86Feature::IsaSvm) {
             Some(VmcbCache::default())
         } else {
             None
@@ -292,7 +292,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.efer_suppmask = self.get_efer_allow_mask();
         self.msr.star = 0;
 
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaLONG_MODE) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaLongMode) {
             if source == ResetReason::Hardware {
                 self.msr.lstar = 0;
                 self.msr.cstar = 0;
@@ -385,11 +385,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if source == ResetReason::Hardware {
             self.mxcsr.mxcsr = MXCSR_RESET;
             self.mxcsr_mask = 0x0000ffbf;
-            if self.bx_cpuid_support_isa_extension(X86Feature::IsaSSE2) {
+            if self.bx_cpuid_support_isa_extension(X86Feature::IsaSse2) {
                 self.mxcsr_mask |= MXCSR_DAZ
             }
 
-            if self.bx_cpuid_support_isa_extension(X86Feature::IsaMISALIGNED_SSE) {
+            if self.bx_cpuid_support_isa_extension(X86Feature::IsaMisalignedSse) {
                 self.mxcsr_mask |= MXCSR_MISALIGNED_EXCEPTION_MASK
             }
 

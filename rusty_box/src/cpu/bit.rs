@@ -18,9 +18,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ext = instr.extend8bit_l();
             self.write_8bit_regx(dst, ext, val);
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.write_virtual_byte(seg, eaddr, val)?;
+            self.v_write_byte(seg, eaddr, val)?;
         }
         Ok(())
     }

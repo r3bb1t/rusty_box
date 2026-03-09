@@ -785,6 +785,39 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
+    /// RMW read qword in 32-bit mode with cross-page handling.
+    /// Bochs: read_RMW_virtual_qword_32
+    pub fn read_rmw_virtual_qword(&mut self, seg: BxSegregs, offset: u32) -> Result<u64> {
+        let laddr = self.agen_write32(seg, offset, 8)? as u64;
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 8 <= 0x1000 {
+            let paddr = self.translate_data_write(laddr)?;
+            let data = self.mem_read_qword(paddr);
+            self.address_xlation.pages = 1;
+            self.address_xlation.paddress1 = paddr;
+            Ok(data)
+        } else {
+            let len1 = (0x1000 - page_offset) as u32;
+            let len2 = 8 - len1;
+            let p0 = self.translate_data_write(laddr)?;
+            let laddr2 = (laddr & 0xFFFF_F000).wrapping_add(0x1000) & 0xFFFF_FFFF;
+            let p1 = self.translate_data_write(laddr2)?;
+            let mut buf = [0u8; 8];
+            for i in 0..len1 as usize {
+                buf[i] = self.mem_read_byte(p0 + i as u64);
+            }
+            for i in 0..len2 as usize {
+                buf[len1 as usize + i] = self.mem_read_byte(p1 + i as u64);
+            }
+            self.address_xlation.pages = 2;
+            self.address_xlation.paddress1 = p0;
+            self.address_xlation.paddress2 = p1;
+            self.address_xlation.len1 = len1;
+            self.address_xlation.len2 = len2;
+            Ok(u64::from_le_bytes(buf))
+        }
+    }
+
     // ===== System read/write functions (Bochs access.cc) =====
     //
     // These bypass segment checks and operate on raw linear addresses at
@@ -1300,5 +1333,338 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
         Ok(())
+    }
+
+    // =========================================================================
+    // Mode-dispatching virtual memory access wrappers
+    // =========================================================================
+    // These dispatch to _32 or _64 variants based on long64_mode(),
+    // allowing 8/16/32-bit instruction handlers to work correctly in both modes.
+
+    /// Read byte — dispatches to read_virtual_byte or read_virtual_byte_64.
+    #[inline]
+    pub fn v_read_byte(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u8> {
+        let offset = offset.into();
+        if self.long64_mode() {
+            self.read_virtual_byte_64(seg, offset)
+        } else {
+            self.read_virtual_byte(seg, offset as u32)
+        }
+    }
+
+    /// Read word — dispatches to read_virtual_word or read_virtual_word_64.
+    #[inline]
+    pub fn v_read_word(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u16> {
+        let offset = offset.into();
+        if self.long64_mode() {
+            self.read_virtual_word_64(seg, offset)
+        } else {
+            self.read_virtual_word(seg, offset as u32)
+        }
+    }
+
+    /// Read dword — dispatches to read_virtual_dword or read_virtual_dword_64.
+    #[inline]
+    pub fn v_read_dword(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u32> {
+        let offset = offset.into();
+        if self.long64_mode() {
+            self.read_virtual_dword_64(seg, offset)
+        } else {
+            self.read_virtual_dword(seg, offset as u32)
+        }
+    }
+
+    /// Write byte — dispatches to write_virtual_byte or write_virtual_byte_64.
+    #[inline]
+    pub fn v_write_byte(&mut self, seg: BxSegregs, offset: impl Into<u64>, val: u8) -> Result<()> {
+        let offset = offset.into();
+        if self.long64_mode() {
+            self.write_virtual_byte_64(seg, offset, val)
+        } else {
+            self.write_virtual_byte(seg, offset as u32, val)
+        }
+    }
+
+    /// Write word — dispatches to write_virtual_word or write_virtual_word_64.
+    #[inline]
+    pub fn v_write_word(&mut self, seg: BxSegregs, offset: impl Into<u64>, val: u16) -> Result<()> {
+        let offset = offset.into();
+        if self.long64_mode() {
+            self.write_virtual_word_64(seg, offset, val)
+        } else {
+            self.write_virtual_word(seg, offset as u32, val)
+        }
+    }
+
+    /// Write dword — dispatches to write_virtual_dword or write_virtual_dword_64.
+    #[inline]
+    pub fn v_write_dword(&mut self, seg: BxSegregs, offset: impl Into<u64>, val: u32) -> Result<()> {
+        let offset = offset.into();
+        if self.long64_mode() {
+            self.write_virtual_dword_64(seg, offset, val)
+        } else {
+            self.write_virtual_dword(seg, offset as u32, val)
+        }
+    }
+
+    // =========================================================================
+    // Mode-dispatching RMW read wrappers
+    // =========================================================================
+
+    /// RMW read byte — dispatches to read_rmw_virtual_byte or read_rmw_virtual_byte_64.
+    #[inline]
+    pub fn v_read_rmw_byte(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u8> {
+        let offset = offset.into();
+        if self.long64_mode() {
+            self.read_rmw_virtual_byte_64(seg, offset)
+        } else {
+            self.read_rmw_virtual_byte(seg, offset as u32)
+        }
+    }
+
+    /// RMW read word — dispatches to read_rmw_virtual_word or read_rmw_virtual_word_64.
+    #[inline]
+    pub fn v_read_rmw_word(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u16> {
+        let offset = offset.into();
+        if self.long64_mode() {
+            self.read_rmw_virtual_word_64(seg, offset)
+        } else {
+            self.read_rmw_virtual_word(seg, offset as u32)
+        }
+    }
+
+    /// RMW read dword — dispatches to read_rmw_virtual_dword or read_rmw_virtual_dword_64.
+    #[inline]
+    pub fn v_read_rmw_dword(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u32> {
+        let offset = offset.into();
+        if self.long64_mode() {
+            self.read_rmw_virtual_dword_64(seg, offset)
+        } else {
+            self.read_rmw_virtual_dword(seg, offset as u32)
+        }
+    }
+
+    // ===== Mode-dispatching wrappers for qword =====
+
+    pub fn v_read_qword(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u64> {
+        let offset = offset.into();
+        if self.long64_mode() {
+            self.read_virtual_qword_64(seg, offset)
+        } else {
+            self.read_virtual_qword(seg, offset as u32)
+        }
+    }
+
+    pub fn v_write_qword(&mut self, seg: BxSegregs, offset: impl Into<u64>, val: u64) -> Result<()> {
+        let offset = offset.into();
+        if self.long64_mode() {
+            self.write_virtual_qword_64(seg, offset, val)
+        } else {
+            self.write_virtual_qword(seg, offset as u32, val)
+        }
+    }
+
+    pub fn v_read_rmw_qword(&mut self, seg: BxSegregs, offset: impl Into<u64>) -> Result<u64> {
+        let offset = offset.into();
+        if self.long64_mode() {
+            self.read_rmw_virtual_qword_64(seg, offset)
+        } else {
+            self.read_rmw_virtual_qword(seg, offset as u32)
+        }
+    }
+
+    // ===== Mode-dispatching wrappers for xmmword =====
+
+    pub fn v_read_xmmword(
+        &mut self,
+        seg: BxSegregs,
+        offset: impl Into<u64>,
+    ) -> Result<super::xmm::BxPackedXmmRegister> {
+        let offset = offset.into();
+        if self.long64_mode() {
+            self.read_virtual_xmmword_64(seg, offset)
+        } else {
+            self.read_virtual_xmmword(seg, offset as u32)
+        }
+    }
+
+    pub fn v_read_xmmword_aligned(
+        &mut self,
+        seg: BxSegregs,
+        offset: impl Into<u64>,
+    ) -> Result<super::xmm::BxPackedXmmRegister> {
+        let offset = offset.into();
+        if self.long64_mode() {
+            self.read_virtual_xmmword_aligned_64(seg, offset)
+        } else {
+            self.read_virtual_xmmword_aligned(seg, offset as u32)
+        }
+    }
+
+    pub fn v_write_xmmword(
+        &mut self,
+        seg: BxSegregs,
+        offset: impl Into<u64>,
+        val: &super::xmm::BxPackedXmmRegister,
+    ) -> Result<()> {
+        let offset = offset.into();
+        if self.long64_mode() {
+            self.write_virtual_xmmword_64(seg, offset, val)
+        } else {
+            self.write_virtual_xmmword(seg, offset as u32, val)
+        }
+    }
+
+    pub fn v_write_xmmword_aligned(
+        &mut self,
+        seg: BxSegregs,
+        offset: impl Into<u64>,
+        val: &super::xmm::BxPackedXmmRegister,
+    ) -> Result<()> {
+        let offset = offset.into();
+        if self.long64_mode() {
+            self.write_virtual_xmmword_aligned_64(seg, offset, val)
+        } else {
+            self.write_virtual_xmmword_aligned(seg, offset as u32, val)
+        }
+    }
+
+    // ===== 64-bit xmmword read/write functions =====
+
+    /// Read a 128-bit XMM word from virtual memory in 64-bit mode.
+    /// Bochs: read_virtual_xmmword_64
+    pub(super) fn read_virtual_xmmword_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: u64,
+    ) -> Result<super::xmm::BxPackedXmmRegister> {
+        let lo = self.read_virtual_qword_64(seg, offset)?;
+        let hi = self.read_virtual_qword_64(seg, offset.wrapping_add(8))?;
+        Ok(super::xmm::BxPackedXmmRegister { xmm64u: [lo, hi] })
+    }
+
+    /// Read a 128-bit XMM word with 16-byte alignment check in 64-bit mode.
+    /// Bochs: read_virtual_xmmword_aligned_64
+    pub(super) fn read_virtual_xmmword_aligned_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: u64,
+    ) -> Result<super::xmm::BxPackedXmmRegister> {
+        if (offset & 0xF) != 0 {
+            self.exception(super::cpu::Exception::Gp, 0)?;
+        }
+        self.read_virtual_xmmword_64(seg, offset)
+    }
+
+    /// Write a 128-bit XMM word to virtual memory in 64-bit mode.
+    /// Bochs: write_virtual_xmmword_64
+    pub(super) fn write_virtual_xmmword_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: u64,
+        val: &super::xmm::BxPackedXmmRegister,
+    ) -> Result<()> {
+        unsafe {
+            self.write_virtual_qword_64(seg, offset, val.xmm64u[0])?;
+            self.write_virtual_qword_64(seg, offset.wrapping_add(8), val.xmm64u[1])?;
+        }
+        Ok(())
+    }
+
+    /// Write a 128-bit XMM word with 16-byte alignment check in 64-bit mode.
+    /// Bochs: write_virtual_xmmword_aligned_64
+    pub(super) fn write_virtual_xmmword_aligned_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: u64,
+        val: &super::xmm::BxPackedXmmRegister,
+    ) -> Result<()> {
+        if (offset & 0xF) != 0 {
+            self.exception(super::cpu::Exception::Gp, 0)?;
+        }
+        self.write_virtual_xmmword_64(seg, offset, val)
+    }
+
+    // =========================================================================
+    // 64-bit RMW read functions for byte/word/dword
+    // =========================================================================
+    // Mirrors read_rmw_virtual_qword_64 pattern but for smaller data sizes.
+
+    /// RMW read byte in 64-bit mode.
+    /// Bochs: read_RMW_virtual_byte_64
+    #[inline]
+    pub(crate) fn read_rmw_virtual_byte_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u8> {
+        let laddr = self.get_laddr64(seg as usize, offset);
+        self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
+        let paddr = self.translate_data_write(laddr)?;
+        let data = self.mem_read_byte(paddr);
+        self.address_xlation.pages = 1;
+        self.address_xlation.paddress1 = paddr;
+        Ok(data)
+    }
+
+    /// RMW read word in 64-bit mode with cross-page handling.
+    /// Bochs: read_RMW_virtual_word_64
+    #[inline]
+    pub(crate) fn read_rmw_virtual_word_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u16> {
+        let laddr = self.get_laddr64(seg as usize, offset);
+        self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 2 <= 0x1000 {
+            let paddr = self.translate_data_write(laddr)?;
+            let data = self.mem_read_word(paddr);
+            self.address_xlation.pages = 1;
+            self.address_xlation.paddress1 = paddr;
+            Ok(data)
+        } else {
+            self.check_canonical_data(seg, laddr.wrapping_add(1), MemoryAccessType::Write)?;
+            let p0 = self.translate_data_write(laddr)?;
+            let b0 = self.mem_read_byte(p0);
+            let next_page = (laddr | 0xFFF).wrapping_add(1);
+            let p1 = self.translate_data_write(next_page)?;
+            let b1 = self.mem_read_byte(p1);
+            self.address_xlation.pages = 2;
+            self.address_xlation.paddress1 = p0;
+            self.address_xlation.paddress2 = p1;
+            self.address_xlation.len1 = 1;
+            self.address_xlation.len2 = 1;
+            Ok(u16::from_le_bytes([b0, b1]))
+        }
+    }
+
+    /// RMW read dword in 64-bit mode with cross-page handling.
+    /// Bochs: read_RMW_virtual_dword_64
+    #[inline]
+    pub(crate) fn read_rmw_virtual_dword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u32> {
+        let laddr = self.get_laddr64(seg as usize, offset);
+        self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 4 <= 0x1000 {
+            let paddr = self.translate_data_write(laddr)?;
+            let data = self.mem_read_dword(paddr);
+            self.address_xlation.pages = 1;
+            self.address_xlation.paddress1 = paddr;
+            Ok(data)
+        } else {
+            self.check_canonical_data(seg, laddr.wrapping_add(3), MemoryAccessType::Write)?;
+            let len1 = (0x1000 - page_offset) as u32;
+            let len2 = 4 - len1;
+            let p0 = self.translate_data_write(laddr)?;
+            let next_page = (laddr | 0xFFF).wrapping_add(1);
+            let p1 = self.translate_data_write(next_page)?;
+            let mut buf = [0u8; 4];
+            for i in 0..len1 as usize {
+                buf[i] = self.mem_read_byte(p0 + i as u64);
+            }
+            for i in 0..len2 as usize {
+                buf[len1 as usize + i] = self.mem_read_byte(p1 + i as u64);
+            }
+            self.address_xlation.pages = 2;
+            self.address_xlation.paddress1 = p0;
+            self.address_xlation.paddress2 = p1;
+            self.address_xlation.len1 = len1;
+            self.address_xlation.len2 = len2;
+            Ok(u32::from_le_bytes(buf))
+        }
     }
 }

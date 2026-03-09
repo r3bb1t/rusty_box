@@ -101,8 +101,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Ok(self.read_mmx_reg(instr.src1()))
         } else {
             let seg = BxSegregs::from(instr.seg());
-            let eaddr = self.resolve_addr32(instr);
-            let val = self.read_virtual_qword(seg, eaddr)?;
+            let eaddr = self.resolve_addr(instr);
+            let val = self.v_read_qword(seg, eaddr)?;
             Ok(BxPackedRegister { U64: val })
         }
     }
@@ -114,8 +114,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Ok(self.read_mmx_reg(instr.src1()))
         } else {
             let seg = BxSegregs::from(instr.seg());
-            let eaddr = self.resolve_addr32(instr);
-            let val = self.read_virtual_dword(seg, eaddr)? as u64;
+            let eaddr = self.resolve_addr(instr);
+            let val = self.v_read_dword(seg, eaddr)? as u64;
             Ok(BxPackedRegister { U64: val })
         }
     }
@@ -725,8 +725,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movd_pq_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val = self.read_virtual_dword(seg, eaddr)? as u64;
+        let eaddr = self.resolve_addr(instr);
+        let val = self.v_read_dword(seg, eaddr)? as u64;
         self.prepare_fpu2mmx();
         self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: val });
         Ok(())
@@ -747,8 +747,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn movq_pq_qq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let val = self.read_virtual_qword(seg, eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val = self.v_read_qword(seg, eaddr)?;
         self.prepare_fpu2mmx();
         self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: val });
         Ok(())
@@ -862,8 +862,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op = self.read_mmx_reg(instr.src1());
         let val = unsafe { op.U32[0] };
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        self.write_virtual_dword(seg, eaddr, val)?;
+        let eaddr = self.resolve_addr(instr);
+        self.v_write_dword(seg, eaddr, val)?;
         self.prepare_fpu2mmx();
         Ok(())
     }
@@ -874,8 +874,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.fpu_check_pending_exceptions()?;
         let val = unsafe { self.read_mmx_reg(instr.src1()).U64 };
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        self.write_virtual_qword(seg, eaddr, val)?;
+        let eaddr = self.resolve_addr(instr);
+        self.v_write_qword(seg, eaddr, val)?;
         self.prepare_fpu2mmx();
         Ok(())
     }
@@ -893,8 +893,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.get_gpr16(instr.src1() as usize)
         } else {
             let seg = BxSegregs::from(instr.seg());
-            let eaddr = self.resolve_addr32(instr);
-            self.read_virtual_word(seg, eaddr)?
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_word(seg, eaddr)?
         };
         self.prepare_fpu2mmx();
         unsafe { op1.U16[(instr.ib() & 3) as usize] = op2 };
@@ -1541,12 +1541,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        let rdi = self.edi() as u32; // 32-bit address mode
+        let rdi = if self.long64_mode() {
+            self.rdi()
+        } else {
+            u64::from(self.edi() as u32)
+        };
         let seg = BxSegregs::Ds;
 
         // Read-modify-write 8 bytes at [DS:EDI]
         let mut tmp = BxPackedRegister {
-            U64: self.read_virtual_qword(seg, rdi)?,
+            U64: self.v_read_qword(seg, rdi)?,
         };
         unsafe {
             for j in 0..8usize {
@@ -1555,7 +1559,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
             }
         }
-        self.write_virtual_qword(seg, rdi, unsafe { tmp.U64 })?;
+        self.v_write_qword(seg, rdi, unsafe { tmp.U64 })?;
         Ok(())
     }
 
@@ -1858,10 +1862,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.fpu_check_pending_exceptions()?;
         self.prepare_fpu2mmx();
         let op = self.read_mmx_reg(instr.src1());
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
         unsafe {
-            self.write_virtual_qword(seg, eaddr, op.U64)?;
+            self.v_write_qword(seg, eaddr, op.U64)?;
         }
         Ok(())
     }

@@ -76,9 +76,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() {
             Ok(self.read_xmm_reg(instr.src1()))
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_xmmword(seg, eaddr)
+            self.v_read_xmmword(seg, eaddr)
         }
     }
 
@@ -1323,8 +1323,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.get_gpr16(instr.src1().into())
         } else {
             let seg = BxSegregs::from(instr.seg());
-            let eaddr = self.resolve_addr32(instr);
-            self.read_virtual_word(seg, eaddr)?
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_word(seg, eaddr)?
         };
 
         unsafe {

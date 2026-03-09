@@ -6,7 +6,7 @@ use crate::cpu::eflags::EFlags;
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 // Helper methods are defined in logical8.rs and data_xfer_ext.rs
-// Free functions below use cpu.resolve_addr32(), cpu.read_8bit_regx(), etc.
+// Free functions below use cpu.resolve_addr(), cpu.read_8bit_regx(), etc.
 // which call the public methods from those modules
 
 /// ADD_EbGbM: ADD r/m8, r8 (memory form)
@@ -16,9 +16,9 @@ pub fn ADD_EbGbM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_byte(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_byte(seg, eaddr)?;
     let op2 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l()); // reg field = source for store-direction
     let sum = op1.wrapping_add(op2);
 
@@ -52,10 +52,10 @@ pub fn ADD_GbEbM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
-    let op2 = cpu.read_virtual_byte(seg, eaddr)?;
+    let op2 = cpu.v_read_byte(seg, eaddr)?;
     let sum = op1.wrapping_add(op2);
 
     cpu.write_8bit_regx(instr.dst() as usize, instr.extend8bit_l(), sum);
@@ -109,9 +109,9 @@ pub fn SUB_EbGbM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_byte(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_byte(seg, eaddr)?;
     let op2 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l()); // reg field = source for store-direction
     let diff = op1.wrapping_sub(op2);
 
@@ -145,10 +145,10 @@ pub fn SUB_GbEbM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
-    let op2 = cpu.read_virtual_byte(seg, eaddr)?;
+    let op2 = cpu.v_read_byte(seg, eaddr)?;
     let diff = op1.wrapping_sub(op2);
 
     cpu.write_8bit_regx(instr.dst() as usize, instr.extend8bit_l(), diff);
@@ -202,9 +202,9 @@ pub fn AND_EbGbM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_byte(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_byte(seg, eaddr)?;
     let op2 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l()); // reg field = source
     let result = op1 & op2;
 
@@ -315,9 +315,9 @@ pub fn ADC_EbGbM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_byte(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_byte(seg, eaddr)?;
     let op2 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l()); // reg field = source
     let cf = cpu.get_cf() as u8;
     let sum = op1.wrapping_add(op2).wrapping_add(cf);
@@ -377,10 +377,10 @@ pub fn ADC_GbEbM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
-    let op2 = cpu.read_virtual_byte(seg, eaddr)?;
+    let op2 = cpu.v_read_byte(seg, eaddr)?;
     let cf = cpu.get_cf() as u8;
     let sum = op1.wrapping_add(op2).wrapping_add(cf);
 
@@ -425,9 +425,9 @@ pub fn ADD_EbIbM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_byte(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_byte(seg, eaddr)?;
     let op2 = instr.ib();
     let sum = op1.wrapping_add(op2);
     cpu.write_rmw_linear_byte(sum);
@@ -483,9 +483,9 @@ pub fn SUB_EbIbM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_byte(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_byte(seg, eaddr)?;
     let op2 = instr.ib();
     let diff = op1.wrapping_sub(op2);
     cpu.write_rmw_linear_byte(diff);
@@ -524,9 +524,9 @@ pub fn ADC_EbIbM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_byte(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_byte(seg, eaddr)?;
     let op2 = instr.ib();
     let cf = cpu.get_cf() as u8;
     let sum = op1.wrapping_add(op2).wrapping_add(cf);
@@ -566,9 +566,9 @@ pub fn SBB_EbIbM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_byte(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_byte(seg, eaddr)?;
     let op2 = instr.ib();
     let cf = cpu.get_cf() as u8;
     let diff = op1.wrapping_sub(op2).wrapping_sub(cf);
@@ -628,9 +628,9 @@ pub fn SBB_EbGbM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_byte(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_byte(seg, eaddr)?;
     let op2 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
     let cf = cpu.get_cf() as u8;
     let diff = op1.wrapping_sub(op2).wrapping_sub(cf);
@@ -676,10 +676,10 @@ pub fn SBB_GbEbM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
-    let op2 = cpu.read_virtual_byte(seg, eaddr)?;
+    let op2 = cpu.v_read_byte(seg, eaddr)?;
     let cf = cpu.get_cf() as u8;
     let diff = op1.wrapping_sub(op2).wrapping_sub(cf);
     cpu.write_8bit_regx(instr.dst() as usize, instr.extend8bit_l(), diff);
@@ -795,9 +795,9 @@ pub fn INC_EbM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_byte(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_byte(seg, eaddr)?;
     let result = op1.wrapping_add(1);
     cpu.write_rmw_linear_byte(result);
 
@@ -837,9 +837,9 @@ pub fn DEC_EbM<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_byte(seg, eaddr)?;
+    let op1 = cpu.v_read_rmw_byte(seg, eaddr)?;
     let result = op1.wrapping_sub(1);
     cpu.write_rmw_linear_byte(result);
 
@@ -964,9 +964,9 @@ pub fn CMPXCHG_EbGb_M<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1_8 = cpu.read_rmw_virtual_byte(seg, eaddr)? as u32;
+    let op1_8 = cpu.v_read_rmw_byte(seg, eaddr)? as u32;
     let al = cpu.al() as u32;
     let diff_8 = al.wrapping_sub(op1_8);
     cpu.set_flags_oszapc_sub_8(al as u8, op1_8 as u8, diff_8 as u8);
@@ -1006,9 +1006,9 @@ pub fn XADD_EbGb_M<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let eaddr = cpu.resolve_addr32(instr);
+    let eaddr = cpu.resolve_addr(instr);
     let seg = BxSegregs::from(instr.seg());
-    let op1 = cpu.read_rmw_virtual_byte(seg, eaddr)? as u32;
+    let op1 = cpu.v_read_rmw_byte(seg, eaddr)? as u32;
     let op2 = cpu.read_8bit_regx(instr.src() as usize, instr.extend8bit_l()) as u32;
     let sum = op1.wrapping_add(op2);
 
@@ -1071,9 +1071,9 @@ pub fn NEG_Eb<'c, I: BxCpuIdTrait>(
         cpu.update_flags_sub8(0, op1, result);
         Ok(())
     } else {
-        let eaddr = cpu.resolve_addr32(instr);
+        let eaddr = cpu.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1 = cpu.read_rmw_virtual_byte(seg, eaddr)?;
+        let op1 = cpu.v_read_rmw_byte(seg, eaddr)?;
         let result = 0u8.wrapping_sub(op1);
         cpu.write_rmw_linear_byte(result);
         cpu.update_flags_sub8(0, op1, result);

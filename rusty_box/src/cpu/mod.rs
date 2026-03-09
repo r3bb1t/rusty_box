@@ -22,6 +22,7 @@ pub mod cpu;
 mod cpu_getters_and_setters;
 pub(super) mod cpu_macros;
 pub(super) mod crc32;
+pub(super) mod cet;
 pub(super) mod cpudb;
 pub(super) mod cpuid;
 pub(super) mod cpustats;

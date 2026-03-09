@@ -24,9 +24,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// PUSH m16 - Push 16-bit value from memory
     /// Based on Bochs stack16.cc PUSH_EwM
     pub fn push_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let value = self.read_virtual_word(seg, eaddr)?;
+        let value = self.v_read_word(seg, eaddr)?;
         self.push_16(value)?;
         tracing::trace!("PUSH m16 [{:?}:{:#010x}]: {:#06x}", seg, eaddr, value);
         Ok(())
@@ -81,9 +81,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Based on Bochs stack16.cc POP_EwM
     pub fn pop_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let value = self.pop_16()?;
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        self.write_virtual_word(seg, eaddr, value)?;
+        self.v_write_word(seg, eaddr, value)?;
         tracing::trace!("POP m16 [{:?}:{:#010x}]: {:#06x}", seg, eaddr, value);
         Ok(())
     }
@@ -314,21 +314,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // PUSH/POP Sw - 16-bit mode segment register push/pop (unified dispatch)
     // =========================================================================
 
-    /// PUSH Sw (16-bit opsize) - Push segment register from meta_data[0]
+    /// PUSH Sw (16-bit opsize) - Push segment register from operands.dst
     /// Used by the PushOp16Sw opcode
     pub fn push_op16_sw(&mut self, instr: &Instruction) -> super::Result<()> {
-        let seg = instr.meta_data[0] as usize;
+        let seg = instr.operands.dst as usize;
         let val = self.sregs[seg].selector.value;
         self.push_16(val)?;
         tracing::trace!("PUSH16 Sw (seg {}): {:#06x}", seg, val);
         Ok(())
     }
 
-    /// POP Sw (16-bit opsize) - Pop into segment register from meta_data[0]
+    /// POP Sw (16-bit opsize) - Pop into segment register from operands.dst
     /// Used by the PopOp16Sw opcode
     pub fn pop_op16_sw(&mut self, instr: &Instruction) -> super::Result<()> {
         let selector_value = self.pop_16()?;
-        let seg = super::decoder::BxSegregs::from(instr.meta_data[0]);
+        let seg = super::decoder::BxSegregs::from(instr.operands.dst);
 
         self.load_seg_reg(seg, selector_value)?;
 
@@ -400,7 +400,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // the memory is touched but no write actually occurs
             // emulate it by doing RMW read access from SS:ESP
             let esp = self.esp();
-            self.read_rmw_virtual_word(super::decoder::BxSegregs::Ss, esp)?;
+            self.v_read_rmw_word(super::decoder::BxSegregs::Ss, esp)?;
 
             self.set_bp(frame_ptr16);
         } else {
@@ -428,7 +428,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // the memory is touched but no write actually occurs
             // emulate it by doing RMW read access from SS:SP
             let sp = self.sp() as u32;
-            self.read_rmw_virtual_word(super::decoder::BxSegregs::Ss, sp)?;
+            self.v_read_rmw_word(super::decoder::BxSegregs::Ss, sp)?;
         }
 
         self.set_bp(frame_ptr16);

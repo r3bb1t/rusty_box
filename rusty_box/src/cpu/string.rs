@@ -1304,6 +1304,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     #[inline(always)]
     pub(super) fn mem_write_byte(&mut self, addr: u64, value: u8) {
+
         // Fast path: direct host pointer for plain RAM (bypass get_host_mem_addr).
         let a20_addr = (addr & self.a20_mask) as usize;
         let host_base = self.mem_host_base;
@@ -1433,6 +1434,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     pub(super) fn mem_write_dword(&mut self, addr: u64, value: u32) {
+
         // Fast path: direct host pointer for plain RAM
         let a20_addr = (addr & self.a20_mask) as usize;
         let host_base = self.mem_host_base;

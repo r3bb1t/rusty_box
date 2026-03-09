@@ -18,9 +18,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() {
             Ok((self.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l()), None))
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            let val = self.read_rmw_virtual_byte(seg, eaddr)?;
+            let val = self.v_read_rmw_byte(seg, eaddr)?;
             Ok((val, Some(())))
         }
     }

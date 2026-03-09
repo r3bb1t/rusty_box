@@ -4,7 +4,7 @@ use crate::{
     config::BxPhyAddress,
     cpu::{
         cpu::BX_ASYNC_EVENT_STOP_TRACE,
-        decoder::{fetchdecode32, fetchdecode64, Instruction, Opcode},
+        decoder::{decode32, decode64, Instruction, Opcode},
         tlb::{lpf_of, page_offset, ppf_of},
         BxCpuC, BxCpuIdTrait, Result,
     },
@@ -723,12 +723,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // Decode instruction based on CPU mode — Bochs style: write directly into mpool slot
             let long64 = self.long64_mode();
             let decode_result = if long64 {
-                fetchdecode64::fetch_decode64(current_fetch_ptr).map(|instr| {
+                decode64::fetch_decode64(current_fetch_ptr).map(|instr| {
                     self.i_cache.mpool[current_mpindex] = instr;
                 })
             } else {
                 // Bochs fetchDecode32(fetchPtr, &mpool[mpindex], remain) — inplace, no copy
-                fetchdecode32::fetch_decode32_inplace(
+                decode32::fetch_decode32_inplace(
                     current_fetch_ptr,
                     is_32_bit_mode,
                     &mut self.i_cache.mpool[current_mpindex],
@@ -751,7 +751,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     }
 
                     // Instruction is already in mpool[current_mpindex] — get its length
-                    let i_len = { self.i_cache.mpool[current_mpindex].meta_info.ilen as u32 };
+                    let i_len = { self.i_cache.mpool[current_mpindex].length as u32 };
 
                     // Call assignHandler during trace creation (matching C++ line 169)
                     // This checks feature flags and determines if trace should stop
@@ -884,7 +884,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         // Check if this is an illegal opcode - if so, generate #UD exception
                         // Based on Bochs exception.cc:937 and cpu.h:248 (Exception::Ud = 6)
                         use crate::cpu::decoder::DecodeError;
-                        use rusty_box_decoder::fetchdecode_generated::BxDecodeError;
+                        use rusty_box_decoder::decoder::tables::BxDecodeError;
                         match &decode_err {
                             DecodeError::Decoder(BxDecodeError::BxIllegalOpcode) => {
                                 tracing::debug!(
@@ -1002,7 +1002,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Update entry tlen and first instruction (matching C++ line 217)
         // In C++, entry->i is a pointer to the first instruction in mpool.
         // In Rust, we store a copy of the first instruction in entry.i so that
-        // find_entry can check i.meta_info.ilen != 0 for cache hit validation.
+        // find_entry can check i.length != 0 for cache hit validation.
         {
             let first_instr = self.i_cache.mpool[trace_start_idx];
             let entry = &mut self.i_cache.entry[entry_idx];
@@ -1095,9 +1095,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Decode instruction from combined buffer (matching C++ line 291-296)
         let total_bytes = remaining_in_page + fetch_buffer_limit;
         let decode_result = if self.long64_mode() {
-            fetchdecode64::fetch_decode64(&fetch_buffer[..total_bytes])
+            decode64::fetch_decode64(&fetch_buffer[..total_bytes])
         } else {
-            fetchdecode32::fetch_decode32(&fetch_buffer[..total_bytes], is_32_bit_mode)
+            decode32::fetch_decode32(&fetch_buffer[..total_bytes], is_32_bit_mode)
         };
 
         let instr = decode_result.unwrap_or_else(|e| {

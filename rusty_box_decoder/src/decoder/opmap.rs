@@ -1,9 +1,13 @@
-#![allow(non_upper_case_globals)]
-#![allow(unused)] // TODO: don't forget to uncomment
+//! Primary opcode map — one-byte and two-byte (0F) opcode tables.
+//!
+//! Table naming follows Bochs convention: `BxOpcodeTableXX` where XX is the
+//! opcode byte in hex. Matches Bochs `fetchdecode_opmap.h`.
 
-use super::fetchdecode::*;
-use super::fetchdecode_generated::*;
-use super::ia_opcodes::Opcode;
+#![allow(non_upper_case_globals, unused)]
+
+use super::*;
+use super::tables::*;
+use crate::opcode::Opcode;
 
 // opcode 00
 pub(super) const BxOpcodeTable00: [u64; 1] = [last_opcode_lockable(0, Opcode::AddEbGb)];

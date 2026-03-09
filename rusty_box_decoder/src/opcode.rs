@@ -1,6 +1,10 @@
-use super::fetchdecode::OpFlags;
+//! x86 opcode enumeration — one variant per distinct instruction form.
+//!
+//! The [`Opcode`] enum is `#[repr(u16)]` with sequential discriminants,
+//! enabling efficient table lookups and range-based category checks.
 
-// https://stackoverflow.com/a/57578431
+use super::decoder::OpFlags;
+
 macro_rules! back_to_enum {
     ($(#[$meta:meta])* $vis:vis enum $name:ident {
         $($(#[$vmeta:meta])* $vname:ident $(= $val:expr)?,)*
@@ -10,13 +14,28 @@ macro_rules! back_to_enum {
             $($(#[$vmeta])* $vname $(= $val)?,)*
         }
 
+        impl $name {
+            const ALL_VARIANTS: &'static [$name] = &[$($name::$vname,)*];
+
+            /// Convert from u16 in const context (safe, no transmute).
+            /// Valid because Opcode is `#[repr(u16)]` with sequential discriminants.
+            pub const fn from_u16_const(val: u16) -> Self {
+                let idx = val as usize;
+                if idx < Self::ALL_VARIANTS.len() {
+                    Self::ALL_VARIANTS[idx]
+                } else {
+                    Self::IaError
+                }
+            }
+        }
+
         impl core::convert::TryFrom<u16> for $name {
             type Error = super::DecodeError;
 
             fn try_from(v: u16) -> Result<Self, Self::Error> {
                 match v {
                     $(x if x == $name::$vname as u16 => Ok($name::$vname),)*
-                    _ => Err(super::fetchdecode_generated::BxDecodeError::BxIllegalOpcode.into()),
+                    _ => Err(super::decoder::tables::BxDecodeError::BxIllegalOpcode.into()),
                 }
             }
         }
@@ -24,10 +43,11 @@ macro_rules! back_to_enum {
 }
 
 back_to_enum! {
+    /// Complete x86 opcode enumeration — all variants defined for Bochs parity.
     #[allow(unused)]
     #[repr(u16)]
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-     pub enum Opcode {
+    pub enum Opcode {
 
         IaError,
         InsertedOpcode,
@@ -4383,20 +4403,3 @@ impl Default for Opcode {
     }
 }
 
-impl Opcode {
-    /// Convert from u16 in const context
-    ///
-    /// This uses transmute which is unsafe but valid because:
-    /// 1. Opcode is repr(u16)
-    /// 2. All u16 values map to valid Opcode variants (IaError for unknown)
-    pub const fn from_u16_const(val: u16) -> Self {
-        // The opcode enum has variants from 0 to ~4300
-        // Values beyond the max variant should return IaError
-        if val > 4300 {
-            return Self::IaError;
-        }
-        // SAFETY: Opcode is #[repr(u16)] and val is within valid range
-        // The enum is densely packed starting from 0
-        unsafe { core::mem::transmute(val) }
-    }
-}

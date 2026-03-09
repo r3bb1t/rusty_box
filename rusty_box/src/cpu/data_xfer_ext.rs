@@ -22,8 +22,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LEA r16, m - Load effective address into 16-bit register
     pub fn lea_gw_m(&mut self, instr: &Instruction) {
-        let dst = instr.meta_data[0] as usize;
-        let eaddr = self.resolve_addr32(instr) as u16;
+        let dst = instr.operands.dst as usize;
+        let eaddr = self.resolve_addr(instr) as u16;
         self.set_gpr16(dst, eaddr);
         tracing::trace!("LEA16: reg{} = {:#06x}", dst, eaddr);
     }
@@ -32,13 +32,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// In 64-bit mode, uses 64-bit address calculation then truncates to 32 bits
     /// Matching Bochs data_xfer32.cc LEA_GdM
     pub fn lea_gd_m(&mut self, instr: &Instruction) {
-        let dst = instr.meta_data[0] as usize;
+        let dst = instr.operands.dst as usize;
         let eaddr = if self.long64_mode() {
-            self.resolve_addr64(instr) as u32
+            self.resolve_addr64(instr)
         } else {
-            self.resolve_addr32(instr)
+            u64::from(self.resolve_addr32(instr))
         };
-        self.set_gpr32(dst, eaddr);
+        self.set_gpr32(dst, eaddr as u32);
         tracing::trace!("LEA32: reg{} = {:#010x}", dst, eaddr);
     }
 
@@ -48,8 +48,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XCHG r8, r/m8 - Exchange 8-bit values
     pub fn xchg_eb_gb(&mut self, instr: &Instruction) {
-        let dst = instr.meta_data[0] as usize;
-        let src = instr.meta_data[1] as usize;
+        let dst = instr.operands.dst as usize;
+        let src = instr.operands.src1 as usize;
         let ext = instr.extend8bit_l();
         let val_dst = self.read_8bit_regx(dst, ext);
         let val_src = self.read_8bit_regx(src, ext);
@@ -66,8 +66,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XCHG r16, r/m16 - Exchange 16-bit values
     pub fn xchg_ew_gw(&mut self, instr: &Instruction) {
-        let dst = instr.meta_data[0] as usize;
-        let src = instr.meta_data[1] as usize;
+        let dst = instr.operands.dst as usize;
+        let src = instr.operands.src1 as usize;
         let val_dst = self.get_gpr16(dst);
         let val_src = self.get_gpr16(src);
         self.set_gpr16(dst, val_src);
@@ -83,8 +83,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XCHG r32, r/m32 - Exchange 32-bit values
     pub fn xchg_ed_gd(&mut self, instr: &Instruction) {
-        let dst = instr.meta_data[0] as usize;
-        let src = instr.meta_data[1] as usize;
+        let dst = instr.operands.dst as usize;
+        let src = instr.operands.src1 as usize;
         let val_dst = self.get_gpr32(dst);
         let val_src = self.get_gpr32(src);
         self.set_gpr32(dst, val_src);
@@ -100,7 +100,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XCHG AX, r16 - Exchange AX with 16-bit register (short forms)
     pub fn xchg_ax_rw(&mut self, instr: &Instruction) {
-        let reg = instr.meta_data[0] as usize;
+        let reg = instr.operands.dst as usize;
         let ax = self.ax();
         let val = self.get_gpr16(reg);
         self.set_ax(val);
@@ -109,7 +109,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XCHG EAX, r32 - Exchange EAX with 32-bit register (short forms)
     pub fn xchg_eax_rd(&mut self, instr: &Instruction) {
-        let reg = instr.meta_data[0] as usize;
+        let reg = instr.operands.dst as usize;
         let eax = self.eax();
         let val = self.get_gpr32(reg);
         self.set_eax(val);
@@ -156,7 +156,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r/m16, Sreg - Move segment register to r/m16
     pub fn mov_ew_sw(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src_seg = instr.meta_data[1] as usize;
+        let src_seg = instr.operands.src1 as usize;
 
         // Decoder should never give us invalid segment registers (6-7)
         // Valid segment registers: ES(0), CS(1), SS(2), DS(3), FS(4), GS(5)
@@ -171,7 +171,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() {
             // Register form: MOV r16/r32, sreg
             // Bochs data_xfer16.cc:77-82: os32L → 32-bit zero-extended write
-            let dst = instr.meta_data[0] as usize;
+            let dst = instr.operands.dst as usize;
             if instr.os32_l() != 0 {
                 self.set_gpr32(dst, seg_val as u32);
             } else {
@@ -180,9 +180,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::trace!("MOV: reg{} = seg{} ({:#06x})", dst, src_seg, seg_val);
         } else {
             // Memory form: MOV [mem], sreg
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.write_virtual_word(seg, eaddr, seg_val)?;
+            self.v_write_word(seg, eaddr, seg_val)?;
             tracing::trace!("MOV: [{:#x}] = seg{} ({:#06x})", eaddr, src_seg, seg_val);
         }
         Ok(())
@@ -190,7 +190,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV Sreg, r/m16 - Move r/m16 to segment register
     pub fn mov_sw_ew(&mut self, instr: &Instruction) -> Result<()> {
-        let dst_seg = instr.meta_data[0] as usize;
+        let dst_seg = instr.operands.dst as usize;
 
         // Decoder should never give us invalid segment registers (6-7)
         // Valid segment registers: ES(0), CS(1), SS(2), DS(3), FS(4), GS(5)
@@ -202,13 +202,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let new_sel = if instr.mod_c0() {
             // Register form: MOV sreg, r16
-            let src = instr.meta_data[1] as usize;
+            let src = instr.operands.src1 as usize;
             self.get_gpr16(src)
         } else {
             // Memory form: MOV sreg, [mem]
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_word(seg, eaddr)?
+            self.v_read_word(seg, eaddr)?
         };
 
         // Don't allow loading CS directly (would need special handling)
@@ -300,7 +300,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // asize_mask: 0xFFFF for 16-bit, 0xFFFFFFFF for 32-bit address size
             let mask = if instr.as32_l() != 0 { 0xFFFF_FFFFu32 } else { 0xFFFF };
             let eaddr = self.ebx().wrapping_add(al as u32) & mask;
-            self.read_virtual_byte(seg, eaddr)?
+            self.v_read_byte(seg, eaddr)?
         };
         self.set_al(new_al);
         Ok(())
@@ -335,7 +335,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r16, imm16
     pub fn mov_rw_iw(&mut self, instr: &Instruction) {
-        let dst = instr.meta_data[0] as usize;
+        let dst = instr.operands.dst as usize;
         let imm = instr.iw();
 
         self.set_gpr16(dst, imm);
@@ -344,7 +344,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r8, imm8
     pub fn mov_rb_ib(&mut self, instr: &Instruction) {
-        let dst = instr.meta_data[0] as usize;
+        let dst = instr.operands.dst as usize;
         let imm = instr.ib();
         self.write_8bit_regx(dst, instr.extend8bit_l(), imm);
         tracing::trace!("MOV: reg{} = {:#04x}", dst, imm);
@@ -352,30 +352,30 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r16, r/m16 (register to register)
     pub fn mov_gw_ew_r(&mut self, instr: &Instruction) {
-        let dst = instr.meta_data[0] as usize;
-        let src = instr.meta_data[1] as usize;
+        let dst = instr.operands.dst as usize;
+        let src = instr.operands.src1 as usize;
         let val = self.get_gpr16(src);
         self.set_gpr16(dst, val);
         tracing::trace!("MOV16: reg{} = reg{} ({:#06x})", dst, src, val);
     }
 
     /// MOV r/m16, r16 (register to register)
-    /// Opcode 0x89 (16-bit): decoder swaps: meta_data[0] = rm (DEST), meta_data[1] = nnn (SOURCE)
+    /// Opcode 0x89 (16-bit): decoder swaps: operands.dst = rm (DEST), operands.src1 = nnn (SOURCE)
     pub fn mov_ew_gw_r(&mut self, instr: &Instruction) {
-        let val = self.get_gpr16(instr.meta_data[1] as usize); // nnn = source
-        self.set_gpr16(instr.meta_data[0] as usize, val); // rm = destination
+        let val = self.get_gpr16(instr.operands.src1 as usize); // nnn = source
+        self.set_gpr16(instr.operands.dst as usize, val); // rm = destination
         tracing::trace!(
             "MOV16: reg{} = reg{} ({:#06x})",
-            instr.meta_data[0],
-            instr.meta_data[1],
+            instr.operands.dst,
+            instr.operands.src1,
             val
         );
     }
 
     /// MOV r8, r/m8 (register to register)
     pub fn mov_gb_eb_r(&mut self, instr: &Instruction) {
-        let dst = instr.meta_data[0] as usize;
-        let src = instr.meta_data[1] as usize;
+        let dst = instr.operands.dst as usize;
+        let src = instr.operands.src1 as usize;
         let ext = instr.extend8bit_l();
         let val = self.read_8bit_regx(src, ext);
         self.write_8bit_regx(dst, ext, val);
@@ -383,15 +383,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r/m8, r8 (register to register)
-    /// Opcode 0x88: 8-bit does NOT match decoder swap — meta_data[0]=nnn=source, meta_data[1]=rm=dest
+    /// Opcode 0x88: 8-bit does NOT match decoder swap — operands.dst=nnn=source, operands.src1=rm=dest
     pub fn mov_eb_gb_r(&mut self, instr: &Instruction) {
         let ext = instr.extend8bit_l();
-        let val = self.read_8bit_regx(instr.meta_data[0] as usize, ext); // nnn = source
-        self.write_8bit_regx(instr.meta_data[1] as usize, ext, val); // rm = destination
+        let val = self.read_8bit_regx(instr.operands.dst as usize, ext); // nnn = source
+        self.write_8bit_regx(instr.operands.src1 as usize, ext, val); // rm = destination
         tracing::trace!(
             "MOV8: reg{} = reg{} ({:#04x})",
-            instr.meta_data[1],
-            instr.meta_data[0],
+            instr.operands.src1,
+            instr.operands.dst,
             val
         );
     }
@@ -403,25 +403,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV r/m8, imm8 (memory form)
     /// Matching C++ data_xfer8.cc:75-82 MOV_EbIbM
     pub fn mov_eb_ib_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
-        self.write_virtual_byte(seg, eaddr, instr.ib())?;
+        self.v_write_byte(seg, eaddr, instr.ib())?;
         tracing::trace!("MOV8 mem: [{:?}:{:#x}] = {:#04x}", seg, eaddr, instr.ib());
         Ok(())
     }
 
     /// MOV r/m8, r8 (memory form)
     /// Matching C++ data_xfer8.cc:34-41 MOV_EbGbM
-    /// 8-bit: no decoder swap, meta_data[0]=nnn=source register, dst()=meta_data[0]
+    /// 8-bit: no decoder swap, operands.dst=nnn=source register, dst()=operands.dst
     pub fn mov_eb_gb_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
         let src_reg = instr.dst() as usize; // dst()=[0]=nnn=source register for 8-bit store
         let extend8bit_l = instr.extend8bit_l();
         let val8 = self.read_8bit_regx(src_reg, extend8bit_l);
 
-        self.write_virtual_byte(seg, eaddr, val8)?;
+        self.v_write_byte(seg, eaddr, val8)?;
         tracing::trace!(
             "MOV8 mem: [{:?}:{:#x}] = reg{} ({:#04x})",
             seg,
@@ -435,9 +435,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV r8, r/m8 (memory form)
     /// Matching C++ data_xfer8.cc:43-51 MOV_GbEbM
     pub fn mov_gb_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let val8 = self.read_virtual_byte(seg, eaddr)?;
+        let val8 = self.v_read_byte(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let extend8bit_l = instr.extend8bit_l();
 
@@ -456,9 +456,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ data_xfer8.cc:99-110 XCHG_EbGbM
     /// Note: always locked (read_RMW_virtual_byte)
     pub fn xchg_eb_gb_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1 = self.read_rmw_virtual_byte(seg, eaddr)?; // always locked
+        let op1 = self.v_read_rmw_byte(seg, eaddr)?; // always locked
         let src_reg = instr.dst() as usize; // dst()=[0]=nnn=register (8-bit XCHG not in decoder swap list)
         let extend8bit_l = instr.extend8bit_l();
         let op2 = self.read_8bit_regx(src_reg, extend8bit_l);
@@ -503,16 +503,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOVZX r32, r/m8 - Move with zero-extend
     pub fn movzx_gd_eb(&mut self, instr: &Instruction) {
-        let dst = instr.meta_data[0] as usize;
-        let src = instr.meta_data[1] as usize;
+        let dst = instr.operands.dst as usize;
+        let src = instr.operands.src1 as usize;
         let val = self.read_8bit_regx(src, instr.extend8bit_l()) as u32;
         self.set_gpr32(dst, val);
     }
 
     /// MOVZX r32, r/m16 - Move with zero-extend
     pub fn movzx_gd_ew(&mut self, instr: &Instruction) {
-        let dst = instr.meta_data[0] as usize;
-        let src = instr.meta_data[1] as usize;
+        let dst = instr.operands.dst as usize;
+        let src = instr.operands.src1 as usize;
         let val = self.get_gpr16(src) as u32;
         self.set_gpr32(dst, val);
     }
@@ -527,10 +527,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
-    /// MOVSX r32, r/m8 - Move with sign-extend (legacy meta_data form, superseded by _r/_m variants)
+    /// MOVSX r32, r/m8 - Move with sign-extend (legacy operands form, superseded by _r/_m variants)
     pub fn movsx_gd_eb_legacy(&mut self, instr: &Instruction) {
-        let dst = instr.meta_data[0] as usize;
-        let src = instr.meta_data[1] as usize;
+        let dst = instr.operands.dst as usize;
+        let src = instr.operands.src1 as usize;
         let val = self.read_8bit_regx(src, instr.extend8bit_l()) as i8 as i32 as u32;
         self.set_gpr32(dst, val);
     }
@@ -542,10 +542,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV r/m16, imm16 (memory form)
     /// Matching C++ data_xfer16.cc:27-33 MOV_EwIwM
     pub fn mov_ew_iw_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
-        self.write_virtual_word(seg, eaddr, instr.iw())?;
+        self.v_write_word(seg, eaddr, instr.iw())?;
         tracing::trace!("MOV16 mem: [{:?}:{:#x}] = {:#06x}", seg, eaddr, instr.iw());
         Ok(())
     }
@@ -561,14 +561,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r/m16, r16 (memory form)
     /// Matching C++ data_xfer16.cc:42-49 MOV_EwGwM
-    /// Decoder swaps for 16/32-bit store: src() = meta_data[1] = nnn = SOURCE register
+    /// Decoder swaps for 16/32-bit store: src() = operands.src1 = nnn = SOURCE register
     pub fn mov_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
         let src_reg = instr.src() as usize;
         let val16 = self.get_gpr16(src_reg);
 
-        self.write_virtual_word(seg, eaddr, val16)?;
+        self.v_write_word(seg, eaddr, val16)?;
         tracing::trace!(
             "MOV16 mem: [{:?}:{:#x}] = reg{} ({:#06x})",
             seg,
@@ -584,9 +584,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV r16, r/m16 (memory form)
     /// Matching C++ data_xfer16.cc:58-65 MOV_GwEwM
     pub fn mov_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let val16 = self.read_virtual_word(seg, eaddr)?;
+        let val16 = self.v_read_word(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         self.set_gpr16(dst_reg, val16);
         tracing::trace!(
@@ -604,9 +604,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Note: always locked (read_RMW_virtual_word)
     /// reg field (dst()) = register operand for XCHG memory form
     pub fn xchg_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1 = self.read_rmw_virtual_word(seg, eaddr)?; // always locked
+        let op1 = self.v_read_rmw_word(seg, eaddr)?; // always locked
         let src_reg = instr.dst() as usize;
         let op2 = self.get_gpr16(src_reg);
 
@@ -627,9 +627,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ data_xfer16.cc:158-168 MOVZX_GwEbM
     /// Zero extend byte op2 into word op1
     pub fn movzx_gw_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op2_8 = self.read_virtual_byte(seg, eaddr)?;
+        let op2_8 = self.v_read_byte(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr16(dst_reg, op2_8 as u16);
@@ -660,9 +660,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ data_xfer16.cc:180-190 MOVSX_GwEbM
     /// Sign extend byte op2 into word op1
     pub fn movsx_gw_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op2_8 = self.read_virtual_byte(seg, eaddr)?;
+        let op2_8 = self.v_read_byte(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let val16 = (op2_8 as i8 as i16) as u16; // sign extend byte to word
 
@@ -886,10 +886,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV r/m32, imm32 (memory form)
     /// Matching C++ data_xfer32.cc:27-33 MOV_EdIdM
     pub fn mov_ed_id_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
-        self.write_virtual_dword(seg, eaddr, instr.id())?;
+        self.v_write_dword(seg, eaddr, instr.id())?;
         tracing::trace!("MOV32 mem: [{:?}:{:#x}] = {:#010x}", seg, eaddr, instr.id());
         Ok(())
     }
@@ -911,12 +911,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     ///
     /// Matching C++ data_xfer32.cc:42-49 BX_CPU_C::MOV32_EdGdM
     pub fn mov32_ed_gd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
         let src_reg = instr.src() as usize;
         let val32 = self.get_gpr32(src_reg);
 
-        self.write_virtual_dword(seg, eaddr, val32)?;
+        self.v_write_dword(seg, eaddr, val32)?;
         tracing::trace!(
             "MOV32 mem: [{:?}:{:#x}] = reg{} ({:#010x})",
             seg,
@@ -931,9 +931,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ data_xfer32.cc:67-75 MOV32_GdEdM
     /// Note: BX_CLEAR_64BIT_HIGH is handled in set_gpr32
     pub fn mov32_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let val32 = self.read_virtual_dword(seg, eaddr)?;
+        let val32 = self.v_read_dword(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr32(dst_reg, val32);
@@ -951,8 +951,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ data_xfer32.cc:77-85 MOV32S_GdEdM
     /// Uses stack_read_dword instead of read_virtual_dword
     pub fn mov32s_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
-        let val32 = self.stack_read_dword(eaddr)?;
+        let eaddr = self.resolve_addr(instr);
+        let val32 = self.stack_read_dword(eaddr as u32)?;
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr32(dst_reg, val32);
@@ -976,11 +976,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// # Operation
     /// Writes a 32-bit value from the source register to SS:offset.
     pub fn mov32s_ed_gd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let src_reg = instr.src() as usize;
         let val32 = self.get_gpr32(src_reg);
 
-        self.stack_write_dword(eaddr, val32)?;
+        self.stack_write_dword(eaddr as u32, val32)?;
         tracing::trace!(
             "MOV32S mem: [SS:{:#x}] = reg{} ({:#010x})",
             eaddr,
@@ -995,9 +995,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Note: always locked (read_RMW_virtual_dword)
     /// XCHG 0x87 is NOT in decoder swap list, so [0]=nnn=register, [1]=rm
     pub fn xchg_ed_gd_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1 = self.read_rmw_virtual_dword(seg, eaddr)?; // always locked
+        let op1 = self.v_read_rmw_dword(seg, eaddr)?; // always locked
         let src_reg = instr.dst() as usize; // dst()=[0]=nnn=register operand
         let op2 = self.get_gpr32(src_reg);
 
@@ -1018,9 +1018,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ data_xfer32.cc:110-120 MOVZX_GdEbM
     /// Zero extend byte op2 into dword op1
     pub fn movzx_gd_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op2_8 = self.read_virtual_byte(seg, eaddr)?;
+        let op2_8 = self.v_read_byte(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr32(dst_reg, op2_8 as u32);
@@ -1051,9 +1051,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ data_xfer32.cc:132-142 MOVZX_GdEwM
     /// Zero extend word op2 into dword op1
     pub fn movzx_gd_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op2_16 = self.read_virtual_word(seg, eaddr)?;
+        let op2_16 = self.v_read_word(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr32(dst_reg, op2_16 as u32);
@@ -1083,9 +1083,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ data_xfer32.cc:154-164 MOVSX_GdEbM
     /// Sign extend byte op2 into dword op1
     pub fn movsx_gd_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op2_8 = self.read_virtual_byte(seg, eaddr)?;
+        let op2_8 = self.v_read_byte(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let val32 = (op2_8 as i8 as i32) as u32; // sign extend byte to dword
 
@@ -1125,9 +1125,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ data_xfer32.cc:176-186 MOVSX_GdEwM
     /// Sign extend word op2 into dword op1
     pub fn movsx_gd_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op2_16 = self.read_virtual_word(seg, eaddr)?;
+        let op2_16 = self.v_read_word(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let val32 = (op2_16 as i16 as i32) as u32; // sign extend word to dword
 
@@ -1386,7 +1386,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub fn cmovo_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_of() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1395,7 +1395,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovno_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if !self.get_of() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1404,7 +1404,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovb_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_cf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1413,7 +1413,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovnb_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if !self.get_cf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1422,7 +1422,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovz_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_zf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1431,7 +1431,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovnz_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if !self.get_zf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1440,7 +1440,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovbe_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_cf() || self.get_zf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1449,7 +1449,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovnbe_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if !self.get_cf() && !self.get_zf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1458,7 +1458,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovs_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_sf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1467,7 +1467,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovns_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if !self.get_sf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1476,7 +1476,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovp_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_pf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1485,7 +1485,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovnp_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if !self.get_pf() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1494,7 +1494,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovl_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_sf() != self.get_of() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1503,7 +1503,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovnl_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_sf() == self.get_of() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1512,7 +1512,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovle_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_zf() || self.get_sf() != self.get_of() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1521,7 +1521,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovnle_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_dword(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_dword(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if !self.get_zf() && self.get_sf() == self.get_of() {
             self.set_gpr32(instr.dst() as usize, op2);
         }
@@ -1667,7 +1667,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     pub fn cmovo_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_of() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
@@ -1675,7 +1675,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovno_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if !self.get_of() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
@@ -1683,7 +1683,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovb_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_cf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
@@ -1691,7 +1691,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovnb_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if !self.get_cf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
@@ -1699,7 +1699,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovz_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_zf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
@@ -1707,7 +1707,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovnz_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if !self.get_zf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
@@ -1715,7 +1715,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovbe_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_cf() || self.get_zf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
@@ -1723,7 +1723,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovnbe_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if !self.get_cf() && !self.get_zf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
@@ -1731,7 +1731,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovs_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_sf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
@@ -1739,7 +1739,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovns_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if !self.get_sf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
@@ -1747,7 +1747,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovp_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_pf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
@@ -1755,7 +1755,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovnp_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if !self.get_pf() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
@@ -1763,7 +1763,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovl_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_sf() != self.get_of() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
@@ -1771,7 +1771,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovnl_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_sf() == self.get_of() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
@@ -1779,7 +1779,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovle_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if self.get_zf() || self.get_sf() != self.get_of() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
@@ -1787,7 +1787,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
     pub fn cmovnle_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 =
-            self.read_virtual_word(BxSegregs::from(instr.seg()), self.resolve_addr32(instr))?;
+            self.v_read_word(BxSegregs::from(instr.seg()), self.resolve_addr(instr))?;
         if !self.get_zf() && self.get_sf() == self.get_of() {
             self.set_gpr16(instr.dst() as usize, op2);
         }
@@ -2032,10 +2032,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// LES r16, m16:16 - Load ES:r16 from memory far pointer
     /// Matching Bochs segment_ctrl.cc LES_GwMp -> load_segw(i, BX_SEG_REG_ES)
     pub fn les_gw_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let reg_16 = self.read_virtual_word(seg, eaddr)?;
-        let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(2))?;
+        let reg_16 = self.v_read_word(seg, eaddr)?;
+        let segsel = self.v_read_word(seg, eaddr.wrapping_add(2))?;
 
         self.load_seg_reg(BxSegregs::Es, segsel)?;
         let dst = instr.dst() as usize;
@@ -2047,10 +2047,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// LES r32, m16:32 - Load ES:r32 from memory far pointer
     /// Matching Bochs segment_ctrl.cc LES_GdMp -> load_segd(i, BX_SEG_REG_ES)
     pub fn les_gd_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let reg_32 = self.read_virtual_dword(seg, eaddr)?;
-        let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(4))?;
+        let reg_32 = self.v_read_dword(seg, eaddr)?;
+        let segsel = self.v_read_word(seg, eaddr.wrapping_add(4))?;
         self.load_seg_reg(BxSegregs::Es, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr32(dst, reg_32);
@@ -2061,10 +2061,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// LDS r16, m16:16 - Load DS:r16 from memory far pointer
     /// Matching Bochs segment_ctrl.cc LDS_GwMp -> load_segw(i, BX_SEG_REG_DS)
     pub fn lds_gw_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let reg_16 = self.read_virtual_word(seg, eaddr)?;
-        let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(2))?;
+        let reg_16 = self.v_read_word(seg, eaddr)?;
+        let segsel = self.v_read_word(seg, eaddr.wrapping_add(2))?;
 
         self.load_seg_reg(BxSegregs::Ds, segsel)?;
         let dst = instr.dst() as usize;
@@ -2076,10 +2076,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// LDS r32, m16:32 - Load DS:r32 from memory far pointer
     /// Matching Bochs segment_ctrl.cc LDS_GdMp -> load_segd(i, BX_SEG_REG_DS)
     pub fn lds_gd_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let reg_32 = self.read_virtual_dword(seg, eaddr)?;
-        let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(4))?;
+        let reg_32 = self.v_read_dword(seg, eaddr)?;
+        let segsel = self.v_read_word(seg, eaddr.wrapping_add(4))?;
         self.load_seg_reg(BxSegregs::Ds, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr32(dst, reg_32);
@@ -2089,10 +2089,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LSS r16, m16:16 - Load SS:r16 from memory far pointer
     pub fn lss_gw_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let reg_16 = self.read_virtual_word(seg, eaddr)?;
-        let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(2))?;
+        let reg_16 = self.v_read_word(seg, eaddr)?;
+        let segsel = self.v_read_word(seg, eaddr.wrapping_add(2))?;
         self.load_seg_reg(BxSegregs::Ss, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr16(dst, reg_16);
@@ -2102,10 +2102,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LSS r32, m16:32 - Load SS:r32 from memory far pointer
     pub fn lss_gd_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let reg_32 = self.read_virtual_dword(seg, eaddr)?;
-        let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(4))?;
+        let reg_32 = self.v_read_dword(seg, eaddr)?;
+        let segsel = self.v_read_word(seg, eaddr.wrapping_add(4))?;
         self.load_seg_reg(BxSegregs::Ss, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr32(dst, reg_32);
@@ -2115,10 +2115,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LFS r16, m16:16 - Load FS:r16 from memory far pointer
     pub fn lfs_gw_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let reg_16 = self.read_virtual_word(seg, eaddr)?;
-        let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(2))?;
+        let reg_16 = self.v_read_word(seg, eaddr)?;
+        let segsel = self.v_read_word(seg, eaddr.wrapping_add(2))?;
         self.load_seg_reg(BxSegregs::Fs, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr16(dst, reg_16);
@@ -2128,10 +2128,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LFS r32, m16:32 - Load FS:r32 from memory far pointer
     pub fn lfs_gd_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let reg_32 = self.read_virtual_dword(seg, eaddr)?;
-        let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(4))?;
+        let reg_32 = self.v_read_dword(seg, eaddr)?;
+        let segsel = self.v_read_word(seg, eaddr.wrapping_add(4))?;
         self.load_seg_reg(BxSegregs::Fs, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr32(dst, reg_32);
@@ -2141,10 +2141,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LGS r16, m16:16 - Load GS:r16 from memory far pointer
     pub fn lgs_gw_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let reg_16 = self.read_virtual_word(seg, eaddr)?;
-        let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(2))?;
+        let reg_16 = self.v_read_word(seg, eaddr)?;
+        let segsel = self.v_read_word(seg, eaddr.wrapping_add(2))?;
         self.load_seg_reg(BxSegregs::Gs, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr16(dst, reg_16);
@@ -2154,10 +2154,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LGS r32, m16:32 - Load GS:r32 from memory far pointer
     pub fn lgs_gd_mp(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let reg_32 = self.read_virtual_dword(seg, eaddr)?;
-        let segsel = self.read_virtual_word(seg, eaddr.wrapping_add(4))?;
+        let reg_32 = self.v_read_dword(seg, eaddr)?;
+        let segsel = self.v_read_word(seg, eaddr.wrapping_add(4))?;
         self.load_seg_reg(BxSegregs::Gs, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr32(dst, reg_32);

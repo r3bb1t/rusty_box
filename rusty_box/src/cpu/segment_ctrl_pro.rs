@@ -1021,8 +1021,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             self.get_gpr16(instr.dst() as usize)
         } else {
             let seg = BxSegregs::from(instr.seg());
-            let eaddr = self.resolve_addr32(instr);
-            self.read_virtual_word(seg, eaddr)?
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_word(seg, eaddr)?
         };
 
         // If selector is NULL, invalidate and done
@@ -1122,8 +1122,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             self.get_gpr16(instr.dst() as usize)
         } else {
             let seg = BxSegregs::from(instr.seg());
-            let eaddr = self.resolve_addr32(instr);
-            self.read_virtual_word(seg, eaddr)?
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_word(seg, eaddr)?
         };
 
         // NULL selector not allowed for LTR

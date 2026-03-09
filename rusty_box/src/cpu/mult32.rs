@@ -53,9 +53,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ mult32.cc:MUL_EAXEdM
     pub fn mul_eax_ed_m(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.get_gpr32(0); // EAX
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_dword(seg, eaddr)?;
+        let op2 = self.v_read_dword(seg, eaddr)?;
 
         let product_64 = (op1 as u64) * (op2 as u64);
         let product_32l = (product_64 & 0xFFFFFFFF) as u32;
@@ -123,9 +123,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ mult32.cc:IMUL_EAXEdM
     pub fn imul_eax_ed_m(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.get_gpr32(0) as i32; // EAX
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_dword(seg, eaddr)? as i32;
+        let op2 = self.v_read_dword(seg, eaddr)? as i32;
 
         let product_64 = (op1 as i64) * (op2 as i64);
         let product_32l = (product_64 & 0xFFFFFFFF) as u32;
@@ -189,9 +189,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// DIV r/m32 (memory form)
     /// Matching C++ mult32.cc:DIV_EAXEdM
     pub fn div_eax_ed_m(&mut self, instr: &Instruction) -> Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_dword(seg, eaddr)?;
+        let op2 = self.v_read_dword(seg, eaddr)?;
 
         if op2 == 0 {
             return self.exception(Exception::De, 0);
@@ -270,9 +270,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(Exception::De, 0);
         }
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_dword(seg, eaddr)? as i32;
+        let op2 = self.v_read_dword(seg, eaddr)? as i32;
 
         if op2 == 0 {
             return self.exception(Exception::De, 0);
@@ -331,9 +331,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         let op1 = self.get_gpr32(dst_reg) as i32;
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op2 = self.read_virtual_dword(seg, eaddr)? as i32;
+        let op2 = self.v_read_dword(seg, eaddr)? as i32;
 
         let product_64 = (op1 as i64) * (op2 as i64);
         let product_32 = (product_64 & 0xFFFFFFFF) as u32;
@@ -434,9 +434,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn imul_gd_ed_id_m(&mut self, instr: &Instruction) -> Result<()> {
         let dst_reg = instr.dst() as usize;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op1 = self.read_virtual_dword(seg, eaddr)? as i32;
+        let op1 = self.v_read_dword(seg, eaddr)? as i32;
         let op2 = instr.id() as i32;
 
         let product_64 = (op1 as i64) * (op2 as i64);
@@ -524,7 +524,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Helper functions
     // =========================================================================
 
-    // Helper method (resolve_addr32) is defined in logical32.rs to avoid duplicate definitions
+    // Helper method (resolve_addr) is defined in logical32.rs to avoid duplicate definitions
 
-    // read_virtual_dword is defined in logical32.rs to avoid duplicate definitions
+    // v_read_dword is defined in logical32.rs to avoid duplicate definitions
 }

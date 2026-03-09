@@ -82,9 +82,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// JMP m16 - Indirect jump through memory (memory form)
     /// Matching Bochs ctrl_xfer16.cc JMP_EwM
     pub fn jmp_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let new_ip = self.read_virtual_word(seg, eaddr)?;
+        let new_ip = self.v_read_word(seg, eaddr)?;
         self.branch_near16(new_ip)?;
         tracing::trace!("JMP m16: [{:?}:{:#x}] -> IP = {:#06x}", seg, eaddr, new_ip);
         Ok(())
@@ -133,9 +133,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// CALL m16 - Indirect call through memory (memory form)
     /// Matching Bochs ctrl_xfer16.cc CALL_EwM
     pub fn call_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let new_ip = self.read_virtual_word(seg, eaddr)?;
+        let new_ip = self.v_read_word(seg, eaddr)?;
         let ip = self.get_ip();
 
         self.push_16(ip)?;
@@ -828,17 +828,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ ctrl_xfer16.cc:261-271
     pub fn call16_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Resolve effective address
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
 
         // Read offset and segment from memory
         let seg = BxSegregs::from(instr.seg());
-        let op1_16 = self.read_virtual_word(seg, eaddr)?;
+        let op1_16 = self.v_read_word(seg, eaddr)?;
         let asize_mask = if instr.as32_l() == 0 {
             0xFFFF
         } else {
             0xFFFFFFFF
         };
-        let cs_raw = self.read_virtual_word(seg, (eaddr.wrapping_add(2)) & asize_mask)?;
+        let cs_raw = self.v_read_word(seg, (eaddr.wrapping_add(2)) & asize_mask)?;
 
         self.call_far16(instr, cs_raw, op1_16)
     }
@@ -859,17 +859,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ ctrl_xfer16.cc:504-514
     pub fn jmp16_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Resolve effective address
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
 
         // Read offset and segment from memory
         let seg = BxSegregs::from(instr.seg());
-        let op1_16 = self.read_virtual_word(seg, eaddr)?;
+        let op1_16 = self.v_read_word(seg, eaddr)?;
         let asize_mask = if instr.as32_l() == 0 {
             0xFFFF
         } else {
             0xFFFFFFFF
         };
-        let cs_raw = self.read_virtual_word(seg, (eaddr.wrapping_add(2)) & asize_mask)?;
+        let cs_raw = self.v_read_word(seg, (eaddr.wrapping_add(2)) & asize_mask)?;
 
         self.jmp_far16(instr, cs_raw, op1_16)
     }

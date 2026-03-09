@@ -214,13 +214,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let laddr = self.get_laddr32(seg as usize, eaddr);
+        let eaddr = self.resolve_addr(instr);
+        let laddr: u64 = if self.long64_mode() {
+            self.get_laddr64(seg as usize, eaddr)
+        } else {
+            self.get_laddr32(seg as usize, eaddr as u32) as u64
+        };
         // Bochs paging.cc TLB_invlpg: invalidate prefetch, stack cache, TLB entries
         self.invalidate_prefetch_q();
         self.invalidate_stack_cache();
-        self.dtlb.invlpg(laddr.into());
-        self.itlb.invlpg(laddr.into());
+        self.dtlb.invlpg(laddr);
+        self.itlb.invlpg(laddr);
         tracing::trace!("INVLPG: laddr={:#x}", laddr);
         Ok(())
     }
@@ -280,7 +284,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Bochs mwait.cc:102-103: MONITOR performs same segmentation and paging
         // checks as a 1-byte read (tickle_read_virtual)
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let _ = self.read_virtual_byte(seg, eaddr as u32)?;
+        let _ = self.v_read_byte(seg, eaddr as u32)?;
 
         // Bochs mwait.cc:105: get physical address from address translation
         let paddr = self.address_xlation.paddress1;
@@ -770,7 +774,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Nm, 0);
         }
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
         // Must be 16-byte aligned
@@ -779,57 +783,57 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Bytes 0-1: FCW (FPU control word)
-        self.write_virtual_word(seg, eaddr, self.the_i387.cwd)?;
+        self.v_write_word(seg, eaddr, self.the_i387.cwd)?;
         // Bytes 2-3: FSW (FPU status word)
-        self.write_virtual_word(seg, eaddr.wrapping_add(2), self.the_i387.swd)?;
+        self.v_write_word(seg, eaddr.wrapping_add(2), self.the_i387.swd)?;
         // Byte 4: FTW (abridged tag word — compact form)
         let abridged_ftw = self.abridged_ftw();
-        self.write_virtual_byte(seg, eaddr.wrapping_add(4), abridged_ftw)?;
+        self.v_write_byte(seg, eaddr.wrapping_add(4), abridged_ftw)?;
         // Byte 5: reserved
-        self.write_virtual_byte(seg, eaddr.wrapping_add(5), 0)?;
+        self.v_write_byte(seg, eaddr.wrapping_add(5), 0)?;
         // Bytes 6-7: FOP (last FPU opcode) — not tracked, write 0
-        self.write_virtual_word(seg, eaddr.wrapping_add(6), 0)?;
+        self.v_write_word(seg, eaddr.wrapping_add(6), 0)?;
         // Bytes 8-11: FIP (FPU instruction pointer) — not tracked
-        self.write_virtual_dword(seg, eaddr.wrapping_add(8), 0)?;
+        self.v_write_dword(seg, eaddr.wrapping_add(8), 0)?;
         // Bytes 12-13: FCS — not tracked
-        self.write_virtual_word(seg, eaddr.wrapping_add(12), 0)?;
+        self.v_write_word(seg, eaddr.wrapping_add(12), 0)?;
         // Bytes 14-15: reserved
-        self.write_virtual_word(seg, eaddr.wrapping_add(14), 0)?;
+        self.v_write_word(seg, eaddr.wrapping_add(14), 0)?;
         // Bytes 16-19: FDP (FPU data pointer) — not tracked
-        self.write_virtual_dword(seg, eaddr.wrapping_add(16), 0)?;
+        self.v_write_dword(seg, eaddr.wrapping_add(16), 0)?;
         // Bytes 20-21: FDS — not tracked
-        self.write_virtual_word(seg, eaddr.wrapping_add(20), 0)?;
+        self.v_write_word(seg, eaddr.wrapping_add(20), 0)?;
         // Bytes 22-23: reserved
-        self.write_virtual_word(seg, eaddr.wrapping_add(22), 0)?;
+        self.v_write_word(seg, eaddr.wrapping_add(22), 0)?;
         // Bytes 24-27: MXCSR
-        self.write_virtual_dword(seg, eaddr.wrapping_add(24), self.mxcsr.mxcsr)?;
+        self.v_write_dword(seg, eaddr.wrapping_add(24), self.mxcsr.mxcsr)?;
         // Bytes 28-31: MXCSR_MASK
-        self.write_virtual_dword(seg, eaddr.wrapping_add(28), self.mxcsr_mask)?;
+        self.v_write_dword(seg, eaddr.wrapping_add(28), self.mxcsr_mask)?;
 
         // Bytes 32-159: FPU/MMX registers ST0-ST7 (16 bytes each = 80-bit + 6 padding)
-        for i in 0..8 {
+        for i in 0..8u64 {
             let offset = eaddr.wrapping_add(32 + i * 16);
             let signif = self.the_i387.st_space[i as usize].signif;
             let sign_exp = self.the_i387.st_space[i as usize].sign_exp;
-            self.write_virtual_qword(seg, offset, signif)?;
-            self.write_virtual_word(seg, offset.wrapping_add(8), sign_exp)?;
+            self.v_write_qword(seg, offset, signif)?;
+            self.v_write_word(seg, offset.wrapping_add(8), sign_exp)?;
             // Bytes 10-15 of each entry are padding (write zeros)
-            self.write_virtual_word(seg, offset.wrapping_add(10), 0)?;
-            self.write_virtual_dword(seg, offset.wrapping_add(12), 0)?;
+            self.v_write_word(seg, offset.wrapping_add(10), 0)?;
+            self.v_write_dword(seg, offset.wrapping_add(12), 0)?;
         }
 
         // Bytes 160-415: XMM registers XMM0-XMM7 (16 bytes each, 32-bit mode)
-        for i in 0..8u32 {
+        for i in 0..8u64 {
             let offset = eaddr.wrapping_add(160 + i * 16);
             let lo = unsafe { self.vmm[i as usize].zmm64u[0] };
             let hi = unsafe { self.vmm[i as usize].zmm64u[1] };
-            self.write_virtual_qword(seg, offset, lo)?;
-            self.write_virtual_qword(seg, offset.wrapping_add(8), hi)?;
+            self.v_write_qword(seg, offset, lo)?;
+            self.v_write_qword(seg, offset.wrapping_add(8), hi)?;
         }
 
         // Bytes 416-511: reserved (zeros)
-        for i in (416u32..512).step_by(8) {
-            self.write_virtual_qword(seg, eaddr.wrapping_add(i), 0)?;
+        for i in (416u64..512).step_by(8) {
+            self.v_write_qword(seg, eaddr.wrapping_add(i), 0)?;
         }
 
         Ok(())
@@ -848,7 +852,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Nm, 0);
         }
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
         // Must be 16-byte aligned
@@ -857,13 +861,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Bytes 0-1: FCW
-        let fcw = self.read_virtual_word(seg, eaddr)?;
+        let fcw = self.v_read_word(seg, eaddr)?;
         // Bytes 2-3: FSW
-        let fsw = self.read_virtual_word(seg, eaddr.wrapping_add(2))?;
+        let fsw = self.v_read_word(seg, eaddr.wrapping_add(2))?;
         // Byte 4: abridged FTW
-        let abridged_ftw = self.read_virtual_byte(seg, eaddr.wrapping_add(4))?;
+        let abridged_ftw = self.v_read_byte(seg, eaddr.wrapping_add(4))?;
         // Bytes 24-27: MXCSR
-        let new_mxcsr = self.read_virtual_dword(seg, eaddr.wrapping_add(24))?;
+        let new_mxcsr = self.v_read_dword(seg, eaddr.wrapping_add(24))?;
 
         // Validate MXCSR — reserved bits must be zero
         if (new_mxcsr & !self.mxcsr_mask) != 0 {
@@ -878,19 +882,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.mxcsr.mxcsr = new_mxcsr;
 
         // Restore FPU/MMX registers
-        for i in 0..8 {
+        for i in 0..8u64 {
             let offset = eaddr.wrapping_add(32 + i * 16);
-            let signif = self.read_virtual_qword(seg, offset)?;
-            let sign_exp = self.read_virtual_word(seg, offset.wrapping_add(8))?;
+            let signif = self.v_read_qword(seg, offset)?;
+            let sign_exp = self.v_read_word(seg, offset.wrapping_add(8))?;
             self.the_i387.st_space[i as usize].signif = signif;
             self.the_i387.st_space[i as usize].sign_exp = sign_exp;
         }
 
         // Restore XMM registers (XMM0-XMM7 in 32-bit mode)
-        for i in 0..8u32 {
+        for i in 0..8u64 {
             let offset = eaddr.wrapping_add(160 + i * 16);
-            let lo = self.read_virtual_qword(seg, offset)?;
-            let hi = self.read_virtual_qword(seg, offset.wrapping_add(8))?;
+            let lo = self.v_read_qword(seg, offset)?;
+            let hi = self.v_read_qword(seg, offset.wrapping_add(8))?;
             unsafe {
                 self.vmm[i as usize].zmm64u[0] = lo;
                 self.vmm[i as usize].zmm64u[1] = hi;
@@ -915,9 +919,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn ldmxcsr(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         self.prepare_sse()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let new_mxcsr = self.read_virtual_dword(seg, eaddr)?;
+        let new_mxcsr = self.v_read_dword(seg, eaddr)?;
 
         // Validate: reserved bits must be zero per mxcsr_mask
         if (new_mxcsr & !self.mxcsr_mask) != 0 {
@@ -936,9 +940,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn stmxcsr(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         self.prepare_sse()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        self.write_virtual_dword(seg, eaddr, self.mxcsr.mxcsr)?;
+        self.v_write_dword(seg, eaddr, self.mxcsr.mxcsr)?;
         Ok(())
     }
 
@@ -1693,11 +1697,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Nm, 0);
         }
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
         // Must be 64-byte aligned
-        let laddr = self.get_laddr32(seg as usize, eaddr);
+        let laddr: u64 = if self.long64_mode() {
+            self.get_laddr64(seg as usize, eaddr)
+        } else {
+            self.get_laddr32(seg as usize, eaddr as u32) as u64
+        };
         if (laddr & 0x3F) != 0 {
             tracing::debug!("XSAVE: not 64-byte aligned, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
@@ -1706,7 +1714,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let requested = self.xcr0.get32() & self.eax();
 
         // Read existing xstate_bv from header
-        let mut xstate_bv = self.read_virtual_qword(seg, eaddr.wrapping_add(512))?;
+        let mut xstate_bv = self.v_read_qword(seg, eaddr.wrapping_add(512))?;
 
         // Save x87 FPU state if requested (bit 0)
         if (requested & 0x1) != 0 {
@@ -1716,8 +1724,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Save MXCSR if SSE or YMM requested (Bochs xsave.cc:87-92)
         if (requested & 0x6) != 0 {
-            self.write_virtual_dword(seg, eaddr.wrapping_add(24), self.mxcsr.mxcsr)?;
-            self.write_virtual_dword(seg, eaddr.wrapping_add(28), self.mxcsr_mask)?;
+            self.v_write_dword(seg, eaddr.wrapping_add(24), self.mxcsr.mxcsr)?;
+            self.v_write_dword(seg, eaddr.wrapping_add(28), self.mxcsr_mask)?;
         }
 
         // Save SSE state if requested (bit 1)
@@ -1727,10 +1735,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Write XSAVE header: xstate_bv at offset 512
-        self.write_virtual_qword(seg, eaddr.wrapping_add(512), xstate_bv)?;
+        self.v_write_qword(seg, eaddr.wrapping_add(512), xstate_bv)?;
         // Clear xcomp_bv and reserved header fields (offsets 520-575)
-        self.write_virtual_qword(seg, eaddr.wrapping_add(520), 0)?;
-        self.write_virtual_qword(seg, eaddr.wrapping_add(528), 0)?;
+        self.v_write_qword(seg, eaddr.wrapping_add(520), 0)?;
+        self.v_write_qword(seg, eaddr.wrapping_add(528), 0)?;
 
         Ok(())
     }
@@ -1751,20 +1759,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Nm, 0);
         }
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
         // Must be 64-byte aligned
-        let laddr = self.get_laddr32(seg as usize, eaddr);
+        let laddr: u64 = if self.long64_mode() {
+            self.get_laddr64(seg as usize, eaddr)
+        } else {
+            self.get_laddr32(seg as usize, eaddr as u32) as u64
+        };
         if (laddr & 0x3F) != 0 {
             tracing::debug!("XRSTOR: not 64-byte aligned, #GP(0)");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
         // Read XSAVE header
-        let xstate_bv = self.read_virtual_qword(seg, eaddr.wrapping_add(512))?;
-        let xcomp_bv = self.read_virtual_qword(seg, eaddr.wrapping_add(520))?;
-        let header3 = self.read_virtual_qword(seg, eaddr.wrapping_add(528))?;
+        let xstate_bv = self.v_read_qword(seg, eaddr.wrapping_add(512))?;
+        let xcomp_bv = self.v_read_qword(seg, eaddr.wrapping_add(520))?;
+        let header3 = self.v_read_qword(seg, eaddr.wrapping_add(528))?;
 
         // Reserved header fields must be zero (standard XRSTOR)
         if header3 != 0 || xcomp_bv != 0 {
@@ -1793,7 +1805,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Restore MXCSR if SSE requested
         if (requested & 0x2) != 0 {
             // Legacy XRSTOR loads MXCSR when SSE or YMM in RFBM
-            let new_mxcsr = self.read_virtual_dword(seg, eaddr.wrapping_add(24))?;
+            let new_mxcsr = self.v_read_dword(seg, eaddr.wrapping_add(24))?;
             if (new_mxcsr & !self.mxcsr_mask) != 0 {
                 tracing::debug!("XRSTOR: invalid MXCSR={:#010x}, #GP(0)", new_mxcsr);
                 return self.exception(super::cpu::Exception::Gp, 0);
@@ -1819,48 +1831,48 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Save x87 FPU state to XSAVE area (offset 0-159)
     /// Same layout as FXSAVE bytes 0-159
-    fn xsave_x87_state(&mut self, seg: super::decoder::BxSegregs, eaddr: u32) -> super::Result<()> {
+    fn xsave_x87_state(&mut self, seg: super::decoder::BxSegregs, eaddr: u64) -> super::Result<()> {
         // FCW
-        self.write_virtual_word(seg, eaddr, self.the_i387.cwd)?;
+        self.v_write_word(seg, eaddr, self.the_i387.cwd)?;
         // FSW
-        self.write_virtual_word(seg, eaddr.wrapping_add(2), self.the_i387.swd)?;
+        self.v_write_word(seg, eaddr.wrapping_add(2), self.the_i387.swd)?;
         // Abridged FTW
         let aftw = self.abridged_ftw();
-        self.write_virtual_byte(seg, eaddr.wrapping_add(4), aftw)?;
+        self.v_write_byte(seg, eaddr.wrapping_add(4), aftw)?;
         // Reserved + FOP
-        self.write_virtual_byte(seg, eaddr.wrapping_add(5), 0)?;
-        self.write_virtual_word(seg, eaddr.wrapping_add(6), 0)?;
+        self.v_write_byte(seg, eaddr.wrapping_add(5), 0)?;
+        self.v_write_word(seg, eaddr.wrapping_add(6), 0)?;
         // FIP, FCS
-        self.write_virtual_dword(seg, eaddr.wrapping_add(8), 0)?;
-        self.write_virtual_word(seg, eaddr.wrapping_add(12), 0)?;
-        self.write_virtual_word(seg, eaddr.wrapping_add(14), 0)?;
+        self.v_write_dword(seg, eaddr.wrapping_add(8), 0)?;
+        self.v_write_word(seg, eaddr.wrapping_add(12), 0)?;
+        self.v_write_word(seg, eaddr.wrapping_add(14), 0)?;
         // FDP, FDS
-        self.write_virtual_dword(seg, eaddr.wrapping_add(16), 0)?;
-        self.write_virtual_word(seg, eaddr.wrapping_add(20), 0)?;
-        self.write_virtual_word(seg, eaddr.wrapping_add(22), 0)?;
+        self.v_write_dword(seg, eaddr.wrapping_add(16), 0)?;
+        self.v_write_word(seg, eaddr.wrapping_add(20), 0)?;
+        self.v_write_word(seg, eaddr.wrapping_add(22), 0)?;
 
         // ST0-ST7 (bytes 32-159, 16 bytes each)
-        for i in 0..8u32 {
+        for i in 0..8u64 {
             let offset = eaddr.wrapping_add(32 + i * 16);
             let signif = self.the_i387.st_space[i as usize].signif;
             let sign_exp = self.the_i387.st_space[i as usize].sign_exp;
-            self.write_virtual_qword(seg, offset, signif)?;
-            self.write_virtual_word(seg, offset.wrapping_add(8), sign_exp)?;
-            self.write_virtual_word(seg, offset.wrapping_add(10), 0)?;
-            self.write_virtual_dword(seg, offset.wrapping_add(12), 0)?;
+            self.v_write_qword(seg, offset, signif)?;
+            self.v_write_word(seg, offset.wrapping_add(8), sign_exp)?;
+            self.v_write_word(seg, offset.wrapping_add(10), 0)?;
+            self.v_write_dword(seg, offset.wrapping_add(12), 0)?;
         }
 
         Ok(())
     }
 
     /// Save SSE state to XSAVE area (at given offset, 256 bytes: XMM0-XMM7)
-    fn xsave_sse_state(&mut self, seg: super::decoder::BxSegregs, base: u32) -> super::Result<()> {
-        for i in 0..8u32 {
+    fn xsave_sse_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        for i in 0..8u64 {
             let offset = base.wrapping_add(i * 16);
             let lo = unsafe { self.vmm[i as usize].zmm64u[0] };
             let hi = unsafe { self.vmm[i as usize].zmm64u[1] };
-            self.write_virtual_qword(seg, offset, lo)?;
-            self.write_virtual_qword(seg, offset.wrapping_add(8), hi)?;
+            self.v_write_qword(seg, offset, lo)?;
+            self.v_write_qword(seg, offset.wrapping_add(8), hi)?;
         }
         Ok(())
     }
@@ -1869,21 +1881,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn xrstor_x87_state(
         &mut self,
         seg: super::decoder::BxSegregs,
-        eaddr: u32,
+        eaddr: u64,
     ) -> super::Result<()> {
-        let fcw = self.read_virtual_word(seg, eaddr)?;
-        let fsw = self.read_virtual_word(seg, eaddr.wrapping_add(2))?;
-        let aftw = self.read_virtual_byte(seg, eaddr.wrapping_add(4))?;
+        let fcw = self.v_read_word(seg, eaddr)?;
+        let fsw = self.v_read_word(seg, eaddr.wrapping_add(2))?;
+        let aftw = self.v_read_byte(seg, eaddr.wrapping_add(4))?;
 
         self.the_i387.cwd = fcw;
         self.the_i387.swd = fsw;
         self.the_i387.tos = ((fsw >> 11) & 7) as u8;
         self.restore_ftw_from_abridged(aftw);
 
-        for i in 0..8u32 {
+        for i in 0..8u64 {
             let offset = eaddr.wrapping_add(32 + i * 16);
-            let signif = self.read_virtual_qword(seg, offset)?;
-            let sign_exp = self.read_virtual_word(seg, offset.wrapping_add(8))?;
+            let signif = self.v_read_qword(seg, offset)?;
+            let sign_exp = self.v_read_word(seg, offset.wrapping_add(8))?;
             self.the_i387.st_space[i as usize].signif = signif;
             self.the_i387.st_space[i as usize].sign_exp = sign_exp;
         }
@@ -1904,11 +1916,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Restore SSE state from XSAVE area
-    fn xrstor_sse_state(&mut self, seg: super::decoder::BxSegregs, base: u32) -> super::Result<()> {
-        for i in 0..8u32 {
+    fn xrstor_sse_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        for i in 0..8u64 {
             let offset = base.wrapping_add(i * 16);
-            let lo = self.read_virtual_qword(seg, offset)?;
-            let hi = self.read_virtual_qword(seg, offset.wrapping_add(8))?;
+            let lo = self.v_read_qword(seg, offset)?;
+            let hi = self.v_read_qword(seg, offset.wrapping_add(8))?;
             unsafe {
                 self.vmm[i as usize].zmm64u[0] = lo;
                 self.vmm[i as usize].zmm64u[1] = hi;

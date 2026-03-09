@@ -163,7 +163,7 @@ fn run_alpine_direct() -> Result<()> {
 
     // Default command line: serial console + Alpine init
     let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_|
-        "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 nomodeset".to_string()
+        "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 nomodeset nokaslr".to_string()
     );
 
     // =========================================================================
@@ -320,6 +320,14 @@ fn run_alpine_direct() -> Result<()> {
         use std::io::Write;
         std::io::stdout().write_all(&output).ok();
         std::io::stdout().flush().ok();
+    }
+
+    // Drain port 0xE9 output (Bochs debug port — used by kernel decompressor __putstr)
+    let e9 = emu.devices.take_port_e9_output();
+    if !e9.is_empty() {
+        println!("\n--- Port 0xE9 (kernel decompressor) ---");
+        let s = String::from_utf8_lossy(&e9);
+        println!("{}", s);
     }
 
     let elapsed = start_time.elapsed();

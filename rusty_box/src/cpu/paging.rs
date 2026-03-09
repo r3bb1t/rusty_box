@@ -749,37 +749,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             offset_mask >>= 9;
             let curr_entry = entry[leaf];
 
-            // Trace prefetch path long mode walks — first few + crash area
-            if leaf == start_leaf {
-                static LOGGED_SLOW: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                let count = LOGGED_SLOW.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if count < 5 || (self.icount >= 1849200 && self.icount <= 1849220) {
-                    tracing::error!(
-                        "LM_SLOW: icount={} leaf={} laddr={:#x} entry_addr={:#x} entry={:#018x} CR3={:#x}",
-                        self.icount, leaf, laddr, entry_addr[leaf], curr_entry.bits(), self.cr3
-                    );
-                }
-            }
-
             if !curr_entry.contains(PteBits::PRESENT) {
-                if self.icount >= 1849000 && self.icount <= 1850000 {
-                    tracing::error!(
-                        "LM_WALK: NOT PRESENT leaf={} laddr={:#x} entry_addr={:#x} entry={:#018x} CR3={:#x}",
-                        leaf, laddr, entry_addr[leaf], curr_entry.bits(), self.cr3
-                    );
-                }
                 return Err(super::CpuError::Memory(
                     crate::memory::MemoryError::PageNotPresent,
                 ));
             }
             if curr_entry.bits() & reserved != 0 {
-                if self.icount >= 1849000 && self.icount <= 1850000 {
-                    tracing::error!(
-                        "LM_WALK: RESERVED leaf={} laddr={:#x} entry_addr={:#x} entry={:#018x} reserved_mask={:#018x} bad_bits={:#018x} CR3={:#x}",
-                        leaf, laddr, entry_addr[leaf], curr_entry.bits(), reserved,
-                        curr_entry.bits() & reserved, self.cr3
-                    );
-                }
                 return Err(super::CpuError::Memory(
                     crate::memory::MemoryError::PageProtectionViolation,
                 ));
@@ -1252,6 +1227,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(paddr & self.a20_mask)
     }
 
+    /// Diagnostic-only: translate a linear address to physical without raising exceptions.
+    /// Returns None if translation fails.
+    pub(super) fn translate_linear_for_diag(&self, laddr: u64) -> Option<u64> {
+        if !self.cr0.pg() {
+            return Some(laddr & self.a20_mask);
+        }
+        self.translate_linear_system_read_long_mode(laddr)
+            .ok()
+            .or_else(|| self.translate_linear_system_read(laddr).ok())
+    }
+
     /// Apply the A20 mask to a physical address.
     #[inline]
     fn apply_a20(&self, paddr: u64) -> u64 {
@@ -1259,17 +1245,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Deliver a #PF exception.
-    #[track_caller]
     fn page_fault(&mut self, fault: u32, laddr: u64, user: bool, is_write: bool) -> Result<()> {
         self.cr2 = laddr;
         let error_code = fault | ((user as u32) << 2) | ((is_write as u32) << 1);
-        if self.icount >= 1849100 && self.icount <= 1849300 {
-            let caller = core::panic::Location::caller();
-            tracing::error!(
-                "PF_DELIVER: err={:#x} laddr={:#x} CR3={:#x} user={} write={} caller={}:{}",
-                error_code, laddr, self.cr3, user, is_write, caller.file(), caller.line()
-            );
-        }
         self.exception(super::cpu::Exception::Pf, error_code as u16)
     }
 
@@ -1773,26 +1751,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             let curr_entry = entry[leaf];
 
-            // Alpine page walk trace — log FIRST few long mode walks plus the crash area
-            if self.icount <= 1849300 && leaf == start_leaf {
-                // Only log for the PML4 level (first level accessed) to see CR3 + first entry
-                static LOGGED: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                let count = LOGGED.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if count < 5 || self.icount >= 1849210 {
-                    tracing::error!(
-                        "LM_WALK: icount={} leaf={} laddr={:#x} ppf={:#x} entry_addr={:#x} entry={:#018x} CR3={:#x}",
-                        self.icount, leaf, laddr, ppf, entry_addr[leaf], curr_entry.bits(), self.cr3
-                    );
-                }
-            }
-            // Also log PDPTE level near crash
-            if self.icount >= 1849210 && self.icount <= 1849220 && leaf == BX_LEVEL_PDPTE {
-                tracing::error!(
-                    "LM_PDPTE: icount={} laddr={:#x} entry_addr={:#x} entry={:#018x} ppf_from_pml4={:#x}",
-                    self.icount, laddr, entry_addr[leaf], curr_entry.bits(), ppf
-                );
-            }
-
             // Check present
             if !curr_entry.contains(PteBits::PRESENT) {
                 self.page_fault(PageFaultError::NOT_PRESENT.bits(), laddr, user, is_write)?;
@@ -1801,11 +1759,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             // Check reserved bits
             if curr_entry.bits() & reserved != 0 {
-                tracing::debug!(
-                    "Long mode level {}: reserved bit set: {:#018x}",
-                    leaf,
-                    curr_entry.bits()
-                );
                 self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
@@ -1835,12 +1788,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if curr_entry.contains(PteBits::PS) {
                 ppf &= 0x000F_FFFF_FFFF_E000; // clear bit 12 for large pages
                 if ppf & offset_mask != 0 {
-                    if self.icount >= 1849100 && self.icount <= 1849300 {
-                        tracing::error!(
-                            "LM_LARGE_RSVD: leaf={} laddr={:#x} entry={:#018x} ppf={:#018x} offset_mask={:#018x} bad={:#018x} CR3={:#x}",
-                            leaf, laddr, curr_entry.bits(), ppf, offset_mask, ppf & offset_mask, self.cr3
-                        );
-                    }
                     self.page_fault(PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                     return Err(super::CpuError::CpuLoopRestart);
                 }

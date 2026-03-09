@@ -311,6 +311,9 @@ pub struct BxLocalApic {
     timer_current: u32,
     /// System tick value when timer started counting; also holds TSC-Deadline value
     ticks_initial: u64,
+    /// Last-known system ticks — updated by emulator loop for timer count reads.
+    /// Used by read_aligned(&self) to compute current timer count without &mut self.
+    pub(crate) current_ticks: u64,
 
     /// Timer divide configuration register (bits 3,1,0 writable)
     timer_divconf: u32,
@@ -403,6 +406,7 @@ impl Default for BxLocalApic {
             timer_initial: 0,
             timer_current: 0,
             ticks_initial: 0,
+            current_ticks: 0,
             timer_divconf: 0,
             timer_divide_factor: 1,
             timer_active: false,
@@ -616,8 +620,22 @@ impl BxLocalApic {
                 data = self.timer_initial;
             }
             // Timer current count (apic.cc:452-454)
+            // Bochs calls get_current_timer_count(bx_pc_system.time_ticks()) here.
+            // We use current_ticks (updated by the emulator loop) to compute inline
+            // without requiring &mut self.
             0x390 => {
-                data = self.timer_current; // updated by get_current_timer_count()
+                let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
+                if timervec.timer_mode_field() == 2 {
+                    // TSC-deadline mode: current count always reads 0
+                    data = 0;
+                } else if self.timer_active && self.timer_divide_factor > 0 {
+                    let delta64 = self.current_ticks.saturating_sub(self.ticks_initial)
+                        / self.timer_divide_factor as u64;
+                    let delta32 = delta64 as u32;
+                    data = if delta32 >= self.timer_initial { 0 } else { self.timer_initial - delta32 };
+                } else {
+                    data = self.timer_current;
+                }
             }
             // Timer divide configuration (apic.cc:455-457)
             0x3E0 => {

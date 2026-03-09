@@ -1012,8 +1012,82 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.tlb_flush();
         }
 
+        // Bochs: update linaddr_width based on LA57 (5-level paging support)
+        self.linaddr_width = if self.cr4.la57() { 57 } else { 48 };
+
         tracing::trace!("MOV CR4, r32: {:#010x}", val_32);
         Ok(())
+    }
+
+    // ----- 64-bit MOV CRn, Rq (writes in long mode) -----
+
+    /// MOV CR0, Rq — Bochs crregs.cc:630-657
+    /// Reads full 64-bit register; upper 32 bits must be zero (#GP if not).
+    pub fn mov_cr0_rq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        self.invalidate_prefetch_q();
+
+        let src = instr.src1() as usize;
+        let val_64 = self.get_gpr64(src);
+
+        // Bochs check_CR0(): upper 32 bits must be zero
+        if (val_64 >> 32) != 0 {
+            tracing::debug!("MOV CR0 (64-bit): upper 32 bits non-zero {:#018x}, #GP(0)", val_64);
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Delegate to 32-bit handler for the actual CR0 logic
+        // Temporarily set the GPR to val_64 low 32 bits so mov_cr0_rd reads it
+        // Actually, just inline the same logic with the known value
+        let val_32 = val_64 as u32;
+        let old_cr0 = self.cr0.get32();
+
+        // Bochs check_CR0(): PG without PE is illegal, NW without CD is illegal
+        let new_cr0 = BxCr0::from_bits_retain(val_32);
+        if new_cr0.contains(BxCr0::PG) && !new_cr0.contains(BxCr0::PE) {
+            tracing::debug!("MOV CR0 (64-bit): PG=1 without PE=1, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        if new_cr0.contains(BxCr0::NW) && !new_cr0.contains(BxCr0::CD) {
+            tracing::debug!("MOV CR0 (64-bit): NW=1 without CD=1, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Call the shared CR0 write logic (reuse mov_cr0_rd body)
+        // We need to set the GPR temporarily so the 32-bit handler reads the right value
+        self.set_gpr32(src, val_32);
+        self.mov_cr0_rd(instr)
+    }
+
+    /// MOV CR2, Rq — Bochs crregs.cc:659-685
+    /// Full 64-bit store (CR2 holds the faulting linear address in long mode).
+    pub fn mov_cr2_rq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        let src = instr.src1() as usize;
+        let val_64 = self.get_gpr64(src);
+        self.cr2 = val_64;
+        tracing::trace!("MOV CR2 (64-bit): {:#018x}", val_64);
+        Ok(())
+    }
+
+    /// MOV CR4, Rq — Bochs crregs.cc:733-758
+    /// Reads full 64-bit register; upper 32 bits must be zero (#GP if not).
+    pub fn mov_cr4_rq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.check_cpl0_for_cr_dr()?;
+        self.invalidate_prefetch_q();
+
+        let src = instr.src1() as usize;
+        let val_64 = self.get_gpr64(src);
+
+        // Bochs check_CR4(): upper 32 bits must be zero
+        if (val_64 >> 32) != 0 {
+            tracing::debug!("MOV CR4 (64-bit): upper 32 bits non-zero {:#018x}, #GP(0)", val_64);
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Delegate to 32-bit handler with the low 32 bits
+        self.set_gpr32(src, val_64 as u32);
+        self.mov_cr4_rd(instr)
     }
 
     // ----- LMSW -----

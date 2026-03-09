@@ -24,9 +24,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// PUSH m32 - Push 32-bit value from memory
     /// Based on Bochs stack32.cc PUSH_EdM
     pub fn push_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let value = self.read_virtual_dword(seg, eaddr)?;
+        let value = self.v_read_dword(seg, eaddr)?;
         self.push_32(value)?;
         tracing::trace!("PUSH m32 [{:?}:{:#010x}]: {:#010x}", seg, eaddr, value);
         Ok(())
@@ -60,9 +60,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Based on Bochs stack32.cc POP_EdM
     pub fn pop_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let value = self.pop_32()?;
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        self.write_virtual_dword(seg, eaddr, value)?;
+        self.v_write_dword(seg, eaddr, value)?;
         tracing::trace!("POP m32 [{:?}:{:#010x}]: {:#010x}", seg, eaddr, value);
         Ok(())
     }
@@ -356,7 +356,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // the memory is touched but no write actually occurs
             // emulate it by doing RMW read access from SS:ESP
             let esp = self.esp();
-            self.read_rmw_virtual_dword(super::decoder::BxSegregs::Ss, esp)?;
+            self.v_read_rmw_dword(super::decoder::BxSegregs::Ss, esp)?;
         } else {
             let mut bp = self.bp() as u32;
 
@@ -382,7 +382,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // the memory is touched but no write actually occurs
             // emulate it by doing RMW read access from SS:SP
             let sp = self.sp() as u32;
-            self.read_rmw_virtual_dword(super::decoder::BxSegregs::Ss, sp)?;
+            self.v_read_rmw_dword(super::decoder::BxSegregs::Ss, sp)?;
         }
 
         self.set_ebp(frame_ptr32);

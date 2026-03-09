@@ -40,6 +40,10 @@ enum BootProfile {
         iso_path: std::path::PathBuf,
         ram_mb: usize,
     },
+    AlpineDirect {
+        iso_path: std::path::PathBuf,
+        ram_mb: usize,
+    },
 }
 
 /// DLX Linux disk geometry (from bochsrc.bxrc)
@@ -67,7 +71,8 @@ fn main() {
 
     let window_title = match &profile {
         BootProfile::Dlx { .. } => "Rusty Box - DLX Linux",
-        BootProfile::Alpine { .. } => "Rusty Box - Alpine Linux",
+        BootProfile::Alpine { .. } => "Rusty Box - Alpine Linux (BIOS)",
+        BootProfile::AlpineDirect { .. } => "Rusty Box - Alpine Linux (Direct Boot)",
     };
 
     // =========================================================================
@@ -185,7 +190,9 @@ fn run_emulator(
 ) -> Result<()> {
     let ram_bytes = match profile {
         BootProfile::Dlx { .. } => 32 * 1024 * 1024,
-        BootProfile::Alpine { ram_mb, .. } => ram_mb * 1024 * 1024,
+        BootProfile::Alpine { ram_mb, .. } | BootProfile::AlpineDirect { ram_mb, .. } => {
+            ram_mb * 1024 * 1024
+        }
     };
 
     let config = EmulatorConfig {
@@ -237,6 +244,56 @@ fn run_emulator(
             emu.attach_cdrom(1, 0, &iso_path_str)
                 .expect("Failed to attach Alpine CD-ROM image");
             println!("Alpine CD-ROM attached: {}", iso_path.display());
+        }
+        BootProfile::AlpineDirect { iso_path, .. } => {
+            // Direct kernel boot — extract vmlinuz + initramfs from ISO
+            emu.configure_memory_in_cmos_from_config();
+            let iso_data = std::fs::read(iso_path).expect("Failed to read ISO");
+            let (kernel, initramfs) =
+                extract_kernel_from_iso(&iso_data).expect("Failed to extract kernel from ISO");
+            let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_| {
+                "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 nomodeset".to_string()
+            });
+            println!(
+                "Direct boot: kernel={} bytes, initramfs={} bytes",
+                kernel.len(),
+                initramfs.len()
+            );
+            emu.init_gui(0, &[])?;
+            emu.reset(ResetReason::Hardware)?;
+            emu.init_gui_signal_handlers();
+            emu.start();
+            emu.setup_direct_linux_boot(&kernel, Some(&initramfs), &cmdline)?;
+            // Skip the common init_gui/reset/start below
+            println!("Emulator started (max {} instructions)", max_instructions);
+            let start_time = Instant::now();
+            let result = emu.run_interactive(max_instructions);
+            let elapsed = start_time.elapsed();
+            match result {
+                Ok(executed) => {
+                    let mips = if elapsed.as_secs_f64() > 0.001 {
+                        executed as f64 / elapsed.as_secs_f64() / 1_000_000.0
+                    } else {
+                        0.0
+                    };
+                    println!(
+                        "Executed {} instructions in {:.3}s ({:.2} MIPS)",
+                        executed,
+                        elapsed.as_secs_f64(),
+                        mips
+                    );
+                }
+                Err(ref e) => eprintln!("Execution error: {:?}", e),
+            }
+            println!("\n===== VGA TEXT DUMP =====");
+            println!("{}", emu.vga_text_dump());
+            if let Ok(mut display) = shared.lock() {
+                display.emu_running = false;
+            }
+            if let Some(ref mut gui) = emu.gui_mut() {
+                gui.exit();
+            }
+            return Ok(());
         }
     }
 
@@ -300,43 +357,21 @@ fn detect_boot_profile(workspace_root: &std::path::Path) -> BootProfile {
                 .and_then(|s| s.parse().ok())
                 .unwrap_or(256);
 
-            let iso_path = if let Ok(path) = std::env::var("ALPINE_DISK") {
-                let p = std::path::PathBuf::from(&path);
-                if !p.exists() {
-                    eprintln!("ERROR: ALPINE_DISK={} does not exist", path);
-                    std::process::exit(1);
-                }
-                p
-            } else {
-                // Auto-detect alpine*.iso in workspace root
-                let iso = std::fs::read_dir(workspace_root)
-                    .ok()
-                    .and_then(|entries| {
-                        entries
-                            .filter_map(|e| e.ok())
-                            .map(|e| e.path())
-                            .find(|p| {
-                                p.extension().map(|ext| ext == "iso").unwrap_or(false)
-                                    && p.file_name()
-                                        .and_then(|n| n.to_str())
-                                        .map(|s| s.to_lowercase().contains("alpine"))
-                                        .unwrap_or(false)
-                            })
-                    });
-
-                match iso {
-                    Some(p) => p,
-                    None => {
-                        eprintln!("ERROR: No Alpine ISO found in workspace root.");
-                        eprintln!("Set ALPINE_DISK=/path/to/alpine.iso or place an alpine*.iso in the project root.");
-                        std::process::exit(1);
-                    }
-                }
-            };
-
-            println!("Boot profile: Alpine Linux ({} MB RAM)", ram_mb);
+            let iso_path = find_alpine_iso(workspace_root);
+            println!("Boot profile: Alpine Linux BIOS ({} MB RAM)", ram_mb);
             println!("ISO: {}", iso_path.display());
             BootProfile::Alpine { iso_path, ram_mb }
+        }
+        "alpine-direct" => {
+            let ram_mb: usize = std::env::var("ALPINE_RAM_MB")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(128);
+
+            let iso_path = find_alpine_iso(workspace_root);
+            println!("Boot profile: Alpine Linux Direct Boot ({} MB RAM)", ram_mb);
+            println!("ISO: {}", iso_path.display());
+            BootProfile::AlpineDirect { iso_path, ram_mb }
         }
         _ => {
             let disk_path = find_path(
@@ -348,6 +383,47 @@ fn detect_boot_profile(workspace_root: &std::path::Path) -> BootProfile {
             println!("Boot profile: DLX Linux (32 MB RAM)");
             println!("Disk: {}", disk_path.display());
             BootProfile::Dlx { disk_path }
+        }
+    }
+}
+
+fn find_alpine_iso(workspace_root: &std::path::Path) -> std::path::PathBuf {
+    if let Ok(path) = std::env::var("ALPINE_ISO") {
+        let p = std::path::PathBuf::from(&path);
+        if !p.exists() {
+            eprintln!("ERROR: ALPINE_ISO={} does not exist", path);
+            std::process::exit(1);
+        }
+        return p;
+    }
+    if let Ok(path) = std::env::var("ALPINE_DISK") {
+        let p = std::path::PathBuf::from(&path);
+        if !p.exists() {
+            eprintln!("ERROR: ALPINE_DISK={} does not exist", path);
+            std::process::exit(1);
+        }
+        return p;
+    }
+    // Auto-detect alpine*.iso in workspace root
+    let iso = std::fs::read_dir(workspace_root)
+        .ok()
+        .and_then(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .find(|p| {
+                    p.extension().map(|ext| ext == "iso").unwrap_or(false)
+                        && p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|s| s.to_lowercase().contains("alpine"))
+                            .unwrap_or(false)
+                })
+        });
+    match iso {
+        Some(p) => p,
+        None => {
+            eprintln!("ERROR: No Alpine ISO found. Set ALPINE_ISO=/path/to/alpine.iso");
+            std::process::exit(1);
         }
     }
 }
@@ -406,6 +482,90 @@ fn find_path(root: &std::path::Path, candidates: &[&str]) -> Option<std::path::P
         let path = root.join(candidate);
         if path.exists() {
             return Some(path);
+        }
+    }
+    None
+}
+
+// =========================================================================
+// ISO extraction for direct kernel boot
+// =========================================================================
+
+fn extract_kernel_from_iso(iso_data: &[u8]) -> Option<(Vec<u8>, Vec<u8>)> {
+    let kernel = extract_from_iso(iso_data, &["BOOT", "VMLINUZ_VIRT."])?;
+    let initramfs = extract_from_iso(iso_data, &["BOOT", "INITRAMFS_VIRT."])?;
+    Some((kernel, initramfs))
+}
+
+fn extract_from_iso(iso_data: &[u8], target_path: &[&str]) -> Option<Vec<u8>> {
+    let pvd_offset = 16 * 2048;
+    if pvd_offset + 190 > iso_data.len() {
+        return None;
+    }
+    let root_lba = u32::from_le_bytes([
+        iso_data[pvd_offset + 158], iso_data[pvd_offset + 159],
+        iso_data[pvd_offset + 160], iso_data[pvd_offset + 161],
+    ]) as usize;
+    let root_size = u32::from_le_bytes([
+        iso_data[pvd_offset + 166], iso_data[pvd_offset + 167],
+        iso_data[pvd_offset + 168], iso_data[pvd_offset + 169],
+    ]) as usize;
+
+    fn find_entry(iso: &[u8], dir_lba: usize, dir_size: usize, name: &str) -> Option<(usize, usize, bool)> {
+        let dir_data_start = dir_lba * 2048;
+        let dir_data_end = dir_data_start + dir_size;
+        if dir_data_end > iso.len() { return None; }
+        let dir_data = &iso[dir_data_start..dir_data_end];
+        let mut offset = 0;
+        while offset < dir_data.len() {
+            let rec_len = dir_data[offset] as usize;
+            if rec_len == 0 {
+                let next_sect = ((offset / 2048) + 1) * 2048;
+                if next_sect >= dir_data.len() { break; }
+                offset = next_sect;
+                continue;
+            }
+            if offset + 33 > dir_data.len() { break; }
+            let name_len = dir_data[offset + 32] as usize;
+            if offset + 33 + name_len > dir_data.len() { break; }
+            let entry_name = std::str::from_utf8(&dir_data[offset + 33..offset + 33 + name_len]).unwrap_or("");
+            let entry_lba = u32::from_le_bytes([
+                dir_data[offset + 2], dir_data[offset + 3],
+                dir_data[offset + 4], dir_data[offset + 5],
+            ]) as usize;
+            let entry_size = u32::from_le_bytes([
+                dir_data[offset + 10], dir_data[offset + 11],
+                dir_data[offset + 12], dir_data[offset + 13],
+            ]) as usize;
+            let is_dir = (dir_data[offset + 25] & 2) != 0;
+            let clean_name = entry_name.split(';').next().unwrap_or(entry_name);
+            if clean_name.eq_ignore_ascii_case(name) {
+                return Some((entry_lba, entry_size, is_dir));
+            }
+            offset += rec_len;
+        }
+        None
+    }
+
+    let mut cur_lba = root_lba;
+    let mut cur_size = root_size;
+    for (i, component) in target_path.iter().enumerate() {
+        let is_last = i == target_path.len() - 1;
+        match find_entry(iso_data, cur_lba, cur_size, component) {
+            Some((lba, size, is_dir)) => {
+                if is_last {
+                    let start = lba * 2048;
+                    let end = start + size;
+                    if end <= iso_data.len() {
+                        return Some(iso_data[start..end].to_vec());
+                    }
+                    return None;
+                }
+                if !is_dir { return None; }
+                cur_lba = lba;
+                cur_size = size;
+            }
+            None => return None,
         }
     }
     None

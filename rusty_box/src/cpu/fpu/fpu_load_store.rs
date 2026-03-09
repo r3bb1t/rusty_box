@@ -75,9 +75,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fld_single_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let load_reg = self.read_virtual_dword(seg, eaddr)?;
+        let load_reg = self.v_read_dword(seg, eaddr)?;
 
         self.fpu_update_last_instruction(instr);
 
@@ -106,9 +106,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fld_double_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let load_reg = self.read_virtual_qword(seg, eaddr)?;
+        let load_reg = self.v_read_qword(seg, eaddr)?;
 
         self.fpu_update_last_instruction(instr);
 
@@ -137,11 +137,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fld_extended_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let signif = self.read_virtual_qword(seg, eaddr)?;
+        let signif = self.v_read_qword(seg, eaddr)?;
         let sign_exp_addr = eaddr.wrapping_add(8);
-        let sign_exp = self.read_virtual_word(seg, sign_exp_addr)?;
+        let sign_exp = self.v_read_word(seg, sign_exp_addr)?;
 
         let result = floatx80 { signif, sign_exp };
 
@@ -168,9 +168,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fild_word_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let load_reg = self.read_virtual_word(seg, eaddr)? as i16;
+        let load_reg = self.v_read_word(seg, eaddr)? as i16;
 
         self.fpu_update_last_instruction(instr);
 
@@ -192,9 +192,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fild_dword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let load_reg = self.read_virtual_dword(seg, eaddr)? as i32;
+        let load_reg = self.v_read_dword(seg, eaddr)? as i32;
 
         self.fpu_update_last_instruction(instr);
 
@@ -216,9 +216,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fild_qword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let load_reg = self.read_virtual_qword(seg, eaddr)? as i64;
+        let load_reg = self.v_read_qword(seg, eaddr)? as i64;
 
         self.fpu_update_last_instruction(instr);
 
@@ -248,10 +248,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fbld_packed_bcd(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let hi2 = self.read_virtual_word(seg, eaddr.wrapping_add(8))?;
-        let lo8 = self.read_virtual_qword(seg, eaddr)?;
+        let hi2 = self.v_read_word(seg, eaddr.wrapping_add(8))?;
+        let lo8 = self.v_read_qword(seg, eaddr)?;
 
         self.fpu_update_last_instruction(instr);
 
@@ -334,7 +334,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fst_single_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
         self.fpu_update_last_instruction(instr);
@@ -368,7 +368,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let saved_swd = self.the_i387.swd;
         self.the_i387.swd = x87_sw;
 
-        self.write_virtual_dword(seg, eaddr, save_reg)?;
+        self.v_write_dword(seg, eaddr, save_reg)?;
 
         self.the_i387.swd = saved_swd;
         if pop_stack {
@@ -392,7 +392,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fst_double_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
         self.fpu_update_last_instruction(instr);
@@ -425,7 +425,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let saved_swd = self.the_i387.swd;
         self.the_i387.swd = x87_sw;
 
-        self.write_virtual_qword(seg, eaddr, save_reg)?;
+        self.v_write_qword(seg, eaddr, save_reg)?;
 
         self.the_i387.swd = saved_swd;
         if pop_stack {
@@ -449,7 +449,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fstp_extended_real(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
         self.fpu_update_last_instruction(instr);
@@ -468,8 +468,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             save_reg = self.read_fpu_reg(0);
         }
 
-        self.write_virtual_qword(seg, eaddr, save_reg.signif)?;
-        self.write_virtual_word(seg, eaddr.wrapping_add(8), save_reg.sign_exp)?;
+        self.v_write_qword(seg, eaddr, save_reg.signif)?;
+        self.v_write_word(seg, eaddr.wrapping_add(8), save_reg.sign_exp)?;
 
         self.the_i387.fpu_pop();
 
@@ -485,7 +485,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fist_word_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
         self.fpu_update_last_instruction(instr);
@@ -518,7 +518,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let saved_swd = self.the_i387.swd;
         self.the_i387.swd = x87_sw;
 
-        self.write_virtual_word(seg, eaddr, save_reg as u16)?;
+        self.v_write_word(seg, eaddr, save_reg as u16)?;
 
         self.the_i387.swd = saved_swd;
         if pop_stack {
@@ -542,7 +542,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fist_dword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
         self.fpu_update_last_instruction(instr);
@@ -580,7 +580,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let saved_swd = self.the_i387.swd;
         self.the_i387.swd = x87_sw;
 
-        self.write_virtual_dword(seg, eaddr, save_reg as u32)?;
+        self.v_write_dword(seg, eaddr, save_reg as u32)?;
 
         self.the_i387.swd = saved_swd;
         if pop_stack {
@@ -604,7 +604,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fistp_qword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
         self.fpu_update_last_instruction(instr);
@@ -640,7 +640,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let saved_swd = self.the_i387.swd;
         self.the_i387.swd = x87_sw;
 
-        self.write_virtual_qword(seg, eaddr, save_reg as u64)?;
+        self.v_write_qword(seg, eaddr, save_reg as u64)?;
 
         self.the_i387.swd = saved_swd;
 
@@ -662,7 +662,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fbstp_packed_bcd(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
         self.fpu_update_last_instruction(instr);
@@ -728,8 +728,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.the_i387.swd = x87_sw;
 
         // Write packed BCD to memory
-        self.write_virtual_qword(seg, eaddr, save_reg_lo)?;
-        self.write_virtual_word(seg, eaddr.wrapping_add(8), save_reg_hi)?;
+        self.v_write_qword(seg, eaddr, save_reg_lo)?;
+        self.v_write_word(seg, eaddr.wrapping_add(8), save_reg_hi)?;
 
         self.the_i387.swd = saved_swd;
 
@@ -747,7 +747,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fisttp16(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
         self.fpu_update_last_instruction(instr);
@@ -778,7 +778,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let saved_swd = self.the_i387.swd;
         self.the_i387.swd = x87_sw;
 
-        self.write_virtual_word(seg, eaddr, save_reg as u16)?;
+        self.v_write_word(seg, eaddr, save_reg as u16)?;
 
         self.the_i387.swd = saved_swd;
 
@@ -792,7 +792,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fisttp32(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
         self.fpu_update_last_instruction(instr);
@@ -823,7 +823,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let saved_swd = self.the_i387.swd;
         self.the_i387.swd = x87_sw;
 
-        self.write_virtual_dword(seg, eaddr, save_reg as u32)?;
+        self.v_write_dword(seg, eaddr, save_reg as u32)?;
 
         self.the_i387.swd = saved_swd;
 
@@ -837,7 +837,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fisttp64(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
 
         self.fpu_update_last_instruction(instr);
@@ -868,7 +868,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let saved_swd = self.the_i387.swd;
         self.the_i387.swd = x87_sw;
 
-        self.write_virtual_qword(seg, eaddr, save_reg as u64)?;
+        self.v_write_qword(seg, eaddr, save_reg as u64)?;
 
         self.the_i387.swd = saved_swd;
 

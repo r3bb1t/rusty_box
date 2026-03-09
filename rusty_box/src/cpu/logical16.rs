@@ -137,7 +137,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Opcode: XOR_EwGw_ZERO_IDIOM or XOR_GwEw_ZERO_IDIOM
     /// Matches BX_CPU_C::ZERO_IDIOM_GwR
     pub fn zero_idiom_gw_r(&mut self, instr: &Instruction) {
-        let dst = instr.meta_data[0] as usize;
+        let dst = instr.operands.dst as usize;
         self.set_gpr16(dst, 0);
         self.set_flags_oszapc_logic_16(0);
     }
@@ -183,10 +183,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// CMP_GwEw_M: CMP r16, r/m16 (memory form)
     pub fn cmp_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
         let op1 = self.get_gpr16(instr.dst() as usize);
-        let op2 = self.read_virtual_word(seg, eaddr)?;
+        let op2 = self.v_read_word(seg, eaddr)?;
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_16(op1, op2, result);
         Ok(())
@@ -194,9 +194,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// CMP_EwIw_M: CMP r/m16, imm16 (memory form)
     pub fn cmp_ew_iw_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1 = self.read_virtual_word(seg, eaddr)?;
+        let op1 = self.v_read_word(seg, eaddr)?;
         let op2 = instr.iw();
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_16(op1, op2, result);
@@ -260,10 +260,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// AND_EwGwR: AND r/m16, r16 (register form, store-direction)
     /// Opcode 0x21: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
     pub fn and_ew_gw_r(&mut self, instr: &Instruction) {
-        let op1 = self.get_gpr16(instr.meta_data[0] as usize); // rm = destination
-        let op2 = self.get_gpr16(instr.meta_data[1] as usize); // nnn = source
+        let op1 = self.get_gpr16(instr.operands.dst as usize); // rm = destination
+        let op2 = self.get_gpr16(instr.operands.src1 as usize); // nnn = source
         let result = op1 & op2;
-        self.set_gpr16(instr.meta_data[0] as usize, result);
+        self.set_gpr16(instr.operands.dst as usize, result);
         self.set_flags_oszapc_logic_16(result);
     }
 
@@ -305,10 +305,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// XOR_EwGwR: XOR r/m16, r16 (register form, store-direction)
     /// Opcode 0x31: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
     pub fn xor_ew_gw_r(&mut self, instr: &Instruction) {
-        let op1 = self.get_gpr16(instr.meta_data[0] as usize); // rm = destination
-        let op2 = self.get_gpr16(instr.meta_data[1] as usize); // nnn = source
+        let op1 = self.get_gpr16(instr.operands.dst as usize); // rm = destination
+        let op2 = self.get_gpr16(instr.operands.src1 as usize); // nnn = source
         let result = op1 ^ op2;
-        self.set_gpr16(instr.meta_data[0] as usize, result);
+        self.set_gpr16(instr.operands.dst as usize, result);
         self.set_flags_oszapc_logic_16(result);
     }
 
@@ -341,10 +341,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// OR_EwGwR: OR r/m16, r16 (register form, store-direction)
     /// Opcode 0x09: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
     pub fn or_ew_gw_r(&mut self, instr: &Instruction) {
-        let op1 = self.get_gpr16(instr.meta_data[0] as usize); // rm = destination
-        let op2 = self.get_gpr16(instr.meta_data[1] as usize); // nnn = source
+        let op1 = self.get_gpr16(instr.operands.dst as usize); // rm = destination
+        let op2 = self.get_gpr16(instr.operands.src1 as usize); // nnn = source
         let result = op1 | op2;
-        self.set_gpr16(instr.meta_data[0] as usize, result);
+        self.set_gpr16(instr.operands.dst as usize, result);
         self.set_flags_oszapc_logic_16(result);
     }
 
@@ -413,9 +413,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// XOR_EwGwM: XOR r/m16, r16 (memory form)
     /// Matches BX_CPU_C::XOR_EwGwM
     pub fn xor_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1_16 = self.read_rmw_virtual_word(seg, eaddr)?;
+        let op1_16 = self.v_read_rmw_word(seg, eaddr)?;
         let src_reg = instr.src() as usize; // src()=[1]=nnn=register for 16-bit store (decoder swaps)
         let op2_16 = self.get_gpr16(src_reg);
         let result = op1_16 ^ op2_16;
@@ -436,9 +436,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// XOR_GwEwM: XOR r16, r/m16 (memory form)
     /// Matches BX_CPU_C::XOR_GwEwM
     pub fn xor_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op2_16 = self.read_virtual_word(seg, eaddr)?;
+        let op2_16 = self.v_read_word(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let op1_16 = self.get_gpr16(dst_reg);
         let result = op1_16 ^ op2_16;
@@ -458,9 +458,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// XOR_EwIwM: XOR r/m16, imm16 (memory form)
     /// Matches BX_CPU_C::XOR_EwIwM
     pub fn xor_ew_iw_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1_16 = self.read_rmw_virtual_word(seg, eaddr)?;
+        let op1_16 = self.v_read_rmw_word(seg, eaddr)?;
         let op2_16 = instr.iw();
         let result = op1_16 ^ op2_16;
 
@@ -480,9 +480,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// OR_EwGwM: OR r/m16, r16 (memory form)
     /// Matches BX_CPU_C::OR_EwGwM
     pub fn or_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1_16 = self.read_rmw_virtual_word(seg, eaddr)?;
+        let op1_16 = self.v_read_rmw_word(seg, eaddr)?;
         let src_reg = instr.src() as usize; // src()=[1]=nnn=register for 16-bit store (decoder swaps)
         let op2_16 = self.get_gpr16(src_reg);
         let result = op1_16 | op2_16;
@@ -503,9 +503,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// OR_GwEwM: OR r16, r/m16 (memory form)
     /// Matches BX_CPU_C::OR_GwEwM
     pub fn or_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op2_16 = self.read_virtual_word(seg, eaddr)?;
+        let op2_16 = self.v_read_word(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let op1_16 = self.get_gpr16(dst_reg);
         let result = op1_16 | op2_16;
@@ -525,9 +525,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// OR_EwIwM: OR r/m16, imm16 (memory form)
     /// Matches BX_CPU_C::OR_EwIwM
     pub fn or_ew_iw_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1_16 = self.read_rmw_virtual_word(seg, eaddr)?;
+        let op1_16 = self.v_read_rmw_word(seg, eaddr)?;
         let op2_16 = instr.iw();
         let result = op1_16 | op2_16;
 
@@ -547,9 +547,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// AND_EwGwM: AND r/m16, r16 (memory form)
     /// Matches BX_CPU_C::AND_EwGwM
     pub fn and_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1_16 = self.read_rmw_virtual_word(seg, eaddr)?;
+        let op1_16 = self.v_read_rmw_word(seg, eaddr)?;
         let src_reg = instr.src() as usize; // src()=[1]=nnn=register for 16-bit store (decoder swaps)
         let op2_16 = self.get_gpr16(src_reg);
         let result = op1_16 & op2_16;
@@ -570,9 +570,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// AND_GwEwM: AND r16, r/m16 (memory form)
     /// Matches BX_CPU_C::AND_GwEwM
     pub fn and_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op2_16 = self.read_virtual_word(seg, eaddr)?;
+        let op2_16 = self.v_read_word(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         let op1_16 = self.get_gpr16(dst_reg);
         let result = op1_16 & op2_16;
@@ -592,9 +592,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// AND_EwIwM: AND r/m16, imm16 (memory form)
     /// Matches BX_CPU_C::AND_EwIwM
     pub fn and_ew_iw_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1_16 = self.read_rmw_virtual_word(seg, eaddr)?;
+        let op1_16 = self.v_read_rmw_word(seg, eaddr)?;
         let op2_16 = instr.iw();
         let result = op1_16 & op2_16;
 
@@ -614,9 +614,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// NOT_EwM: NOT r/m16 (memory form)
     /// Matches BX_CPU_C::NOT_EwM
     pub fn not_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1_16 = self.read_rmw_virtual_word(seg, eaddr)?;
+        let op1_16 = self.v_read_rmw_word(seg, eaddr)?;
         let result = !op1_16;
 
         self.write_rmw_linear_word(result);
@@ -633,9 +633,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// TEST_EwGwM: TEST r/m16, r16 (memory form)
     /// Opcode 0x85 is NOT store-direction, so dst() = nnn = register operand
     pub fn test_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1_16 = self.read_virtual_word(seg, eaddr)?;
+        let op1_16 = self.v_read_word(seg, eaddr)?;
         let src_reg = instr.dst() as usize; // Opcode 0x85 is NOT store-direction: dst()=nnn=register
         let op2_16 = self.get_gpr16(src_reg);
         let result = op1_16 & op2_16;
@@ -656,9 +656,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// TEST_EwIwM: TEST r/m16, imm16 (memory form)
     /// Matches BX_CPU_C::TEST_EwIwM
     pub fn test_ew_iw_m(&mut self, instr: &Instruction) -> super::Result<()> {
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let op1_16 = self.read_virtual_word(seg, eaddr)?;
+        let op1_16 = self.v_read_word(seg, eaddr)?;
         let op2_16 = instr.iw();
         let result = op1_16 & op2_16;
 
@@ -802,9 +802,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = if instr.mod_c0() {
             self.get_gpr16(instr.dst() as usize)
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_word(seg, eaddr)?
+            self.v_read_word(seg, eaddr)?
         };
         let bit = (instr.ib() & 0x0F) as u16;
         let cf = (op1 >> bit) & 1;
@@ -822,9 +822,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.set(EFlags::CF, cf != 0);
             self.set_gpr16(dst, op1 | (1 << bit));
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            let op1 = self.read_rmw_virtual_word(seg, eaddr)?;
+            let op1 = self.v_read_rmw_word(seg, eaddr)?;
             let cf = (op1 >> bit) & 1;
             self.eflags.set(EFlags::CF, cf != 0);
             self.write_rmw_linear_word(op1 | (1 << bit));
@@ -842,9 +842,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.set(EFlags::CF, cf != 0);
             self.set_gpr16(dst, op1 & !(1 << bit));
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            let op1 = self.read_rmw_virtual_word(seg, eaddr)?;
+            let op1 = self.v_read_rmw_word(seg, eaddr)?;
             let cf = (op1 >> bit) & 1;
             self.eflags.set(EFlags::CF, cf != 0);
             self.write_rmw_linear_word(op1 & !(1 << bit));
@@ -862,9 +862,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.set(EFlags::CF, cf != 0);
             self.set_gpr16(dst, op1 ^ (1 << bit));
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
-            let op1 = self.read_rmw_virtual_word(seg, eaddr)?;
+            let op1 = self.v_read_rmw_word(seg, eaddr)?;
             let cf = (op1 >> bit) & 1;
             self.eflags.set(EFlags::CF, cf != 0);
             self.write_rmw_linear_word(op1 ^ (1 << bit));
@@ -878,13 +878,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = if instr.mod_c0() {
             self.get_gpr16(instr.dst() as usize)
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             // For memory form, bit offset is full op2 (not masked to 15).
             // Bochs bit16.cc: displacement = ((Bit16s)(op2 & 0xfff0)) / 16 * 2
             let displacement = ((op2 as i16) >> 4) << 1;
             let addr = (eaddr as i32).wrapping_add(displacement as i32) as u32;
             let seg = BxSegregs::from(instr.seg());
-            self.read_virtual_word(seg, addr)?
+            self.v_read_word(seg, addr)?
         };
         let bit = op2 & 0x0F;
         let cf = (op1 >> bit) & 1;
@@ -903,11 +903,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.set(EFlags::CF, cf != 0);
             self.set_gpr16(dst, op1 | (1 << bit));
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let displacement = ((op2 as i16) >> 4) << 1;
             let addr = (eaddr as i32).wrapping_add(displacement as i32) as u32;
             let seg = BxSegregs::from(instr.seg());
-            let op1 = self.read_rmw_virtual_word(seg, addr)?;
+            let op1 = self.v_read_rmw_word(seg, addr)?;
             let cf = (op1 >> bit) & 1;
             self.eflags.set(EFlags::CF, cf != 0);
             self.write_rmw_linear_word(op1 | (1 << bit));
@@ -926,11 +926,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.set(EFlags::CF, cf != 0);
             self.set_gpr16(dst, op1 & !(1 << bit));
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let displacement = ((op2 as i16) >> 4) << 1;
             let addr = (eaddr as i32).wrapping_add(displacement as i32) as u32;
             let seg = BxSegregs::from(instr.seg());
-            let op1 = self.read_rmw_virtual_word(seg, addr)?;
+            let op1 = self.v_read_rmw_word(seg, addr)?;
             let cf = (op1 >> bit) & 1;
             self.eflags.set(EFlags::CF, cf != 0);
             self.write_rmw_linear_word(op1 & !(1 << bit));
@@ -949,11 +949,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.set(EFlags::CF, cf != 0);
             self.set_gpr16(dst, op1 ^ (1 << bit));
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let displacement = ((op2 as i16) >> 4) << 1;
             let addr = (eaddr as i32).wrapping_add(displacement as i32) as u32;
             let seg = BxSegregs::from(instr.seg());
-            let op1 = self.read_rmw_virtual_word(seg, addr)?;
+            let op1 = self.v_read_rmw_word(seg, addr)?;
             let cf = (op1 >> bit) & 1;
             self.eflags.set(EFlags::CF, cf != 0);
             self.write_rmw_linear_word(op1 ^ (1 << bit));
