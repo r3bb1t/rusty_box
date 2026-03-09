@@ -27,15 +27,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
+        let eaddr = self.resolve_addr(instr);
         // Bochs: (eaddr + 2) & i->asize_mask() — mask for 16-bit address wrap
-        let asize_mask: u32 = if instr.as32_l() == 0 {
+        let asize_mask: u64 = if self.long64_mode() {
+            0xFFFF_FFFF_FFFF_FFFF
+        } else if instr.as32_l() == 0 {
             0xFFFF
         } else {
-            0xFFFFFFFF
+            0xFFFF_FFFF
         };
-        let limit = self.read_virtual_word(seg, eaddr)?;
-        let mut base = self.read_virtual_dword(seg, eaddr.wrapping_add(2) & asize_mask)? as u64;
+        let limit = self.v_read_word(seg, eaddr)?;
+        let mut base = self.v_read_dword(seg, eaddr.wrapping_add(2) & asize_mask)? as u64;
 
         // In 16-bit operand size mode, mask base to 24 bits (80286 compatibility)
         // Based on Bochs protect_ctrl.cc:858
@@ -60,14 +62,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let asize_mask: u32 = if instr.as32_l() == 0 {
+        let eaddr = self.resolve_addr(instr);
+        let asize_mask: u64 = if self.long64_mode() {
+            0xFFFF_FFFF_FFFF_FFFF
+        } else if instr.as32_l() == 0 {
             0xFFFF
         } else {
-            0xFFFFFFFF
+            0xFFFF_FFFF
         };
-        self.write_virtual_word(seg, eaddr, self.gdtr.limit)?;
-        self.write_virtual_dword(
+        self.v_write_word(seg, eaddr, self.gdtr.limit)?;
+        self.v_write_dword(
             seg,
             eaddr.wrapping_add(2) & asize_mask,
             self.gdtr.base as u32,
@@ -86,14 +90,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let asize_mask: u32 = if instr.as32_l() == 0 {
+        let eaddr = self.resolve_addr(instr);
+        let asize_mask: u64 = if self.long64_mode() {
+            0xFFFF_FFFF_FFFF_FFFF
+        } else if instr.as32_l() == 0 {
             0xFFFF
         } else {
-            0xFFFFFFFF
+            0xFFFF_FFFF
         };
-        let limit = self.read_virtual_word(seg, eaddr)?;
-        let mut base = self.read_virtual_dword(seg, eaddr.wrapping_add(2) & asize_mask)? as u64;
+        let limit = self.v_read_word(seg, eaddr)?;
+        let mut base = self.v_read_dword(seg, eaddr.wrapping_add(2) & asize_mask)? as u64;
 
         // In 16-bit operand size mode, mask base to 24 bits
         // Based on Bochs protect_ctrl.cc:893
@@ -118,14 +124,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
         let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr32(instr);
-        let asize_mask: u32 = if instr.as32_l() == 0 {
+        let eaddr = self.resolve_addr(instr);
+        let asize_mask: u64 = if self.long64_mode() {
+            0xFFFF_FFFF_FFFF_FFFF
+        } else if instr.as32_l() == 0 {
             0xFFFF
         } else {
-            0xFFFFFFFF
+            0xFFFF_FFFF
         };
-        self.write_virtual_word(seg, eaddr, self.idtr.limit)?;
-        self.write_virtual_dword(
+        self.v_write_word(seg, eaddr, self.idtr.limit)?;
+        self.v_write_dword(
             seg,
             eaddr.wrapping_add(2) & asize_mask,
             self.idtr.base as u32,
@@ -157,8 +165,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             // Memory destination — always write 16-bit
             let seg = BxSegregs::from(instr.seg());
-            let eaddr = self.resolve_addr32(instr);
-            self.write_virtual_word(seg, eaddr, val)?;
+            let eaddr = self.resolve_addr(instr);
+            self.v_write_word(seg, eaddr, val)?;
         }
         Ok(())
     }
@@ -188,8 +196,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             // Memory form: always writes 16-bit (Bochs crregs.cc:937-958)
             let seg = BxSegregs::from(instr.seg());
-            let eaddr = self.resolve_addr32(instr);
-            self.write_virtual_word(seg, eaddr, msw as u16)?;
+            let eaddr = self.resolve_addr(instr);
+            self.v_write_word(seg, eaddr, msw as u16)?;
         }
         Ok(())
     }
@@ -218,8 +226,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             // Memory destination — always write 16-bit
             let seg = BxSegregs::from(instr.seg());
-            let eaddr = self.resolve_addr32(instr);
-            self.write_virtual_word(seg, eaddr, val)?;
+            let eaddr = self.resolve_addr(instr);
+            self.v_write_word(seg, eaddr, val)?;
         }
         Ok(())
     }
@@ -240,8 +248,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op1_16 = self.get_gpr16(instr.src1() as usize);
         } else {
             let seg = BxSegregs::from(instr.seg());
-            let eaddr = self.resolve_addr32(instr);
-            op1_16 = self.read_virtual_word(seg, eaddr)?;
+            let eaddr = self.resolve_addr(instr);
+            op1_16 = self.v_read_word(seg, eaddr)?;
         }
         // op2_16 = Gw = nnn = dst()
         let op2_16 = self.get_gpr16(instr.dst() as usize);
@@ -254,8 +262,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.set_gpr16(instr.src1() as usize, new_op1);
             } else {
                 let seg = BxSegregs::from(instr.seg());
-                let eaddr = self.resolve_addr32(instr);
-                self.write_virtual_word(seg, eaddr, new_op1)?;
+                let eaddr = self.resolve_addr(instr);
+                self.v_write_word(seg, eaddr, new_op1)?;
             }
             self.eflags.insert(EFlags::ZF);
         } else {
@@ -313,8 +321,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             raw_selector = self.get_gpr16(instr.src1() as usize);
         } else {
             let seg = BxSegregs::from(instr.seg());
-            let eaddr = self.resolve_addr32(instr);
-            raw_selector = self.read_virtual_word(seg, eaddr)?;
+            let eaddr = self.resolve_addr(instr);
+            raw_selector = self.v_read_word(seg, eaddr)?;
         }
 
         // Null selector → clear ZF
@@ -409,8 +417,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             raw_selector = self.get_gpr16(instr.src1() as usize);
         } else {
             let seg = BxSegregs::from(instr.seg());
-            let eaddr = self.resolve_addr32(instr);
-            raw_selector = self.read_virtual_word(seg, eaddr)?;
+            let eaddr = self.resolve_addr(instr);
+            raw_selector = self.v_read_word(seg, eaddr)?;
         }
 
         // Null selector → clear ZF
@@ -501,8 +509,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             raw_selector = self.get_gpr16(instr.dst() as usize);
         } else {
             let seg = BxSegregs::from(instr.seg());
-            let eaddr = self.resolve_addr32(instr);
-            raw_selector = self.read_virtual_word(seg, eaddr)?;
+            let eaddr = self.resolve_addr(instr);
+            raw_selector = self.v_read_word(seg, eaddr)?;
         }
 
         // Null selector → clear ZF
@@ -594,8 +602,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             raw_selector = self.get_gpr16(instr.dst() as usize);
         } else {
             let seg = BxSegregs::from(instr.seg());
-            let eaddr = self.resolve_addr32(instr);
-            raw_selector = self.read_virtual_word(seg, eaddr)?;
+            let eaddr = self.resolve_addr(instr);
+            raw_selector = self.v_read_word(seg, eaddr)?;
         }
 
         // Null selector → clear ZF

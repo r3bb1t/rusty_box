@@ -247,20 +247,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if vec_idx < 32 {
             self.diag_exception_counts[vec_idx] += 1;
         }
-        // Alpine boot debug: trace first exception near the stuck point
-        if self.icount >= 1849000 && self.icount <= 1849300 {
-            let caller = core::panic::Location::caller();
-            tracing::error!(
-                "ALPINE_EXC: vec={:?} err={:#x} RIP={:#x} prev_RIP={:#x} icount={} caller={}:{}",
-                vector,
-                error_code,
-                self.rip(),
-                self.prev_rip,
-                self.icount,
-                caller.file(),
-                caller.line(),
-            );
-        }
         // Log the caller site for #GP to identify spurious exceptions during debugging
         if vector == Exception::Gp && !self.real_mode() {
             let caller = core::panic::Location::caller();
@@ -351,8 +337,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let last = self.last_exception_type as usize;
             let newt = exception_type as usize;
             if last < 3 && newt < 3 && !IS_EXCEPTION_OK[last][newt] {
-                tracing::error!("DOUBLE FAULT: 1st exception type={} 2nd={:?}(type={}) at RIP={:#x} error_code={:#x} icount={}",
-                    last, vector, newt, self.rip(), error_code, self.icount);
+                tracing::error!("DOUBLE FAULT: 1st exception type={} 2nd={:?}(type={}) at RIP={:#x} error_code={:#x} icount={} CR2={:#x}",
+                    last, vector, newt, self.rip(), error_code, self.icount, self.cr2);
                 return self.exception(Exception::Df, 0);
             }
         }
@@ -452,11 +438,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn exception_push_error(&mut self, vector: usize) -> bool {
         if vector < BX_CPU_HANDLED_EXCEPTIONS {
             if vector == Exception::Cp as usize {
-                if !self.bx_cpuid_support_isa_extension(X86Feature::IsaCET) {
+                if !self.bx_cpuid_support_isa_extension(X86Feature::IsaCet) {
                     return false;
                 }
             } else if vector == Exception::Sx as usize
-                && !self.bx_cpuid_support_isa_extension(X86Feature::IsaSVM)
+                && !self.bx_cpuid_support_isa_extension(X86Feature::IsaSvm)
             {
                 return false;
             }

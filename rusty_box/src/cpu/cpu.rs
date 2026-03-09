@@ -543,11 +543,6 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(crate) perf_icache_miss: u64,
     pub(crate) perf_prefetch: u64,
 
-    // TEMPORARY: Alpine kernel stuck-point diagnostics
-    pub(crate) diag_alpine_trace: u32,
-    pub(crate) diag_alpine_trace2: u32,
-    pub(crate) diag_alpine_trace3: u32,
-
     // Diagnostic counters for handle_async_event interrupt delivery
     pub(crate) diag_hae_intr_delivered: u64,
     pub(crate) diag_hae_intr_if_blocked: u64,
@@ -981,6 +976,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Write 64-bit qword to memory (matching mem_write_qword)
     pub(super) fn mem_write_qword(&mut self, laddr: u64, value: u64) {
+
         // Write 8 bytes to memory
         let bytes = value.to_le_bytes();
         self.mem_write_byte(laddr, bytes[0]);
@@ -1463,42 +1459,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // Save pre-execution RIP for diagnostic address tracking
                 let pre_exec_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx as u32 };
 
-                // TEMPORARY: Dump the loop body code once
-                if pre_exec_rip == 0x035aef46 && self.diag_alpine_trace == 0 {
-                    self.diag_alpine_trace = 1;
-                    // Dump code from 0x35aeed1 (loop start) through 0x35aef48 (loop end)
-                    let mut code_buf = alloc::vec![0u8; 128]; // 0x35aeed1 to 0x35aef51
-                    for i in 0..code_buf.len() {
-                        let addr = 0x35aeed1u64 + i as u64;
-                        if let Ok(paddr) = self.translate_data_read(addr) {
-                            code_buf[i] = self.mem_read_byte(paddr);
-                        }
-                    }
-                    // Print first 64 bytes of loop body
-                    let hex1: alloc::string::String = code_buf[..64].iter().map(|b| alloc::format!("{:02x} ", b)).collect();
-                    let hex2: alloc::string::String = code_buf[64..].iter().map(|b| alloc::format!("{:02x} ", b)).collect();
-                    tracing::error!("[ALPINE-CODE] Loop body at 0x35aeed1: {}", hex1);
-                    tracing::error!("[ALPINE-CODE] Loop body at 0x35aef11: {}", hex2);
-                    tracing::error!(
-                        "[ALPINE-REGS] RAX={:#018x} RBX={:#018x} RCX={:#018x} RDX={:#018x} RSI={:#018x} RDI={:#018x} RSP={:#018x} RBP={:#018x} R8={:#018x} R9={:#018x} R10={:#018x} R11={:#018x} R12={:#018x} R13={:#018x} R14={:#018x} R15={:#018x} CR3={:#018x}",
-                        self.rax(), self.rbx(), self.rcx(), self.rdx(),
-                        self.rsi(), self.rdi(), self.rsp(), self.rbp(),
-                        self.r8(), self.r9(), self.r10(), self.r11(),
-                        self.r12(), self.r13(), self.r14(), self.r15(),
-                        self.cr3
-                    );
-                    // Dump stack
-                    let sp = self.rsp();
-                    let mut stack = [0u64; 8];
-                    for i in 0..8 {
-                        let addr = sp + (i as u64 * 8);
-                        stack[i] = self.translate_data_read(addr).map(|p| self.mem_read_qword(p)).unwrap_or(0xDEAD);
-                    }
-                    tracing::error!(
-                        "[ALPINE-STACK] RSP={:#018x}: {:#018x} {:#018x} {:#018x} {:#018x} {:#018x} {:#018x} {:#018x} {:#018x}",
-                        sp, stack[0], stack[1], stack[2], stack[3], stack[4], stack[5], stack[6], stack[7]
-                    );
-                }
+                // TEMPORARY: Trace serial port writes (earlyprintk)
+                // (moved to dispatcher/io level)
 
                 // Matching C++ line 202: RIP += i->ilen();
                 // Advance RIP before execution (handlers may read RIP and expect it advanced)
@@ -1511,6 +1473,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // Execute instruction (matching C++ BX_CPU_CALL_METHOD)
                 // SAFETY: i_ptr is valid for the lifetime of this loop iteration (see above).
                 let opcode = unsafe { (*i_ptr).get_ia_opcode() };
+
                 match self.execute_instruction(unsafe { &*i_ptr }) {
                     Ok(()) => {}
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
@@ -1742,7 +1705,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Check if entry matches and has valid instruction (matching C++ line 299)
         let cache_hit = matches!(entry.p_addr, crate::cpu::icache::IcacheAddress::Address(addr) if addr == p_addr)
-            && entry.i.meta_info.ilen != 0;
+            && entry.i.length != 0;
 
         if cache_hit {
             // SMC detection: compare first 8 bytes against current memory
@@ -1760,7 +1723,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // remapped (e.g. uselib/mmap loaded a new library), the
                 // second-page bytes changed but the SMC check didn't catch it.
                 // Force a cache miss so boundary_fetch re-reads both pages.
-                let ilen = entry.i.meta_info.ilen as usize;
+                let ilen = entry.i.length as usize;
                 if ilen > 0 && avail < ilen {
                     smc_invalid = true;
                 }
@@ -1779,7 +1742,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 "ICACHE-MISS: p_addr={:#x}, hash={}, ilen={}",
                 p_addr,
                 hash_idx,
-                self.i_cache.entry[hash_idx].i.meta_info.ilen
+                self.i_cache.entry[hash_idx].i.length
             );
         }
 

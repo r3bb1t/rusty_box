@@ -958,7 +958,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             self.get_gpr32(src) as u64
         };
-        tracing::error!("CR3_WRITE: old={:#x} new={:#x} icount={} RIP={:#x}", self.cr3, val, self.icount, self.prev_rip);
         self.cr3 = val;
 
         // In PAE mode (but not long mode), validate and cache PDPTE entries.
@@ -1038,9 +1037,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Bochs's i->src()=rm. In our decoder src1()=nnn (opcode ext), dst()=rm.
             self.get_gpr16(instr.dst() as usize)
         } else {
-            let eaddr = self.resolve_addr32(instr);
+            let eaddr = self.resolve_addr(instr);
             let seg = super::decoder::BxSegregs::from(instr.seg());
-            self.read_virtual_word(seg, eaddr)?
+            self.v_read_word(seg, eaddr)?
         };
 
         // LMSW cannot clear PE (Bochs crregs.cc:903-905)
@@ -1089,91 +1088,91 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut allow = 0u32;
 
         // VME → CR4.VME + CR4.PVI
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaVME) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaVme) {
             allow |= BxCr4::VME.bits() | BxCr4::PVI.bits();
         }
         // Pentium → CR4.TSD
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPENTIUM) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPentium) {
             allow |= BxCr4::TSD.bits();
         }
         // Debug Extensions → CR4.DE
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaDEBUG_EXTENSIONS) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaDebugExtensions) {
             allow |= BxCr4::DE.bits();
         }
         // PSE → CR4.PSE
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPSE) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPse) {
             allow |= BxCr4::PSE.bits();
         }
         // PAE → CR4.PAE
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPAE) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPae) {
             allow |= BxCr4::PAE.bits();
         }
         // MCE always allowed (Bochs crregs.cc:1227)
         allow |= BxCr4::MCE.bits();
         // PGE → CR4.PGE
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPGE) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPge) {
             allow |= BxCr4::PGE.bits();
         }
         // PCE always allowed for CPU level >= 6 (Bochs crregs.cc:1233)
         allow |= BxCr4::PCE.bits();
         // SSE → CR4.OSFXSR + CR4.OSXMMEXCPT
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaSSE) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaSse) {
             allow |= BxCr4::OSFXSR.bits() | BxCr4::OSXMMEXCPT.bits();
         }
         // VMX → CR4.VMXE
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaVMX) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaVmx) {
             allow |= BxCr4::VMXE.bits();
         }
         // SMX → CR4.SMXE
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaSMX) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaSmx) {
             allow |= BxCr4::SMXE.bits();
         }
         // PCID → CR4.PCIDE
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPCID) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPcid) {
             allow |= BxCr4::PCIDE.bits();
         }
         // FSGSBASE → CR4.FSGSBASE
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaFSGSBASE) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaFsgsbase) {
             allow |= BxCr4::FSGSBASE.bits();
         }
         // XSAVE → CR4.OSXSAVE
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaXSAVE) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaXsave) {
             allow |= BxCr4::OSXSAVE.bits();
         }
         // SMEP → CR4.SMEP
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaSMEP) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaSmep) {
             allow |= BxCr4::SMEP.bits();
         }
         // SMAP → CR4.SMAP
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaSMAP) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaSmap) {
             allow |= BxCr4::SMAP.bits();
         }
         // PKU → CR4.PKE
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPKU) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPku) {
             allow |= BxCr4::PKE.bits();
         }
         // UMIP → CR4.UMIP
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaUMIP) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaUmip) {
             allow |= BxCr4::UMIP.bits();
         }
         // LA57 → CR4.LA57
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaLA57) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaLa57) {
             allow |= BxCr4::LA57.bits();
         }
         // CET → CR4.CET
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaCET) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaCet) {
             allow |= BxCr4::CET.bits();
         }
         // PKS → CR4.PKS
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPKS) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPks) {
             allow |= BxCr4::PKS.bits();
         }
         // UINTR → CR4.UINTR
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaUINTR) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaUintr) {
             allow |= BxCr4::UINTR.bits();
         }
         // LASS → CR4.LASS
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaLASS) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaLass) {
             allow |= BxCr4::LASS.bits();
         }
 
@@ -1188,26 +1187,26 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut allow = 0u32;
 
         // NX → EFER.NXE (bit 11)
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaNX) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaNx) {
             allow |= 1 << 11; // BX_EFER_NXE_MASK
         }
         // SYSCALL_SYSRET_LEGACY → EFER.SCE (bit 0)
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaSYSCALL_SYSRET_LEGACY) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaSyscallSysretLegacy) {
             allow |= 1 << 0; // BX_EFER_SCE_MASK
         }
         // Long mode → SCE + LME + LMA
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaLONG_MODE) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaLongMode) {
             allow |= (1 << 0) | (1 << 8) | (1 << 10); // SCE | LME | LMA
                                                       // FFXSR → EFER.FFXSR (bit 14)
-            if self.bx_cpuid_support_isa_extension(X86Feature::IsaFFXSR) {
+            if self.bx_cpuid_support_isa_extension(X86Feature::IsaFfxsr) {
                 allow |= 1 << 14;
             }
             // SVM → EFER.SVME (bit 12)
-            if self.bx_cpuid_support_isa_extension(X86Feature::IsaSVM) {
+            if self.bx_cpuid_support_isa_extension(X86Feature::IsaSvm) {
                 allow |= 1 << 12;
             }
             // TCE → EFER.TCE (bit 15)
-            if self.bx_cpuid_support_isa_extension(X86Feature::IsaTCE) {
+            if self.bx_cpuid_support_isa_extension(X86Feature::IsaTce) {
                 allow |= 1 << 15;
             }
         }
@@ -1224,19 +1223,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut allow = (1u32 << 0) | (1u32 << 1);
 
         // AVX → YMM (bit 2)
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaAVX) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaAvx) {
             allow |= 1 << 2;
         }
         // AVX-512 → OPMASK (bit 5), ZMM_HI256 (bit 6), HI_ZMM (bit 7)
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaAVX512) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaAvx512) {
             allow |= (1 << 5) | (1 << 6) | (1 << 7);
         }
         // PKU → PKRU (bit 9)
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPKU) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaPku) {
             allow |= 1 << 9;
         }
         // AMX → XTILECFG (bit 17) + XTILEDATA (bit 18)
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaAMX) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaAmx) {
             allow |= (1 << 17) | (1 << 18);
         }
 
@@ -1251,11 +1250,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut allow = 0u32;
 
         // CET → CET_U (bit 11) + CET_S (bit 12)
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaCET) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaCet) {
             allow |= (1 << 11) | (1 << 12);
         }
         // UINTR → UINTR (bit 14)
-        if self.bx_cpuid_support_isa_extension(X86Feature::IsaUINTR) {
+        if self.bx_cpuid_support_isa_extension(X86Feature::IsaUintr) {
             allow |= 1 << 14;
         }
 

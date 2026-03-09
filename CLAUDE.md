@@ -16,9 +16,9 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-03-07):**
+**Current Status (2026-03-09):**
 - ✅ **DLX Linux boots to interactive bash shell!** Full boot: BIOS POST → LILO → kernel → init → `dlx login: root` → `dlx:~#` (200M instructions sufficient)
-- ✅ **Alpine Linux enters 64-bit long mode!** Direct kernel boot reaches long mode (mode=4, CR0=0x80050033). Stuck at RIP=0x35aef46 (page table mapping function returning 0). Session 28 audit found multiple 64-bit decoder/accessor bugs (see below) that likely cause this.
+- ⚠️ **Alpine Linux triple-faults at i=620815422** — ROOT CAUSE IDENTIFIED (session 31): FineIBT thunk for `idt_setup_early_handler` is unpatched (XOR EDI,EDI), passing NULL → IDT entries never filled. Kernel page tables only identity-map 16MB-54MB (kernel image range), not 0x10000 (boot_params). Access to 0x10000 #PFs with empty IDT → triple fault. See `docs/ALPINE_DIRECT_BOOT_INVESTIGATION.md`. **Fix paths**: (a) implement/trace FineIBT alternative patching, (b) widen identity mapping, (c) move boot_params to mapped range.
 - ✅ **Session 28-29 audit RESOLVED**: All 6 CRITICAL bugs resolved (3 already fixed, 1 not-a-bug, 2 confirmed fixed). Most HIGH bugs also confirmed fixed. Remaining unfixed: ~95 SSE opcode tables, decmask NNN/RRR fields, SRC_EQ_DST bit, UD64 opcodes, 64-bit TLB fast path (performance only).
 - ✅ **64-bit canonical address checks (session 30)**: All 10 `read/write_virtual_*_64` functions now check canonical addresses (Bochs access.cc:339/444). Non-canonical raises #GP(0) or #SS(0). Cross-page paths check last byte too.
 - ✅ **LPF mask 64-bit fix (session 30)**: `translate_data_access` used `0xFFFF_F000` (32-bit truncating) for lpf/ppf. Fixed to `LPF_MASK` (`0xFFFF_FFFF_FFFF_F000`). Was causing incorrect TLB lookups for 64-bit kernel virtual addresses.
@@ -261,8 +261,9 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ### Next Steps
 1. ~~**Reach DLX Linux `dlx login:` prompt**~~ — **DONE** (2026-03-03). Full boot to login prompt achieved.
 2. ~~**Interactive login**~~ — **DONE** (2026-03-04). SHRD/SHLD decoder fix resolved ext2 "directory #12 contains a hole" errors. `root` login → `dlx:~#` bash shell works.
-3. **Boot Alpine Linux** — **IN PROGRESS** (2026-03-07). Session 28 audit found the root causes:
-   - **Direct kernel boot**: Enters 64-bit mode but stuck at RIP=0x35aef46. Audit found 6 CRITICAL bugs: (a) SSE prefix F2/F3 swapped → wrong SSE opcodes, (b) get_gpr32 returns 0 for R8D-R15D → all extended register reads broken, (c) REX.B not applied for non-ModRM → PUSH/POP/MOV R8-R15 wrong, (d) 0x67 prefix clears As32 → 16-bit addressing, (e) msr_fsbase/gsbase read wrong data, (f) 8-bit handlers ignore REX in CMP/TEST/AND/OR/NOT. Plus ~16 HIGH bugs in access.rs and decoder. Fix priority: C1-C3 first (trivial), then H1-H4.
+3. **Boot Alpine Linux** — **IN PROGRESS** (2026-03-09). ROOT CAUSE of triple fault identified (session 31):
+   - **Direct kernel boot**: Triple-faults at i=620815422. FineIBT thunk unpatched → `idt_setup_early_handler` receives NULL → IDT stays empty. Page tables only identity-map kernel image (PD[8]-PD[26], 16-54MB), not boot_params at 0x10000. Access to unmapped address #PFs with empty IDT → triple fault. See `docs/ALPINE_DIRECT_BOOT_INVESTIGATION.md`.
+   - **Fix paths**: (a) investigate/implement `__apply_fineibt` patching, (b) widen identity mapping in `__startup_64`, (c) move boot_params to mapped range (0x1000000+).
    - **ISOLINUX path**: El Torito boot works, ISOLINUX 6.04 loads + enters PM, but init_func table is empty → iso_init never called. See `docs/ISOLINUX_DEBUG.md`.
 4. **Fix `ide2 at 0x1e8` phantom** — PCI PIIX IDE BAR misconfiguration causes kernel to probe a non-existent 3rd IDE channel
 5. ~~**Fix LDT triple fault**~~ — FIXED: root cause was INT using IVT in PM + XCHG mod_c0 bug

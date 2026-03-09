@@ -900,8 +900,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Read 16-byte IDT entry (two qwords)
-        let desctmp1 = self.system_read_qword(self.idtr.base + vector as u64 * 16)?;
-        let desctmp2 = self.system_read_qword(self.idtr.base + vector as u64 * 16 + 8)?;
+        let idt_entry_addr = self.idtr.base + vector as u64 * 16;
+        let desctmp1 = self.system_read_qword(idt_entry_addr)?;
+        let desctmp2 = self.system_read_qword(idt_entry_addr + 8)?;
 
         // Bochs exception.cc:59-62 — extended attributes DWORD4 TYPE must be 0
         if desctmp2 & 0x00001F00_00000000u64 != 0 {
@@ -919,7 +920,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let gate_descriptor = self.parse_descriptor(dword1, dword2)?;
 
         if gate_descriptor.valid == 0 || gate_descriptor.segment {
-            tracing::error!("long_mode_int(): gate descriptor is not valid sys seg");
+            tracing::debug!(
+                "long_mode_int(): gate descriptor is not valid sys seg: vector={} type={:#x}",
+                vector as u8, gate_descriptor.r#type
+            );
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
                 error_code: idt_error_code,
