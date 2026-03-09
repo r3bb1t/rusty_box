@@ -1508,7 +1508,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.icount += 1;
 
                 // Record RIP in ring buffer during kernel phase for HLT diagnosis
-                if self.icount > 622_000_000 && self.long64_mode() {
+                if self.icount > 620_000_000 && self.long64_mode() {
                     self.diag_rip_ring[self.diag_rip_ring_idx & 63] = self.prev_rip;
                     self.diag_rip_ring_idx += 1;
                 }

@@ -993,8 +993,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
             }
             // Read boot_params to check initramfs address/size
-            // boot_params addr from R15 (originally ESI), fallback to 0x035f3000
-            let bp_addr = if self.r15() != 0 { self.r15() } else { 0x035f3000u64 };
+            // boot_params addr from R15 (originally ESI), fallback to 0x10000
+            let bp_addr = if self.r15() != 0 { self.r15() } else { 0x10000u64 };
             let rd_image = self.mem_read_dword(bp_addr + 0x218);
             let rd_size = self.mem_read_dword(bp_addr + 0x21C);
             eprintln!("  boot_params ramdisk_image={:#010x} ramdisk_size={:#010x} ({})",

@@ -1001,18 +1001,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // =====================================================================
         // Write boot_params (zero page)
         // =====================================================================
-        // For modern 64-bit kernels (protocol >= 2.10 with pref_address), place
-        // boot_params within the kernel's identity-mapped range. The decompressed
-        // kernel's __startup_64 only identity-maps PD entries covering
-        // pref_address..pref_address+init_size. boot_params at 0x10000 is outside
-        // this range and causes #PF → triple fault if IDT is not yet set up.
-        // Place boot_params just past init_size (still within the last mapped 2MB PD entry).
-        let boot_params_addr = if pref_address > 0 && init_size > 0 {
-            (pref_address + init_size + 0xFFF) & !0xFFF
-        } else {
-            0x10000 // Legacy fallback for old kernels (e.g., DLX Linux 1.3.89)
-        };
-        let cmdline_addr = boot_params_addr + 0x1000;
+        // Place boot_params at 0x10000 (standard location, matches QEMU).
+        // The decompressor relocates itself to ~pref_address+init_size area,
+        // which would overwrite boot_params if placed there. Low addresses
+        // (< 0x100000) are safe — the compressed kernel loads at 0x100000+
+        // and the decompressor never touches conventional memory.
+        // The kernel's early page fault handler (__early_make_pgtable) creates
+        // identity mappings on demand for any unmapped physical address.
+        let boot_params_addr: u64 = 0x10000;
+        let cmdline_addr: u64 = 0x20000;
         tracing::info!(
             "boot_params at {:#x}, cmdline at {:#x} (pref={:#x}, init_size={:#x})",
             boot_params_addr, cmdline_addr, pref_address, init_size

@@ -18,7 +18,7 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 **Current Status (2026-03-09):**
 - ✅ **DLX Linux boots to interactive bash shell!** Full boot: BIOS POST → LILO → kernel → init → `dlx login: root` → `dlx:~#` (200M instructions sufficient)
-- ⚠️ **Alpine Linux kernel panics before console setup** — Parity audit phases 1-5 complete. Triple fault resolved (C6/C7 decoder fix + boot_params relocation). Kernel now decompresses, enters 64-bit long mode, runs ~2.4M instructions, then hits native_halt() with IF=0 (panic). No serial/VGA output produced. Initramfs correctly loaded (ramdisk_image=0x076e5000, ramdisk_size=9544193). Root cause of early panic under investigation — likely unimplemented opcode or incorrect behavior in early kernel init before earlyprintk setup.
+- ⚠️ **Alpine Linux kernel panics before console setup** — Parity audit phases 1-5 in progress. boot_params moved to 0x10000 (QEMU standard) after confirming decompressor overwrites pref_address+init_size area. Kernel decompresses, enters 64-bit long mode, runs ~1.6M instructions in long mode, then hits native_halt() with IF=0 (panic). Two #PFs occur: (1) boot_params direct mapping at 0xffff888000010000 (handled correctly by `__early_make_pgtable`), (2) garbage CR2=0xcbc55149 from corrupted RBP during stack canary epilogue check → unrecoverable #PF → panic. No serial/VGA output (panic before earlyprintk). Root cause: RBP gets corrupted ~6K instructions after the first #PF — likely an incorrectly emulated instruction or missing feature in early kernel init.
 - ✅ **Session 28-29 audit RESOLVED**: All 6 CRITICAL bugs resolved (3 already fixed, 1 not-a-bug, 2 confirmed fixed). Most HIGH bugs also confirmed fixed. Remaining unfixed: ~95 SSE opcode tables, decmask NNN/RRR fields, SRC_EQ_DST bit, UD64 opcodes, 64-bit TLB fast path (performance only).
 - ✅ **64-bit canonical address checks (session 30)**: All 10 `read/write_virtual_*_64` functions now check canonical addresses (Bochs access.cc:339/444). Non-canonical raises #GP(0) or #SS(0). Cross-page paths check last byte too.
 - ✅ **LPF mask 64-bit fix (session 30)**: `translate_data_access` used `0xFFFF_F000` (32-bit truncating) for lpf/ppf. Fixed to `LPF_MASK` (`0xFFFF_FFFF_FFFF_F000`). Was causing incorrect TLB lookups for 64-bit kernel virtual addresses.
@@ -261,11 +261,11 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ### Next Steps
 1. ~~**Reach DLX Linux `dlx login:` prompt**~~ — **DONE** (2026-03-03). Full boot to login prompt achieved.
 2. ~~**Interactive login**~~ — **DONE** (2026-03-04). SHRD/SHLD decoder fix resolved ext2 "directory #12 contains a hole" errors. `root` login → `dlx:~#` bash shell works.
-3. **Boot Alpine Linux** — **IN PROGRESS** (2026-03-09). Parity audit phases 1-5 complete:
-   - **Triple fault FIXED**: C6/C7 decoder bug (MOV r/m,imm missing from is_group_opcode) + boot_params relocated to identity-mapped range (pref_address + init_size = 0x035f3000).
+3. **Boot Alpine Linux** — **IN PROGRESS** (2026-03-09). Parity audit phases 1-5 in progress:
+   - **boot_params fix**: Moved from pref_address+init_size (0x035f3000) to 0x10000 (QEMU standard). The decompressor relocates itself into the pref_address+init_size area, overwriting boot_params placed there. 0x10000 is safe — below 0x100000 compressed kernel load point. Kernel's `__early_make_pgtable` creates identity mappings on demand.
    - **64-bit CR writes FIXED**: mov_cr0_rq/cr2_rq/cr4_rq use get_gpr64 (was truncating to 32 bits).
    - **LAPIC timer FIXED**: Current count read now calls get_current_timer_count().
-   - **Current status**: Kernel decompresses, enters 64-bit long mode, runs ~2.4M instructions, then panics (native_halt with IF=0) before any console output. Initramfs correctly loaded at 0x076e5000 (9.1MB). Root cause of early panic under investigation.
+   - **Current status**: Kernel decompresses, enters 64-bit long mode at icount=620815298, runs ~1.6M instructions, then panics (native_halt with IF=0 at icount=622412419) before any console output. Two #PFs: (1) boot_params direct mapping 0xffff888000010000 — handled correctly, (2) CR2=0xcbc55149 from corrupted RBP during stack canary check — unrecoverable → panic. RBP corrupts ~6K instructions after first #PF. Next step: trace RBP corruption to find emulator bug.
    - **ISOLINUX path**: El Torito boot works, ISOLINUX 6.04 loads + enters PM, but init_func table is empty → iso_init never called. See `docs/ISOLINUX_DEBUG.md`.
 4. **Fix `ide2 at 0x1e8` phantom** — PCI PIIX IDE BAR misconfiguration causes kernel to probe a non-existent 3rd IDE channel
 5. ~~**Fix LDT triple fault**~~ — FIXED: root cause was INT using IVT in PM + XCHG mod_c0 bug
