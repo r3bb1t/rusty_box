@@ -20,7 +20,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ mult64.cc:MUL_RAXEqR
     pub fn mul_rax_eq_r(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.rax(); // RAX
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize; // Group 3: rm field is in dst()
         let op2 = self.get_gpr64(src_reg);
 
         let product_128 = (op1 as u128) * (op2 as u128);
@@ -90,7 +90,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching C++ mult64.cc:IMUL_RAXEqR
     pub fn imul_rax_eq_r(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.rax() as i64;
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize; // Group 3: rm field is in dst()
         let op2 = self.get_gpr64(src_reg) as i64;
 
         let product_128 = (op1 as i128) * (op2 as i128);
@@ -165,7 +165,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// (register form)
     /// Matching C++ mult64.cc:DIV_RAXEqR
     pub fn div_rax_eq_r(&mut self, instr: &Instruction) -> Result<()> {
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize; // Group 3: rm field is in dst()
         let op2 = self.get_gpr64(src_reg);
 
         if op2 == 0 {
@@ -252,7 +252,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(Exception::De, 0);
         }
 
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize; // Group 3: rm field is in dst()
         let op2 = self.get_gpr64(src_reg) as i64;
 
         if op2 == 0 {

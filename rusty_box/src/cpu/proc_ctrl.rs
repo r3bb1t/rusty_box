@@ -1202,7 +1202,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let kernel_gs = self.msr.kernelgsbase;
         self.set_segment_base(super::decoder::BxSegregs::Gs, kernel_gs);
         self.msr.kernelgsbase = gs_base;
-        tracing::trace!("SWAPGS: GS.base={:#018x} <-> KernelGSbase={:#018x}", gs_base, kernel_gs);
         Ok(())
     }
 

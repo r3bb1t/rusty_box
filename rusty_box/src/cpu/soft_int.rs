@@ -940,75 +940,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::warn!("HLT: CPU halted with IF=0 (interrupts disabled) - CPU will be stuck!");
         }
 
-        // Capture first HLT in long mode with full 64-bit register dump
-        if !self.diag_first_pm_hlt_captured && self.long64_mode() {
-            self.diag_first_pm_hlt_captured = true;
-            eprintln!("=== FIRST HLT IN LONG MODE (icount={}) ===", self.icount);
-            eprintln!("  RIP={:#018x} RSP={:#018x} RBP={:#018x}", self.rip(), self.rsp(), self.rbp());
-            eprintln!("  RAX={:#018x} RBX={:#018x} RCX={:#018x} RDX={:#018x}", self.rax(), self.rbx(), self.rcx(), self.rdx());
-            eprintln!("  RSI={:#018x} RDI={:#018x} R8={:#018x}  R9={:#018x}", self.rsi(), self.rdi(), self.r8(), self.r9());
-            eprintln!("  R10={:#018x} R11={:#018x} R12={:#018x} R13={:#018x}", self.r10(), self.r11(), self.r12(), self.r13());
-            eprintln!("  R14={:#018x} R15={:#018x}", self.r14(), self.r15());
-            eprintln!("  CS={:#06x} SS={:#06x} EFLAGS={:#010x} CR3={:#018x}",
-                self.sregs[BxSegregs::Cs as usize].selector.value,
-                self.sregs[BxSegregs::Ss as usize].selector.value,
-                self.eflags.bits(), self.cr3);
-            // Dump RIP ring buffer (last N instructions before HLT)
-            let ring_count = self.diag_rip_ring_idx.min(64);
-            eprintln!("  Last {} RIPs before HLT:", ring_count);
-            for i in 0..ring_count {
-                let idx = if self.diag_rip_ring_idx >= 64 {
-                    (self.diag_rip_ring_idx - ring_count + i) & 63
-                } else {
-                    i
-                };
-                eprintln!("    [{:>3}] RIP={:#018x}", i, self.diag_rip_ring[idx]);
-            }
-            // Read code bytes at unique RIPs from ring buffer
-            let mut seen_rips = alloc::vec::Vec::new();
-            for i in 0..ring_count {
-                let idx = if self.diag_rip_ring_idx >= 64 {
-                    (self.diag_rip_ring_idx - ring_count + i) & 63
-                } else { i };
-                let rip_val = self.diag_rip_ring[idx];
-                if rip_val > 0xFFFF800000000000 && !seen_rips.contains(&rip_val) {
-                    seen_rips.push(rip_val);
-                    // Translate virtual → physical and read code
-                    if let Ok(paddr) = self.translate_data_read(rip_val) {
-                        eprint!("  Code@{:#018x} (phys={:#010x}): ", rip_val, paddr);
-                        for off in 0..16u64 {
-                            eprint!("{:02x} ", self.mem_read_byte(paddr + off));
-                        }
-                        eprintln!();
-                    }
-                }
-            }
-            // Dump stack (64-bit return addresses)
-            let rsp = self.rsp();
-            eprintln!("  Stack (RSP={:#018x}):", rsp);
-            for i in 0..16u64 {
-                let addr = rsp.wrapping_add(i * 8);
-                if let Ok(val) = self.stack_read_qword_64(addr) {
-                    eprintln!("    RSP+{:#04x}: {:#018x}", i * 8, val);
-                }
-            }
-            // Read boot_params to check initramfs address/size
-            // boot_params addr from R15 (originally ESI), fallback to 0x10000
-            let bp_addr = if self.r15() != 0 { self.r15() } else { 0x10000u64 };
-            let rd_image = self.mem_read_dword(bp_addr + 0x218);
-            let rd_size = self.mem_read_dword(bp_addr + 0x21C);
-            eprintln!("  boot_params ramdisk_image={:#010x} ramdisk_size={:#010x} ({})",
-                rd_image, rd_size, rd_size);
-
-            // Dump first 32 bytes at the initramfs physical address
-            eprint!("  Initramfs bytes at {:#010x}: ", rd_image);
-            for off in 0..32u64 {
-                let b = self.mem_read_byte(rd_image as u64 + off);
-                eprint!("{:02x} ", b);
-            }
-            eprintln!();
-
-        } else if !self.diag_first_pm_hlt_captured && self.protected_mode() {
+        if !self.diag_first_pm_hlt_captured && self.protected_mode() {
             self.diag_first_pm_hlt_captured = true;
             self.diag_first_pm_hlt_icount = self.icount;
             self.diag_first_pm_hlt_rip = self.eip();

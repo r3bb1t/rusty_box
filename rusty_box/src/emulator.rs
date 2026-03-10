@@ -1293,6 +1293,14 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     }
                     // Detect zero-return batches (HLT or stuck)
                     if executed == 0 {
+                        // HLT with IF=0: CPU is dead (panic or intentional halt)
+                        // Break out to avoid infinite loop
+                        if matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::Hlt)
+                            && !self.cpu.interrupts_enabled()
+                        {
+                            tracing::debug!("[ZERO-BATCH] HLT with IF=0 — CPU halted, breaking");
+                            break;
+                        }
                         static ZERO_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
                         let zc = ZERO_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         if zc < 5 || zc % 10000 == 0 {
@@ -1401,7 +1409,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             } else {
                                 0
                             };
-                            tracing::error!(
+                            tracing::warn!(
                                 "STUCK at RIP={:#x} after {}k instructions, last I/O read: port={:#06x} value={:#x}, CS={:#06x} mode={}, BP={:#06x} AX={:#06x} [BP+2]={:#06x} [BP+4]={:#06x} [BP+6]={:#06x}",
                                 current_rip,
                                 instructions_executed / 1000,
@@ -1420,7 +1428,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                         .iter()
                                         .map(|b| format!("{:02x}", b))
                                         .collect();
-                                    tracing::error!(
+                                    tracing::warn!(
                                         "Code at RIP={:#x}: {}",
                                         current_rip,
                                         bytes.join(" ")
@@ -1444,7 +1452,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     }
                                 }
                                 // Also dump all general registers + CR0
-                                tracing::error!(
+                                tracing::warn!(
                                     "Regs: EAX={:#010x} EBX={:#010x} ECX={:#010x} EDX={:#010x} ESI={:#010x} EDI={:#010x} ESP={:#010x} EBP={:#010x} CR0={:#010x}",
                                     self.cpu.eax(), self.cpu.ebx(), self.cpu.ecx(), self.cpu.edx(),
                                     self.cpu.esi(), self.cpu.edi(), self.cpu.esp(), self.cpu.ebp(),
