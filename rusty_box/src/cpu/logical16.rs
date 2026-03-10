@@ -323,6 +323,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_flags_oszapc_logic_16(result);
     }
 
+    /// XOR AX, imm16 (opcode 0x35 with 66 prefix) — accumulator-immediate form.
+    /// Must hardcode register 0 (AX) because decoder sets rm = opcode & 7 = 5 (BP).
+    pub fn xor_ax_iw(&mut self, instr: &Instruction) {
+        let op1 = self.get_gpr16(0); // AX
+        let op2 = instr.iw();
+        let result = op1 ^ op2;
+        self.set_gpr16(0, result);
+        self.set_flags_oszapc_logic_16(result);
+    }
+
     // =========================================================================
     // OR instructions
     // =========================================================================

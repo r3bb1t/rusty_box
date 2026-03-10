@@ -400,65 +400,46 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// IMUL Gd, Ed, Id - Three-operand signed multiply with 32-bit immediate (register source)
     /// dst = src * imm32
     /// Opcode: 69 /r id
+    /// IMUL Gd, Ed, Id - Three-operand signed multiply (register source)
+    /// Bochs mult32.cc:138-160 — IMUL_GdEdIdR
     pub fn imul_gd_ed_id_r(&mut self, instr: &Instruction) -> Result<()> {
-        let dst_reg = instr.dst() as usize;
-        let src_reg = instr.src() as usize;
+        let op2 = self.get_gpr32(instr.src() as usize) as i32;
+        let op3 = instr.id() as i32;
 
-        let op1 = self.get_gpr32(src_reg) as i32;
-        let op2 = instr.id() as i32;
+        let product_64 = (op2 as i64) * (op3 as i64);
+        let product_32 = product_64 as u32;
 
-        let product_64 = (op1 as i64) * (op2 as i64);
-        let result_32 = product_64 as i32;
+        self.set_gpr32(instr.dst() as usize, product_32);
 
-        self.set_gpr32(dst_reg, result_32 as u32);
-
-        if product_64 != (result_32 as i64) {
-            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
-        } else {
-            self.eflags.remove(EFlags::CF.union(EFlags::OF)); // CF=0, OF=0
+        // Bochs: SET_FLAGS_OSZAPC_LOGIC_32 then assert CF/OF if overflow
+        self.set_flags_oszapc_logic_32(product_32);
+        if product_64 != (product_32 as i32 as i64) {
+            self.eflags.insert(EFlags::CF.union(EFlags::OF));
         }
 
-        tracing::trace!(
-            "IMUL32 Gd,Ed,Id: reg{} ({:#010x}) * imm32 ({:#010x}) = reg{} ({:#010x})",
-            src_reg,
-            op1 as u32,
-            op2 as u32,
-            dst_reg,
-            result_32 as u32
-        );
         Ok(())
     }
 
     /// IMUL Gd, Ed, Id - Three-operand signed multiply with 32-bit immediate (memory source)
-    /// Opcode: 69 /r id
+    /// IMUL Gd, Ed, Id - Three-operand signed multiply (memory source)
+    /// Bochs mult32.cc:138-160 (LOAD_Ed + IMUL_GdEdIdR pattern)
     pub fn imul_gd_ed_id_m(&mut self, instr: &Instruction) -> Result<()> {
-        let dst_reg = instr.dst() as usize;
-
         let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let op1 = self.v_read_dword(seg, eaddr)? as i32;
-        let op2 = instr.id() as i32;
+        let op2 = self.v_read_dword(seg, eaddr)? as i32;
+        let op3 = instr.id() as i32;
 
-        let product_64 = (op1 as i64) * (op2 as i64);
-        let result_32 = product_64 as i32;
+        let product_64 = (op2 as i64) * (op3 as i64);
+        let product_32 = product_64 as u32;
 
-        self.set_gpr32(dst_reg, result_32 as u32);
+        self.set_gpr32(instr.dst() as usize, product_32);
 
-        if product_64 != (result_32 as i64) {
-            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
-        } else {
-            self.eflags.remove(EFlags::CF.union(EFlags::OF)); // CF=0, OF=0
+        // Bochs: SET_FLAGS_OSZAPC_LOGIC_32 then assert CF/OF if overflow
+        self.set_flags_oszapc_logic_32(product_32);
+        if product_64 != (product_32 as i32 as i64) {
+            self.eflags.insert(EFlags::CF.union(EFlags::OF));
         }
 
-        tracing::trace!(
-            "IMUL32 Gd,Ed,Id mem: [{:?}:{:#x}] ({:#010x}) * imm32 ({:#010x}) = reg{} ({:#010x})",
-            seg,
-            eaddr,
-            op1 as u32,
-            op2 as u32,
-            dst_reg,
-            result_32 as u32
-        );
         Ok(())
     }
 

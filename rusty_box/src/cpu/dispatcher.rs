@@ -295,11 +295,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 Ok(())
             }
             Opcode::XorAxiw => {
-                self.xor_ew_iw_r(instr);
+                self.xor_ax_iw(instr);
                 Ok(())
             }
             Opcode::XorEaxid => {
-                self.xor_ed_id_r(instr);
+                self.xor_eax_id(instr);
                 Ok(())
             }
 
@@ -1408,6 +1408,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Wbinvd => self.wbinvd(instr),
             Opcode::Invd => self.invd(instr),
             Opcode::Invlpg => self.invlpg(instr),
+            Opcode::Invpcid => self.invpcid(instr),
             Opcode::Clts => self.clts(instr),
 
             // =========================================================================

@@ -1513,6 +1513,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     self.diag_rip_ring_idx += 1;
                 }
 
+                // (diagnostic trace removed — IMUL 0x69 decoder convention bug fixed)
+
 
                 iteration += 1;
 

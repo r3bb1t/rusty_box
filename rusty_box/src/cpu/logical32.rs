@@ -247,6 +247,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_flags_oszapc_logic_32(result);
     }
 
+    /// XOR EAX, imm32 (opcode 0x35) — accumulator-immediate form.
+    /// Must hardcode register 0 (EAX) because decoder sets rm = opcode & 7 = 5 (EBP).
+    pub fn xor_eax_id(&mut self, instr: &Instruction) {
+        let op1 = self.get_gpr32(0); // EAX
+        let op2 = instr.id();
+        let result = op1 ^ op2;
+        self.set_gpr32(0, result);
+        self.set_flags_oszapc_logic_32(result);
+    }
+
     // =========================================================================
     // OR instructions
     // =========================================================================

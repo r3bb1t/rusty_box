@@ -504,7 +504,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             // MOV Sw,Ew: nnn is destination (segment), rm is source (gpr)
             instr.operands.dst = nnn as u8;
             instr.operands.src1 = rm as u8;
-        } else if (b1 < 0x100 && ((b1 & 0x0F) == 0x01 || (b1 & 0x0F) == 0x09))
+        } else if (b1 < 0x100 && ((b1 & 0x0F) == 0x01 || (b1 & 0x0F) == 0x09) && b1 != 0x69)
             || b1 == 0x89
             // Two-byte Ed,Gd opcodes (DST=rm): Group 7, store-form SSE, MOV Rd/DRn, Groups 12-14
             || matches!(b1, 0x101 | 0x111 | 0x121 | 0x129 | 0x171 | 0x172 | 0x173)

@@ -284,6 +284,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::debug!("exception({:?}): error_code={:#x}", vector, error_code);
         }
 
+        // (Alpine exception trace removed — IMUL 0x69 decoder convention bug fixed)
+
         if self.real_mode() {
             push_error = false; // not INT, no error code pushed
             error_code = 0;

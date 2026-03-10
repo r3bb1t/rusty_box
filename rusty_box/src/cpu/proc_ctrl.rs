@@ -1267,7 +1267,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !self.cr4.fsgsbase() {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
-        let val = self.get_gpr32(instr.src1().into()) as u64;
+        // Group 15 opcode: dst() = rm = register operand (not src1() which is nnn = opcode extension)
+        let val = self.get_gpr32(instr.dst().into()) as u64;
         self.set_segment_base(super::decoder::BxSegregs::Fs, val);
         Ok(())
     }
@@ -1279,7 +1280,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !self.cr4.fsgsbase() {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
-        let val = self.get_gpr64(instr.src1() as usize);
+        // Group 15 opcode: dst() = rm = register operand
+        let val = self.get_gpr64(instr.dst() as usize);
         if !self.is_canonical(val) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -1294,7 +1296,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !self.cr4.fsgsbase() {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
-        let val = self.get_gpr32(instr.src1().into()) as u64;
+        // Group 15 opcode: dst() = rm = register operand
+        let val = self.get_gpr32(instr.dst().into()) as u64;
         self.set_segment_base(super::decoder::BxSegregs::Gs, val);
         Ok(())
     }
@@ -1306,7 +1309,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !self.cr4.fsgsbase() {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
-        let val = self.get_gpr64(instr.src1() as usize);
+        // Group 15 opcode: dst() = rm = register operand
+        let val = self.get_gpr64(instr.dst() as usize);
         if !self.is_canonical(val) {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -1932,6 +1936,80 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.vmm[i as usize].zmm64u[7] = 0;
             }
         }
+        Ok(())
+    }
+
+    /// INVPCID — Invalidate Process-Context Identifier
+    /// Bochs vmx.cc:4024-4116
+    /// Opcode: 66 0F 38 82 (memory-only, #UD if mod==11)
+    pub(super) fn invpcid(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        // v8086 mode: #GP(0)
+        if self.v8086_mode() {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // CPL != 0: #GP(0)
+        let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.rpl;
+        if cpl != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Read type from register operand (Bochs: i->dst())
+        let inv_type = if instr.os64_l() != 0 {
+            self.get_gpr64(instr.dst() as usize)
+        } else {
+            self.get_gpr32(instr.dst() as usize) as u64
+        };
+
+        // Read 128-bit descriptor from memory (Bochs: read_virtual_xmmword)
+        let eaddr = self.resolve_addr(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let desc = self.v_read_xmmword(seg, eaddr)?;
+
+        // Descriptor bits [63:12] must be zero (reserved)
+        // SAFETY: xmm64u union field is always valid for u64 access
+        let desc_lo = unsafe { desc.xmm64u[0] };
+        let desc_hi = unsafe { desc.xmm64u[1] };
+        if desc_lo > 0xFFF {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // PCID from descriptor (bits [11:0])
+        let _pcid = (desc_lo & 0xFFF) as u16;
+
+        match inv_type {
+            // Type 0: Individual address, non-global invalidation
+            0 => {
+                // Canonical check on linear address (descriptor[127:64])
+                if !self.is_canonical(desc_hi) {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                // PCID check: if CR4.PCIDE=0, PCID must be 0
+                if !self.cr4.pcide() && _pcid != 0 {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.tlb_flush_non_global();
+            }
+            // Type 1: Single-context, non-global invalidation
+            1 => {
+                if !self.cr4.pcide() && _pcid != 0 {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.tlb_flush_non_global();
+            }
+            // Type 2: All-context invalidation (including globals)
+            2 => {
+                self.tlb_flush();
+            }
+            // Type 3: All-context, non-global invalidation
+            3 => {
+                self.tlb_flush_non_global();
+            }
+            _ => {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+        }
+
         Ok(())
     }
 
