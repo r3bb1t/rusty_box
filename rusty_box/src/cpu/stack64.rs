@@ -23,7 +23,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let new_rsp = rsp.wrapping_sub(8);
         self.stack_write_qword_64(new_rsp, value)?;
         self.set_rsp(new_rsp);
-        tracing::trace!("PUSH64: value {:#x} written to stack", value);
         Ok(())
     }
 
@@ -33,7 +32,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let rsp = self.rsp();
         let value = self.stack_read_qword_64(rsp)?;
         self.set_rsp(rsp.wrapping_add(8));
-        tracing::trace!("POP64: value {:#x} read from stack", value);
         Ok(value)
     }
 
@@ -48,7 +46,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst = instr.dst() as usize;
         let value = self.get_gpr64(dst);
         self.push_64(value)?;
-        tracing::trace!("PUSH r64 (reg {}): {:#018x}", dst, value);
         Ok(())
     }
 
@@ -57,7 +54,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn push_iq(&mut self, instr: &Instruction) -> super::Result<()> {
         let value = instr.id() as i32 as i64 as u64;
         self.push_64(value)?;
-        tracing::trace!("PUSH imm64: {:#018x}", value);
         Ok(())
     }
 
@@ -72,7 +68,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst = instr.dst() as usize;
         let value = self.pop_64()?;
         self.set_gpr64(dst, value);
-        tracing::trace!("POP r64 (reg {}): {:#018x}", dst, value);
         Ok(())
     }
 
@@ -124,7 +119,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // VM & RF flags cleared in image stored on the stack
         let flags = (self.eflags.bits() & 0x00FCFFFF) as u64;
         self.push_64(flags)?;
-        tracing::trace!("PUSHFQ: {:#018x}", flags);
         Ok(())
     }
 
@@ -153,6 +147,53 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // VIF, VIP, VM are unaffected
         self.write_eflags(eflags32, change_mask.bits());
+        Ok(())
+    }
+
+    // =========================================================================
+    // ENTER (64-bit)
+    // Based on Bochs stack64.cc ENTER64_IwIb
+    // =========================================================================
+
+    /// ENTER64 IwIb - Make Stack Frame (64-bit)
+    /// Matching Bochs stack64.cc ENTER64_IwIb
+    pub fn enter64_iw_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        let level = instr.ib2() & 0x1F;
+
+        let mut temp_rsp = self.rsp();
+        let mut temp_rbp = self.get_gpr64(5); // RBP
+
+        // Push RBP
+        temp_rsp = temp_rsp.wrapping_sub(8);
+        self.stack_write_qword_64(temp_rsp, temp_rbp)?;
+
+        let frame_ptr64 = temp_rsp;
+
+        if level > 0 {
+            let mut lvl = level;
+            // do level-1 times
+            while { lvl -= 1; lvl } != 0 {
+                temp_rbp = temp_rbp.wrapping_sub(8);
+                let temp64 = self.stack_read_qword_64(temp_rbp)?;
+                temp_rsp = temp_rsp.wrapping_sub(8);
+                self.stack_write_qword_64(temp_rsp, temp64)?;
+            }
+
+            // push(frame pointer)
+            temp_rsp = temp_rsp.wrapping_sub(8);
+            self.stack_write_qword_64(temp_rsp, frame_ptr64)?;
+        }
+
+        temp_rsp = temp_rsp.wrapping_sub(instr.iw() as u64);
+
+        // Probe final stack location (Bochs: read_RMW_linear_qword touch)
+        let _ = self.read_rmw_virtual_qword_64(BxSegregs::Ss, temp_rsp)?;
+        // Write back unchanged (no actual modification)
+        // Bochs does the read but doesn't write back — it's just a probe.
+        // Our RMW path sets up address_xlation but we don't call write_back.
+
+        self.set_gpr64(5, frame_ptr64); // RBP = frame_ptr64
+        self.set_rsp(temp_rsp);         // RSP = temp_rsp
         Ok(())
     }
 

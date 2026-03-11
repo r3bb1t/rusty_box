@@ -3,6 +3,165 @@
 use crate::cpu::cpuid::BxCpuIdTrait;
 use crate::cpu::decoder::{features::X86Feature, BX_ISA_EXTENSIONS_ARRAY_SIZE};
 
+use bitflags::bitflags;
+
+// ─── CPUID Leaf 1 ECX feature flags (Bochs cpuid.h:313-344) ────────────────
+
+bitflags! {
+    /// CPUID Leaf 1 ECX — Extended Feature Flags
+    #[derive(Debug, Clone, Copy)]
+    pub struct CpuIdStd1Ecx: u32 {
+        const SSE3           = 1 <<  0;
+        const PCLMULQDQ      = 1 <<  1;
+        const DTES64         = 1 <<  2;
+        const MONITOR_MWAIT  = 1 <<  3;
+        const DS_CPL         = 1 <<  4;
+        const VMX            = 1 <<  5;
+        const SMX            = 1 <<  6;
+        const EST            = 1 <<  7;
+        const TM2            = 1 <<  8;
+        const SSSE3          = 1 <<  9;
+        const CNXT_ID        = 1 << 10;
+        // bit 11 reserved
+        const FMA            = 1 << 12;
+        const CMPXCHG16B     = 1 << 13;
+        const XTPR           = 1 << 14;
+        const PDCM           = 1 << 15;
+        // bit 16 reserved
+        const PCID           = 1 << 17;
+        const DCA            = 1 << 18;
+        const SSE4_1         = 1 << 19;
+        const SSE4_2         = 1 << 20;
+        const X2APIC         = 1 << 21;
+        const MOVBE          = 1 << 22;
+        const POPCNT         = 1 << 23;
+        const TSC_DEADLINE   = 1 << 24;
+        const AES            = 1 << 25;
+        const XSAVE          = 1 << 26;
+        const OSXSAVE        = 1 << 27; // dynamic — set only when CR4.OSXSAVE=1
+        const AVX            = 1 << 28;
+        const AVX_F16C       = 1 << 29;
+        const RDRAND         = 1 << 30;
+        // bit 31 reserved
+    }
+}
+
+// ─── CPUID Leaf 1 EDX feature flags (Bochs cpuid.h:244-275) ────────────────
+
+bitflags! {
+    /// CPUID Leaf 1 EDX — Standard Feature Flags
+    #[derive(Debug, Clone, Copy)]
+    pub struct CpuIdStd1Edx: u32 {
+        const X87                = 1 <<  0;
+        const VME                = 1 <<  1;
+        const DEBUG_EXTENSIONS   = 1 <<  2;
+        const PSE                = 1 <<  3;
+        const TSC                = 1 <<  4;
+        const MSR                = 1 <<  5;
+        const PAE                = 1 <<  6;
+        const MCE                = 1 <<  7;
+        const CMPXCHG8B          = 1 <<  8;
+        const APIC               = 1 <<  9; // dynamic — cleared when APIC globally disabled
+        // bit 10 reserved
+        const SYSENTER_SYSEXIT   = 1 << 11;
+        const MTRR               = 1 << 12;
+        const GLOBAL_PAGES       = 1 << 13;
+        const MCA                = 1 << 14;
+        const CMOV               = 1 << 15;
+        const PAT                = 1 << 16;
+        const PSE36              = 1 << 17;
+        const PSN                = 1 << 18;
+        const CLFLUSH            = 1 << 19;
+        // bit 20 reserved
+        const DEBUG_STORE        = 1 << 21;
+        const ACPI               = 1 << 22;
+        const MMX                = 1 << 23;
+        const FXSAVE_FXRSTOR    = 1 << 24;
+        const SSE                = 1 << 25;
+        const SSE2               = 1 << 26;
+        const SELF_SNOOP         = 1 << 27;
+        const HT                 = 1 << 28;
+        const THERMAL_MONITOR    = 1 << 29;
+        // bit 30 reserved
+        const PBE                = 1 << 31;
+    }
+}
+
+// ─── CPUID Leaf 7, Subleaf 0 EBX feature flags (Bochs cpuid.h:382-413) ─────
+
+bitflags! {
+    /// CPUID Leaf 7 Subleaf 0 EBX — Structured Extended Feature Flags
+    #[derive(Debug, Clone, Copy)]
+    pub struct CpuIdStd7Ebx: u32 {
+        const FSGSBASE           = 1 <<  0;
+        const TSC_ADJUST         = 1 <<  1;
+        const SGX                = 1 <<  2;
+        const BMI1               = 1 <<  3;
+        const HLE                = 1 <<  4;
+        const AVX2               = 1 <<  5;
+        const FDP_DEPRECATION    = 1 <<  6;
+        const SMEP               = 1 <<  7;
+        const BMI2               = 1 <<  8;
+        const ERMS               = 1 <<  9; // Enhanced REP MOVSB/STOSB
+        const INVPCID            = 1 << 10;
+        const RTM                = 1 << 11;
+        const QOS_MONITORING     = 1 << 12;
+        const DEPRECATE_FCS_FDS  = 1 << 13;
+        const MPX                = 1 << 14;
+        const QOS_ENFORCEMENT    = 1 << 15;
+        const AVX512F            = 1 << 16;
+        const AVX512DQ           = 1 << 17;
+        const RDSEED             = 1 << 18;
+        const ADX                = 1 << 19;
+        const SMAP               = 1 << 20;
+        const AVX512IFMA52       = 1 << 21;
+        // bit 22 reserved
+        const CLFLUSHOPT         = 1 << 23;
+        const CLWB               = 1 << 24;
+        const PROCESSOR_TRACE    = 1 << 25;
+        const AVX512PF           = 1 << 26;
+        const AVX512ER           = 1 << 27;
+        const AVX512CD           = 1 << 28;
+        const SHA                = 1 << 29;
+        const AVX512BW           = 1 << 30;
+        const AVX512VL           = 1 << 31;
+    }
+}
+
+// ─── CPUID Extended Leaf 0x80000001 ECX (Bochs cpuid.h:763-794) ────────────
+
+bitflags! {
+    /// CPUID Leaf 0x80000001 ECX — Extended Feature Flags
+    #[derive(Debug, Clone, Copy)]
+    pub struct CpuIdExt1Ecx: u32 {
+        const LAHF_SAHF          = 1 <<  0;
+        const CMP_LEGACY         = 1 <<  1;
+        const SVM                = 1 <<  2;
+        const EXT_APIC_SPACE     = 1 <<  3;
+        const ALT_MOV_CR8        = 1 <<  4;
+        const LZCNT              = 1 <<  5;
+        const SSE4A              = 1 <<  6;
+        const MISALIGNED_SSE     = 1 <<  7;
+        const PREFETCHW          = 1 <<  8;
+    }
+}
+
+// ─── CPUID Extended Leaf 0x80000001 EDX (Bochs cpuid.h:712-725) ────────────
+
+bitflags! {
+    /// CPUID Leaf 0x80000001 EDX — Extended Feature Flags
+    #[derive(Debug, Clone, Copy)]
+    pub struct CpuIdExt1Edx: u32 {
+        const SYSCALL_SYSRET     = 1 << 11; // dynamic — only set in long mode
+        const NX                 = 1 << 20;
+        const PAGES_1G           = 1 << 26;
+        const RDTSCP             = 1 << 27;
+        const LONG_MODE          = 1 << 29;
+    }
+}
+
+// ─── Helper ────────────────────────────────────────────────────────────────
+
 /// Set a feature bit in the ISA extensions bitmask.
 /// Mirrors Bochs bx_cpuid_t::enable_cpu_extension().
 fn enable_extension(bitmask: &mut [u32; BX_ISA_EXTENSIONS_ARRAY_SIZE], feature: X86Feature) {
@@ -10,11 +169,119 @@ fn enable_extension(bitmask: &mut [u32; BX_ISA_EXTENSIONS_ARRAY_SIZE], feature: 
     bitmask[idx / 32] |= 1 << (idx % 32);
 }
 
+// ─── Skylake-X CPUID model ────────────────────────────────────────────────
+
+/// Skylake-X (i7-7800X) static CPUID base values.
+/// Built from ISA extensions + extra bits, matching Bochs computation exactly.
+///
+/// Leaf 1 ECX base (no OSXSAVE — that's dynamic):
+///   ISA: SSE3|PCLMULQDQ|MON|VMX|SSSE3|FMA|CX16|PCID|
+///        SSE4.1|SSE4.2|X2APIC|MOVBE|POPCNT|TSC_DL|AES|XSAVE|AVX|F16C|RDRAND
+///   Extra: DTES64|DS_CPL|EST|TM2|xTPR|PDCM
+const LEAF1_ECX_BASE: CpuIdStd1Ecx = CpuIdStd1Ecx::SSE3
+    .union(CpuIdStd1Ecx::PCLMULQDQ)
+    .union(CpuIdStd1Ecx::DTES64)       // extra
+    .union(CpuIdStd1Ecx::MONITOR_MWAIT)
+    .union(CpuIdStd1Ecx::DS_CPL)       // extra
+    .union(CpuIdStd1Ecx::VMX)
+    .union(CpuIdStd1Ecx::EST)          // extra
+    .union(CpuIdStd1Ecx::TM2)          // extra
+    .union(CpuIdStd1Ecx::SSSE3)
+    .union(CpuIdStd1Ecx::FMA)
+    .union(CpuIdStd1Ecx::CMPXCHG16B)
+    .union(CpuIdStd1Ecx::XTPR)         // extra
+    .union(CpuIdStd1Ecx::PDCM)         // extra
+    .union(CpuIdStd1Ecx::PCID)
+    .union(CpuIdStd1Ecx::SSE4_1)
+    .union(CpuIdStd1Ecx::SSE4_2)
+    .union(CpuIdStd1Ecx::X2APIC)
+    .union(CpuIdStd1Ecx::MOVBE)
+    .union(CpuIdStd1Ecx::POPCNT)
+    .union(CpuIdStd1Ecx::TSC_DEADLINE)
+    .union(CpuIdStd1Ecx::AES)
+    .union(CpuIdStd1Ecx::XSAVE)
+    .union(CpuIdStd1Ecx::AVX)
+    .union(CpuIdStd1Ecx::AVX_F16C)
+    .union(CpuIdStd1Ecx::RDRAND);
+
+/// Leaf 1 EDX base (APIC bit dynamic — cleared when APIC globally disabled):
+///   ISA: X87|VME|DE|PSE|TSC|MSR|PAE|MCE|CX8|APIC|SEP|MTRR|PGE|MCA|CMOV|
+///        PAT|PSE36|CLFLUSH|MMX|FXSR|SSE|SSE2
+///   Extra: DEBUG_STORE|ACPI|SELF_SNOOP|HT|TM|PBE
+const LEAF1_EDX_BASE: CpuIdStd1Edx = CpuIdStd1Edx::X87
+    .union(CpuIdStd1Edx::VME)
+    .union(CpuIdStd1Edx::DEBUG_EXTENSIONS)
+    .union(CpuIdStd1Edx::PSE)
+    .union(CpuIdStd1Edx::TSC)
+    .union(CpuIdStd1Edx::MSR)
+    .union(CpuIdStd1Edx::PAE)
+    .union(CpuIdStd1Edx::MCE)
+    .union(CpuIdStd1Edx::CMPXCHG8B)
+    .union(CpuIdStd1Edx::APIC)
+    .union(CpuIdStd1Edx::SYSENTER_SYSEXIT)
+    .union(CpuIdStd1Edx::MTRR)
+    .union(CpuIdStd1Edx::GLOBAL_PAGES)
+    .union(CpuIdStd1Edx::MCA)
+    .union(CpuIdStd1Edx::CMOV)
+    .union(CpuIdStd1Edx::PAT)
+    .union(CpuIdStd1Edx::PSE36)
+    .union(CpuIdStd1Edx::CLFLUSH)
+    .union(CpuIdStd1Edx::DEBUG_STORE)      // extra
+    .union(CpuIdStd1Edx::ACPI)             // extra
+    .union(CpuIdStd1Edx::MMX)
+    .union(CpuIdStd1Edx::FXSAVE_FXRSTOR)
+    .union(CpuIdStd1Edx::SSE)
+    .union(CpuIdStd1Edx::SSE2)
+    .union(CpuIdStd1Edx::SELF_SNOOP)       // extra
+    .union(CpuIdStd1Edx::HT)               // extra
+    .union(CpuIdStd1Edx::THERMAL_MONITOR)   // extra
+    .union(CpuIdStd1Edx::PBE);              // extra
+
+/// Leaf 7 subleaf 0 EBX:
+///   ISA: FSGSBASE|TSC_ADJUST|BMI1|AVX2|FDP_DEPR|SMEP|BMI2|INVPCID|
+///        FCS_FDS_DEPR|AVX512F|AVX512DQ|RDSEED|ADX|SMAP|CLFLUSHOPT|
+///        CLWB|AVX512CD|AVX512BW|AVX512VL
+///   Extra: ERMS (Enhanced REP MOVSB/STOSB)
+const LEAF7_EBX_BASE: CpuIdStd7Ebx = CpuIdStd7Ebx::FSGSBASE
+    .union(CpuIdStd7Ebx::TSC_ADJUST)
+    .union(CpuIdStd7Ebx::BMI1)
+    .union(CpuIdStd7Ebx::AVX2)
+    .union(CpuIdStd7Ebx::FDP_DEPRECATION)
+    .union(CpuIdStd7Ebx::SMEP)
+    .union(CpuIdStd7Ebx::BMI2)
+    .union(CpuIdStd7Ebx::ERMS)             // extra
+    .union(CpuIdStd7Ebx::INVPCID)
+    .union(CpuIdStd7Ebx::DEPRECATE_FCS_FDS)
+    .union(CpuIdStd7Ebx::AVX512F)
+    .union(CpuIdStd7Ebx::AVX512DQ)
+    .union(CpuIdStd7Ebx::RDSEED)
+    .union(CpuIdStd7Ebx::ADX)
+    .union(CpuIdStd7Ebx::SMAP)
+    .union(CpuIdStd7Ebx::CLFLUSHOPT)
+    .union(CpuIdStd7Ebx::CLWB)
+    .union(CpuIdStd7Ebx::AVX512CD)
+    .union(CpuIdStd7Ebx::AVX512BW)
+    .union(CpuIdStd7Ebx::AVX512VL);
+
+/// Extended leaf 0x80000001 ECX:
+///   LAHF_SAHF | LZCNT | PREFETCHW
+const EXT1_ECX_BASE: CpuIdExt1Ecx = CpuIdExt1Ecx::LAHF_SAHF
+    .union(CpuIdExt1Ecx::LZCNT)
+    .union(CpuIdExt1Ecx::PREFETCHW);
+
+/// Extended leaf 0x80000001 EDX (SYSCALL_SYSRET is dynamic — only in long mode):
+///   NX | 1G_PAGES | RDTSCP | LONG_MODE
+const EXT1_EDX_BASE: CpuIdExt1Edx = CpuIdExt1Edx::NX
+    .union(CpuIdExt1Edx::PAGES_1G)
+    .union(CpuIdExt1Edx::RDTSCP)
+    .union(CpuIdExt1Edx::LONG_MODE);
+
+// ─── Skylake-X struct ─────────────────────────────────────────────────────
+
 #[derive(Debug)]
 pub struct Corei7SkylakeX {}
 
 impl BxCpuIdTrait for Corei7SkylakeX {
-    //const NAME: &'static str = "corei7_skylake_x";
     fn get_name(&self) -> &'static str {
         "corei7_skylake_x"
     }
@@ -130,37 +397,44 @@ impl BxCpuIdTrait for Corei7SkylakeX {
         b
     }
 
-    /// CPUID leaf data matching hardware values from corei7_skylake-x.txt (Logical CPU #0).
-    /// Reference: cpp_orig/bochs/cpu/cpudb/intel/corei7_skylake-x.cc
+    /// CPUID leaf data matching Bochs corei7_skylake-x.cc exactly.
+    /// Uses bitflags for feature registers for readability and correctness.
     ///
-    /// Leaf 1 EAX = 0x00050654: Family 6, Extended Model 5 → Skylake-X (stepping U0)
-    /// Leaf 1 ECX = 0x7FFEFBBF: Full Skylake ECX feature flags
-    /// Leaf 1 EDX = 0xBFEBFBFF: Full Skylake EDX feature flags (APIC, MSR, HTT, etc.)
-    /// Leaf 0x80000008 EAX = 0x3024: 36 phys / 48 virt address bits (4GB emulator)
+    /// Dynamic bits (patched in cpuid() handler at soft_int.rs):
+    ///   - Leaf 1 ECX[27] OSXSAVE: set only when CR4.OSXSAVE=1
+    ///   - Leaf 1 EDX[9] APIC: cleared when APIC globally disabled
+    ///   - Leaf 0xD subleaf 0 EAX/EBX/ECX: from xcr0_suppmask / current XCR0
+    ///   - Leaf 0xD subleaf 1 EBX: from XCR0 | IA32_XSS
+    ///   - Leaf 0x80000001 EDX[11] SYSCALL: only in long mode
     fn get_cpuid_leaf(&self, eax: u32, ecx: u32) -> (u32, u32, u32, u32) {
         match eax {
-            // Basic CPUID Information
+            // ── Basic CPUID Information ─────────────────────────────────
             0x00000000 => (
                 0x00000016, // Max basic leaf = 22
                 0x756e6547, // "Genu"
                 0x6c65746e, // "ntel"
                 0x49656e69, // "ineI" → "GenuineIntel"
             ),
+
+            // ── Leaf 1: Version / Feature Flags ─────────────────────────
+            // Bochs corei7_skylake-x.cc:260-365
             0x00000001 => (
-                0x00050654, // Family 6, Extended Model 5, Model 5 → Skylake-X (stepping U0)
-                0x00010800, // Brand index 0, CLFLUSH=8 (64B line), 1 logical proc, APIC ID 0
-                0x7FFEFBBF, // ECX: SSE3,PCLMULQDQ,DTES64,MON,DSCPL,VMX,EST,TM2,SSSE3,FMA,
-                //      CX16,xTPR,PDCM,PCID,SSE4.1,SSE4.2,X2APIC,MOVBE,POPCNT,
-                //      TSC-DL,AES,XSAVE,OSXSAVE,AVX,F16C,RDRAND
-                0xBFEBFBFF, // EDX: FPU,VME,DE,PSE,TSC,MSR,PAE,MCE,CX8,APIC,SEP,MTRR,PGE,
-                            //      MCA,CMOV,PAT,PSE36,CLFLUSH,DS,ACPI,MMX,FXSR,SSE,SSE2,SS,HTT,TM,PBE
+                0x00050654, // EAX: Family 6, ExtModel 5, Model 5 → Skylake-X (stepping U0)
+                0x00010800, // EBX: Brand=0, CLFLUSH=8(64B), 1 logical proc, APIC ID 0
+                LEAF1_ECX_BASE.bits(),
+                LEAF1_EDX_BASE.bits(),
             ),
-            0x00000002 => (
-                0x76036301, // Cache/TLB descriptor info (from hardware)
-                0x00F0B5FF, 0x00000000, 0x00C30000,
-            ),
+
+            // ── Leaf 2: Cache/TLB descriptors ───────────────────────────
+            // Bochs corei7_skylake-x.cc:368-375
+            0x00000002 => (0x76036301, 0x00F0B5FF, 0x00000000, 0x00C30000),
+
+            // ── Leaf 3: Processor Serial Number (not supported) ─────────
+            0x00000003 => (0, 0, 0, 0),
+
+            // ── Leaf 4: Deterministic Cache Parameters ──────────────────
+            // Bochs corei7_skylake-x.cc:380-439
             0x00000004 => {
-                // Deterministic Cache Parameters — sub-leaf in ECX
                 match ecx {
                     0 => (0x1C004121, 0x01C0003F, 0x0000003F, 0x00000000), // L1D 32KB
                     1 => (0x1C004122, 0x01C0003F, 0x0000003F, 0x00000000), // L1I 32KB
@@ -169,146 +443,154 @@ impl BxCpuIdTrait for Corei7SkylakeX {
                     _ => (0, 0, 0, 0),
                 }
             }
+
+            // ── Leaf 5: MONITOR/MWAIT ───────────────────────────────────
+            // Bochs corei7_skylake-x.cc:441-443
             0x00000005 => (
-                // MONITOR/MWAIT Leaf — Bochs cpuid.cc:86-118
-                // Skylake passes edx_power_states = 0x00002020
-                64,         // EAX: smallest monitor-line size (cache line = 64)
-                64,         // EBX: largest monitor-line size (cache line = 64)
-                0x00000003, // ECX: extensions supported (bit 0) + interrupt break-event (bit 1)
+                64,         // EAX: smallest monitor-line size
+                64,         // EBX: largest monitor-line size
+                0x00000003, // ECX: extensions + interrupt break-event
                 0x00002020, // EDX: C0/C1 sub-states
             ),
-            0x00000006 => (0x00000075, 0x00000002, 0x00000009, 0x00000000), // Thermal/Power
+
+            // ── Leaf 6: Thermal/Power ───────────────────────────────────
+            0x00000006 => (0x00000075, 0x00000002, 0x00000009, 0x00000000),
+
+            // ── Leaf 7: Structured Extended Features ────────────────────
+            // Bochs corei7_skylake-x.cc:445-493
             0x00000007 => {
-                // Structured Extended Feature Flags — sub-leaf in ECX
-                // Bochs corei7_skylake-x.cc:445-493 + cpuid.cc:964-1082
-                // Only advertise features that Bochs enables for Skylake-X
                 match ecx {
                     0 => (
-                        0x00000000, // max sub-leaf
-                        // EBX: Bochs-matching dynamic value for Skylake-X ISA extensions:
-                        // bit 0:  FSGSBASE
-                        // bit 1:  TSC_ADJUST
-                        // bit 3:  BMI1
-                        // bit 5:  AVX2
-                        // bit 6:  FDP_DEPRECATION
-                        // bit 7:  SMEP
-                        // bit 8:  BMI2
-                        // bit 9:  ERMS (enhanced REP MOVSB/STOSB)
-                        // bit 10: INVPCID
-                        // bit 13: FCS/FDS deprecation
-                        // bit 16: AVX512F
-                        // bit 17: AVX512DQ
-                        // bit 18: RDSEED
-                        // bit 19: ADX
-                        // bit 20: SMAP
-                        // bit 23: CLFLUSHOPT
-                        // bit 24: CLWB
-                        // bit 28: AVX512CD
-                        // bit 30: AVX512BW
-                        // bit 31: AVX512VL
-                        0xD19F27EB,
-                        0x00000000, // ECX
-                        0x00000000, // EDX
+                        0x00000000,             // EAX: max sub-leaf = 0
+                        LEAF7_EBX_BASE.bits(),  // EBX: feature flags
+                        0x00000000,             // ECX: no features
+                        0x00000000,             // EDX: no features
                     ),
                     _ => (0, 0, 0, 0),
                 }
             }
-            0x0000000A => (0x07300404, 0x00000000, 0x00000000, 0x00000603), // Perf monitoring
+
+            // ── Leaves 8-9: Reserved ────────────────────────────────────
+            0x00000008 | 0x00000009 => (0, 0, 0, 0),
+
+            // ── Leaf A: Performance Monitoring ──────────────────────────
+            // Bochs corei7_skylake-x.cc:498-533
+            0x0000000A => (0x07300404, 0x00000000, 0x00000000, 0x00000603),
+
+            // ── Leaf B: Extended Topology ───────────────────────────────
+            // Bochs corei7_skylake-x.cc:535-554
             0x0000000B => {
-                // Extended Topology Enumeration — Bochs cpuid.cc:163-177
                 match ecx {
                     0 => (
-                        0x00000001, // EAX: bits to shift for next level (SMT=1)
+                        0x00000001, // EAX: bits to shift for SMT
                         0x00000001, // EBX: logical procs at this level
-                        0x00000100, // ECX: level number=0, type=SMT(1)
-                        0x00000000, // EDX: x2APIC ID (filled dynamically)
+                        0x00000100, // ECX: level=0, type=SMT(1)
+                        0x00000000, // EDX: x2APIC ID
                     ),
                     1 => (
                         0x00000000, // EAX: bits to shift
                         0x00000001, // EBX: logical procs at this level
-                        0x00000201, // ECX: level number=1, type=Core(2)
+                        0x00000201, // ECX: level=1, type=Core(2)
                         0x00000000, // EDX: x2APIC ID
                     ),
                     _ => (0, 0, 0, 0),
                 }
             }
+
+            // ── Leaf C: Reserved ────────────────────────────────────────
+            0x0000000C => (0, 0, 0, 0),
+
+            // ── Leaf D: XSAVE state ─────────────────────────────────────
+            // Bochs cpuid.cc:206-268 — dynamically patched in cpuid() handler
             0x0000000D => {
-                // XSAVE state — Bochs cpuid.cc:206-268
-                // Subleaf 0: XCR0 valid bits + max sizes
-                // NOTE: EAX (xcr0_suppmask) and EBX (size for current XCR0) are
-                // fixed up dynamically in cpuid() handler using CPU state.
-                // Static values here use xcr0_suppmask=0xE7 (FPU+SSE+YMM+OPMASK+ZMM_HI256+HI_ZMM)
                 match ecx {
                     0 => (
                         0x000000E7, // EAX: xcr0_suppmask (overridden dynamically)
-                        0x00000240, // EBX: max size for current xcr0 (576 = 0x240 for x87+SSE; overridden dynamically)
-                        0x00000A80, // ECX: max size for all features = 2688 (0xA80)
+                        0x00000240, // EBX: size for current xcr0 (overridden dynamically)
+                        0x00000A80, // ECX: max size for all features = 2688
                         0x00000000, // EDX: xcr0 upper 32 bits
                     ),
                     1 => (
-                        // XSAVEOPT(bit 0) + compaction(bit 1) + XGETBV ECX=1(bit 2) + XSAVES(bit 3)
-                        0x0000000F, // EAX: XSAVEOPT + XSAVEC + XGETBV_ECX1 + XSAVES
-                        0x00000000, // EBX: size of XSAVE area for XCRO|XSS
+                        // XSAVEOPT(0) + XSAVEC(1) + XGETBV_ECX1(2) + XSAVES(3)
+                        0x0000000F,
+                        0x00000000, // EBX: overridden dynamically
                         0x00000000, // ECX: IA32_XSS lower supported bits
                         0x00000000, // EDX: IA32_XSS upper supported bits
                     ),
                     // Per-component sub-leaves: (len, offset, flags, 0)
-                    2 => (256, 576, 0, 0),    // YMM state: len=256, offset=576
-                    5 => (64, 1088, 0, 0),    // OPMASK: len=64, offset=1088
-                    6 => (512, 1152, 0, 0),   // ZMM_HI256: len=512, offset=1152
-                    7 => (1024, 1664, 0, 0),  // HI_ZMM: len=1024, offset=1664
+                    2 => (256, 576, 0, 0),    // YMM state
+                    5 => (64, 1088, 0, 0),    // OPMASK
+                    6 => (512, 1152, 0, 0),   // ZMM_HI256
+                    7 => (1024, 1664, 0, 0),  // HI_ZMM
                     _ => (0, 0, 0, 0),
                 }
             }
+
+            // ── Leaves E-14: Reserved ───────────────────────────────────
+            0x0000000E..=0x00000014 => (0, 0, 0, 0),
+
+            // ── Leaf 15: TSC/Crystal Clock Ratio ────────────────────────
+            // Bochs corei7_skylake-x.cc:195-196
+            // EAX=2, EBX=0x124 (292), ECX=0 (crystal freq unknown)
+            // TSC_freq = crystal_freq * (EBX/EAX).
+            // ECX=0 means kernel cannot compute TSC freq from this leaf.
             0x00000015 => (
-                // TSC/Crystal Clock Info — Bochs corei7_skylake-x.cc:196
                 0x00000002, // EAX: denominator
                 0x00000124, // EBX: numerator
-                0x00000000, // ECX: nominal frequency (0 = not enumerated)
+                0x00000000, // ECX: nominal crystal freq (0 = unknown)
                 0x00000000,
             ),
+
+            // ── Leaf 16: Processor Frequency ────────────────────────────
+            // Bochs corei7_skylake-x.cc:198-201 (also the default case)
             0x00000016 => (
-                // Processor Frequency Info — Bochs corei7_skylake-x.cc:200
-                0x00000DAC, // EAX: base frequency (MHz) = 3500
-                0x00000FA0, // EBX: max frequency (MHz) = 4000
-                0x00000064, // ECX: bus (reference) frequency (MHz) = 100
+                0x00000DAC, // EAX: base freq = 3500 MHz
+                0x00000FA0, // EBX: max freq = 4000 MHz
+                0x00000064, // ECX: bus freq = 100 MHz
                 0x00000000,
             ),
-            // Extended CPUID Information
+
+            // ── Extended CPUID Leaves ───────────────────────────────────
+
             0x80000000 => (
                 0x80000008, // Max extended leaf
                 0x00000000, 0x00000000, 0x00000000,
             ),
+
+            // Leaf 0x80000001: Extended Feature Flags
+            // Bochs cpuid.cc:761-889 — SYSCALL patched dynamically
             0x80000001 => (
-                0x00000000, 0x00000000, 0x00000121, // ECX: LAHF64, LZCNT, PREFETCHW
-                0x2C100000, // EDX: NX, RDTSCP, LM, 1G-pages, SYSCALL
-            ),
-            // Brand string: "Intel(R) Core(TM) i7-7800X CPU @ 3.50GHz"
-            // Bytes are little-endian in each register (LSB = first char)
-            0x80000002 => (0x65746E49, 0x2952286C, 0x726F4320, 0x4D542865), // "Intel(R) Core(TM"
-            0x80000003 => (0x37692029, 0x3038372D, 0x43205830, 0x40205550), // ") i7-7800X CPU @"
-            0x80000004 => (0x352E3320, 0x7A484730, 0x00000000, 0x00000000), // " 3.50GHz\0..."
-            0x80000005 => (0x00000000, 0x00000000, 0x00000000, 0x00000000), // reserved for Intel
-            0x80000006 => (
-                0x00000000, 0x00000000, 0x01006040, // L2: 512KB, 8-way, 64B line
                 0x00000000,
+                0x00000000,
+                EXT1_ECX_BASE.bits(),
+                EXT1_EDX_BASE.bits(),
             ),
-            0x80000007 => (
-                0x00000000, 0x00000000, 0x00000000, 0x00000100, // Invariant TSC
-            ),
+
+            // Leaf 0x80000002-4: Brand string
+            // "Intel(R) Core(TM) i7-7800X CPU @ 3.50GHz"
+            0x80000002 => (0x65746E49, 0x2952286C, 0x726F4320, 0x4D542865),
+            0x80000003 => (0x37692029, 0x3038372D, 0x43205830, 0x40205550),
+            0x80000004 => (0x352E3320, 0x7A484730, 0x00000000, 0x00000000),
+
+            // Leaf 0x80000005: reserved for Intel
+            0x80000005 => (0, 0, 0, 0),
+
+            // Leaf 0x80000006: L2 Cache
+            0x80000006 => (0x00000000, 0x00000000, 0x01006040, 0x00000000),
+
+            // Leaf 0x80000007: Advanced Power Management
+            0x80000007 => (0x00000000, 0x00000000, 0x00000000, 0x00000100), // Invariant TSC
+
+            // Leaf 0x80000008: Virtual/Physical Address Sizes
             0x80000008 => (
-                // [7:0]=36 phys addr bits (4GB emulator), [15:8]=48 virt addr bits
-                // Hardware has 46 phys bits; we use 36 to match our 4GB address space
-                0x00003024,
-                // EBX: bit 9 = WBNOINVD (Bochs cpuid.cc:1497-1498 sets for long mode CPUs)
-                0x00000200,
+                0x00003024, // [7:0]=36 phys, [15:8]=48 virt
+                0x00000200, // EBX: bit 9 = WBNOINVD
                 0x00000000,
                 0x00000000,
             ),
-            // Bochs corei7_skylake-x.cc:198-201: default case falls through
-            // to leaf 0x16 (Processor Frequency). This matches real hardware behavior
-            // where unknown standard leaves return the last valid leaf's data.
-            // Extended leaves > max_ext_leaf return zeros (handled by check below).
+
+            // ── Default: beyond max leaf → return leaf 0x16 data ────────
+            // Bochs corei7_skylake-x.cc:199-201
             _ => {
                 if eax >= 0x80000000 && eax > 0x80000008 {
                     (0, 0, 0, 0) // beyond max extended leaf
@@ -316,7 +598,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
                     // Beyond max standard leaf — Bochs returns leaf 0x16 data
                     (0x00000DAC, 0x00000FA0, 0x00000064, 0x00000000)
                 } else {
-                    (0, 0, 0, 0) // reserved/unhandled standard leaves
+                    (0, 0, 0, 0)
                 }
             }
         }

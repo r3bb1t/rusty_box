@@ -712,7 +712,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val_32 = self.cr0.get32();
         let gpr = instr.src() as usize;
         self.set_gpr32(gpr, val_32);
-        tracing::trace!("MOV r32, CR0: {:#010x} -> reg{}", val_32, gpr);
+
         Ok(())
     }
 
@@ -721,7 +721,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val_32 = self.cr2 as u32;
         let gpr = instr.src() as usize;
         self.set_gpr32(gpr, val_32);
-        tracing::trace!("MOV r32, CR2: {:#010x} -> reg{}", val_32, gpr);
+
         Ok(())
     }
 
@@ -730,7 +730,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val_32 = self.cr3 as u32;
         let gpr = instr.src() as usize;
         self.set_gpr32(gpr, val_32);
-        tracing::trace!("MOV r32, CR3: {:#010x} -> reg{}", val_32, gpr);
+
         Ok(())
     }
 
@@ -739,7 +739,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val_32 = self.cr4.get32();
         let gpr = instr.src() as usize;
         self.set_gpr32(gpr, val_32);
-        tracing::trace!("MOV r32, CR4: {:#010x} -> reg{}", val_32, gpr);
+
         Ok(())
     }
 
@@ -942,7 +942,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let src = instr.src1() as usize;
         let val_32 = self.get_gpr32(src);
         self.cr2 = val_32 as u64;
-        tracing::trace!("MOV CR2, r32: {:#010x}", val_32);
+
         Ok(())
     }
 
@@ -973,7 +973,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.tlb_flush();
         }
 
-        tracing::trace!("MOV CR3: {:#018x} (long_mode={})", val, self.long_mode());
+
         Ok(())
     }
 
@@ -1015,7 +1015,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Bochs: update linaddr_width based on LA57 (5-level paging support)
         self.linaddr_width = if self.cr4.la57() { 57 } else { 48 };
 
-        tracing::trace!("MOV CR4, r32: {:#010x}", val_32);
+
         Ok(())
     }
 
@@ -1066,7 +1066,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let src = instr.src1() as usize;
         let val_64 = self.get_gpr64(src);
         self.cr2 = val_64;
-        tracing::trace!("MOV CR2 (64-bit): {:#018x}", val_64);
+
         Ok(())
     }
 

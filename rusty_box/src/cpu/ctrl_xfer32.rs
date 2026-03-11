@@ -91,7 +91,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eip = self.eip();
         let new_eip = (eip as i32).wrapping_add(disp) as u32;
         self.branch_near32(new_eip)?;
-        tracing::trace!("JMP rel32: EIP = {:#010x}", new_eip);
         Ok(())
     }
 
@@ -104,7 +103,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::debug!("JMP r32: EIP={:#010x} from RIP={:#010x} reg={}", new_eip, self.prev_rip, dst);
         }
         self.branch_near32(new_eip)?;
-        tracing::trace!("JMP r32: EIP = {:#010x}", new_eip);
         Ok(())
     }
 
@@ -118,12 +116,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::debug!("JMP m32: [{:?}:{:#010x}] -> EIP={:#010x} from RIP={:#010x}", seg, eaddr, new_eip, self.prev_rip);
         }
         self.branch_near32(new_eip)?;
-        tracing::trace!(
-            "JMP m32: [{:?}:{:#010x}] -> EIP = {:#010x}",
-            seg,
-            eaddr,
-            new_eip
-        );
         Ok(())
     }
 
@@ -151,7 +143,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let new_eip = (eip as i32).wrapping_add(disp) as u32;
 
         self.branch_near32(new_eip)?;
-        tracing::trace!("CALL rel32: EIP = {:#010x}, ret = {:#010x}", new_eip, eip);
         Ok(())
     }
 
@@ -164,7 +155,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.push_32(eip)?;
         self.branch_near32(new_eip)?;
-        tracing::trace!("CALL r32: EIP = {:#010x}, ret = {:#010x}", new_eip, eip);
         Ok(())
     }
 
@@ -181,13 +171,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         self.push_32(eip)?;
         self.branch_near32(new_eip)?;
-        tracing::trace!(
-            "CALL m32: [{:?}:{:#010x}] -> EIP = {:#010x}, ret = {:#010x}",
-            seg,
-            eaddr,
-            new_eip,
-            eip
-        );
         Ok(())
     }
 
@@ -229,11 +212,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let sp = self.get_gpr16(4);
             self.set_gpr16(4, sp.wrapping_add(imm16));
         }
-        tracing::trace!(
-            "RET near32 imm16: EIP = {:#010x}, pop = {}",
-            return_eip,
-            imm16
-        );
         Ok(())
     }
 
@@ -248,7 +226,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JO rel32 taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }
@@ -260,7 +237,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JNO rel32 taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }
@@ -272,7 +248,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JB/JC rel32 taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }
@@ -284,7 +259,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JNB/JNC rel32 taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }
@@ -296,7 +270,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JZ/JE rel32 taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }
@@ -308,7 +281,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JNZ/JNE rel32 taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }
@@ -320,7 +292,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JBE/JNA rel32 taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }
@@ -332,7 +303,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JNBE/JA rel32 taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }
@@ -344,7 +314,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JS rel32 taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }
@@ -356,7 +325,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JNS rel32 taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }
@@ -368,7 +336,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JP/JPE rel32 taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }
@@ -380,7 +347,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JNP/JPO rel32 taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }
@@ -392,7 +358,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JL/JNGE rel32 taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }
@@ -404,7 +369,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JNL/JGE rel32 taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }
@@ -416,7 +380,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JLE/JNG rel32 taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }
@@ -428,7 +391,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JNLE/JG rel32 taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }

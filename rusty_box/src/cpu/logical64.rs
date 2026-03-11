@@ -58,14 +58,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_qword(rmw_laddr, result);
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "XOR64 mem: [{:?}:{:#x}] = {:#018x} ^ {:#018x} = {:#018x}",
-            seg,
-            eaddr,
-            op1_64,
-            op2_64,
-            result
-        );
         Ok(())
     }
 
@@ -80,13 +72,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr64(dst, result);
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "XOR64 reg: reg{} = {:#018x} ^ {:#018x} = {:#018x}",
-            dst,
-            op1_64,
-            op2_64,
-            result
-        );
     }
 
     /// XOR_GqEqM: XOR r64, r/m64 (memory form, load-direction)
@@ -103,13 +88,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr64(dst, result);
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "XOR64 mem: reg{} = {:#018x} ^ {:#018x} = {:#018x}",
-            dst,
-            op1_64,
-            op2_64,
-            result
-        );
         Ok(())
     }
 
@@ -126,14 +104,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_qword(rmw_laddr, result);
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "XOR64 mem: [{:?}:{:#x}] = {:#018x} ^ {:#018x} = {:#018x}",
-            seg,
-            eaddr,
-            op1_64,
-            op2_64,
-            result
-        );
         Ok(())
     }
 
@@ -147,13 +117,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr64(dst, result);
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "XOR64 reg: reg{} = {:#018x} ^ {:#018x} = {:#018x}",
-            dst,
-            op1_64,
-            op2_64,
-            result
-        );
     }
 
     // =========================================================================
@@ -173,14 +136,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_qword(rmw_laddr, result);
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "OR64 mem: [{:?}:{:#x}] = {:#018x} | {:#018x} = {:#018x}",
-            seg,
-            eaddr,
-            op1_64,
-            op2_64,
-            result
-        );
         Ok(())
     }
 
@@ -194,13 +149,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr64(dst, result);
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "OR64 reg: reg{} = {:#018x} | {:#018x} = {:#018x}",
-            dst,
-            op1_64,
-            op2_64,
-            result
-        );
     }
 
     /// OR_EqGqM: OR r/m64, r64 (memory form)
@@ -216,14 +164,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_qword(rmw_laddr, result);
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "OR64 mem: [{:?}:{:#x}] = {:#018x} | {:#018x} = {:#018x}",
-            seg,
-            eaddr,
-            op1_64,
-            op2_64,
-            result
-        );
         Ok(())
     }
 
@@ -238,13 +178,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr64(dst, result);
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "OR64 reg: reg{} = {:#018x} | {:#018x} = {:#018x}",
-            dst,
-            op1_64,
-            op2_64,
-            result
-        );
     }
 
     /// OR_GqEqM: OR r64, r/m64 (memory form, load-direction)
@@ -261,13 +194,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr64(dst, result);
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "OR64 mem: reg{} = {:#018x} | {:#018x} = {:#018x}",
-            dst,
-            op1_64,
-            op2_64,
-            result
-        );
         Ok(())
     }
 
@@ -288,14 +214,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_qword(rmw_laddr, result);
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "AND64 mem: [{:?}:{:#x}] = {:#018x} & {:#018x} = {:#018x}",
-            seg,
-            eaddr,
-            op1_64,
-            op2_64,
-            result
-        );
         Ok(())
     }
 
@@ -310,13 +228,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr64(dst, result);
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "AND64 reg: reg{} = {:#018x} & {:#018x} = {:#018x}",
-            dst,
-            op1_64,
-            op2_64,
-            result
-        );
     }
 
     /// AND_GqEqM: AND r64, r/m64 (memory form, load-direction)
@@ -333,13 +244,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr64(dst, result);
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "AND64 mem: reg{} = {:#018x} & {:#018x} = {:#018x}",
-            dst,
-            op1_64,
-            op2_64,
-            result
-        );
         Ok(())
     }
 
@@ -356,14 +260,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_qword(rmw_laddr, result);
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "AND64 mem: [{:?}:{:#x}] = {:#018x} & {:#018x} = {:#018x}",
-            seg,
-            eaddr,
-            op1_64,
-            op2_64,
-            result
-        );
         Ok(())
     }
 
@@ -377,13 +273,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr64(dst, result);
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "AND64 reg: reg{} = {:#018x} & {:#018x} = {:#018x}",
-            dst,
-            op1_64,
-            op2_64,
-            result
-        );
     }
 
     // =========================================================================
@@ -401,13 +290,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = !op1_64;
 
         self.write_rmw_linear_qword(rmw_laddr, result);
-        tracing::trace!(
-            "NOT64 mem: [{:?}:{:#x}] = !{:#018x} = {:#018x}",
-            seg,
-            eaddr,
-            op1_64,
-            result
-        );
         Ok(())
     }
 
@@ -419,7 +301,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = !op1_64;
 
         self.set_gpr64(dst, result);
-        tracing::trace!("NOT64 reg: reg{} = !{:#018x} = {:#018x}", dst, op1_64, result);
     }
 
     // =========================================================================
@@ -436,12 +317,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op1_64 & op2_64;
 
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "TEST64 reg: {:#018x} & {:#018x} = {:#018x}",
-            op1_64,
-            op2_64,
-            result
-        );
     }
 
     /// TEST_EqGqM: TEST r/m64, r64 (memory form)
@@ -452,19 +327,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
         let op1_64 = self.read_linear_qword(seg, laddr)?;
-        // In Bochs TEST_EqGqM, src() is the register operand
-        let op2_64 = self.get_gpr64(instr.src() as usize);
+        // In Bochs TEST_EqGqM, i->src() = nnn (register operand).
+        // Our decoder ELSE branch: dst=nnn, src1=rm. So use dst() for the register.
+        let op2_64 = self.get_gpr64(instr.dst() as usize);
         let result = op1_64 & op2_64;
 
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "TEST64 mem: [{:?}:{:#x}] & reg = {:#018x} & {:#018x} = {:#018x}",
-            seg,
-            eaddr,
-            op1_64,
-            op2_64,
-            result
-        );
         Ok(())
     }
 
@@ -477,12 +345,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op1_64 & op2_64;
 
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "TEST64 reg: {:#018x} & {:#018x} = {:#018x}",
-            op1_64,
-            op2_64,
-            result
-        );
     }
 
     /// TEST_EqIdM: TEST r/m64, imm32 (sign-extended) (memory form)
@@ -497,15 +359,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op1_64 & op2_64;
 
         self.set_flags_oszapc_logic_64(result);
-        tracing::trace!(
-            "TEST64 mem: [{:?}:{:#x}] & {:#018x} = {:#018x} & {:#018x} = {:#018x}",
-            seg,
-            eaddr,
-            op2_64,
-            op1_64,
-            op2_64,
-            result
-        );
         Ok(())
     }
 
@@ -536,7 +389,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = instr.id() as i32 as u64; // sign-extend imm32 to 64 bits
         let result = op1.wrapping_sub(op2);
         self.update_flags_sub64(op1, op2, result);
-        tracing::trace!("CMP RAX, imm64: {:#018x} - {:#018x}", op1, op2);
     }
 
     // =========================================================================

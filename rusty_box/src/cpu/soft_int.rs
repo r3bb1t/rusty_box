@@ -188,12 +188,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let bound_min = self.v_read_word(seg, eaddr)? as i16;
         let bound_max = self.v_read_word(seg, eaddr.wrapping_add(2) & asize_mask)? as i16;
 
-        tracing::trace!(
-            "BOUND r16: value={}, min={}, max={}",
-            op1_16,
-            bound_min,
-            bound_max
-        );
 
         // Check if value is outside bounds
         if op1_16 < bound_min || op1_16 > bound_max {
@@ -235,12 +229,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let bound_min = self.v_read_dword(seg, eaddr)? as i32;
         let bound_max = self.v_read_dword(seg, eaddr.wrapping_add(4) & asize_mask)? as i32;
 
-        tracing::trace!(
-            "BOUND r32: value={}, min={}, max={}",
-            op1_32,
-            bound_min,
-            bound_max
-        );
 
         // Check if value is outside bounds
         if op1_32 < bound_min || op1_32 > bound_max {
@@ -1036,13 +1024,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Our static trait returns base values; we patch them here.
         match function {
             0x00000001 => {
-                // ECX bit 27 (OSXSAVE): only set if CR4.OSXSAVE is enabled
-                // Bochs cpuid.cc:586-588
-                if !self.cr4.osxsave() {
-                    ecx &= !(1 << 27); // clear OSXSAVE
+                // ECX bit 27 (OSXSAVE): set only when CR4.OSXSAVE is enabled
+                // Bochs cpuid.cc:586-588 — base value does NOT include this bit
+                if self.cr4.osxsave() {
+                    ecx |= 1 << 27; // set OSXSAVE
                 }
 
-                // EDX bit 9 (APIC): only set if APIC is globally enabled
+                // EDX bit 9 (APIC): cleared when APIC is globally disabled
                 // Bochs cpuid.cc:651-657
                 if self.lapic.get_mode() == super::apic::ApicMode::GloballyDisabled {
                     edx &= !(1 << 9); // clear APIC feature bit
@@ -1093,14 +1081,5 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rcx(ecx as u64);
         self.set_rdx(edx as u64);
 
-        tracing::trace!(
-            "CPUID(EAX={:#x}, ECX={:#x}): -> EAX={:#x}, EBX={:#x}, ECX={:#x}, EDX={:#x}",
-            function,
-            sub_function,
-            eax,
-            ebx,
-            ecx,
-            edx
-        );
     }
 }

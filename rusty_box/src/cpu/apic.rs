@@ -311,9 +311,23 @@ pub struct BxLocalApic {
     timer_current: u32,
     /// System tick value when timer started counting; also holds TSC-Deadline value
     ticks_initial: u64,
-    /// Last-known system ticks — updated by emulator loop for timer count reads.
+    /// Last-known system ticks — updated by emulator loop and before LAPIC reads.
     /// Used by read_aligned(&self) to compute current timer count without &mut self.
     pub(crate) current_ticks: u64,
+    /// System ticks at last sync point (batch boundary).
+    /// Used with icount_at_sync to compute live ticks mid-batch.
+    pub(crate) ticks_at_sync: u64,
+    /// CPU instruction count at last sync point.
+    pub(crate) icount_at_sync: u64,
+    /// Pointer to CPU's icount field for live tick computation during MMIO reads.
+    /// Set during emulator initialization. Same pattern as PIT's icount_ptr.
+    icount_ptr: Option<*const u64>,
+    /// Pointer to CPU's pending_event field for direct event signaling.
+    /// Allows service_local_apic() to signal BX_EVENT_PENDING_LAPIC_INTR
+    /// without going through the emulator loop (matching Bochs behavior).
+    pending_event_ptr: Option<*mut u32>,
+    /// Pointer to CPU's async_event field for direct event triggering.
+    async_event_ptr: Option<*mut u32>,
 
     /// Timer divide configuration register (bits 3,1,0 writable)
     timer_divconf: u32,
@@ -369,6 +383,13 @@ pub struct BxLocalApic {
     /// Pending timer deactivation request. Set by set_initial_timer_count()
     /// and periodic(), cleared by emulator loop.
     pub(crate) timer_deactivate_request: bool,
+
+    /// Diagnostic counter: number of timer fires observed.
+    pub(crate) diag_timer_fires: u64,
+    /// Diagnostic: number of set_initial_timer_count calls
+    pub(crate) diag_set_initial_count: u64,
+    /// Diagnostic: number of LVT-masked periodic fires (not delivered)
+    pub(crate) diag_timer_masked: u64,
 }
 
 /// Pending IPI that needs APIC bus routing (filled by send_ipi shorthand 0/2/3)
@@ -407,6 +428,11 @@ impl Default for BxLocalApic {
             timer_current: 0,
             ticks_initial: 0,
             current_ticks: 0,
+            ticks_at_sync: 0,
+            icount_at_sync: 0,
+            icount_ptr: None,
+            pending_event_ptr: None,
+            async_event_ptr: None,
             timer_divconf: 0,
             timer_divide_factor: 1,
             timer_active: false,
@@ -425,6 +451,9 @@ impl Default for BxLocalApic {
             timer_fired: false,
             timer_activate_request: None,
             timer_deactivate_request: false,
+            diag_timer_fires: 0,
+            diag_set_initial_count: 0,
+            diag_timer_masked: 0,
         }
     }
 }
@@ -432,6 +461,34 @@ impl Default for BxLocalApic {
 // ─── Static helper functions (Bochs: apic.cc:768-781) ────────────────────────
 
 impl BxLocalApic {
+    /// Set the pointer to CPU's icount for live tick computation.
+    /// SAFETY: The pointer must remain valid for the lifetime of the LAPIC.
+    pub(crate) unsafe fn set_icount_ptr(&mut self, ptr: *const u64) {
+        self.icount_ptr = Some(ptr);
+    }
+
+    /// Set pointers to CPU's event fields for direct interrupt signaling.
+    /// This allows service_local_apic() to signal BX_EVENT_PENDING_LAPIC_INTR
+    /// directly, matching Bochs where the LAPIC calls cpu->signal_event().
+    /// SAFETY: Pointers must remain valid for the lifetime of the LAPIC.
+    pub(crate) unsafe fn set_event_ptrs(&mut self, pending: *mut u32, async_evt: *mut u32) {
+        self.pending_event_ptr = Some(pending);
+        self.async_event_ptr = Some(async_evt);
+    }
+
+    /// Get the live system tick count, accounting for instructions executed
+    /// since the last batch boundary. This allows LAPIC timer current count
+    /// reads to see progress within a CPU batch (critical for calibration loops).
+    #[inline]
+    fn live_ticks(&self) -> u64 {
+        if let Some(ptr) = self.icount_ptr {
+            let cpu_icount = unsafe { *ptr };
+            self.ticks_at_sync + (cpu_icount - self.icount_at_sync)
+        } else {
+            self.current_ticks
+        }
+    }
+
     /// Check if a vector bit is set in a 256-bit register array.
     /// Bochs: bx_local_apic_c::get_vector (apic.cc:768-771)
     #[inline]
@@ -535,8 +592,6 @@ impl BxLocalApic {
         let mut data: u32 = 0;
         let apic_reg = (addr & 0xFF0) as u32;
 
-        debug!("LAPIC read from register {:#06x}", apic_reg);
-
         match apic_reg {
             // Local APIC ID (apic.cc:371-372)
             0x020 => {
@@ -621,15 +676,16 @@ impl BxLocalApic {
             }
             // Timer current count (apic.cc:452-454)
             // Bochs calls get_current_timer_count(bx_pc_system.time_ticks()) here.
-            // We use current_ticks (updated by the emulator loop) to compute inline
-            // without requiring &mut self.
+            // We use live_ticks() which reads CPU icount via pointer for accuracy
+            // within CPU batches (critical for kernel timer calibration loops).
             0x390 => {
                 let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
                 if timervec.timer_mode_field() == 2 {
                     // TSC-deadline mode: current count always reads 0
                     data = 0;
                 } else if self.timer_active && self.timer_divide_factor > 0 {
-                    let delta64 = self.current_ticks.saturating_sub(self.ticks_initial)
+                    let ticks = self.live_ticks();
+                    let delta64 = ticks.saturating_sub(self.ticks_initial)
                         / self.timer_divide_factor as u64;
                     let delta32 = delta64 as u32;
                     data = if delta32 >= self.timer_initial { 0 } else { self.timer_initial - delta32 };
@@ -674,8 +730,6 @@ impl BxLocalApic {
     pub(crate) fn write_aligned(&mut self, addr: BxPhyAddress, value: u32) {
         debug_assert!((addr & 0xF) == 0);
         let apic_reg = (addr & 0xFF0) as u32;
-
-        debug!("LAPIC write {:#010x} to register {:#06x}", value, apic_reg);
 
         match apic_reg {
             // TPR (apic.cc:508-510)
@@ -826,8 +880,12 @@ impl BxLocalApic {
         if apic_reg == 0x320 {
             // Cannot enable TSC-Deadline when not supported (we don't support it)
             value &= !0x40000;
-            // Note: if TSC-Deadline support were enabled, transitioning between
-            // TSC-Deadline and other timer modes would disarm the timer here.
+            // Trace timer LVT writes
+            let mode = match (value >> 17) & 3 { 0 => "one-shot", 1 => "periodic", 2 => "tsc-dl", _ => "??" };
+            let vec = value & 0xFF;
+            let masked = (value >> 16) & 1;
+            debug!("[LAPIC] LVT_TIMER write: vec={:#x} mode={} masked={} raw={:#010x}",
+                vec, mode, masked, value);
         }
 
         // Apply LVT mask for this entry
@@ -928,8 +986,15 @@ impl BxLocalApic {
             self.spurious_vector = ((value & 0xF0) | 0x0F) as u8;
         }
 
+        let was_enabled = self.software_enabled;
         self.software_enabled = ((value >> 8) & 1) != 0;
         self.focus_disable = ((value >> 9) & 1) != 0;
+
+        // Trace enable/disable transitions
+        if was_enabled != self.software_enabled {
+            debug!("[LAPIC] SVR write: sw_enabled {} -> {} (SVR={:#x})",
+                was_enabled, self.software_enabled, value);
+        }
 
         if !self.software_enabled {
             for entry in &mut self.lvt {
@@ -944,8 +1009,8 @@ impl BxLocalApic {
     /// For level-triggered interrupts, broadcasts EOI to I/O APIC.
     /// Bochs: receive_EOI (apic.cc:719-739)
     pub(crate) fn receive_eoi(&mut self, _value: u32) {
-        debug!("Wrote EOI");
         let vec = self.highest_priority_int(&self.isr);
+        debug!("EOI: isr_hp={}", vec);
         if vec < 0 {
             debug!("EOI written without any bit in ISR");
         } else {
@@ -1024,11 +1089,23 @@ impl BxLocalApic {
         }
 
         // Signal CPU that interrupt is ready (apic.cc:825-826)
+        // Bochs: cpu->signal_event(BX_EVENT_PENDING_LAPIC_INTR)
         debug!(
             "service_local_apic(): setting INTR=1 for vector {:#04x}",
             first_irr
         );
         self.intr = true;
+
+        // Directly signal the CPU's event system (matching Bochs apic.cc:825).
+        // Without this, the event would only be signaled at the next batch boundary,
+        // causing interrupts triggered by EOI within a batch to be delayed.
+        const BX_EVENT_PENDING_LAPIC_INTR: u32 = 1 << 2;
+        if let Some(ptr) = self.pending_event_ptr {
+            unsafe { *ptr |= BX_EVENT_PENDING_LAPIC_INTR; }
+        }
+        if let Some(ptr) = self.async_event_ptr {
+            unsafe { *ptr |= 1; }
+        }
     }
 
     /// Deliver an interrupt to this LAPIC (from APIC bus or IPI).
@@ -1279,9 +1356,20 @@ impl BxLocalApic {
 
         // If timer is not masked, trigger interrupt (apic.cc:1045-1050)
         if !timervec.contains(LvtBits::MASKED) {
+            // Log first few and transition events
+            let fire_num = self.diag_timer_fires; // incremented by caller after this
+            if fire_num < 5 || (fire_num < 200 && fire_num % 50 == 0) {
+                debug!("[LAPIC] periodic FIRE #{}: vec={:#x} mode={} ticks={} irr_set={} isr_set={} intr={}",
+                    fire_num, timervec.vector(), timervec.timer_mode_field(), current_ticks,
+                    Self::get_vector(&self.irr, timervec.vector() as u32),
+                    Self::get_vector(&self.isr, timervec.vector() as u32),
+                    self.intr);
+            }
             self.trigger_irq(timervec.vector(), APIC_EDGE_TRIGGERED, false);
         } else {
-            debug!("local apic timer LVT masked");
+            self.diag_timer_masked += 1;
+            debug!("[LAPIC] periodic: LVT MASKED (fire #{}), sw_enabled={}",
+                self.diag_timer_fires, self.software_enabled);
         }
 
         // Check timer mode (apic.cc:1053-1068)
@@ -1322,7 +1410,14 @@ impl BxLocalApic {
     /// Write the initial timer count register. Starts or restarts the timer.
     /// Bochs: set_initial_timer_count (apic.cc:1081-1110)
     pub(crate) fn set_initial_timer_count(&mut self, value: u32) {
+        self.diag_set_initial_count += 1;
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
+        let mode = match timervec.timer_mode_field() { 0 => "one-shot", 1 => "periodic", _ => "other" };
+        debug!("[LAPIC] set_initial_count: value={} div_factor={} period={} mode={} vec={:#x} masked={} (call #{})",
+            value, self.timer_divide_factor,
+            value as u64 * self.timer_divide_factor as u64,
+            mode, timervec.vector(), timervec.contains(LvtBits::MASKED),
+            self.diag_set_initial_count);
 
         // In TSC-deadline mode, writes to initial time count are ignored (apic.cc:1087)
         if timervec.timer_mode_field() == 2 {
@@ -1340,9 +1435,17 @@ impl BxLocalApic {
 
         if self.timer_initial != 0 {
             // Start counting (apic.cc:1099-1109)
-            debug!("APIC: Initial Timer Count Register = {}", value);
+            debug!("APIC: Initial Timer Count Register = {} div_factor={} period={} mode={}",
+                value, self.timer_divide_factor,
+                value as u64 * self.timer_divide_factor as u64,
+                timervec.timer_mode_field());
             self.timer_current = self.timer_initial;
             self.timer_active = true;
+            // Bochs apic.cc:1106: ticksInitial = bx_pc_system.time_ticks()
+            // We use current_ticks (updated at batch boundary) as best available
+            // approximation. The emulator loop will also call set_ticks_initial()
+            // with the precise value when processing the activate request.
+            self.ticks_initial = self.current_ticks;
             // Request timer activation: period = initial_count * divide_factor ticks
             // Bochs apic.cc:1107-1108: activate_timer_ticks(handle, Bit64u(value) * Bit64u(factor), 0)
             let period = value as u64 * self.timer_divide_factor as u64;
@@ -1604,6 +1707,47 @@ impl From<ApicError> for u8 {
 impl From<u8> for ApicError {
     fn from(value: u8) -> Self {
         ApicError::from_raw(value)
+    }
+}
+
+impl BxLocalApic {
+    /// Dump LAPIC state for debugging. Uses eprintln! so it's always visible.
+    pub(crate) fn dump_state(&self) {
+        let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
+        let timer_mode = match timervec.timer_mode_field() {
+            0 => "one-shot",
+            1 => "periodic",
+            2 => "tsc-deadline",
+            _ => "unknown",
+        };
+        let timer_masked = timervec.contains(LvtBits::MASKED);
+        let timer_vector = timervec.vector();
+        eprintln!("--- LAPIC State ---");
+        eprintln!("  mode={:?} sw_enabled={} base={:#x} id={}",
+            self.mode, self.software_enabled, self.base_addr, self.apic_id);
+        eprintln!("  TPR={:#x} PPR={:#x} spurious_vec={:#x}",
+            self.task_priority, self.get_ppr(), self.spurious_vector);
+        eprintln!("  LVT[Timer]={:#010x} (vec={:#x} mode={} masked={})",
+            timervec.bits(), timer_vector, timer_mode, timer_masked);
+        eprintln!("  LVT[LINT0]={:#010x} LVT[LINT1]={:#010x}",
+            self.lvt[3].bits(), self.lvt[4].bits());
+        eprintln!("  timer: initial={} current={} active={} div_factor={} period={}",
+            self.timer_initial, self.timer_current, self.timer_active,
+            self.timer_divide_factor,
+            self.timer_initial as u64 * self.timer_divide_factor as u64);
+        eprintln!("  ticks_initial={} current_ticks={}", self.ticks_initial, self.current_ticks);
+        eprintln!("  intr={} timer_fired={} timer_activate_req={} timer_deact_req={}",
+            self.intr, self.timer_fired,
+            self.timer_activate_request.is_some(), self.timer_deactivate_request);
+        // Show IRR/ISR summary - which vectors are pending/in-service
+        let mut irr_vecs = Vec::new();
+        let mut isr_vecs = Vec::new();
+        for i in 0..256u32 {
+            if Self::get_vector(&self.irr, i) { irr_vecs.push(i); }
+            if Self::get_vector(&self.isr, i) { isr_vecs.push(i); }
+        }
+        eprintln!("  IRR vectors: {:?}", irr_vecs);
+        eprintln!("  ISR vectors: {:?}", isr_vecs);
     }
 }
 

@@ -152,7 +152,7 @@ fn run_alpine_direct() -> Result<()> {
     let ram_mb: usize = std::env::var("ALPINE_RAM_MB")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(128);
+        .unwrap_or(256);
 
     let headless = std::env::var("RUSTY_BOX_HEADLESS").is_ok();
 
@@ -163,7 +163,7 @@ fn run_alpine_direct() -> Result<()> {
 
     // Default command line: serial console + Alpine init
     let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_|
-        "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 nomodeset nokaslr".to_string()
+        "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 earlyprintk=serial,ttyS0,115200 nomodeset nokaslr kfence.sample_interval=0".to_string()
     );
 
     // =========================================================================
@@ -338,6 +338,8 @@ fn run_alpine_direct() -> Result<()> {
         elapsed.as_secs_f64(),
         total_executed as f64 / elapsed.as_secs_f64() / 1_000_000.0,
     );
+
+    emu.dump_alpine_diag();
 
     // VGA text dump
     let vga = emu.vga_text_dump();

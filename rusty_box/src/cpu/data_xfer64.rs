@@ -18,7 +18,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let imm64 = instr.iq();
 
         self.set_gpr64(dst, imm64);
-        tracing::trace!("MOV64: reg{} = {:#018x}", dst, imm64);
     }
 
     /// MOV r32, r/m32 (memory form, 64-bit addressing)
@@ -30,13 +29,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr32(dst_reg, val32);
-        tracing::trace!(
-            "MOV64 mem: reg{} = [{:?}:{:#x}] ({:#010x})",
-            dst_reg,
-            seg,
-            eaddr,
-            val32
-        );
         Ok(())
     }
 
@@ -63,13 +55,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val32 = self.get_gpr32(src_reg);
 
         self.write_virtual_dword_64(seg, eaddr, val32)?;
-        tracing::trace!(
-            "MOV64 mem: [{:?}:{:#x}] = reg{} ({:#010x})",
-            seg,
-            eaddr,
-            src_reg,
-            val32
-        );
         Ok(())
     }
 
@@ -82,13 +67,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val64 = self.get_gpr64(src_reg);
 
         self.write_virtual_qword_64(seg, eaddr, val64)?;
-        tracing::trace!(
-            "MOV64 mem: [{:?}:{:#x}] = reg{} ({:#018x})",
-            seg,
-            eaddr,
-            src_reg,
-            val64
-        );
         Ok(())
     }
 
@@ -100,12 +78,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val64 = self.get_gpr64(src_reg);
 
         self.stack_write_qword_64(eaddr, val64)?;
-        tracing::trace!(
-            "MOV64 stack: [{:#x}] = reg{} ({:#018x})",
-            eaddr,
-            src_reg,
-            val64
-        );
         Ok(())
     }
 
@@ -118,13 +90,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr64(dst_reg, val64);
-        tracing::trace!(
-            "MOV64 mem: reg{} = [{:?}:{:#x}] ({:#018x})",
-            dst_reg,
-            seg,
-            eaddr,
-            val64
-        );
         Ok(())
     }
 
@@ -136,12 +101,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr64(dst_reg, val64);
-        tracing::trace!(
-            "MOV64 stack: reg{} = [{:#x}] ({:#018x})",
-            dst_reg,
-            eaddr,
-            val64
-        );
         Ok(())
     }
 
@@ -153,7 +112,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr64(dst_reg, val64);
-        tracing::trace!("MOV64: reg{} = reg{} ({:#018x})", dst_reg, src_reg, val64);
     }
 
     /// LEA r64, m - Load effective address into 64-bit register
@@ -163,7 +121,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr64(dst_reg, eaddr);
-        tracing::trace!("LEA64: reg{} = {:#018x}", dst_reg, eaddr);
     }
 
     /// MOV AL, moffs64
@@ -173,7 +130,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val8 = self.read_virtual_byte_64(seg, instr.iq())?;
 
         self.set_gpr8(0, val8); // AL
-        tracing::trace!("MOV AL, [{:?}:{:#018x}] = {:#04x}", seg, instr.iq(), val8);
         Ok(())
     }
 
@@ -184,7 +140,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val8 = self.get_gpr8(0); // AL
 
         self.write_virtual_byte_64(seg, instr.iq(), val8)?;
-        tracing::trace!("MOV [{:?}:{:#018x}], AL = {:#04x}", seg, instr.iq(), val8);
         Ok(())
     }
 
@@ -195,7 +150,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val16 = self.read_virtual_word_64(seg, instr.iq())?;
 
         self.set_gpr16(0, val16); // AX
-        tracing::trace!("MOV AX, [{:?}:{:#018x}] = {:#06x}", seg, instr.iq(), val16);
         Ok(())
     }
 
@@ -206,7 +160,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val16 = self.get_gpr16(0); // AX
 
         self.write_virtual_word_64(seg, instr.iq(), val16)?;
-        tracing::trace!("MOV [{:?}:{:#018x}], AX = {:#06x}", seg, instr.iq(), val16);
         Ok(())
     }
 
@@ -217,12 +170,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val32 = self.read_virtual_dword_64(seg, instr.iq())?;
 
         self.set_gpr32(0, val32); // EAX
-        tracing::trace!(
-            "MOV EAX, [{:?}:{:#018x}] = {:#010x}",
-            seg,
-            instr.iq(),
-            val32
-        );
         Ok(())
     }
 
@@ -233,12 +180,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val32 = self.get_gpr32(0); // EAX
 
         self.write_virtual_dword_64(seg, instr.iq(), val32)?;
-        tracing::trace!(
-            "MOV [{:?}:{:#018x}], EAX = {:#010x}",
-            seg,
-            instr.iq(),
-            val32
-        );
         Ok(())
     }
 
@@ -249,12 +190,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val64 = self.read_virtual_qword_64(seg, instr.iq())?;
 
         self.set_gpr64(0, val64); // RAX
-        tracing::trace!(
-            "MOV RAX, [{:?}:{:#018x}] = {:#018x}",
-            seg,
-            instr.iq(),
-            val64
-        );
         Ok(())
     }
 
@@ -265,12 +200,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val64 = self.get_gpr64(0); // RAX
 
         self.write_virtual_qword_64(seg, instr.iq(), val64)?;
-        tracing::trace!(
-            "MOV [{:?}:{:#018x}], RAX = {:#018x}",
-            seg,
-            instr.iq(),
-            val64
-        );
         Ok(())
     }
 
@@ -282,7 +211,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
 
         self.write_virtual_qword_64(seg, eaddr, op_64)?;
-        tracing::trace!("MOV64 mem: [{:?}:{:#x}] = {:#018x}", seg, eaddr, op_64);
         Ok(())
     }
 
@@ -293,7 +221,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr64(dst_reg, op_64);
-        tracing::trace!("MOV64: reg{} = {:#018x}", dst_reg, op_64);
     }
 
     // =========================================================================
@@ -310,13 +237,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr64(dst_reg, op2_8 as u64);
-        tracing::trace!(
-            "MOVZX64 mem: reg{} = [{:?}:{:#x}] ({:#04x})",
-            dst_reg,
-            seg,
-            eaddr,
-            op2_8
-        );
         Ok(())
     }
 
@@ -330,7 +250,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr64(dst_reg, op2_8 as u64);
-        tracing::trace!("MOVZX64: reg{} = reg{} ({:#04x})", dst_reg, src_reg, op2_8);
     }
 
     /// MOVZX r64, r/m16 (memory form)
@@ -343,13 +262,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr64(dst_reg, op2_16 as u64);
-        tracing::trace!(
-            "MOVZX64 mem: reg{} = [{:?}:{:#x}] ({:#06x})",
-            dst_reg,
-            seg,
-            eaddr,
-            op2_16
-        );
         Ok(())
     }
 
@@ -362,7 +274,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr64(dst_reg, op2_16 as u64);
-        tracing::trace!("MOVZX64: reg{} = reg{} ({:#06x})", dst_reg, src_reg, op2_16);
     }
 
     // =========================================================================
@@ -380,14 +291,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val64 = (op2_8 as i8 as i64) as u64; // sign extend byte to qword
 
         self.set_gpr64(dst_reg, val64);
-        tracing::trace!(
-            "MOVSX64 mem: reg{} = [{:?}:{:#x}] ({:#04x} -> {:#018x})",
-            dst_reg,
-            seg,
-            eaddr,
-            op2_8,
-            val64
-        );
         Ok(())
     }
 
@@ -402,13 +305,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val64 = (op2_8 as i8 as i64) as u64; // sign extend byte to qword
 
         self.set_gpr64(dst_reg, val64);
-        tracing::trace!(
-            "MOVSX64: reg{} = reg{} ({:#04x} -> {:#018x})",
-            dst_reg,
-            src_reg,
-            op2_8,
-            val64
-        );
     }
 
     /// MOVSX r64, r/m16 (memory form)
@@ -422,14 +318,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val64 = (op2_16 as i16 as i64) as u64; // sign extend word to qword
 
         self.set_gpr64(dst_reg, val64);
-        tracing::trace!(
-            "MOVSX64 mem: reg{} = [{:?}:{:#x}] ({:#06x} -> {:#018x})",
-            dst_reg,
-            seg,
-            eaddr,
-            op2_16,
-            val64
-        );
         Ok(())
     }
 
@@ -443,13 +331,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val64 = (op2_16 as i16 as i64) as u64; // sign extend word to qword
 
         self.set_gpr64(dst_reg, val64);
-        tracing::trace!(
-            "MOVSX64: reg{} = reg{} ({:#06x} -> {:#018x})",
-            dst_reg,
-            src_reg,
-            op2_16,
-            val64
-        );
     }
 
     /// MOVSX r64, r/m32 (memory form)
@@ -463,14 +344,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val64 = (op2_32 as i32 as i64) as u64; // sign extend dword to qword
 
         self.set_gpr64(dst_reg, val64);
-        tracing::trace!(
-            "MOVSX64 mem: reg{} = [{:?}:{:#x}] ({:#010x} -> {:#018x})",
-            dst_reg,
-            seg,
-            eaddr,
-            op2_32,
-            val64
-        );
         Ok(())
     }
 
@@ -484,13 +357,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val64 = (op2_32 as i32 as i64) as u64; // sign extend dword to qword
 
         self.set_gpr64(dst_reg, val64);
-        tracing::trace!(
-            "MOVSX64: reg{} = reg{} ({:#010x} -> {:#018x})",
-            dst_reg,
-            src_reg,
-            op2_32,
-            val64
-        );
     }
 
     // =========================================================================
@@ -509,14 +375,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_virtual_qword_back_64(op2_64);
         self.set_gpr64(src_reg, op1_64);
-        tracing::trace!(
-            "XCHG64 mem: [{:?}:{:#x}]={:#018x} <-> reg{}={:#018x}",
-            seg,
-            eaddr,
-            op2_64,
-            src_reg,
-            op1_64
-        );
         Ok(())
     }
 
@@ -530,13 +388,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr64(src_reg, op1_64);
         self.set_gpr64(dst_reg, op2_64);
-        tracing::trace!(
-            "XCHG64: reg{}={:#018x} <-> reg{}={:#018x}",
-            dst_reg,
-            op2_64,
-            src_reg,
-            op1_64
-        );
     }
 
     /// XCHG r64, RAX — opcode 0x90+rd with REX.W

@@ -154,12 +154,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.get_gpr16(src);
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_16(op1, op2, result);
-        tracing::trace!(
-            "CMP r16, r16: {:#06x} - {:#06x} = {:#06x}",
-            op1,
-            op2,
-            result
-        );
     }
 
     /// CMP AX, imm16
@@ -168,7 +162,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = instr.iw();
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_16(op1, op2, result);
-        tracing::trace!("CMP AX, imm16: {:#06x} - {:#06x}", op1, op2);
     }
 
     /// CMP r/m16, imm16
@@ -178,7 +171,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = instr.iw();
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_16(op1, op2, result);
-        tracing::trace!("CMP r16, imm16: {:#06x} - {:#06x}", op1, op2);
     }
 
     /// CMP_GwEw_M: CMP r16, r/m16 (memory form)
@@ -215,12 +207,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.get_gpr16(src);
         let result = op1 & op2;
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!(
-            "TEST r16, r16: {:#06x} & {:#06x} = {:#06x}",
-            op1,
-            op2,
-            result
-        );
     }
 
     /// TEST AX, imm16
@@ -229,7 +215,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = instr.iw();
         let result = op1 & op2;
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!("TEST AX, imm16: {:#06x} & {:#06x}", op1, op2);
     }
 
     /// TEST r/m16, imm16
@@ -239,7 +224,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = instr.iw();
         let result = op1 & op2;
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!("TEST r16, imm16: {:#06x} & {:#06x}", op1, op2);
     }
 
     // =========================================================================
@@ -432,14 +416,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_word(result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!(
-            "XOR16 mem: [{:?}:{:#x}] = {:#06x} ^ {:#06x} = {:#06x}",
-            seg,
-            eaddr,
-            op1_16,
-            op2_16,
-            result
-        );
         Ok(())
     }
 
@@ -455,13 +431,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr16(dst_reg, result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!(
-            "XOR16 mem: reg{} = {:#06x} ^ {:#06x} = {:#06x}",
-            dst_reg,
-            op1_16,
-            op2_16,
-            result
-        );
         Ok(())
     }
 
@@ -476,14 +445,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_word(result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!(
-            "XOR16 mem: [{:?}:{:#x}] = {:#06x} ^ {:#06x} = {:#06x}",
-            seg,
-            eaddr,
-            op1_16,
-            op2_16,
-            result
-        );
         Ok(())
     }
 
@@ -499,14 +460,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_word(result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!(
-            "OR16 mem: [{:?}:{:#x}] = {:#06x} | {:#06x} = {:#06x}",
-            seg,
-            eaddr,
-            op1_16,
-            op2_16,
-            result
-        );
         Ok(())
     }
 
@@ -522,13 +475,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr16(dst_reg, result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!(
-            "OR16 mem: reg{} = {:#06x} | {:#06x} = {:#06x}",
-            dst_reg,
-            op1_16,
-            op2_16,
-            result
-        );
         Ok(())
     }
 
@@ -543,14 +489,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_word(result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!(
-            "OR16 mem: [{:?}:{:#x}] = {:#06x} | {:#06x} = {:#06x}",
-            seg,
-            eaddr,
-            op1_16,
-            op2_16,
-            result
-        );
         Ok(())
     }
 
@@ -566,14 +504,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_word(result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!(
-            "AND16 mem: [{:?}:{:#x}] = {:#06x} & {:#06x} = {:#06x}",
-            seg,
-            eaddr,
-            op1_16,
-            op2_16,
-            result
-        );
         Ok(())
     }
 
@@ -589,13 +519,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr16(dst_reg, result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!(
-            "AND16 mem: reg{} = {:#06x} & {:#06x} = {:#06x}",
-            dst_reg,
-            op1_16,
-            op2_16,
-            result
-        );
         Ok(())
     }
 
@@ -610,14 +533,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_word(result);
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!(
-            "AND16 mem: [{:?}:{:#x}] = {:#06x} & {:#06x} = {:#06x}",
-            seg,
-            eaddr,
-            op1_16,
-            op2_16,
-            result
-        );
         Ok(())
     }
 
@@ -630,13 +545,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = !op1_16;
 
         self.write_rmw_linear_word(result);
-        tracing::trace!(
-            "NOT16 mem: [{:?}:{:#x}] = !{:#06x} = {:#06x}",
-            seg,
-            eaddr,
-            op1_16,
-            result
-        );
         Ok(())
     }
 
@@ -651,15 +559,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op1_16 & op2_16;
 
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!(
-            "TEST16 mem: [{:?}:{:#x}] & reg{} = {:#06x} & {:#06x} = {:#06x}",
-            seg,
-            eaddr,
-            src_reg,
-            op1_16,
-            op2_16,
-            result
-        );
         Ok(())
     }
 
@@ -673,15 +572,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op1_16 & op2_16;
 
         self.set_flags_oszapc_logic_16(result);
-        tracing::trace!(
-            "TEST16 mem: [{:?}:{:#x}] & {:#06x} = {:#06x} & {:#06x} = {:#06x}",
-            seg,
-            eaddr,
-            op2_16,
-            op1_16,
-            op2_16,
-            result
-        );
         Ok(())
     }
 

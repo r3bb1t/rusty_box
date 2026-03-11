@@ -17,7 +17,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst = instr.dst() as usize;
         let value = self.get_gpr32(dst);
         self.push_32(value)?;
-        tracing::trace!("PUSH r32 (reg {}): {:#010x}", dst, value);
         Ok(())
     }
 
@@ -28,7 +27,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let value = self.v_read_dword(seg, eaddr)?;
         self.push_32(value)?;
-        tracing::trace!("PUSH m32 [{:?}:{:#010x}]: {:#010x}", seg, eaddr, value);
         Ok(())
     }
 
@@ -37,7 +35,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn push_id(&mut self, instr: &Instruction) -> super::Result<()> {
         let value = instr.id();
         self.push_32(value)?;
-        tracing::trace!("PUSH imm32: {:#010x}", value);
         Ok(())
     }
 
@@ -52,7 +49,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst = instr.dst() as usize;
         let value = self.pop_32()?;
         self.set_gpr32(dst, value);
-        tracing::trace!("POP r32 (reg {}): {:#010x}", dst, value);
         Ok(())
     }
 
@@ -63,7 +59,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
         self.v_write_dword(seg, eaddr, value)?;
-        tracing::trace!("POP m32 [{:?}:{:#010x}]: {:#010x}", seg, eaddr, value);
         Ok(())
     }
 
@@ -160,16 +155,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_sp(temp_sp.wrapping_sub(32));
         }
 
-        tracing::trace!(
-            "PUSHAD: EAX={:08x} ECX={:08x} EDX={:08x} EBX={:08x} EBP={:08x} ESI={:08x} EDI={:08x}",
-            eax,
-            ecx,
-            edx,
-            ebx,
-            ebp,
-            esi,
-            edi
-        );
         Ok(())
     }
 
@@ -220,16 +205,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_ecx(ecx);
         self.set_eax(eax);
 
-        tracing::trace!(
-            "POPAD: EDI={:08x} ESI={:08x} EBP={:08x} EBX={:08x} EDX={:08x} ECX={:08x} EAX={:08x}",
-            edi,
-            esi,
-            ebp,
-            ebx,
-            edx,
-            ecx,
-            eax
-        );
         Ok(())
     }
 
@@ -300,7 +275,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Based on Bochs stack32.cc:70-85 PUSH32_Sw
     /// Pushes 4 bytes (only lower 16 bits are meaningful)
     pub fn push_op32_sw(&mut self, instr: &Instruction) -> super::Result<()> {
-        let seg_idx = instr.dst() as usize; // nnn field = segment register index
+        let seg_idx = instr.src() as usize; // Bochs: i->src() for PUSH Sw
         let val_16 = self.sregs[seg_idx].selector.value;
         // Bochs writes only a word at ESP-4, not a full dword
         let ss_d_b = unsafe {

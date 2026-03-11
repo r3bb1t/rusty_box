@@ -471,6 +471,14 @@ impl BxSerialC {
             None => return 0xFF,
         };
         let offset = port & 0x07;
+        // Temporary diagnostic: track first serial reads
+        if port_idx == 0 {
+            static SER_RD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+            let rc = SER_RD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if rc < 10 {
+                eprintln!("[SER-RD#{}] port={:#06x} offset={}", rc, port, offset);
+            }
+        }
 
         // Use direct indexing instead of a long-lived mutable borrow to allow
         // calling self.lower_interrupt() within branches.
@@ -697,6 +705,13 @@ impl BxSerialC {
                     s.divisor_lsb = val;
                 } else {
                     // DLAB=0: write THR
+                    // Temporary: trace serial writes
+                    static SER_WR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+                    let sc = SER_WR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if sc < 200 {
+                        eprintln!("[SERIAL-TX#{}] port={} ch={:#04x} '{}'", sc, port_idx, val,
+                            if val >= 0x20 && val < 0x7F { val as char } else { '.' });
+                    }
                     let bitmask: u8 = 0xFF >> (3u8.saturating_sub(s.line_cntl.wordlen_sel));
                     let data = val & bitmask;
 
@@ -950,20 +965,10 @@ impl BxSerialC {
 
             REG_LSR => {
                 // LSR is mostly read-only. Writes are ignored per 16550 spec.
-                tracing::trace!(
-                    "COM{}: write to LSR ignored (value={:#04x})",
-                    port_idx + 1,
-                    val
-                );
             }
 
             REG_MSR => {
                 // MSR is read-only. Writes are ignored.
-                tracing::trace!(
-                    "COM{}: write to MSR ignored (value={:#04x})",
-                    port_idx + 1,
-                    val
-                );
             }
 
             REG_SCR => {

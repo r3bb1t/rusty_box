@@ -59,16 +59,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = if count >= 16 { 0 } else { op1 << count };
         self.shift_write16(instr, laddr, result);
 
-        let cf = if count >= 16 {
+        // Bochs shift16.cc: count <= 16 computes CF from formula, count > 16 CF=0
+        let cf = if count > 16 {
             false
         } else {
             ((op1 << (count - 1)) & 0x8000) != 0
         };
-        let of = if count == 1 {
-            ((result ^ op1) & 0x8000) != 0
-        } else {
-            false
-        };
+        // Bochs computes OF unconditionally: cf ^ (result >> 15)
+        let of = cf != ((result >> 15) != 0);
         self.update_flags_shl16(result, cf, of);
         Ok(())
     }
@@ -84,16 +82,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = if count >= 16 { 0 } else { op1 << count };
         self.shift_write16(instr, laddr, result);
 
-        let cf = if count >= 16 {
+        // Bochs shift16.cc: count <= 16 computes CF from formula, count > 16 CF=0
+        let cf = if count > 16 {
             false
         } else {
             ((op1 << (count - 1)) & 0x8000) != 0
         };
-        let of = if count == 1 {
-            ((result ^ op1) & 0x8000) != 0
-        } else {
-            false
-        };
+        // Bochs computes OF unconditionally: cf ^ (result >> 15)
+        let of = cf != ((result >> 15) != 0);
         self.update_flags_shl16(result, cf, of);
         Ok(())
     }
@@ -125,16 +121,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = if count >= 16 { 0 } else { op1 >> count };
         self.shift_write16(instr, laddr, result);
 
-        let cf = if count >= 16 {
-            false
-        } else {
-            ((op1 >> (count - 1)) & 0x0001) != 0
-        };
-        let of = if count == 1 {
-            (op1 & 0x8000) != 0
-        } else {
-            false
-        };
+        // Bochs shift16.cc: no boundary check for SHR, formula works for all counts 1-31
+        // Cast to u32 to avoid Rust panic on shift >= 16 for u16
+        let cf = (((op1 as u32) >> (count - 1)) & 0x0001) != 0;
+        // Bochs computes OF unconditionally: ((result << 1) ^ result) >> 15
+        let of = ((((result as u32) << 1) ^ (result as u32)) >> 15) != 0;
         self.update_flags_shr16(result, cf, of);
         Ok(())
     }
@@ -150,16 +141,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = if count >= 16 { 0 } else { op1 >> count };
         self.shift_write16(instr, laddr, result);
 
-        let cf = if count >= 16 {
-            false
-        } else {
-            ((op1 >> (count - 1)) & 0x0001) != 0
-        };
-        let of = if count == 1 {
-            (op1 & 0x8000) != 0
-        } else {
-            false
-        };
+        // Bochs shift16.cc: no boundary check for SHR, formula works for all counts 1-31
+        // Cast to u32 to avoid Rust panic on shift >= 16 for u16
+        let cf = (((op1 as u32) >> (count - 1)) & 0x0001) != 0;
+        // Bochs computes OF unconditionally: ((result << 1) ^ result) >> 15
+        let of = ((((result as u32) << 1) ^ (result as u32)) >> 15) != 0;
         self.update_flags_shr16(result, cf, of);
         Ok(())
     }

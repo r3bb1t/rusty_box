@@ -559,6 +559,11 @@ pub struct BxKeyboardC {
     /// 0x80 to produce the set 1 break code. Matches Bochs gen_scancode() logic
     /// (keyboard.cc:679-688).
     scancode_escaped: bool,
+    /// Raw pointer to PIT for port 0x61 integration.
+    /// Port 0x61 bit 5 reflects PIT counter 2 output (Bochs keyboard.cc read handler).
+    /// Port 0x61 bit 0 controls PIT counter 2 gate (Bochs keyboard.cc write handler).
+    /// SAFETY: Must remain valid for the lifetime of the keyboard.
+    pit_ptr: Option<*mut super::pit::BxPitC>,
 }
 
 impl Default for BxKeyboardC {
@@ -642,7 +647,16 @@ impl BxKeyboardC {
             irq12_lower_pending: false,
             kbd_initialized: false,
             scancode_escaped: false,
+            pit_ptr: None,
         }
+    }
+
+    /// Set pointer to PIT for port 0x61 integration.
+    /// Port 0x61 bit 5 must reflect PIT counter 2 output state (Bochs keyboard.cc).
+    /// Port 0x61 bit 0 must control PIT counter 2 GATE input (Bochs keyboard.cc).
+    /// SAFETY: The pointer must remain valid for the lifetime of the keyboard.
+    pub unsafe fn set_pit_ptr(&mut self, ptr: *mut super::pit::BxPitC) {
+        self.pit_ptr = Some(ptr);
     }
 
     /// Initialize the keyboard controller
@@ -693,11 +707,31 @@ impl BxKeyboardC {
             KBD_DATA_PORT => self.read_port_60(),
             KBD_STATUS_PORT => self.read_port_64(),
             SYSTEM_CONTROL_B => {
-                // Toggle bit 4 (PIT channel 2 output) on each read.
+                // Toggle bit 4 (refresh request) on each read.
                 // The BIOS delay_ms() polls this bit waiting for transitions.
                 self.system_control_b ^= SYSCTL_B_PIT_CH2_OUT;
+
+                // Bit 5: actual PIT counter 2 output state (Bochs keyboard.cc).
+                // Linux pit_calibrate_tsc() polls this bit to detect when C2
+                // counts to zero (mode 0: output goes HIGH on terminal count).
+                if let Some(pit_ptr) = self.pit_ptr {
+                    let pit = unsafe { &mut *pit_ptr };
+                    // Sync PIT to current icount so counter 2 is up-to-date
+                    pit.sync_to_icount();
+                    if pit.get_output2() {
+                        self.system_control_b |= 0x20; // bit 5 = PIT C2 output HIGH
+                    } else {
+                        self.system_control_b &= !0x20; // bit 5 = PIT C2 output LOW
+                    }
+                }
+
                 let value = self.system_control_b;
-                tracing::trace!("Keyboard: Read system control B = {:#04x}", value);
+                // Temporary diagnostic for Alpine boot debugging
+                static P61_RD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+                let rc = P61_RD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if rc < 20 || (rc < 500 && rc % 100 == 0) {
+                    eprintln!("[P61-RD#{}] val={:#04x} bit5={}", rc, value, (value >> 5) & 1);
+                }
                 value as u32
             }
             _ => {
@@ -787,7 +821,6 @@ impl BxKeyboardC {
             | ((self.kbd_controller.inpb as u8) << 1)
             | (self.kbd_controller.outb as u8);
         self.kbd_controller.tim = false; // cleared on each status read
-        tracing::trace!("Keyboard: Read status 0x64 = {:#04x}", val);
         val as u32
     }
 
@@ -816,7 +849,17 @@ impl BxKeyboardC {
             KBD_DATA_PORT => self.write_port_60(value_u8),
             KBD_COMMAND_PORT => self.write_port_64(value_u8),
             SYSTEM_CONTROL_B => {
-                tracing::trace!("Keyboard: Write system control B = {:#04x}", value_u8);
+                // Temporary diagnostic
+                static P61_WR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+                let wc = P61_WR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if wc < 20 {
+                    eprintln!("[P61-WR#{}] val={:#04x} gate2={}", wc, value_u8, value_u8 & 1);
+                }
+                // Bit 0 controls PIT counter 2 GATE (Bochs keyboard.cc write handler)
+                if let Some(pit_ptr) = self.pit_ptr {
+                    let pit = unsafe { &mut *pit_ptr };
+                    pit.set_gate2((value_u8 & 0x01) != 0);
+                }
                 self.system_control_b = value_u8;
             }
             _ => {
@@ -945,10 +988,6 @@ impl BxKeyboardC {
             }
             CTRL_CMD_BIOS_NAME | CTRL_CMD_BIOS_VERSION => {
                 // BIOS name / version — not supported
-                tracing::trace!(
-                    "Keyboard: BIOS name/version cmd {:#04x} (unsupported)",
-                    value
-                );
             }
             CTRL_CMD_DISABLE_AUX => {
                 // Disable aux device — keyboard.cc:508-510
@@ -1003,7 +1042,6 @@ impl BxKeyboardC {
             }
             CTRL_CMD_GET_VERSION => {
                 // Get controller version — not supported
-                tracing::trace!("Keyboard: Get controller version (unsupported)");
             }
             CTRL_CMD_READ_INPUT_PORT => {
                 // Read input port — keyboard.cc:559-567
@@ -1068,7 +1106,6 @@ impl BxKeyboardC {
             _ => {
                 if value == 0xFF || (value >= 0xF0 && value <= 0xFD) {
                     // Useless pulse output bit commands
-                    tracing::trace!("Keyboard: Pulse command {:#04x}", value);
                 } else {
                     tracing::warn!("Keyboard: Unknown command {:#04x}", value);
                 }

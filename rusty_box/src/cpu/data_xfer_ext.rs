@@ -25,7 +25,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst = instr.operands.dst as usize;
         let eaddr = self.resolve_addr(instr) as u16;
         self.set_gpr16(dst, eaddr);
-        tracing::trace!("LEA16: reg{} = {:#06x}", dst, eaddr);
     }
 
     /// LEA r32, m - Load effective address into 32-bit register
@@ -39,7 +38,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             u64::from(self.resolve_addr32(instr))
         };
         self.set_gpr32(dst, eaddr as u32);
-        tracing::trace!("LEA32: reg{} = {:#010x}", dst, eaddr);
     }
 
     // =========================================================================
@@ -55,13 +53,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val_src = self.read_8bit_regx(src, ext);
         self.write_8bit_regx(dst, ext, val_src);
         self.write_8bit_regx(src, ext, val_dst);
-        tracing::trace!(
-            "XCHG8: reg{}={:#04x} <-> reg{}={:#04x}",
-            dst,
-            val_src,
-            src,
-            val_dst
-        );
     }
 
     /// XCHG r16, r/m16 - Exchange 16-bit values
@@ -72,13 +63,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val_src = self.get_gpr16(src);
         self.set_gpr16(dst, val_src);
         self.set_gpr16(src, val_dst);
-        tracing::trace!(
-            "XCHG16: reg{}={:#06x} <-> reg{}={:#06x}",
-            dst,
-            val_src,
-            src,
-            val_dst
-        );
     }
 
     /// XCHG r32, r/m32 - Exchange 32-bit values
@@ -89,13 +73,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val_src = self.get_gpr32(src);
         self.set_gpr32(dst, val_src);
         self.set_gpr32(src, val_dst);
-        tracing::trace!(
-            "XCHG32: reg{}={:#010x} <-> reg{}={:#010x}",
-            dst,
-            val_src,
-            src,
-            val_dst
-        );
     }
 
     /// XCHG AX, r16 - Exchange AX with 16-bit register (short forms)
@@ -177,13 +154,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             } else {
                 self.set_gpr16(dst, seg_val);
             }
-            tracing::trace!("MOV: reg{} = seg{} ({:#06x})", dst, src_seg, seg_val);
         } else {
             // Memory form: MOV [mem], sreg
             let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
             self.v_write_word(seg, eaddr, seg_val)?;
-            tracing::trace!("MOV: [{:#x}] = seg{} ({:#06x})", eaddr, src_seg, seg_val);
         }
         Ok(())
     }
@@ -230,7 +205,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
         }
 
-        tracing::trace!("MOV: seg{} = {:#06x}", dst_seg, new_sel);
         Ok(())
     }
 
@@ -242,7 +216,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn cbw(&mut self, _instr: &Instruction) {
         let al = self.al() as i8;
         self.set_ax(al as i16 as u16);
-        tracing::trace!("CBW: AL={:#04x} -> AX={:#06x}", self.al(), self.ax());
     }
 
     /// CWD - Convert Word to Doubleword (AX -> DX:AX)
@@ -253,19 +226,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             self.set_dx(0);
         }
-        tracing::trace!(
-            "CWD: AX={:#06x} -> DX:AX={:#06x}:{:#06x}",
-            ax,
-            self.dx(),
-            self.ax()
-        );
     }
 
     /// CWDE - Convert Word to Doubleword Extended (AX -> EAX)
     pub fn cwde(&mut self, _instr: &Instruction) {
         let ax = self.ax() as i16;
         self.set_eax(ax as i32 as u32);
-        tracing::trace!("CWDE: AX={:#06x} -> EAX={:#010x}", ax, self.eax());
     }
 
     /// CDQ - Convert Doubleword to Quadword (EAX -> EDX:EAX)
@@ -276,12 +242,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             self.set_edx(0);
         }
-        tracing::trace!(
-            "CDQ: EAX={:#010x} -> EDX:EAX={:#010x}:{:#010x}",
-            eax,
-            self.edx(),
-            self.eax()
-        );
     }
 
     // =========================================================================
@@ -317,7 +277,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let lahf_mask = EFlags::LAHF_MASK.bits() as u8;
         let ah = (flags & lahf_mask) | EFlags::R1.bits() as u8;
         self.set_ah(ah);
-        tracing::trace!("LAHF: AH = {:#04x}", ah);
     }
 
     /// SAHF - Store AH into Flags
@@ -326,7 +285,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Only modify SF, ZF, AF, PF, CF (LAHF_MASK bits)
         let mask = EFlags::LAHF_MASK.bits();
         self.eflags = EFlags::from_bits_retain((self.eflags.bits() & !mask) | ((ah as u32) & mask));
-        tracing::trace!("SAHF: flags = {:#010x}", self.eflags.bits());
     }
 
     // =========================================================================
@@ -339,7 +297,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let imm = instr.iw();
 
         self.set_gpr16(dst, imm);
-        tracing::trace!("MOV: reg{} = {:#06x}", dst, imm);
     }
 
     /// MOV r8, imm8
@@ -347,7 +304,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst = instr.operands.dst as usize;
         let imm = instr.ib();
         self.write_8bit_regx(dst, instr.extend8bit_l(), imm);
-        tracing::trace!("MOV: reg{} = {:#04x}", dst, imm);
     }
 
     /// MOV r16, r/m16 (register to register)
@@ -356,7 +312,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let src = instr.operands.src1 as usize;
         let val = self.get_gpr16(src);
         self.set_gpr16(dst, val);
-        tracing::trace!("MOV16: reg{} = reg{} ({:#06x})", dst, src, val);
     }
 
     /// MOV r/m16, r16 (register to register)
@@ -364,12 +319,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn mov_ew_gw_r(&mut self, instr: &Instruction) {
         let val = self.get_gpr16(instr.operands.src1 as usize); // nnn = source
         self.set_gpr16(instr.operands.dst as usize, val); // rm = destination
-        tracing::trace!(
-            "MOV16: reg{} = reg{} ({:#06x})",
-            instr.operands.dst,
-            instr.operands.src1,
-            val
-        );
     }
 
     /// MOV r8, r/m8 (register to register)
@@ -379,7 +328,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let ext = instr.extend8bit_l();
         let val = self.read_8bit_regx(src, ext);
         self.write_8bit_regx(dst, ext, val);
-        tracing::trace!("MOV8: reg{} = reg{} ({:#04x})", dst, src, val);
     }
 
     /// MOV r/m8, r8 (register to register)
@@ -388,12 +336,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let ext = instr.extend8bit_l();
         let val = self.read_8bit_regx(instr.operands.dst as usize, ext); // nnn = source
         self.write_8bit_regx(instr.operands.src1 as usize, ext, val); // rm = destination
-        tracing::trace!(
-            "MOV8: reg{} = reg{} ({:#04x})",
-            instr.operands.src1,
-            instr.operands.dst,
-            val
-        );
     }
 
     // =========================================================================
@@ -407,7 +349,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
 
         self.v_write_byte(seg, eaddr, instr.ib())?;
-        tracing::trace!("MOV8 mem: [{:?}:{:#x}] = {:#04x}", seg, eaddr, instr.ib());
         Ok(())
     }
 
@@ -422,13 +363,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val8 = self.read_8bit_regx(src_reg, extend8bit_l);
 
         self.v_write_byte(seg, eaddr, val8)?;
-        tracing::trace!(
-            "MOV8 mem: [{:?}:{:#x}] = reg{} ({:#04x})",
-            seg,
-            eaddr,
-            src_reg,
-            val8
-        );
         Ok(())
     }
 
@@ -442,13 +376,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let extend8bit_l = instr.extend8bit_l();
 
         self.write_8bit_regx(dst_reg, extend8bit_l, val8);
-        tracing::trace!(
-            "MOV8 mem: reg{} = [{:?}:{:#x}] ({:#04x})",
-            dst_reg,
-            seg,
-            eaddr,
-            val8
-        );
         Ok(())
     }
 
@@ -465,14 +392,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_byte(op2);
         self.write_8bit_regx(src_reg, extend8bit_l, op1);
-        tracing::trace!(
-            "XCHG8 mem: [{:?}:{:#x}]={:#04x} <-> reg{}={:#04x}",
-            seg,
-            eaddr,
-            op2,
-            src_reg,
-            op1
-        );
         Ok(())
     }
 
@@ -546,7 +465,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
 
         self.v_write_word(seg, eaddr, instr.iw())?;
-        tracing::trace!("MOV16 mem: [{:?}:{:#x}] = {:#06x}", seg, eaddr, instr.iw());
         Ok(())
     }
 
@@ -556,7 +474,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst = instr.dst() as usize;
 
         self.set_gpr16(dst, instr.iw());
-        tracing::trace!("MOV16: reg{} = {:#06x}", dst, instr.iw());
     }
 
     /// MOV r/m16, r16 (memory form)
@@ -569,13 +486,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val16 = self.get_gpr16(src_reg);
 
         self.v_write_word(seg, eaddr, val16)?;
-        tracing::trace!(
-            "MOV16 mem: [{:?}:{:#x}] = reg{} ({:#06x})",
-            seg,
-            eaddr,
-            src_reg,
-            val16
-        );
         Ok(())
     }
 
@@ -589,13 +499,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val16 = self.v_read_word(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
         self.set_gpr16(dst_reg, val16);
-        tracing::trace!(
-            "MOV16 mem: reg{} = [{:?}:{:#x}] ({:#06x})",
-            dst_reg,
-            seg,
-            eaddr,
-            val16
-        );
         Ok(())
     }
 
@@ -612,14 +515,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_word(op2);
         self.set_gpr16(src_reg, op1);
-        tracing::trace!(
-            "XCHG16 mem: [{:?}:{:#x}]={:#06x} <-> reg{}={:#06x}",
-            seg,
-            eaddr,
-            op2,
-            src_reg,
-            op1
-        );
         Ok(())
     }
 
@@ -633,13 +528,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr16(dst_reg, op2_8 as u16);
-        tracing::trace!(
-            "MOVZX16 mem: reg{} = [{:?}:{:#x}] ({:#04x})",
-            dst_reg,
-            seg,
-            eaddr,
-            op2_8
-        );
         Ok(())
     }
 
@@ -653,7 +541,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr16(dst_reg, op2_8 as u16);
-        tracing::trace!("MOVZX16: reg{} = reg{} ({:#04x})", dst_reg, src_reg, op2_8);
     }
 
     /// MOVSX r16, r/m8 (memory form)
@@ -667,14 +554,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val16 = (op2_8 as i8 as i16) as u16; // sign extend byte to word
 
         self.set_gpr16(dst_reg, val16);
-        tracing::trace!(
-            "MOVSX16 mem: reg{} = [{:?}:{:#x}] ({:#04x} -> {:#06x})",
-            dst_reg,
-            seg,
-            eaddr,
-            op2_8,
-            val16
-        );
         Ok(())
     }
 
@@ -689,13 +568,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val16 = (op2_8 as i8 as i16) as u16; // sign extend byte to word
 
         self.set_gpr16(dst_reg, val16);
-        tracing::trace!(
-            "MOVSX16: reg{} = reg{} ({:#04x} -> {:#06x})",
-            dst_reg,
-            src_reg,
-            op2_8,
-            val16
-        );
     }
 
     // =========================================================================
@@ -890,7 +762,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
 
         self.v_write_dword(seg, eaddr, instr.id())?;
-        tracing::trace!("MOV32 mem: [{:?}:{:#x}] = {:#010x}", seg, eaddr, instr.id());
         Ok(())
     }
 
@@ -901,7 +772,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst = instr.dst() as usize;
 
         self.set_gpr32(dst, instr.id());
-        tracing::trace!("MOV32: reg{} = {:#010x}", dst, instr.id());
     }
 
     /// MOV r/m32, r32 (memory form)
@@ -917,13 +787,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val32 = self.get_gpr32(src_reg);
 
         self.v_write_dword(seg, eaddr, val32)?;
-        tracing::trace!(
-            "MOV32 mem: [{:?}:{:#x}] = reg{} ({:#010x})",
-            seg,
-            eaddr,
-            src_reg,
-            val32
-        );
         Ok(())
     }
 
@@ -937,13 +800,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr32(dst_reg, val32);
-        tracing::trace!(
-            "MOV32 mem: reg{} = [{:?}:{:#x}] ({:#010x})",
-            dst_reg,
-            seg,
-            eaddr,
-            val32
-        );
         Ok(())
     }
 
@@ -956,12 +812,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr32(dst_reg, val32);
-        tracing::trace!(
-            "MOV32S mem: reg{} = [SS:{:#x}] ({:#010x})",
-            dst_reg,
-            eaddr,
-            val32
-        );
         Ok(())
     }
 
@@ -981,12 +831,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val32 = self.get_gpr32(src_reg);
 
         self.stack_write_dword(eaddr as u32, val32)?;
-        tracing::trace!(
-            "MOV32S mem: [SS:{:#x}] = reg{} ({:#010x})",
-            eaddr,
-            src_reg,
-            val32
-        );
         Ok(())
     }
 
@@ -1003,14 +847,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_dword(op2);
         self.set_gpr32(src_reg, op1);
-        tracing::trace!(
-            "XCHG32 mem: [{:?}:{:#x}]={:#010x} <-> reg{}={:#010x}",
-            seg,
-            eaddr,
-            op2,
-            src_reg,
-            op1
-        );
         Ok(())
     }
 
@@ -1024,13 +860,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr32(dst_reg, op2_8 as u32);
-        tracing::trace!(
-            "MOVZX32 mem: reg{} = [{:?}:{:#x}] ({:#04x})",
-            dst_reg,
-            seg,
-            eaddr,
-            op2_8
-        );
         Ok(())
     }
 
@@ -1044,7 +873,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr32(dst_reg, op2_8 as u32);
-        tracing::trace!("MOVZX32: reg{} = reg{} ({:#04x})", dst_reg, src_reg, op2_8);
     }
 
     /// MOVZX r32, r/m16 (memory form)
@@ -1057,13 +885,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr32(dst_reg, op2_16 as u32);
-        tracing::trace!(
-            "MOVZX32 mem: reg{} = [{:?}:{:#x}] ({:#06x})",
-            dst_reg,
-            seg,
-            eaddr,
-            op2_16
-        );
         Ok(())
     }
 
@@ -1076,7 +897,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst() as usize;
 
         self.set_gpr32(dst_reg, op2_16 as u32);
-        tracing::trace!("MOVZX32: reg{} = reg{} ({:#06x})", dst_reg, src_reg, op2_16);
     }
 
     /// MOVSX r32, r/m8 (memory form)
@@ -1090,14 +910,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val32 = (op2_8 as i8 as i32) as u32; // sign extend byte to dword
 
         self.set_gpr32(dst_reg, val32);
-        tracing::trace!(
-            "MOVSX32 mem: reg{} = [{:?}:{:#x}] ({:#04x} -> {:#010x})",
-            dst_reg,
-            seg,
-            eaddr,
-            op2_8,
-            val32
-        );
         Ok(())
     }
 
@@ -1112,13 +924,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val32 = (op2_8 as i8 as i32) as u32; // sign extend byte to dword
 
         self.set_gpr32(dst_reg, val32);
-        tracing::trace!(
-            "MOVSX32: reg{} = reg{} ({:#04x} -> {:#010x})",
-            dst_reg,
-            src_reg,
-            op2_8,
-            val32
-        );
     }
 
     /// MOVSX r32, r/m16 (memory form)
@@ -1132,14 +937,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val32 = (op2_16 as i16 as i32) as u32; // sign extend word to dword
 
         self.set_gpr32(dst_reg, val32);
-        tracing::trace!(
-            "MOVSX32 mem: reg{} = [{:?}:{:#x}] ({:#06x} -> {:#010x})",
-            dst_reg,
-            seg,
-            eaddr,
-            op2_16,
-            val32
-        );
         Ok(())
     }
 
@@ -1153,13 +950,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val32 = (op2_16 as i16 as i32) as u32; // sign extend word to dword
 
         self.set_gpr32(dst_reg, val32);
-        tracing::trace!(
-            "MOVSX32: reg{} = reg{} ({:#06x} -> {:#010x})",
-            dst_reg,
-            src_reg,
-            op2_16,
-            val32
-        );
     }
 
     // =========================================================================
@@ -2040,7 +1830,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.load_seg_reg(BxSegregs::Es, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr16(dst, reg_16);
-        tracing::trace!("LES16: reg{} = {:#06x}, ES = {:#06x}", dst, reg_16, segsel);
         Ok(())
     }
 
@@ -2054,7 +1843,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.load_seg_reg(BxSegregs::Es, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr32(dst, reg_32);
-        tracing::trace!("LES32: reg{} = {:#010x}, ES = {:#06x}", dst, reg_32, segsel);
         Ok(())
     }
 
@@ -2069,7 +1857,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.load_seg_reg(BxSegregs::Ds, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr16(dst, reg_16);
-        tracing::trace!("LDS16: reg{} = {:#06x}, DS = {:#06x}", dst, reg_16, segsel);
         Ok(())
     }
 
@@ -2083,7 +1870,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.load_seg_reg(BxSegregs::Ds, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr32(dst, reg_32);
-        tracing::trace!("LDS32: reg{} = {:#010x}, DS = {:#06x}", dst, reg_32, segsel);
         Ok(())
     }
 
@@ -2096,7 +1882,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.load_seg_reg(BxSegregs::Ss, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr16(dst, reg_16);
-        tracing::trace!("LSS16: reg{} = {:#06x}, SS = {:#06x}", dst, reg_16, segsel);
         Ok(())
     }
 
@@ -2109,7 +1894,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.load_seg_reg(BxSegregs::Ss, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr32(dst, reg_32);
-        tracing::trace!("LSS32: reg{} = {:#010x}, SS = {:#06x}", dst, reg_32, segsel);
         Ok(())
     }
 
@@ -2122,7 +1906,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.load_seg_reg(BxSegregs::Fs, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr16(dst, reg_16);
-        tracing::trace!("LFS16: reg{} = {:#06x}, FS = {:#06x}", dst, reg_16, segsel);
         Ok(())
     }
 
@@ -2135,7 +1918,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.load_seg_reg(BxSegregs::Fs, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr32(dst, reg_32);
-        tracing::trace!("LFS32: reg{} = {:#010x}, FS = {:#06x}", dst, reg_32, segsel);
         Ok(())
     }
 
@@ -2148,7 +1930,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.load_seg_reg(BxSegregs::Gs, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr16(dst, reg_16);
-        tracing::trace!("LGS16: reg{} = {:#06x}, GS = {:#06x}", dst, reg_16, segsel);
         Ok(())
     }
 
@@ -2161,7 +1942,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.load_seg_reg(BxSegregs::Gs, segsel)?;
         let dst = instr.dst() as usize;
         self.set_gpr32(dst, reg_32);
-        tracing::trace!("LGS32: reg{} = {:#010x}, GS = {:#06x}", dst, reg_32, segsel);
         Ok(())
     }
 }

@@ -1374,6 +1374,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::RetfOp64 => self.retfar64(instr),
             Opcode::RetfOp64Iw => self.retfar64_iw(instr),
             Opcode::IretOp64 => self.iret64(instr),
+            Opcode::EnterOp64IwIb => self.enter64_iw_ib(instr),
             Opcode::LeaveOp64 => self.leave64(instr),
             Opcode::JrcxzJbq => self.jrcxz_jb(instr),
             Opcode::LoopJbq => self.loop64_jb(instr),
@@ -1444,15 +1445,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Xsetbv => self.xsetbv(instr),
             Opcode::Xsave => self.xsave(instr),
             Opcode::Xrstor => self.xrstor(instr),
-            Opcode::Xsavec | Opcode::Xsaveopt | Opcode::Xsaves | Opcode::Xrstors => {
-                // These variants require compaction support — stub as #UD for now
-                self.exception(super::cpu::Exception::Ud, 0)
-            }
+            Opcode::Xsaveopt => self.xsaveopt(instr),
+            Opcode::Xsavec => self.xsavec(instr, false),
+            Opcode::Xsaves => self.xsavec(instr, true),
+            Opcode::Xrstors => self.xrstor_unified(instr, true),
             Opcode::Monitor | Opcode::Monitorx => self.monitor(instr),
             Opcode::Mwait | Opcode::Mwaitx => self.mwait(instr),
             Opcode::Clac => self.clac(instr),
             Opcode::Stac => self.stac(instr),
-            Opcode::Clflush | Opcode::Clflushopt => self.clflush(instr),
+            Opcode::Clflush | Opcode::Clflushopt | Opcode::Clwb => self.clflush(instr),
             Opcode::Rdtscp => self.rdtscp(instr),
             Opcode::Swapgs => self.swapgs(instr),
 
@@ -2290,6 +2291,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             // Prefetch hints and memory fences — NOPs in emulation
             Opcode::PrefetchMb
+            | Opcode::PrefetchwMb
             | Opcode::Prefetcht0Mb
             | Opcode::Prefetcht1Mb
             | Opcode::Prefetcht2Mb
@@ -2940,6 +2942,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::InsertedOpcode => {
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 Ok(())
+            }
+
+            // UD0/UD1/UD2 — intentional #UD exceptions (Linux uses UD2 for BUG()/WARN())
+            Opcode::Ud0 | Opcode::Ud1 | Opcode::Ud2 => {
+                self.exception(super::cpu::Exception::Ud, 0)?;
+                Err(crate::cpu::CpuError::CpuLoopRestart)
             }
 
             _ => {

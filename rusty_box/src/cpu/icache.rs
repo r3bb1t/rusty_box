@@ -1,4 +1,4 @@
-use alloc::{format, string::String, vec, vec::Vec};
+use alloc::{format, vec, vec::Vec};
 
 use crate::{
     config::BxPhyAddress,
@@ -644,8 +644,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
         let fetch_ptr = &fetch_ptr_slice[eip_biased as usize..];
         let page_offset = page_offset(p_addr as u32);
-        tracing::trace!("serve_icache_miss: p_addr_fetch_page={:#x}, eip_biased={}, p_addr={:#x}, page_offset={}, RIP={:#x}", 
-            self.p_addr_fetch_page, eip_biased, p_addr, page_offset, self.rip());
+
         let mut trace_mask = 0u32;
 
         // Check if this is the stack page and invalidate stack cache if needed
@@ -737,18 +736,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
             match decode_result {
                 Ok(()) => {
-                    // Debug: log first few bytes being decoded (only when trace actually enabled)
-                    if tlen < 3 && tracing::enabled!(tracing::Level::TRACE) {
-                        let bytes_str: String = current_fetch_ptr
-                            .iter()
-                            .take(8)
-                            .map(|b| format!("{:02x}", b))
-                            .collect::<Vec<_>>()
-                            .join(" ");
-                        tracing::trace!("Decoding instruction #{}: p_addr={:#x}, page_offset={}, bytes=[{}], opcode={:?}",
-                            tlen, current_p_addr, current_page_offset, bytes_str,
-                            self.i_cache.mpool[current_mpindex].get_ia_opcode());
-                    }
 
                     // Instruction is already in mpool[current_mpindex] — get its length
                     let i_len = { self.i_cache.mpool[current_mpindex].length as u32 };
@@ -799,11 +786,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     current_page_offset = (current_page_offset + i_len) & 0xfff;
                     current_fetch_ptr = &current_fetch_ptr[i_len as usize..];
 
-                    // Debug: verify fetch pointer is advancing
-                    if tlen < 3 {
-                        tracing::trace!("After instruction #{}: new p_addr={:#x}, new page_offset={}, remaining={}, fetch_ptr_len={}", 
-                            tlen, current_p_addr, current_page_offset, remaining, current_fetch_ptr.len());
-                    }
 
                     // Try to find a trace starting from current pAddr and merge
                     // TODO: Check if debugger is active (matching C++ line 194)

@@ -770,7 +770,6 @@ impl BxVgaC {
                     let ve = if self.video_enabled { 0x20u8 } else { 0 };
                     (ve | self.attr_index) as u32
                 } else {
-                    tracing::trace!("VGA: read 0x3C0 with flip_flop=1");
                     0
                 }
             }
@@ -835,7 +834,6 @@ impl BxVgaC {
             0x3CA | 0x3CB | 0x3CD => 0x00,
 
             _ => {
-                tracing::trace!("VGA read from unhandled port {:#x}", port);
                 0xFF
             }
         }
@@ -1024,7 +1022,6 @@ impl BxVgaC {
             }
 
             _ => {
-                tracing::trace!("VGA write to unhandled port {:#x} = {:#x}", port, value);
             }
         }
     }

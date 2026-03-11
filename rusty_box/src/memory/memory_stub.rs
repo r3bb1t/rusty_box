@@ -339,15 +339,6 @@ impl BxMemoryStubC {
     ) -> Result<Option<&'a mut [u8]>> {
         let a20_addr = addr & a20_mask;
 
-        // Trace suspicious memory accesses (around 0x101710 region)
-        if a20_addr >= 0x100000 && a20_addr < 0x110000 {
-            tracing::trace!(
-                "Memory {} at suspicious address: {:#x} (may be uninitialized)",
-                if rw & 1 != 0 { "write" } else { "read" },
-                a20_addr
-            );
-        }
-
         let write = rw & 1 != 0;
 
         #[cfg(feature = "bx_support_monitor_mwait")]
@@ -463,8 +454,6 @@ impl BxMemoryStubC {
 
                 page_write_stamp_table.dec_write_stamp(a20_addr);
             }
-        } else {
-            tracing::trace!("Write outside the limits of physical memory ({a20_addr:#x}) (ignore)");
         }
         Ok(())
     }

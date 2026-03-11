@@ -199,14 +199,6 @@ pub fn MOVZX_GdEb<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
 
     // Zero extend byte op2 into dword op1
     cpu.set_gpr32(dst_reg, op2_8 as u32);
-
-    tracing::trace!(
-        "MOVZX32 r{}, r{}b: {:#04x} -> {:#010x}",
-        dst_reg,
-        src_reg,
-        op2_8,
-        op2_8 as u32
-    );
 }
 
 /// MOVZX_GdEw: MOVZX r32, r/m16
@@ -222,14 +214,6 @@ pub fn MOVZX_GdEw<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
 
     // Zero extend word op2 into dword op1
     cpu.set_gpr32(dst_reg, op2_16 as u32);
-
-    tracing::trace!(
-        "MOVZX32 r{}, r{}w: {:#06x} -> {:#010x}",
-        dst_reg,
-        src_reg,
-        op2_16,
-        op2_16 as u32
-    );
 }
 
 /// MOV_EAXOd: MOV EAX, moffs32
@@ -244,7 +228,6 @@ pub fn MOV_EAXOd<I: BxCpuIdTrait>(
     let offset = instr.id();
     let value = cpu.v_read_dword(seg, offset)?;
     cpu.set_eax(value);
-    tracing::trace!("MOV EAX, [{:#x}]: {:#x}", offset, value);
     Ok(())
 }
 
@@ -260,6 +243,5 @@ pub fn MOV_OdEAX<I: BxCpuIdTrait>(
     let offset = instr.id();
     let eax_val = cpu.eax();
     cpu.v_write_dword(seg, offset, eax_val)?;
-    tracing::trace!("MOV [{:#x}], EAX: {:#x}", offset, eax_val);
     Ok(())
 }

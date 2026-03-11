@@ -55,7 +55,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let ip = self.get_ip();
         let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
         self.branch_near16(new_ip)?;
-        tracing::trace!("JMP rel8: IP = {:#06x}", new_ip);
         Ok(())
     }
 
@@ -65,7 +64,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let ip = self.get_ip();
         let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
         self.branch_near16(new_ip)?;
-        tracing::trace!("JMP rel16: IP = {:#06x}", new_ip);
         Ok(())
     }
 
@@ -75,7 +73,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst = instr.dst() as usize;
         let new_ip = self.get_gpr16(dst);
         self.branch_near16(new_ip)?;
-        tracing::trace!("JMP r16: IP = {:#06x}", new_ip);
         Ok(())
     }
 
@@ -86,7 +83,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let new_ip = self.v_read_word(seg, eaddr)?;
         self.branch_near16(new_ip)?;
-        tracing::trace!("JMP m16: [{:?}:{:#x}] -> IP = {:#06x}", seg, eaddr, new_ip);
         Ok(())
     }
 
@@ -113,7 +109,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
         self.branch_near16(new_ip)?;
-        tracing::trace!("CALL rel16: IP = {:#06x}, ret = {:#06x}", new_ip, ip);
         Ok(())
     }
 
@@ -126,7 +121,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.push_16(ip)?;
         self.branch_near16(new_ip)?;
-        tracing::trace!("CALL r16: IP = {:#06x}, ret = {:#06x}", new_ip, ip);
         Ok(())
     }
 
@@ -140,13 +134,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.push_16(ip)?;
         self.branch_near16(new_ip)?;
-        tracing::trace!(
-            "CALL m16: [{:?}:{:#x}] -> IP = {:#06x}, ret = {:#06x}",
-            seg,
-            eaddr,
-            new_ip,
-            ip
-        );
         Ok(())
     }
 
@@ -167,7 +154,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn ret_near16(&mut self, _instr: &Instruction) -> super::Result<()> {
         let return_ip = self.pop_16()?;
         self.branch_near16(return_ip)?;
-        tracing::trace!("RET near16: IP = {:#06x}", return_ip);
         Ok(())
     }
 
@@ -187,7 +173,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let sp = self.get_gpr16(4);
             self.set_gpr16(4, sp.wrapping_add(imm16));
         }
-        tracing::trace!("RET near16 imm16: IP = {:#06x}, pop = {}", return_ip, imm16);
         Ok(())
     }
 
@@ -202,7 +187,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JO taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -214,7 +198,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JNO taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -226,7 +209,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JB/JC taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -238,7 +220,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JNB/JNC taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -250,7 +231,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JZ/JE taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -262,7 +242,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JNZ/JNE taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -274,7 +253,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JBE/JNA taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -286,7 +264,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JNBE/JA taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -298,7 +275,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JS taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -310,7 +286,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JNS taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -322,7 +297,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JP/JPE taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -334,7 +308,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JNP/JPO taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -346,7 +319,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JL/JNGE taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -358,7 +330,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JNL/JGE taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -370,7 +341,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JLE/JNG taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -382,7 +352,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JNLE/JG taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -398,7 +367,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JZ/JE rel16 taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -410,7 +378,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JNZ/JNE rel16 taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -422,7 +389,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JO rel16 taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -434,7 +400,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JNO rel16 taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -446,7 +411,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JB/JC rel16 taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -458,7 +422,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JNB/JNC rel16 taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -470,7 +433,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JBE/JNA rel16 taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -482,7 +444,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JNBE/JA rel16 taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -494,7 +455,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JS rel16 taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -506,7 +466,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JNS rel16 taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -518,7 +477,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JP/JPE rel16 taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -530,7 +488,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JNP/JPO rel16 taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -542,7 +499,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JL/JNGE rel16 taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -554,7 +510,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JNL/JGE rel16 taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -566,7 +521,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JLE/JNG rel16 taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -578,7 +532,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JNLE/JG rel16 taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -601,7 +554,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let ip = self.get_ip();
                 let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
                 self.branch_near16(new_ip)?;
-                tracing::trace!("LOOP taken (32-bit): IP = {:#06x}, ECX = {}", new_ip, count);
             }
 
             self.set_gpr32(1, count);
@@ -613,7 +565,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let ip = self.get_ip();
                 let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
                 self.branch_near16(new_ip)?;
-                tracing::trace!("LOOP taken (16-bit): IP = {:#06x}, CX = {}", new_ip, count);
             }
 
             self.set_gpr16(1, count);
@@ -697,7 +648,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ip = self.get_ip();
             let new_ip = (ip as i32).wrapping_add(disp as i32) as u16;
             self.branch_near16(new_ip)?;
-            tracing::trace!("JCXZ taken: IP = {:#06x}", new_ip);
         }
         Ok(())
     }
@@ -718,7 +668,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let eip = self.eip();
             let new_eip = (eip as i32).wrapping_add(disp) as u32;
             self.branch_near32(new_eip)?;
-            tracing::trace!("JECXZ taken: EIP = {:#010x}", new_eip);
         }
         Ok(())
     }

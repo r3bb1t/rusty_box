@@ -88,12 +88,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.get_gpr32(src);
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_32(op1, op2, result);
-        tracing::trace!(
-            "CMP r32, r32: {:#010x} - {:#010x} = {:#010x}",
-            op1,
-            op2,
-            result
-        );
     }
 
     /// CMP EAX, imm32
@@ -113,7 +107,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.icount
             );
         }
-        tracing::trace!("CMP EAX, imm32: {:#010x} - {:#010x}", op1, op2);
     }
 
     /// CMP r/m32, imm32
@@ -123,8 +116,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = instr.id();
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_32(op1, op2, result);
-        // vsprintf trace removed (using printk breakpoint instead)
-        tracing::trace!("CMP r32, imm32: {:#010x} - {:#010x}", op1, op2);
     }
 
     // =========================================================================
@@ -139,12 +130,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.get_gpr32(src);
         let result = op1 & op2;
         self.set_flags_oszapc_logic_32(result);
-        tracing::trace!(
-            "TEST r32, r32: {:#010x} & {:#010x} = {:#010x}",
-            op1,
-            op2,
-            result
-        );
     }
 
     /// TEST EAX, imm32
@@ -153,7 +138,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = instr.id();
         let result = op1 & op2;
         self.set_flags_oszapc_logic_32(result);
-        tracing::trace!("TEST EAX, imm32: {:#010x} & {:#010x}", op1, op2);
     }
 
     /// TEST r/m32, imm32
@@ -163,7 +147,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = instr.id();
         let result = op1 & op2;
         self.set_flags_oszapc_logic_32(result);
-        tracing::trace!("TEST r32, imm32: {:#010x} & {:#010x}", op1, op2);
     }
 
     // =========================================================================
@@ -352,7 +335,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::OF);
         }
 
-        tracing::trace!("INC r32: {:#010x} + 1 = {:#010x}", op1, result);
     }
 
     /// DEC r32
@@ -390,7 +372,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::OF);
         }
 
-        tracing::trace!("DEC r32: {:#010x} - 1 = {:#010x}", op1, result);
     }
 
     /// INC r/m32 (memory form) — matches Bochs INC_EdM
@@ -540,14 +521,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_dword(result);
         self.set_flags_oszapc_logic_32(result);
-        tracing::trace!(
-            "XOR32 mem: [{:?}:{:#x}] = {:#010x} ^ {:#010x} = {:#010x}",
-            seg,
-            eaddr,
-            op1_32,
-            op2_32,
-            result
-        );
         Ok(())
     }
 
@@ -563,13 +536,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr32(dst_reg, result);
         self.set_flags_oszapc_logic_32(result);
-        tracing::trace!(
-            "XOR32 mem: reg{} = {:#010x} ^ {:#010x} = {:#010x}",
-            dst_reg,
-            op1_32,
-            op2_32,
-            result
-        );
         Ok(())
     }
 
@@ -584,14 +550,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_dword(result);
         self.set_flags_oszapc_logic_32(result);
-        tracing::trace!(
-            "XOR32 mem: [{:?}:{:#x}] = {:#010x} ^ {:#010x} = {:#010x}",
-            seg,
-            eaddr,
-            op1_32,
-            op2_32,
-            result
-        );
         Ok(())
     }
 
@@ -607,14 +565,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_dword(result);
         self.set_flags_oszapc_logic_32(result);
-        tracing::trace!(
-            "OR32 mem: [{:?}:{:#x}] = {:#010x} | {:#010x} = {:#010x}",
-            seg,
-            eaddr,
-            op1_32,
-            op2_32,
-            result
-        );
         Ok(())
     }
 
@@ -630,13 +580,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr32(dst_reg, result);
         self.set_flags_oszapc_logic_32(result);
-        tracing::trace!(
-            "OR32 mem: reg{} = {:#010x} | {:#010x} = {:#010x}",
-            dst_reg,
-            op1_32,
-            op2_32,
-            result
-        );
         Ok(())
     }
 
@@ -651,14 +594,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_dword(result);
         self.set_flags_oszapc_logic_32(result);
-        tracing::trace!(
-            "OR32 mem: [{:?}:{:#x}] = {:#010x} | {:#010x} = {:#010x}",
-            seg,
-            eaddr,
-            op1_32,
-            op2_32,
-            result
-        );
         Ok(())
     }
 
@@ -674,14 +609,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_dword(result);
         self.set_flags_oszapc_logic_32(result);
-        tracing::trace!(
-            "AND32 mem: [{:?}:{:#x}] = {:#010x} & {:#010x} = {:#010x}",
-            seg,
-            eaddr,
-            op1_32,
-            op2_32,
-            result
-        );
         Ok(())
     }
 
@@ -697,13 +624,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.set_gpr32(dst_reg, result);
         self.set_flags_oszapc_logic_32(result);
-        tracing::trace!(
-            "AND32 mem: reg{} = {:#010x} & {:#010x} = {:#010x}",
-            dst_reg,
-            op1_32,
-            op2_32,
-            result
-        );
         Ok(())
     }
 
@@ -718,14 +638,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_dword(result);
         self.set_flags_oszapc_logic_32(result);
-        tracing::trace!(
-            "AND32 mem: [{:?}:{:#x}] = {:#010x} & {:#010x} = {:#010x}",
-            seg,
-            eaddr,
-            op1_32,
-            op2_32,
-            result
-        );
         Ok(())
     }
 
@@ -738,13 +650,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = !op1_32;
 
         self.write_rmw_linear_dword(result);
-        tracing::trace!(
-            "NOT32 mem: [{:?}:{:#x}] = !{:#010x} = {:#010x}",
-            seg,
-            eaddr,
-            op1_32,
-            result
-        );
         Ok(())
     }
 
@@ -759,15 +664,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op1_32 & op2_32;
 
         self.set_flags_oszapc_logic_32(result);
-        tracing::trace!(
-            "TEST32 mem: [{:?}:{:#x}] & reg{} = {:#010x} & {:#010x} = {:#010x}",
-            seg,
-            eaddr,
-            src_reg,
-            op1_32,
-            op2_32,
-            result
-        );
         Ok(())
     }
 
@@ -781,15 +677,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op1_32 & op2_32;
 
         self.set_flags_oszapc_logic_32(result);
-        tracing::trace!(
-            "TEST32 mem: [{:?}:{:#x}] & {:#010x} = {:#010x} & {:#010x} = {:#010x}",
-            seg,
-            eaddr,
-            op2_32,
-            op1_32,
-            op2_32,
-            result
-        );
         Ok(())
     }
 

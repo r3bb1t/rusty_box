@@ -99,7 +99,7 @@ unsafe impl Sync for Timer {}
 #[derive(Debug)]
 pub struct BxPcSystemC {
     /// Array of timers
-    timers: [Timer; BX_MAX_TIMERS],
+    pub(crate) timers: [Timer; BX_MAX_TIMERS],
     /// Number of registered timers
     num_timers: usize,
     /// Index of most recently triggered timer
@@ -431,6 +431,26 @@ impl BxPcSystemC {
             t.max(MIN_ALLOWABLE_TIMER_PERIOD)
         };
         self.activate_timer(timer_index, ticks, continuous)
+    }
+
+    /// Reactivate a periodic timer relative to its previous fire time.
+    ///
+    /// Unlike `activate_timer` which sets `time_to_fire = ticks_total + period`,
+    /// this adds `period` to the existing `time_to_fire`. This enables catch-up:
+    /// if the batch advanced ticks_total past multiple fire points, calling this
+    /// + `check_timers()` in a loop will fire the timer for each missed period.
+    pub fn reactivate_timer_relative(
+        &mut self,
+        timer_index: usize,
+        period: u64,
+    ) -> Result<(), PcSystemError> {
+        self.validate_timer_index(timer_index)?;
+        let period = period.max(MIN_ALLOWABLE_TIMER_PERIOD);
+        self.timers[timer_index].period = period;
+        self.timers[timer_index].time_to_fire += period;
+        self.timers[timer_index].active = true;
+        self.timers[timer_index].continuous = false;
+        Ok(())
     }
 
     /// Deactivate a timer.

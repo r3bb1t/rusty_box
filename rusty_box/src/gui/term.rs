@@ -87,7 +87,6 @@ impl BxGui for TermGui {
     }
 
     fn graphics_tile_update(&mut self, _tile: &[u8], _x: u32, _y: u32) {
-        tracing::trace!("TermGUI: Graphics tile update (not implemented)");
     }
 
     fn handle_events(&mut self) {
@@ -176,8 +175,7 @@ impl BxGui for TermGui {
         tracing::debug!("TermGUI: Display mode changed to {:?}", mode);
     }
 
-    fn show_ips(&mut self, ips_count: u32) {
-        tracing::trace!("TermGUI: IPS = {}", ips_count);
+    fn show_ips(&mut self, _ips_count: u32) {
     }
 
     fn get_pending_scancodes(&mut self) -> Vec<u8> {

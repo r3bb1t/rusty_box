@@ -540,11 +540,19 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         // 06=PUSH ES, 07=POP ES, 0E=PUSH CS, 16=PUSH SS, 17=POP SS, 1E=PUSH DS, 1F=POP DS
         // Also 0FA0=PUSH FS, 0FA1=POP FS, 0FA8=PUSH GS, 0FA9=POP GS (two-byte)
         // Note: In 64-bit mode, 06/07/0E/16/17/1E/1F are invalid, only 0FAx forms exist
-        let is_segment_push_pop = matches!(b1, 0x06 | 0x07 | 0x0E | 0x16 | 0x17 | 0x1E | 0x1F)
-            || (opcode_map == 1 && matches!(b1 & 0xFF, 0xA0 | 0xA1 | 0xA8 | 0xA9));
+        // Bochs convention: PUSH Sw has segment in src() (OP_NONE, OP_Sw),
+        // POP Sw has segment in dst() (OP_Sw, OP_NONE)
+        let is_segment_push = matches!(b1, 0x06 | 0x0E | 0x16 | 0x1E)
+            || (opcode_map == 1 && matches!(b1 & 0xFF, 0xA0 | 0xA8));
+        let is_segment_pop = matches!(b1, 0x07 | 0x17 | 0x1F)
+            || (opcode_map == 1 && matches!(b1 & 0xFF, 0xA1 | 0xA9));
 
-        if is_segment_push_pop {
-            // Segment is in bits 3-5 (nnn)
+        if is_segment_push {
+            // PUSH Sw: segment in src1 (Bochs: i->src())
+            instr.operands.dst = rm as u8;
+            instr.operands.src1 = nnn as u8;
+        } else if is_segment_pop {
+            // POP Sw: segment in dst (Bochs: i->dst())
             instr.operands.dst = nnn as u8;
             instr.operands.src1 = rm as u8;
         } else {

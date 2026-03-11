@@ -669,17 +669,26 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// CMPXCHG16B m128
     /// Compares RDX:RAX with m128. If equal, sets ZF and stores RCX:RBX into m128.
     /// Otherwise clears ZF and loads m128 into RDX:RAX.
-    /// Bochs uses a special read_RMW_linear_dqword_aligned_64; we read as two qwords.
+    /// Bochs: read_RMW_linear_dqword_aligned_64 + write_RMW_linear_dqword.
+    /// Since the operand is 16-byte aligned, both qwords are always on the same page.
+    /// We translate once with write permission and do direct physical reads/writes.
     pub fn cmpxchg16b(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
         let seg_idx = seg as usize;
         let laddr = self.get_laddr64(seg_idx, eaddr);
 
-        // read_RMW_linear_dqword_aligned_64 returns hi, lo
-        // (hi = [laddr+8], lo = [laddr])
-        let (op1_lo, rmw_laddr_lo) = self.read_rmw_linear_qword(seg, laddr)?;
-        let op1_hi = self.read_linear_qword(seg, laddr.wrapping_add(8))?;
+        // Bochs: #GP(0) if not 16-byte aligned
+        if (laddr & 0xF) != 0 {
+            self.exception(super::cpu::Exception::Gp, 0)?;
+            return Err(super::CpuError::CpuLoopRestart);
+        }
+
+        // 16-byte aligned → both qwords on same page. Translate once with write access.
+        let paddr = self.translate_data_write(laddr)?;
+
+        let op1_lo = self.mem_read_qword(paddr);
+        let op1_hi = self.mem_read_qword(paddr + 8);
 
         let rax = self.get_gpr64(0); // RAX
         let rdx = self.get_gpr64(2); // RDX
@@ -691,13 +700,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // dest <- RCX:RBX
             let rbx = self.get_gpr64(3);
             let rcx = self.get_gpr64(1);
-            self.write_rmw_linear_qword(rmw_laddr_lo, rbx);
-            self.write_rmw_linear_qword(laddr.wrapping_add(8), rcx);
+            self.mem_write_qword(paddr, rbx);
+            self.mem_write_qword(paddr + 8, rcx);
             self.eflags.insert(EFlags::ZF);
         } else {
             // write back original (Bochs: write_RMW_linear_dqword(hi, lo))
-            self.write_rmw_linear_qword(rmw_laddr_lo, op1_lo);
-            self.write_rmw_linear_qword(laddr.wrapping_add(8), op1_hi);
+            self.mem_write_qword(paddr, op1_lo);
+            self.mem_write_qword(paddr + 8, op1_hi);
             self.eflags.remove(EFlags::ZF);
             // RAX <- op1_lo, RDX <- op1_hi
             self.set_gpr64(0, op1_lo);

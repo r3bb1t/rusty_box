@@ -565,6 +565,7 @@ impl BxPicC {
     fn write_cmd(&mut self, value: u8, is_master: bool) {
         if (value & 0x10) != 0 {
             // ICW1 — Initialization Command Word 1 (Bochs pic.cc:278-306)
+            eprintln!("[PIC-CMD] ICW1={:#04x} {}", value, if is_master { "master" } else { "slave" });
             tracing::debug!(
                 "PIC: ICW1 = {:#04x} ({})",
                 value,
@@ -744,11 +745,12 @@ impl BxPicC {
                 } else {
                     &mut self.slave
                 };
-                tracing::trace!(
-                    "PIC: {} IMR = {:#04x}",
-                    if is_master { "Master" } else { "Slave" },
-                    value
-                );
+                static IMR_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+                let ic = IMR_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if ic < 20 {
+                    eprintln!("[PIC-IMR#{}] {} IMR={:#04x}", ic,
+                        if is_master { "master" } else { "slave" }, value);
+                }
                 pic.imr = value;
             }
             self.service_pic_dispatch(is_master);
@@ -767,6 +769,9 @@ impl BxPicC {
             2 => {
                 // ICW2 — Interrupt vector offset (top 5 bits)
                 pic.interrupt_offset = value & 0xF8;
+                eprintln!("[PIC-CMD] ICW2={:#04x} offset={:#04x} {}",
+                    value, pic.interrupt_offset,
+                    if is_master { "master" } else { "slave" });
                 tracing::debug!(
                     "PIC: ICW2 = {:#04x} (offset = {:#04x})",
                     value,
@@ -949,7 +954,6 @@ impl BxPicC {
         // Re-service master after acknowledge (Bochs pic.cc:659)
         self.service_pic_dispatch(true);
 
-        tracing::trace!("PIC: IAC vector = {:#04x}", vector);
         vector
     }
 }

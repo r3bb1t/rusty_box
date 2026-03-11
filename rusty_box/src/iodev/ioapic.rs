@@ -583,8 +583,9 @@ impl BxIoApic {
                 // Bochs: DEV_register_memory_handlers(..., base_addr, base_addr + 0xfff);
                 // (ioapic.cc:243-244)
                 let base = self.base_addr as BxPhyAddress;
+                let self_ptr = self as *const BxIoApic as *const core::ffi::c_void;
                 mem.register_memory_handlers(
-                    core::ptr::null(), // param set later via set_this_ptr
+                    self_ptr,
                     ioapic_mem_read_handler,
                     ioapic_mem_write_handler,
                     base,
@@ -599,8 +600,9 @@ impl BxIoApic {
             // Bochs: (ioapic.cc:249-253)
             self.base_addr = IOAPIC_BASE_ADDR | (base_offset as u32);
             let base = self.base_addr as BxPhyAddress;
+            let self_ptr = self as *const BxIoApic as *const core::ffi::c_void;
             mem.register_memory_handlers(
-                core::ptr::null(),
+                self_ptr,
                 ioapic_mem_read_handler,
                 ioapic_mem_write_handler,
                 base,

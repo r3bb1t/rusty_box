@@ -60,11 +60,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.shift_write32(instr, laddr, result);
 
         let cf = ((op1 << (count - 1)) & 0x80000000) != 0;
-        let of = if count == 1 {
-            ((result ^ op1) & 0x80000000) != 0
-        } else {
-            false
-        };
+        // Bochs computes OF unconditionally: cf ^ (result >> 31)
+        let of = cf != ((result >> 31) != 0);
         self.update_flags_shl32(result, cf, of);
         Ok(())
     }
@@ -81,11 +78,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.shift_write32(instr, laddr, result);
 
         let cf = ((op1 << (count - 1)) & 0x80000000) != 0;
-        let of = if count == 1 {
-            ((result ^ op1) & 0x80000000) != 0
-        } else {
-            false
-        };
+        // Bochs computes OF unconditionally: cf ^ (result >> 31)
+        let of = cf != ((result >> 31) != 0);
         self.update_flags_shl32(result, cf, of);
         Ok(())
     }
@@ -118,11 +112,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.shift_write32(instr, laddr, result);
 
         let cf = ((op1 >> (count - 1)) & 0x00000001) != 0;
-        let of = if count == 1 {
-            (op1 & 0x80000000) != 0
-        } else {
-            false
-        };
+        // Bochs computes OF unconditionally: ((result << 1) ^ result) >> 31
+        let of = (((result << 1) ^ result) >> 31) != 0;
         self.update_flags_shr32(result, cf, of);
         Ok(())
     }
@@ -139,11 +130,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.shift_write32(instr, laddr, result);
 
         let cf = ((op1 >> (count - 1)) & 0x00000001) != 0;
-        let of = if count == 1 {
-            (op1 & 0x80000000) != 0
-        } else {
-            false
-        };
+        // Bochs computes OF unconditionally: ((result << 1) ^ result) >> 31
+        let of = (((result << 1) ^ result) >> 31) != 0;
         self.update_flags_shr32(result, cf, of);
         Ok(())
     }
@@ -228,11 +216,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.shift_write32(instr, laddr, result);
 
         let cf = result & 1 != 0;
-        let of = if count == 1 {
-            ((result ^ (result >> 31)) & 1) != 0
-        } else {
-            false
-        };
+        // Bochs computes OF unconditionally: bit0 ^ bit31
+        let of = ((result ^ (result >> 31)) & 1) != 0;
         self.set_cf_of(cf, of);
         Ok(())
     }
@@ -249,11 +234,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.shift_write32(instr, laddr, result);
 
         let cf = result & 1 != 0;
-        let of = if count == 1 {
-            ((result ^ (result >> 31)) & 1) != 0
-        } else {
-            false
-        };
+        // Bochs computes OF unconditionally: bit0 ^ bit31
+        let of = ((result ^ (result >> 31)) & 1) != 0;
         self.set_cf_of(cf, of);
         Ok(())
     }
@@ -286,11 +268,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.shift_write32(instr, laddr, result);
 
         let cf = (result & 0x80000000) != 0;
-        let of = if count == 1 {
-            ((result ^ (result << 1)) & 0x80000000) != 0
-        } else {
-            false
-        };
+        // Bochs computes OF unconditionally: bit30 ^ bit31
+        let of = ((result ^ (result << 1)) & 0x80000000) != 0;
         self.set_cf_of(cf, of);
         Ok(())
     }
@@ -307,11 +286,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.shift_write32(instr, laddr, result);
 
         let cf = (result & 0x80000000) != 0;
-        let of = if count == 1 {
-            ((result ^ (result << 1)) & 0x80000000) != 0
-        } else {
-            false
-        };
+        // Bochs computes OF unconditionally: bit30 ^ bit31
+        let of = ((result ^ (result << 1)) & 0x80000000) != 0;
         self.set_cf_of(cf, of);
         Ok(())
     }

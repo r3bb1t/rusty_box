@@ -52,12 +52,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_di(self.di().wrapping_add(1));
         }
 
-        tracing::trace!(
-            "MOVSB16: DS:{:04x} -> ES:{:04x}, byte={:#04x}",
-            si,
-            di,
-            byte
-        );
         Ok(())
     }
 
@@ -74,12 +68,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rsi(esi.wrapping_add(increment) as u64);
         self.set_rdi(edi.wrapping_add(increment) as u64);
 
-        tracing::trace!(
-            "MOVSB32: DS:{:#x} -> ES:{:#x}, byte={:#04x}",
-            esi,
-            edi,
-            byte
-        );
         Ok(())
     }
 
@@ -99,7 +87,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_di(self.di().wrapping_add(2));
         }
 
-        tracing::trace!("MOVSW16: word={:#06x}", word);
         Ok(())
     }
 
@@ -115,7 +102,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rsi(esi.wrapping_add(increment) as u64);
         self.set_rdi(edi.wrapping_add(increment) as u64);
 
-        tracing::trace!("MOVSW32: word={:#06x}", word);
         Ok(())
     }
 
@@ -135,7 +121,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_di(self.di().wrapping_add(4));
         }
 
-        tracing::trace!("MOVSD16: dword={:#010x}", dword);
         Ok(())
     }
 
@@ -151,12 +136,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rsi(esi.wrapping_add(increment) as u64);
         self.set_rdi(edi.wrapping_add(increment) as u64);
 
-        tracing::trace!(
-            "MOVSD32: dword={:#010x}, ESI={:#x}, EDI={:#x}",
-            dword,
-            self.esi(),
-            self.edi()
-        );
         Ok(())
     }
 
@@ -177,7 +156,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_di(self.di().wrapping_add(1));
         }
 
-        tracing::trace!("STOSB16: AL={:#04x} -> ES:{:04x}", al, di);
         Ok(())
     }
 
@@ -191,7 +169,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let increment: u32 = if self.get_df() { 0xFFFFFFFF } else { 1 };
         self.set_rdi(edi.wrapping_add(increment) as u64);
 
-        tracing::trace!("STOSB32: AL={:#04x} -> ES:{:#x}", al, edi);
         Ok(())
     }
 
@@ -208,7 +185,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_di(self.di().wrapping_add(2));
         }
 
-        tracing::trace!("STOSW16: AX={:#06x} -> ES:{:04x}", ax, di);
         Ok(())
     }
 
@@ -222,7 +198,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let increment: u32 = if self.get_df() { 0xFFFFFFFE } else { 2 };
         self.set_rdi(edi.wrapping_add(increment) as u64);
 
-        tracing::trace!("STOSW32: AX={:#06x} -> ES:{:#x}", ax, edi);
         Ok(())
     }
 
@@ -239,7 +214,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_di(self.di().wrapping_add(4));
         }
 
-        tracing::trace!("STOSD16: EAX={:#010x} -> ES:{:04x}", eax, di);
         Ok(())
     }
 
@@ -253,7 +227,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let increment: u32 = if self.get_df() { 0xFFFFFFFC } else { 4 };
         self.set_rdi(edi.wrapping_add(increment) as u64);
 
-        tracing::trace!("STOSD32: EAX={:#010x} -> ES:{:#x}", eax, edi);
         Ok(())
     }
 
@@ -275,7 +248,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_si(self.si().wrapping_add(1));
         }
 
-        tracing::trace!("LODSB16: DS:{:04x} -> AL={:#04x}", si, byte);
         Ok(())
     }
 
@@ -289,7 +261,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let increment: u32 = if self.get_df() { 0xFFFFFFFF } else { 1 };
         self.set_rsi(esi.wrapping_add(increment) as u64);
 
-        tracing::trace!("LODSB32: DS:{:#x} -> AL={:#04x}", esi, byte);
         Ok(())
     }
 
@@ -307,7 +278,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_si(self.si().wrapping_add(2));
         }
 
-        tracing::trace!("LODSW16: DS:{:04x} -> AX={:#06x}", si, word);
         Ok(())
     }
 
@@ -321,7 +291,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let increment: u32 = if self.get_df() { 0xFFFFFFFE } else { 2 };
         self.set_rsi(esi.wrapping_add(increment) as u64);
 
-        tracing::trace!("LODSW32: DS:{:#x} -> AX={:#06x}", esi, word);
         Ok(())
     }
 
@@ -339,7 +308,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_si(self.si().wrapping_add(4));
         }
 
-        tracing::trace!("LODSD16: DS:{:04x} -> EAX={:#010x}", si, dword);
         Ok(())
     }
 
@@ -353,7 +321,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let increment: u32 = if self.get_df() { 0xFFFFFFFC } else { 4 };
         self.set_rsi(esi.wrapping_add(increment) as u64);
 
-        tracing::trace!("LODSD32: DS:{:#x} -> EAX={:#010x}", esi, dword);
         Ok(())
     }
 
@@ -380,7 +347,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_di(self.di().wrapping_add(1));
         }
 
-        tracing::trace!("CMPSB16: [{:#04x}] vs [{:#04x}]", op1, op2);
         Ok(())
     }
 
@@ -399,7 +365,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rsi(esi.wrapping_add(increment) as u64);
         self.set_rdi(edi.wrapping_add(increment) as u64);
 
-        tracing::trace!("CMPSB32: [{:#04x}] vs [{:#04x}]", op1, op2);
         Ok(())
     }
 
@@ -422,7 +387,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_di(self.di().wrapping_add(2));
         }
 
-        tracing::trace!("CMPSW16: [{:#06x}] vs [{:#06x}]", op1, op2);
         Ok(())
     }
 
@@ -441,7 +405,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rsi(esi.wrapping_add(increment) as u64);
         self.set_rdi(edi.wrapping_add(increment) as u64);
 
-        tracing::trace!("CMPSW32: [{:#06x}] vs [{:#06x}]", op1, op2);
         Ok(())
     }
 
@@ -464,7 +427,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_di(self.di().wrapping_add(4));
         }
 
-        tracing::trace!("CMPSD16: [{:#010x}] vs [{:#010x}]", op1, op2);
         Ok(())
     }
 
@@ -483,7 +445,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rsi(esi.wrapping_add(increment) as u64);
         self.set_rdi(edi.wrapping_add(increment) as u64);
 
-        tracing::trace!("CMPSD32: [{:#010x}] vs [{:#010x}]", op1, op2);
         Ok(())
     }
 
@@ -507,7 +468,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_di(self.di().wrapping_add(1));
         }
 
-        tracing::trace!("SCASB16: AL={:#04x} vs [{:#04x}]", al, op2);
         Ok(())
     }
 
@@ -524,7 +484,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let increment: u32 = if self.get_df() { 0xFFFFFFFF } else { 1 };
         self.set_rdi(edi.wrapping_add(increment) as u64);
 
-        tracing::trace!("SCASB32: AL={:#04x} vs [{:#04x}]", al, op2);
         Ok(())
     }
 
@@ -544,7 +503,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_di(self.di().wrapping_add(2));
         }
 
-        tracing::trace!("SCASW16: AX={:#06x} vs [{:#06x}]", ax, op2);
         Ok(())
     }
 
@@ -561,7 +519,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let increment: u32 = if self.get_df() { 0xFFFFFFFE } else { 2 };
         self.set_rdi(edi.wrapping_add(increment) as u64);
 
-        tracing::trace!("SCASW32: AX={:#06x} vs [{:#06x}]", ax, op2);
         Ok(())
     }
 
@@ -581,7 +538,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_di(self.di().wrapping_add(4));
         }
 
-        tracing::trace!("SCASD16: EAX={:#010x} vs [{:#010x}]", eax, op2);
         Ok(())
     }
 
@@ -598,7 +554,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let increment: u32 = if self.get_df() { 0xFFFFFFFC } else { 4 };
         self.set_rdi(edi.wrapping_add(increment) as u64);
 
-        tracing::trace!("SCASD32: EAX={:#010x} vs [{:#010x}]", eax, op2);
         Ok(())
     }
 
@@ -613,7 +568,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.movsb16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
+            if cx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -626,7 +587,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.movsw16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
+            if cx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -639,7 +606,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.movsd16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
+            if cx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -652,7 +625,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.stosb16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
+            if cx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -665,7 +644,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.stosw16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
+            if cx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -678,7 +663,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.stosd16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
+            if cx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -691,7 +682,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.lodsb16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
+            if cx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -704,7 +701,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.lodsw16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
+            if cx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -717,7 +720,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.lodsd16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
+            if cx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -730,10 +739,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsb16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
-            if !self.get_zf() {
+            if !self.get_zf() || cx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -746,10 +757,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsb16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
-            if self.get_zf() {
+            if self.get_zf() || cx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -762,10 +775,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsw16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
-            if !self.get_zf() {
+            if !self.get_zf() || cx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -778,10 +793,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsw16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
-            if self.get_zf() {
+            if self.get_zf() || cx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -794,10 +811,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsd16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
-            if !self.get_zf() {
+            if !self.get_zf() || cx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -810,10 +829,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsd16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
-            if self.get_zf() {
+            if self.get_zf() || cx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -826,10 +847,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasb16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
-            if !self.get_zf() {
+            if !self.get_zf() || cx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -842,10 +865,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasb16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
-            if self.get_zf() {
+            if self.get_zf() || cx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -858,10 +883,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasw16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
-            if !self.get_zf() {
+            if !self.get_zf() || cx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -874,10 +901,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasw16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
-            if self.get_zf() {
+            if self.get_zf() || cx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -890,10 +919,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasd16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
-            if !self.get_zf() {
+            if !self.get_zf() || cx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -906,10 +937,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasd16(instr)?;
             cx = cx.wrapping_sub(1);
             self.set_cx(cx);
-            self.icount += 1;
-            if self.get_zf() {
+            if self.get_zf() || cx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -926,6 +959,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.movsb32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
+            if ecx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -939,6 +979,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.movsw32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
+            if ecx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -952,6 +999,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.movsd32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
+            if ecx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -965,6 +1019,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.stosb32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
+            if ecx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -978,6 +1039,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.stosw32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
+            if ecx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -991,6 +1059,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.stosd32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
+            if ecx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1004,6 +1079,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.lodsb32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
+            if ecx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1017,6 +1099,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.lodsw32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
+            if ecx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1030,6 +1119,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.lodsd32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
+            if ecx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1043,9 +1139,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsb32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if !self.get_zf() {
+            if !self.get_zf() || ecx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1059,9 +1158,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsb32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if self.get_zf() {
+            if self.get_zf() || ecx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1075,9 +1177,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsw32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if !self.get_zf() {
+            if !self.get_zf() || ecx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1091,9 +1196,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsw32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if self.get_zf() {
+            if self.get_zf() || ecx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1107,9 +1215,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsd32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if !self.get_zf() {
+            if !self.get_zf() || ecx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1123,9 +1234,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsd32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if self.get_zf() {
+            if self.get_zf() || ecx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1139,9 +1253,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasb32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if !self.get_zf() {
+            if !self.get_zf() || ecx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1155,9 +1272,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasb32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if self.get_zf() {
+            if self.get_zf() || ecx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1171,9 +1291,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasw32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if !self.get_zf() {
+            if !self.get_zf() || ecx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1187,9 +1310,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasw32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if self.get_zf() {
+            if self.get_zf() || ecx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1203,9 +1329,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasd32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if !self.get_zf() {
+            if !self.get_zf() || ecx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1219,9 +1348,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasd32(instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
-            if self.get_zf() {
+            if self.get_zf() || ecx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
                 break;
             }
+            self.icount += 1;
         }
         self.set_rcx(self.ecx() as u64);
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1427,7 +1559,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if self.lapic.is_selected(a20_addr as BxPhyAddress) {
             return self.lapic.read(a20_addr as BxPhyAddress, 4);
         }
-        // Slow path: per-word reads (handles MMIO/VGA/ROM)
+        // Slow path: route through read_physical_page to hit registered MMIO handlers
+        // (IOAPIC, VGA, etc.) with proper dword access width.
+        if let Some(mem_bus) = self.mem_bus {
+            let mem = unsafe { &mut *mem_bus.as_ptr() };
+            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            let paddr: BxPhyAddress = addr as BxPhyAddress;
+            let mut data = [0u8; 4];
+            if mem.read_physical_page(&[cpu_ref], paddr, 4, &mut data).is_ok() {
+                return u32::from_le_bytes(data);
+            }
+        }
+        // Fallback: per-word reads
         let lo = self.mem_read_word(addr) as u32;
         let hi = self.mem_read_word(addr + 2) as u32;
         lo | (hi << 16)
@@ -1452,7 +1596,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.lapic.write(a20_addr as BxPhyAddress, value, 4);
             return;
         }
-        // Slow path: per-word writes (handles MMIO/VGA/ROM)
+        // Slow path: route through write_physical_page to hit registered MMIO handlers
+        // (IOAPIC, VGA, etc.) with proper dword access width.
+        if let Some(mem_bus) = self.mem_bus {
+            let mem = unsafe { &mut *mem_bus.as_ptr() };
+            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            let paddr: BxPhyAddress = addr as BxPhyAddress;
+            let mut dummy_mapping: [u32; 0] = [];
+            let mut stamp = BxPageWriteStampTable::new(&mut dummy_mapping);
+            let mut data = value.to_le_bytes();
+            if mem.write_physical_page(&[cpu_ref], &mut stamp, paddr, 4, &mut data).is_ok() {
+                self.i_cache.smc_write_check(paddr, 4);
+                return;
+            }
+        }
+        // Fallback: per-word writes
         self.mem_write_word(addr, value as u16);
         self.mem_write_word(addr + 2, (value >> 16) as u16);
     }
@@ -1732,7 +1891,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.movsb64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
-            self.icount += 1;
+            if rcx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1756,7 +1921,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.movsw64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
-            self.icount += 1;
+            if rcx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1780,7 +1951,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.movsd64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
-            self.icount += 1;
+            if rcx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1804,7 +1981,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.stosb64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
-            self.icount += 1;
+            if rcx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1826,7 +2009,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.stosw64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
-            self.icount += 1;
+            if rcx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1848,7 +2037,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.stosd64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
-            self.icount += 1;
+            if rcx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1872,7 +2067,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.lodsb64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
-            self.icount += 1;
+            if rcx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1894,7 +2095,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.lodsw64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
-            self.icount += 1;
+            if rcx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1917,7 +2124,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.lodsd64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
-            self.icount += 1;
+            if rcx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1945,8 +2158,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsb64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
+            if !self.get_zf() || rcx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
+            }
             self.icount += 1;
-            if !self.get_zf() { break; }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1958,8 +2175,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsb64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
+            if self.get_zf() || rcx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
+            }
             self.icount += 1;
-            if self.get_zf() { break; }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1985,8 +2206,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsw64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
+            if !self.get_zf() || rcx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
+            }
             self.icount += 1;
-            if !self.get_zf() { break; }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -1998,8 +2223,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsw64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
+            if self.get_zf() || rcx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
+            }
             self.icount += 1;
-            if self.get_zf() { break; }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -2025,8 +2254,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsd64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
+            if !self.get_zf() || rcx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
+            }
             self.icount += 1;
-            if !self.get_zf() { break; }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -2038,8 +2271,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsd64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
+            if self.get_zf() || rcx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
+            }
             self.icount += 1;
-            if self.get_zf() { break; }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -2065,8 +2302,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasb64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
+            if !self.get_zf() || rcx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
+            }
             self.icount += 1;
-            if !self.get_zf() { break; }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -2078,8 +2319,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasb64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
+            if self.get_zf() || rcx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
+            }
             self.icount += 1;
-            if self.get_zf() { break; }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -2103,8 +2348,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasw64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
+            if !self.get_zf() || rcx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
+            }
             self.icount += 1;
-            if !self.get_zf() { break; }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -2116,8 +2365,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasw64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
+            if self.get_zf() || rcx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
+            }
             self.icount += 1;
-            if self.get_zf() { break; }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -2141,8 +2394,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasd64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
+            if !self.get_zf() || rcx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
+            }
             self.icount += 1;
-            if !self.get_zf() { break; }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -2154,8 +2411,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasd64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
+            if self.get_zf() || rcx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
+            }
             self.icount += 1;
-            if self.get_zf() { break; }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -2167,10 +2428,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// MOVSQ -- Move qword from [RSI] to [RDI] (64-bit addressing)
-    pub fn movsq64(&mut self, _instr: &Instruction) -> super::Result<()> {
+    pub fn movsq64(&mut self, instr: &Instruction) -> super::Result<()> {
         let rsi = self.rsi();
         let rdi = self.rdi();
-        let val = self.read_virtual_qword_64(BxSegregs::Ds, rsi)?;
+        let val = self.read_virtual_qword_64(BxSegregs::from(instr.seg()), rsi)?;
         self.write_virtual_qword_64(BxSegregs::Es, rdi, val)?;
         let delta: u64 = if self.get_df() { (-8i64) as u64 } else { 8 };
         self.set_rsi(rsi.wrapping_add(delta));
@@ -2185,7 +2446,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.movsq64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
-            self.icount += 1;
+            if rcx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -2208,16 +2475,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.stosq64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
-            self.icount += 1;
+            if rcx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     /// LODSQ -- Load qword from [RSI] into RAX (64-bit addressing)
-    pub fn lodsq64(&mut self, _instr: &Instruction) -> super::Result<()> {
+    pub fn lodsq64(&mut self, instr: &Instruction) -> super::Result<()> {
         let rsi = self.rsi();
-        let val = self.read_virtual_qword_64(BxSegregs::Ds, rsi)?;
+        let val = self.read_virtual_qword_64(BxSegregs::from(instr.seg()), rsi)?;
         self.set_rax(val);
         let delta: u64 = if self.get_df() { (-8i64) as u64 } else { 8 };
         self.set_rsi(rsi.wrapping_add(delta));
@@ -2231,17 +2504,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.lodsq64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
-            self.icount += 1;
+            if rcx != 0 {
+                if self.async_event != 0 {
+                    self.set_rip(self.prev_rip);
+                    break;
+                }
+                self.icount += 1;
+            }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
     /// CMPSQ -- Compare qword [RSI] with [RDI] (64-bit addressing)
-    pub fn cmpsq64(&mut self, _instr: &Instruction) -> super::Result<()> {
+    pub fn cmpsq64(&mut self, instr: &Instruction) -> super::Result<()> {
         let rsi = self.rsi();
         let rdi = self.rdi();
-        let op1 = self.read_virtual_qword_64(BxSegregs::Ds, rsi)?;
+        let op1 = self.read_virtual_qword_64(BxSegregs::from(instr.seg()), rsi)?;
         let op2 = self.read_virtual_qword_64(BxSegregs::Es, rdi)?;
         let result = op1.wrapping_sub(op2);
         self.update_flags_sub64(op1, op2, result);
@@ -2258,8 +2537,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsq64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
+            if !self.get_zf() || rcx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
+            }
             self.icount += 1;
-            if !self.get_zf() { break; }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -2272,8 +2555,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.cmpsq64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
+            if self.get_zf() || rcx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
+            }
             self.icount += 1;
-            if self.get_zf() { break; }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -2298,8 +2585,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasq64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
+            if !self.get_zf() || rcx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
+            }
             self.icount += 1;
-            if !self.get_zf() { break; }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
@@ -2312,8 +2603,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.scasq64(instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
+            if self.get_zf() || rcx == 0 { break; }
+            if self.async_event != 0 {
+                self.set_rip(self.prev_rip);
+                break;
+            }
             self.icount += 1;
-            if self.get_zf() { break; }
         }
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())

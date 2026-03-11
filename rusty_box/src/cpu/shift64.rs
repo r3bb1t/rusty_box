@@ -234,9 +234,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let bit0 = result & 0x1;
         let bit63 = result >> 63;
-        // of = cf ^ result63 (only defined when count == 1)
-        let of = if count == 1 { (bit0 ^ bit63) != 0 } else { false };
-        self.set_cf_of(bit0 != 0, of);
+        // Bochs sets OF unconditionally (Intel says undefined for count>1)
+        self.set_cf_of(bit0 != 0, (bit0 ^ bit63) != 0);
         Ok(())
     }
 
@@ -253,9 +252,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let bit0 = result & 0x1;
         let bit63 = result >> 63;
-        // of = cf ^ result63 (only defined when count == 1)
-        let of = if count == 1 { (bit0 ^ bit63) != 0 } else { false };
-        self.set_cf_of(bit0 != 0, of);
+        // Bochs sets OF unconditionally (Intel says undefined for count>1)
+        self.set_cf_of(bit0 != 0, (bit0 ^ bit63) != 0);
         Ok(())
     }
 
@@ -290,9 +288,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let bit63 = (result >> 63) & 1;
         let bit62 = (result >> 62) & 1;
-        // of = result62 ^ result63 (only defined when count == 1)
-        let of = if count == 1 { (bit62 ^ bit63) != 0 } else { false };
-        self.set_cf_of(bit63 != 0, of);
+        // Bochs computes OF unconditionally (Intel says undefined for count>1)
+        self.set_cf_of(bit63 != 0, (bit62 ^ bit63) != 0);
         Ok(())
     }
 
@@ -309,9 +306,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let bit63 = (result >> 63) & 1;
         let bit62 = (result >> 62) & 1;
-        // of = result62 ^ result63 (only defined when count == 1)
-        let of = if count == 1 { (bit62 ^ bit63) != 0 } else { false };
-        self.set_cf_of(bit63 != 0, of);
+        // Bochs computes OF unconditionally (Intel says undefined for count>1)
+        self.set_cf_of(bit63 != 0, (bit62 ^ bit63) != 0);
         Ok(())
     }
 

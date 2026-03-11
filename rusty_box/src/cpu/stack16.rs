@@ -17,7 +17,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst = instr.dst() as usize;
         let value = self.get_gpr16(dst);
         self.push_16(value)?;
-        tracing::trace!("PUSH r16 (reg {}): {:#06x}", dst, value);
         Ok(())
     }
 
@@ -28,7 +27,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = super::decoder::BxSegregs::from(instr.seg());
         let value = self.v_read_word(seg, eaddr)?;
         self.push_16(value)?;
-        tracing::trace!("PUSH m16 [{:?}:{:#010x}]: {:#06x}", seg, eaddr, value);
         Ok(())
     }
 
@@ -38,7 +36,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let src = instr.src() as usize;
         let value = self.sregs[src].selector.value;
         self.push_16(value)?;
-        tracing::trace!("PUSH Sw (seg {}): {:#06x}", src, value);
         Ok(())
     }
 
@@ -47,7 +44,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn push_iw(&mut self, instr: &Instruction) -> super::Result<()> {
         let value = instr.iw();
         self.push_16(value)?;
-        tracing::trace!("PUSH imm16: {:#06x}", value);
         Ok(())
     }
 
@@ -58,7 +54,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let imm8 = instr.ib() as i8;
         let value = imm8 as i16 as u16;
         self.push_16(value)?;
-        tracing::trace!("PUSH sign-extended imm8: {:#04x} -> {:#06x}", imm8, value);
         Ok(())
     }
 
@@ -73,7 +68,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst = instr.dst() as usize;
         let value = self.pop_16()?;
         self.set_gpr16(dst, value);
-        tracing::trace!("POP r16 (reg {}): {:#06x}", dst, value);
         Ok(())
     }
 
@@ -84,7 +78,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
         self.v_write_word(seg, eaddr, value)?;
-        tracing::trace!("POP m16 [{:?}:{:#010x}]: {:#06x}", seg, eaddr, value);
         Ok(())
     }
 
@@ -153,16 +146,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_sp(temp_sp.wrapping_sub(16));
         }
 
-        tracing::trace!(
-            "PUSHA16: AX={:04x} CX={:04x} DX={:04x} BX={:04x} BP={:04x} SI={:04x} DI={:04x}",
-            ax,
-            cx,
-            dx,
-            bx,
-            bp,
-            si,
-            di
-        );
         Ok(())
     }
 
@@ -213,16 +196,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_cx(cx);
         self.set_ax(ax);
 
-        tracing::trace!(
-            "POPA16: DI={:04x} SI={:04x} BP={:04x} BX={:04x} DX={:04x} CX={:04x} AX={:04x}",
-            di,
-            si,
-            bp,
-            bx,
-            dx,
-            cx,
-            ax
-        );
         Ok(())
     }
 
@@ -314,13 +287,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // PUSH/POP Sw - 16-bit mode segment register push/pop (unified dispatch)
     // =========================================================================
 
-    /// PUSH Sw (16-bit opsize) - Push segment register from operands.dst
-    /// Used by the PushOp16Sw opcode
+    /// PUSH Sw (16-bit opsize) - Push segment register
+    /// Used by the PushOp16Sw opcode. Bochs: i->src() for PUSH Sw
     pub fn push_op16_sw(&mut self, instr: &Instruction) -> super::Result<()> {
-        let seg = instr.operands.dst as usize;
+        let seg = instr.src() as usize;
         let val = self.sregs[seg].selector.value;
         self.push_16(val)?;
-        tracing::trace!("PUSH16 Sw (seg {}): {:#06x}", seg, val);
         Ok(())
     }
 

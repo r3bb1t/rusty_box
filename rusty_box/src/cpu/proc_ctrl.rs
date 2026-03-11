@@ -157,14 +157,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             == 3;
     }
 
-    /// Get the Time Stamp Counter value
+    /// Get the Time Stamp Counter value.
+    ///
+    /// Bochs: TSC = bx_pc_system.time_ticks() + tsc_adjust (no scaling).
+    /// time_ticks() increments by 1 per instruction. TSC_SCALE = 1 matches Bochs.
+    const TSC_SCALE: u64 = 1;
+
     pub fn get_tsc(&self, system_ticks: u64) -> u64 {
-        system_ticks.wrapping_add(self.tsc_adjust as u64)
+        (system_ticks.wrapping_mul(Self::TSC_SCALE)).wrapping_add(self.tsc_adjust as u64)
     }
 
     /// Set the Time Stamp Counter to a specific value
     pub fn set_tsc(&mut self, newval: u64, system_ticks: u64) {
-        self.tsc_adjust = newval.wrapping_sub(system_ticks) as i64
+        self.tsc_adjust = newval.wrapping_sub(system_ticks.wrapping_mul(Self::TSC_SCALE)) as i64
     }
 
     // =========================================================================
@@ -225,7 +230,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.invalidate_stack_cache();
         self.dtlb.invlpg(laddr);
         self.itlb.invlpg(laddr);
-        tracing::trace!("INVLPG: laddr={:#x}", laddr);
+
         Ok(())
     }
 
@@ -274,20 +279,29 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Bochs mwait.cc:100: effective address = RAX & asize_mask
-        let asize_mask: u64 = if instr.as32_l() != 0 {
-            0xFFFF_FFFF
-        } else {
-            0xFFFF
-        };
-        let eaddr = self.rax() & asize_mask;
-
-        // Bochs mwait.cc:102-103: MONITOR performs same segmentation and paging
-        // checks as a 1-byte read (tickle_read_virtual)
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        let _ = self.v_read_byte(seg, eaddr as u32)?;
 
-        // Bochs mwait.cc:105: get physical address from address translation
-        let paddr = self.address_xlation.paddress1;
+        let paddr = if self.long64_mode() {
+            // 64-bit mode: default address size is 64, 0x67 prefix → 32-bit
+            let eaddr = if instr.as32_l() != 0 {
+                self.rax() & 0xFFFF_FFFF
+            } else {
+                self.rax()
+            };
+            // Bochs mwait.cc:102-103: tickle_read_virtual (1-byte read check)
+            let _ = self.read_virtual_byte_64(seg, eaddr)?;
+            self.address_xlation.paddress1
+        } else {
+            let asize_mask: u64 = if instr.as32_l() != 0 {
+                0xFFFF_FFFF
+            } else {
+                0xFFFF
+            };
+            let eaddr = self.rax() & asize_mask;
+            // Bochs mwait.cc:102-103: tickle_read_virtual (1-byte read check)
+            let _ = self.v_read_byte(seg, eaddr as u32)?;
+            self.address_xlation.paddress1
+        };
 
         // Bochs mwait.cc:121: invalidate page in monitoring system
         // (In Bochs this calls bx_pc_system.invlpg(paddr) to clear any
@@ -461,12 +475,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rax((ticks & 0xFFFF_FFFF) as u64);
         self.set_rdx((ticks >> 32) as u64);
 
-        tracing::trace!(
-            "RDTSC: ticks={:#018x} -> EDX:EAX={:#010x}:{:#010x}",
-            ticks,
-            self.edx(),
-            self.eax()
-        );
+
         Ok(())
     }
 
@@ -528,7 +537,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             BX_MSR_KERNELGSBASE => self.msr.kernelgsbase,
             BX_MSR_TSC_AUX => self.msr.tsc_aux as u64,
             _ => {
-                tracing::trace!("RDMSR: unhandled MSR={:#010x}, returning 0", msr);
+
                 0
             }
         };
@@ -555,6 +564,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let msr = self.ecx();
         let val = ((self.edx() as u64) << 32) | (self.eax() as u64);
+
+        // Temporary: trace WRMSR
+        static MSR_WR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let mc = MSR_WR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if mc < 50 || (mc < 500 && mc % 50 == 0) {
+            eprintln!("[WRMSR#{}] MSR={:#010x} val={:#018x} icount={}", mc, msr, val, self.icount);
+        }
         match msr {
             BX_MSR_TSC => self.set_tsc(val, self.icount),
             #[cfg(feature = "bx_support_apic")]
@@ -656,7 +672,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
             BX_MSR_TSC_AUX => self.msr.tsc_aux = val as u32,
             _ => {
-                tracing::trace!("WRMSR: unhandled MSR={:#010x} = {:#018x}", msr, val);
+
             }
         }
         tracing::debug!("WRMSR: MSR={:#010x} = {:#018x}", msr, val);
@@ -697,13 +713,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             _ => 0,
         };
         self.set_gpr32(dst_gpr, val);
-        tracing::trace!(
-            "MOV r32, DR{}: DR{}={:#010x} -> reg{}",
-            dr_idx,
-            dr_idx,
-            val,
-            dst_gpr
-        );
+
         Ok(())
     }
 
@@ -751,13 +761,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
             _ => {}
         }
-        tracing::trace!(
-            "MOV DR{}, r32: reg{}={:#010x} -> DR{}",
-            dr_idx,
-            src_gpr,
-            val,
-            dr_idx
-        );
+
         Ok(())
     }
 
@@ -1625,7 +1629,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rax(xcr0_val & 0xFFFF_FFFF);
         self.set_rdx(xcr0_val >> 32);
 
-        tracing::trace!("XGETBV: XCR0={:#010x}", xcr0_val);
+
         Ok(())
     }
 
@@ -1714,15 +1718,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
-        let requested = self.xcr0.get32() & self.eax();
+        let xcr0 = self.xcr0.get32() as u64;
+        let requested = xcr0 & self.eax() as u64;
 
         // Read existing xstate_bv from header
         let mut xstate_bv = self.v_read_qword(seg, eaddr.wrapping_add(512))?;
 
+        // Compute xinuse vector (Bochs xsave.cc:75)
+        let xinuse = self.get_xinuse_vector(requested);
+
         // Save x87 FPU state if requested (bit 0)
-        if (requested & 0x1) != 0 {
+        // Bochs: always saves if requested (not XSAVEOPT), updates xstate_bv per xinuse
+        if (requested & 1) != 0 {
             self.xsave_x87_state(seg, eaddr)?;
-            xstate_bv |= 0x1;
+            if (xinuse & 1) != 0 {
+                xstate_bv |= 1;
+            } else {
+                xstate_bv &= !1;
+            }
         }
 
         // Save MXCSR if SSE or YMM requested (Bochs xsave.cc:87-92)
@@ -1732,9 +1745,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Save SSE state if requested (bit 1)
-        if (requested & 0x2) != 0 {
+        if (requested & 2) != 0 {
             self.xsave_sse_state(seg, eaddr.wrapping_add(160))?;
-            xstate_bv |= 0x2;
+            if (xinuse & 2) != 0 {
+                xstate_bv |= 2;
+            } else {
+                xstate_bv &= !2;
+            }
+        }
+
+        // Save extended features at standard (fixed) offsets
+        for feature in 2..=7u32 {
+            let mask = 1u64 << feature;
+            if (requested & mask) != 0 {
+                let offset = Self::xsave_component_offset(feature);
+                self.xsave_extended_component(seg, eaddr.wrapping_add(offset), feature)?;
+                if (xinuse & mask) != 0 {
+                    xstate_bv |= mask;
+                } else {
+                    xstate_bv &= !mask;
+                }
+            }
         }
 
         // Write XSAVE header: xstate_bv at offset 512
@@ -1748,84 +1779,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // XRSTOR — Restore Processor Extended State (opcode 0F AE /5)
-    // Bochs: xsave.cc:242-449
+    // Bochs: xsave.cc:242-449 — delegates to xrstor_unified
     // ========================================================================
 
     pub(super) fn xrstor(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
-        use super::decoder::BxSegregs;
-
-        // Check CR4.OSXSAVE and CR0.TS
-        if !self.cr4.osxsave() {
-            return self.exception(super::cpu::Exception::Ud, 0);
-        }
-        if self.cr0.ts() {
-            return self.exception(super::cpu::Exception::Nm, 0);
-        }
-
-        let eaddr = self.resolve_addr(instr);
-        let seg = BxSegregs::from(instr.seg());
-
-        // Must be 64-byte aligned
-        let laddr: u64 = if self.long64_mode() {
-            self.get_laddr64(seg as usize, eaddr)
-        } else {
-            self.get_laddr32(seg as usize, eaddr as u32) as u64
-        };
-        if (laddr & 0x3F) != 0 {
-            tracing::debug!("XRSTOR: not 64-byte aligned, #GP(0)");
-            return self.exception(super::cpu::Exception::Gp, 0);
-        }
-
-        // Read XSAVE header
-        let xstate_bv = self.v_read_qword(seg, eaddr.wrapping_add(512))?;
-        let xcomp_bv = self.v_read_qword(seg, eaddr.wrapping_add(520))?;
-        let header3 = self.v_read_qword(seg, eaddr.wrapping_add(528))?;
-
-        // Reserved header fields must be zero (standard XRSTOR)
-        if header3 != 0 || xcomp_bv != 0 {
-            tracing::debug!("XRSTOR: reserved header fields not zero, #GP(0)");
-            return self.exception(super::cpu::Exception::Gp, 0);
-        }
-
-        let xcr0 = self.xcr0.get32() as u64;
-        // xstate_bv must not set bits outside XCR0
-        if ((!xcr0) & xstate_bv) != 0 {
-            tracing::debug!("XRSTOR: xstate_bv has bits not in XCR0, #GP(0)");
-            return self.exception(super::cpu::Exception::Gp, 0);
-        }
-
-        let requested = (xcr0 & self.eax() as u64) as u32;
-
-        // Restore x87 FPU state
-        if (requested & 0x1) != 0 {
-            if (xstate_bv & 0x1) != 0 {
-                self.xrstor_x87_state(seg, eaddr)?;
-            } else {
-                self.xrstor_init_x87_state();
-            }
-        }
-
-        // Restore MXCSR if SSE requested
-        if (requested & 0x2) != 0 {
-            // Legacy XRSTOR loads MXCSR when SSE or YMM in RFBM
-            let new_mxcsr = self.v_read_dword(seg, eaddr.wrapping_add(24))?;
-            if (new_mxcsr & !self.mxcsr_mask) != 0 {
-                tracing::debug!("XRSTOR: invalid MXCSR={:#010x}, #GP(0)", new_mxcsr);
-                return self.exception(super::cpu::Exception::Gp, 0);
-            }
-            self.mxcsr.mxcsr = new_mxcsr;
-        }
-
-        // Restore SSE state
-        if (requested & 0x2) != 0 {
-            if (xstate_bv & 0x2) != 0 {
-                self.xrstor_sse_state(seg, eaddr.wrapping_add(160))?;
-            } else {
-                self.xrstor_init_sse_state();
-            }
-        }
-
-        Ok(())
+        self.xrstor_unified(instr, false)
     }
 
     // ========================================================================
@@ -1868,9 +1826,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// Save SSE state to XSAVE area (at given offset, 256 bytes: XMM0-XMM7)
+    /// Save SSE state to XSAVE area (at given offset, up to 256 bytes: XMM0-XMM15)
+    /// Bochs xsave.cc: 8 regs in 32-bit mode, 16 in 64-bit mode
     fn xsave_sse_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
-        for i in 0..8u64 {
+        let num = if self.long64_mode() { 16u64 } else { 8u64 };
+        for i in 0..num {
             let offset = base.wrapping_add(i * 16);
             let lo = unsafe { self.vmm[i as usize].zmm64u[0] };
             let hi = unsafe { self.vmm[i as usize].zmm64u[1] };
@@ -1919,20 +1879,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Restore SSE state from XSAVE area
+    /// Bochs xsave.cc: 8 regs in 32-bit mode, 16 in 64-bit mode
+    /// Only modifies lower 128 bits (XMM); upper YMM/ZMM bits are separate components
     fn xrstor_sse_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
-        for i in 0..8u64 {
+        let num = if self.long64_mode() { 16u64 } else { 8u64 };
+        for i in 0..num {
             let offset = base.wrapping_add(i * 16);
             let lo = self.v_read_qword(seg, offset)?;
             let hi = self.v_read_qword(seg, offset.wrapping_add(8))?;
             unsafe {
                 self.vmm[i as usize].zmm64u[0] = lo;
                 self.vmm[i as usize].zmm64u[1] = hi;
-                self.vmm[i as usize].zmm64u[2] = 0;
-                self.vmm[i as usize].zmm64u[3] = 0;
-                self.vmm[i as usize].zmm64u[4] = 0;
-                self.vmm[i as usize].zmm64u[5] = 0;
-                self.vmm[i as usize].zmm64u[6] = 0;
-                self.vmm[i as usize].zmm64u[7] = 0;
             }
         }
         Ok(())
@@ -2014,13 +1971,661 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Initialize SSE state to reset values
     fn xrstor_init_sse_state(&mut self) {
-        use super::xmm::MXCSR_RESET;
-        self.mxcsr.mxcsr = MXCSR_RESET;
-        for i in 0..8 {
+        let num = if self.long64_mode() { 16 } else { 8 };
+        for i in 0..num {
             unsafe {
                 self.vmm[i].zmm64u[0] = 0;
                 self.vmm[i].zmm64u[1] = 0;
             }
         }
+    }
+
+    // ========================================================================
+    // Extended XSAVE component helpers (YMM, OPMASK, ZMM_HI256, HI_ZMM)
+    // Bochs xsave.cc per-component save/restore/init methods
+    // ========================================================================
+
+    /// YMM state: upper 128 bits of YMM0-YMM15 (256 bytes max)
+    fn xsave_ymm_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        let num = if self.long64_mode() { 16u64 } else { 8u64 };
+        for i in 0..num {
+            let offset = base.wrapping_add(i * 16);
+            unsafe {
+                self.v_write_qword(seg, offset, self.vmm[i as usize].zmm64u[2])?;
+                self.v_write_qword(seg, offset.wrapping_add(8), self.vmm[i as usize].zmm64u[3])?;
+            }
+        }
+        Ok(())
+    }
+
+    fn xrstor_ymm_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        let num = if self.long64_mode() { 16u64 } else { 8u64 };
+        for i in 0..num {
+            let offset = base.wrapping_add(i * 16);
+            unsafe {
+                self.vmm[i as usize].zmm64u[2] = self.v_read_qword(seg, offset)?;
+                self.vmm[i as usize].zmm64u[3] = self.v_read_qword(seg, offset.wrapping_add(8))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn xrstor_init_ymm_state(&mut self) {
+        let num = if self.long64_mode() { 16 } else { 8 };
+        for i in 0..num {
+            unsafe {
+                self.vmm[i].zmm64u[2] = 0;
+                self.vmm[i].zmm64u[3] = 0;
+            }
+        }
+    }
+
+    /// OPMASK state: k0-k7 (64 bytes)
+    fn xsave_opmask_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        for i in 0..8u64 {
+            let val = unsafe { self.opmask[i as usize].rrx };
+            self.v_write_qword(seg, base.wrapping_add(i * 8), val)?;
+        }
+        Ok(())
+    }
+
+    fn xrstor_opmask_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        for i in 0..8u64 {
+            let val = self.v_read_qword(seg, base.wrapping_add(i * 8))?;
+            self.bx_write_opmask(i as usize, val);
+        }
+        Ok(())
+    }
+
+    fn xrstor_init_opmask_state(&mut self) {
+        for i in 0..8 {
+            self.bx_write_opmask(i, 0);
+        }
+    }
+
+    /// ZMM_HI256 state: upper 256 bits of ZMM0-ZMM15 (512 bytes max)
+    fn xsave_zmm_hi256_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        let num = if self.long64_mode() { 16u64 } else { 8u64 };
+        for i in 0..num {
+            let offset = base.wrapping_add(i * 32);
+            unsafe {
+                self.v_write_qword(seg, offset, self.vmm[i as usize].zmm64u[4])?;
+                self.v_write_qword(seg, offset.wrapping_add(8), self.vmm[i as usize].zmm64u[5])?;
+                self.v_write_qword(seg, offset.wrapping_add(16), self.vmm[i as usize].zmm64u[6])?;
+                self.v_write_qword(seg, offset.wrapping_add(24), self.vmm[i as usize].zmm64u[7])?;
+            }
+        }
+        Ok(())
+    }
+
+    fn xrstor_zmm_hi256_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        let num = if self.long64_mode() { 16u64 } else { 8u64 };
+        for i in 0..num {
+            let offset = base.wrapping_add(i * 32);
+            unsafe {
+                self.vmm[i as usize].zmm64u[4] = self.v_read_qword(seg, offset)?;
+                self.vmm[i as usize].zmm64u[5] = self.v_read_qword(seg, offset.wrapping_add(8))?;
+                self.vmm[i as usize].zmm64u[6] = self.v_read_qword(seg, offset.wrapping_add(16))?;
+                self.vmm[i as usize].zmm64u[7] = self.v_read_qword(seg, offset.wrapping_add(24))?;
+            }
+        }
+        Ok(())
+    }
+
+    fn xrstor_init_zmm_hi256_state(&mut self) {
+        let num = if self.long64_mode() { 16 } else { 8 };
+        for i in 0..num {
+            unsafe {
+                self.vmm[i].zmm64u[4] = 0;
+                self.vmm[i].zmm64u[5] = 0;
+                self.vmm[i].zmm64u[6] = 0;
+                self.vmm[i].zmm64u[7] = 0;
+            }
+        }
+    }
+
+    /// HI_ZMM state: full ZMM16-ZMM31 (1024 bytes, 64-bit mode only)
+    fn xsave_hi_zmm_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        if self.long64_mode() {
+            for idx in 16..32u64 {
+                let offset = base.wrapping_add((idx - 16) * 64);
+                unsafe {
+                    for j in 0..8u64 {
+                        self.v_write_qword(seg, offset.wrapping_add(j * 8),
+                            self.vmm[idx as usize].zmm64u[j as usize])?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn xrstor_hi_zmm_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
+        if self.long64_mode() {
+            for idx in 16..32u64 {
+                let offset = base.wrapping_add((idx - 16) * 64);
+                unsafe {
+                    for j in 0..8u64 {
+                        self.vmm[idx as usize].zmm64u[j as usize] =
+                            self.v_read_qword(seg, offset.wrapping_add(j * 8))?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn xrstor_init_hi_zmm_state(&mut self) {
+        if self.long64_mode() {
+            for idx in 16..32 {
+                unsafe {
+                    for j in 0..8 {
+                        self.vmm[idx].zmm64u[j] = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Save an extended component at the given offset
+    /// Used by both standard XSAVE and compacted XSAVEC
+    fn xsave_extended_component(&mut self, seg: super::decoder::BxSegregs, base: u64, feature: u32) -> super::Result<()> {
+        match feature {
+            2 => self.xsave_ymm_state(seg, base),
+            5 => self.xsave_opmask_state(seg, base),
+            6 => self.xsave_zmm_hi256_state(seg, base),
+            7 => self.xsave_hi_zmm_state(seg, base),
+            _ => Ok(()),
+        }
+    }
+
+    /// Restore an extended component from the given offset
+    fn xrstor_extended_component(&mut self, seg: super::decoder::BxSegregs, base: u64, feature: u32) -> super::Result<()> {
+        match feature {
+            2 => self.xrstor_ymm_state(seg, base),
+            5 => self.xrstor_opmask_state(seg, base),
+            6 => self.xrstor_zmm_hi256_state(seg, base),
+            7 => self.xrstor_hi_zmm_state(seg, base),
+            _ => Ok(()),
+        }
+    }
+
+    /// Init an extended component to reset values
+    fn xrstor_init_extended_component(&mut self, feature: u32) {
+        match feature {
+            2 => self.xrstor_init_ymm_state(),
+            5 => self.xrstor_init_opmask_state(),
+            6 => self.xrstor_init_zmm_hi256_state(),
+            7 => self.xrstor_init_hi_zmm_state(),
+            _ => {}
+        }
+    }
+
+    /// Get the size of an extended XSAVE component
+    /// Bochs xsave_restore[] table sizes
+    fn xsave_component_len(feature: u32) -> u64 {
+        match feature {
+            0 => 160,   // FPU
+            1 => 256,   // SSE
+            2 => 256,   // YMM
+            5 => 64,    // OPMASK
+            6 => 512,   // ZMM_HI256
+            7 => 1024,  // HI_ZMM
+            _ => 0,
+        }
+    }
+
+    /// Get the standard (non-compacted) offset for an extended component
+    /// From CPUID leaf 0xD sub-leaves
+    fn xsave_component_offset(feature: u32) -> u64 {
+        match feature {
+            2 => 576,   // YMM
+            5 => 1088,  // OPMASK
+            6 => 1152,  // ZMM_HI256
+            7 => 1664,  // HI_ZMM
+            _ => 0,
+        }
+    }
+
+    /// Check which XSAVE components have non-init state
+    /// Bochs xsave.cc get_xinuse_vector()
+    fn get_xinuse_vector(&self, rfbm: u64) -> u64 {
+        use super::xmm::MXCSR_RESET;
+        let mut xinuse: u64 = 0;
+
+        // FPU (bit 0) — Bochs xsave.cc:616-631
+        if (rfbm & 1) != 0 {
+            if self.the_i387.cwd != 0x037F || self.the_i387.swd != 0
+                || self.the_i387.twd != 0xFFFF
+            {
+                xinuse |= 1;
+            } else {
+                for i in 0..8 {
+                    if self.the_i387.st_space[i].signif != 0 || self.the_i387.st_space[i].sign_exp != 0 {
+                        xinuse |= 1;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // SSE (bit 1) — also set if MXCSR != reset (Bochs xsave.cc:1180)
+        if (rfbm & 2) != 0 {
+            if self.mxcsr.mxcsr != MXCSR_RESET {
+                xinuse |= 2;
+            } else {
+                let num = if self.long64_mode() { 16 } else { 8 };
+                for i in 0..num {
+                    unsafe {
+                        if self.vmm[i].zmm64u[0] != 0 || self.vmm[i].zmm64u[1] != 0 {
+                            xinuse |= 2;
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        // YMM (bit 2) — upper 128 bits
+        if (rfbm & 4) != 0 {
+            let num = if self.long64_mode() { 16 } else { 8 };
+            for i in 0..num {
+                unsafe {
+                    if self.vmm[i].zmm64u[2] != 0 || self.vmm[i].zmm64u[3] != 0 {
+                        xinuse |= 4;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // OPMASK (bit 5)
+        if (rfbm & (1 << 5)) != 0 {
+            for i in 0..8 {
+                if unsafe { self.opmask[i].rrx } != 0 {
+                    xinuse |= 1 << 5;
+                    break;
+                }
+            }
+        }
+
+        // ZMM_HI256 (bit 6) — upper 256 bits of ZMM0-15
+        if (rfbm & (1 << 6)) != 0 {
+            let num = if self.long64_mode() { 16 } else { 8 };
+            for i in 0..num {
+                unsafe {
+                    if self.vmm[i].zmm64u[4] != 0 || self.vmm[i].zmm64u[5] != 0
+                        || self.vmm[i].zmm64u[6] != 0 || self.vmm[i].zmm64u[7] != 0
+                    {
+                        xinuse |= 1 << 6;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // HI_ZMM (bit 7) — ZMM16-31 (64-bit mode only)
+        if (rfbm & (1 << 7)) != 0 && self.long64_mode() {
+            for i in 16..32 {
+                unsafe {
+                    if self.vmm[i].zmm64u[0] != 0 || self.vmm[i].zmm64u[1] != 0
+                        || self.vmm[i].zmm64u[2] != 0 || self.vmm[i].zmm64u[3] != 0
+                        || self.vmm[i].zmm64u[4] != 0 || self.vmm[i].zmm64u[5] != 0
+                        || self.vmm[i].zmm64u[6] != 0 || self.vmm[i].zmm64u[7] != 0
+                    {
+                        xinuse |= 1 << 7;
+                        break;
+                    }
+                }
+            }
+        }
+
+        xinuse
+    }
+
+    // ========================================================================
+    // XSAVEOPT — Optimized Save (opcode 0F AE /6)
+    // Bochs xsave.cc:50-132 (shared with XSAVE, xsaveopt flag)
+    // Same as XSAVE but only saves components that are in-use
+    // ========================================================================
+
+    pub(super) fn xsaveopt(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
+        use super::decoder::BxSegregs;
+
+        if !self.cr4.osxsave() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if self.cr0.ts() {
+            return self.exception(super::cpu::Exception::Nm, 0);
+        }
+
+        let eaddr = self.resolve_addr(instr);
+        let seg = BxSegregs::from(instr.seg());
+
+        let laddr: u64 = if self.long64_mode() {
+            self.get_laddr64(seg as usize, eaddr)
+        } else {
+            self.get_laddr32(seg as usize, eaddr as u32) as u64
+        };
+        if (laddr & 0x3F) != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        let xcr0 = self.xcr0.get32() as u64;
+        let requested = xcr0 & self.eax() as u64;
+        let xinuse = self.get_xinuse_vector(requested);
+
+        // Read existing xstate_bv
+        let mut xstate_bv = self.v_read_qword(seg, eaddr.wrapping_add(512))?;
+
+        // FPU (bit 0): only save if in-use (XSAVEOPT optimization)
+        if (requested & 1) != 0 {
+            if (xinuse & 1) != 0 {
+                self.xsave_x87_state(seg, eaddr)?;
+                xstate_bv |= 1;
+            } else {
+                xstate_bv &= !1;
+            }
+        }
+
+        // MXCSR: always written when SSE or YMM requested (Bochs xsave.cc:96-101)
+        // NOT gated on xinuse — matches standard XSAVE behavior
+        if (requested & 0x6) != 0 {
+            self.v_write_dword(seg, eaddr.wrapping_add(24), self.mxcsr.mxcsr)?;
+            self.v_write_dword(seg, eaddr.wrapping_add(28), self.mxcsr_mask)?;
+        }
+
+        // SSE (bit 1)
+        if (requested & 2) != 0 {
+            if (xinuse & 2) != 0 {
+                self.xsave_sse_state(seg, eaddr.wrapping_add(160))?;
+                xstate_bv |= 2;
+            } else {
+                xstate_bv &= !2;
+            }
+        }
+
+        // Extended features at standard offsets
+        for feature in 2..=7u32 {
+            let mask = 1u64 << feature;
+            if (requested & mask) != 0 {
+                if (xinuse & mask) != 0 {
+                    let offset = Self::xsave_component_offset(feature);
+                    self.xsave_extended_component(seg, eaddr.wrapping_add(offset), feature)?;
+                    xstate_bv |= mask;
+                } else {
+                    xstate_bv &= !mask;
+                }
+            }
+        }
+
+        // Write XSAVE header
+        self.v_write_qword(seg, eaddr.wrapping_add(512), xstate_bv)?;
+        self.v_write_qword(seg, eaddr.wrapping_add(520), 0)?;
+        self.v_write_qword(seg, eaddr.wrapping_add(528), 0)?;
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // XSAVEC — Compacted Save (opcode 0F C7 /4)
+    // XSAVES — Compacted Save with Supervisor state (opcode 0F C7 /5)
+    // Bochs xsave.cc:134-239
+    // ========================================================================
+
+    pub(super) fn xsavec(&mut self, instr: &super::decoder::Instruction, is_xsaves: bool) -> super::Result<()> {
+        use super::decoder::BxSegregs;
+
+        if !self.cr4.osxsave() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if self.cr0.ts() {
+            return self.exception(super::cpu::Exception::Nm, 0);
+        }
+
+        // XSAVES requires CPL=0
+        if is_xsaves {
+            let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+            if cpl != 0 {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+        }
+
+        let eaddr = self.resolve_addr(instr);
+        let seg = BxSegregs::from(instr.seg());
+
+        let laddr: u64 = if self.long64_mode() {
+            self.get_laddr64(seg as usize, eaddr)
+        } else {
+            self.get_laddr32(seg as usize, eaddr as u32) as u64
+        };
+        if (laddr & 0x3F) != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Feature mask: XCR0 for XSAVEC, XCR0|XSS for XSAVES
+        let mut xcr0 = self.xcr0.get32() as u64;
+        if is_xsaves {
+            xcr0 |= self.msr.ia32_xss;
+        }
+
+        let requested = xcr0 & self.eax() as u64;
+        let xinuse = self.get_xinuse_vector(requested);
+        let xstate_bv = requested & xinuse;
+        let xcomp_bv = requested | (1u64 << 63); // XSAVEC_COMPACTION_ENABLED
+
+        // FPU (bit 0) at standard offset
+        if (requested & 1) != 0 && (xinuse & 1) != 0 {
+            self.xsave_x87_state(seg, eaddr)?;
+        }
+
+        // MXCSR if SSE or YMM in xstate_bv
+        if (xstate_bv & 0x6) != 0 {
+            self.v_write_dword(seg, eaddr.wrapping_add(24), self.mxcsr.mxcsr)?;
+            self.v_write_dword(seg, eaddr.wrapping_add(28), self.mxcsr_mask)?;
+        }
+
+        // SSE (bit 1) at standard offset 160
+        if (requested & 2) != 0 && (xinuse & 2) != 0 {
+            self.xsave_sse_state(seg, eaddr.wrapping_add(160))?;
+        }
+
+        // Extended features in compacted format starting at offset 576
+        // Bochs xsave.cc:206-230 — offset advances for every requested feature
+        let mut offset: u64 = 576; // XSAVE_YMM_STATE_OFFSET
+        for feature in 2..=7u32 {
+            let mask = 1u64 << feature;
+            if (requested & mask) != 0 {
+                if (xinuse & mask) != 0 {
+                    self.xsave_extended_component(seg, eaddr.wrapping_add(offset), feature)?;
+                }
+                offset += Self::xsave_component_len(feature);
+            }
+        }
+
+        // Write XSAVE header: xstate_bv + xcomp_bv
+        self.v_write_qword(seg, eaddr.wrapping_add(512), xstate_bv)?;
+        self.v_write_qword(seg, eaddr.wrapping_add(520), xcomp_bv)?;
+        // Clear reserved header fields (offsets 528-575)
+        for i in (528u64..576).step_by(8) {
+            self.v_write_qword(seg, eaddr.wrapping_add(i), 0)?;
+        }
+
+        Ok(())
+    }
+
+    // ========================================================================
+    // XRSTOR unified (standard + compacted) / XRSTORS
+    // Bochs xsave.cc:242-449
+    // Replaces the basic xrstor() — handles both standard and compacted format
+    // XRSTORS is the same but requires CPL=0 and compaction, adds XSS
+    // ========================================================================
+
+    pub(super) fn xrstor_unified(&mut self, instr: &super::decoder::Instruction, is_xrstors: bool) -> super::Result<()> {
+        use super::decoder::BxSegregs;
+
+        if !self.cr4.osxsave() {
+            return self.exception(super::cpu::Exception::Ud, 0);
+        }
+        if self.cr0.ts() {
+            return self.exception(super::cpu::Exception::Nm, 0);
+        }
+
+        // XRSTORS requires CPL=0
+        if is_xrstors {
+            let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
+            if cpl != 0 {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+        }
+
+        let eaddr = self.resolve_addr(instr);
+        let seg = BxSegregs::from(instr.seg());
+
+        let laddr: u64 = if self.long64_mode() {
+            self.get_laddr64(seg as usize, eaddr)
+        } else {
+            self.get_laddr32(seg as usize, eaddr as u32) as u64
+        };
+        if (laddr & 0x3F) != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        // Read XSAVE header
+        let xstate_bv = self.v_read_qword(seg, eaddr.wrapping_add(512))?;
+        let xcomp_bv = self.v_read_qword(seg, eaddr.wrapping_add(520))?;
+        let header3 = self.v_read_qword(seg, eaddr.wrapping_add(528))?;
+
+        // Reserved header field must be zero
+        if header3 != 0 {
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
+        let compaction = (xcomp_bv >> 63) & 1 != 0;
+
+        // Feature mask: XCR0 for XRSTOR, XCR0|XSS for XRSTORS
+        let mut xcr0 = self.xcr0.get32() as u64;
+        if is_xrstors {
+            xcr0 |= self.msr.ia32_xss;
+        }
+
+        if compaction {
+            // Compacted format validation
+            let xcomp_features = xcomp_bv & !(1u64 << 63);
+            // xcomp_bv features must be subset of xcr0
+            if (xcomp_features & !xcr0) != 0 {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+            // xstate_bv must be subset of xcomp_bv
+            if (xstate_bv & !xcomp_features) != 0 {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+            // Header words 4-8 (offsets 536-575) must be zero
+            for i in (536u64..576).step_by(8) {
+                let val = self.v_read_qword(seg, eaddr.wrapping_add(i))?;
+                if val != 0 {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+            }
+        } else {
+            // Standard format: xcomp_bv must be 0
+            if xcomp_bv != 0 {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+            // XRSTORS requires compaction
+            if is_xrstors {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+            // xstate_bv must be subset of xcr0
+            if (xstate_bv & !xcr0) != 0 {
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+        }
+
+        let requested = xcr0 & self.eax() as u64;
+
+        // For compacted format, 'format' = features present in compacted area
+        // For standard, 'format' = all possible features (fixed offsets)
+        let format = if compaction {
+            xcomp_bv & !(1u64 << 63)
+        } else {
+            !(1u64 << 63) // Bochs: ~XSAVEC_COMPACTION_ENABLED
+        };
+        let restore_mask = xstate_bv & format;
+
+        // --- FPU (bit 0) ---
+        if (requested & 1) != 0 {
+            if (restore_mask & 1) != 0 {
+                self.xrstor_x87_state(seg, eaddr)?;
+            } else {
+                self.xrstor_init_x87_state();
+            }
+        }
+
+        // --- MXCSR ---
+        if compaction {
+            // Compacted: load MXCSR only if SSE is requested AND in restore_mask
+            if (requested & 2) != 0 && (restore_mask & 2) != 0 {
+                let new_mxcsr = self.v_read_dword(seg, eaddr.wrapping_add(24))?;
+                if (new_mxcsr & !self.mxcsr_mask) != 0 {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.mxcsr.mxcsr = new_mxcsr;
+            }
+        } else {
+            // Standard: load MXCSR when SSE or YMM is requested
+            if (requested & 0x6) != 0 {
+                let new_mxcsr = self.v_read_dword(seg, eaddr.wrapping_add(24))?;
+                if (new_mxcsr & !self.mxcsr_mask) != 0 {
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
+                self.mxcsr.mxcsr = new_mxcsr;
+            }
+        }
+
+        // --- SSE (bit 1) at standard offset 160 ---
+        if (requested & 2) != 0 {
+            if (restore_mask & 2) != 0 {
+                self.xrstor_sse_state(seg, eaddr.wrapping_add(160))?;
+            } else {
+                self.xrstor_init_sse_state();
+            }
+        }
+
+        // --- Extended features (YMM and beyond) ---
+        if compaction {
+            // Compacted format: offset starts at 576, advances per component in xcomp_bv
+            let mut offset: u64 = 576;
+            for feature in 2..=7u32 {
+                let mask = 1u64 << feature;
+                if (requested & mask) != 0 {
+                    if (restore_mask & mask) != 0 {
+                        self.xrstor_extended_component(seg, eaddr.wrapping_add(offset), feature)?;
+                    } else {
+                        self.xrstor_init_extended_component(feature);
+                    }
+
+                    // Offset advances inside the requested block (Bochs xsave.cc:408-409)
+                    if (format & mask) != 0 {
+                        offset += Self::xsave_component_len(feature);
+                    }
+                }
+            }
+        } else {
+            // Standard format: each feature at its fixed offset
+            for feature in 2..=7u32 {
+                let mask = 1u64 << feature;
+                if (requested & mask) != 0 {
+                    if (xstate_bv & mask) != 0 {
+                        let comp_offset = Self::xsave_component_offset(feature);
+                        self.xrstor_extended_component(seg, eaddr.wrapping_add(comp_offset), feature)?;
+                    } else {
+                        self.xrstor_init_extended_component(feature);
+                    }
+                }
+            }
+        }
+
+        Ok(())
     }
 }

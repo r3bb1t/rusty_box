@@ -701,6 +701,34 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     /// Call this before entering the CPU loop.
     pub fn prepare_run(&mut self) {
         tracing::info!("Starting CPU execution at RIP={:#x}", self.cpu.rip());
+
+        // Wire PIT icount sync so PIT counter reads advance with CPU time.
+        // This is critical for kernel PIT-polling calibration loops (e.g., Alpine Linux).
+        let ips = self.config.ips as u64;
+        if ips > 0 {
+            let icount_ptr = self.cpu.icount_ptr();
+            // SAFETY: The CPU struct outlives the PIT — both live in the Emulator.
+            // The pointer is only used for reads during I/O dispatch.
+            unsafe {
+                self.device_manager.pit.set_icount_sync(icount_ptr, ips);
+            }
+        }
+
+        // Set up LAPIC pointers for live tick computation and direct event signaling.
+        // SAFETY: CPU struct fields outlive LAPIC (it's a field of CPU). Pointers are
+        // only dereferenced during LAPIC MMIO reads (icount) and service_local_apic()
+        // (pending_event/async_event).
+        {
+            let icount_ptr = self.cpu.icount_ptr();
+            let pending_event_ptr = &mut self.cpu.pending_event as *mut u32;
+            let async_event_ptr = &mut self.cpu.async_event as *mut u32;
+            let lapic_ptr = self.cpu.lapic_ptr_mut();
+            unsafe {
+                (*lapic_ptr).set_icount_ptr(icount_ptr);
+                (*lapic_ptr).set_event_ptrs(pending_event_ptr, async_event_ptr);
+            }
+        }
+
         self.start();
     }
 
@@ -1048,6 +1076,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // vid_mode at 0x1FA (in setup header, but also used by kernel)
         boot_params[0x1FA..0x1FC].copy_from_slice(&0xFFFFu16.to_le_bytes()); // NORMAL_VGA
 
+        // acpi_rsdp_addr at offset 0x070 (boot protocol 2.14+)
+        // Tells kernel where to find RSDP without scanning BIOS area
+        boot_params[0x070..0x078].copy_from_slice(&0x40000u64.to_le_bytes());
+
         // =====================================================================
         // Set up initramfs if provided
         // =====================================================================
@@ -1129,6 +1161,159 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         cmdline_buf[..cmdline_len].copy_from_slice(&cmdline_bytes[..cmdline_len]);
         self.memory.load_RAM(&cmdline_buf, cmdline_addr)?;
         tracing::info!("Command line: {}", cmdline);
+
+        // =====================================================================
+        // Create minimal ACPI tables (RSDP → XSDT → MADT)
+        // Without these, the kernel can't find the APIC/IOAPIC and falls back
+        // to a mode where no interrupt delivery works, stalling boot.
+        // Layout: RSDP at 0xE0000, XSDT at 0xE0100, MADT at 0xE0200
+        // =====================================================================
+        {
+            // Place in low memory (safe area: 0x40000-0x4FFFF unused by kernel/bootloader)
+            const RSDP_ADDR: u64 = 0x40000;
+            const XSDT_ADDR: u64 = 0x40100;
+            const MADT_ADDR: u64 = 0x40200;
+
+            // --- MADT (Multiple APIC Description Table) ---
+            // Header: 44 bytes
+            // + Local APIC entry: 8 bytes (type 0)
+            // + I/O APIC entry: 12 bytes (type 1)
+            // + Interrupt Source Override: 10 bytes (type 2) — IRQ0 → GSI2
+            let madt_len: u32 = 44 + 8 + 12 + 10;
+            let mut madt = alloc::vec![0u8; madt_len as usize];
+            // Signature "APIC"
+            madt[0..4].copy_from_slice(b"APIC");
+            // Length
+            madt[4..8].copy_from_slice(&madt_len.to_le_bytes());
+            // Revision
+            madt[8] = 3; // ACPI 2.0 revision
+            // Checksum (byte 9) — filled later
+            // OEM ID
+            madt[10..16].copy_from_slice(b"RUSTYB");
+            // OEM Table ID
+            madt[16..24].copy_from_slice(b"BXMADT  ");
+            // OEM Revision
+            madt[24..28].copy_from_slice(&1u32.to_le_bytes());
+            // Creator ID
+            madt[28..32].copy_from_slice(b"RBOX");
+            // Creator Revision
+            madt[32..36].copy_from_slice(&1u32.to_le_bytes());
+            // Local APIC Address (offset 36)
+            madt[36..40].copy_from_slice(&0xFEE00000u32.to_le_bytes());
+            // Flags (offset 40): bit 0 = PCAT_COMPAT (dual 8259 present)
+            madt[40..44].copy_from_slice(&1u32.to_le_bytes());
+
+            // Entry: Local APIC (type 0, len 8)
+            let e = 44;
+            madt[e] = 0; // type
+            madt[e + 1] = 8; // length
+            madt[e + 2] = 0; // ACPI Processor ID
+            madt[e + 3] = 0; // APIC ID
+            madt[e + 4..e + 8].copy_from_slice(&1u32.to_le_bytes()); // flags: enabled
+
+            // Entry: I/O APIC (type 1, len 12)
+            let e = 44 + 8;
+            madt[e] = 1; // type
+            madt[e + 1] = 12; // length
+            madt[e + 2] = 1; // I/O APIC ID
+            madt[e + 3] = 0; // reserved
+            madt[e + 4..e + 8].copy_from_slice(&0xFEC00000u32.to_le_bytes()); // address
+            madt[e + 8..e + 12].copy_from_slice(&0u32.to_le_bytes()); // GSI base
+
+            // Entry: Interrupt Source Override (type 2, len 10) — IRQ0 → GSI 2
+            let e = 44 + 8 + 12;
+            madt[e] = 2; // type
+            madt[e + 1] = 10; // length
+            madt[e + 2] = 0; // bus (ISA)
+            madt[e + 3] = 0; // source (IRQ0)
+            madt[e + 4..e + 8].copy_from_slice(&2u32.to_le_bytes()); // GSI 2
+            madt[e + 8..e + 10].copy_from_slice(&0u16.to_le_bytes()); // flags (conforming)
+
+            // Checksum
+            let sum: u8 = madt.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+            madt[9] = 0u8.wrapping_sub(sum);
+            self.memory.load_RAM(&madt, MADT_ADDR)?;
+
+            // --- XSDT (Extended System Description Table) ---
+            // Header: 36 bytes + 1 pointer (8 bytes) = 44 bytes
+            let xsdt_len: u32 = 36 + 8;
+            let mut xsdt = alloc::vec![0u8; xsdt_len as usize];
+            xsdt[0..4].copy_from_slice(b"XSDT");
+            xsdt[4..8].copy_from_slice(&xsdt_len.to_le_bytes());
+            xsdt[8] = 1; // revision
+            xsdt[10..16].copy_from_slice(b"RUSTYB");
+            xsdt[16..24].copy_from_slice(b"BXXSDT  ");
+            xsdt[24..28].copy_from_slice(&1u32.to_le_bytes());
+            xsdt[28..32].copy_from_slice(b"RBOX");
+            xsdt[32..36].copy_from_slice(&1u32.to_le_bytes());
+            // Pointer to MADT (64-bit)
+            xsdt[36..44].copy_from_slice(&(MADT_ADDR as u64).to_le_bytes());
+            let sum: u8 = xsdt.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+            xsdt[9] = 0u8.wrapping_sub(sum);
+            self.memory.load_RAM(&xsdt, XSDT_ADDR)?;
+
+            // --- RSDP (Root System Description Pointer) ---
+            // RSDP v2.0 = 36 bytes
+            let mut rsdp = [0u8; 36];
+            rsdp[0..8].copy_from_slice(b"RSD PTR "); // signature
+            // checksum (byte 8) — filled later
+            rsdp[9..15].copy_from_slice(b"RUSTYB"); // OEM ID
+            rsdp[15] = 2; // revision (2 = ACPI 2.0+)
+            // RSDT address (offset 16) — point to XSDT address as 32-bit for v1 compat
+            rsdp[16..20].copy_from_slice(&(XSDT_ADDR as u32).to_le_bytes());
+            // Length (offset 20) — v2.0 extended length
+            rsdp[20..24].copy_from_slice(&36u32.to_le_bytes());
+            // XSDT address (offset 24) — 64-bit
+            rsdp[24..32].copy_from_slice(&(XSDT_ADDR as u64).to_le_bytes());
+            // Extended checksum (byte 32) — filled later
+            // v1 checksum covers bytes 0-19
+            let v1_sum: u8 = rsdp[0..20].iter().fold(0u8, |a, &b| a.wrapping_add(b));
+            rsdp[8] = 0u8.wrapping_sub(v1_sum);
+            // v2 extended checksum covers bytes 0-35
+            let v2_sum: u8 = rsdp.iter().fold(0u8, |a, &b| a.wrapping_add(b));
+            rsdp[32] = 0u8.wrapping_sub(v2_sum);
+            self.memory.load_RAM(&rsdp, RSDP_ADDR)?;
+
+            tracing::info!(
+                "ACPI tables: RSDP at {:#x}, XSDT at {:#x}, MADT at {:#x} ({}B)",
+                RSDP_ADDR, XSDT_ADDR, MADT_ADDR, madt_len
+            );
+        }
+
+        // =====================================================================
+        // Initialize PIC and PIT (normally done by BIOS POST)
+        // Direct boot skips BIOS, so we must set up the interrupt controllers
+        // manually. The kernel needs timer interrupts (IRQ0) for calibration
+        // and early init functions that call udelay()/mdelay().
+        // =====================================================================
+        {
+            // Initialize master PIC: ICW1-ICW4
+            // ICW1: edge-triggered, cascade, ICW4 needed
+            self.device_manager.pic.write(0x20, 0x11, 1);
+            // ICW2: master vectors 0x20-0x27 (Linux kernel expects IRQ0=0x20)
+            self.device_manager.pic.write(0x21, 0x20, 1);
+            // ICW3: slave on IRQ2
+            self.device_manager.pic.write(0x21, 0x04, 1);
+            // ICW4: 8086 mode, normal EOI
+            self.device_manager.pic.write(0x21, 0x01, 1);
+            // OCW1: mask all master IRQs — kernel will unmask what it needs
+            self.device_manager.pic.write(0x21, 0xFF, 1);
+
+            // Initialize slave PIC: ICW1-ICW4
+            self.device_manager.pic.write(0xA0, 0x11, 1);
+            // ICW2: slave vectors 0x28-0x2F (Linux kernel expects IRQ8=0x28)
+            self.device_manager.pic.write(0xA1, 0x28, 1);
+            // ICW3: cascade identity = 2
+            self.device_manager.pic.write(0xA1, 0x02, 1);
+            // ICW4: 8086 mode
+            self.device_manager.pic.write(0xA1, 0x01, 1);
+            // OCW1: mask all slave IRQs
+            self.device_manager.pic.write(0xA1, 0xFF, 1);
+
+            // Do NOT program PIT — kernel will set up its own timer via time_init().
+            // quick_pit_calibrate() programs PIT C2 via port 0x43/0x42 directly.
+            tracing::info!("Direct boot: PIC initialized (master=0x20, slave=0x28), all IRQs masked");
+        }
 
         // =====================================================================
         // Load protected-mode kernel at code32_start
@@ -1237,17 +1422,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             // 2. Execute CPU instructions in batches
             let batch_size = (max_instructions - instructions_executed).min(INSTRUCTION_BATCH_SIZE);
             let batch_start_time = std::time::Instant::now();
-            // PRE-BATCH diagnostic: print batch number, activity state, and elapsed
-            static BATCH_NUM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-            let bn = BATCH_NUM.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            if bn >= 500 && bn < 505 {
-                tracing::debug!("[PRE-BATCH #{}] total={}k RIP={:#010x} activity={:?}",
-                    bn, instructions_executed/1000, self.cpu.rip(), self.cpu.activity_state);
-            }
-            // Wall-clock watchdog: spawn thread to detect if cpu_loop_n hangs >5s
-            let batch_rip = self.cpu.rip();
-            let batch_mode = self.cpu.get_cpu_mode();
-            let batch_ie = instructions_executed;
             // Use unsafe to work around lifetime issues - the memory borrow is safe because
             // we control the lifetime and the CPU doesn't outlive the memory
             let result = unsafe {
@@ -1257,23 +1431,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 self.cpu
                     .cpu_loop_n_with_io(mem_extended, &[], batch_size, io_ptr)
             };
-
-            // Post-batch timing check
-            let batch_wall_time = batch_start_time.elapsed();
-            if batch_wall_time.as_secs() >= 5 {
-                tracing::warn!(
-                    "[BATCH-HANG] batch #{} took {:?}! RIP before={:#x} mode={} instr_so_far={}k",
-                    bn, batch_wall_time, batch_rip, batch_mode, batch_ie / 1000,
-                );
-            }
-            // Detailed batch result logging (phase 2 starts around batch ~555)
-            if bn >= 550 && bn < 600 {
-                tracing::debug!(
-                    "[BATCH#{}] wall={:?} total={}k RIP={:#x} activity={:?}",
-                    bn, batch_wall_time, batch_ie / 1000,
-                    self.cpu.rip(), self.cpu.activity_state
-                );
-            }
 
             let should_update_gui = match result {
                 Ok(executed) => {
@@ -1943,12 +2100,13 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 None
                             };
                             let mut hlt_usec = 0u64;
-                            // Headless mode: use larger tick steps (1ms vs 10µs) to reduce
-                            // iteration count from 20K to 200 per HLT cycle. PIT fires at
-                            // ~55ms, so we need ~55 iterations instead of ~5500.
-                            let hlt_step_usec: u64 = if hlt_sync { 10 } else { 1000 };
-                            // Tick increment per HLT iteration: approximate bus ticks from IPS
-                            let hlt_tick_increment = (self.config.ips as u64 * hlt_step_usec) / 1_000_000;
+                            // Use small step (10µs) in both modes for fine-grained timer
+                            // resolution during HLT. Bochs event.cc:112 uses BX_TICKN(10)
+                            // per iteration — we scale by IPS to get equivalent ticks.
+                            let hlt_step_usec: u64 = 10;
+                            // Tick increment = instructions equivalent to hlt_step_usec.
+                            // With IPS=15M, step=10us: 150 ticks/iter. Over 20K iters: 3M ticks.
+                            let hlt_tick_increment = ((self.config.ips as u64) * hlt_step_usec / 1_000_000).max(1);
                             while !self.has_interrupt() && hlt_usec < 200_000 {
                                 self.tick_devices(hlt_step_usec);
                                 // Also drive pc_system timers (LAPIC timer)
@@ -1958,12 +2116,14 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 {
                                     let lapic_ptr = self.cpu.lapic_ptr_mut();
                                     let lapic = unsafe { &mut *lapic_ptr };
-                                    // Update LAPIC's snapshot of system ticks
-                                    lapic.current_ticks = self.pc_system.time_ticks();
+                                    // Sync LAPIC tick tracking for live timer reads
+                                    let ticks_now = self.pc_system.time_ticks();
+                                    lapic.current_ticks = ticks_now;
+                                    lapic.ticks_at_sync = ticks_now;
+                                    lapic.icount_at_sync = self.cpu.icount;
                                     if lapic.timer_fired {
                                         lapic.timer_fired = false;
-                                        let current_ticks = self.pc_system.time_ticks();
-                                        lapic.periodic(current_ticks);
+                                        lapic.periodic(ticks_now);
                                     }
                                     if lapic.timer_deactivate_request {
                                         lapic.timer_deactivate_request = false;
@@ -1975,8 +2135,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     }
                                     if let Some(period) = lapic.timer_activate_request.take() {
                                         if let Some(handle) = lapic.timer_handle {
-                                            if let Err(e) = self.pc_system.activate_timer(handle, period, false) {
-                                                tracing::error!("LAPIC activate_timer: {}", e);
+                                            // Use relative reactivation for periodic catch-up
+                                            if let Err(e) = self.pc_system.reactivate_timer_relative(handle, period) {
+                                                tracing::error!("LAPIC reactivate_timer: {}", e);
                                             }
                                         }
                                         lapic.set_ticks_initial(self.pc_system.time_ticks());
@@ -1987,7 +2148,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     }
                                     // LAPIC interrupt can also break the HLT spin
                                     if lapic.intr {
-                                        self.cpu.signal_event(0);
+                                        self.cpu.signal_event(1 << 2); // BX_EVENT_PENDING_LAPIC_INTR
                                         break;
                                     }
                                 }
@@ -2026,55 +2187,105 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     // Advance tick count by instructions executed and fire expired timers.
                     // Matches Bochs: bx_pc_system.time_ticks() advances by instruction count.
                     self.pc_system.tick(executed);
+
                     self.pc_system.check_timers();
 
-                    // Handle LAPIC timer fire + activate/deactivate requests
+                    // Handle LAPIC timer fires with catch-up for large batches.
+                    // With batch=150K ticks and timer period=24K, ~6 fires should occur
+                    // per batch. We loop: fire → periodic() → reactivate (relative to
+                    // previous fire time) → check_timers → repeat until caught up.
+                    //
+                    // IMPORTANT: The `lapic` borrow must be dropped before calling
+                    // check_timers(), because the timer callback also mutably accesses
+                    // the same BxLocalApic via raw pointer. Holding &mut across that
+                    // call would be UB and the compiler may optimize away re-reads.
                     #[cfg(feature = "bx_support_apic")]
                     {
                         let lapic_ptr = self.cpu.lapic_ptr_mut();
-                        let lapic = unsafe { &mut *lapic_ptr };
 
-                        // Update LAPIC's snapshot of system ticks for timer count reads
-                        lapic.current_ticks = self.pc_system.time_ticks();
-
-                        // Process timer fire: call periodic() to trigger interrupt vector
-                        // and set up next period (Bochs apic.cc:1029-1069)
-                        if lapic.timer_fired {
-                            lapic.timer_fired = false;
-                            let current_ticks = self.pc_system.time_ticks();
-                            lapic.periodic(current_ticks);
+                        // Sync LAPIC tick tracking for live timer reads
+                        {
+                            let lapic = unsafe { &mut *lapic_ptr };
+                            let ticks_now = self.pc_system.time_ticks();
+                            lapic.current_ticks = ticks_now;
+                            lapic.ticks_at_sync = ticks_now;
+                            lapic.icount_at_sync = self.cpu.icount;
                         }
 
-                        // Process pending timer deactivation (Bochs: deactivate_timer)
-                        if lapic.timer_deactivate_request {
-                            lapic.timer_deactivate_request = false;
-                            if let Some(handle) = lapic.timer_handle {
-                                if let Err(e) = self.pc_system.deactivate_timer(handle) {
-                                    tracing::error!("LAPIC deactivate_timer: {}", e);
+                        // Catch-up loop: fire timer for each missed period in this batch.
+                        // Each iteration: borrow lapic → process fire → drop lapic →
+                        // check_timers (may set timer_fired via callback) → re-check.
+                        let mut catchup_count = 0u32;
+                        let max_catchup = 1000u32; // safety limit
+                        loop {
+                            // Borrow lapic, check timer_fired, process fire, drop borrow
+                            let should_continue = {
+                                let lapic = unsafe { &mut *lapic_ptr };
+                                if !lapic.timer_fired || catchup_count >= max_catchup {
+                                    false
+                                } else {
+                                    lapic.timer_fired = false;
+                                    lapic.diag_timer_fires += 1;
+                                    let ticks_now = self.pc_system.time_ticks();
+                                    lapic.periodic(ticks_now);
+
+                                    // Process pending timer deactivation
+                                    if lapic.timer_deactivate_request {
+                                        lapic.timer_deactivate_request = false;
+                                        if let Some(handle) = lapic.timer_handle {
+                                            let _ = self.pc_system.deactivate_timer(handle);
+                                        }
+                                    }
+
+                                    // Process pending timer reactivation (periodic catch-up)
+                                    if let Some(period) = lapic.timer_activate_request.take() {
+                                        if let Some(handle) = lapic.timer_handle {
+                                            let _ = self.pc_system.reactivate_timer_relative(handle, period);
+                                        }
+                                        lapic.set_ticks_initial(self.pc_system.time_ticks());
+                                    }
+
+                                    catchup_count += 1;
+                                    true
+                                }
+                            }; // lapic borrow dropped here
+
+                            if !should_continue {
+                                break;
+                            }
+
+                            // Now safe to call check_timers — no &mut lapic alive.
+                            // The callback may set timer_fired=true via raw pointer.
+                            self.pc_system.check_timers();
+                        }
+
+                        // Handle non-fire deactivate/activate requests (from
+                        // set_initial_timer_count during instruction execution)
+                        {
+                            let lapic = unsafe { &mut *lapic_ptr };
+                            if lapic.timer_deactivate_request {
+                                lapic.timer_deactivate_request = false;
+                                if let Some(handle) = lapic.timer_handle {
+                                    let _ = self.pc_system.deactivate_timer(handle);
                                 }
                             }
-                        }
-
-                        // Process pending timer activation (Bochs: activate_timer_ticks)
-                        if let Some(period) = lapic.timer_activate_request.take() {
-                            if let Some(handle) = lapic.timer_handle {
-                                if let Err(e) = self.pc_system.activate_timer(handle, period, false) {
-                                    tracing::error!("LAPIC activate_timer: {}", e);
+                            if let Some(period) = lapic.timer_activate_request.take() {
+                                if let Some(handle) = lapic.timer_handle {
+                                    // Fresh activation — use absolute time_to_fire
+                                    let _ = self.pc_system.activate_timer(handle, period, false);
                                 }
+                                lapic.set_ticks_initial(self.pc_system.time_ticks());
                             }
-                            lapic.set_ticks_initial(self.pc_system.time_ticks());
-                        }
 
-                        // Forward EOI broadcast from LAPIC to I/O APIC for level-triggered
-                        // Bochs: apic_bus_broadcast_eoi(vec) → ioapic.receive_eoi(vec)
-                        if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
-                            self.device_manager.ioapic.receive_eoi(eoi_vec);
-                        }
+                            // Forward EOI broadcast from LAPIC to I/O APIC
+                            if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
+                                self.device_manager.ioapic.receive_eoi(eoi_vec);
+                            }
 
-                        // Signal pending LAPIC interrupt to CPU event system
-                        // Matches Bochs: cpu->signal_event(BX_EVENT_PENDING_INTR)
-                        if lapic.intr {
-                            self.cpu.signal_event(0); // BX_EVENT_PENDING_INTR = 1 << 0
+                            // Signal pending LAPIC interrupt to CPU event system
+                            if lapic.intr {
+                                self.cpu.signal_event(1 << 2); // BX_EVENT_PENDING_LAPIC_INTR
+                            }
                         }
                     }
 
@@ -2427,30 +2638,12 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     }
 
                     // Deliver pending PIC interrupts to the CPU (Bochs-like).
-                    {
-                        let has_int = self.has_interrupt();
-                        let if_flag = self.cpu.get_b_if();
-                        if has_int {
-                            tracing::trace!(
-                                "INT-DELIVER: has_int={}, IF={}, activity={:?}, RIP={:#x}",
-                                has_int,
-                                if_flag,
-                                self.cpu.activity_state,
-                                self.cpu.rip()
-                            );
-                        }
-                    }
                     if self.has_interrupt()
                         && self.cpu.get_b_if() != 0
                         && !self.cpu.interrupts_inhibited(0x01)
                     // BX_INHIBIT_INTERRUPTS
                     {
                         let vector = self.iac();
-                        tracing::trace!(
-                            "INT-INJECT: vector={:#04x}, activity_before={:?}",
-                            vector,
-                            self.cpu.activity_state
-                        );
 
                         // Temporarily wire the memory bus so the interrupt path can
                         // read IVT/IDT and push stack frames correctly.
@@ -2592,36 +2785,66 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 self.pc_system.tick(executed);
                 self.pc_system.check_timers();
 
-                // Handle LAPIC timer fire + activate/deactivate requests
+                // Handle LAPIC timer fires with catch-up (same as main loop)
                 #[cfg(feature = "bx_support_apic")]
                 {
                     let lapic_ptr = self.cpu.lapic_ptr_mut();
-                    let lapic = unsafe { &mut *lapic_ptr };
-                    // Update LAPIC's snapshot of system ticks
-                    lapic.current_ticks = self.pc_system.time_ticks();
-                    if lapic.timer_fired {
-                        lapic.timer_fired = false;
-                        let current_ticks = self.pc_system.time_ticks();
-                        lapic.periodic(current_ticks);
+                    {
+                        let lapic = unsafe { &mut *lapic_ptr };
+                        let ticks_now = self.pc_system.time_ticks();
+                        lapic.current_ticks = ticks_now;
+                        lapic.ticks_at_sync = ticks_now;
+                        lapic.icount_at_sync = self.cpu.icount;
                     }
-                    if lapic.timer_deactivate_request {
-                        lapic.timer_deactivate_request = false;
-                        if let Some(handle) = lapic.timer_handle {
-                            if let Err(e) = self.pc_system.deactivate_timer(handle) {
-                                tracing::error!("LAPIC deactivate_timer: {}", e);
+
+                    let mut catchup_count = 0u32;
+                    loop {
+                        let should_continue = {
+                            let lapic = unsafe { &mut *lapic_ptr };
+                            if !lapic.timer_fired || catchup_count >= 1000 {
+                                false
+                            } else {
+                                lapic.timer_fired = false;
+                                lapic.diag_timer_fires += 1;
+                                let ticks_now = self.pc_system.time_ticks();
+                                lapic.periodic(ticks_now);
+                                if lapic.timer_deactivate_request {
+                                    lapic.timer_deactivate_request = false;
+                                    if let Some(handle) = lapic.timer_handle {
+                                        let _ = self.pc_system.deactivate_timer(handle);
+                                    }
+                                }
+                                if let Some(period) = lapic.timer_activate_request.take() {
+                                    if let Some(handle) = lapic.timer_handle {
+                                        let _ = self.pc_system.reactivate_timer_relative(handle, period);
+                                    }
+                                    lapic.set_ticks_initial(self.pc_system.time_ticks());
+                                }
+                                catchup_count += 1;
+                                true
+                            }
+                        };
+                        if !should_continue { break; }
+                        self.pc_system.check_timers();
+                    }
+                    // Handle non-fire requests
+                    {
+                        let lapic = unsafe { &mut *lapic_ptr };
+                        if lapic.timer_deactivate_request {
+                            lapic.timer_deactivate_request = false;
+                            if let Some(handle) = lapic.timer_handle {
+                                let _ = self.pc_system.deactivate_timer(handle);
                             }
                         }
-                    }
-                    if let Some(period) = lapic.timer_activate_request.take() {
-                        if let Some(handle) = lapic.timer_handle {
-                            if let Err(e) = self.pc_system.activate_timer(handle, period, false) {
-                                tracing::error!("LAPIC activate_timer: {}", e);
+                        if let Some(period) = lapic.timer_activate_request.take() {
+                            if let Some(handle) = lapic.timer_handle {
+                                let _ = self.pc_system.activate_timer(handle, period, false);
                             }
+                            lapic.set_ticks_initial(self.pc_system.time_ticks());
                         }
-                        lapic.set_ticks_initial(self.pc_system.time_ticks());
-                    }
-                    if lapic.intr {
-                        self.cpu.signal_event(0);
+                        if lapic.intr {
+                            self.cpu.signal_event(1 << 2); // BX_EVENT_PENDING_LAPIC_INTR
+                        }
                     }
                 }
 
@@ -2972,6 +3195,181 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         } else {
             None
         }
+    }
+}
+
+impl<I: BxCpuIdTrait> Emulator<'_, I> {
+    /// Dump comprehensive diagnostic state (for Alpine debugging).
+    pub fn dump_alpine_diag(&mut self) {
+        eprintln!("\n=== DIAGNOSTIC DUMP ===");
+        eprintln!("RIP={:#018x} RSP={:#018x} RBP={:#018x}",
+            self.cpu.rip(), self.cpu.rsp(), self.cpu.rbp());
+        eprintln!("RAX={:#018x} RBX={:#018x} RCX={:#018x} RDX={:#018x}",
+            self.cpu.rax(), self.cpu.rbx(), self.cpu.rcx(), self.cpu.rdx());
+        eprintln!("RSI={:#018x} RDI={:#018x} R8={:#018x}  R9={:#018x}",
+            self.cpu.rsi(), self.cpu.rdi(), self.cpu.r8(), self.cpu.r9());
+        eprintln!("CS={:#06x} mode={} IF={}",
+            self.cpu.get_cs_selector(), self.get_cpu_mode_str(),
+            if self.cpu.get_b_if() != 0 { 1 } else { 0 });
+        eprintln!("CR0={:#010x} CR3={:#018x}",
+            self.cpu.cr0.bits(), self.cpu.cr3);
+        eprintln!("pending_event={:#010x} event_mask={:#010x} async_event={}",
+            self.cpu.pending_event, self.cpu.event_mask, self.cpu.async_event);
+        eprintln!("diag: intr_delivered={} if_blocked={} pic_empty={}",
+            self.cpu.diag_hae_intr_delivered, self.cpu.diag_hae_intr_if_blocked,
+            self.cpu.diag_hae_intr_pic_empty);
+        // PIC state
+        eprintln!("--- PIC State ---");
+        eprintln!("  master: IMR={:#04x} IRR={:#04x} ISR={:#04x} has_int={}",
+            self.device_manager.pic.master.imr,
+            self.device_manager.pic.master.irr,
+            self.device_manager.pic.master.isr,
+            self.device_manager.pic.has_interrupt());
+        eprintln!("  slave:  IMR={:#04x} IRR={:#04x} ISR={:#04x}",
+            self.device_manager.pic.slave.imr,
+            self.device_manager.pic.slave.irr,
+            self.device_manager.pic.slave.isr);
+        // PIT state
+        let pit_c0 = &self.device_manager.pit.counters[0];
+        eprintln!("--- PIT State ---");
+        eprintln!("  C0: mode={:?} count={} gate={} output={}",
+            pit_c0.mode, pit_c0.count, pit_c0.gate, pit_c0.output);
+        // Device tick diagnostics
+        eprintln!("--- Device Tick Diag ---");
+        eprintln!("  tick_count={} total_usec={} pit_fires={} irq0_latched={} iac_count={}",
+            self.device_manager.diag_tick_count,
+            self.device_manager.diag_total_usec,
+            self.device_manager.diag_pit_fires,
+            self.device_manager.diag_irq0_latched,
+            self.device_manager.diag_iac_count);
+        let lapic = self.cpu.lapic_ptr_mut();
+        let lapic_ref = unsafe { &*lapic };
+        eprintln!("  lapic_timer_fires={} set_initial_count={} timer_masked={}",
+            lapic_ref.diag_timer_fires, lapic_ref.diag_set_initial_count,
+            lapic_ref.diag_timer_masked);
+        // Show pc_system timer state for LAPIC timer
+        if let Some(handle) = lapic_ref.timer_handle {
+            let t = &self.pc_system.timers[handle];
+            eprintln!("  pc_system_timer[{}]: active={} continuous={} time_to_fire={} period={} ticks_total={}",
+                handle, t.active, t.continuous, t.time_to_fire, t.period,
+                self.pc_system.time_ticks());
+        }
+        lapic_ref.dump_state();
+        // Dump key code addresses from memory
+        {
+            let ram = self.memory.ram_slice();
+            let addrs: &[(u64, &str)] = &[
+                (0x01e1d340, "delay_loop_entry"),
+                (0x01e38ef0, "jmp_target_after_delay"),
+                (0x01207430, "outer_loop_context"),
+                (0x01207460, "stack_ret_addr_1"),
+                (0x012074e0, "stack_ret_addr_2"),
+            ];
+            for (paddr, label) in addrs {
+                let p = *paddr as usize;
+                if p + 48 <= ram.len() {
+                    let code = &ram[p..p+48];
+                    eprintln!("--- {} (phys={:#010x}) ---", label, paddr);
+                    for row in 0..3 {
+                        let off = row * 16;
+                        eprintln!("  +{:02x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                            off,
+                            code[off], code[off+1], code[off+2], code[off+3],
+                            code[off+4], code[off+5], code[off+6], code[off+7],
+                            code[off+8], code[off+9], code[off+10], code[off+11],
+                            code[off+12], code[off+13], code[off+14], code[off+15]);
+                    }
+                }
+            }
+        }
+        // Dump stack (16 qwords)
+        let rsp = self.cpu.rsp();
+        if rsp > 0xffffffff80000000 {
+            let cr3 = self.cpu.cr3 & !0xFFF;
+            let ram = self.memory.ram_slice();
+            let ram_len = ram.len();
+            let read_u64 = |addr: u64| -> u64 {
+                let pml4_idx = (addr >> 39) & 0x1FF;
+                let pdpt_idx = (addr >> 30) & 0x1FF;
+                let pd_idx = (addr >> 21) & 0x1FF;
+                let pt_idx = (addr >> 12) & 0x1FF;
+                let page_off = addr & 0xFFF;
+                let safe_read = |phys: u64| -> u64 {
+                    let off = phys as usize;
+                    if off + 8 > ram_len { return 0; }
+                    u64::from_le_bytes(ram[off..off + 8].try_into().unwrap())
+                };
+                let pml4e = safe_read(cr3 + pml4_idx * 8);
+                if pml4e & 1 == 0 { return 0; }
+                let pdpte = safe_read((pml4e & 0xFFFFF_FFFFF000) + pdpt_idx * 8);
+                if pdpte & 1 == 0 { return 0; }
+                if pdpte & 0x80 != 0 { return safe_read((pdpte & 0xFFFFF_C0000000) | (addr & 0x3FFFFFFF)); }
+                let pde = safe_read((pdpte & 0xFFFFF_FFFFF000) + pd_idx * 8);
+                if pde & 1 == 0 { return 0; }
+                if pde & 0x80 != 0 { return safe_read((pde & 0xFFFFF_FFE00000) | (addr & 0x1FFFFF)); }
+                let pte = safe_read((pde & 0xFFFFF_FFFFF000) + pt_idx * 8);
+                if pte & 1 == 0 { return 0; }
+                safe_read((pte & 0xFFFFF_FFFFF000) | page_off)
+            };
+            eprintln!("--- Stack at RSP={:#018x} ---", rsp);
+            for i in 0..16 {
+                let addr = rsp.wrapping_add(i * 8);
+                let val = read_u64(addr);
+                let marker = if val > 0xffffffff81000000 && val < 0xffffffff82000000 { " <-- kernel text?" } else { "" };
+                eprintln!("  [{:+4}] {:#018x}{}", i * 8, val, marker);
+            }
+        }
+        // Dump 64 bytes of code at current RIP via manual page walk
+        let rip = self.cpu.rip();
+        if rip > 0xffffffff80000000 {
+            let cr3 = self.cpu.cr3 & !0xFFF;
+            let ram = self.memory.ram_slice();
+            let read_u64 = |paddr: u64| -> u64 {
+                let p = paddr as usize;
+                if p + 8 <= ram.len() {
+                    u64::from_le_bytes(ram[p..p+8].try_into().unwrap())
+                } else { 0 }
+            };
+            let pml4_idx = (rip >> 39) & 0x1FF;
+            let pdpt_idx = (rip >> 30) & 0x1FF;
+            let pd_idx = (rip >> 21) & 0x1FF;
+            let pt_idx = (rip >> 12) & 0x1FF;
+            let pml4e = read_u64(cr3 + pml4_idx * 8);
+            if pml4e & 1 != 0 {
+                let pdpte = read_u64((pml4e & 0x000FFFFF_FFFFF000) + pdpt_idx * 8);
+                if pdpte & 1 != 0 {
+                    let paddr = if pdpte & 0x80 != 0 {
+                        (pdpte & 0x000FFFFF_C0000000) | (rip & 0x3FFFFFFF)
+                    } else {
+                        let pde = read_u64((pdpte & 0x000FFFFF_FFFFF000) + pd_idx * 8);
+                        if pde & 1 != 0 {
+                            if pde & 0x80 != 0 {
+                                (pde & 0x000FFFFF_FFE00000) | (rip & 0x1FFFFF)
+                            } else {
+                                let pte = read_u64((pde & 0x000FFFFF_FFFFF000) + pt_idx * 8);
+                                if pte & 1 != 0 {
+                                    (pte & 0x000FFFFF_FFFFF000) | (rip & 0xFFF)
+                                } else { 0 }
+                            }
+                        } else { 0 }
+                    };
+                    if paddr != 0 && (paddr as usize) + 64 <= ram.len() {
+                        let code = &ram[paddr as usize..(paddr as usize) + 64];
+                        eprintln!("--- Code at RIP={:#018x} (phys={:#010x}) ---", rip, paddr);
+                        for row in 0..4 {
+                            let off = row * 16;
+                            eprintln!("  {:016x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                                rip + off as u64,
+                                code[off], code[off+1], code[off+2], code[off+3],
+                                code[off+4], code[off+5], code[off+6], code[off+7],
+                                code[off+8], code[off+9], code[off+10], code[off+11],
+                                code[off+12], code[off+13], code[off+14], code[off+15]);
+                        }
+                    }
+                }
+            }
+        }
+        eprintln!("=== END DIAGNOSTIC ===");
     }
 }
 

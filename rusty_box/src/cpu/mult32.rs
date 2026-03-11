@@ -38,14 +38,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
-        tracing::trace!(
-            "MUL32: EAX ({:#010x}) * reg{} ({:#010x}) = EDX:EAX ({:#010x}:{:#010x})",
-            op1,
-            src_reg,
-            op2,
-            product_32h,
-            product_32l
-        );
         Ok(())
     }
 
@@ -72,15 +64,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
-        tracing::trace!(
-            "MUL32 mem: EAX ({:#010x}) * [{:?}:{:#x}] ({:#010x}) = EDX:EAX ({:#010x}:{:#010x})",
-            op1,
-            seg,
-            eaddr,
-            op2,
-            product_32h,
-            product_32l
-        );
         Ok(())
     }
 
@@ -108,14 +91,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
-        tracing::trace!(
-            "IMUL32: EAX ({:#010x}) * reg{} ({:#010x}) = EDX:EAX ({:#010x}:{:#010x})",
-            op1 as u32,
-            src_reg,
-            op2 as u32,
-            product_32h,
-            product_32l
-        );
         Ok(())
     }
 
@@ -144,15 +119,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
-        tracing::trace!(
-            "IMUL32 mem: EAX ({:#010x}) * [{:?}:{:#x}] ({:#010x}) = EDX:EAX ({:#010x}:{:#010x})",
-            op1 as u32,
-            seg,
-            eaddr,
-            op2 as u32,
-            product_32h,
-            product_32l
-        );
         Ok(())
     }
 
@@ -182,7 +148,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr32(0, quotient_32l); // EAX
         self.set_gpr32(2, remainder_32); // EDX
 
-        tracing::trace!("DIV32: EDX:EAX ({:#010x}:{:#010x}) / reg{} ({:#010x}) = EAX ({:#010x}), EDX ({:#010x})", edx, eax, src_reg, op2, quotient_32l, remainder_32);
         Ok(())
     }
 
@@ -213,7 +178,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr32(0, quotient_32l); // EAX
         self.set_gpr32(2, remainder_32); // EDX
 
-        tracing::trace!("DIV32 mem: EDX:EAX ({:#010x}:{:#010x}) / [{:?}:{:#x}] ({:#010x}) = EAX ({:#010x}), EDX ({:#010x})", edx, eax, seg, eaddr, op2, quotient_32l, remainder_32);
         Ok(())
     }
 
@@ -251,7 +215,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr32(0, quotient_32l as u32); // EAX
         self.set_gpr32(2, remainder_32 as u32); // EDX
 
-        tracing::trace!("IDIV32: EDX:EAX ({:#010x}:{:#010x}) / reg{} ({:#010x}) = EAX ({:#010x}), EDX ({:#010x})", edx as u32, eax as u32, src_reg, op2 as u32, quotient_32l as u32, remainder_32 as u32);
         Ok(())
     }
 
@@ -290,7 +253,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr32(0, quotient_32l as u32); // EAX
         self.set_gpr32(2, remainder_32 as u32); // EDX
 
-        tracing::trace!("IDIV32 mem: EDX:EAX ({:#010x}:{:#010x}) / [{:?}:{:#x}] ({:#010x}) = EAX ({:#010x}), EDX ({:#010x})", edx as u32, eax as u32, seg, eaddr, op2 as u32, quotient_32l as u32, remainder_32 as u32);
         Ok(())
     }
 
@@ -314,14 +276,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
-        tracing::trace!(
-            "IMUL Gd,Ed: reg{} ({:#010x}) * reg{} ({:#010x}) = {:#010x}",
-            dst_reg,
-            op1 as u32,
-            src_reg,
-            op2 as u32,
-            product_32
-        );
         Ok(())
     }
 
@@ -345,15 +299,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
-        tracing::trace!(
-            "IMUL Gd,Ed mem: reg{} ({:#010x}) * [{:?}:{:#x}] ({:#010x}) = {:#010x}",
-            dst_reg,
-            op1 as u32,
-            seg,
-            eaddr,
-            op2 as u32,
-            product_32
-        );
         Ok(())
     }
 
@@ -386,14 +331,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.remove(EFlags::CF.union(EFlags::OF)); // CF=0, OF=0
         }
 
-        tracing::trace!(
-            "IMUL32: reg{} ({:#010x}) * imm8 ({:#04x}) = reg{} ({:#010x})",
-            src_reg,
-            op1 as u32,
-            imm8 as u8,
-            dst_reg,
-            result_32 as u32
-        );
         Ok(())
     }
 

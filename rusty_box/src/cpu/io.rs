@@ -72,7 +72,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let value = self.port_in(port, 1) as u8;
         self.set_al(value);
-        tracing::trace!("IN AL, {:#x} -> {:#x}", port, value);
         Ok(())
     }
 
@@ -85,7 +84,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let value = self.port_in(port, 2) as u16;
         self.set_ax(value);
-        tracing::trace!("IN AX, {:#x} -> {:#x}", port, value);
         Ok(())
     }
 
@@ -98,7 +96,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let value = self.port_in(port, 4);
         self.set_rax(value as u64);
-        tracing::trace!("IN EAX, {:#x} -> {:#x}", port, value);
         Ok(())
     }
 
@@ -111,7 +108,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let value = self.al();
         self.port_out(port, value as u32, 1);
-        tracing::trace!("OUT {:#x}, AL ({:#x})", port, value);
         Ok(())
     }
 
@@ -124,7 +120,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let value = self.ax();
         self.port_out(port, value as u32, 2);
-        tracing::trace!("OUT {:#x}, AX ({:#x})", port, value);
         Ok(())
     }
 
@@ -137,7 +132,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let value = self.eax();
         self.port_out(port, value, 4);
-        tracing::trace!("OUT {:#x}, EAX ({:#x})", port, value);
         Ok(())
     }
 
@@ -150,7 +144,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let value = self.port_in(port, 1) as u8;
         self.set_al(value);
-        tracing::trace!("IN AL, DX ({:#x}) -> {:#x}", port, value);
         Ok(())
     }
 
@@ -163,7 +156,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let value = self.port_in(port, 2) as u16;
         self.set_ax(value);
-        tracing::trace!("IN AX, DX ({:#x}) -> {:#x}", port, value);
         Ok(())
     }
 
@@ -176,7 +168,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let value = self.port_in(port, 4);
         self.set_rax(value as u64);
-        tracing::trace!("IN EAX, DX ({:#x}) -> {:#x}", port, value);
         Ok(())
     }
 
@@ -189,7 +180,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let value = self.al();
         self.port_out(port, value as u32, 1);
-        tracing::trace!("OUT DX ({:#x}), AL ({:#x})", port, value);
         Ok(())
     }
 
@@ -202,7 +192,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let value = self.ax();
         self.port_out(port, value as u32, 2);
-        tracing::trace!("OUT DX ({:#x}), AX ({:#x})", port, value);
         Ok(())
     }
 
@@ -215,7 +204,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let value = self.eax();
         self.port_out(port, value, 4);
-        tracing::trace!("OUT DX ({:#x}), EAX ({:#x})", port, value);
         Ok(())
     }
 
@@ -885,7 +873,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // SAFETY: `io_bus` is set by the emulator for the duration of execution
             // and cleared afterwards. Single-CPU execution avoids concurrent access.
             let value = unsafe { io_bus.as_mut().inp(port, len) };
-            tracing::trace!("port_in: port={:#06x} len={} -> {:#x}", port, len, value);
             return value;
         }
 
@@ -896,12 +883,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             4 => 0xFFFFFFFF,
             _ => 0xFF,
         };
-        tracing::trace!(
-            "port_in (no bus): port={:#06x} len={} -> {:#x}",
-            port,
-            len,
-            value
-        );
         value
     }
 

@@ -916,23 +916,6 @@ pub fn SUB_AL_Ib<'c, I: BxCpuIdTrait>(
     cpu.set_al(result);
     cpu.update_flags_sub8(al, imm8, result);
 
-    // Trace vsprintf '%' detection: SUB AL, 0x25 in kernel space
-    if imm8 == 0x25
-        && cpu.rip() > 0xC0000000
-        && cpu.icount > 100_000_000
-        && cpu.icount < 200_000_000
-    {
-        let zf = cpu.get_zf();
-        tracing::warn!(
-            "SUB AL={:#04x}, 0x25 at RIP={:#x} result={:#04x} ZF={} icount={}",
-            al,
-            cpu.rip(),
-            result,
-            zf,
-            cpu.icount
-        );
-    }
-
     Ok(())
 }
 

@@ -49,13 +49,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn call_jq(&mut self, instr: &Instruction) -> Result<()> {
         let new_rip = self.rip().wrapping_add(instr.id() as i32 as u64);
 
+        // RSP_SPECULATIVE (matching C++ line 112)
+        self.speculative_rsp = true;
+        self.prev_rsp = self.rsp();
+
+        // Push BEFORE canonical check (matching C++ line 115)
+        self.push_64(self.rip())?;
+
         if !self.is_canonical(new_rip) {
+            self.set_rsp(self.prev_rsp);
+            self.speculative_rsp = false;
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
         }
 
-        self.push_64(self.rip())?;
         self.set_rip(new_rip);
+
+        // RSP_COMMIT (matching C++ line 128)
+        self.speculative_rsp = false;
         Ok(())
     }
 
@@ -64,13 +75,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn call_eq_r(&mut self, instr: &Instruction) -> Result<()> {
         let new_rip = self.get_gpr64(instr.dst() as usize);
 
+        // RSP_SPECULATIVE (matching C++ line 143)
+        self.speculative_rsp = true;
+        self.prev_rsp = self.rsp();
+
+        // Push BEFORE canonical check (matching C++ line 146)
+        self.push_64(self.rip())?;
+
         if !self.is_canonical(new_rip) {
+            self.set_rsp(self.prev_rsp);
+            self.speculative_rsp = false;
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
         }
 
-        self.push_64(self.rip())?;
         self.set_rip(new_rip);
+
+        // RSP_COMMIT (matching C++ line 160)
+        self.speculative_rsp = false;
         Ok(())
     }
 
@@ -243,15 +265,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Near return with immediate (64-bit)
     /// Matching C++ ctrl_xfer64.cc:46-76 RETnear64_Iw
     pub fn retnear64_iw(&mut self, instr: &Instruction) -> Result<()> {
+        // RSP_SPECULATIVE (matching C++ line 52)
+        self.speculative_rsp = true;
+        self.prev_rsp = self.rsp();
+
         let return_rip = self.pop_64()?;
 
         if !self.is_canonical(return_rip) {
+            // Restore RSP before exception (RSP_SPECULATIVE rollback)
+            self.set_rsp(self.prev_rsp);
+            self.speculative_rsp = false;
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
         }
 
         self.set_rip(return_rip);
         self.set_rsp(self.rsp().wrapping_add(instr.iw() as u64));
+
+        // RSP_COMMIT (matching C++ line 71)
+        self.speculative_rsp = false;
         Ok(())
     }
 
@@ -294,9 +326,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.eip_fetch_ptr = None;
         self.eip_page_window_size = 0;
 
+        // VMX: nmi_unblocking_iret = true (matching C++ line 471)
+        // (We don't have VMX guest mode, but set for completeness)
+
         // Unmask NMI (matching C++ line 478)
-        // unmask_event(BX_EVENT_NMI)
-        self.nmi_unblocking_iret = false;
+        self.unmask_event(Self::BX_EVENT_NMI);
 
         // BX_ASSERT(long_mode()) — matching C++ line 488
 
@@ -309,6 +343,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // RSP_COMMIT (matching C++ line 494)
         self.speculative_rsp = false;
+
+        // VMX: nmi_unblocking_iret = false (matching C++ line 497, AFTER RSP_COMMIT)
+        self.nmi_unblocking_iret = false;
 
         // Set STOP_TRACE to break trace loop
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;

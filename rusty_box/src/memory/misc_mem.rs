@@ -1,4 +1,4 @@
-use alloc::{boxed::Box, format, vec::Vec};
+use alloc::{boxed::Box, vec::Vec};
 use core::ffi::c_void;
 
 use crate::{
@@ -542,19 +542,6 @@ impl BxMemC<'_> {
             // All of data is within limits of physical memory
             if a20_addr < 0x000a0000 || a20_addr >= 0x00100000 {
                 // Log writes to very low RAM (first 4KB) - these might be IVT/BDA initialization
-                if a20_addr < 0x1000 {
-                    let data_preview = if len <= 8 {
-                        format!("{:02x?}", &data[0..len])
-                    } else {
-                        format!("{:02x?}...", &data[0..8])
-                    };
-                    tracing::trace!(
-                        "💾 LOW_RAM_WRITE: addr={:#x}, len={}, data={}",
-                        a20_addr,
-                        len,
-                        data_preview
-                    );
-                }
                 // Regular RAM - delegate to stub
                 return self.inherited_memory_stub.write_physical_page(
                     cpus,
@@ -648,10 +635,6 @@ impl BxMemC<'_> {
             return Ok(());
         } else {
             // Access outside limits of physical memory, ignore (from memory.cc:172-174)
-            tracing::trace!(
-                "Write outside the limits of physical memory ({:#x}) (ignore)",
-                a20_addr
-            );
             return Ok(());
         }
     }

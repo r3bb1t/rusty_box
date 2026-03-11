@@ -377,7 +377,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) prev_ssp: BxAddress,
     pub(super) speculative_rsp: bool,
 
-    pub(super) icount: u64,
+    pub(crate) icount: u64,
     pub(super) icount_last_sync: u64,
 
     /// What events to inhibit at any given time.  Certain instructions
@@ -1104,15 +1104,22 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Called by PIC (via raw pointer) when master int_pin asserts.
     #[inline]
     pub(crate) fn signal_event(&mut self, event: u32) {
-        self.pending_event |= 1 << event;
-        self.async_event = 1;
+        // Bochs cpu.h: pending_event |= event (event IS the bitmask, not a bit index)
+        self.pending_event |= event;
+        // Bochs cpu.h:1189-1190: if (! is_masked_event(event)) async_event = 1;
+        // is_masked_event returns (event & event_mask) != 0
+        // So only set async_event when event is NOT masked
+        if (event & self.event_mask) == 0 {
+            self.async_event = 1;
+        }
     }
 
     /// Bochs `clear_event()`: clear event bit.
     /// Called by PIC (via raw pointer) when master int_pin deasserts.
     #[inline]
     pub(crate) fn clear_event(&mut self, event: u32) {
-        self.pending_event &= !(1 << event);
+        // Bochs cpu.h: pending_event &= ~event (event IS the bitmask)
+        self.pending_event &= !event;
     }
 
     /// Bochs `mask_event()`: add event bits to event_mask so they won't fire.
@@ -1749,14 +1756,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Cache miss path
         self.perf_icache_miss += 1;
-        if p_addr >= 0xC0000 && p_addr < 0xD0000 && self.perf_icache_miss <= 5 {
-            tracing::trace!(
-                "ICACHE-MISS: p_addr={:#x}, hash={}, ilen={}",
-                p_addr,
-                hash_idx,
-                self.i_cache.entry[hash_idx].i.length
-            );
-        }
 
         let mut dummy_mapping: [u32; 0] = [];
         let mut dummy_stamp_table = crate::cpu::icache::BxPageWriteStampTable {

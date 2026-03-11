@@ -294,12 +294,6 @@ impl BxDevicesC {
         let mut retval: u32 = 0xFFFF_FFFF;
         if address == 0x00E9 {
             retval = 0xE9;
-        } else {
-            tracing::trace!(
-                "Unhandled I/O read: port={:#06x}, len={} -> 0xFF..F",
-                address,
-                io_len
-            );
         }
 
         match io_len {
@@ -342,12 +336,6 @@ impl BxDevicesC {
             return;
         }
 
-        tracing::trace!(
-            "Unhandled I/O write: port={:#06x}, value={:#x}, len={}",
-            address,
-            value,
-            io_len
-        );
     }
 
     /// Check if PCI is enabled

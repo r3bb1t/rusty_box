@@ -16,9 +16,9 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-03-09):**
+**Current Status (2026-03-11):**
 - ✅ **DLX Linux boots to interactive bash shell!** Full boot: BIOS POST → LILO → kernel → init → `dlx login: root` → `dlx:~#` (200M instructions sufficient)
-- ⚠️ **Alpine Linux kernel runs 1.5B+ instructions, stuck in polling loop** — Parity audit phases 1-5 complete. DIV64 Group 3 decoder convention fix resolved the #DE panic (was reading RSI instead of RDI due to `instr.src()` vs `instr.dst()`). Kernel decompresses, enters 64-bit long mode, reaches kernel virtual addresses (0xffffffff81...), but no serial/VGA output. Stuck at RIP=0xffffffff81e1d347 — likely timer/interrupt calibration. Next: investigate timer interrupt delivery to unblock kernel init.
+- ⚠️ **Alpine Linux kernel gets past delay calibration, crashes in kfree** — Three timer/interrupt delivery bugs fixed (session 36): signal_event mask check, async_event OR-assign, HLT tick granularity. Kernel now prints `Calibrating delay loop (skipped), value calculated using timer frequency.. 6999.82 BogoMIPS` and proceeds through extensive init. New crash: page fault in `kfree+0x64/0x490` at vmemmap address `ffffeb02000002c8` — PFN computed from direct-mapping virt_to_phys exceeds actual RAM (256MB). Likely a vmalloc address going through the wrong virt_to_phys path. Next: investigate carry flag or address classification in kfree.
 - ✅ **Session 28-29 audit RESOLVED**: All 6 CRITICAL bugs resolved (3 already fixed, 1 not-a-bug, 2 confirmed fixed). Most HIGH bugs also confirmed fixed. Remaining unfixed: ~95 SSE opcode tables, decmask NNN/RRR fields, SRC_EQ_DST bit, UD64 opcodes, 64-bit TLB fast path (performance only).
 - ✅ **64-bit canonical address checks (session 30)**: All 10 `read/write_virtual_*_64` functions now check canonical addresses (Bochs access.cc:339/444). Non-canonical raises #GP(0) or #SS(0). Cross-page paths check last byte too.
 - ✅ **LPF mask 64-bit fix (session 30)**: `translate_data_access` used `0xFFFF_F000` (32-bit truncating) for lpf/ppf. Fixed to `LPF_MASK` (`0xFFFF_FFFF_FFFF_F000`). Was causing incorrect TLB lookups for 64-bit kernel virtual addresses.
@@ -261,12 +261,17 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ### Next Steps
 1. ~~**Reach DLX Linux `dlx login:` prompt**~~ — **DONE** (2026-03-03). Full boot to login prompt achieved.
 2. ~~**Interactive login**~~ — **DONE** (2026-03-04). SHRD/SHLD decoder fix resolved ext2 "directory #12 contains a hole" errors. `root` login → `dlx:~#` bash shell works.
-3. **Boot Alpine Linux** — **IN PROGRESS** (2026-03-10). Kernel runs 1.5B+ instructions in 64-bit mode:
+3. **Boot Alpine Linux** — **IN PROGRESS** (2026-03-11). Kernel gets past delay calibration, crashes in kfree:
+   - **Session 36 FIXES (timer/interrupt delivery)**: Three bugs fixed that unblocked delay calibration:
+     1. `signal_event()` mask check: now matches Bochs cpu.h:1189-1190 — only sets async_event when event is NOT masked (was always setting it)
+     2. `async_event |= 1` in service_local_apic: was `*ptr = 1` which cleared STOP_TRACE bit
+     3. HLT tick granularity: unified 10µs steps with IPS-proportional ticks (was 15K ticks/step, now 150)
+   - **Result**: Kernel prints `Calibrating delay loop (skipped), value calculated using timer frequency.. 6999.82 BogoMIPS` and proceeds through extensive init
+   - **New crash**: Page fault in `kfree+0x64/0x490` at vmemmap address `ffffeb02000002c8`. PFN computed exceeds 256MB RAM. `PGD 0 P4D 0` — vmemmap not mapped for that range. Likely a vmalloc address going through wrong virt_to_phys path. Next: investigate address classification or carry flag in kfree.
    - **DIV64 Group 3 decoder convention FIXED**: `instr.src()` → `instr.dst()` in mult64.rs register-form handlers (MUL/IMUL/DIV/IDIV). Was reading opcode extension instead of rm register index. `DIV RDI` read RSI(0)→#DE. This was the root cause of the previous kernel panic at ~622M instructions.
    - **boot_params fix**: Moved from pref_address+init_size (0x035f3000) to 0x10000 (QEMU standard).
    - **64-bit CR writes FIXED**: mov_cr0_rq/cr2_rq/cr4_rq use get_gpr64 (was truncating to 32 bits).
    - **LAPIC timer FIXED**: Current count read now calls get_current_timer_count().
-   - **Current status**: Kernel decompresses, enters 64-bit long mode, runs 1.5B+ instructions reaching kernel virtual addresses (0xffffffff81...). No crash. Stuck in polling loop at RIP=0xffffffff81e1d347 — likely timer/interrupt calibration. No serial/VGA output yet. Next: investigate timer interrupt delivery.
    - **ISOLINUX path**: El Torito boot works, ISOLINUX 6.04 loads + enters PM, but init_func table is empty → iso_init never called. See `docs/ISOLINUX_DEBUG.md`.
 4. **Fix `ide2 at 0x1e8` phantom** — PCI PIIX IDE BAR misconfiguration causes kernel to probe a non-existent 3rd IDE channel
 5. ~~**Fix LDT triple fault**~~ — FIXED: root cause was INT using IVT in PM + XCHG mod_c0 bug

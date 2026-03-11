@@ -38,14 +38,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF));
         }
 
-        tracing::trace!(
-            "MUL64: RAX ({:#018x}) * reg{} ({:#018x}) = RDX:RAX ({:#018x}:{:#018x})",
-            op1,
-            src_reg,
-            op2,
-            product_64h,
-            product_64l
-        );
         Ok(())
     }
 
@@ -74,15 +66,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF));
         }
 
-        tracing::trace!(
-            "MUL64 mem: RAX ({:#018x}) * [{:?}:{:#x}] ({:#018x}) = RDX:RAX ({:#018x}:{:#018x})",
-            op1,
-            seg,
-            eaddr,
-            op2,
-            product_64h,
-            product_64l
-        );
         Ok(())
     }
 
@@ -111,14 +94,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF));
         }
 
-        tracing::trace!(
-            "IMUL64: RAX ({:#018x}) * reg{} ({:#018x}) = RDX:RAX ({:#018x}:{:#018x})",
-            op1 as u64,
-            src_reg,
-            op2 as u64,
-            product_64h,
-            product_64l
-        );
         Ok(())
     }
 
@@ -149,15 +124,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF));
         }
 
-        tracing::trace!(
-            "IMUL64 mem: RAX ({:#018x}) * [{:?}:{:#x}] ({:#018x}) = RDX:RAX ({:#018x}:{:#018x})",
-            op1 as u64,
-            seg,
-            eaddr,
-            op2 as u64,
-            product_64h,
-            product_64l
-        );
         Ok(())
     }
 
@@ -191,10 +157,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rax(quotient_64l);
         self.set_rdx(remainder_64);
 
-        tracing::trace!(
-            "DIV64: RDX:RAX ({:#018x}:{:#018x}) / reg{} ({:#018x}) = RAX ({:#018x}), RDX ({:#018x})",
-            rdx, rax, src_reg, op2, quotient_64l, remainder_64
-        );
         Ok(())
     }
 
@@ -229,10 +191,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rax(quotient_64l);
         self.set_rdx(remainder_64);
 
-        tracing::trace!(
-            "DIV64 mem: RDX:RAX ({:#018x}:{:#018x}) / [{:?}:{:#x}] ({:#018x}) = RAX ({:#018x}), RDX ({:#018x})",
-            rdx, rax, seg, eaddr, op2, quotient_64l, remainder_64
-        );
         Ok(())
     }
 
@@ -280,10 +238,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rax(quotient_64l as u64);
         self.set_rdx(remainder_64 as u64);
 
-        tracing::trace!(
-            "IDIV64: RDX:RAX ({:#018x}:{:#018x}) / reg{} ({:#018x}) = RAX ({:#018x}), RDX ({:#018x})",
-            rdx, rax, src_reg, op2 as u64, quotient_64l as u64, remainder_64 as u64
-        );
         Ok(())
     }
 
@@ -325,10 +279,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_rax(quotient_64l as u64);
         self.set_rdx(remainder_64 as u64);
 
-        tracing::trace!(
-            "IDIV64 mem: RDX:RAX ({:#018x}:{:#018x}) / [{:?}:{:#x}] ({:#018x}) = RAX ({:#018x}), RDX ({:#018x})",
-            rdx, rax, seg, eaddr, op2 as u64, quotient_64l as u64, remainder_64 as u64
-        );
         Ok(())
     }
 
@@ -354,14 +304,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF));
         }
 
-        tracing::trace!(
-            "IMUL64 Gq,Eq: reg{} ({:#018x}) * reg{} ({:#018x}) = {:#018x}",
-            dst_reg,
-            op1 as u64,
-            src_reg,
-            op2 as u64,
-            product_64l
-        );
         Ok(())
     }
 
@@ -388,15 +330,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF));
         }
 
-        tracing::trace!(
-            "IMUL64 Gq,Eq mem: reg{} ({:#018x}) * [{:?}:{:#x}] ({:#018x}) = {:#018x}",
-            dst_reg,
-            op1 as u64,
-            seg,
-            eaddr,
-            op2 as u64,
-            product_64l
-        );
         Ok(())
     }
 
@@ -426,14 +359,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.remove(EFlags::CF.union(EFlags::OF));
         }
 
-        tracing::trace!(
-            "IMUL64 Gq,Eq,Id: reg{} ({:#018x}) * imm32 ({:#010x}) = reg{} ({:#018x})",
-            src_reg,
-            op1 as u64,
-            op2 as u32,
-            dst_reg,
-            product_64l
-        );
         Ok(())
     }
 
@@ -463,15 +388,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.remove(EFlags::CF.union(EFlags::OF));
         }
 
-        tracing::trace!(
-            "IMUL64 Gq,Eq,Id mem: [{:?}:{:#x}] ({:#018x}) * imm32 ({:#010x}) = reg{} ({:#018x})",
-            seg,
-            eaddr,
-            op1 as u64,
-            op2 as u32,
-            dst_reg,
-            product_64l
-        );
         Ok(())
     }
 
@@ -502,14 +418,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.remove(EFlags::CF.union(EFlags::OF));
         }
 
-        tracing::trace!(
-            "IMUL64 Gq,Eq,sIb: reg{} ({:#018x}) * imm8 ({:#04x}) = reg{} ({:#018x})",
-            src_reg,
-            op1 as u64,
-            op2 as u8,
-            dst_reg,
-            product_64l
-        );
         Ok(())
     }
 
@@ -538,15 +446,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.remove(EFlags::CF.union(EFlags::OF));
         }
 
-        tracing::trace!(
-            "IMUL64 Gq,Eq,sIb mem: [{:?}:{:#x}] ({:#018x}) * imm8 ({:#04x}) = reg{} ({:#018x})",
-            seg,
-            eaddr,
-            op1 as u64,
-            op2 as u8,
-            dst_reg,
-            product_64l
-        );
         Ok(())
     }
 

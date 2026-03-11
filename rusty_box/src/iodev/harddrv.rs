@@ -819,11 +819,6 @@ impl AtaDrive {
             buf_offset += SECTOR_SIZE;
         }
 
-        tracing::trace!(
-            "ATA: ide_read_sector: read {} sector(s), num_sectors remaining={}",
-            sector_count,
-            self.controller.num_sectors
-        );
         true
     }
 
@@ -864,11 +859,6 @@ impl AtaDrive {
             f.flush().ok();
         }
 
-        tracing::trace!(
-            "ATA: ide_write_sector: wrote {} sector(s), num_sectors remaining={}",
-            sector_count,
-            self.controller.num_sectors
-        );
         true
     }
 
@@ -898,11 +888,6 @@ impl AtaDrive {
             buf_offset += SECTOR_SIZE;
         }
 
-        tracing::trace!(
-            "ATA: ide_write_sector: wrote {} sector(s), num_sectors remaining={}",
-            sector_count,
-            self.controller.num_sectors
-        );
         true
     }
 
@@ -1501,12 +1486,6 @@ impl BxHardDriveC {
                 if idx + bytes > drive.controller.buffer_size {
                     // This can happen when the BIOS overshoots by one read after
                     // draining the IDENTIFY buffer — harmless, return 0.
-                    tracing::trace!(
-                        "ATA: data read past buffer end: index={} io_len={} buffer_size={}",
-                        idx,
-                        bytes,
-                        drive.controller.buffer_size
-                    );
                     return 0;
                 }
 

@@ -38,13 +38,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
-        tracing::trace!(
-            "MUL8: AL ({:#04x}) * reg{} ({:#04x}) = AX ({:#06x})",
-            op1,
-            src_reg,
-            op2,
-            product_16
-        );
         Ok(())
     }
 
@@ -70,14 +63,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
-        tracing::trace!(
-            "MUL8 mem: AL ({:#04x}) * [{:?}:{:#x}] ({:#04x}) = AX ({:#06x})",
-            op1,
-            seg,
-            eaddr,
-            op2,
-            product_16
-        );
         Ok(())
     }
 
@@ -104,13 +89,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
-        tracing::trace!(
-            "IMUL8: AL ({:#04x}) * reg{} ({:#04x}) = AX ({:#06x})",
-            op1 as u8,
-            src_reg,
-            op2 as u8,
-            product_16 as u16
-        );
         Ok(())
     }
 
@@ -137,14 +115,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
         }
 
-        tracing::trace!(
-            "IMUL8 mem: AL ({:#04x}) * [{:?}:{:#x}] ({:#04x}) = AX ({:#06x})",
-            op1 as u8,
-            seg,
-            eaddr,
-            op2 as u8,
-            product_16 as u16
-        );
         Ok(())
     }
 
@@ -172,14 +142,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr8(0, quotient_8l); // AL
         self.set_gpr8(4, remainder_8); // AH (reg 4 = AH)
 
-        tracing::trace!(
-            "DIV8: AX ({:#06x}) / reg{} ({:#04x}) = AL ({:#04x}), AH ({:#04x})",
-            op1,
-            src_reg,
-            op2,
-            quotient_8l,
-            remainder_8
-        );
         Ok(())
     }
 
@@ -207,15 +169,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr8(0, quotient_8l); // AL
         self.set_gpr8(4, remainder_8); // AH (reg 4 = AH)
 
-        tracing::trace!(
-            "DIV8 mem: AX ({:#06x}) / [{:?}:{:#x}] ({:#04x}) = AL ({:#04x}), AH ({:#04x})",
-            op1,
-            seg,
-            eaddr,
-            op2,
-            quotient_8l,
-            remainder_8
-        );
         Ok(())
     }
 
@@ -249,14 +202,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr8(0, quotient_8l as u8); // AL
         self.set_gpr8(4, remainder_8); // AH (reg 4 = AH)
 
-        tracing::trace!(
-            "IDIV8: AX ({:#06x}) / reg{} ({:#04x}) = AL ({:#04x}), AH ({:#04x})",
-            op1 as u16,
-            src_reg,
-            op2 as u8,
-            quotient_8l as u8,
-            remainder_8
-        );
         Ok(())
     }
 
@@ -290,15 +235,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.set_gpr8(0, quotient_8l as u8); // AL
         self.set_gpr8(4, remainder_8); // AH (reg 4 = AH)
 
-        tracing::trace!(
-            "IDIV8 mem: AX ({:#06x}) / [{:?}:{:#x}] ({:#04x}) = AL ({:#04x}), AH ({:#04x})",
-            op1 as u16,
-            seg,
-            eaddr,
-            op2 as u8,
-            quotient_8l as u8,
-            remainder_8
-        );
         Ok(())
     }
 

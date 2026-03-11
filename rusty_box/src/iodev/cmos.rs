@@ -497,7 +497,6 @@ impl BxCmosC {
         match port {
             CMOS_ADDR | 0x0072 => {
                 // Port 0x70 is write-only on most machines (Bochs cmos.cc:389-394)
-                tracing::trace!("CMOS: Read of index port {:#06x} returning 0xFF", port);
                 0xFF
             }
             CMOS_DATA | 0x0073 => {
@@ -530,7 +529,6 @@ impl BxCmosC {
                         }
                     }
                 };
-                tracing::trace!("CMOS: Read [{:#04x}] = {:#04x}", addr, value);
                 value as u32
             }
             _ => {
@@ -547,15 +545,9 @@ impl BxCmosC {
             CMOS_ADDR | 0x0072 => {
                 self.nmi_mask = (value & 0x80) != 0;
                 self.address = value & 0x7F;
-                tracing::trace!(
-                    "CMOS: Select register {:#04x} (NMI mask={})",
-                    self.address,
-                    self.nmi_mask
-                );
             }
             CMOS_DATA | 0x0073 => {
                 let addr = (self.address & 0x7F) as usize;
-                tracing::trace!("CMOS: Write [{:#04x}] = {:#04x}", addr, value);
 
                 match addr as u8 {
                     REG_STAT_A => {

@@ -139,14 +139,6 @@ fn CMP_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
     let diff = op1.wrapping_sub(op2);
 
     cpu.update_flags_sub32(op1, op2, diff);
-
-    tracing::trace!(
-        "CMP r{}d, r{}d: {:#010x} - {:#010x}",
-        instr.operands.dst,
-        instr.operands.src1,
-        op1,
-        op2
-    );
 }
 
 /// ADC_EdGd_R: ADC r/m32, r32 (register form)

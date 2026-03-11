@@ -707,7 +707,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         self.idtr.limit = limit;
         self.idtr.base = base;
-        tracing::trace!("LIDT64: base={:#x} limit={:#x} RIP={:#x} icount={}", base, limit, self.rip(), self.icount);
+
         Ok(())
     }
 

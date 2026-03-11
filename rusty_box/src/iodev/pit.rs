@@ -665,6 +665,18 @@ pub struct BxPitC {
     pub(crate) timer_handles: [Option<usize>; 3],
     /// IRQ0 callback (for system timer)
     irq0_pending: bool,
+    /// Pointer to CPU's icount for fine-grained PIT synchronization.
+    /// When set, the PIT advances counters on port reads (not just batch boundaries),
+    /// allowing the kernel's PIT-polling calibration loops to see the counter decrement.
+    icount_ptr: Option<*const u64>,
+    /// IPS (instructions per second) for converting icount to PIT ticks.
+    ips: u64,
+    /// icount value at last PIT synchronization point.
+    icount_at_last_sync: u64,
+    /// Fractional PIT tick accumulator (units: instruction_count * PIT_FREQUENCY).
+    /// Preserves fractions across calls so that even a few instructions
+    /// between reads can accumulate enough for a PIT tick (~13 instr at 15M IPS).
+    pit_tick_accumulator: u128,
 }
 
 impl Default for BxPitC {
@@ -681,6 +693,10 @@ impl BxPitC {
             total_ticks: 0,
             timer_handles: [None; 3],
             irq0_pending: false,
+            icount_ptr: None,
+            ips: 0,
+            icount_at_last_sync: 0,
+            pit_tick_accumulator: 0,
         }
     }
 
@@ -695,14 +711,77 @@ impl BxPitC {
         self.counters = [PitCounter::new(0), PitCounter::new(1), PitCounter::new(2)];
         self.total_ticks = 0;
         self.irq0_pending = false;
+        self.icount_at_last_sync = 0;
+        self.pit_tick_accumulator = 0;
+    }
+
+    /// Set the icount pointer for fine-grained PIT synchronization.
+    /// When set, PIT counter reads will advance counters to match elapsed CPU time.
+    /// SAFETY: The pointer must remain valid for the lifetime of the PIT.
+    pub unsafe fn set_icount_sync(&mut self, icount_ptr: *const u64, ips: u64) {
+        self.icount_ptr = Some(icount_ptr);
+        self.ips = ips;
+        self.icount_at_last_sync = *icount_ptr;
+    }
+
+    /// Synchronize PIT counters to match elapsed CPU time.
+    /// Called before counter reads to ensure counters are up-to-date.
+    /// Uses a fractional accumulator to avoid losing ticks when only a few
+    /// instructions have elapsed between reads (~13 instructions per PIT tick
+    /// at 15M IPS).
+    pub fn sync_to_icount(&mut self) {
+        if let Some(ptr) = self.icount_ptr {
+            let current_icount = unsafe { *ptr };
+            let elapsed_instr = current_icount.saturating_sub(self.icount_at_last_sync);
+            if elapsed_instr > 0 && self.ips > 0 {
+                // Accumulate fractional PIT ticks
+                self.pit_tick_accumulator += elapsed_instr as u128 * TICKS_PER_SECOND as u128;
+                let pit_ticks = (self.pit_tick_accumulator / self.ips as u128) as u64;
+                self.pit_tick_accumulator %= self.ips as u128;
+
+                // Cap to avoid long stalls (500K PIT ticks ≈ 419ms)
+                for _ in 0..pit_ticks.min(500_000) {
+                    self.total_ticks += 1;
+                    if self.counters[0].clock() {
+                        self.irq0_pending = true;
+                    }
+                    self.counters[1].clock();
+                    self.counters[2].clock();
+                }
+                self.icount_at_last_sync = current_icount;
+            }
+        }
     }
 
     /// Read from PIT I/O port
     pub fn read(&mut self, port: u16, _io_len: u8) -> u32 {
+        // Synchronize counters to current CPU time before reading.
+        // This ensures the kernel's PIT-polling calibration loops see the counter decrement.
+        self.sync_to_icount();
         match port {
-            PIT_COUNTER0 => self.counters[0].read() as u32,
+            PIT_COUNTER0 => {
+                let v = self.counters[0].read() as u32;
+                // Temporary diagnostic
+                static RD_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+                let rc = RD_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if rc < 20 || (rc < 200 && rc % 50 == 0) {
+                    eprintln!("[PIT-RD#{}] C0={} mode={} count={}", rc, v, self.counters[0].mode, self.counters[0].count);
+                }
+                v
+            }
             PIT_COUNTER1 => self.counters[1].read() as u32,
-            PIT_COUNTER2 => self.counters[2].read() as u32,
+            PIT_COUNTER2 => {
+                let v = self.counters[2].read() as u32;
+                static RD2_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+                let rc = RD2_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if rc < 30 || (rc < 300 && rc % 50 == 0) {
+                    eprintln!("[PIT-RD2#{}] C2={} mode={} count={} gate={} cw={} output={}", rc, v,
+                        self.counters[2].mode, self.counters[2].count,
+                        self.counters[2].gate, self.counters[2].count_written,
+                        self.counters[2].output);
+                }
+                v
+            }
             PIT_CONTROL => 0xFF, // Control port is write-only
             _ => {
                 tracing::warn!("PIT: Unknown read port {:#06x}", port);
@@ -714,6 +793,12 @@ impl BxPitC {
     /// Write to PIT I/O port
     pub fn write(&mut self, port: u16, value: u32, _io_len: u8) {
         let value = value as u8;
+        // Temporary diagnostic
+        static PIT_WR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let wc = PIT_WR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if wc < 30 || (wc < 300 && wc % 30 == 0) {
+            eprintln!("[PIT-WR#{}] port={:#06x} val={:#04x}", wc, port, value);
+        }
         match port {
             PIT_COUNTER0 => self.counters[0].write(value),
             PIT_COUNTER1 => self.counters[1].write(value),
@@ -825,7 +910,6 @@ impl BxPitC {
 
     /// Simulate time passing (in microseconds)
     pub fn tick(&mut self, usec: u64) -> bool {
-        // Convert microseconds to PIT ticks
         let pit_ticks = (usec * TICKS_PER_SECOND as u64) / USEC_PER_SECOND as u64;
 
         let mut irq0 = false;
@@ -846,6 +930,13 @@ impl BxPitC {
 
         if irq0 {
             self.irq0_pending = true;
+        }
+
+        // Reset icount baseline and accumulator so that read()-based sync
+        // doesn't double-count the ticks we just advanced via usec.
+        if let Some(ptr) = self.icount_ptr {
+            self.icount_at_last_sync = unsafe { *ptr };
+            self.pit_tick_accumulator = 0;
         }
 
         irq0

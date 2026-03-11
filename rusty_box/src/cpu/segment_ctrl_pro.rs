@@ -633,7 +633,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     /// Jump to protected mode code segment
     /// Based on BX_CPU_C::jump_protected in jmp_far.cc:30
     pub(super) fn jump_protected(&mut self, cs_raw: u16, disp: u64) -> Result<()> {
-        tracing::trace!("jump_protected: cs={:#06x}, disp={:#010x}", cs_raw, disp);
+
 
         // Selector must not be null
         if (cs_raw & 0xFFFC) == 0 {
@@ -1029,7 +1029,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         if (raw_selector & 0xfffc) == 0 {
             self.ldtr.selector.value = raw_selector;
             self.ldtr.cache.valid = 0;
-            tracing::trace!("LLDT: NULL selector, invalidated");
+
             return Ok(());
         }
 
@@ -1093,7 +1093,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         self.ldtr.cache = descriptor;
         self.ldtr.cache.valid = SEG_VALID_CACHE;
 
-        tracing::trace!("LLDT: loaded selector={:#06x}", raw_selector);
+
         Ok(())
     }
 
@@ -1220,7 +1220,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         let phys_addr = self.translate_linear_system_write(gdt_offset)?;
         self.mem_write_dword(phys_addr, new_dword2);
 
-        tracing::trace!("LTR: loaded selector={:#06x}, marked busy", raw_selector);
+
         Ok(())
     }
 

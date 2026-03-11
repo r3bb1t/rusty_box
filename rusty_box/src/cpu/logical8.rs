@@ -232,7 +232,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.read_8bit_regx(src, extend8bit_l);
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_8(op1, op2, result);
-        tracing::trace!("CMP r8, r8: {:#04x} - {:#04x} = {:#04x}", op1, op2, result);
     }
 
     /// CMP AL, imm8
@@ -241,8 +240,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = instr.ib();
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_8(op1, op2, result);
-        // vsprintf trace removed (using printk breakpoint instead)
-        tracing::trace!("CMP AL, imm8: {:#04x} - {:#04x}", op1, op2);
     }
 
     /// CMP_GbEb_M: CMP r8, r/m8 (memory form)
@@ -303,7 +300,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.read_8bit_regx(src, extend8bit_l);
         let result = op1 & op2;
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!("TEST r8, r8: {:#04x} & {:#04x} = {:#04x}", op1, op2, result);
     }
 
     /// TEST AL, imm8
@@ -312,7 +308,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = instr.ib();
         let result = op1 & op2;
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!("TEST AL, imm8: {:#04x} & {:#04x}", op1, op2);
     }
 
     /// TEST_EbIbR: TEST r8, imm8 (register form)
@@ -341,7 +336,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op1 & op2;
         self.write_8bit_regx(dst, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!("AND r8, r8: {:#04x} & {:#04x} = {:#04x}", op1, op2, result);
     }
 
     /// AND_EbGbR: AND r/m8, r8 (register form, store-direction)
@@ -448,13 +442,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = !op1_8;
 
         self.write_rmw_linear_byte(result);
-        tracing::trace!(
-            "NOT8 mem: [{:?}:{:#x}] = !{:#04x} = {:#04x}",
-            seg,
-            eaddr,
-            op1_8,
-            result
-        );
         Ok(())
     }
 
@@ -475,14 +462,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_byte(result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!(
-            "XOR8 mem: [{:?}:{:#x}] = {:#04x} ^ {:#04x} = {:#04x}",
-            seg,
-            eaddr,
-            op1,
-            op2,
-            result
-        );
         Ok(())
     }
 
@@ -499,13 +478,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_8bit_regx(dst_reg, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!(
-            "XOR8 mem: reg{} = {:#04x} ^ {:#04x} = {:#04x}",
-            dst_reg,
-            op1,
-            op2,
-            result
-        );
         Ok(())
     }
 
@@ -520,14 +492,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_byte(result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!(
-            "XOR8 mem: [{:?}:{:#x}] = {:#04x} ^ {:#04x} = {:#04x}",
-            seg,
-            eaddr,
-            op1,
-            op2,
-            result
-        );
         Ok(())
     }
 
@@ -544,14 +508,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_byte(result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!(
-            "OR8 mem: [{:?}:{:#x}] = {:#04x} | {:#04x} = {:#04x}",
-            seg,
-            eaddr,
-            op1,
-            op2,
-            result
-        );
         Ok(())
     }
 
@@ -568,13 +524,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_8bit_regx(dst_reg, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!(
-            "OR8 mem: reg{} = {:#04x} | {:#04x} = {:#04x}",
-            dst_reg,
-            op1,
-            op2,
-            result
-        );
         Ok(())
     }
 
@@ -589,14 +538,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_byte(result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!(
-            "OR8 mem: [{:?}:{:#x}] = {:#04x} | {:#04x} = {:#04x}",
-            seg,
-            eaddr,
-            op1,
-            op2,
-            result
-        );
         Ok(())
     }
 
@@ -613,14 +554,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_byte(result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!(
-            "AND8 mem: [{:?}:{:#x}] = {:#04x} & {:#04x} = {:#04x}",
-            seg,
-            eaddr,
-            op1,
-            op2,
-            result
-        );
         Ok(())
     }
 
@@ -637,13 +570,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_8bit_regx(dst_reg, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!(
-            "AND8 mem: reg{} = {:#04x} & {:#04x} = {:#04x}",
-            dst_reg,
-            op1,
-            op2,
-            result
-        );
         Ok(())
     }
 
@@ -658,14 +584,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.write_rmw_linear_byte(result);
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!(
-            "AND8 mem: [{:?}:{:#x}] = {:#04x} & {:#04x} = {:#04x}",
-            seg,
-            eaddr,
-            op1,
-            op2,
-            result
-        );
         Ok(())
     }
 
@@ -681,15 +599,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op1 & op2;
 
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!(
-            "TEST8 mem: [{:?}:{:#x}] & reg{} = {:#04x} & {:#04x} = {:#04x}",
-            seg,
-            eaddr,
-            src_reg,
-            op1,
-            op2,
-            result
-        );
         Ok(())
     }
 
@@ -703,15 +612,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = op1 & op2;
 
         self.set_flags_oszapc_logic_8(result);
-        tracing::trace!(
-            "TEST8 mem: [{:?}:{:#x}] & {:#04x} = {:#04x} & {:#04x} = {:#04x}",
-            seg,
-            eaddr,
-            op2,
-            op1,
-            op2,
-            result
-        );
         Ok(())
     }
 

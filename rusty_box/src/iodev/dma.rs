@@ -273,7 +273,6 @@ impl BxDmaC {
             DMA_PAGE_CH7 => self.dma2.channels[3].page as u32,
             DMA_PAGE_REFRESH => self.extra_pages[0] as u32,
             _ => {
-                tracing::trace!("DMA: Unknown read port {:#06x}", port);
                 0xFF
             }
         }
@@ -348,7 +347,6 @@ impl BxDmaC {
             DMA_PAGE_REFRESH => self.extra_pages[0] = value,
 
             _ => {
-                tracing::trace!("DMA: Unknown write port {:#06x} value={:#04x}", port, value);
             }
         }
     }

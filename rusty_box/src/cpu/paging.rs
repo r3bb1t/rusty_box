@@ -456,7 +456,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Ok(paddr) => {
                 // Apply A20 mask
                 let paddr = paddr & a20_mask;
-                tracing::trace!("translate_linear: laddr={:#x} -> paddr={:#x}", laddr, paddr);
+
                 Ok(paddr)
             }
             Err(e) => {

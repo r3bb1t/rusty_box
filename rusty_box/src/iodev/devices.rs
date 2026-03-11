@@ -214,6 +214,10 @@ impl DeviceManager {
             self.pci_ide.reset();
         }
 
+        // Wire up PIT pointer for port 0x61 integration (keyboard reads PIT C2 output)
+        let pit_ptr = &mut self.pit as *mut BxPitC;
+        unsafe { self.keyboard.set_pit_ptr(pit_ptr); }
+
         // Register I/O handlers for each device (order doesn't matter for handlers)
         self.register_cmos_handlers(io);
         self.register_dma_handlers(io);
@@ -636,11 +640,6 @@ impl DeviceManager {
             0x0B => self.acpi.pci_read(address, io_len),
             // Unrecognized device
             _ => {
-                tracing::trace!(
-                    "PCI config read: unrecognized devfunc={:#04x} reg={:#04x}",
-                    devfunc,
-                    address
-                );
                 0xFFFF_FFFF
             }
         }
@@ -993,7 +992,6 @@ impl BxDevicesC {
 fn port92_read_handler(this_ptr: *mut c_void, _port: u16, _io_len: u8) -> u32 {
     if this_ptr.is_null() {
         // No state available, return default
-        tracing::trace!("Port 92h read (no state)");
         return 0x01; // A20 enabled
     }
 
@@ -1135,7 +1133,6 @@ fn pci_write_handler(this_ptr: *mut c_void, address: u16, value: u32, io_len: u8
                     }
                 }
                 _ => {
-                    tracing::trace!("PCI config write: unrecognized devfunc={:#04x}", devfunc);
                 }
             }
         }

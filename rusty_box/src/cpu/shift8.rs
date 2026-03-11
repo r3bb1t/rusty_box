@@ -59,16 +59,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = if count >= 8 { 0 } else { op1 << count };
         self.shift_write8(instr, laddr, result);
 
-        let cf = if count >= 8 {
+        // Bochs shift8.cc: count <= 8 computes CF from formula, count > 8 CF=0
+        let cf = if count > 8 {
             false
         } else {
             ((op1 << (count - 1)) & 0x80) != 0
         };
-        let of = if count == 1 {
-            ((result ^ op1) & 0x80) != 0
-        } else {
-            false
-        };
+        // Bochs computes OF unconditionally: cf ^ (result >> 7)
+        let of = cf != ((result >> 7) != 0);
         self.update_flags_shl8(result, cf, of);
         Ok(())
     }
@@ -84,16 +82,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = if count >= 8 { 0 } else { op1 << count };
         self.shift_write8(instr, laddr, result);
 
-        let cf = if count >= 8 {
+        // Bochs shift8.cc: count <= 8 computes CF from formula, count > 8 CF=0
+        let cf = if count > 8 {
             false
         } else {
             ((op1 << (count - 1)) & 0x80) != 0
         };
-        let of = if count == 1 {
-            ((result ^ op1) & 0x80) != 0
-        } else {
-            false
-        };
+        // Bochs computes OF unconditionally: cf ^ (result >> 7)
+        let of = cf != ((result >> 7) != 0);
         self.update_flags_shl8(result, cf, of);
         Ok(())
     }
@@ -125,12 +121,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = if count >= 8 { 0 } else { op1 >> count };
         self.shift_write8(instr, laddr, result);
 
-        let cf = if count >= 8 {
-            false
-        } else {
-            ((op1 >> (count - 1)) & 0x01) != 0
-        };
-        let of = if count == 1 { (op1 & 0x80) != 0 } else { false };
+        // Bochs shift8.cc: no boundary check for SHR, formula works for all counts 1-31
+        // Cast to u32 to avoid Rust panic on shift >= 8 for u8
+        let cf = (((op1 as u32) >> (count - 1)) & 0x01) != 0;
+        // Bochs computes OF unconditionally: ((result << 1) ^ result) >> 7
+        let of = ((((result as u32) << 1) ^ (result as u32)) >> 7) != 0;
         self.update_flags_shr8(result, cf, of);
         Ok(())
     }
@@ -146,12 +141,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let result = if count >= 8 { 0 } else { op1 >> count };
         self.shift_write8(instr, laddr, result);
 
-        let cf = if count >= 8 {
-            false
-        } else {
-            ((op1 >> (count - 1)) & 0x01) != 0
-        };
-        let of = if count == 1 { (op1 & 0x80) != 0 } else { false };
+        // Bochs shift8.cc: no boundary check for SHR, formula works for all counts 1-31
+        // Cast to u32 to avoid Rust panic on shift >= 8 for u8
+        let cf = (((op1 as u32) >> (count - 1)) & 0x01) != 0;
+        // Bochs computes OF unconditionally: ((result << 1) ^ result) >> 7
+        let of = ((((result as u32) << 1) ^ (result as u32)) >> 7) != 0;
         self.update_flags_shr8(result, cf, of);
         Ok(())
     }
