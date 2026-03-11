@@ -366,11 +366,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// XCHG r/m64, r64 (memory form)
     /// Matching C++ data_xfer64.cc:292-300 XCHG_EqGqM
     /// Note: always locked (read_RMW_virtual_qword)
+    /// XCHG 0x87 is NOT in decoder swap list, so [0]=nnn=register, [1]=rm
     pub fn xchg_eq_gq_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
         let op1_64 = self.read_rmw_virtual_qword_64(seg, eaddr)?;
-        let src_reg = instr.src() as usize;
+        let src_reg = instr.dst() as usize; // dst()=[0]=nnn=register operand
         let op2_64 = self.get_gpr64(src_reg);
 
         self.write_rmw_virtual_qword_back_64(op2_64);
