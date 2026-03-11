@@ -1044,10 +1044,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::IdivAxew => self.idiv_ax_ew(instr),
             Opcode::MulEaxed => self.mul_eax_ed(instr),
             Opcode::ImulEaxed => self.imul_eax_ed(instr),
-            Opcode::ImulGdEdsIb => {
-                self.imul_gd_ed_ib(instr)?;
-                Ok(())
-            }
+            Opcode::ImulGdEdsIb => self.imul_gd_ed_ib(instr),
             Opcode::ImulGdEdId => self.imul_gd_ed_id(instr),
             Opcode::ImulGdEd => self.imul_gd_ed(instr),
             Opcode::ImulGwEw => self.imul_gw_ew(instr),
@@ -2306,26 +2303,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // SSE/SSE2 Data Movement (sse_move.rs)
             // =========================================================================
 
-            // MOVUPS (unaligned packed single) — load
+            // MOVUPS (unaligned packed single) — load (VEX.L aware)
             Opcode::MovupsVpsWps => {
                 if instr.mod_c0() {
-                    self.prepare_sse()?;
-                    let val = self.read_xmm_reg(instr.src1());
-                    self.write_xmm_reg_lo128(instr.dst(), val);
-                    Ok(())
+                    self.vmovdqa_reg(instr)
                 } else {
-                    self.movups_vps_wps_m(instr)
+                    self.vmovdqu_load(instr)
                 }
             }
-            // MOVUPS (unaligned packed single) — store
+            // MOVUPS (unaligned packed single) — store (VEX.L aware)
             Opcode::MovupsWpsVps => {
                 if instr.mod_c0() {
-                    self.prepare_sse()?;
-                    let val = self.read_xmm_reg(instr.dst());
-                    self.write_xmm_reg_lo128(instr.src1(), val);
-                    Ok(())
+                    self.vmovdqa_reg(instr)
                 } else {
-                    self.movups_wps_vps_m(instr)
+                    self.vmovdqu_store(instr)
                 }
             }
             // MOVUPD (unaligned packed double) — load
@@ -2350,83 +2341,68 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     self.movupd_wpd_vpd_m(instr)
                 }
             }
-            // MOVAPS (aligned packed single) — load
+            // MOVAPS (aligned packed single) — load (VEX.L aware)
             Opcode::MovapsVpsWps => {
                 if instr.mod_c0() {
-                    self.movaps_vps_wps_r(instr)
+                    self.vmovdqa_reg(instr)
                 } else {
-                    self.movaps_vps_wps_m(instr)
+                    self.vmovdqa_load(instr)
                 }
             }
-            // MOVAPS (aligned packed single) — store
+            // MOVAPS (aligned packed single) — store (VEX.L aware)
             Opcode::MovapsWpsVps => {
                 if instr.mod_c0() {
-                    self.prepare_sse()?;
-                    let val = self.read_xmm_reg(instr.dst());
-                    self.write_xmm_reg_lo128(instr.src1(), val);
-                    Ok(())
+                    self.vmovdqa_reg(instr)
                 } else {
-                    self.movaps_wps_vps_m(instr)
+                    self.vmovdqa_store(instr)
                 }
             }
-            // MOVAPD (aligned packed double) — load
+            // MOVAPD (aligned packed double) — load (VEX.L aware)
             Opcode::MovapdVpdWpd => {
                 if instr.mod_c0() {
-                    self.movaps_vps_wps_r(instr)
+                    self.vmovdqa_reg(instr)
                 } else {
-                    self.movapd_vpd_wpd_m(instr)
+                    self.vmovdqa_load(instr)
                 }
             }
-            // MOVAPD (aligned packed double) — store
+            // MOVAPD (aligned packed double) — store (VEX.L aware)
             Opcode::MovapdWpdVpd => {
                 if instr.mod_c0() {
-                    self.prepare_sse()?;
-                    let val = self.read_xmm_reg(instr.dst());
-                    self.write_xmm_reg_lo128(instr.src1(), val);
-                    Ok(())
+                    self.vmovdqa_reg(instr)
                 } else {
-                    self.movapd_wpd_vpd_m(instr)
+                    self.vmovdqa_store(instr)
                 }
             }
-            // MOVDQA (aligned packed integer) — load
+            // MOVDQA (aligned packed integer) — load (VEX.L aware)
             Opcode::MovdqaVdqWdq => {
                 if instr.mod_c0() {
-                    self.movaps_vps_wps_r(instr)
+                    self.vmovdqa_reg(instr)
                 } else {
-                    self.movdqa_vdq_wdq_m(instr)
+                    self.vmovdqa_load(instr)
                 }
             }
-            // MOVDQA (aligned packed integer) — store
+            // MOVDQA (aligned packed integer) — store (VEX.L aware)
             Opcode::MovdqaWdqVdq => {
                 if instr.mod_c0() {
-                    self.prepare_sse()?;
-                    let val = self.read_xmm_reg(instr.dst());
-                    self.write_xmm_reg_lo128(instr.src1(), val);
-                    Ok(())
+                    self.vmovdqa_reg(instr)
                 } else {
-                    self.movdqa_wdq_vdq_m(instr)
+                    self.vmovdqa_store(instr)
                 }
             }
-            // MOVDQU (unaligned packed integer) — load
+            // MOVDQU (unaligned packed integer) — load (VEX.L aware)
             Opcode::MovdquVdqWdq => {
                 if instr.mod_c0() {
-                    self.prepare_sse()?;
-                    let val = self.read_xmm_reg(instr.src1());
-                    self.write_xmm_reg_lo128(instr.dst(), val);
-                    Ok(())
+                    self.vmovdqa_reg(instr)
                 } else {
-                    self.movdqu_vdq_wdq_m(instr)
+                    self.vmovdqu_load(instr)
                 }
             }
-            // MOVDQU (unaligned packed integer) — store
+            // MOVDQU (unaligned packed integer) — store (VEX.L aware)
             Opcode::MovdquWdqVdq => {
                 if instr.mod_c0() {
-                    self.prepare_sse()?;
-                    let val = self.read_xmm_reg(instr.dst());
-                    self.write_xmm_reg_lo128(instr.src1(), val);
-                    Ok(())
+                    self.vmovdqa_reg(instr) // reg-to-reg is same as MOVDQA
                 } else {
-                    self.movdqu_wdq_vdq_m(instr)
+                    self.vmovdqu_store(instr)
                 }
             }
 
@@ -2648,11 +2624,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Arithmetic
             Opcode::PaddbVdqWdq => self.paddb_vdq_wdq(instr),
             Opcode::PaddwVdqWdq => self.paddw_vdq_wdq(instr),
-            Opcode::PadddVdqWdq => self.paddd_vdq_wdq(instr),
+            Opcode::PadddVdqWdq => self.vpaddd(instr),
             Opcode::PaddqVdqWdq => self.paddq_vdq_wdq(instr),
             Opcode::PsubbVdqWdq => self.psubb_vdq_wdq(instr),
             Opcode::PsubwVdqWdq => self.psubw_vdq_wdq(instr),
-            Opcode::PsubdVdqWdq => self.psubd_vdq_wdq(instr),
+            Opcode::PsubdVdqWdq => self.vpsubd(instr),
             Opcode::PsubqVdqWdq => self.psubq_vdq_wdq(instr),
             Opcode::PaddsbVdqWdq => self.paddsb_vdq_wdq(instr),
             Opcode::PaddswVdqWdq => self.paddsw_vdq_wdq(instr),
@@ -2671,16 +2647,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Compare
             Opcode::PcmpeqbVdqWdq => self.pcmpeqb_vdq_wdq(instr),
             Opcode::PcmpeqwVdqWdq => self.pcmpeqw_vdq_wdq(instr),
-            Opcode::PcmpeqdVdqWdq => self.pcmpeqd_vdq_wdq(instr),
+            Opcode::PcmpeqdVdqWdq => self.vpcmpeqd(instr),
             Opcode::PcmpgtbVdqWdq => self.pcmpgtb_vdq_wdq(instr),
             Opcode::PcmpgtwVdqWdq => self.pcmpgtw_vdq_wdq(instr),
             Opcode::PcmpgtdVdqWdq => self.pcmpgtd_vdq_wdq(instr),
 
             // Logical
-            Opcode::PandVdqWdq => self.pand_vdq_wdq(instr),
+            Opcode::PandVdqWdq => self.vpand(instr),
             Opcode::PandnVdqWdq => self.pandn_vdq_wdq(instr),
-            Opcode::PorVdqWdq => self.por_vdq_wdq(instr),
-            Opcode::PxorVdqWdq => self.pxor_vdq_wdq(instr),
+            Opcode::PorVdqWdq => self.vpor(instr),
+            Opcode::PxorVdqWdq => self.vpxor(instr),
 
             // Shift by XMM register
             Opcode::PsrlwVdqWdq => self.psrlw_vdq_wdq(instr),
@@ -2707,11 +2683,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Unpack/interleave
             Opcode::PunpcklbwVdqWdq => self.punpcklbw_vdq_wdq(instr),
             Opcode::PunpcklwdVdqWdq => self.punpcklwd_vdq_wdq(instr),
-            Opcode::PunpckldqVdqWdq => self.punpckldq_vdq_wdq(instr),
+            Opcode::PunpckldqVdqWdq => self.vpunpckldq(instr),
             Opcode::PunpcklqdqVdqWdq => self.punpcklqdq_vdq_wdq(instr),
             Opcode::PunpckhbwVdqWdq => self.punpckhbw_vdq_wdq(instr),
             Opcode::PunpckhwdVdqWdq => self.punpckhwd_vdq_wdq(instr),
-            Opcode::PunpckhdqVdqWdq => self.punpckhdq_vdq_wdq(instr),
+            Opcode::PunpckhdqVdqWdq => self.vpunpckhdq(instr),
             Opcode::PunpckhqdqVdqWdq => self.punpckhqdq_vdq_wdq(instr),
 
             // Pack
@@ -2720,7 +2696,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::PackuswbVdqWdq => self.packuswb_vdq_wdq(instr),
 
             // Shuffle
-            Opcode::PshufdVdqWdqIb => self.pshufd_vdq_wdq_ib(instr),
+            Opcode::PshufdVdqWdqIb => self.vpshufd(instr),
             Opcode::PshufhwVdqWdqIb => self.pshufhw_vdq_wdq_ib(instr),
             Opcode::PshuflwVdqWdqIb => self.pshuflw_vdq_wdq_ib(instr),
 
@@ -2814,13 +2790,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     self.pmovzxbw_vdq_wq_m(instr)
                 }
             }
-            Opcode::PmovzxbdVdqWd => {
-                if instr.mod_c0() {
-                    self.pmovzxbd_vdq_wd_r(instr)
-                } else {
-                    self.pmovzxbd_vdq_wd_m(instr)
-                }
-            }
+            Opcode::PmovzxbdVdqWd => self.vpmovzxbd(instr),
             Opcode::PmovzxbqVdqWw => {
                 if instr.mod_c0() {
                     self.pmovzxbq_vdq_ww_r(instr)
@@ -2945,6 +2915,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
                 Ok(())
             }
+
+            // =========================================================================
+            // AVX/AVX-512 specific opcodes
+            // =========================================================================
+            Opcode::EvexVpermi2dVdqHdqWdqKmask => self.vpermi2d(instr),
 
             // UD0/UD1/UD2 — intentional #UD exceptions (Linux uses UD2 for BUG()/WARN())
             Opcode::Ud0 | Opcode::Ud1 | Opcode::Ud2 => {

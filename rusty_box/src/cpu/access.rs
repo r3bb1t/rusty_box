@@ -1585,6 +1585,61 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.write_virtual_xmmword_64(seg, offset, val)
     }
 
+    // ===== 64-bit ymmword read/write functions =====
+
+    /// Read a 256-bit YMM word from virtual memory in 64-bit mode.
+    pub(super) fn read_virtual_ymmword_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: u64,
+    ) -> Result<super::xmm::BxPackedYmmRegister> {
+        let q0 = self.read_virtual_qword_64(seg, offset)?;
+        let q1 = self.read_virtual_qword_64(seg, offset.wrapping_add(8))?;
+        let q2 = self.read_virtual_qword_64(seg, offset.wrapping_add(16))?;
+        let q3 = self.read_virtual_qword_64(seg, offset.wrapping_add(24))?;
+        Ok(super::xmm::BxPackedYmmRegister {
+            ymm64u: [q0, q1, q2, q3],
+        })
+    }
+
+    /// Write a 256-bit YMM word to virtual memory in 64-bit mode.
+    pub(super) fn write_virtual_ymmword_64(
+        &mut self,
+        seg: BxSegregs,
+        offset: u64,
+        val: &super::xmm::BxPackedYmmRegister,
+    ) -> Result<()> {
+        unsafe {
+            self.write_virtual_qword_64(seg, offset, val.ymm64u[0])?;
+            self.write_virtual_qword_64(seg, offset.wrapping_add(8), val.ymm64u[1])?;
+            self.write_virtual_qword_64(seg, offset.wrapping_add(16), val.ymm64u[2])?;
+            self.write_virtual_qword_64(seg, offset.wrapping_add(24), val.ymm64u[3])?;
+        }
+        Ok(())
+    }
+
+    // ===== Mode-dispatching wrappers for ymmword =====
+
+    pub fn v_read_ymmword(
+        &mut self,
+        seg: BxSegregs,
+        offset: impl Into<u64>,
+    ) -> Result<super::xmm::BxPackedYmmRegister> {
+        let offset = offset.into();
+        // YMM operations are only used in long mode (VEX/EVEX)
+        self.read_virtual_ymmword_64(seg, offset)
+    }
+
+    pub fn v_write_ymmword(
+        &mut self,
+        seg: BxSegregs,
+        offset: impl Into<u64>,
+        val: &super::xmm::BxPackedYmmRegister,
+    ) -> Result<()> {
+        let offset = offset.into();
+        self.write_virtual_ymmword_64(seg, offset, val)
+    }
+
     // =========================================================================
     // 64-bit RMW read functions for byte/word/dword
     // =========================================================================

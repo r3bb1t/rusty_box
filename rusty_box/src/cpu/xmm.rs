@@ -329,6 +329,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
+    /// Read YMM register (lower 256 bits of vmm[index])
+    #[inline]
+    pub(super) fn read_ymm_reg(&self, index: u8) -> BxPackedYmmRegister {
+        unsafe { self.vmm[index as usize].zmm256[0] }
+    }
+
+    /// Write YMM register (writes lower 256 bits, clears upper 256 bits)
+    #[inline]
+    pub(super) fn write_ymm_reg(&mut self, index: u8, val: BxPackedYmmRegister) {
+        let i = index as usize;
+        self.vmm[i].clear();
+        unsafe {
+            self.vmm[i].zmm256[0] = val;
+        }
+    }
+
     /// Prepare for SSE instruction — check CR0.EM, CR4.OSFXSR, CR0.TS
     /// Returns Ok(()) if SSE is available, or raises #UD/#NM exception.
     /// Bochs: BX_CPU_C::prepareSSE() / bx_no_sse checks

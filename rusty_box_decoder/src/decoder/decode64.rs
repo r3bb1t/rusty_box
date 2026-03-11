@@ -8,7 +8,7 @@ use crate::error::{DecodeError, DecodeResult};
 use crate::opcode::Opcode;
 use crate::BxSegregs;
 
-use super::tables::{BxDecodeError, SsePrefix};
+use super::tables::{BxDecodeError, SsePrefix, VEX_W_OFFSET, VEX_VL_128_256_OFFSET, MASK_K0_OFFSET};
 
 // Import opcode tables
 use super::opmap::*;
@@ -208,18 +208,197 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
     pos += 1;
 
     // Check for VEX/EVEX/XOP prefixes
+    let mut vex_vvv: u8 = 0; // VEX.vvvv register (0 = unused, stored inverted in encoding)
+    let mut is_vex: bool = false;
+    let mut is_evex: bool = false;
+    let mut opcode_map: u8 = 0; // 0=1-byte, 1=0F, 2=0F38, 3=0F3A
+    let mut vex_l: u8 = 0; // 0=128-bit (XMM), 1=256-bit (YMM), 2=512-bit (ZMM)
+    let mut vex_w: u8 = 0; // VEX.W / EVEX.W bit
+    let mut evex_z: u8 = 0; // EVEX zeroing-masking
+    let mut evex_b_flag: u8 = 0; // EVEX broadcast/RC/SAE
+    let mut evex_aaa: u8 = 0; // EVEX opmask register
+
     if b1 == 0xC4 || b1 == 0xC5 {
         // VEX prefix — in 64-bit mode, C4/C5 are always VEX (never LES/LDS)
-        // Bochs decoder_vex64 fully parses; we reject as unsupported
-        return Err(DecodeError::Decoder(
-            BxDecodeError::BxIllegalVexXopOpcodeMap,
-        ));
+        // Bochs decoder_vex64 (fetchdecode64.cc:764-883)
+        if sse_prefix != SsePrefix::PrefixNone as u8 || rex_prefix != 0 {
+            return Err(DecodeError::Decoder(BxDecodeError::BxIllegalVexXopWithRexPrefix));
+        }
+
+        is_vex = true;
+        let mut vex_opc_map: u8 = 1; // 2-byte VEX implies map=1 (0F)
+        let mut rex_x: u8 = 0;
+        let mut rex_b: u8 = 0;
+
+        if pos >= max_len {
+            return Err(DecodeError::OpcodeBufferUnderflow);
+        }
+        let vex_byte1 = bytes[pos];
+        pos += 1;
+
+        // VEX.R is inverted: bit 7=0 means REX.R=1
+        let rex_r = ((vex_byte1 >> 4) & 0x8) ^ 0x8;
+
+        if b1 == 0xC4 {
+            // 3-byte VEX prefix: C4 [RXBmmmmm] [WvvvvLpp]
+            rex_x = ((vex_byte1 >> 3) & 0x8) ^ 0x8;
+            rex_b = ((vex_byte1 >> 2) & 0x8) ^ 0x8;
+            vex_opc_map = vex_byte1 & 0x1F;
+
+            if pos >= max_len {
+                return Err(DecodeError::OpcodeBufferUnderflow);
+            }
+            let vex_byte2 = bytes[pos];
+            pos += 1;
+
+            if (vex_byte2 & 0x80) != 0 {
+                vex_w = 1;
+                // VEX.W=1 implies 64-bit operand size
+                metainfo1_bits |= MetaInfoFlags::Os64.bits() | MetaInfoFlags::Os32.bits();
+            }
+
+            vex_vvv = (15 - ((vex_byte2 >> 3) & 0xF)) as u8;
+            vex_l = (vex_byte2 >> 2) & 0x1;
+            sse_prefix = vex_byte2 & 0x3; // pp field = SSE prefix
+        } else {
+            // 2-byte VEX prefix: C5 [RvvvvLpp]
+            vex_vvv = (15 - ((vex_byte1 >> 3) & 0xF)) as u8;
+            vex_l = (vex_byte1 >> 2) & 0x1;
+            sse_prefix = vex_byte1 & 0x3; // pp field = SSE prefix
+        }
+
+        // Build rex_prefix from VEX R/X/B bits (matching Bochs convention)
+        // rex_prefix bit layout: 0=B, 1=X, 2=R, 3=W
+        rex_prefix = (rex_b >> 3) | ((rex_x >> 3) << 1) | ((rex_r >> 3) << 2);
+
+        // Read opcode byte
+        if pos >= max_len {
+            return Err(DecodeError::OpcodeBufferUnderflow);
+        }
+        let opcode_byte = bytes[pos] as u32;
+        pos += 1;
+
+        // Valid VEX maps: 1 (0F), 2 (0F38), 3 (0F3A)
+        match vex_opc_map {
+            1 => {
+                b1 = 0x100 | opcode_byte;
+                opcode_map = 1;
+            }
+            2 => {
+                b1 = 0x200 | opcode_byte;
+                opcode_map = 2;
+            }
+            3 => {
+                b1 = 0x300 | opcode_byte;
+                opcode_map = 3;
+            }
+            _ => {
+                return Err(DecodeError::Decoder(BxDecodeError::BxIllegalVexXopOpcodeMap));
+            }
+        }
+
+        // VZEROUPPER/VZEROALL (VEX.0F 77) has no ModRM
+        // All other VEX instructions have ModRM
     }
 
     if b1 == 0x62 {
         // In 64-bit mode, 0x62 is always EVEX (never BOUND)
-        // EVEX not fully supported — reject with appropriate error
-        return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
+        // EVEX format: 62 [P0] [P1] [P2] [opcode] [modrm] ...
+        // P0: ~R ~X ~B ~R' 00 mm
+        // P1: W ~vvvv 1 pp
+        // P2: z L'L b ~V' aaa
+        if sse_prefix != SsePrefix::PrefixNone as u8 || rex_prefix != 0 {
+            return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
+        }
+        if pos + 3 >= max_len {
+            return Err(DecodeError::OpcodeBufferUnderflow);
+        }
+
+        is_vex = true; // treat EVEX like VEX for dispatch purposes
+        is_evex = true;
+        let p0 = bytes[pos];
+        let p1 = bytes[pos + 1];
+        let p2 = bytes[pos + 2];
+        pos += 3;
+
+        // P0: ~R(7) ~X(6) ~B(5) ~R'(4) 0(3) mmm(2:0)
+        // Bochs: bit 3 must be 0 (reserved)
+        if (p0 & 0x08) != 0 {
+            return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
+        }
+        let evex_map = p0 & 0x07; // 3-bit map (Bochs: evex & 0x7)
+        // R/X/B from P0 (inverted bits) — bit 3 extension for register encoding
+        let rex_r_bit = if (p0 & 0x80) == 0 { 4u8 } else { 0u8 }; // ~R → REX.R (bit 2 of rex_prefix)
+        let rex_x_bit = if (p0 & 0x40) == 0 { 2u8 } else { 0u8 }; // ~X → REX.X (bit 1)
+        let rex_b_bit = if (p0 & 0x20) == 0 { 1u8 } else { 0u8 }; // ~B → REX.B (bit 0)
+        // R' from P0 bit 4 — extends R to 5 bits for EVEX register encoding
+        let _evex_r_prime = if (p0 & 0x10) == 0 { 1u8 } else { 0u8 }; // inverted
+
+        // P1: W(7) ~vvvv(6:3) 1(2) pp(1:0)
+        // Bit 2 must be 1
+        if (p1 & 0x04) == 0 {
+            return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
+        }
+        vex_w = (p1 >> 7) & 1;
+        vex_vvv = (15 - ((p1 >> 3) & 0xF)) as u8;
+        sse_prefix = p1 & 0x03;
+
+        if vex_w != 0 {
+            metainfo1_bits |= MetaInfoFlags::Os64.bits() | MetaInfoFlags::Os32.bits();
+        }
+
+        // P2: z(7) L'L(6:5) b(4) ~V'(3) aaa(2:0)
+        vex_l = (p2 >> 5) & 0x03; // 0=128, 1=256, 2=512
+        evex_z = (p2 >> 7) & 1;
+        evex_b_flag = (p2 >> 4) & 1;
+        evex_aaa = p2 & 0x07;
+        // V' extends vvvv to 5 bits (inverted)
+        let _evex_v_prime = if (p2 & 0x08) == 0 { 1u8 } else { 0u8 };
+
+        rex_prefix = rex_b_bit | rex_x_bit | rex_r_bit;
+
+        // Read opcode byte
+        if pos >= max_len {
+            return Err(DecodeError::OpcodeBufferUnderflow);
+        }
+        let opcode_byte = bytes[pos] as u32;
+        pos += 1;
+
+        // Bochs: map 0, 4, 7 are invalid; maps 5/6 valid but adjusted
+        match evex_map {
+            0 | 4 | 7 => {
+                return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
+            }
+            1 => {
+                b1 = 0x100 | opcode_byte;
+                opcode_map = 1;
+            }
+            2 => {
+                b1 = 0x200 | opcode_byte;
+                opcode_map = 2;
+            }
+            3 => {
+                b1 = 0x300 | opcode_byte;
+                opcode_map = 3;
+            }
+            // Maps 5/6 (APX extensions) — adjust down by 1 to skip map 4
+            5 => {
+                b1 = 0x400 | opcode_byte;
+                opcode_map = 4;
+            }
+            6 => {
+                b1 = 0x500 | opcode_byte;
+                opcode_map = 5;
+            }
+            _ => {
+                return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
+            }
+        }
+
+        // Validate z + k0: zeroing-masking with k0 is invalid (#UD) (Bochs fetchdecode64.cc:977-978)
+        if evex_z != 0 && evex_aaa == 0 {
+            return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
+        }
     }
 
     if b1 == 0x8F {
@@ -233,9 +412,8 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         // If bit 3 not set, fall through to decode as POP r/m64
     }
 
-    // Two-byte escape (0F xx)
-    let mut opcode_map: u8 = 0; // 0=1-byte, 1=0F, 2=0F38, 3=0F3A
-    if b1 == 0x0F {
+    // Two-byte escape (0F xx) — for non-VEX instructions
+    if !is_vex && b1 == 0x0F {
         if pos >= max_len {
             return Err(DecodeError::OpcodeBufferUnderflow);
         }
@@ -562,6 +740,18 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         }
     }
 
+    // Store VEX/EVEX fields in instruction
+    if is_vex {
+        instr.operands.src2 = vex_vvv;
+        instr.set_vl(vex_l);
+        instr.set_vex_w(vex_w);
+    }
+    if is_evex {
+        instr.set_opmask(evex_aaa);
+        instr.set_evex_b(evex_b_flag);
+        instr.set_zero_masking(evex_z);
+    }
+
     // === Phase 3.5: Read 3DNow! suffix byte (comes after ModRM/displacement) ===
     let mut dnow_suffix: u8 = 0;
     if opcode_map == 4 {
@@ -647,7 +837,10 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         | (if mod_c0 { 1 } else { 0 } << MODC0_OFFSET)
         | (1 << IS64_OFFSET) // 64-bit mode
         | ((nnn & 0x7) << NNN_OFFSET)
-        | ((rm & 0x7) << RRR_OFFSET);
+        | ((rm & 0x7) << RRR_OFFSET)
+        | ((vex_w as u32) << VEX_W_OFFSET)
+        | ((vex_l as u32) << VEX_VL_128_256_OFFSET)
+        | (if is_evex && evex_aaa == 0 { 1u32 << MASK_K0_OFFSET } else { 0 });
     // SRC_EQ_DST: Bochs sets this for zero-idiom detection (XOR reg,reg; SUB reg,reg)
     // Bochs uses full nnn == rm comparison (not masked to 3 bits) — prevents false positives
     // for register pairs like RAX/R8 where (nnn & 0x7) == (rm & 0x7) but nnn != rm

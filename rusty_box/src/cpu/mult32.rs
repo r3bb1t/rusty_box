@@ -302,33 +302,52 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// IMUL Gd, Ed, Ib - Three-operand signed multiply with 8-bit immediate
-    /// dst = src * sign_extend(imm8)
+    /// IMUL Gd, Ed, sIb - Three-operand signed multiply with sign-extended 8-bit immediate
     /// Opcode: 6B /r ib
+    /// Unified wrapper — dispatches to register or memory form
     pub fn imul_gd_ed_ib(&mut self, instr: &Instruction) -> Result<()> {
-        let dst_reg = instr.dst() as usize;
-        let src_reg = instr.src() as usize;
-
-        // Get source operand (32-bit)
-        let op1 = self.get_gpr32(src_reg) as i32;
-
-        // Get immediate operand (8-bit, sign-extended to 32-bit)
-        let imm8 = instr.ib() as i8;
-        let op2 = imm8 as i32;
-
-        // Perform signed multiplication
-        let product_64 = (op1 as i64) * (op2 as i64);
-        let result_32 = product_64 as i32;
-
-        // Store result in destination register
-        self.set_gpr32(dst_reg, result_32 as u32);
-
-        // Set CF and OF if result doesn't fit in signed 32-bit
-        // (i.e., if sign-extension of result doesn't equal the full 64-bit product)
-        if product_64 != (result_32 as i64) {
-            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+        if instr.mod_c0() {
+            self.imul_gd_ed_ib_r(instr)
         } else {
-            self.eflags.remove(EFlags::CF.union(EFlags::OF)); // CF=0, OF=0
+            self.imul_gd_ed_ib_m(instr)
+        }
+    }
+
+    /// IMUL Gd, Ed, sIb - register form
+    /// Bochs mult32.cc IMUL_GdEdIdR (same handler for both Id and sIb)
+    fn imul_gd_ed_ib_r(&mut self, instr: &Instruction) -> Result<()> {
+        let op1 = self.get_gpr32(instr.src() as usize) as i32;
+        let op2 = instr.ib() as i8 as i32;
+
+        let product_64 = (op1 as i64) * (op2 as i64);
+        let product_32 = product_64 as u32;
+
+        self.set_gpr32(instr.dst() as usize, product_32);
+
+        self.set_flags_oszapc_logic_32(product_32);
+        if product_64 != (product_32 as i32 as i64) {
+            self.eflags.insert(EFlags::CF.union(EFlags::OF));
+        }
+
+        Ok(())
+    }
+
+    /// IMUL Gd, Ed, sIb - memory form
+    /// Bochs mult32.cc IMUL_GdEdIdM (loads from memory)
+    fn imul_gd_ed_ib_m(&mut self, instr: &Instruction) -> Result<()> {
+        let eaddr = self.resolve_addr(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let op1 = self.v_read_dword(seg, eaddr)? as i32;
+        let op2 = instr.ib() as i8 as i32;
+
+        let product_64 = (op1 as i64) * (op2 as i64);
+        let product_32 = product_64 as u32;
+
+        self.set_gpr32(instr.dst() as usize, product_32);
+
+        self.set_flags_oszapc_logic_32(product_32);
+        if product_64 != (product_32 as i32 as i64) {
+            self.eflags.insert(EFlags::CF.union(EFlags::OF));
         }
 
         Ok(())

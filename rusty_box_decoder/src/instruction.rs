@@ -676,19 +676,19 @@ impl Instruction {
 
     /// Set the immediate from native-endian byte array
     #[inline]
-    fn set_imm_bytes(&mut self, bytes: [u8; 4]) {
+    const fn set_imm_bytes(&mut self, bytes: [u8; 4]) {
         self.immediate = u32::from_ne_bytes(bytes);
     }
 
     /// Get AVX vector length (VL)
     #[inline]
-    pub fn get_vl(&self) -> u8 {
+    pub const fn get_vl(&self) -> u8 {
         self.imm_bytes()[1]
     }
 
     /// Set AVX vector length (VL)
     #[inline]
-    pub fn set_vl(&mut self, value: u8) {
+    pub const fn set_vl(&mut self, value: u8) {
         let mut ib = self.imm_bytes();
         ib[1] = value;
         self.set_imm_bytes(ib);
@@ -696,13 +696,13 @@ impl Instruction {
 
     /// Get VEX.W bit
     #[inline]
-    pub fn get_vex_w(&self) -> u8 {
+    pub const fn get_vex_w(&self) -> u8 {
         (self.imm_bytes()[2] >> 4) & 1
     }
 
     /// Set VEX.W bit
     #[inline]
-    pub fn set_vex_w(&mut self, bit: u8) {
+    pub const fn set_vex_w(&mut self, bit: u8) {
         let mut ib = self.imm_bytes();
         ib[2] = (ib[2] & !0x10) | ((bit & 1) << 4);
         self.set_imm_bytes(ib);
@@ -710,13 +710,13 @@ impl Instruction {
 
     /// Get EVEX opmask register
     #[inline]
-    pub fn opmask(&self) -> u8 {
+    pub const fn opmask(&self) -> u8 {
         self.imm_bytes()[3]
     }
 
     /// Set EVEX opmask register
     #[inline]
-    pub fn set_opmask(&mut self, reg: u8) {
+    pub const fn set_opmask(&mut self, reg: u8) {
         let mut ib = self.imm_bytes();
         ib[3] = reg;
         self.set_imm_bytes(ib);
@@ -724,13 +724,13 @@ impl Instruction {
 
     /// Get EVEX.b bit (broadcast/RC/SAE control)
     #[inline]
-    pub fn get_evex_b(&self) -> u8 {
+    pub const fn get_evex_b(&self) -> u8 {
         (self.imm_bytes()[2] >> 3) & 1
     }
 
     /// Set EVEX.b bit
     #[inline]
-    pub fn set_evex_b(&mut self, bit: u8) {
+    pub const fn set_evex_b(&mut self, bit: u8) {
         let mut ib = self.imm_bytes();
         ib[2] = (ib[2] & !0x8) | ((bit & 1) << 3);
         self.set_imm_bytes(ib);
@@ -738,13 +738,13 @@ impl Instruction {
 
     /// Get zero masking bit (EVEX.z)
     #[inline]
-    pub fn is_zero_masking(&self) -> u8 {
+    pub const fn is_zero_masking(&self) -> u8 {
         (self.imm_bytes()[2] >> 2) & 1
     }
 
     /// Set zero masking bit
     #[inline]
-    pub fn set_zero_masking(&mut self, bit: u8) {
+    pub const fn set_zero_masking(&mut self, bit: u8) {
         let mut ib = self.imm_bytes();
         ib[2] = (ib[2] & !0x4) | ((bit & 1) << 2);
         self.set_imm_bytes(ib);
@@ -752,13 +752,13 @@ impl Instruction {
 
     /// Get rounding control (RC)
     #[inline]
-    pub fn get_rc(&self) -> u8 {
+    pub const fn get_rc(&self) -> u8 {
         self.imm_bytes()[2] & 0x3
     }
 
     /// Set rounding control (RC)
     #[inline]
-    pub fn set_rc(&mut self, rc: u8) {
+    pub const fn set_rc(&mut self, rc: u8) {
         let mut ib = self.imm_bytes();
         ib[2] = (ib[2] & !0x3) | (rc & 0x3);
         self.set_imm_bytes(ib);

@@ -189,6 +189,11 @@ pub const BxOpcodeTable0F38DF: [u64; 1] =
     [last_opcode(ATTR_SSE_PREFIX_66, Opcode::AesdeclastVdqWdq)];
 
 // opcode 0F 38 F0
+// EVEX.66.0F38.W0 76 — VPERMI2D (AVX-512F)
+pub const BxOpcodeTable0F3876: [u64; 1] = [
+    last_opcode(ATTR_SSE_PREFIX_66, Opcode::EvexVpermi2dVdqHdqWdqKmask),
+];
+
 pub const BxOpcodeTable0F38F0: [u64; 4] = [
     form_opcode(
         ATTR_NO_SSE_PREFIX_F2_F3 | ATTR_OS16 | ATTR_MOD_MEM,
@@ -413,7 +418,7 @@ pub(super) const BxOpcodeTable0F38: [&[u64]; 256] = [
     /* 0F 38 73 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 74 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 75 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 76 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 76 */ &BxOpcodeTable0F3876,
     /* 0F 38 77 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 78 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 79 */ &BX_OPCODE_GROUP_ERR,

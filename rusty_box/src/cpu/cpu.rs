@@ -43,7 +43,7 @@ pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
 const BX_DTLB_SIZE: usize = 4096;
 const BX_ITLB_SIZE: usize = 1024;
 
-use super::avx::amx::AMX;
+use super::avx::AMX;
 
 use super::tlb::BxMemType;
 
