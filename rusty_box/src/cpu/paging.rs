@@ -115,24 +115,27 @@ const PAGE_DIRECTORY_NX_BIT: u64 = 0x8000_0000_0000_0000;
 // For BX_PHY_ADDRESS_WIDTH=40: ((1 << (41-40))-1) << (13+40-32) = 1 << 21 = 0x200000
 const PAGING_PDE4M_RESERVED_BITS: u32 = 0x200000;
 
-// Reserved bits for PAE paging (BX_PHY_ADDRESS_WIDTH=40)
-// BX_PAGING_PHY_ADDRESS_RESERVED_BITS = bits 51:40 = 0x000F_FF00_0000_0000
-const PAGING_PAE_PHY_RESERVED_BITS: u64 = 0x000F_FF00_0000_0000;
+// Physical address width (matching Bochs config.h BX_PHY_ADDRESS_WIDTH for BX_PHY_ADDRESS_LONG)
+const BX_PHY_ADDRESS_WIDTH: u32 = 40;
 
-// In legacy PAE mode, bits [62:52] are reserved (bit 63 is NX)
-// PAGING_LEGACY_PAE_RESERVED_BITS = PHY_RESERVED | 0x7FF0_0000_0000_0000
-const PAGING_LEGACY_PAE_RESERVED_BITS: u64 = 0x7FFF_FF00_0000_0000;
+// BX_PAGING_PHY_ADDRESS_RESERVED_BITS = (~((1 << WIDTH) - 1)) & 0x000F_FFFF_FFFF_FFFF
+// Strips bit 63 (NX) and bits 62:52 (ignored) — only bits [51:WIDTH] are reserved
+const PAGING_PAE_PHY_RESERVED_BITS: u64 = {
+    let mask = (1u64 << BX_PHY_ADDRESS_WIDTH) - 1;
+    (!mask) & 0x000F_FFFF_FFFF_FFFFu64
+};
 
-// PAE PDE 2MB page reserved bits: bits 20:13 must be zero
-// PAGING_PAE_PDE2M_RESERVED_BITS = PHY_RESERVED | 0x001F_E000
-const PAGING_PAE_PDE2M_RESERVED_BITS: u64 = 0x000F_FF00_001F_E000;
+// Legacy PAE: bits [62:52] are also reserved (bit 63 = NX)
+const PAGING_LEGACY_PAE_RESERVED_BITS: u64 = PAGING_PAE_PHY_RESERVED_BITS | 0x7FF0_0000_0000_0000;
 
-// Legacy PAE PDPTE reserved bits: PHY_RESERVED | bits 63:52, 8:5, 2:1
-// = 0x000F_FF00_0000_0000 | 0xFFF0_0000_0000_01E6 = 0xFFFF_FF00_0000_01E6
-const PAGING_PAE_PDPTE_RESERVED_BITS: u64 = 0xFFFF_FF00_0000_01E6;
+// PAE PDE 2MB: bits 20:13 must be zero + PHY reserved
+const PAGING_PAE_PDE2M_RESERVED_BITS: u64 = PAGING_PAE_PHY_RESERVED_BITS | 0x001F_E000;
 
-// Long mode PDPTE 1GB page reserved bits: bits 29:13 + PHY_RESERVED
-const PAGING_PAE_PDPTE1G_RESERVED_BITS: u64 = 0x000F_FF00_3FFF_E000;
+// PAE PDPTE reserved: PHY + bits 63:52, 8:5, 2:1
+const PAGING_PAE_PDPTE_RESERVED_BITS: u64 = PAGING_PAE_PHY_RESERVED_BITS | 0xFFF0_0000_0000_01E6;
+
+// Long mode PDPTE 1GB: bits 29:13 + PHY reserved
+const PAGING_PAE_PDPTE1G_RESERVED_BITS: u64 = PAGING_PAE_PHY_RESERVED_BITS | 0x3FFF_E000;
 
 // Privilege check array (for CR0.WP=0 and CR0.WP=1)
 // Index format: |wp|us|us|rw|rw| where:
@@ -809,6 +812,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if is_execute
             && self.cr4.smep()
             && !user
+            && (combined_access & CombinedAccess::USER.bits()) != 0
+        {
+            return Err(super::CpuError::Memory(
+                crate::memory::MemoryError::PageProtectionViolation,
+            ));
+        }
+
+        // SMAP check: supervisor data access to user page when AC=0 (Bochs paging.cc:746-749)
+        if !is_execute
+            && self.cr4.smap()
+            && !user
+            && self.get_ac() == 0
             && (combined_access & CombinedAccess::USER.bits()) != 0
         {
             return Err(super::CpuError::Memory(

@@ -1028,6 +1028,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::MovbeMdGd => self.movbe_md_gd(instr),
             Opcode::MovbeGwMw => self.movbe_gw_mw(instr),
             Opcode::MovbeMwGw => self.movbe_mw_gw(instr),
+            Opcode::MovbeGqMq => self.movbe_gq_mq(instr),
+            Opcode::MovbeMqGq => self.movbe_mq_gq(instr),
 
             // =========================================================================
             // Multiplication and Division instructions

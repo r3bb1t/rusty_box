@@ -27,12 +27,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ── RDRAND ──────────────────────────────────────────────────────
 
     /// RDRAND r16  (0F C7 /6, opsize 16)
+    /// Bochs BX_WRITE_16BIT_REG: only writes low 16 bits, preserves 63:16.
     pub fn rdrand_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         self.clear_flags_set_cf();
-        let val = (self.hw_rand64() & 0xFFFF) as u32;
-        let dst = instr.dst() as usize;
-        let cur = self.get_gpr32(dst);
-        self.set_gpr32(dst, (cur & 0xFFFF0000) | val);
+        let val = self.hw_rand64() as u16;
+        self.set_gpr16(instr.dst() as usize, val);
         Ok(())
     }
 
@@ -55,12 +54,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ── RDSEED ──────────────────────────────────────────────────────
 
     /// RDSEED r16  (0F C7 /7, opsize 16)
+    /// Bochs BX_WRITE_16BIT_REG: only writes low 16 bits, preserves 63:16.
     pub fn rdseed_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         self.clear_flags_set_cf();
-        let val = (self.hw_rand64() & 0xFFFF) as u32;
-        let dst = instr.dst() as usize;
-        let cur = self.get_gpr32(dst);
-        self.set_gpr32(dst, (cur & 0xFFFF0000) | val);
+        let val = self.hw_rand64() as u16;
+        self.set_gpr16(instr.dst() as usize, val);
         Ok(())
     }
 

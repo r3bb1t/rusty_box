@@ -14,11 +14,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Bochs bmi64.cc uses this for ANDN, BLSI, BLSMSK, BLSR, BZHI
     // =====================================================================
 
-    /// Clear OF, SF, ZF, CF; set SF if sign bit set, set ZF if zero.
-    /// Leaves PF and AF unchanged (matching Bochs SET_FLAGS_OSZAxC_LOGIC_64).
+    /// Clear OF, SF, ZF, AF, CF; set SF if sign bit set, set ZF if zero.
+    /// Leaves PF unchanged (matching Bochs SET_FLAGS_OSZAxC_LOGIC_64).
     fn set_flags_oszaxc_logic_64(&mut self, result: u64) {
+        // Bochs SET_FLAGS_OSZAxC_LOGIC_64: save PF, call SET_FLAGS_OSZAPC_SIZE
+        // with carries=0 (clears OF, CF, AF; sets SF, ZF from result), restore PF.
+        // Net effect: clears OF, SF, ZF, AF, CF; sets SF/ZF from result; PF unchanged.
         self.eflags
-            .remove(EFlags::OF | EFlags::SF | EFlags::ZF | EFlags::CF);
+            .remove(EFlags::OF | EFlags::SF | EFlags::ZF | EFlags::AF | EFlags::CF);
         if result == 0 {
             self.eflags.insert(EFlags::ZF);
         }

@@ -342,6 +342,29 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
+    // MOVBE — Move Big-Endian (64-bit) (0F 38 F0 / 0F 38 F1 with REX.W)
+    // Matching Bochs bit.cc MOVBE_GqMq / MOVBE_MqGq
+    // =========================================================================
+
+    /// MOVBE r64, m64 — load qword with byte swap
+    pub fn movbe_gq_mq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let eaddr = self.resolve_addr64(instr);
+        let seg = BxSegregs::from(instr.seg());
+        let val = self.read_virtual_qword_64(seg, eaddr)?;
+        self.set_gpr64(instr.dst() as usize, val.swap_bytes());
+        Ok(())
+    }
+
+    /// MOVBE m64, r64 — store qword with byte swap
+    pub fn movbe_mq_gq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let val = self.get_gpr64(instr.dst() as usize);
+        let eaddr = self.resolve_addr64(instr);
+        let seg = BxSegregs::from(instr.seg());
+        self.write_virtual_qword_64(seg, eaddr, val.swap_bytes())?;
+        Ok(())
+    }
+
+    // =========================================================================
     // TZCNT — Trailing Zero Count (64-bit) (F3 REX.W 0F BC /r)
     // =========================================================================
 

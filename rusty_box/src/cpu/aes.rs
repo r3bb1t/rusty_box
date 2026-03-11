@@ -15,7 +15,7 @@
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
-    decoder::Instruction,
+    decoder::{BxSegregs, Instruction},
     xmm::BxPackedXmmRegister,
 };
 
@@ -333,12 +333,29 @@ fn xmm_pclmulqdq(a: u64, b: u64) -> BxPackedXmmRegister {
 // ============================================================================
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    /// Read source XMM operand from register or memory.
+    /// Matches Bochs LOAD_Wdq pattern: if mod==11b read register, else read 128-bit
+    /// from memory via paging-aware access.
+    #[inline]
+    fn read_xmm_src(
+        &mut self,
+        instr: &Instruction,
+    ) -> super::Result<BxPackedXmmRegister> {
+        if instr.mod_c0() {
+            Ok(self.read_xmm_reg(instr.src()))
+        } else {
+            let eaddr = self.resolve_addr(instr);
+            let seg = BxSegregs::from(instr.seg());
+            self.v_read_xmmword(seg, eaddr)
+        }
+    }
+
     /// AESIMC VdqWdq — 66 0F 38 DB
     ///
     /// Perform Inverse MixColumns on the source XMM operand and store
     /// the result in the destination XMM register.
     pub(super) fn aesimc_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        let mut op = self.read_xmm_reg(instr.src());
+        let mut op = self.read_xmm_src(instr)?;
 
         aes_inverse_mix_columns(&mut op);
 
@@ -352,7 +369,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// ShiftRows(state), SubBytes(state), MixColumns(state), XOR with round key.
     pub(super) fn aesenc_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut state = self.read_xmm_reg(instr.dst());
-        let round_key = self.read_xmm_reg(instr.src());
+        let round_key = self.read_xmm_src(instr)?;
 
         aes_shift_rows(&mut state);
         aes_substitute_bytes(&mut state);
@@ -369,7 +386,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// ShiftRows(state), SubBytes(state), XOR with round key.
     pub(super) fn aesenclast_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut state = self.read_xmm_reg(instr.dst());
-        let round_key = self.read_xmm_reg(instr.src());
+        let round_key = self.read_xmm_src(instr)?;
 
         aes_shift_rows(&mut state);
         aes_substitute_bytes(&mut state);
@@ -385,7 +402,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// InverseShiftRows, InverseSubBytes, InverseMixColumns, XOR with round key.
     pub(super) fn aesdec_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut state = self.read_xmm_reg(instr.dst());
-        let round_key = self.read_xmm_reg(instr.src());
+        let round_key = self.read_xmm_src(instr)?;
 
         aes_inverse_shift_rows(&mut state);
         aes_inverse_substitute_bytes(&mut state);
@@ -402,7 +419,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// InverseShiftRows, InverseSubBytes, XOR with round key.
     pub(super) fn aesdeclast_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut state = self.read_xmm_reg(instr.dst());
-        let round_key = self.read_xmm_reg(instr.src());
+        let round_key = self.read_xmm_src(instr)?;
 
         aes_inverse_shift_rows(&mut state);
         aes_inverse_substitute_bytes(&mut state);
@@ -419,7 +436,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         &mut self,
         instr: &Instruction,
     ) -> super::Result<()> {
-        let op = self.read_xmm_reg(instr.src());
+        let op = self.read_xmm_src(instr)?;
         let rcon32 = instr.ib() as u32;
         let mut result = BxPackedXmmRegister::default();
 
@@ -441,7 +458,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn pclmulqdq_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let imm8 = instr.ib();
         let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src());
+        let op2 = self.read_xmm_src(instr)?;
 
         let a = unsafe { op1.xmm64u[(imm8 & 1) as usize] };
         let b = unsafe { op2.xmm64u[((imm8 >> 4) & 1) as usize] };

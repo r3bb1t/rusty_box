@@ -148,13 +148,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn jmp_jq(&mut self, instr: &Instruction) -> Result<()> {
         let new_rip = self.rip().wrapping_add(instr.id() as i32 as u64);
 
-
         if !self.is_canonical(new_rip) {
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
         }
 
         self.set_rip(new_rip);
+
+        // BX_LINK_TRACE(i) — without handler chaining, equivalent to BX_NEXT_TRACE (STOP_TRACE)
+        // Matching C++ ctrl_xfer64.cc:215
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -169,6 +172,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         self.set_rip(new_rip);
+
+        // BX_NEXT_TRACE(i) — matching C++ ctrl_xfer64.cc:426
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -218,13 +224,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let new_rip = self.read_virtual_qword_64(seg, eaddr)?;
 
+        // RSP_SPECULATIVE — matching CALL_EqR pattern (C++ ctrl_xfer64.cc:143)
+        self.speculative_rsp = true;
+        self.prev_rsp = self.rsp();
+
+        // Push BEFORE canonical check — matching CALL_EqR (C++ ctrl_xfer64.cc:146)
+        self.push_64(self.rip())?;
+
         if !self.is_canonical(new_rip) {
+            self.set_rsp(self.prev_rsp);
+            self.speculative_rsp = false;
             self.exception(Exception::Gp, 0)?;
             return Err(CpuError::CpuLoopRestart);
         }
 
-        self.push_64(self.rip())?;
         self.set_rip(new_rip);
+
+        // RSP_COMMIT — matching CALL_EqR (C++ ctrl_xfer64.cc:160)
+        self.speculative_rsp = false;
         Ok(())
     }
 
@@ -250,6 +267,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         self.set_rip(new_rip);
+
+        // BX_NEXT_TRACE(i) — matching JMP_EqR pattern (C++ ctrl_xfer64.cc:426)
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
