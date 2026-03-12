@@ -92,6 +92,7 @@
 use alloc::format;
 use alloc::string::String;
 use alloc::vec;
+use bitflags::bitflags;
 use alloc::vec::Vec;
 use core::ffi::c_void;
 
@@ -114,22 +115,45 @@ pub const ATA_DRIVE_HEAD: u16 = 6; // Drive/Head / LBA top 4 bits
 pub const ATA_STATUS: u16 = 7; // Status (R) / Command (W)
 pub const ATA_ALT_STATUS: u16 = 0x206; // Alternate status / Device control
 
-/// Status register bits
-pub const ATA_STATUS_ERR: u8 = 0x01; // Error
-pub const ATA_STATUS_IDX: u8 = 0x02; // Index (always 0)
-pub const ATA_STATUS_CORR: u8 = 0x04; // Corrected data (always 0)
-pub const ATA_STATUS_DRQ: u8 = 0x08; // Data request
-pub const ATA_STATUS_DSC: u8 = 0x10; // Drive seek complete
-pub const ATA_STATUS_DWF: u8 = 0x20; // Drive write fault
-pub const ATA_STATUS_DRDY: u8 = 0x40; // Drive ready
-pub const ATA_STATUS_BSY: u8 = 0x80; // Busy
+bitflags! {
+    /// ATA Status register bits (port+7 read)
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct AtaStatus: u8 {
+        /// Error — check Error register for details
+        const ERR  = 0x01;
+        /// Index — set once per disk revolution (simulated)
+        const IDX  = 0x02;
+        /// Corrected data — ECC correction applied (always 0)
+        const CORR = 0x04;
+        /// Data Request — data is ready to transfer
+        const DRQ  = 0x08;
+        /// Drive Seek Complete
+        const DSC  = 0x10;
+        /// Drive Write Fault
+        const DWF  = 0x20;
+        /// Drive Ready — drive is powered up and ready
+        const DRDY = 0x40;
+        /// Busy — controller is executing a command
+        const BSY  = 0x80;
+    }
+}
 
-/// Error register bits
-pub const ATA_ERROR_AMNF: u8 = 0x01; // Address mark not found
-pub const ATA_ERROR_TK0NF: u8 = 0x02; // Track 0 not found
-pub const ATA_ERROR_ABRT: u8 = 0x04; // Command aborted
-pub const ATA_ERROR_IDNF: u8 = 0x10; // ID not found
-pub const ATA_ERROR_UNC: u8 = 0x40; // Uncorrectable data error
+bitflags! {
+    /// ATA Error register bits (port+1 read)
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct AtaError: u8 {
+        /// Address mark not found
+        const AMNF  = 0x01;
+        /// Track 0 not found
+        const TK0NF = 0x02;
+        /// Command aborted
+        const ABRT  = 0x04;
+        /// ID not found
+        const IDNF  = 0x10;
+        /// Uncorrectable data error
+        const UNC   = 0x40;
+    }
+}
 
 /// ATA commands
 pub const ATA_CMD_RECALIBRATE: u8 = 0x10;
@@ -240,11 +264,11 @@ impl DriveGeometry {
 ///   `buffer_size`, the next sector batch is loaded or the transfer completes.
 #[derive(Debug)]
 pub struct AtaController {
-    /// Status register (port+7 read). See ATA_STATUS_* constants for bit definitions.
-    pub(crate) status: u8,
+    /// Status register (port+7 read).
+    pub(crate) status: AtaStatus,
     /// Error register (port+1 read). Set when status ERR bit is set.
     /// After EXECUTE DEVICE DIAGNOSTIC: 0x01 = no error (diagnostic passed).
-    pub(crate) error: u8,
+    pub(crate) error: AtaError,
     /// Features register (port+1 write). Used by SET FEATURES command.
     /// Also serves as Write Precompensation in legacy drives (0xFF = no precomp).
     pub(crate) features: u8,
@@ -333,6 +357,7 @@ pub struct AtaHob {
 pub enum SenseKey {
     None = 0,
     NotReady = 2,
+    MediumError = 3,
     IllegalRequest = 5,
     UnitAttention = 6,
 }
@@ -341,6 +366,7 @@ pub enum SenseKey {
 #[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(u8)]
 pub enum Asc {
+    UnrecoveredReadError = 0x11,
     IllegalOpcode = 0x20,
     LogicalBlockOor = 0x21,
     InvFieldInCmdPacket = 0x24,
@@ -394,8 +420,8 @@ impl Default for CdromState {
 impl Default for AtaController {
     fn default() -> Self {
         Self {
-            status: ATA_STATUS_DRDY | ATA_STATUS_DSC,
-            error: 0x01, // Diagnostic passed
+            status: AtaStatus::DRDY | AtaStatus::DSC,
+            error: AtaError::from_bits_retain(0x01), // Diagnostic passed
             features: 0,
             sector_count: 1,
             sector_no: 1,
@@ -1261,6 +1287,16 @@ impl BxHardDriveC {
         for channel in &mut self.channels {
             for drive in &mut channel.drives {
                 drive.controller = AtaController::default();
+                // Set drive signature (Bochs set_signature): head_no=0, sector_count=1, sector_no=1
+                drive.controller.head_no = 0;
+                drive.controller.sector_count = 1;
+                drive.controller.sector_no = 1;
+                // HD → cylinder_no=0, CDROM → 0xEB14 (ATAPI signature), absent → 0xFFFF
+                match drive.device_type {
+                    DeviceType::Disk => drive.controller.cylinder_no = 0,
+                    DeviceType::Cdrom => drive.controller.cylinder_no = 0xEB14,
+                    DeviceType::None => drive.controller.cylinder_no = 0xFFFF,
+                }
             }
             channel.drive_select = 0;
         }
@@ -1314,6 +1350,14 @@ impl BxHardDriveC {
         self.channels[channel].drives[drive] = AtaDrive::create_cdrom();
         self.channels[channel].drives[drive].device_num = drive as u8;
         self.channels[channel].drives[drive].attach_cdrom(path)?;
+        // Set ATAPI signature so kernel detects device type correctly
+        // (reset() may have run before attach, so cylinder_no is still default 0)
+        let d = &mut self.channels[channel].drives[drive];
+        d.controller.head_no = 0;
+        d.controller.sector_count = 1;
+        d.controller.sector_no = 1;
+        d.controller.cylinder_no = 0xEB14; // ATAPI signature
+        d.controller.status = AtaStatus::DRDY | AtaStatus::DSC;
         Ok(())
     }
 
@@ -1352,12 +1396,13 @@ impl BxHardDriveC {
                 // Bochs harddrv.cc:3511: just DEV_pic_raise_irq(irq) — no lower first.
                 let pic = unsafe { &mut *self.pic_ptr };
                 pic.raise_irq(irq);
-            } else {
-                // Fallback deferred path (no PIC pointer wired yet)
-                match channel_num {
-                    0 => self.irq14_needs_raise = true,
-                    _ => self.irq15_needs_raise = true,
-                }
+            }
+            // Always set the deferred flag so update_irq_lines_with_ioapic()
+            // can forward to the IOAPIC. In APIC mode the PIC's IRQ may be
+            // masked, so the IOAPIC is the only path to the CPU.
+            match channel_num {
+                0 => self.irq14_needs_raise = true,
+                _ => self.irq15_needs_raise = true,
             }
             if irq == 14 {
                 self.diag_irq14_raise_count += 1;
@@ -1433,7 +1478,7 @@ impl BxHardDriveC {
             ATA_DATA => {
                 // Bochs harddrv.cc:806-894 — data port read
                 // Bochs harddrv.cc:806-811: DRQ check
-                if (drive.controller.status & ATA_STATUS_DRQ) == 0 {
+                if !drive.controller.status.contains(AtaStatus::DRQ) {
                     tracing::debug!(
                         "ATA: IO read(0x{:04x}) with drq == 0: last cmd was {:02x}",
                         port,
@@ -1460,21 +1505,26 @@ impl BxHardDriveC {
                                 if drive.read_cdrom_block(next_lba, &mut temp_buf) {
                                     drive.controller.buffer[..buf_size]
                                         .copy_from_slice(&temp_buf[..buf_size]);
-                                    // Debug: check if this LBA contains GDT data (offset 0x200 in LBA 58)
-                                    if next_lba == 58 {
-                                        tracing::debug!(
-                                            "ATAPI lazy-load LBA 58: buf[0x200..0x206] = {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                                            drive.controller.buffer[0x200], drive.controller.buffer[0x201],
-                                            drive.controller.buffer[0x202], drive.controller.buffer[0x203],
-                                            drive.controller.buffer[0x204], drive.controller.buffer[0x205]
-                                        );
-                                    }
+                                    drive.cdrom.next_lba += 1;
+                                    drive.cdrom.remaining_blocks -= 1;
+                                    drive.controller.buffer_index = 0;
                                 } else {
-                                    tracing::debug!("ATAPI lazy-load LBA {} FAILED", next_lba);
+                                    // Abort ATAPI transfer on read failure
+                                    // (matches atapi_cmd_error inline — can't call method due to borrow)
+                                    tracing::warn!("ATAPI lazy-load LBA {} FAILED — aborting transfer", next_lba);
+                                    drive.atapi.drq_bytes = 0;
+                                    drive.atapi.total_bytes_remaining = 0;
+                                    drive.cdrom.remaining_blocks = 0;
+                                    drive.controller.buffer_index = 0;
+                                    drive.controller.error = AtaError::from_bits_retain((SenseKey::MediumError as u8) << 4);
+                                    drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x03;
+                                    drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DWF | AtaStatus::DRQ);
+                                    drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::ERR);
+                                    drive.sense.sense_key = SenseKey::MediumError as u8;
+                                    drive.sense.asc = Asc::UnrecoveredReadError as u8;
+                                    drive.sense.ascq = 0;
+                                    return 0;
                                 }
-                                drive.cdrom.next_lba += 1;
-                                drive.cdrom.remaining_blocks -= 1;
-                                drive.controller.buffer_index = 0;
                             }
                         }
                         _ => {}
@@ -1520,13 +1570,13 @@ impl BxHardDriveC {
                                 }
                             }
 
-                            drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC;
-                            drive.controller.error = 0;
+                            drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC;
+                            drive.controller.error = AtaError::empty();
 
                             if drive.controller.num_sectors == 0 {
                                 // All sectors transferred — command complete
                             } else {
-                                drive.controller.status |= ATA_STATUS_DRQ;
+                                drive.controller.status.insert(AtaStatus::DRQ);
 
                                 if drive.ide_read_sector() {
                                     drive.controller.buffer_index = 0;
@@ -1537,8 +1587,8 @@ impl BxHardDriveC {
                             }
                         }
                         ATA_CMD_IDENTIFY | ATA_CMD_IDENTIFY_PACKET => {
-                            drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC;
-                            drive.controller.error = 0;
+                            drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC;
+                            drive.controller.error = AtaError::empty();
                         }
                         ATA_CMD_PACKET => {
                             // ATAPI: CD block buffer drained (Bochs harddrv.cc:935-965)
@@ -1566,7 +1616,7 @@ impl BxHardDriveC {
                             }
                         }
                         _ => {
-                            drive.controller.status &= !ATA_STATUS_DRQ;
+                            drive.controller.status.remove(AtaStatus::DRQ);
                         }
                     }
                 }
@@ -1577,7 +1627,7 @@ impl BxHardDriveC {
                 if current_command == ATA_CMD_PACKET
                     && drive.controller.drq_index >= drive.atapi.drq_bytes as u32
                 {
-                    drive.controller.status &= !ATA_STATUS_DRQ;
+                    drive.controller.status.remove(AtaStatus::DRQ);
                     drive.controller.drq_index = 0;
 
                     drive.atapi.total_bytes_remaining -= drive.atapi.drq_bytes;
@@ -1585,9 +1635,8 @@ impl BxHardDriveC {
                     if drive.atapi.total_bytes_remaining > 0 {
                         drive.controller.sector_count =
                             (drive.controller.sector_count & 0xF8) | 0x02;
-                        drive.controller.status |= ATA_STATUS_DRDY | ATA_STATUS_DRQ;
-                        drive.controller.status &=
-                            !(ATA_STATUS_BSY | ATA_STATUS_ERR);
+                        drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::DRQ);
+                        drive.controller.status.remove(AtaStatus::BSY | AtaStatus::ERR);
                         if drive.atapi.total_bytes_remaining
                             < drive.controller.cylinder_no as i32
                         {
@@ -1599,9 +1648,8 @@ impl BxHardDriveC {
                         drive.controller.sector_count =
                             (drive.controller.sector_count & 0xF8) | 0x03;
                         // Preserve DSC — same pattern as atapi_cmd_nop
-                        drive.controller.status &=
-                            !(ATA_STATUS_BSY | ATA_STATUS_DRQ | ATA_STATUS_ERR);
-                        drive.controller.status |= ATA_STATUS_DRDY;
+                        drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
+                        drive.controller.status.insert(AtaStatus::DRDY);
                     }
                     need_raise_irq = true;
                 }
@@ -1615,7 +1663,7 @@ impl BxHardDriveC {
 
                 return value;
             }
-            ATA_ERROR => drive.controller.error as u32,
+            ATA_ERROR => drive.controller.error.bits() as u32,
             ATA_SECTOR_COUNT => drive.controller.sector_count as u32,
             ATA_SECTOR_NUM => drive.controller.sector_no as u32,
             ATA_CYL_LOW => (drive.controller.cylinder_no & 0xFF) as u32,
@@ -1633,7 +1681,7 @@ impl BxHardDriveC {
                 // INDEX_PULSE_CYCLE = 10: set IDX bit once every 10 status reads
                 drive.controller.index_pulse_count += 1;
                 if drive.controller.index_pulse_count >= 10 {
-                    status |= ATA_STATUS_IDX;
+                    status |= AtaStatus::IDX;
                     drive.controller.index_pulse_count = 0;
                 }
 
@@ -1650,11 +1698,14 @@ impl BxHardDriveC {
                         // IMMEDIATE PIC lower — matches Bochs DEV_pic_lower_irq()
                         let pic = unsafe { &mut *self.pic_ptr };
                         pic.lower_irq(irq);
-                    } else {
-                        match channel_num {
-                            0 => self.irq14_needs_lower = true,
-                            _ => self.irq15_needs_lower = true,
-                        }
+                    }
+                    // Always set deferred lower for IOAPIC routing.
+                    // In APIC mode, Bochs DEV_pic_lower_irq() lowers BOTH PIC and IOAPIC.
+                    // Without this, the IOAPIC line stays HIGH after the first interrupt,
+                    // and subsequent raise_interrupt calls see no edge transition → lost IRQs.
+                    match channel_num {
+                        0 => self.irq14_needs_lower = true,
+                        _ => self.irq15_needs_lower = true,
                     }
                     if irq == 14 {
                         self.diag_irq14_lower_count += 1;
@@ -1663,12 +1714,12 @@ impl BxHardDriveC {
                 tracing::debug!(
                     "ATA: Status read #{} = {:#04x} (port={:#06x}) cmd={:#04x} drq={}",
                     self.read_count,
-                    status,
+                    status.bits(),
                     port,
                     drive.controller.current_command,
-                    (status & 0x08) != 0,
+                    status.contains(AtaStatus::DRQ),
                 );
-                status as u32
+                status.bits() as u32
             }
             _ => 0xFF,
         }
@@ -1784,12 +1835,12 @@ impl BxHardDriveC {
                                 if drive.controller.num_sectors != 0 {
                                     // More sectors to write — keep DRQ, raise IRQ
                                     drive.controller.status =
-                                        ATA_STATUS_DRDY | ATA_STATUS_DSC | ATA_STATUS_DRQ;
-                                    drive.controller.error = 0;
+                                        AtaStatus::DRDY | AtaStatus::DSC | AtaStatus::DRQ;
+                                    drive.controller.error = AtaError::empty();
                                 } else {
                                     // All sectors written — clear DRQ
-                                    drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC;
-                                    drive.controller.error = 0;
+                                    drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC;
+                                    drive.controller.error = AtaError::empty();
                                 }
 
                                 // Bochs harddrv.cc: raise_interrupt(channel)
@@ -1798,9 +1849,9 @@ impl BxHardDriveC {
                             } else {
                                 // Write error
                                 tracing::error!("ATA: ide_write_sector failed");
-                                drive.controller.error = ATA_ERROR_ABRT;
-                                drive.controller.status = ATA_STATUS_ERR | ATA_STATUS_DRDY;
-                                drive.controller.status &= !ATA_STATUS_DRQ;
+                                drive.controller.error = AtaError::ABRT;
+                                drive.controller.status = AtaStatus::ERR | AtaStatus::DRDY;
+                                drive.controller.status.remove(AtaStatus::DRQ);
                             }
                         }
                         ATA_CMD_PACKET => {
@@ -1907,7 +1958,7 @@ impl BxHardDriveC {
 
                 // Bochs harddrv.cc:2179-2182: check BSY before executing command
                 let drive = channel.selected_drive();
-                if drive.controller.status & ATA_STATUS_BSY != 0 {
+                if drive.controller.status.contains(AtaStatus::BSY) {
                     tracing::debug!(
                         "ATA ch{}: command {:#04x} sent while BSY, ignoring",
                         channel_num,
@@ -1947,9 +1998,9 @@ impl BxHardDriveC {
                     tracing::debug!("ATA: Software reset asserted ch={}", channel_num);
                     for d in 0..2 {
                         // Bochs: BSY=1, DRDY=0, WF=0, DSC=1, DRQ=0, CORR=0, ERR=0
-                        channel.drives[d].controller.status = ATA_STATUS_BSY | ATA_STATUS_DSC;
+                        channel.drives[d].controller.status = AtaStatus::BSY | AtaStatus::DSC;
                         channel.drives[d].controller.reset_in_progress = true;
-                        channel.drives[d].controller.error = 0x01; // diagnostic: no error
+                        channel.drives[d].controller.error = AtaError::from_bits_retain(0x01); // diagnostic: no error
                         channel.drives[d].controller.current_command = 0;
                         channel.drives[d].controller.buffer_index = 0;
                         channel.drives[d].controller.multiple_sectors = 0;
@@ -1969,7 +2020,7 @@ impl BxHardDriveC {
                     tracing::debug!("ATA: Software reset deasserted ch={}", channel_num);
                     for d in 0..2 {
                         channel.drives[d].controller.reset_in_progress = false;
-                        channel.drives[d].controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC;
+                        channel.drives[d].controller.status = AtaStatus::DRDY | AtaStatus::DSC;
                         // Bochs set_signature(): head_no=0, sector_count=1, sector_no=1
                         channel.drives[d].controller.head_no = 0;
                         channel.drives[d].controller.sector_count = 1;
@@ -1995,13 +2046,17 @@ impl BxHardDriveC {
 
     /// Abort the current command (Bochs harddrv.cc:3517-3534).
     ///
-    /// Sets error register to ABRT, clears BSY/DRQ, sets DRDY/ERR, raises interrupt.
+    /// Sets error register to ABRT, clears BSY/DRQ/CORR, sets DRDY/ERR.
+    /// Preserves DSC (seek_complete) — matches Bochs harddrv.cc:3526-3531.
     fn command_aborted(&mut self, channel_num: usize, _value: u8) {
         {
             let drive = self.channels[channel_num].selected_drive_mut();
             drive.controller.current_command = 0;
-            drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_ERR;
-            drive.controller.error = ATA_ERROR_ABRT;
+            // Bochs: clears busy, drq, corrected_data, write_fault; sets drive_ready, err
+            // Does NOT touch seek_complete (DSC) — preserve it
+            let dsc = drive.controller.status & AtaStatus::DSC;
+            drive.controller.status = AtaStatus::DRDY | AtaStatus::ERR | dsc;
+            drive.controller.error = AtaError::ABRT;
             drive.controller.buffer_index = 0;
         }
         // Bochs harddrv.cc:3533: raise_interrupt(channel)
@@ -2034,8 +2089,8 @@ impl BxHardDriveC {
 
         // Bochs sets individual fields: busy=1, drive_ready=1, drq=0, err=0
         // preserving other bits like seek_complete (DSC).
-        drive.controller.status &= !(ATA_STATUS_DRQ | ATA_STATUS_ERR);
-        drive.controller.status |= ATA_STATUS_BSY | ATA_STATUS_DRDY;
+        drive.controller.status.remove(AtaStatus::DRQ | AtaStatus::ERR);
+        drive.controller.status.insert(AtaStatus::BSY | AtaStatus::DRDY);
 
         if lazy {
             drive.controller.buffer_index = drive.controller.buffer_size;
@@ -2067,10 +2122,10 @@ impl BxHardDriveC {
     /// preserving other bits like seek_complete (DSC).
     fn atapi_cmd_error(&mut self, channel_num: usize, sense_key: SenseKey, asc: Asc) {
         let drive = self.channels[channel_num].selected_drive_mut();
-        drive.controller.error = (sense_key as u8) << 4;
+        drive.controller.error = AtaError::from_bits_retain((sense_key as u8) << 4);
         drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x03; // i_o=1, c_d=1
-        drive.controller.status &= !(ATA_STATUS_BSY | ATA_STATUS_DWF | ATA_STATUS_DRQ);
-        drive.controller.status |= ATA_STATUS_DRDY | ATA_STATUS_ERR;
+        drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DWF | AtaStatus::DRQ);
+        drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::ERR);
 
         drive.sense.sense_key = sense_key as u8;
         drive.sense.asc = asc as u8;
@@ -2084,8 +2139,8 @@ impl BxHardDriveC {
     fn atapi_cmd_nop(&mut self, channel_num: usize) {
         let drive = self.channels[channel_num].selected_drive_mut();
         drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x03; // i_o=1, c_d=1
-        drive.controller.status &= !(ATA_STATUS_BSY | ATA_STATUS_DRQ | ATA_STATUS_ERR);
-        drive.controller.status |= ATA_STATUS_DRDY;
+        drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
+        drive.controller.status.insert(AtaStatus::DRDY);
     }
 
     /// Signal data ready to send (Bochs ready_to_send_atapi, harddrv.cc:3482-3500)
@@ -2095,8 +2150,8 @@ impl BxHardDriveC {
     fn ready_to_send_atapi(&mut self, channel_num: usize) {
         let drive = self.channels[channel_num].selected_drive_mut();
         drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x02; // i_o=1, c_d=0
-        drive.controller.status &= !(ATA_STATUS_BSY | ATA_STATUS_ERR);
-        drive.controller.status |= ATA_STATUS_DRQ;
+        drive.controller.status.remove(AtaStatus::BSY | AtaStatus::ERR);
+        drive.controller.status.insert(AtaStatus::DRQ);
 
         self.raise_interrupt(channel_num);
     }
@@ -2107,7 +2162,7 @@ impl BxHardDriveC {
         let atapi_command = drive.controller.buffer[0];
         drive.controller.buffer_size = CDROM_SECTOR_SIZE;
 
-        tracing::warn!("ATAPI: command {:#04x} on ch{}", atapi_command, channel_num);
+        tracing::debug!("ATAPI: command {:#04x} on ch{}", atapi_command, channel_num);
 
         // Clear sense unless REQUEST SENSE
         if atapi_command != 0x03 {
@@ -2829,8 +2884,9 @@ impl BxHardDriveC {
         }
 
         drive.controller.current_command = command;
-        drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC;
-        drive.controller.error = 0;
+        // Bochs harddrv.cc:2185: only clears ERR bit, preserves all other status bits
+        drive.controller.error = AtaError::empty();
+        drive.controller.status.remove(AtaStatus::ERR);
 
         tracing::debug!(
             "ATA: Command {:#04x} drive={} scount={} sno={} cyl={} head={} lba_mode={}",
@@ -2846,7 +2902,7 @@ impl BxHardDriveC {
         match command {
             ATA_CMD_RECALIBRATE => {
                 // Bochs harddrv.cc:2188-2216
-                drive.controller.error = 0;
+                drive.controller.error = AtaError::empty();
                 drive.controller.cylinder_no = 0;
                 drive.controller.interrupt_pending = true;
             }
@@ -2875,7 +2931,7 @@ impl BxHardDriveC {
                 if drive.ide_read_sector() {
                     // Skip seek timer — set DRQ and raise IRQ immediately
                     // Bochs seek_timer (harddrv.cc:655-718) does: clear BSY, set DRQ, raise IRQ
-                    drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC | ATA_STATUS_DRQ;
+                    drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC | AtaStatus::DRQ;
                     drive.controller.buffer_index = 0;
                     drive.controller.interrupt_pending = true;
                 } else {
@@ -2888,8 +2944,8 @@ impl BxHardDriveC {
                 // Bochs harddrv.cc:2250-2262 — READ MULTIPLE (28-bit only; 0x29 EXT not yet)
                 drive.lba48_transform(false);
                 if drive.controller.multiple_sectors == 0 {
-                    drive.controller.error = ATA_ERROR_ABRT;
-                    drive.controller.status = ATA_STATUS_ERR | ATA_STATUS_DRDY;
+                    drive.controller.error = AtaError::ABRT;
+                    drive.controller.status = AtaStatus::ERR | AtaStatus::DRDY;
                 } else {
                     let ms = drive.controller.multiple_sectors as u32;
                     if drive.controller.num_sectors > ms {
@@ -2908,12 +2964,12 @@ impl BxHardDriveC {
                     );
 
                     if drive.ide_read_sector() {
-                        drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC | ATA_STATUS_DRQ;
+                        drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC | AtaStatus::DRQ;
                         drive.controller.buffer_index = 0;
                         drive.controller.interrupt_pending = true;
                     } else {
-                        drive.controller.error = ATA_ERROR_ABRT;
-                        drive.controller.status = ATA_STATUS_ERR | ATA_STATUS_DRDY;
+                        drive.controller.error = AtaError::ABRT;
+                        drive.controller.status = AtaStatus::ERR | AtaStatus::DRDY;
                     }
                 }
             }
@@ -2933,15 +2989,15 @@ impl BxHardDriveC {
                 );
 
                 // Set DRQ — host will write sector data
-                drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC | ATA_STATUS_DRQ;
+                drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC | AtaStatus::DRQ;
                 // No IRQ on initial write command (Bochs doesn't raise here)
             }
             ATA_CMD_WRITE_MULTIPLE => {
                 // Bochs harddrv.cc:2304-2345 — WRITE MULTIPLE (28-bit only; 0x39 EXT not yet)
                 drive.lba48_transform(false);
                 if drive.controller.multiple_sectors == 0 {
-                    drive.controller.error = ATA_ERROR_ABRT;
-                    drive.controller.status = ATA_STATUS_ERR | ATA_STATUS_DRDY;
+                    drive.controller.error = AtaError::ABRT;
+                    drive.controller.status = AtaStatus::ERR | AtaStatus::DRDY;
                 } else {
                     let ms = drive.controller.multiple_sectors as u32;
                     if drive.controller.num_sectors > ms {
@@ -2959,7 +3015,7 @@ impl BxHardDriveC {
                         drive.controller.buffer_size / SECTOR_SIZE
                     );
 
-                    drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC | ATA_STATUS_DRQ;
+                    drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC | AtaStatus::DRQ;
                 }
             }
             // 0x40 = READ VERIFY with retries, 0x41 = without retries
@@ -2973,7 +3029,18 @@ impl BxHardDriveC {
                 drive.controller.interrupt_pending = true;
             }
             ATA_CMD_EXECUTE_DIAGNOSTICS => {
-                drive.controller.error = 0x01; // No error
+                // Bochs harddrv.cc:2334-2338: set_signature + error=0x01 + raise_interrupt
+                // Must set signature for BOTH drives on the channel
+                drive.controller.head_no = 0;
+                drive.controller.sector_count = 1;
+                drive.controller.sector_no = 1;
+                match drive.device_type {
+                    DeviceType::Disk => drive.controller.cylinder_no = 0,
+                    DeviceType::Cdrom => drive.controller.cylinder_no = 0xEB14,
+                    DeviceType::None => drive.controller.cylinder_no = 0xFFFF,
+                }
+                drive.controller.status.remove(AtaStatus::DRQ); // Clear DRQ
+                drive.controller.error = AtaError::from_bits_retain(0x01); // No error
                 drive.controller.interrupt_pending = true;
             }
             ATA_CMD_INITIALIZE_PARAMS => {
@@ -2994,7 +3061,7 @@ impl BxHardDriveC {
                 } else if head_no == 0 {
                     // Linux 2.6.x kernels use head_no=0 — log but don't abort (Bochs behavior)
                     tracing::debug!("ATA: init drive params: max. logical head number 0");
-                    drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC;
+                    drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC;
                     drive.controller.interrupt_pending = true;
                 } else if head_no != (disk_heads - 1) as u8 {
                     tracing::error!(
@@ -3004,7 +3071,7 @@ impl BxHardDriveC {
                     self.command_aborted(channel_num, command);
                     return;
                 } else {
-                    drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC;
+                    drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC;
                     drive.controller.interrupt_pending = true;
                 }
             }
@@ -3020,7 +3087,7 @@ impl BxHardDriveC {
                 }
                 tracing::debug!("ATA: IDENTIFY command");
                 drive.fill_identify_buffer();
-                drive.controller.status |= ATA_STATUS_DRQ;
+                drive.controller.status.insert(AtaStatus::DRQ);
                 drive.controller.interrupt_pending = true;
             }
             ATA_CMD_SET_FEATURES => {
@@ -3093,10 +3160,16 @@ impl BxHardDriveC {
                 // Bochs harddrv.cc:2525-2562 — IDENTIFY PACKET DEVICE
                 if drive.device_type == DeviceType::Cdrom {
                     drive.controller.current_command = command;
-                    drive.controller.error = 0;
-                    drive.controller.status = ATA_STATUS_DRDY | ATA_STATUS_DSC | ATA_STATUS_DRQ;
+                    drive.controller.error = AtaError::empty();
+                    drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC | AtaStatus::DRQ;
                     // Set interrupt_reason: i_o=1, c_d=0 (data to host)
                     drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x02;
+                    // Restore ATAPI signature in cylinder registers (byte_count).
+                    // The Linux ata_piix driver zeroes CYL_LOW/CYL_HIGH before sending
+                    // IDENTIFY PACKET, then re-reads them after completion to classify
+                    // the device via ata_dev_classify(). ATAPI devices must report
+                    // their signature (0xEB14) here so the driver sees ATAPI, not ATA.
+                    drive.controller.cylinder_no = 0xEB14;
                     drive.controller.buffer_index = 0;
 
                     if !drive.identify_set {
@@ -3122,8 +3195,8 @@ impl BxHardDriveC {
                     drive.controller.sector_count = 1;
                     drive.controller.sector_no = 1;
                     drive.controller.cylinder_no = 0xEB14;
-                    drive.controller.status = ATA_STATUS_DSC;
-                    drive.controller.error &= !(1 << 7);
+                    drive.controller.status = AtaStatus::DSC;
+                    drive.controller.error = AtaError::from_bits_retain(drive.controller.error.bits() & !(1 << 7));
                 } else {
                     self.command_aborted(channel_num, command);
                     return;
@@ -3131,13 +3204,13 @@ impl BxHardDriveC {
             }
             ATA_CMD_PACKET => {
                 // Bochs harddrv.cc:2589-2611 — SEND PACKET (ATAPI)
-                tracing::warn!("ATA: PACKET command on ch{} (ATAPI)", channel_num);
+                tracing::debug!("ATA: PACKET command on ch{} (ATAPI)", channel_num);
                 if drive.device_type == DeviceType::Cdrom {
                     drive.controller.sector_count = 1; // c_d=1 (command)
                     // Bochs sets individual fields: busy=0, write_fault=0, drq=1
                     // preserving other bits like drive_ready (DRDY) and seek_complete (DSC).
-                    drive.controller.status &= !(ATA_STATUS_BSY | ATA_STATUS_DWF);
-                    drive.controller.status |= ATA_STATUS_DRQ;
+                    drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DWF);
+                    drive.controller.status.insert(AtaStatus::DRQ);
                     drive.controller.current_command = command;
                     drive.controller.buffer_index = 0;
                     drive.controller.buffer_size = PACKET_SIZE;
@@ -3177,7 +3250,7 @@ impl BxHardDriveC {
                     "  ch{} drv{}: type={:?} cmd={:#04x} status={:#04x} ctrl={:#04x} irq_pend={} sec_cnt={} buf_idx={}\n",
                     ch, drv, drive.device_type,
                     drive.controller.current_command,
-                    drive.controller.status,
+                    drive.controller.status.bits(),
                     drive.controller.control,
                     drive.controller.interrupt_pending,
                     drive.controller.sector_count,

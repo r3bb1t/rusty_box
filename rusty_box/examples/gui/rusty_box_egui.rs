@@ -248,11 +248,16 @@ fn run_emulator(
         BootProfile::AlpineDirect { iso_path, .. } => {
             // Direct kernel boot — extract vmlinuz + initramfs from ISO
             emu.configure_memory_in_cmos_from_config();
+            // Attach ISO as CD-ROM so Alpine Init can mount the squashfs root filesystem
+            let iso_path_str = iso_path.to_string_lossy().to_string();
+            emu.attach_cdrom(1, 0, &iso_path_str)
+                .expect("Failed to attach Alpine ISO as CD-ROM");
+            println!("CD-ROM attached: {}", iso_path.display());
             let iso_data = std::fs::read(iso_path).expect("Failed to read ISO");
             let (kernel, initramfs) =
                 extract_kernel_from_iso(&iso_data).expect("Failed to extract kernel from ISO");
             let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_| {
-                "console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 nomodeset".to_string()
+                "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 earlyprintk=serial,ttyS0,115200 nomodeset nokaslr kfence.sample_interval=0 modules=cdrom,sr_mod,isofs".to_string()
             });
             println!(
                 "Direct boot: kernel={} bytes, initramfs={} bytes",
