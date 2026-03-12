@@ -291,7 +291,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     entry[BX_LEVEL_PDE]
                 );
                 return Err(super::CpuError::Memory(
-                    crate::memory::MemoryError::PageProtectionViolation,
+                    crate::memory::MemoryError::PageReservedBitViolation,
                 ));
             }
             // 4MB page — permission check using combined access from PDE only
@@ -470,6 +470,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let is_execute = matches!(rw, MemoryAccessType::Execute);
                 let mut error_code = match &e {
                     super::CpuError::Memory(
+                        crate::memory::MemoryError::PageReservedBitViolation,
+                    ) => PageFaultError::RESERVED.bits() | PageFaultError::PROTECTION.bits() | ((user as u32) << 2) | ((is_write as u32) << 1),
+                    super::CpuError::Memory(
                         crate::memory::MemoryError::PageProtectionViolation,
                     ) => PageFaultError::PROTECTION.bits() | ((user as u32) << 2) | ((is_write as u32) << 1),
                     _ => PageFaultError::NOT_PRESENT.bits() | ((user as u32) << 2) | ((is_write as u32) << 1),
@@ -545,7 +548,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         if entry[BX_LEVEL_PDE].bits() & reserved != 0 {
             return Err(super::CpuError::Memory(
-                crate::memory::MemoryError::PageProtectionViolation,
+                crate::memory::MemoryError::PageReservedBitViolation,
             ));
         }
         if entry[BX_LEVEL_PDE].bits() & PAGE_DIRECTORY_NX_BIT != 0 {
@@ -558,7 +561,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if entry[BX_LEVEL_PDE].contains(PteBits::PS) {
             if entry[BX_LEVEL_PDE].bits() & PAGING_PAE_PDE2M_RESERVED_BITS != 0 {
                 return Err(super::CpuError::Memory(
-                    crate::memory::MemoryError::PageProtectionViolation,
+                    crate::memory::MemoryError::PageReservedBitViolation,
                 ));
             }
             ppf = entry[BX_LEVEL_PDE].bits() & 0x000F_FFFF_FFE0_0000;
@@ -633,7 +636,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         if entry[BX_LEVEL_PTE].bits() & reserved != 0 {
             return Err(super::CpuError::Memory(
-                crate::memory::MemoryError::PageProtectionViolation,
+                crate::memory::MemoryError::PageReservedBitViolation,
             ));
         }
         if entry[BX_LEVEL_PTE].bits() & PAGE_DIRECTORY_NX_BIT != 0 {
@@ -759,13 +762,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
             if curr_entry.bits() & reserved != 0 {
                 return Err(super::CpuError::Memory(
-                    crate::memory::MemoryError::PageProtectionViolation,
+                    crate::memory::MemoryError::PageReservedBitViolation,
                 ));
             }
             // PS at PML4/PML5 is reserved
             if curr_entry.contains(PteBits::PS) && leaf > BX_LEVEL_PDPTE {
                 return Err(super::CpuError::Memory(
-                    crate::memory::MemoryError::PageProtectionViolation,
+                    crate::memory::MemoryError::PageReservedBitViolation,
                 ));
             }
             if curr_entry.bits() & PAGE_DIRECTORY_NX_BIT != 0 {
@@ -782,7 +785,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 ppf &= 0x000F_FFFF_FFFF_E000;
                 if ppf & offset_mask != 0 {
                     return Err(super::CpuError::Memory(
-                        crate::memory::MemoryError::PageProtectionViolation,
+                        crate::memory::MemoryError::PageReservedBitViolation,
                     ));
                 }
                 lpf_mask = offset_mask as u32;

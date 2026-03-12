@@ -63,4 +63,6 @@ pub enum MemoryError {
     PageNotPresent,
     #[error("Page protection violation")]
     PageProtectionViolation,
+    #[error("Page reserved bit violation")]
+    PageReservedBitViolation,
 }

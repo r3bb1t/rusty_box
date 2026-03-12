@@ -82,6 +82,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
             }
         }
+
+        // Bochs proc_ctrl.cc:402 — updateFetchModeMask() after every mode change
+        self.update_fetch_mode_mask();
+
+        // Bochs proc_ctrl.cc:406 — handleAvxModeChange() after mode change
+        self.handle_avx_mode_change();
     }
 
     // Bochs proc_ctrl.cc:453-461 — update FPU/MMX permission based on CR0.EM, CR0.TS
@@ -278,27 +284,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
-        // Bochs mwait.cc:100: effective address = RAX & asize_mask
+        // Bochs mwait.cc:100: bx_address eaddr = RAX & i->asize_mask();
         let seg = super::decoder::BxSegregs::from(instr.seg());
 
+        // Match Bochs asize_mask() lookup table: asize = metaInfo1 & 0x3
+        // [0]=16-bit, [1]=32-bit, [2]=64-bit, [3]=64-bit
+        const ASIZE_MASK: [u64; 4] = [
+            0xFFFF,
+            0xFFFF_FFFF,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0xFFFF_FFFF_FFFF_FFFF,
+        ];
+        let asize = (instr.as32_l() != 0) as usize | (((instr.as64_l() != 0) as usize) << 1);
+        let eaddr = self.rax() & ASIZE_MASK[asize];
+
+        // Bochs mwait.cc:102-103: tickle_read_virtual (1-byte read check)
         let paddr = if self.long64_mode() {
-            // 64-bit mode: default address size is 64, 0x67 prefix → 32-bit
-            let eaddr = if instr.as32_l() != 0 {
-                self.rax() & 0xFFFF_FFFF
-            } else {
-                self.rax()
-            };
-            // Bochs mwait.cc:102-103: tickle_read_virtual (1-byte read check)
             let _ = self.read_virtual_byte_64(seg, eaddr)?;
             self.address_xlation.paddress1
         } else {
-            let asize_mask: u64 = if instr.as32_l() != 0 {
-                0xFFFF_FFFF
-            } else {
-                0xFFFF
-            };
-            let eaddr = self.rax() & asize_mask;
-            // Bochs mwait.cc:102-103: tickle_read_virtual (1-byte read check)
             let _ = self.v_read_byte(seg, eaddr as u32)?;
             self.address_xlation.paddress1
         };
@@ -1490,6 +1494,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cs_idx = BxSegregs::Cs as usize;
         let ss_idx = BxSegregs::Ss as usize;
 
+        // Bochs proc_ctrl.cc:1223 — temp_RIP stores the return address;
+        // RIP is set AFTER all mode changes (line 1348).
+        let temp_rip: u64;
+
         if self.cpu_mode == super::cpu::CpuMode::Long64 {
             // 64-bit mode SYSRET (Bochs proc_ctrl.cc:1244-1306)
             if instr.os64_l() != 0 {
@@ -1517,7 +1525,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     self.sregs[cs_idx].cache.u.segment.avl = false;
                 }
 
-                self.set_rip(self.rcx());
+                // Bochs proc_ctrl.cc:1269 — save RCX for later RIP assignment
+                temp_rip = self.rcx();
             } else {
                 // Return to 32-bit compat mode (Bochs proc_ctrl.cc:1271-1289)
                 super::segment_ctrl_pro::parse_selector(
@@ -1538,13 +1547,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     self.sregs[cs_idx].cache.u.segment.avl = false;
                 }
 
-                self.set_rip(self.ecx() as u64);
+                // Bochs proc_ctrl.cc:1288 — save ECX for later RIP assignment
+                temp_rip = self.ecx() as u64;
             }
 
+            // Bochs proc_ctrl.cc:1291 — handleCpuModeChange (mode change from CS.L)
             self.handle_cpu_mode_change();
+            // Bochs proc_ctrl.cc:1293 — handleAlignmentCheck (CPL change)
             self.handle_alignment_check();
-            // Bochs — updateFetchModeMask() after CS reload
-            self.update_fetch_mode_mask();
 
             // SS: (star >> 48) + 8) | 3 (Bochs proc_ctrl.cc:1296-1304)
             super::segment_ctrl_pro::parse_selector(
@@ -1557,7 +1567,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[ss_idx].cache.segment = true;
             self.sregs[ss_idx].cache.r#type = 0x3;
 
-            // Restore RFLAGS from R11 (Bochs proc_ctrl.cc:1305)
+            // Bochs proc_ctrl.cc:1305 — restore RFLAGS from R11
             self.write_eflags(self.r11() as u32, EFlags::VALID_MASK.bits());
         } else {
             // Legacy/compat mode SYSRET (Bochs proc_ctrl.cc:1309-1344)
@@ -1579,10 +1589,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.sregs[cs_idx].cache.u.segment.avl = false;
             }
 
-            self.handle_cpu_mode_change();
-            self.handle_alignment_check();
-            // Bochs — updateFetchModeMask() after CS reload
+            // Bochs proc_ctrl.cc:1328 — updateFetchModeMask after CS reload
+            // (NOT handleCpuModeChange — that's only called at line 1346 outside)
             self.update_fetch_mode_mask();
+            // Bochs proc_ctrl.cc:1330 — handleAlignmentCheck (CPL change)
+            self.handle_alignment_check();
 
             // SS: (star >> 48) + 8) | 3 (Bochs proc_ctrl.cc:1333-1340)
             super::segment_ctrl_pro::parse_selector(
@@ -1595,13 +1606,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[ss_idx].cache.segment = true;
             self.sregs[ss_idx].cache.r#type = 0x3;
 
-            // Restore IF, set RIP from ECX (Bochs proc_ctrl.cc:1342-1343)
+            // Bochs proc_ctrl.cc:1342 — assert_IF()
             self.eflags.insert(super::eflags::EFlags::IF_);
             self.handle_interrupt_mask_change();
-            self.set_rip(self.ecx() as u64);
+            // Bochs proc_ctrl.cc:1343 — temp_RIP = ECX
+            temp_rip = self.ecx() as u64;
         }
 
+        // Bochs proc_ctrl.cc:1346 — handleCpuModeChange (final, outside if/else)
         self.handle_cpu_mode_change();
+        // Bochs proc_ctrl.cc:1348 — RIP = temp_RIP (set AFTER all mode changes)
+        self.set_rip(temp_rip);
 
         Ok(())
     }

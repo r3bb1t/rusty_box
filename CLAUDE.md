@@ -18,7 +18,8 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 **Current Status (2026-03-12):**
 - ✅ **DLX Linux boots to interactive bash shell!** Full boot: BIOS POST → LILO → kernel → init → `dlx login: root` → `dlx:~#` (200M instructions sufficient)
-- ⚠️ **Alpine Linux reaches init, loads boot drivers, crashes in mwait_idle** — Kernel boots fully through crypto subsystem (blake2s_compress_avx512, sha256_transform_rorx both working), PCI/SCSI/ATA init, i8042 keyboard, RTC, IPv6, X.509 certificates. Reaches `Alpine Init 3.13.0-r0`, loads boot drivers OK. `modprobe` segfaults at IP=0 (ELF/execve issue). Mount boot media fails (no virtio/disk driver). Crashes in `mwait_idle+0x32` — MONITOR instruction page faults at address `0x82a12940` (should be `0xffffffff82a12940`). Next: investigate MONITOR address truncation or page table corruption in idle loop.
+- ⚠️ **Alpine Linux reaches init, loads boot drivers, mwait_idle FIXED** — Kernel boots fully through crypto, PCI/SCSI/ATA, i8042, RTC, IPv6, X.509. Reaches `Alpine Init 3.13.0-r0`, loads boot drivers OK. Mount boot media fails (no virtio/disk driver). `modprobe` segfaults at IP=0 (error code 14=RSVD|USER|WRITE — page table reserved bits issue). Next: investigate modprobe page fault error code 14.
+- ✅ **MONITOR asize_mask fix (session 40)**: MONITOR instruction truncated RAX to 32 bits in 64-bit mode. Root cause: `as32_l()` is always 1 in 64-bit mode (both As32 and As64 set). Fixed with Bochs's `asize_mask()` lookup table: `asize = as32 | (as64 << 1)` indexes into `[0xFFFF, 0xFFFFFFFF, u64::MAX, u64::MAX]`. Unblocked mwait_idle — Alpine now enters idle cleanly.
 - ✅ **AVX/AVX-512/BMI2 instructions (session 39)**: blake2s_compress_avx512 and sha256_transform_rorx fully working. Implemented VPRORD, VPROLD, VEXTRACTI128, VPERM2I128, VPSHUFB 256-bit, RORX opcode table entries. All handlers match Bochs 1:1.
 - ✅ **Session 28-29 audit RESOLVED**: All 6 CRITICAL bugs resolved (3 already fixed, 1 not-a-bug, 2 confirmed fixed). Most HIGH bugs also confirmed fixed. Remaining unfixed: ~95 SSE opcode tables, decmask NNN/RRR fields, SRC_EQ_DST bit, UD64 opcodes, 64-bit TLB fast path (performance only).
 - ✅ **64-bit canonical address checks (session 30)**: All 10 `read/write_virtual_*_64` functions now check canonical addresses (Bochs access.cc:339/444). Non-canonical raises #GP(0) or #SS(0). Cross-page paths check last byte too.
@@ -262,13 +263,10 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ### Next Steps
 1. ~~**Reach DLX Linux `dlx login:` prompt**~~ — **DONE** (2026-03-03). Full boot to login prompt achieved.
 2. ~~**Interactive login**~~ — **DONE** (2026-03-04). SHRD/SHLD decoder fix resolved ext2 "directory #12 contains a hole" errors. `root` login → `dlx:~#` bash shell works.
-3. **Boot Alpine Linux** — **IN PROGRESS** (2026-03-11). Kernel gets past delay calibration, crashes in kfree:
-   - **Session 36 FIXES (timer/interrupt delivery)**: Three bugs fixed that unblocked delay calibration:
-     1. `signal_event()` mask check: now matches Bochs cpu.h:1189-1190 — only sets async_event when event is NOT masked (was always setting it)
-     2. `async_event |= 1` in service_local_apic: was `*ptr = 1` which cleared STOP_TRACE bit
-     3. HLT tick granularity: unified 10µs steps with IPS-proportional ticks (was 15K ticks/step, now 150)
-   - **Result**: Kernel prints `Calibrating delay loop (skipped), value calculated using timer frequency.. 6999.82 BogoMIPS` and proceeds through extensive init
-   - **New crash**: Page fault in `kfree+0x64/0x490` at vmemmap address `ffffeb02000002c8`. PFN computed exceeds 256MB RAM. `PGD 0 P4D 0` — vmemmap not mapped for that range. Likely a vmalloc address going through wrong virt_to_phys path. Next: investigate address classification or carry flag in kfree.
+3. **Boot Alpine Linux** — **IN PROGRESS** (2026-03-12). Kernel boots to Alpine Init, loads boot drivers:
+   - **Session 40 FIX (MONITOR asize_mask)**: MONITOR truncated RAX to 32 bits in 64-bit mode. `as32_l()` always=1 in 64-bit (both As32+As64 set). Fixed with Bochs `asize_mask()` lookup table. Unblocked mwait_idle.
+   - **Result**: Kernel boots fully through crypto/PCI/SCSI/ATA/i8042/RTC/IPv6/X.509 → `Alpine Init 3.13.0-r0` → `Loading boot drivers: ok.` → `Mounting boot media: failed.` (no disk driver). Enters mwait_idle cleanly.
+   - **Remaining**: `modprobe` segfaults at IP=0 with error code 14 (RSVD|USER|WRITE). Three modprobe processes crash. Page table reserved bits issue. Boot continues past these failures.
    - **DIV64 Group 3 decoder convention FIXED**: `instr.src()` → `instr.dst()` in mult64.rs register-form handlers (MUL/IMUL/DIV/IDIV). Was reading opcode extension instead of rm register index. `DIV RDI` read RSI(0)→#DE. This was the root cause of the previous kernel panic at ~622M instructions.
    - **boot_params fix**: Moved from pref_address+init_size (0x035f3000) to 0x10000 (QEMU standard).
    - **64-bit CR writes FIXED**: mov_cr0_rq/cr2_rq/cr4_rq use get_gpr64 (was truncating to 32 bits).
