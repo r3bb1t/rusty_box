@@ -59,6 +59,10 @@ pub(super) const BxOpcodeTable0F3A22: [u64; 2] = [
     last_opcode(ATTR_SSE_PREFIX_66, Opcode::PinsrdVdqEdIb),
 ];
 
+// VEXTRACTI128 — VEX.256.66.0F3A.W0 39 /r ib
+pub(super) const BxOpcodeTable0F3A39: [u64; 1] =
+    [last_opcode(ATTR_SSE_PREFIX_66, Opcode::V256Vextracti128WdqVdqIb)];
+
 pub(super) const BxOpcodeTable0F3A40: [u64; 1] =
     [last_opcode(ATTR_SSE_PREFIX_66, Opcode::DppsVpsWpsIb)];
 pub(super) const BxOpcodeTable0F3A41: [u64; 1] =
@@ -91,6 +95,17 @@ pub(super) const BxOpcodeTable0F3ADF: [u64; 1] = [last_opcode(
     ATTR_SSE_PREFIX_66,
     Opcode::AeskeygenassistVdqWdqIb,
 )];
+
+// VPERM2I128 (VEX.256.66.0F3A.W0 46 /r ib)
+pub(super) const BxOpcodeTable0F3A46: [u64; 1] =
+    [last_opcode(ATTR_SSE_PREFIX_66, Opcode::V256Vperm2i128VdqHdqWdqIb)];
+
+// RORX (VEX.LZ.F2.0F3A.W0/W1 F0 /r ib) — BMI2 rotate right extract
+// Bochs fetchdecode_opmap_avx.cc:1602
+pub(super) const BxOpcodeTable0F3AF0: [u64; 2] = [
+    form_opcode(ATTR_SSE_PREFIX_F2 | ATTR_VL128 | ATTR_VEX_W0, Opcode::RorxGdEdIb),
+    last_opcode(ATTR_SSE_PREFIX_F2 | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::RorxGqEqIb),
+];
 
 /* ************************************************************************ */
 
@@ -153,7 +168,7 @@ pub(super) const BxOpcodeTable0F3A: [&[u64]; 256] = [
     /* 0F 3A 36 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 37 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 38 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 3A 39 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 3A 39 */ &BxOpcodeTable0F3A39,
     /* 0F 3A 3A */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 3B */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 3C */ &BX_OPCODE_GROUP_ERR,
@@ -166,7 +181,7 @@ pub(super) const BxOpcodeTable0F3A: [&[u64]; 256] = [
     /* 0F 3A 43 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 44 */ &BxOpcodeTable0F3A44,
     /* 0F 3A 45 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 3A 46 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 3A 46 */ &BxOpcodeTable0F3A46,
     /* 0F 3A 47 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 48 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 49 */ &BX_OPCODE_GROUP_ERR,
@@ -336,7 +351,7 @@ pub(super) const BxOpcodeTable0F3A: [&[u64]; 256] = [
     /* 0F 3A ED */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A EE */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A EF */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 3A F0 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 3A F0 */ &BxOpcodeTable0F3AF0,
     /* 0F 3A F1 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A F2 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A F3 */ &BX_OPCODE_GROUP_ERR,

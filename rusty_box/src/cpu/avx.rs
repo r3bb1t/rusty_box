@@ -414,10 +414,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VPRORD — Packed Rotate Right Dwords by immediate
     /// EVEX.66.0F.W0 72 /0 ib
-    /// dst[i] = rotate_right(src[i], imm8)
+    /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
     pub(super) fn vprord(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let dst_idx = instr.dst(); // VEX.vvvv for EVEX group opcodes
+        let dst_idx = instr.src2(); // VEX.vvvv — for EVEX group opcodes, dst is in vvvv
         let count = (instr.ib() & 31) as u32; // rotate count mod 32
 
         if instr.get_vl() >= 1 {
@@ -447,6 +447,48 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             unsafe {
                 for i in 0..4 {
                     result.xmm32u[i] = src.xmm32u[i].rotate_right(count);
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPROLD — Packed Rotate Left Dwords by immediate
+    /// EVEX.66.0F.W0 72 /1 ib
+    /// Operands: dst=VEX.vvvv (src2), src=rm (src1), imm8
+    pub(super) fn vprold(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.src2(); // VEX.vvvv — for EVEX group opcodes, dst is in vvvv
+        let count = (instr.ib() & 31) as u32; // rotate count mod 32
+
+        if instr.get_vl() >= 1 {
+            let src = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..8 {
+                    result.ymm32u[i] = src.ymm32u[i].rotate_left(count);
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..4 {
+                    result.xmm32u[i] = src.xmm32u[i].rotate_left(count);
                 }
             }
             self.write_xmm_reg(dst_idx, result);
@@ -775,6 +817,151 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             unsafe {
                 for i in 0..2 {
                     result.xmm64u[i] = src1.xmm64u[i] | src2.xmm64u[i];
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VEXTRACTI128 — Extract 128-bit integer value from 256-bit register
+    /// VEX.256.66.0F3A.W0 39 /r ib
+    /// If imm8[0]=0: dst = src[127:0]; if imm8[0]=1: dst = src[255:128]
+    /// Our decoder: dst() = nnn (source YMM), src1() = rm (destination XMM)
+    pub(super) fn vextracti128(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let src_idx = instr.dst(); // nnn — source YMM register
+        let imm = instr.ib();
+        let src = self.read_ymm_reg(src_idx);
+        let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+        if (imm & 1) != 0 {
+            // Extract upper 128 bits
+            unsafe {
+                result.xmm64u[0] = src.ymm64u[2];
+                result.xmm64u[1] = src.ymm64u[3];
+            }
+        } else {
+            // Extract lower 128 bits
+            unsafe {
+                result.xmm64u[0] = src.ymm64u[0];
+                result.xmm64u[1] = src.ymm64u[1];
+            }
+        }
+
+        if instr.mod_c0() {
+            self.write_xmm_reg(instr.src1(), result); // rm = destination
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_write_xmmword(seg, eaddr, &result)?;
+        }
+        Ok(())
+    }
+
+    /// VPERM2I128 — Permute 128-bit integer values from two 256-bit sources
+    /// VEX.256.66.0F3A.W0 46 /r ib
+    /// Matches Bochs VPERM2F128_VdqHdqWdqIbR (avx.cc:543)
+    /// For each 128-bit half (n=0,1): select from imm8 bits [n*4+3:n*4]
+    ///   bit 3: zero that half
+    ///   bit 1: select op2 (else op1)
+    ///   bit 0: select which 128-bit half of chosen source
+    pub(super) fn vperm2i128(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_ymm_reg(instr.src2()); // VEX.vvvv
+        let op2 = if instr.mod_c0() {
+            self.read_ymm_reg(instr.src1()) // rm
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_ymmword(seg, eaddr)?
+        };
+        let mut order = instr.ib();
+        let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+
+        for n in 0..2u8 {
+            let base = (n as usize) * 2; // index into ymm64u (0 or 2)
+            if (order & 0x8) != 0 {
+                // Zero this 128-bit half
+                unsafe {
+                    result.ymm64u[base] = 0;
+                    result.ymm64u[base + 1] = 0;
+                }
+            } else {
+                let src = if (order & 0x2) != 0 { &op2 } else { &op1 };
+                let half = (order & 0x1) as usize; // which 128-bit half of source
+                let src_base = half * 2;
+                unsafe {
+                    result.ymm64u[base] = src.ymm64u[src_base];
+                    result.ymm64u[base + 1] = src.ymm64u[src_base + 1];
+                }
+            }
+            order >>= 4;
+        }
+
+        self.write_ymm_reg(instr.dst(), result);
+        Ok(())
+    }
+
+    /// VPSHUFB — Packed Shuffle Bytes (VEX.L aware, 3-operand VEX encoding)
+    /// VEX.128/256.66.0F38 00 /r
+    /// Matches Bochs VPSHUFB (avx512.cc:702) — per-lane byte shuffle
+    /// dst[i] = (mask[i] & 0x80) ? 0 : data[mask[i] & 0xF]  (within each 128-bit lane)
+    pub(super) fn vpshufb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let data_idx = instr.src2(); // VEX.vvvv — data source
+
+        if instr.get_vl() >= 1 {
+            // 256-bit: two independent 128-bit lane shuffles
+            let data = self.read_ymm_reg(data_idx);
+            let mask = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                // Lower 128-bit lane (bytes 0-15)
+                for i in 0..16usize {
+                    let m = mask.ymmubyte[i];
+                    if (m & 0x80) != 0 {
+                        result.ymmubyte[i] = 0;
+                    } else {
+                        result.ymmubyte[i] = data.ymmubyte[(m & 0xf) as usize];
+                    }
+                }
+                // Upper 128-bit lane (bytes 16-31) — shuffles within upper lane only
+                for i in 16..32usize {
+                    let m = mask.ymmubyte[i];
+                    if (m & 0x80) != 0 {
+                        result.ymmubyte[i] = 0;
+                    } else {
+                        result.ymmubyte[i] = data.ymmubyte[16 + (m & 0xf) as usize];
+                    }
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            // 128-bit: single lane shuffle
+            let data = self.read_xmm_reg(data_idx);
+            let mask = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..16usize {
+                    let m = mask.xmmubyte[i];
+                    if (m & 0x80) != 0 {
+                        result.xmmubyte[i] = 0;
+                    } else {
+                        result.xmmubyte[i] = data.xmmubyte[(m & 0xf) as usize];
+                    }
                 }
             }
             self.write_xmm_reg(dst_idx, result);

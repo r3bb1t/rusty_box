@@ -2720,7 +2720,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // =========================================================================
             // SSSE3 128-bit Packed Integer (sse.rs)
             // =========================================================================
-            Opcode::PshufbVdqWdq => self.pshufb_vdq_wdq(instr),
+            Opcode::PshufbVdqWdq => self.vpshufb(instr),
             Opcode::PmaddubswVdqWdq => self.pmaddubsw_vdq_wdq(instr),
             Opcode::PsignbVdqWdq => self.psignb_vdq_wdq(instr),
             Opcode::PsignwVdqWdq => self.psignw_vdq_wdq(instr),
@@ -2920,6 +2920,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // AVX/AVX-512 specific opcodes
             // =========================================================================
             Opcode::EvexVpermi2dVdqHdqWdqKmask => self.vpermi2d(instr),
+            Opcode::EvexVprordUdqIb | Opcode::EvexVprordUdqIbKmask => self.vprord(instr),
+            Opcode::EvexVproldUdqIb | Opcode::EvexVproldUdqIbKmask => self.vprold(instr),
+            Opcode::V256Vextracti128WdqVdqIb => self.vextracti128(instr),
+            Opcode::V256Vperm2i128VdqHdqWdqIb => self.vperm2i128(instr),
 
             // UD0/UD1/UD2 — intentional #UD exceptions (Linux uses UD2 for BUG()/WARN())
             Opcode::Ud0 | Opcode::Ud1 | Opcode::Ud2 => {

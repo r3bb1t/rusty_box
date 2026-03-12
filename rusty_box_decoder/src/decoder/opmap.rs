@@ -1990,7 +1990,17 @@ pub(super) const BxOpcodeTable0F71: [u64; 6] = [
 ];
 
 // opcode 0F 72
-pub(super) const BxOpcodeTable0F72: [u64; 6] = [
+// nnn=0: VPRORD (EVEX only), nnn=1: VPROLD (EVEX only)
+// nnn=2: PSRLD/VPSRLD, nnn=4: PSRAD/VPSRAD, nnn=6: PSLLD/VPSLLD
+pub(super) const BxOpcodeTable0F72: [u64; 8] = [
+    form_opcode(
+        ATTR_NNN0 | ATTR_SSE_PREFIX_66 | ATTR_MODC0,
+        Opcode::EvexVprordUdqIb,
+    ),
+    form_opcode(
+        ATTR_NNN1 | ATTR_SSE_PREFIX_66 | ATTR_MODC0,
+        Opcode::EvexVproldUdqIb,
+    ),
     form_opcode(
         ATTR_NNN2 | ATTR_SSE_NO_PREFIX | ATTR_MODC0,
         Opcode::PsrldNqIb,
