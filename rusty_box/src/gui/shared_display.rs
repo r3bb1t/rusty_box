@@ -43,6 +43,8 @@ pub struct SharedDisplay {
     pub reset_requested: bool,
     /// Atomic flag polled by run_interactive to stop early (e.g. on reset); shared with GUI
     pub stop_flag: Arc<AtomicBool>,
+    /// Serial console output text (accumulated from serial port TX)
+    pub serial_log: String,
 }
 
 impl SharedDisplay {
@@ -69,6 +71,7 @@ impl SharedDisplay {
             palette: VGA_DEFAULT_PALETTE_16,
             reset_requested: false,
             stop_flag: Arc::new(AtomicBool::new(false)),
+            serial_log: String::new(),
         }
     }
 

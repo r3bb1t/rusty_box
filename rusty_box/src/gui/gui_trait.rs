@@ -150,4 +150,9 @@ pub trait BxGui: Send + Sync {
         // Default: empty (GUIs that don't support keyboard input)
         Vec::new()
     }
+
+    /// Append text to the serial console log (for display in GUI)
+    fn append_serial_log(&self, _text: &str) {
+        // Default: no-op
+    }
 }

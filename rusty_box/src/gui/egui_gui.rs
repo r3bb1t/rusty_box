@@ -155,6 +155,17 @@ mod bridge_impl {
         fn get_pending_scancodes(&mut self) -> Vec<u8> {
             self.local_scancodes.drain(..).collect()
         }
+
+        fn append_serial_log(&self, text: &str) {
+            if let Ok(mut display) = self.shared.lock() {
+                display.serial_log.push_str(text);
+                // Cap at 64KB to prevent unbounded growth
+                if display.serial_log.len() > 65536 {
+                    let drain = display.serial_log.len() - 49152;
+                    display.serial_log.drain(..drain);
+                }
+            }
+        }
     }
 }
 

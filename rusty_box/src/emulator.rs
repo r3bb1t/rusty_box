@@ -2701,6 +2701,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             // Update more frequently if text is dirty OR periodically (like Bochs timer)
             if should_update_gui {
                 self.update_gui();
+
+                // Drain serial port output and push to shared display for GUI
+                let serial_bytes: Vec<u8> = self.device_manager.drain_serial_tx(0).collect();
+                if !serial_bytes.is_empty() {
+                    let text = String::from_utf8_lossy(&serial_bytes);
+                    if let Some(ref gui) = self.gui {
+                        gui.append_serial_log(&text);
+                    }
+                }
             }
 
             // Update IPS: show_ips() every 1 real second (keeps egui status bar responsive).

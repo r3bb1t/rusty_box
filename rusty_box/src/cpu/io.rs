@@ -605,9 +605,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let rdi = self.rdi();
-        let laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
         let value = self.port_in(port, 2) as u16;
-        self.mem_write_word(laddr, value);
+        self.write_virtual_word_64(BxSegregs::Es, rdi, value)?;
         if self.get_df() {
             self.set_rdi(rdi.wrapping_sub(2));
         } else {
@@ -623,9 +622,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let rdi = self.rdi();
-        let laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
         let value = self.port_in(port, 4);
-        self.mem_write_dword(laddr, value);
+        self.write_virtual_dword_64(BxSegregs::Es, rdi, value)?;
         if self.get_df() {
             self.set_rdi(rdi.wrapping_sub(4));
         } else {
@@ -664,8 +662,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let seg = BxSegregs::from(instr.seg());
         let rsi = self.rsi();
-        let laddr = self.get_laddr64(seg as usize, rsi);
-        let value = self.mem_read_word(laddr);
+        let value = self.read_virtual_word_64(seg, rsi)?;
         self.port_out(port, value as u32, 2);
         if self.get_df() {
             self.set_rsi(rsi.wrapping_sub(2));
@@ -683,8 +680,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let seg = BxSegregs::from(instr.seg());
         let rsi = self.rsi();
-        let laddr = self.get_laddr64(seg as usize, rsi);
-        let value = self.mem_read_dword(laddr);
+        let value = self.read_virtual_dword_64(seg, rsi)?;
         self.port_out(port, value, 4);
         if self.get_df() {
             self.set_rsi(rsi.wrapping_sub(4));

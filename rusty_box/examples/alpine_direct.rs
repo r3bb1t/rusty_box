@@ -163,7 +163,7 @@ fn run_alpine_direct() -> Result<()> {
 
     // Default command line: serial console + Alpine init
     let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_|
-        "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 earlyprintk=serial,ttyS0,115200 nomodeset nokaslr kfence.sample_interval=0".to_string()
+        "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 earlyprintk=serial,ttyS0,115200 nomodeset nokaslr kfence.sample_interval=0 modules=cdrom,sr_mod,isofs".to_string()
     );
 
     // =========================================================================
@@ -227,6 +227,11 @@ fn run_alpine_direct() -> Result<()> {
 
     // Configure CMOS memory
     emu.configure_memory_in_cmos_from_config();
+
+    // Attach ISO as CD-ROM so Alpine Init can mount the squashfs root filesystem
+    emu.attach_cdrom(1, 0, &iso_path)
+        .expect("Failed to attach Alpine ISO as CD-ROM");
+    println!("  CD-ROM attached: {}", iso_path);
 
     // Initialize GUI
     if headless {

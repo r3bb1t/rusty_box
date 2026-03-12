@@ -22,6 +22,9 @@ pub struct RustyBoxApp {
     // Cached status for status bar (avoids re-locking)
     cached_ips: u32,
     cached_emu_running: bool,
+    // Cached serial log for display (updated each frame from shared)
+    cached_serial_log: String,
+    serial_log_len: usize,
 }
 
 impl RustyBoxApp {
@@ -34,6 +37,8 @@ impl RustyBoxApp {
             last_height: 0,
             cached_ips: 0,
             cached_emu_running: true,
+            cached_serial_log: String::new(),
+            serial_log_len: 0,
         }
     }
 
@@ -113,6 +118,12 @@ impl RustyBoxApp {
         // Always cache status for the status bar
         self.cached_emu_running = display.emu_running;
         self.cached_ips = display.ips;
+
+        // Sync serial log if it changed
+        if display.serial_log.len() != self.serial_log_len {
+            self.cached_serial_log.clone_from(&display.serial_log);
+            self.serial_log_len = display.serial_log.len();
+        }
 
         if !display.fb_dirty && self.texture.is_some() {
             return;
@@ -276,6 +287,42 @@ impl eframe::App for RustyBoxApp {
                     });
                 });
             });
+
+        // Serial console panel — shown when there is serial output
+        if !self.cached_serial_log.is_empty() {
+            let console_bg = egui::Color32::from_rgb(0x0A, 0x0A, 0x14);
+            let console_text = egui::Color32::from_rgb(0x00, 0xCC, 0x66);
+            egui::TopBottomPanel::bottom("serial_console")
+                .resizable(true)
+                .min_height(60.0)
+                .default_height(160.0)
+                .max_height(400.0)
+                .frame(
+                    egui::Frame::NONE
+                        .fill(console_bg)
+                        .inner_margin(egui::Margin::same(6)),
+                )
+                .show(ctx, |ui| {
+                    ui.label(
+                        egui::RichText::new("Serial Console (ttyS0)")
+                            .monospace()
+                            .size(10.0)
+                            .color(egui::Color32::from_rgb(0x66, 0x66, 0x88)),
+                    );
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .stick_to_bottom(true)
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.label(
+                                egui::RichText::new(&self.cached_serial_log)
+                                    .monospace()
+                                    .size(11.0)
+                                    .color(console_text),
+                            );
+                        });
+                });
+        }
 
         // Main display area — deep dark background
         egui::CentralPanel::default()
