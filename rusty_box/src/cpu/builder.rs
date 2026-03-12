@@ -189,6 +189,7 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             diag_first_pm_hlt_rip: 0,
             diag_first_pm_hlt_stack: [0; 16],
             diag_rip_ring: [0; 64],
+            diag_opcode_ring: [0; 64],
             diag_rip_ring_idx: 0,
             diag_pm_to_rm_count: 0,
             diag_rm_to_pm_count: 0,

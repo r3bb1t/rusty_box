@@ -514,7 +514,10 @@ pub const fn fetch_decode32_inplace(
             // Two-byte Ed,Gd opcodes (DST=rm): Group 7, store-form SSE, MOV Rd/DRn, Groups 12-14
             || matches!(b1, 0x101 | 0x111 | 0x121 | 0x129 | 0x171 | 0x172 | 0x173)
             // SSE store-form opcodes: dst=rm(memory), src=nnn(xmm/mmx)
-            || matches!(b1, 0x113 | 0x117 | 0x12B | 0x17E | 0x17F | 0x1E7)
+            || matches!(b1, 0x113 | 0x117 | 0x12B | 0x17F | 0x1E7)
+            // 0x17E (0F 7E): Ed,Gd for no-prefix (MOVD Ed,Pq) and 66 (MOVD Ed,Vd),
+            // but NOT for F3 prefix (MOVQ Vq,Wq is a LOAD: nnn=dst, rm=src)
+            || (b1 == 0x17E && sse_prefix != SsePrefix::PrefixF3 as u8)
             // BT/BTS/BTR/BTC EdGd (0F A3/AB/B3/BB): rm=bit-field(dst), nnn=bit-index(src)
             || matches!(b1, 0x1A3 | 0x1AB | 0x1B3 | 0x1BB)
             // XADD EbGb (0F C0), XADD EdGd (0F C1): rm=dst, nnn=src

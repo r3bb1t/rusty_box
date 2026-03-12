@@ -1615,6 +1615,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Bochs proc_ctrl.cc:1346 — handleCpuModeChange (final, outside if/else)
         self.handle_cpu_mode_change();
+
         // Bochs proc_ctrl.cc:1348 — RIP = temp_RIP (set AFTER all mode changes)
         self.set_rip(temp_rip);
 

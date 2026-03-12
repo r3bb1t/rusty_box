@@ -588,6 +588,8 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(crate) diag_first_pm_hlt_stack: [u32; 16],
     /// RIP ring buffer for tracing last N instructions before HLT
     pub(super) diag_rip_ring: [u64; 64],
+    /// Opcode ring buffer (parallel to diag_rip_ring)
+    pub(super) diag_opcode_ring: [u16; 64],
     pub(super) diag_rip_ring_idx: usize,
     /// PM→RM transition count (CR0 PE: 1→0)
     pub(crate) diag_pm_to_rm_count: u64,
@@ -1514,9 +1516,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.prev_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
                 self.icount += 1;
 
-                // Record RIP in ring buffer during kernel phase for HLT diagnosis
+                // Record RIP + opcode in ring buffer during kernel phase for HLT diagnosis
                 if self.icount > 620_000_000 && self.long64_mode() {
-                    self.diag_rip_ring[self.diag_rip_ring_idx & 63] = self.prev_rip;
+                    let ring_slot = self.diag_rip_ring_idx & 63;
+                    self.diag_rip_ring[ring_slot] = self.prev_rip;
+                    self.diag_opcode_ring[ring_slot] = opcode as u16;
                     self.diag_rip_ring_idx += 1;
                 }
 
