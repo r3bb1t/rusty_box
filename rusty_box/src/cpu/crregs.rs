@@ -922,9 +922,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.tlb_flush();
         }
 
-        // Bochs: updateFetchModeMask() called inside handleCpuModeChange (proc_ctrl.cc:402)
-        // Ensures icache hash discriminator is updated for 16-bit vs 32-bit mode
-        self.update_fetch_mode_mask();
+        // Bochs crregs.cc:1142-1153 — mode change handlers after CR0 write
+        self.handle_alignment_check();
+        self.handle_cpu_mode_change(); // updates cpu_mode + calls update_fetch_mode_mask
+        self.handle_fpu_mmx_mode_change();
+        self.handle_sse_mode_change();
+        self.handle_avx_mode_change();
+
+        // Bochs crregs.cc:1166 — update linaddr_width
+        self.linaddr_width = if self.cr4.la57() { 57 } else { 48 };
 
         tracing::debug!(
             "MOV CR0, r32: {:#010x} -> {:#010x} (PE={}, PG={}, LMA={})",
@@ -1040,9 +1046,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.tlb_flush();
         }
 
+        // Bochs crregs.cc:1402-1407 — mode change handlers after CR4 write
+        self.handle_fpu_mmx_mode_change();
+        self.handle_sse_mode_change();
+        self.handle_avx_mode_change();
+
         // Bochs: update linaddr_width based on LA57 (5-level paging support)
         self.linaddr_width = if self.cr4.la57() { 57 } else { 48 };
-
 
         Ok(())
     }
