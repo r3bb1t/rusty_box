@@ -437,19 +437,17 @@ impl BxMemoryStubC {
                         return Ok(());
                     }
                 } else {
-                    page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 8);
-                    self.get_vector(a20_addr, cpus)?[0] = data[0];
+                    // Single byte write — Bochs misc_mem.cc: *data_ptr++
+                    page_write_stamp_table.dec_write_stamp_with_len(a20_addr, 1);
+                    self.get_vector(a20_addr, cpus)?[0] = data[data_ptr_offset];
 
                     if len == 1 {
                         return Ok(());
                     }
 
                     len -= 1;
-                    if cfg!(feature = "bx_little_endian") {
-                        data_ptr_offset += 8;
-                    } else {
-                        data_ptr_offset -= 8
-                    }
+                    a20_addr += 1;
+                    data_ptr_offset += 1;
                 }
 
                 page_write_stamp_table.dec_write_stamp(a20_addr);
