@@ -16,6 +16,41 @@
 //! uses SoftFloat3e, native FP is sufficient since we run on x86 host with
 //! the same FP behavior. SoftFloat integration can be added later if needed.
 
+/// Round-to-nearest-ties-even for f32 (no_std compatible).
+/// IEEE 754 default rounding: if exactly halfway, round to even.
+#[cfg(not(feature = "std"))]
+#[inline]
+fn round_ties_even_f32(val: f32) -> f32 {
+    // Use integer truncation + manual halfway detection
+    let trunc = val as i32; // truncate toward zero
+    let frac = val - trunc as f32;
+    let abs_frac = if frac >= 0.0 { frac } else { -frac };
+    if abs_frac == 0.5 {
+        // Exactly halfway — round to even
+        if trunc % 2 == 0 { trunc as f32 } else if val > 0.0 { (trunc + 1) as f32 } else { (trunc - 1) as f32 }
+    } else if abs_frac > 0.5 {
+        if val > 0.0 { (trunc + 1) as f32 } else { (trunc - 1) as f32 }
+    } else {
+        trunc as f32
+    }
+}
+
+/// Round-to-nearest-ties-even for f64 (no_std compatible).
+#[cfg(not(feature = "std"))]
+#[inline]
+fn round_ties_even_f64(val: f64) -> f64 {
+    let trunc = val as i64;
+    let frac = val - trunc as f64;
+    let abs_frac = if frac >= 0.0 { frac } else { -frac };
+    if abs_frac == 0.5 {
+        if trunc % 2 == 0 { trunc as f64 } else if val > 0.0 { (trunc + 1) as f64 } else { (trunc - 1) as f64 }
+    } else if abs_frac > 0.5 {
+        if val > 0.0 { (trunc + 1) as f64 } else { (trunc - 1) as f64 }
+    } else {
+        trunc as f64
+    }
+}
+
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
@@ -931,20 +966,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 // Integer indefinite value for out-of-range conversions
                 0x8000_0000u32
             } else {
-                #[cfg(not(feature = "no_std"))]
+                #[cfg(feature = "std")]
                 {
                     (op.round_ties_even() as i32) as u32
                 }
-                #[cfg(feature = "no_std")]
+                #[cfg(not(feature = "std"))]
                 {
-                    // Fallback: use truncation toward nearest (not exactly round-to-even
-                    // but close enough for emulation)
-                    let rounded = if op >= 0.0 {
-                        (op + 0.5) as i32
-                    } else {
-                        (op - 0.5) as i32
-                    };
-                    rounded as u32
+                    round_ties_even_f32(op) as i32 as u32
                 }
             };
         self.set_gpr32(instr.dst().into(), result);
@@ -959,18 +987,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if op.is_nan() || op.is_infinite() || op > i32::MAX as f64 || op < i32::MIN as f64 {
                 0x8000_0000u32
             } else {
-                #[cfg(not(feature = "no_std"))]
+                #[cfg(feature = "std")]
                 {
                     (op.round_ties_even() as i32) as u32
                 }
-                #[cfg(feature = "no_std")]
+                #[cfg(not(feature = "std"))]
                 {
-                    let rounded = if op >= 0.0 {
-                        (op + 0.5) as i32
-                    } else {
-                        (op - 0.5) as i32
-                    };
-                    rounded as u32
+                    round_ties_even_f64(op) as i32 as u32
                 }
             };
         self.set_gpr32(instr.dst().into(), result);
@@ -1087,18 +1110,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if op.is_nan() || op.is_infinite() || op > i64::MAX as f32 || op < i64::MIN as f32 {
                 0x8000_0000_0000_0000u64
             } else {
-                #[cfg(not(feature = "no_std"))]
+                #[cfg(feature = "std")]
                 {
                     (op.round_ties_even() as i64) as u64
                 }
-                #[cfg(feature = "no_std")]
+                #[cfg(not(feature = "std"))]
                 {
-                    let rounded = if op >= 0.0 {
-                        (op + 0.5) as i64
-                    } else {
-                        (op - 0.5) as i64
-                    };
-                    rounded as u64
+                    round_ties_even_f32(op) as i64 as u64
                 }
             };
         self.set_gpr64(instr.dst() as usize, result);
@@ -1113,18 +1131,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if op.is_nan() || op.is_infinite() || op > i64::MAX as f64 || op < i64::MIN as f64 {
                 0x8000_0000_0000_0000u64
             } else {
-                #[cfg(not(feature = "no_std"))]
+                #[cfg(feature = "std")]
                 {
                     (op.round_ties_even() as i64) as u64
                 }
-                #[cfg(feature = "no_std")]
+                #[cfg(not(feature = "std"))]
                 {
-                    let rounded = if op >= 0.0 {
-                        (op + 0.5) as i64
-                    } else {
-                        (op - 0.5) as i64
-                    };
-                    rounded as u64
+                    round_ties_even_f32(op) as i64 as u64
                 }
             };
         self.set_gpr64(instr.dst() as usize, result);
@@ -1236,17 +1249,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 {
                     0x8000_0000u32 as i32
                 } else {
-                    #[cfg(not(feature = "no_std"))]
+                    #[cfg(feature = "std")]
                     {
                         val.round_ties_even() as i32
                     }
-                    #[cfg(feature = "no_std")]
+                    #[cfg(not(feature = "std"))]
                     {
-                        if val >= 0.0 {
-                            (val + 0.5) as i32
-                        } else {
-                            (val - 0.5) as i32
-                        }
+                        round_ties_even_f32(val) as i32
                     }
                 };
             }
@@ -1320,17 +1329,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 {
                     0x8000_0000u32 as i32
                 } else {
-                    #[cfg(not(feature = "no_std"))]
+                    #[cfg(feature = "std")]
                     {
                         val.round_ties_even() as i32
                     }
-                    #[cfg(feature = "no_std")]
+                    #[cfg(not(feature = "std"))]
                     {
-                        if val >= 0.0 {
-                            (val + 0.5) as i32
-                        } else {
-                            (val - 0.5) as i32
-                        }
+                        round_ties_even_f64(val) as i32
                     }
                 };
             }
