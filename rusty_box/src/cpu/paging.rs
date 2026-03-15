@@ -1314,12 +1314,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let tlb_entry = self.dtlb.get_entry_of(laddr, 0);
             if tlb_entry.lpf == lpf && (tlb_entry.access_bits & needed_bit) != 0 {
                 // TLB hit — return cached physical address directly.
+                self.perf_tlb_hit += 1;
                 let paddr = tlb_entry.ppf | (laddr & 0xFFF);
                 return Ok(paddr);
             }
         }
 
         // ---- DTLB miss — full page table walk ----
+        self.perf_tlb_miss += 1;
         let (paddr, combined_access, lpf_mask) = self.page_walk_for_dtlb(laddr, user, is_write)?;
         let paddr = self.apply_a20(paddr);
         let is_large_page = lpf_mask > 0xFFF;
@@ -1512,6 +1514,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         user: bool,
         is_write: bool,
     ) -> Result<(u64, u32, u32)> {
+        self.perf_page_walk += 1;
         if self.long_mode() {
             return self.page_walk_for_dtlb_long_mode(laddr, user, is_write);
         }

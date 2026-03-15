@@ -1134,4 +1134,2386 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.write_ymm_reg(instr.dst(), result);
         Ok(())
     }
+
+    // ========================================================================
+    // Unpack byte/word/qword variants
+    // ========================================================================
+
+    /// VPUNPCKLBW — Unpack and Interleave Low Bytes (VEX.L aware)
+    /// Per 128-bit lane: result[2i] = src1[i], result[2i+1] = src2[i] for i in 0..8
+    pub(super) fn vpunpcklbw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                // Lower 128-bit lane
+                for i in 0..8usize {
+                    result.ymmubyte[i * 2] = src1.ymmubyte[i];
+                    result.ymmubyte[i * 2 + 1] = src2.ymmubyte[i];
+                }
+                // Upper 128-bit lane
+                for i in 0..8usize {
+                    result.ymmubyte[16 + i * 2] = src1.ymmubyte[16 + i];
+                    result.ymmubyte[16 + i * 2 + 1] = src2.ymmubyte[16 + i];
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..8usize {
+                    result.xmmubyte[i * 2] = src1.xmmubyte[i];
+                    result.xmmubyte[i * 2 + 1] = src2.xmmubyte[i];
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPUNPCKHBW — Unpack and Interleave High Bytes (VEX.L aware)
+    /// Per 128-bit lane: result[2i] = src1[8+i], result[2i+1] = src2[8+i] for i in 0..8
+    pub(super) fn vpunpckhbw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                // Lower 128-bit lane (high bytes 8..16)
+                for i in 0..8usize {
+                    result.ymmubyte[i * 2] = src1.ymmubyte[8 + i];
+                    result.ymmubyte[i * 2 + 1] = src2.ymmubyte[8 + i];
+                }
+                // Upper 128-bit lane (high bytes 24..32)
+                for i in 0..8usize {
+                    result.ymmubyte[16 + i * 2] = src1.ymmubyte[24 + i];
+                    result.ymmubyte[16 + i * 2 + 1] = src2.ymmubyte[24 + i];
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..8usize {
+                    result.xmmubyte[i * 2] = src1.xmmubyte[8 + i];
+                    result.xmmubyte[i * 2 + 1] = src2.xmmubyte[8 + i];
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPUNPCKLWD — Unpack and Interleave Low Words (VEX.L aware)
+    /// Per 128-bit lane: result[2i] = src1[i], result[2i+1] = src2[i] for i in 0..4
+    pub(super) fn vpunpcklwd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                // Lower 128-bit lane
+                for i in 0..4usize {
+                    result.ymm16u[i * 2] = src1.ymm16u[i];
+                    result.ymm16u[i * 2 + 1] = src2.ymm16u[i];
+                }
+                // Upper 128-bit lane
+                for i in 0..4usize {
+                    result.ymm16u[8 + i * 2] = src1.ymm16u[8 + i];
+                    result.ymm16u[8 + i * 2 + 1] = src2.ymm16u[8 + i];
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..4usize {
+                    result.xmm16u[i * 2] = src1.xmm16u[i];
+                    result.xmm16u[i * 2 + 1] = src2.xmm16u[i];
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPUNPCKHWD — Unpack and Interleave High Words (VEX.L aware)
+    /// Per 128-bit lane: result[2i] = src1[4+i], result[2i+1] = src2[4+i] for i in 0..4
+    pub(super) fn vpunpckhwd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                // Lower 128-bit lane (high words 4..8)
+                for i in 0..4usize {
+                    result.ymm16u[i * 2] = src1.ymm16u[4 + i];
+                    result.ymm16u[i * 2 + 1] = src2.ymm16u[4 + i];
+                }
+                // Upper 128-bit lane (high words 12..16)
+                for i in 0..4usize {
+                    result.ymm16u[8 + i * 2] = src1.ymm16u[12 + i];
+                    result.ymm16u[8 + i * 2 + 1] = src2.ymm16u[12 + i];
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..4usize {
+                    result.xmm16u[i * 2] = src1.xmm16u[4 + i];
+                    result.xmm16u[i * 2 + 1] = src2.xmm16u[4 + i];
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPUNPCKLQDQ — Unpack and Interleave Low Qwords (VEX.L aware)
+    /// Per 128-bit lane: result[0] = src1[0], result[1] = src2[0]
+    pub(super) fn vpunpcklqdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                // Lower lane
+                result.ymm64u[0] = src1.ymm64u[0];
+                result.ymm64u[1] = src2.ymm64u[0];
+                // Upper lane
+                result.ymm64u[2] = src1.ymm64u[2];
+                result.ymm64u[3] = src2.ymm64u[2];
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                result.xmm64u[0] = src1.xmm64u[0];
+                result.xmm64u[1] = src2.xmm64u[0];
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPUNPCKHQDQ — Unpack and Interleave High Qwords (VEX.L aware)
+    /// Per 128-bit lane: result[0] = src1[1], result[1] = src2[1]
+    pub(super) fn vpunpckhqdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                // Lower lane
+                result.ymm64u[0] = src1.ymm64u[1];
+                result.ymm64u[1] = src2.ymm64u[1];
+                // Upper lane
+                result.ymm64u[2] = src1.ymm64u[3];
+                result.ymm64u[3] = src2.ymm64u[3];
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                result.xmm64u[0] = src1.xmm64u[1];
+                result.xmm64u[1] = src2.xmm64u[1];
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // Packed integer add/sub (byte, word, qword widths)
+    // ========================================================================
+
+    /// VPADDQ — Packed Add Qwords (VEX.L aware)
+    /// dst[i] = vvvv[i] + src[i] (element-wise 64-bit wrapping add)
+    pub(super) fn vpaddq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..4 {
+                    result.ymm64u[i] = src1.ymm64u[i].wrapping_add(src2.ymm64u[i]);
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..2 {
+                    result.xmm64u[i] = src1.xmm64u[i].wrapping_add(src2.xmm64u[i]);
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPADDW — Packed Add Words (VEX.L aware)
+    /// dst[i] = vvvv[i] + src[i] (element-wise 16-bit wrapping add)
+    pub(super) fn vpaddw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..16 {
+                    result.ymm16u[i] = src1.ymm16u[i].wrapping_add(src2.ymm16u[i]);
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..8 {
+                    result.xmm16u[i] = src1.xmm16u[i].wrapping_add(src2.xmm16u[i]);
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPADDB — Packed Add Bytes (VEX.L aware)
+    /// dst[i] = vvvv[i] + src[i] (element-wise 8-bit wrapping add)
+    pub(super) fn vpaddb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..32 {
+                    result.ymmubyte[i] = src1.ymmubyte[i].wrapping_add(src2.ymmubyte[i]);
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..16 {
+                    result.xmmubyte[i] = src1.xmmubyte[i].wrapping_add(src2.xmmubyte[i]);
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSUBQ — Packed Subtract Qwords (VEX.L aware)
+    /// dst[i] = vvvv[i] - src[i] (element-wise 64-bit wrapping sub)
+    pub(super) fn vpsubq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..4 {
+                    result.ymm64u[i] = src1.ymm64u[i].wrapping_sub(src2.ymm64u[i]);
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..2 {
+                    result.xmm64u[i] = src1.xmm64u[i].wrapping_sub(src2.xmm64u[i]);
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSUBW — Packed Subtract Words (VEX.L aware)
+    /// dst[i] = vvvv[i] - src[i] (element-wise 16-bit wrapping sub)
+    pub(super) fn vpsubw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..16 {
+                    result.ymm16u[i] = src1.ymm16u[i].wrapping_sub(src2.ymm16u[i]);
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..8 {
+                    result.xmm16u[i] = src1.xmm16u[i].wrapping_sub(src2.xmm16u[i]);
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSUBB — Packed Subtract Bytes (VEX.L aware)
+    /// dst[i] = vvvv[i] - src[i] (element-wise 8-bit wrapping sub)
+    pub(super) fn vpsubb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..32 {
+                    result.ymmubyte[i] = src1.ymmubyte[i].wrapping_sub(src2.ymmubyte[i]);
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..16 {
+                    result.xmmubyte[i] = src1.xmmubyte[i].wrapping_sub(src2.xmmubyte[i]);
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // Packed logical: VPANDN
+    // ========================================================================
+
+    /// VPANDN — Packed AND NOT (VEX.L aware)
+    /// dst[i] = NOT(vvvv[i]) AND src[i]
+    pub(super) fn vpandn(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..4 {
+                    result.ymm64u[i] = !src1.ymm64u[i] & src2.ymm64u[i];
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..2 {
+                    result.xmm64u[i] = !src1.xmm64u[i] & src2.xmm64u[i];
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // Packed multiply
+    // ========================================================================
+
+    /// VPMULUDQ — Unsigned Multiply Dwords to Qwords (VEX.L aware)
+    /// dst_q[i] = (vvvv_d[i*2] as u64) * (src_d[i*2] as u64)
+    /// Uses even-numbered dwords only, produces qword results
+    pub(super) fn vpmuludq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..4 {
+                    result.ymm64u[i] =
+                        (src1.ymm32u[i * 2] as u64) * (src2.ymm32u[i * 2] as u64);
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..2 {
+                    result.xmm64u[i] =
+                        (src1.xmm32u[i * 2] as u64) * (src2.xmm32u[i * 2] as u64);
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPMULDQ — Signed Multiply Dwords to Qwords (VEX.L aware)
+    /// dst_q[i] = (vvvv_d[i*2] as i32 as i64) * (src_d[i*2] as i32 as i64)
+    /// Uses even-numbered dwords only (signed), produces qword results
+    pub(super) fn vpmuldq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..4 {
+                    let a = src1.ymm32s[i * 2] as i64;
+                    let b = src2.ymm32s[i * 2] as i64;
+                    result.ymm64u[i] = (a * b) as u64;
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..2 {
+                    let a = src1.xmm32s[i * 2] as i64;
+                    let b = src2.xmm32s[i * 2] as i64;
+                    result.xmm64u[i] = (a * b) as u64;
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPMULLD — Packed Multiply Low Dwords (VEX.L aware)
+    /// dst[i] = (vvvv[i] as i32).wrapping_mul(src[i] as i32) as u32
+    pub(super) fn vpmulld(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..8 {
+                    result.ymm32u[i] =
+                        (src1.ymm32s[i] as i64 * src2.ymm32s[i] as i64) as u32;
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..4 {
+                    result.xmm32u[i] =
+                        (src1.xmm32s[i] as i64 * src2.xmm32s[i] as i64) as u32;
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPMULLW — Packed Multiply Low Words (VEX.L aware)
+    /// dst[i] = low 16 bits of (vvvv[i] * src[i])
+    pub(super) fn vpmullw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..16 {
+                    let prod = (src1.ymm16s[i] as i32) * (src2.ymm16s[i] as i32);
+                    result.ymm16u[i] = prod as u16;
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..8 {
+                    let prod = (src1.xmm16s[i] as i32) * (src2.xmm16s[i] as i32);
+                    result.xmm16u[i] = prod as u16;
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPMULHW — Packed Multiply High Words Signed (VEX.L aware)
+    /// dst[i] = high 16 bits of (vvvv[i] as i16 * src[i] as i16)
+    pub(super) fn vpmulhw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..16 {
+                    let prod = (src1.ymm16s[i] as i32) * (src2.ymm16s[i] as i32);
+                    result.ymm16u[i] = (prod >> 16) as u16;
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..8 {
+                    let prod = (src1.xmm16s[i] as i32) * (src2.xmm16s[i] as i32);
+                    result.xmm16u[i] = (prod >> 16) as u16;
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPMULHUW — Packed Multiply High Words Unsigned (VEX.L aware)
+    /// dst[i] = high 16 bits of (vvvv[i] as u16 * src[i] as u16)
+    pub(super) fn vpmulhuw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..16 {
+                    let prod = (src1.ymm16u[i] as u32) * (src2.ymm16u[i] as u32);
+                    result.ymm16u[i] = (prod >> 16) as u16;
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..8 {
+                    let prod = (src1.xmm16u[i] as u32) * (src2.xmm16u[i] as u32);
+                    result.xmm16u[i] = (prod >> 16) as u16;
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // Packed shift by register (count from low 64 bits of XMM source)
+    // ========================================================================
+
+    /// VPSRLQ — Packed Shift Right Logical Qwords by XMM count (VEX.L aware)
+    /// Count is from bits [63:0] of src XMM. If count > 63, result is zero.
+    pub(super) fn vpsrlq_reg(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        // Shift count from ModRM source (register or memory)
+        let count = if instr.mod_c0() {
+            let src = self.read_xmm_reg(instr.src1());
+            unsafe { src.xmm64u[0] }
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_qword(seg, eaddr)?
+        };
+        if instr.get_vl() >= 1 {
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            if count < 64 {
+                let count = count as u32;
+                unsafe {
+                    for i in 0..4 {
+                        result.ymm64u[i] = src1.ymm64u[i] >> count;
+                    }
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            if count < 64 {
+                let count = count as u32;
+                unsafe {
+                    for i in 0..2 {
+                        result.xmm64u[i] = src1.xmm64u[i] >> count;
+                    }
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSLLD — Packed Shift Left Logical Dwords by XMM count (VEX.L aware)
+    /// Count is from bits [63:0] of src XMM. If count > 31, result is zero.
+    pub(super) fn vpslld_reg(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        let count = if instr.mod_c0() {
+            let src = self.read_xmm_reg(instr.src1());
+            unsafe { src.xmm64u[0] }
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_qword(seg, eaddr)?
+        };
+        if instr.get_vl() >= 1 {
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            if count < 32 {
+                let count = count as u32;
+                unsafe {
+                    for i in 0..8 {
+                        result.ymm32u[i] = src1.ymm32u[i] << count;
+                    }
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            if count < 32 {
+                let count = count as u32;
+                unsafe {
+                    for i in 0..4 {
+                        result.xmm32u[i] = src1.xmm32u[i] << count;
+                    }
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSLLQ — Packed Shift Left Logical Qwords by XMM count (VEX.L aware)
+    /// Count is from bits [63:0] of src XMM. If count > 63, result is zero.
+    pub(super) fn vpsllq_reg(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        let count = if instr.mod_c0() {
+            let src = self.read_xmm_reg(instr.src1());
+            unsafe { src.xmm64u[0] }
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_qword(seg, eaddr)?
+        };
+        if instr.get_vl() >= 1 {
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            if count < 64 {
+                let count = count as u32;
+                unsafe {
+                    for i in 0..4 {
+                        result.ymm64u[i] = src1.ymm64u[i] << count;
+                    }
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            if count < 64 {
+                let count = count as u32;
+                unsafe {
+                    for i in 0..2 {
+                        result.xmm64u[i] = src1.xmm64u[i] << count;
+                    }
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSRLW — Packed Shift Right Logical Words by XMM count (VEX.L aware)
+    /// Count is from bits [63:0] of src XMM. If count > 15, result is zero.
+    pub(super) fn vpsrlw_reg(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        let count = if instr.mod_c0() {
+            let src = self.read_xmm_reg(instr.src1());
+            unsafe { src.xmm64u[0] }
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_qword(seg, eaddr)?
+        };
+        if instr.get_vl() >= 1 {
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            if count < 16 {
+                let count = count as u32;
+                unsafe {
+                    for i in 0..16 {
+                        result.ymm16u[i] = src1.ymm16u[i] >> count;
+                    }
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            if count < 16 {
+                let count = count as u32;
+                unsafe {
+                    for i in 0..8 {
+                        result.xmm16u[i] = src1.xmm16u[i] >> count;
+                    }
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSRLD — Packed Shift Right Logical Dwords by XMM count (VEX.L aware)
+    /// Count is from bits [63:0] of src XMM. If count > 31, result is zero.
+    pub(super) fn vpsrld_reg(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        let count = if instr.mod_c0() {
+            let src = self.read_xmm_reg(instr.src1());
+            unsafe { src.xmm64u[0] }
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_qword(seg, eaddr)?
+        };
+        if instr.get_vl() >= 1 {
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            if count < 32 {
+                let count = count as u32;
+                unsafe {
+                    for i in 0..8 {
+                        result.ymm32u[i] = src1.ymm32u[i] >> count;
+                    }
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            if count < 32 {
+                let count = count as u32;
+                unsafe {
+                    for i in 0..4 {
+                        result.xmm32u[i] = src1.xmm32u[i] >> count;
+                    }
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSRAW — Packed Shift Right Arithmetic Words by XMM count (VEX.L aware)
+    /// Count is from bits [63:0] of src XMM. If count > 15, count is clamped to 15.
+    pub(super) fn vpsraw_reg(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        let count_raw = if instr.mod_c0() {
+            let src = self.read_xmm_reg(instr.src1());
+            unsafe { src.xmm64u[0] }
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_qword(seg, eaddr)?
+        };
+        let count = if count_raw > 15 { 15u32 } else { count_raw as u32 };
+        if instr.get_vl() >= 1 {
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..16 {
+                    result.ymm16u[i] = (src1.ymm16s[i] >> count) as u16;
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..8 {
+                    result.xmm16u[i] = (src1.xmm16s[i] >> count) as u16;
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSRAD — Packed Shift Right Arithmetic Dwords by XMM count (VEX.L aware)
+    /// Count is from bits [63:0] of src XMM. If count > 31, count is clamped to 31.
+    pub(super) fn vpsrad_reg(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        let count_raw = if instr.mod_c0() {
+            let src = self.read_xmm_reg(instr.src1());
+            unsafe { src.xmm64u[0] }
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_qword(seg, eaddr)?
+        };
+        let count = if count_raw > 31 { 31u32 } else { count_raw as u32 };
+        if instr.get_vl() >= 1 {
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..8 {
+                    result.ymm32u[i] = (src1.ymm32s[i] >> count) as u32;
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..4 {
+                    result.xmm32u[i] = (src1.xmm32s[i] >> count) as u32;
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSLLW — Packed Shift Left Logical Words by XMM count (VEX.L aware)
+    /// Count is from bits [63:0] of src XMM. If count > 15, result is zero.
+    pub(super) fn vpsllw_reg(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        let count = if instr.mod_c0() {
+            let src = self.read_xmm_reg(instr.src1());
+            unsafe { src.xmm64u[0] }
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_qword(seg, eaddr)?
+        };
+        if instr.get_vl() >= 1 {
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            if count < 16 {
+                let count = count as u32;
+                unsafe {
+                    for i in 0..16 {
+                        result.ymm16u[i] = src1.ymm16u[i] << count;
+                    }
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            if count < 16 {
+                let count = count as u32;
+                unsafe {
+                    for i in 0..8 {
+                        result.xmm16u[i] = src1.xmm16u[i] << count;
+                    }
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // Packed shift by immediate
+    // ========================================================================
+
+    /// VPSRLQ — Packed Shift Right Logical Qwords by immediate (VEX.L aware)
+    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    pub(super) fn vpsrlq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.src2(); // VEX.vvvv
+        let count = instr.ib() as u32;
+        if instr.get_vl() >= 1 {
+            let src = if instr.mod_c0() {
+                self.read_ymm_reg(instr.dst())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            if count < 64 {
+                unsafe {
+                    for i in 0..4 {
+                        result.ymm64u[i] = src.ymm64u[i] >> count;
+                    }
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src = if instr.mod_c0() {
+                self.read_xmm_reg(instr.dst())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            if count < 64 {
+                unsafe {
+                    for i in 0..2 {
+                        result.xmm64u[i] = src.xmm64u[i] >> count;
+                    }
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSLLQ — Packed Shift Left Logical Qwords by immediate (VEX.L aware)
+    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    pub(super) fn vpsllq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.src2(); // VEX.vvvv
+        let count = instr.ib() as u32;
+        if instr.get_vl() >= 1 {
+            let src = if instr.mod_c0() {
+                self.read_ymm_reg(instr.dst())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            if count < 64 {
+                unsafe {
+                    for i in 0..4 {
+                        result.ymm64u[i] = src.ymm64u[i] << count;
+                    }
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src = if instr.mod_c0() {
+                self.read_xmm_reg(instr.dst())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            if count < 64 {
+                unsafe {
+                    for i in 0..2 {
+                        result.xmm64u[i] = src.xmm64u[i] << count;
+                    }
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSRLW — Packed Shift Right Logical Words by immediate (VEX.L aware)
+    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    pub(super) fn vpsrlw_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.src2(); // VEX.vvvv
+        let count = instr.ib() as u32;
+        if instr.get_vl() >= 1 {
+            let src = if instr.mod_c0() {
+                self.read_ymm_reg(instr.dst())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            if count < 16 {
+                unsafe {
+                    for i in 0..16 {
+                        result.ymm16u[i] = src.ymm16u[i] >> count;
+                    }
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src = if instr.mod_c0() {
+                self.read_xmm_reg(instr.dst())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            if count < 16 {
+                unsafe {
+                    for i in 0..8 {
+                        result.xmm16u[i] = src.xmm16u[i] >> count;
+                    }
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSLLW — Packed Shift Left Logical Words by immediate (VEX.L aware)
+    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    pub(super) fn vpsllw_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.src2(); // VEX.vvvv
+        let count = instr.ib() as u32;
+        if instr.get_vl() >= 1 {
+            let src = if instr.mod_c0() {
+                self.read_ymm_reg(instr.dst())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            if count < 16 {
+                unsafe {
+                    for i in 0..16 {
+                        result.ymm16u[i] = src.ymm16u[i] << count;
+                    }
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src = if instr.mod_c0() {
+                self.read_xmm_reg(instr.dst())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            if count < 16 {
+                unsafe {
+                    for i in 0..8 {
+                        result.xmm16u[i] = src.xmm16u[i] << count;
+                    }
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSRAW — Packed Shift Right Arithmetic Words by immediate (VEX.L aware)
+    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    /// Arithmetic shift sign-extends; count clamped to 15 if > 15.
+    pub(super) fn vpsraw_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.src2(); // VEX.vvvv
+        let count_raw = instr.ib() as u32;
+        let count = if count_raw > 15 { 15 } else { count_raw };
+        if instr.get_vl() >= 1 {
+            let src = if instr.mod_c0() {
+                self.read_ymm_reg(instr.dst())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..16 {
+                    result.ymm16u[i] = (src.ymm16s[i] >> count) as u16;
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src = if instr.mod_c0() {
+                self.read_xmm_reg(instr.dst())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..8 {
+                    result.xmm16u[i] = (src.xmm16s[i] >> count) as u16;
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSRAD — Packed Shift Right Arithmetic Dwords by immediate (VEX.L aware)
+    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    /// Arithmetic shift sign-extends; count clamped to 31 if > 31.
+    pub(super) fn vpsrad_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.src2(); // VEX.vvvv
+        let count_raw = instr.ib() as u32;
+        let count = if count_raw > 31 { 31 } else { count_raw };
+        if instr.get_vl() >= 1 {
+            let src = if instr.mod_c0() {
+                self.read_ymm_reg(instr.dst())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..8 {
+                    result.ymm32u[i] = (src.ymm32s[i] >> count) as u32;
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src = if instr.mod_c0() {
+                self.read_xmm_reg(instr.dst())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..4 {
+                    result.xmm32u[i] = (src.xmm32s[i] >> count) as u32;
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSLLDQ — Packed Shift Left Double Quadword by immediate (VEX.L aware)
+    /// Byte-granularity left shift of each 128-bit lane. Immediate = byte count (0-15).
+    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    pub(super) fn vpslldq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.src2(); // VEX.vvvv
+        let shift = instr.ib() as usize;
+        let shift = if shift > 15 { 16 } else { shift };
+        if instr.get_vl() >= 1 {
+            let src = if instr.mod_c0() {
+                self.read_ymm_reg(instr.dst())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                // Lower 128-bit lane
+                for i in 0..16usize {
+                    if i >= shift {
+                        result.ymmubyte[i] = src.ymmubyte[i - shift];
+                    }
+                    // else remains 0 (zero-fill from the right)
+                }
+                // Upper 128-bit lane
+                for i in 0..16usize {
+                    if i >= shift {
+                        result.ymmubyte[16 + i] = src.ymmubyte[16 + i - shift];
+                    }
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src = if instr.mod_c0() {
+                self.read_xmm_reg(instr.dst())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..16usize {
+                    if i >= shift {
+                        result.xmmubyte[i] = src.xmmubyte[i - shift];
+                    }
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSRLDQ — Packed Shift Right Double Quadword by immediate (VEX.L aware)
+    /// Byte-granularity right shift of each 128-bit lane. Immediate = byte count (0-15).
+    /// Operands: dst=VEX.vvvv (src2), src=rm (dst), imm8
+    pub(super) fn vpsrldq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.src2(); // VEX.vvvv
+        let shift = instr.ib() as usize;
+        let shift = if shift > 15 { 16 } else { shift };
+        if instr.get_vl() >= 1 {
+            let src = if instr.mod_c0() {
+                self.read_ymm_reg(instr.dst())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                // Lower 128-bit lane
+                for i in 0..16usize {
+                    if i + shift < 16 {
+                        result.ymmubyte[i] = src.ymmubyte[i + shift];
+                    }
+                    // else remains 0 (zero-fill from the left)
+                }
+                // Upper 128-bit lane
+                for i in 0..16usize {
+                    if i + shift < 16 {
+                        result.ymmubyte[16 + i] = src.ymmubyte[16 + i + shift];
+                    }
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src = if instr.mod_c0() {
+                self.read_xmm_reg(instr.dst())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..16usize {
+                    if i + shift < 16 {
+                        result.xmmubyte[i] = src.xmmubyte[i + shift];
+                    }
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // Packed compare
+    // ========================================================================
+
+    /// VPCMPEQB — Packed Compare Equal Bytes (VEX.L aware)
+    /// dst[i] = (vvvv[i] == src[i]) ? 0xFF : 0x00
+    pub(super) fn vpcmpeqb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..32 {
+                    result.ymmubyte[i] =
+                        if src1.ymmubyte[i] == src2.ymmubyte[i] { 0xFF } else { 0x00 };
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..16 {
+                    result.xmmubyte[i] =
+                        if src1.xmmubyte[i] == src2.xmmubyte[i] { 0xFF } else { 0x00 };
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPCMPEQW — Packed Compare Equal Words (VEX.L aware)
+    /// dst[i] = (vvvv[i] == src[i]) ? 0xFFFF : 0x0000
+    pub(super) fn vpcmpeqw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..16 {
+                    result.ymm16u[i] =
+                        if src1.ymm16u[i] == src2.ymm16u[i] { 0xFFFF } else { 0x0000 };
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..8 {
+                    result.xmm16u[i] =
+                        if src1.xmm16u[i] == src2.xmm16u[i] { 0xFFFF } else { 0x0000 };
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPCMPEQQ — Packed Compare Equal Qwords (VEX.L aware)
+    /// dst[i] = (vvvv[i] == src[i]) ? 0xFFFF_FFFF_FFFF_FFFF : 0
+    pub(super) fn vpcmpeqq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..4 {
+                    result.ymm64u[i] =
+                        if src1.ymm64u[i] == src2.ymm64u[i] { 0xFFFF_FFFF_FFFF_FFFF } else { 0 };
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..2 {
+                    result.xmm64u[i] =
+                        if src1.xmm64u[i] == src2.xmm64u[i] { 0xFFFF_FFFF_FFFF_FFFF } else { 0 };
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPCMPGTB — Packed Compare Greater Than Bytes, signed (VEX.L aware)
+    /// dst[i] = ((vvvv[i] as i8) > (src[i] as i8)) ? 0xFF : 0x00
+    pub(super) fn vpcmpgtb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..32 {
+                    result.ymmubyte[i] =
+                        if src1.ymm_sbyte[i] > src2.ymm_sbyte[i] { 0xFF } else { 0x00 };
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..16 {
+                    result.xmmubyte[i] =
+                        if src1.xmm_sbyte[i] > src2.xmm_sbyte[i] { 0xFF } else { 0x00 };
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPCMPGTW — Packed Compare Greater Than Words, signed (VEX.L aware)
+    /// dst[i] = ((vvvv[i] as i16) > (src[i] as i16)) ? 0xFFFF : 0x0000
+    pub(super) fn vpcmpgtw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..16 {
+                    result.ymm16u[i] =
+                        if src1.ymm16s[i] > src2.ymm16s[i] { 0xFFFF } else { 0x0000 };
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..8 {
+                    result.xmm16u[i] =
+                        if src1.xmm16s[i] > src2.xmm16s[i] { 0xFFFF } else { 0x0000 };
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPCMPGTD — Packed Compare Greater Than Dwords, signed (VEX.L aware)
+    /// dst[i] = ((vvvv[i] as i32) > (src[i] as i32)) ? 0xFFFFFFFF : 0
+    pub(super) fn vpcmpgtd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..8 {
+                    result.ymm32u[i] =
+                        if src1.ymm32s[i] > src2.ymm32s[i] { 0xFFFF_FFFF } else { 0 };
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..4 {
+                    result.xmm32u[i] =
+                        if src1.xmm32s[i] > src2.xmm32s[i] { 0xFFFF_FFFF } else { 0 };
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPCMPGTQ — Packed Compare Greater Than Qwords, signed (VEX.L aware)
+    /// dst[i] = ((vvvv[i] as i64) > (src[i] as i64)) ? 0xFFFF_FFFF_FFFF_FFFF : 0
+    pub(super) fn vpcmpgtq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..4 {
+                    result.ymm64u[i] =
+                        if src1.ymm64s[i] > src2.ymm64s[i] { 0xFFFF_FFFF_FFFF_FFFF } else { 0 };
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..2 {
+                    result.xmm64u[i] =
+                        if src1.xmm64s[i] > src2.xmm64s[i] { 0xFFFF_FFFF_FFFF_FFFF } else { 0 };
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // VPMOVMSKB — Move Byte Mask to GPR
+    // ========================================================================
+
+    /// VPMOVMSKB — Extract MSB of each byte, packed into GPR (VEX.L aware)
+    /// Result is a bitmask: bit i = MSB of byte i in source XMM/YMM
+    pub(super) fn vpmovmskb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_gpr = instr.dst() as usize;
+        if instr.get_vl() >= 1 {
+            // 256-bit: 32 bytes -> 32-bit mask
+            let src = self.read_ymm_reg(instr.src1());
+            let mut mask: u32 = 0;
+            unsafe {
+                for i in 0..32 {
+                    if (src.ymmubyte[i] & 0x80) != 0 {
+                        mask |= 1u32 << i;
+                    }
+                }
+            }
+            self.set_gpr32(dst_gpr, mask);
+        } else {
+            // 128-bit: 16 bytes -> 16-bit mask (zero-extended to 32/64)
+            let src = self.read_xmm_reg(instr.src1());
+            let mut mask: u32 = 0;
+            unsafe {
+                for i in 0..16 {
+                    if (src.xmmubyte[i] & 0x80) != 0 {
+                        mask |= 1u32 << i;
+                    }
+                }
+            }
+            self.set_gpr32(dst_gpr, mask);
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // VPSHUFHW / VPSHUFLW — Shuffle high/low words within 64-bit lanes
+    // ========================================================================
+
+    /// VPSHUFHW — Shuffle High Words within 64-bit lanes (VEX.L aware)
+    /// In each 128-bit lane: words 0-3 are copied unchanged, words 4-7 are shuffled
+    /// by imm8[1:0], imm8[3:2], imm8[5:4], imm8[7:6]
+    pub(super) fn vpshufhw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let imm = instr.ib();
+        if instr.get_vl() >= 1 {
+            let src = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                // Lower 128-bit lane
+                // Words 0-3 copied unchanged
+                for i in 0..4 {
+                    result.ymm16u[i] = src.ymm16u[i];
+                }
+                // Words 4-7 shuffled from high half of lower lane (words 4-7)
+                for i in 0..4 {
+                    let sel = ((imm >> (i * 2)) & 0x3) as usize;
+                    result.ymm16u[4 + i] = src.ymm16u[4 + sel];
+                }
+                // Upper 128-bit lane
+                // Words 8-11 copied unchanged
+                for i in 0..4 {
+                    result.ymm16u[8 + i] = src.ymm16u[8 + i];
+                }
+                // Words 12-15 shuffled from high half of upper lane (words 12-15)
+                for i in 0..4 {
+                    let sel = ((imm >> (i * 2)) & 0x3) as usize;
+                    result.ymm16u[12 + i] = src.ymm16u[12 + sel];
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                // Words 0-3 copied unchanged
+                for i in 0..4 {
+                    result.xmm16u[i] = src.xmm16u[i];
+                }
+                // Words 4-7 shuffled
+                for i in 0..4 {
+                    let sel = ((imm >> (i * 2)) & 0x3) as usize;
+                    result.xmm16u[4 + i] = src.xmm16u[4 + sel];
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSHUFLW — Shuffle Low Words within 64-bit lanes (VEX.L aware)
+    /// In each 128-bit lane: words 4-7 are copied unchanged, words 0-3 are shuffled
+    /// by imm8[1:0], imm8[3:2], imm8[5:4], imm8[7:6]
+    pub(super) fn vpshuflw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let imm = instr.ib();
+        if instr.get_vl() >= 1 {
+            let src = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                // Lower 128-bit lane
+                // Words 0-3 shuffled from low half of lower lane (words 0-3)
+                for i in 0..4 {
+                    let sel = ((imm >> (i * 2)) & 0x3) as usize;
+                    result.ymm16u[i] = src.ymm16u[sel];
+                }
+                // Words 4-7 copied unchanged
+                for i in 0..4 {
+                    result.ymm16u[4 + i] = src.ymm16u[4 + i];
+                }
+                // Upper 128-bit lane
+                // Words 8-11 shuffled from low half of upper lane (words 8-11)
+                for i in 0..4 {
+                    let sel = ((imm >> (i * 2)) & 0x3) as usize;
+                    result.ymm16u[8 + i] = src.ymm16u[8 + sel];
+                }
+                // Words 12-15 copied unchanged
+                for i in 0..4 {
+                    result.ymm16u[12 + i] = src.ymm16u[12 + i];
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                // Words 0-3 shuffled
+                for i in 0..4 {
+                    let sel = ((imm >> (i * 2)) & 0x3) as usize;
+                    result.xmm16u[i] = src.xmm16u[sel];
+                }
+                // Words 4-7 copied unchanged
+                for i in 0..4 {
+                    result.xmm16u[4 + i] = src.xmm16u[4 + i];
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // Saturating packed add/sub
+    // ========================================================================
+
+    /// VPADDSB — Packed Add Signed Saturating Bytes (VEX.L aware)
+    pub(super) fn vpaddsb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..32 {
+                    result.ymm_sbyte[i] = src1.ymm_sbyte[i].saturating_add(src2.ymm_sbyte[i]);
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..16 {
+                    result.xmm_sbyte[i] = src1.xmm_sbyte[i].saturating_add(src2.xmm_sbyte[i]);
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPADDSW — Packed Add Signed Saturating Words (VEX.L aware)
+    pub(super) fn vpaddsw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..16 {
+                    result.ymm16s[i] = src1.ymm16s[i].saturating_add(src2.ymm16s[i]);
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..8 {
+                    result.xmm16s[i] = src1.xmm16s[i].saturating_add(src2.xmm16s[i]);
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSUBSB — Packed Subtract Signed Saturating Bytes (VEX.L aware)
+    pub(super) fn vpsubsb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..32 {
+                    result.ymm_sbyte[i] = src1.ymm_sbyte[i].saturating_sub(src2.ymm_sbyte[i]);
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..16 {
+                    result.xmm_sbyte[i] = src1.xmm_sbyte[i].saturating_sub(src2.xmm_sbyte[i]);
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSUBSW — Packed Subtract Signed Saturating Words (VEX.L aware)
+    pub(super) fn vpsubsw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..16 {
+                    result.ymm16s[i] = src1.ymm16s[i].saturating_sub(src2.ymm16s[i]);
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..8 {
+                    result.xmm16s[i] = src1.xmm16s[i].saturating_sub(src2.xmm16s[i]);
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPADDUSB — Packed Add Unsigned Saturating Bytes (VEX.L aware)
+    pub(super) fn vpaddusb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..32 {
+                    result.ymmubyte[i] = src1.ymmubyte[i].saturating_add(src2.ymmubyte[i]);
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..16 {
+                    result.xmmubyte[i] = src1.xmmubyte[i].saturating_add(src2.xmmubyte[i]);
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPADDUSW — Packed Add Unsigned Saturating Words (VEX.L aware)
+    pub(super) fn vpaddusw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..16 {
+                    result.ymm16u[i] = src1.ymm16u[i].saturating_add(src2.ymm16u[i]);
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..8 {
+                    result.xmm16u[i] = src1.xmm16u[i].saturating_add(src2.xmm16u[i]);
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSUBUSB — Packed Subtract Unsigned Saturating Bytes (VEX.L aware)
+    pub(super) fn vpsubusb(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..32 {
+                    result.ymmubyte[i] = src1.ymmubyte[i].saturating_sub(src2.ymmubyte[i]);
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..16 {
+                    result.xmmubyte[i] = src1.xmmubyte[i].saturating_sub(src2.xmmubyte[i]);
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPSUBUSW — Packed Subtract Unsigned Saturating Words (VEX.L aware)
+    pub(super) fn vpsubusw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..16 {
+                    result.ymm16u[i] = src1.ymm16u[i].saturating_sub(src2.ymm16u[i]);
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..8 {
+                    result.xmm16u[i] = src1.xmm16u[i].saturating_sub(src2.xmm16u[i]);
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
 }

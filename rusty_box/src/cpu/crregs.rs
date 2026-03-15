@@ -953,11 +953,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let src = instr.src1() as usize;
 
         // Bochs crregs.cc: In long mode, CR3 gets full 64-bit value
-        let val = if self.long_mode() {
+        let mut val = if self.long_mode() {
             self.get_gpr64(src)
         } else {
             self.get_gpr32(src) as u64
         };
+
+        // Bochs crregs.cc:721-723 — allow NOFLUSH hint (bit 63) when PCIDE is set,
+        // but ignore the hint: always clear it before storing to CR3
+        if self.cr4.pcide() {
+            val &= !(1u64 << 63);
+        }
+
         self.cr3 = val;
 
         // In PAE mode (but not long mode), validate and cache PDPTE entries.

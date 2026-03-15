@@ -3,7 +3,7 @@ use tracing::info;
 
 use super::Result;
 #[cfg(feature = "bx_support_amx")]
-use crate::cpu::avx::amx::AMX;
+use crate::cpu::avx::AMX;
 
 use crate::{
     cpu::{
@@ -30,7 +30,7 @@ const MXCSR_DAZ: u32 = 1 << 6;
 const MXCSR_MISALIGNED_EXCEPTION_MASK: u32 = 1 << 13;
 
 use super::{
-    cpudb::intel::core_i7_skylake::Corei7SkylakeX, cpuid::BxCpuIdTrait, decoder::X86FeatureName,
+    cpudb::intel::core_i7_skylake::Corei7SkylakeX, cpuid::BxCpuIdTrait,
 };
 
 pub(super) fn cpuid_factory() -> impl BxCpuIdTrait {
@@ -49,7 +49,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn initialize(&mut self, config: BxParams) -> Result<()> {
         tracing::info!("Initialized cpu model {}", self.cpuid.get_name());
 
-        let _cpuid_features: Vec<X86FeatureName> = config
+        let _cpuid_features: Vec<X86Feature> = config
             .cpu_include_features
             .iter()
             .cloned()

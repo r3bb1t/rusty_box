@@ -2317,7 +2317,7 @@ impl BxHardDriveC {
             0x28 | 0xa8 => {
                 // READ (10) / READ (12)
                 let drive = self.channels[channel_num].selected_drive_mut();
-                let transfer_length: i32;
+                let mut transfer_length: i32;
                 if atapi_command == 0x28 {
                     transfer_length = ((drive.controller.buffer[7] as i32) << 8)
                         | drive.controller.buffer[8] as i32;
@@ -2351,6 +2351,10 @@ impl BxHardDriveC {
                     );
                     self.raise_interrupt(channel_num);
                     return;
+                }
+                // Bochs harddrv.cc:1774-1776 — clip transfer when read extends past end of disc
+                if transfer_length > 0 && (lba + transfer_length as u32 - 1) > max_lba {
+                    transfer_length = (max_lba - lba + 1) as i32;
                 }
                 if transfer_length <= 0 {
                     self.atapi_cmd_nop(channel_num);

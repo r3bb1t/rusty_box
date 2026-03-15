@@ -539,9 +539,13 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
 
     pub(super) cpuloop_stack_anchor: Option<&'c [u8]>,
 
-    // Perf counters (temporary, for diagnosing slowdowns)
+    // Perf counters (for diagnosing slowdowns)
     pub(crate) perf_icache_miss: u64,
     pub(crate) perf_prefetch: u64,
+    pub(crate) perf_tlb_hit: u64,
+    pub(crate) perf_tlb_miss: u64,
+    pub(crate) perf_page_walk: u64,
+    pub(crate) perf_instructions: u64,
 
     // Diagnostic counters for handle_async_event interrupt delivery
     pub(crate) diag_hae_intr_delivered: u64,
@@ -1524,6 +1528,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // Matching C++ line 204-206: prev_rip = RIP; icount++;
                 self.prev_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
                 self.icount += 1;
+                self.perf_instructions += 1;
 
                 // Record RIP + opcode in ring buffer — separate kernel and userspace rings
                 if self.icount > 620_000_000 && self.long64_mode() {
@@ -1760,7 +1765,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Check if entry matches and has valid instruction (matching C++ line 299)
         let cache_hit = matches!(entry.p_addr, crate::cpu::icache::IcacheAddress::Address(addr) if addr == p_addr)
-            && entry.i.length != 0;
+            && entry.i.ilen() != 0;
 
         if cache_hit {
             // SMC detection: compare first 8 bytes against current memory
@@ -1778,7 +1783,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // remapped (e.g. uselib/mmap loaded a new library), the
                 // second-page bytes changed but the SMC check didn't catch it.
                 // Force a cache miss so boundary_fetch re-reads both pages.
-                let ilen = entry.i.length as usize;
+                let ilen = entry.i.ilen() as usize;
                 if ilen > 0 && avail < ilen {
                     smc_invalid = true;
                 }
@@ -2120,6 +2125,25 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             if !self.is_canonical_access(self.rip(), MemoryAccessType::Execute, self.user_pl()) {
                 tracing::error!("prefetch: #GP(0): RIP crossed canonical boundary");
                 self.exception(Exception::Gp, 0)?;
+            }
+
+            // DIAG: detect ring 3 executing at kernel address (PIE entry point bug)
+            if self.user_pl && self.rip() >= 0xffff_8000_0000_0000 && self.icount > 1_500_000_000 {
+                eprintln!("[RING3-KERNEL] user_pl=true but RIP={:#x} is kernel address! icount={}",
+                    self.rip(), self.icount);
+                eprintln!("  CS.sel={:#06x} CS.rpl={} SS.sel={:#06x} RSP={:#x}",
+                    self.sregs[BxSegregs::Cs as usize].selector.value,
+                    self.sregs[BxSegregs::Cs as usize].selector.rpl,
+                    self.sregs[BxSegregs::Ss as usize].selector.value,
+                    self.rsp());
+                eprintln!("  CR3={:#x} EFLAGS={:#x}", self.cr3, self.eflags.bits());
+                // Dump last 16 RIPs from ring buffer
+                let end = self.diag_rip_ring_idx;
+                let start = if end > 16 { end - 16 } else { 0 };
+                for i in start..end {
+                    let r = self.diag_rip_ring[i & 255];
+                    eprintln!("  rip_ring[{}]={:#x}", i, r);
+                }
             }
 
             // linear address is equal to RIP in 64-bit long mode

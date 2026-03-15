@@ -2835,6 +2835,19 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             instructions_executed
         );
 
+        // Print perf summary to stderr (only for large batches, not sub-batches)
+        if instructions_executed >= 1_000_000 {
+            let pi = self.cpu.perf_instructions;
+            let tlb_h = self.cpu.perf_tlb_hit;
+            let tlb_m = self.cpu.perf_tlb_miss;
+            let pw = self.cpu.perf_page_walk;
+            let ic_m = self.cpu.perf_icache_miss;
+            let pf = self.cpu.perf_prefetch;
+            let tlb_total = tlb_h + tlb_m;
+            let tlb_pct = if tlb_total > 0 { tlb_h as f64 / tlb_total as f64 * 100.0 } else { 0.0 };
+            eprintln!("[PERF] instructions={pi} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw} icache_miss={ic_m} prefetch={pf}");
+        }
+
         Ok(instructions_executed)
     }
 
