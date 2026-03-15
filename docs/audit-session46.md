@@ -78,7 +78,7 @@ Date: 2026-03-15
 | `cpu/fpu/*.rs` | CLEAN | Agent 16 |
 | `cpu/gf2.rs` | CLEAN | Agent 28 |
 | `cpu/sha.rs` | CLEAN (dispatch) | Agent 26 |
-| `cpu/aes.rs` | PENDING | Agent 30 (running) |
+| `cpu/aes.rs` | CLEAN | Agent 30 |
 
 ### CPU Core / Mode Management
 | File | Status | Agent |
