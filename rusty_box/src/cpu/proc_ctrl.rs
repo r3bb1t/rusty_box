@@ -1,6 +1,16 @@
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    // TEMPORARY: errno name for syscall debugging
+    fn errno_name(e: u64) -> &'static str {
+        match e {
+            1 => "EPERM", 2 => "ENOENT", 3 => "ESRCH", 9 => "EBADF",
+            11 => "EAGAIN", 12 => "ENOMEM", 13 => "EACCES", 14 => "EFAULT",
+            17 => "EEXIST", 22 => "EINVAL", 28 => "ENOSPC", 38 => "ENOSYS",
+            _ => "?",
+        }
+    }
+
     pub(super) fn handle_cpu_context_change(&mut self) {
         self.tlb_flush();
 
@@ -299,13 +309,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.rax() & ASIZE_MASK[asize];
 
         // Bochs mwait.cc:102-103: tickle_read_virtual (1-byte read check)
-        let paddr = if self.long64_mode() {
-            let _ = self.read_virtual_byte_64(seg, eaddr)?;
-            self.address_xlation.paddress1
+        // Compute the linear address, then translate directly to physical.
+        // (read_virtual_byte / v_read_byte don't populate paddress1 —
+        //  they call translate_data_read which returns paddr directly.)
+        let laddr = if self.long64_mode() {
+            // In 64-bit mode the effective address IS the linear address
+            eaddr
         } else {
-            let _ = self.v_read_byte(seg, eaddr as u32)?;
-            self.address_xlation.paddress1
+            let seg_base = self.get_segment_base(seg);
+            seg_base.wrapping_add(eaddr as u64)
         };
+        let paddr = self.translate_data_read(laddr)?;
 
         // Bochs mwait.cc:121: invalidate page in monitoring system
         // (In Bochs this calls bx_pc_system.invlpg(paddr) to clear any
@@ -473,7 +487,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        // Use icount as time source (matches Bochs bx_pc_system.time_ticks() model)
+        // Use icount as time source. During HLT, the emulator's HLT handler
+        // advances icount to reflect elapsed virtual time (see emulator.rs HLT loop).
         let ticks = self.get_tsc(self.icount);
 
         self.set_rax((ticks & 0xFFFF_FFFF) as u64);
@@ -950,7 +965,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
-        self.v_write_dword(seg, eaddr, self.mxcsr.mxcsr)?;
+        self.v_write_dword(seg, eaddr, self.mxcsr.mxcsr & self.mxcsr_mask)?;
         Ok(())
     }
 
@@ -1337,6 +1352,184 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         };
         use super::eflags::EFlags;
 
+        // DIAG: trace execve/mount/write syscalls during Alpine boot
+        {
+            let nr = self.rax();
+            // Trace execve(59) to see what binaries are being run
+            if nr == 59 && self.icount > 3_230_000_000 {
+                let path_addr = self.rdi();
+                let mut path_buf = alloc::vec::Vec::new();
+                for i in 0..128u64 {
+                    if let Ok(b) = self.v_read_byte(super::decoder::BxSegregs::Ds, path_addr + i) {
+                        if b == 0 { break; }
+                        path_buf.push(b);
+                    } else { break; }
+                }
+                static EXEC_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                let ec = EXEC_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if ec < 30 {
+                    eprintln!("[EXECVE#{}] path={:?} icount={}",
+                        ec, alloc::string::String::from_utf8_lossy(&path_buf), self.icount);
+                }
+            }
+            let caller_rip = self.rip(); // RIP of instruction after SYSCALL (saved to RCX)
+            // Trace openat(257), newfstatat(262), faccessat(269) syscalls
+            if (nr == 257 || nr == 262 || nr == 269) && self.icount > 2_260_000_000 {
+                let dirfd = self.rdi() as i64;
+                let path_addr = self.rsi();
+                let mut path_buf = alloc::vec::Vec::new();
+                for i in 0..128u64 {
+                    if let Ok(b) = self.v_read_byte(super::decoder::BxSegregs::Ds, path_addr + i) {
+                        if b == 0 { break; }
+                        path_buf.push(b);
+                    } else { break; }
+                }
+                let path = alloc::string::String::from_utf8_lossy(&path_buf);
+                static OPENAT_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                let oc = OPENAT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if oc < 50 {
+                    eprintln!("[OPENAT#{}] dirfd={} path={:?} flags={:#x} icount={}",
+                        oc, dirfd, path, self.rdx(), self.icount);
+                }
+            }
+            // Trace mount(165) syscalls
+            if nr == 165 && self.icount > 1_500_000_000 {
+                // mount(source, target, fstype, flags, data)
+                let source_addr = self.rdi();
+                let target_addr = self.rsi();
+                let fstype_addr = self.rdx();
+                let mut source_buf = alloc::vec::Vec::new();
+                let mut target_buf = alloc::vec::Vec::new();
+                let mut fstype_buf = alloc::vec::Vec::new();
+                for i in 0..64u64 {
+                    if let Ok(b) = self.v_read_byte(super::decoder::BxSegregs::Ds, source_addr + i) {
+                        if b == 0 { break; }
+                        source_buf.push(b);
+                    } else { break; }
+                }
+                for i in 0..64u64 {
+                    if let Ok(b) = self.v_read_byte(super::decoder::BxSegregs::Ds, target_addr + i) {
+                        if b == 0 { break; }
+                        target_buf.push(b);
+                    } else { break; }
+                }
+                for i in 0..32u64 {
+                    if let Ok(b) = self.v_read_byte(super::decoder::BxSegregs::Ds, fstype_addr + i) {
+                        if b == 0 { break; }
+                        fstype_buf.push(b);
+                    } else { break; }
+                }
+                static MOUNT_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                let mc = MOUNT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if mc < 20 {
+                    eprintln!("[MOUNT#{}] source={:?} target={:?} fstype={:?} flags={:#x} icount={}",
+                        mc,
+                        alloc::string::String::from_utf8_lossy(&source_buf),
+                        alloc::string::String::from_utf8_lossy(&target_buf),
+                        alloc::string::String::from_utf8_lossy(&fstype_buf),
+                        self.r10(), self.icount);
+                }
+            }
+            // Also trace mmap (nr=9) to find library mappings
+            if nr == 9 && self.icount > 1_700_000_000 && self.icount < 1_770_000_000 {
+                let addr = self.rdi();
+                let len = self.rsi();
+                let prot = self.rdx();
+                let flags = self.r10();
+                let fd = self.r8() as i64;
+                let off = self.r9();
+                static MMAP_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                let mc = MMAP_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if mc < 30 {
+                    eprintln!("[MMAP#{}] addr={:#x} len={:#x} prot={:#x} flags={:#x} fd={} off={:#x} caller={:#x} icount={}",
+                        mc, addr, len, prot, flags, fd, off, caller_rip, self.icount);
+                }
+            }
+            if nr == 1 && self.icount > 1_500_000_000 {  // write=1 only
+                // write(fd, buf, count): rdi=fd, rsi=buf, rdx=count
+                let fd = self.rdi();
+                let buf_addr = self.rsi();
+                let count = self.rdx();
+                // Log write(2,...) calls after 1.5B instructions (mdev phase)
+                if fd == 2 && count > 0 && count < 500 && buf_addr < 0xffff_0000_0000_0000 {
+                    static WRITE2_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                    let wc = WRITE2_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if wc < 3 {
+                        let mut buf_str = alloc::vec::Vec::new();
+                        for j in 0..count.min(80) {
+                            if let Ok(b) = self.v_read_byte(super::decoder::BxSegregs::Ds, buf_addr + j) {
+                                buf_str.push(b);
+                            }
+                        }
+                        let text = alloc::string::String::from_utf8_lossy(&buf_str);
+                        eprintln!("[WRITE-STDERR#{}] fd=2 count={} caller={:#x} icount={} text={:?}",
+                            wc, count, caller_rip, self.icount, text);
+                        // If this is the mdev regex error, dump the last 256 instructions
+                        if text.contains("bad regex") {
+                            eprintln!("[MDEV-FOUND] Dumping last 256 instructions from ring:");
+                            let end = self.diag_rip_ring_idx;
+                            let start = if end >= 256 { end - 256 } else { 0 };
+                            for i in (start..end).rev().take(120) {
+                                let slot = i & 255;
+                                let r = self.diag_rip_ring[slot];
+                                let opc = self.diag_opcode_ring[slot];
+                                // Mark userspace RIPs
+                                let marker = if r < 0x0000_8000_0000_0000 && r > 0x1000 { " <USER>" } else { "" };
+                                eprintln!("  [{}] rip={:#x} opcode={:#06x}{}", i, r, opc, marker);
+                            }
+                            // Dump GPR state at SYSCALL entry
+                            eprintln!("[MDEV-FOUND] GPR state at write() SYSCALL:");
+                            for r in 0..16u8 {
+                                let v = unsafe { self.gen_reg[r as usize].rrx };
+                                if v != 0 { eprintln!("  r{}={:#018x}", r, v); }
+                            }
+                        }
+                    }
+                }
+                if count >= 4 && buf_addr < 0xffff_0000_0000_0000 {
+                    // Try to read first 4 bytes of the buffer
+                    if let Ok(b0) = self.v_read_byte(super::decoder::BxSegregs::Ds, buf_addr) {
+                        if let Ok(b1) = self.v_read_byte(super::decoder::BxSegregs::Ds, buf_addr + 1) {
+                            if let Ok(b2) = self.v_read_byte(super::decoder::BxSegregs::Ds, buf_addr + 2) {
+                                if let Ok(b3) = self.v_read_byte(super::decoder::BxSegregs::Ds, buf_addr + 3) {
+                                    if b0 == b'b' && b1 == b'a' && b2 == b'd' && b3 == b' ' {
+                                        static DIAG_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                                        let dc = DIAG_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                                        if dc == 0 {
+                                            eprintln!("[SYSCALL-WRITE-BAD] nr=1 fd={} buf={:#x} count={} caller_rip={:#x} icount={}",
+                                                self.rdi(), buf_addr, count, caller_rip, self.icount);
+                                            // Dump last 64 userspace RIPs from ring
+                                            let end = self.diag_rip_ring_idx;
+                                            let start = if end >= 256 { end - 256 } else { 0 };
+                                            let mut ucount = 0;
+                                            eprintln!("[SYSCALL-WRITE-BAD] Last userspace RIPs before this syscall:");
+                                            for i in (start..end).rev() {
+                                                let slot = i & 255;
+                                                let r = self.diag_rip_ring[slot];
+                                                if r < 0x0000_8000_0000_0000 && r > 0x1000 {
+                                                    eprintln!("  user[{}] rip={:#x} opcode={:#06x}", ucount, r, self.diag_opcode_ring[slot]);
+                                                    ucount += 1;
+                                                    if ucount >= 30 { break; }
+                                                }
+                                            }
+                                            // Read and print the full buffer
+                                            let mut buf_str = alloc::vec::Vec::new();
+                                            for j in 0..count.min(200) {
+                                                if let Ok(b) = self.v_read_byte(super::decoder::BxSegregs::Ds, buf_addr + j) {
+                                                    buf_str.push(b);
+                                                }
+                                            }
+                                            eprintln!("[SYSCALL-WRITE-BAD] buffer: {:?}", alloc::string::String::from_utf8_lossy(&buf_str));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if !self.efer.sce() {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
@@ -1617,6 +1810,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.handle_cpu_mode_change();
 
         // Bochs proc_ctrl.cc:1348 — RIP = temp_RIP (set AFTER all mode changes)
+        // DIAG: detect SYSRET returning to kernel address
+        if temp_rip >= 0xffff_0000_0000_0000 && self.icount > 1_500_000_000 {
+            eprintln!("[SYSRET-KERNEL] temp_rip={:#x} rcx={:#x} r11={:#x} os64={} icount={}",
+                temp_rip, self.rcx(), self.r11(), instr.os64_l(), self.icount);
+        }
         self.set_rip(temp_rip);
 
         Ok(())
@@ -1635,18 +1833,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         let ecx = self.ecx();
-        if ecx != 0 {
-            tracing::debug!("XGETBV: invalid XCR{}, #GP(0)", ecx);
-            return self.exception(super::cpu::Exception::Gp, 0);
+        if ecx == 0 {
+            // XCR0 → EDX:EAX
+            let xcr0_val = self.xcr0.get32() as u64;
+            self.set_rax(xcr0_val & 0xFFFF_FFFF);
+            self.set_rdx(xcr0_val >> 32);
+            return Ok(());
         }
 
-        // XCR0 → EDX:EAX
-        let xcr0_val = self.xcr0.get32() as u64;
-        self.set_rax(xcr0_val & 0xFFFF_FFFF);
-        self.set_rdx(xcr0_val >> 32);
+        if ecx == 1 {
+            // XGETBV ECX=1 returns XINUSE vector (requires XSAVEC support)
+            let xinuse = self.get_xinuse_vector(self.xcr0.get32() as u64);
+            self.set_rdx(0);
+            self.set_rax(xinuse as u64);
+            return Ok(());
+        }
 
-
-        Ok(())
+        tracing::debug!("XGETBV: invalid XCR{}, #GP(0)", ecx);
+        self.exception(super::cpu::Exception::Gp, 0)
     }
 
     // ========================================================================
@@ -1697,7 +1901,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
+        // AVX-512: if any of OPMASK/ZMM_HI256/HI_ZMM set, all of FPU+SSE+YMM+OPMASK+ZMM_HI256+HI_ZMM must be set
+        if (eax & 0xE0) != 0 {
+            // bits 5,6,7 = OPMASK, ZMM_HI256, HI_ZMM
+            let avx512_mask = 0x01 | 0x02 | 0x04 | 0x20 | 0x40 | 0x80; // FPU+SSE+YMM+OPMASK+ZMM_HI256+HI_ZMM
+            if (eax & avx512_mask) != avx512_mask {
+                tracing::debug!("XSETBV: AVX-512 partial enable without all dependencies, #GP(0)");
+                return self.exception(super::cpu::Exception::Gp, 0);
+            }
+        }
+
         self.xcr0.set32(eax);
+        self.handle_avx_mode_change();
         tracing::debug!("XSETBV: XCR0={:#010x}", eax);
 
         Ok(())
@@ -1746,7 +1961,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Save x87 FPU state if requested (bit 0)
         // Bochs: always saves if requested (not XSAVEOPT), updates xstate_bv per xinuse
         if (requested & 1) != 0 {
-            self.xsave_x87_state(seg, eaddr)?;
+            self.xsave_x87_state(seg, eaddr, instr.os64_l() != 0)?;
             if (xinuse & 1) != 0 {
                 xstate_bv |= 1;
             } else {
@@ -1785,10 +2000,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Write XSAVE header: xstate_bv at offset 512
+        // XSAVE must NOT modify bytes 519:63 (xcomp_bv and reserved fields)
         self.v_write_qword(seg, eaddr.wrapping_add(512), xstate_bv)?;
-        // Clear xcomp_bv and reserved header fields (offsets 520-575)
-        self.v_write_qword(seg, eaddr.wrapping_add(520), 0)?;
-        self.v_write_qword(seg, eaddr.wrapping_add(528), 0)?;
 
         Ok(())
     }
@@ -1808,7 +2021,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Save x87 FPU state to XSAVE area (offset 0-159)
     /// Same layout as FXSAVE bytes 0-159
-    fn xsave_x87_state(&mut self, seg: super::decoder::BxSegregs, eaddr: u64) -> super::Result<()> {
+    fn xsave_x87_state(&mut self, seg: super::decoder::BxSegregs, eaddr: u64, os64: bool) -> super::Result<()> {
         // FCW
         self.v_write_word(seg, eaddr, self.the_i387.cwd)?;
         // FSW
@@ -1816,17 +2029,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Abridged FTW
         let aftw = self.abridged_ftw();
         self.v_write_byte(seg, eaddr.wrapping_add(4), aftw)?;
-        // Reserved + FOP
+        // Reserved byte at offset 5
         self.v_write_byte(seg, eaddr.wrapping_add(5), 0)?;
-        self.v_write_word(seg, eaddr.wrapping_add(6), 0)?;
-        // FIP, FCS
-        self.v_write_dword(seg, eaddr.wrapping_add(8), 0)?;
-        self.v_write_word(seg, eaddr.wrapping_add(12), 0)?;
-        self.v_write_word(seg, eaddr.wrapping_add(14), 0)?;
-        // FDP, FDS
-        self.v_write_dword(seg, eaddr.wrapping_add(16), 0)?;
-        self.v_write_word(seg, eaddr.wrapping_add(20), 0)?;
-        self.v_write_word(seg, eaddr.wrapping_add(22), 0)?;
+        // FOP (opcode, 11 bits)
+        self.v_write_word(seg, eaddr.wrapping_add(6), self.the_i387.foo & 0x7FF)?;
+        // FIP, FCS / FDP, FDS — format depends on operand size, not CPU mode
+        if os64 {
+            // 64-bit mode: FIP as u64 at offset 8, FDP as u64 at offset 16
+            self.v_write_qword(seg, eaddr.wrapping_add(8), self.the_i387.fip)?;
+            self.v_write_qword(seg, eaddr.wrapping_add(16), self.the_i387.fdp)?;
+        } else {
+            // 32-bit mode: FIP as u32, FCS as u16, FDP as u32, FDS as u16
+            self.v_write_dword(seg, eaddr.wrapping_add(8), self.the_i387.fip as u32)?;
+            self.v_write_word(seg, eaddr.wrapping_add(12), self.the_i387.fcs)?;
+            self.v_write_word(seg, eaddr.wrapping_add(14), 0)?;
+            self.v_write_dword(seg, eaddr.wrapping_add(16), self.the_i387.fdp as u32)?;
+            self.v_write_word(seg, eaddr.wrapping_add(20), self.the_i387.fds)?;
+            self.v_write_word(seg, eaddr.wrapping_add(22), 0)?;
+        }
 
         // ST0-ST7 (bytes 32-159, 16 bytes each)
         for i in 0..8u64 {
@@ -1861,16 +2081,39 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         &mut self,
         seg: super::decoder::BxSegregs,
         eaddr: u64,
+        os64: bool,
     ) -> super::Result<()> {
         let fcw = self.v_read_word(seg, eaddr)?;
         let fsw = self.v_read_word(seg, eaddr.wrapping_add(2))?;
         let aftw = self.v_read_byte(seg, eaddr.wrapping_add(4))?;
 
-        self.the_i387.cwd = fcw;
+        // Bochs forces CW bit 6 always set, clear reserved bits (6,7,13,14,15)
+        let cwd = (fcw & !0xe0c0u16) | 0x0040;
+        self.the_i387.cwd = cwd;
         self.the_i387.swd = fsw;
         self.the_i387.tos = ((fsw >> 11) & 7) as u8;
         self.restore_ftw_from_abridged(aftw);
 
+        // Restore FOP (opcode, 11 bits)
+        let foo = self.v_read_word(seg, eaddr.wrapping_add(6))?;
+        self.the_i387.foo = foo & 0x7FF;
+
+        // Restore FIP/FCS/FDP/FDS — format depends on operand size, not CPU mode
+        if os64 {
+            // 64-bit mode: FIP as u64 at offset 8, FDP as u64 at offset 16
+            self.the_i387.fip = self.v_read_qword(seg, eaddr.wrapping_add(8))?;
+            self.the_i387.fdp = self.v_read_qword(seg, eaddr.wrapping_add(16))?;
+            self.the_i387.fcs = 0;
+            self.the_i387.fds = 0;
+        } else {
+            // 32-bit mode: FIP as u32, FCS as u16, FDP as u32, FDS as u16
+            self.the_i387.fip = self.v_read_dword(seg, eaddr.wrapping_add(8))? as u64;
+            self.the_i387.fcs = self.v_read_word(seg, eaddr.wrapping_add(12))?;
+            self.the_i387.fdp = self.v_read_dword(seg, eaddr.wrapping_add(16))? as u64;
+            self.the_i387.fds = self.v_read_word(seg, eaddr.wrapping_add(20))?;
+        }
+
+        // Restore ST0-ST7
         for i in 0..8u64 {
             let offset = eaddr.wrapping_add(32 + i * 16);
             let signif = self.v_read_qword(seg, offset)?;
@@ -1878,6 +2121,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.the_i387.st_space[i as usize].signif = signif;
             self.the_i387.st_space[i as usize].sign_exp = sign_exp;
         }
+
+        // Update B and ES bits based on unmasked exceptions
+        // Bochs: if unmasked exceptions exist, set Summary + Backward bits
+        let mut swd = self.the_i387.swd;
+        if (swd & !cwd) & 0x3F != 0 {
+            swd |= 0xC000; // FPU_SW_Summary | FPU_SW_Backward
+        } else {
+            swd &= !0xC000u16;
+        }
+        self.the_i387.swd = swd;
 
         Ok(())
     }
@@ -1888,6 +2141,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.the_i387.swd = 0;
         self.the_i387.tos = 0;
         self.the_i387.twd = 0xFFFF; // All empty
+        self.the_i387.foo = 0;
+        self.the_i387.fip = 0;
+        self.the_i387.fcs = 0;
+        self.the_i387.fdp = 0;
+        self.the_i387.fds = 0;
         for i in 0..8 {
             self.the_i387.st_space[i].signif = 0;
             self.the_i387.st_space[i].sign_exp = 0;
@@ -2213,6 +2471,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if (rfbm & 1) != 0 {
             if self.the_i387.cwd != 0x037F || self.the_i387.swd != 0
                 || self.the_i387.twd != 0xFFFF
+                || self.the_i387.foo != 0
+                || self.the_i387.fip != 0
+                || self.the_i387.fcs != 0
+                || self.the_i387.fdp != 0
+                || self.the_i387.fds != 0
             {
                 xinuse |= 1;
             } else {
@@ -2337,7 +2600,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // FPU (bit 0): only save if in-use (XSAVEOPT optimization)
         if (requested & 1) != 0 {
             if (xinuse & 1) != 0 {
-                self.xsave_x87_state(seg, eaddr)?;
+                self.xsave_x87_state(seg, eaddr, instr.os64_l() != 0)?;
                 xstate_bv |= 1;
             } else {
                 xstate_bv &= !1;
@@ -2375,10 +2638,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        // Write XSAVE header
+        // Write XSAVE header: xstate_bv at offset 512
+        // XSAVEOPT must NOT modify bytes 519:63 (xcomp_bv and reserved fields)
         self.v_write_qword(seg, eaddr.wrapping_add(512), xstate_bv)?;
-        self.v_write_qword(seg, eaddr.wrapping_add(520), 0)?;
-        self.v_write_qword(seg, eaddr.wrapping_add(528), 0)?;
 
         Ok(())
     }
@@ -2432,7 +2694,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // FPU (bit 0) at standard offset
         if (requested & 1) != 0 && (xinuse & 1) != 0 {
-            self.xsave_x87_state(seg, eaddr)?;
+            self.xsave_x87_state(seg, eaddr, instr.os64_l() != 0)?;
         }
 
         // MXCSR if SSE or YMM in xstate_bv
@@ -2572,7 +2834,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // --- FPU (bit 0) ---
         if (requested & 1) != 0 {
             if (restore_mask & 1) != 0 {
-                self.xrstor_x87_state(seg, eaddr)?;
+                self.xrstor_x87_state(seg, eaddr, instr.os64_l() != 0)?;
             } else {
                 self.xrstor_init_x87_state();
             }

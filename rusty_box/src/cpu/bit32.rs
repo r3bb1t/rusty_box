@@ -235,7 +235,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// CRC32 r32, r/m8 — CRC32C accumulate byte
     pub fn crc32_gd_eb(&mut self, instr: &Instruction) -> super::Result<()> {
         let op2 = if instr.mod_c0() {
-            self.get_gpr32(instr.src() as usize) as u8
+            self.read_8bit_regx(instr.src() as usize, instr.extend8bit_l())
         } else {
             let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());

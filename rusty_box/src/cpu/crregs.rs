@@ -997,6 +997,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
+        let new_cr4 = BxCr4::from_bits_retain(val_32);
+
+        // Bochs crregs.cc:1316-1332 — long-mode checks
+        // (1) Cannot clear CR4.PAE when EFER.LMA=1
+        if self.efer.lma() && !new_cr4.contains(BxCr4::PAE) {
+            tracing::debug!("MOV CR4: attempt to clear PAE while EFER.LMA=1, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        // (2) Cannot change CR4.LA57 when EFER.LMA=1
+        if self.efer.lma()
+            && (new_cr4.contains(BxCr4::LA57) != self.cr4.contains(BxCr4::LA57))
+        {
+            tracing::debug!("MOV CR4: attempt to change LA57 while EFER.LMA=1, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+        // (3) Cannot set CR4.PCIDE when EFER.LMA=0
+        if !self.efer.lma() && new_cr4.contains(BxCr4::PCIDE) {
+            tracing::debug!("MOV CR4: attempt to set PCIDE while EFER.LMA=0, #GP(0)");
+            return self.exception(super::cpu::Exception::Gp, 0);
+        }
+
         let old_cr4 = self.cr4.get32();
         self.cr4.set32(val_32);
 

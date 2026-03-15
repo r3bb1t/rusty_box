@@ -180,6 +180,37 @@ pub const BxOpcodeTable0F38CD: [u64; 1] =
     [last_opcode(ATTR_SSE_NO_PREFIX, Opcode::Sha256msg2VdqWdq)];
 pub const BxOpcodeTable0F38CF: [u64; 1] =
     [last_opcode(ATTR_SSE_PREFIX_66, Opcode::Gf2p8mulbVdqWdq)];
+// BMI1: ANDN (VEX.NDS.LZ.0F38.W0/W1 F2 /r)
+// Bochs fetchdecode_opmap_avx.cc:1343-1346
+pub const BxOpcodeTable0F38F2_BMI: [u64; 2] = [
+    form_opcode(ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W0,             Opcode::AndnGdBdEd),
+    last_opcode(ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::AndnGqBqEq),
+];
+
+// BMI1: BLSR/BLSMSK/BLSI group (VEX.NDD.LZ.0F38.W0/W1 F3 /1,/2,/3)
+// Bochs fetchdecode_opmap_avx.cc:1348-1357
+pub const BxOpcodeTable0F38F3_BMI: [u64; 6] = [
+    form_opcode(ATTR_NNN1 | ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W0,             Opcode::BlsrBdEd),
+    form_opcode(ATTR_NNN1 | ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::BlsrBqEq),
+    form_opcode(ATTR_NNN2 | ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W0,             Opcode::BlsmskBdEd),
+    form_opcode(ATTR_NNN2 | ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::BlsmskBqEq),
+    form_opcode(ATTR_NNN3 | ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W0,             Opcode::BlsiBdEd),
+    last_opcode(ATTR_NNN3 | ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::BlsiBqEq),
+];
+
+// BMI1/BMI2: BEXTR/SHLX/SARX/SHRX (VEX.NDS.LZ.0F38.W0/W1 F7 /r)
+// Bochs fetchdecode_opmap_avx.cc:1373-1382
+pub const BxOpcodeTable0F38F7_BMI: [u64; 8] = [
+    form_opcode(ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W0,             Opcode::BextrGdEdBd),
+    form_opcode(ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::BextrGqEqBq),
+    form_opcode(ATTR_SSE_PREFIX_66 | ATTR_VL128 | ATTR_VEX_W0,             Opcode::ShlxGdEdBd),
+    form_opcode(ATTR_SSE_PREFIX_66 | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::ShlxGqEqBq),
+    form_opcode(ATTR_SSE_PREFIX_F3 | ATTR_VL128 | ATTR_VEX_W0,             Opcode::SarxGdEdBd),
+    form_opcode(ATTR_SSE_PREFIX_F3 | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::SarxGqEqBq),
+    form_opcode(ATTR_SSE_PREFIX_F2 | ATTR_VL128 | ATTR_VEX_W0,             Opcode::ShrxGdEdBd),
+    last_opcode(ATTR_SSE_PREFIX_F2 | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::ShrxGqEqBq),
+];
+
 pub const BxOpcodeTable0F38DB: [u64; 1] = [last_opcode(ATTR_SSE_PREFIX_66, Opcode::AesimcVdqWdq)];
 pub const BxOpcodeTable0F38DC: [u64; 1] = [last_opcode(ATTR_SSE_PREFIX_66, Opcode::AesencVdqWdq)];
 pub const BxOpcodeTable0F38DD: [u64; 1] =
@@ -229,8 +260,20 @@ pub const BxOpcodeTable0F38F1: [u64; 6] = [
     last_opcode(ATTR_SSE_PREFIX_F2 | ATTR_OS16, Opcode::Crc32GdEw),
 ];
 
-// opcode 0F 38 F6
-pub const BxOpcodeTable0F38F5: [u64; 2] = [
+// opcode 0F 38 F5
+// Legacy: WRUSS (66 prefix); BMI2: BZHI (no prefix), PEXT (F3), PDEP (F2)
+// Bochs fetchdecode_opmap_avx.cc:1359-1366
+pub const BxOpcodeTable0F38F5: [u64; 8] = [
+    // BMI2: BZHI (VEX.NDS.LZ.0F38.W0/W1 F5 /r, no prefix)
+    form_opcode(ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W0,             Opcode::BzhiGdBdEd),
+    form_opcode(ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::BzhiGqBqEq),
+    // BMI2: PEXT (VEX.NDS.LZ.F3.0F38.W0/W1 F5 /r)
+    form_opcode(ATTR_SSE_PREFIX_F3 | ATTR_VL128 | ATTR_VEX_W0,             Opcode::PextGdBdEd),
+    form_opcode(ATTR_SSE_PREFIX_F3 | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::PextGqBqEq),
+    // BMI2: PDEP (VEX.NDS.LZ.F2.0F38.W0/W1 F5 /r)
+    form_opcode(ATTR_SSE_PREFIX_F2 | ATTR_VL128 | ATTR_VEX_W0,             Opcode::PdepGdBdEd),
+    form_opcode(ATTR_SSE_PREFIX_F2 | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::PdepGqBqEq),
+    // Legacy: WRUSS
     form_opcode(
         ATTR_OS64 | ATTR_MOD_MEM | ATTR_SSE_PREFIX_66,
         Opcode::Wrussq,
@@ -242,7 +285,13 @@ pub const BxOpcodeTable0F38F5: [u64; 2] = [
 ];
 
 // opcode 0F 38 F6
-pub const BxOpcodeTable0F38F6: [u64; 6] = [
+// Legacy: WRSS (no prefix), ADCX (66), ADOX (F3); BMI2: MULX (F2)
+// Bochs fetchdecode_opmap_avx.cc:1368-1371
+pub const BxOpcodeTable0F38F6: [u64; 8] = [
+    // BMI2: MULX (VEX.NDD.LZ.F2.0F38.W0/W1 F6 /r)
+    form_opcode(ATTR_SSE_PREFIX_F2 | ATTR_VL128 | ATTR_VEX_W0,             Opcode::MulxGdBdEd),
+    form_opcode(ATTR_SSE_PREFIX_F2 | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::MulxGqBqEq),
+    // Legacy entries
     form_opcode(ATTR_OS64 | ATTR_MOD_MEM | ATTR_SSE_NO_PREFIX, Opcode::Wrssq),
     form_opcode(
         ATTR_OS16_32 | ATTR_MOD_MEM | ATTR_SSE_NO_PREFIX,
@@ -294,6 +343,24 @@ pub const BxOpcodeTable0F38FC: [u64; 8] = [
     form_opcode(ATTR_MOD_MEM | ATTR_SSE_PREFIX_66, Opcode::AandEdGd),
     form_opcode(ATTR_MOD_MEM | ATTR_SSE_PREFIX_F2, Opcode::AorEdGd),
     last_opcode(ATTR_MOD_MEM | ATTR_SSE_PREFIX_F3, Opcode::AxorEdGd),
+];
+
+// AVX2 broadcast/permute (VEX 0F38 36/58/59/78/79)
+// Matching Bochs fetchdecode_opmap_avx.cc
+pub(super) const BxOpcodeTable0F3836_AVX: [u64; 1] = [
+    last_opcode(ATTR_SSE_PREFIX_66 | ATTR_VEX_W0 | ATTR_VL256, Opcode::V256VpermdVdqHdqWdq),
+];
+pub(super) const BxOpcodeTable0F3858_AVX: [u64; 1] = [
+    last_opcode(ATTR_SSE_PREFIX_66 | ATTR_VEX_W0, Opcode::VpbroadcastdVdqWd),
+];
+pub(super) const BxOpcodeTable0F3859_AVX: [u64; 1] = [
+    last_opcode(ATTR_SSE_PREFIX_66 | ATTR_VEX_W0, Opcode::VpbroadcastqVdqWq),
+];
+pub(super) const BxOpcodeTable0F3878_AVX: [u64; 1] = [
+    last_opcode(ATTR_SSE_PREFIX_66 | ATTR_VEX_W0, Opcode::VpbroadcastbVdqWb),
+];
+pub(super) const BxOpcodeTable0F3879_AVX: [u64; 1] = [
+    last_opcode(ATTR_SSE_PREFIX_66 | ATTR_VEX_W0, Opcode::VpbroadcastwVdqWw),
 ];
 
 // /* ************************************************************************ */
@@ -354,7 +421,7 @@ pub(super) const BxOpcodeTable0F38: [&[u64]; 256] = [
     /* 0F 38 33 */ &BxOpcodeTable0F3833,
     /* 0F 38 34 */ &BxOpcodeTable0F3834,
     /* 0F 38 35 */ &BxOpcodeTable0F3835,
-    /* 0F 38 36 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 36 */ &BxOpcodeTable0F3836_AVX,
     /* 0F 38 37 */ &BxOpcodeTable0F3837,
     /* 0F 38 38 */ &BxOpcodeTable0F3838,
     /* 0F 38 39 */ &BxOpcodeTable0F3839,
@@ -388,8 +455,8 @@ pub(super) const BxOpcodeTable0F38: [&[u64]; 256] = [
     /* 0F 38 55 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 56 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 57 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 58 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 59 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 58 */ &BxOpcodeTable0F3858_AVX,
+    /* 0F 38 59 */ &BxOpcodeTable0F3859_AVX,
     /* 0F 38 5A */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 5B */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 5C */ &BX_OPCODE_GROUP_ERR,
@@ -420,8 +487,8 @@ pub(super) const BxOpcodeTable0F38: [&[u64]; 256] = [
     /* 0F 38 75 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 76 */ &BxOpcodeTable0F3876,
     /* 0F 38 77 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 78 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 79 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 78 */ &BxOpcodeTable0F3878_AVX,
+    /* 0F 38 79 */ &BxOpcodeTable0F3879_AVX,
     /* 0F 38 7A */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 7B */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 7C */ &BX_OPCODE_GROUP_ERR,
@@ -542,12 +609,12 @@ pub(super) const BxOpcodeTable0F38: [&[u64]; 256] = [
     /* 0F 38 EF */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 F0 */ &BxOpcodeTable0F38F0,
     /* 0F 38 F1 */ &BxOpcodeTable0F38F1,
-    /* 0F 38 F2 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 F3 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 F2 */ &BxOpcodeTable0F38F2_BMI,
+    /* 0F 38 F3 */ &BxOpcodeTable0F38F3_BMI,
     /* 0F 38 F4 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 F5 */ &BxOpcodeTable0F38F5,
     /* 0F 38 F6 */ &BxOpcodeTable0F38F6,
-    /* 0F 38 F7 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 F7 */ &BxOpcodeTable0F38F7_BMI,
     /* 0F 38 F8 */ &BxOpcodeTable0F38F8,
     /* 0F 38 F9 */ &BxOpcodeTable0F38F9,
     /* 0F 38 FA */ &BX_OPCODE_GROUP_ERR,

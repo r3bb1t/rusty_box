@@ -518,6 +518,9 @@ pub const fn fetch_decode32_inplace(
             // 0x17E (0F 7E): Ed,Gd for no-prefix (MOVD Ed,Pq) and 66 (MOVD Ed,Vd),
             // but NOT for F3 prefix (MOVQ Vq,Wq is a LOAD: nnn=dst, rm=src)
             || (b1 == 0x17E && sse_prefix != SsePrefix::PrefixF3 as u8)
+            // 0x1D6 (0F D6): Ed,Gd for 66 prefix (MOVQ Wq,Vq is a STORE: rm=dst, nnn=src),
+            // but NOT for F2 (MOVDQ2Q) or F3 (MOVQ2DQ) which are LOADs (nnn=dst, rm=src)
+            || (b1 == 0x1D6 && sse_prefix == SsePrefix::Prefix66 as u8)
             // BT/BTS/BTR/BTC EdGd (0F A3/AB/B3/BB): rm=bit-field(dst), nnn=bit-index(src)
             || matches!(b1, 0x1A3 | 0x1AB | 0x1B3 | 0x1BB)
             // XADD EbGb (0F C0), XADD EdGd (0F C1): rm=dst, nnn=src

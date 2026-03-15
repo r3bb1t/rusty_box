@@ -856,9 +856,18 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             .attach_cdrom_image(channel, drive, path)
     }
 
-    /// Check if an interrupt is pending
+    /// Check if an interrupt is pending (PIC or LAPIC)
     pub fn has_interrupt(&self) -> bool {
-        self.device_manager.has_interrupt()
+        // Legacy PIC path
+        if self.device_manager.has_interrupt() {
+            return true;
+        }
+        // APIC path: check LAPIC for pending interrupts
+        #[cfg(feature = "bx_support_apic")]
+        if self.cpu.lapic_has_intr() {
+            return true;
+        }
+        false
     }
 
     /// Acknowledge interrupt and get vector
@@ -1394,7 +1403,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         const MIPS_LOG_INTERVAL: u64 = 5_000_000;
         let mut last_port92_value: u8 = self.system_control.value;
 
-        const INSTRUCTION_BATCH_SIZE: u64 = 10000; // Larger batch size for better performance
+        const INSTRUCTION_BATCH_SIZE: u64 = 10000;
 
         tracing::info!("Starting interactive execution loop");
         tracing::debug!(
@@ -1409,14 +1418,21 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             // 1. Handle GUI events (keyboard input) - do this first to avoid borrow conflicts
 
             let mut scancodes_to_send = Vec::new();
+            let mut serial_input = Vec::new();
             if let Some(ref mut gui) = self.gui {
                 gui.handle_events();
                 scancodes_to_send = gui.get_pending_scancodes();
+                serial_input = gui.get_pending_serial_input();
             }
 
             // Send scancodes to keyboard device
             for scancode in scancodes_to_send {
                 self.device_manager.keyboard.send_scancode(scancode);
+            }
+
+            // Send serial input to COM1 (ttyS0)
+            for byte in serial_input {
+                self.device_manager.serial.receive_byte(0, byte);
             }
 
             // 2. Execute CPU instructions in batches
@@ -1452,7 +1468,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     if executed == 0 {
                         // HLT with IF=0: CPU is dead (panic or intentional halt)
                         // Break out to avoid infinite loop
-                        if matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::Hlt)
+                        if matches!(self.cpu.activity_state,
+                            crate::cpu::cpu::CpuActivityState::Hlt
+                            | crate::cpu::cpu::CpuActivityState::Mwait
+                            | crate::cpu::cpu::CpuActivityState::MwaitIf)
                             && !self.cpu.interrupts_enabled()
                         {
                             tracing::debug!("[ZERO-BATCH] HLT with IF=0 — CPU halted, breaking");
@@ -2074,8 +2093,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         if matches!(
                             self.cpu.activity_state,
                             crate::cpu::cpu::CpuActivityState::Hlt
+                            | crate::cpu::cpu::CpuActivityState::Mwait
+                            | crate::cpu::cpu::CpuActivityState::MwaitIf
                         ) {
-                            // CPU is halted: advance virtual clock in 10-usec steps until an
+                            // CPU is halted/mwait: advance virtual clock in 10-usec steps until an
                             // interrupt is pending. Matches Bochs handleWaitForEvent + BX_TICKN.
                             //
                             // When a GUI is attached AND the CPU is in protected mode: sleep once
@@ -2092,85 +2113,131 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             //
                             // Without a GUI (headless): spin at full speed; the caller injects
                             // periodic keystrokes to keep the screen alive.
-                            let hlt_sync = self.gui.as_ref().map_or(false, |g| !g.is_headless())
-                                && self.cpu.get_cpu_mode() != 0;
+                            // HLT real-time sync disabled — run at full speed.
+                            // Previous sync caused 6K IPS during I/O phases because
+                            // each HLT batch spin-waited for 0.5-1.5ms of real time.
+                            // The kernel's console blank timer and other timing-sensitive
+                            // code works fine without sync in Alpine boot.
+                            let hlt_sync = false;
                             let hlt_real_start = if hlt_sync {
                                 Some(std::time::Instant::now())
                             } else {
                                 None
                             };
-                            let mut hlt_usec = 0u64;
-                            // Use small step (10µs) in both modes for fine-grained timer
-                            // resolution during HLT. Bochs event.cc:112 uses BX_TICKN(10)
-                            // per iteration — we scale by IPS to get equivalent ticks.
-                            let hlt_step_usec: u64 = 10;
-                            // Tick increment = instructions equivalent to hlt_step_usec.
-                            // With IPS=15M, step=10us: 150 ticks/iter. Over 20K iters: 3M ticks.
-                            let hlt_tick_increment = ((self.config.ips as u64) * hlt_step_usec / 1_000_000).max(1);
-                            while !self.has_interrupt() && hlt_usec < 200_000 {
-                                self.tick_devices(hlt_step_usec);
-                                // Also drive pc_system timers (LAPIC timer)
-                                self.pc_system.tick(hlt_tick_increment.max(1));
-                                self.pc_system.check_timers();
+                            let mut hlt_ticks = 0u64;
+                            static HLT_ENTRY_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+                            let hlt_entry = HLT_ENTRY_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            if hlt_entry < 5 || hlt_entry % 100_000 == 0 {
                                 #[cfg(feature = "bx_support_apic")]
                                 {
-                                    let lapic_ptr = self.cpu.lapic_ptr_mut();
-                                    let lapic = unsafe { &mut *lapic_ptr };
-                                    // Sync LAPIC tick tracking for live timer reads
-                                    let ticks_now = self.pc_system.time_ticks();
-                                    lapic.current_ticks = ticks_now;
-                                    lapic.ticks_at_sync = ticks_now;
-                                    lapic.icount_at_sync = self.cpu.icount;
+                                    let lapic = unsafe { &*self.cpu.lapic_ptr_mut() };
+                                    let (tmr_active, tmr_initial, tmr_period, tmr_vec, act_req, deact_req) =
+                                        lapic.hlt_timer_diag();
+                                    let tmr_handle_active = lapic.timer_handle
+                                        .map(|h| self.pc_system.is_timer_active(h))
+                                        .unwrap_or(false);
+                                    let tmr_countdown = lapic.timer_handle
+                                        .map(|h| self.pc_system.timer_countdown(h))
+                                        .unwrap_or(0);
+                                    eprintln!("[HLT-DIAG#{}] RIP={:#x} has_intr={} lapic_intr={} ticks={} tmr_active={} tmr_initial={} tmr_period={} vec={:#x} pc_active={} countdown={} act_req={} deact_req={}",
+                                        hlt_entry, self.cpu.rip(),
+                                        self.has_interrupt(),
+                                        self.cpu.lapic_has_intr(),
+                                        self.pc_system.time_ticks(),
+                                        tmr_active, tmr_initial, tmr_period, tmr_vec,
+                                        tmr_handle_active, tmr_countdown,
+                                        act_req, deact_req);
+                                }
+                                #[cfg(not(feature = "bx_support_apic"))]
+                                eprintln!("[HLT-DIAG#{}] RIP={:#x} has_intr={} ticks={}",
+                                    hlt_entry, self.cpu.rip(),
+                                    self.has_interrupt(),
+                                    self.pc_system.time_ticks());
+                            }
+                            // Efficient HLT: advance to next countdown event, capped at 100K ticks
+                            // (~6.7ms at 15M IPS) to prevent huge tick_devices calls.
+                            // Max 3M ticks total per HLT batch (~200ms).
+                            while !self.has_interrupt() && hlt_ticks < 3_000_000 {
+                                // 1. Process pending LAPIC requests FIRST so timers are active
+                                #[cfg(feature = "bx_support_apic")]
+                                {
+                                    let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
                                     if lapic.timer_fired {
                                         lapic.timer_fired = false;
-                                        lapic.periodic(ticks_now);
+                                        lapic.periodic(self.pc_system.time_ticks());
                                     }
                                     if lapic.timer_deactivate_request {
                                         lapic.timer_deactivate_request = false;
-                                        if let Some(handle) = lapic.timer_handle {
-                                            if let Err(e) = self.pc_system.deactivate_timer(handle) {
-                                                tracing::error!("LAPIC deactivate_timer: {}", e);
+                                        if let Some(h) = lapic.timer_handle {
+                                            if let Err(e) = self.pc_system.deactivate_timer(h) {
+                                                tracing::error!("LAPIC deactivate: {}", e);
                                             }
                                         }
                                     }
                                     if let Some(period) = lapic.timer_activate_request.take() {
-                                        if let Some(handle) = lapic.timer_handle {
-                                            // Use relative reactivation for periodic catch-up
-                                            if let Err(e) = self.pc_system.reactivate_timer_relative(handle, period) {
-                                                tracing::error!("LAPIC reactivate_timer: {}", e);
+                                        if let Some(h) = lapic.timer_handle {
+                                            if let Err(e) = self.pc_system.activate_timer(h, period, false) {
+                                                tracing::error!("LAPIC activate: {}", e);
                                             }
                                         }
                                         lapic.set_ticks_initial(self.pc_system.time_ticks());
                                     }
-                                    // Forward EOI broadcast from LAPIC to I/O APIC
                                     if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
                                         self.device_manager.ioapic.receive_eoi(eoi_vec);
                                     }
-                                    // LAPIC interrupt can also break the HLT spin
                                     if lapic.intr {
-                                        self.cpu.signal_event(1 << 2); // BX_EVENT_PENDING_LAPIC_INTR
+                                        self.cpu.signal_event(1 << 2);
                                         break;
                                     }
                                 }
-                                hlt_usec += hlt_step_usec;
+                                // 2. Now get accurate countdown and advance
+                                let step = self.pc_system.get_num_ticks_left_next_event()
+                                    .max(1)
+                                    .min(100_000);
+                                self.pc_system.tickn(step);
+                                hlt_ticks += step as u64;
+                                let dev_usec = (step as u64 * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
+                                self.tick_devices(dev_usec);
                             }
-                            if let Some(start) = hlt_real_start {
-                                let real_elapsed_us = start.elapsed().as_micros() as u64;
-                                if hlt_usec > real_elapsed_us {
-                                    let sleep_us = hlt_usec - real_elapsed_us;
-                                    // Busy-wait for short sleeps to avoid Windows 15.6ms
-                                    // minimum timer granularity (Bochs also busy-spins).
-                                    const SPIN_THRESHOLD_US: u64 = 2_000; // 2ms
-                                    if sleep_us < SPIN_THRESHOLD_US {
-                                        let deadline =
-                                            start + std::time::Duration::from_micros(hlt_usec);
-                                        while std::time::Instant::now() < deadline {
-                                            std::hint::spin_loop();
+                            // Advance icount to reflect virtual time that passed during HLT.
+                            // This is critical for TSC-based kernel timekeeping (RDTSC uses icount).
+                            // Without this, TSC freezes during HLT and kernel poll() timeouts never expire.
+                            self.cpu.icount += hlt_ticks;
+
+                            // Log exit reason for first few
+                            if hlt_entry < 5 || hlt_entry % 100_000 == 0 {
+                                let exit_reason = if self.has_interrupt() {
+                                    "interrupt"
+                                } else {
+                                    "timeout"
+                                };
+                                let hlt_usec = hlt_ticks * 1_000_000 / (self.config.ips as u64).max(1);
+                                eprintln!("[HLT-EXIT#{}] reason={} hlt_ticks={} hlt_usec={} ticks={} lapic_intr={}",
+                                    hlt_entry, exit_reason, hlt_ticks, hlt_usec,
+                                    self.pc_system.time_ticks(),
+                                    self.cpu.lapic_has_intr());
+                            }
+                            // If LAPIC has a pending interrupt, signal CPU
+                            #[cfg(feature = "bx_support_apic")]
+                            if self.cpu.lapic_has_intr() {
+                                self.cpu.signal_event(1 << 2); // BX_EVENT_PENDING_LAPIC_INTR
+                            }
+                            // Optional: sync to real time if GUI is active
+                            if hlt_sync {
+                                if let Some(start) = hlt_real_start {
+                                    let hlt_usec = hlt_ticks * 1_000_000 / (self.config.ips as u64).max(1);
+                                    let real_elapsed_us = start.elapsed().as_micros() as u64;
+                                    if hlt_usec > real_elapsed_us {
+                                        let sleep_us = hlt_usec - real_elapsed_us;
+                                        const SPIN_THRESHOLD_US: u64 = 2_000;
+                                        if sleep_us < SPIN_THRESHOLD_US {
+                                            let deadline = start + std::time::Duration::from_micros(hlt_usec);
+                                            while std::time::Instant::now() < deadline {
+                                                std::hint::spin_loop();
+                                            }
+                                        } else {
+                                            std::thread::sleep(std::time::Duration::from_micros(sleep_us));
                                         }
-                                    } else {
-                                        std::thread::sleep(std::time::Duration::from_micros(
-                                            sleep_us,
-                                        ));
                                     }
                                 }
                             }
@@ -2183,17 +2250,14 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         }
                     }
 
-                    // Drive pc_system timers (LAPIC timer uses this infrastructure).
-                    // Advance tick count by instructions executed and fire expired timers.
-                    // Matches Bochs: bx_pc_system.time_ticks() advances by instruction count.
-                    self.pc_system.tick(executed);
+                    // Drive pc_system timers via Bochs-exact tickn() mechanism.
+                    // tickn() decrements curr_countdown, fires countdown_event() at 0,
+                    // which fires all expired timer callbacks at exact tick boundaries.
+                    self.pc_system.tickn(executed as u32);
 
-                    self.pc_system.check_timers();
-
-                    // Handle LAPIC timer fires with catch-up for large batches.
-                    // With batch=150K ticks and timer period=24K, ~6 fires should occur
-                    // per batch. We loop: fire → periodic() → reactivate (relative to
-                    // previous fire time) → check_timers → repeat until caught up.
+                    // Handle LAPIC timer fires. With small batches (500 ticks) and
+                    // typical LAPIC period (~24K ticks), at most 1 fire per batch.
+                    // The catch-up loop is retained as a safety net.
                     //
                     // IMPORTANT: The `lapic` borrow must be dropped before calling
                     // check_timers(), because the timer callback also mutably accesses
@@ -2254,9 +2318,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 break;
                             }
 
-                            // Now safe to call check_timers — no &mut lapic alive.
-                            // The callback may set timer_fired=true via raw pointer.
-                            self.pc_system.check_timers();
+                            // Trigger any timers due at exactly the current tick.
+                            // tickn(0) fires countdown_event() only if curr_countdown==0,
+                            // which happens when reactivate_timer_relative set it to 0.
+                            self.pc_system.tickn(0);
                         }
 
                         // Handle non-fire deactivate/activate requests (from
@@ -2638,7 +2703,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     }
 
                     // Deliver pending PIC interrupts to the CPU (Bochs-like).
-                    if self.has_interrupt()
+                    // Only use PIC path — LAPIC interrupts are delivered via
+                    // handleAsyncEvent() through the CPU event system.
+                    if self.device_manager.has_interrupt()
                         && self.cpu.get_b_if() != 0
                         && !self.cpu.interrupts_inhibited(0x01)
                     // BX_INHIBIT_INTERRUPTS
@@ -2697,19 +2764,29 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 }
             };
 
+            // Drain serial port output every batch for responsive serial console.
+            // Previously gated by should_update_gui (100ms) — now immediate.
+            {
+                let serial_bytes: Vec<u8> = self.device_manager.drain_serial_tx(0).collect();
+                if !serial_bytes.is_empty() {
+                    if let Some(ref gui) = self.gui {
+                        let text = String::from_utf8_lossy(&serial_bytes);
+                        gui.append_serial_log(&text);
+                    }
+                    // Always write serial output to stdout for headless/terminal visibility
+                    #[cfg(feature = "std")]
+                    {
+                        use std::io::Write;
+                        let _ = std::io::stdout().write_all(serial_bytes.as_slice());
+                        let _ = std::io::stdout().flush();
+                    }
+                }
+            }
+
             // Update GUI after CPU execution (outside the match to avoid borrow conflicts)
             // Update more frequently if text is dirty OR periodically (like Bochs timer)
             if should_update_gui {
                 self.update_gui();
-
-                // Drain serial port output and push to shared display for GUI
-                let serial_bytes: Vec<u8> = self.device_manager.drain_serial_tx(0).collect();
-                if !serial_bytes.is_empty() {
-                    let text = String::from_utf8_lossy(&serial_bytes);
-                    if let Some(ref gui) = self.gui {
-                        gui.append_serial_log(&text);
-                    }
-                }
             }
 
             // Update IPS: show_ips() every 1 real second (keeps egui status bar responsive).
@@ -2790,9 +2867,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 };
                 self.tick_devices(usec);
 
-                // Drive pc_system timers (LAPIC timer infrastructure)
-                self.pc_system.tick(executed);
-                self.pc_system.check_timers();
+                // Drive pc_system timers via Bochs-exact tickn() mechanism
+                self.pc_system.tickn(executed as u32);
 
                 // Handle LAPIC timer fires with catch-up (same as main loop)
                 #[cfg(feature = "bx_support_apic")]
@@ -2834,7 +2910,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             }
                         };
                         if !should_continue { break; }
-                        self.pc_system.check_timers();
+                        self.pc_system.tickn(0);
                     }
                     // Handle non-fire requests
                     {
@@ -2870,7 +2946,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 // This must happen EVERY batch, not just during HLT, because
                 // the BIOS and OS rely on timer interrupts during normal
                 // execution (not only when halted).
-                if self.has_interrupt()
+                // Only use PIC path — LAPIC interrupts delivered via CPU event system.
+                if self.device_manager.has_interrupt()
                     && self.cpu.get_b_if() != 0
                     && !self.cpu.interrupts_inhibited(0x01)
                 {
@@ -2918,14 +2995,19 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 // Sync A20 state
                 self.sync_a20_state();
 
-                // Handle keyboard scancodes from GUI
+                // Handle keyboard scancodes and serial input from GUI
                 let mut scancodes_to_send = Vec::new();
+                let mut serial_input = Vec::new();
                 if let Some(ref mut gui) = self.gui {
                     gui.handle_events();
                     scancodes_to_send = gui.get_pending_scancodes();
+                    serial_input = gui.get_pending_serial_input();
                 }
                 for scancode in scancodes_to_send {
                     self.device_manager.keyboard.send_scancode(scancode);
+                }
+                for byte in serial_input {
+                    self.device_manager.serial.receive_byte(0, byte);
                 }
 
                 let shutdown = self.cpu.is_in_shutdown();
@@ -3101,6 +3183,21 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         }
     }
 
+    /// Get ATA channel read counters for diagnostics.
+    pub fn ata_diag_reads(&self) -> (u64, u64) {
+        (self.device_manager.harddrv.diag_ch0_reads, self.device_manager.harddrv.diag_ch1_reads)
+    }
+
+    /// Get total I/O port read/write counters for diagnostics.
+    pub fn io_diag_counts(&self) -> (u64, u64) {
+        (self.devices.diag_io_reads, self.devices.diag_io_writes)
+    }
+
+    /// Get CPU activity state and async_event for diagnostics.
+    pub fn cpu_diag_state(&self) -> (u32, u32) {
+        (self.cpu.activity_state as u32, self.cpu.async_event)
+    }
+
     /// Get CR0 for diagnostics (bit 0 = PE).
     pub fn get_cr0(&self) -> u32 {
         self.cpu.cr0.bits()
@@ -3259,11 +3356,24 @@ impl<I: BxCpuIdTrait> Emulator<'_, I> {
         // Show pc_system timer state for LAPIC timer
         if let Some(handle) = lapic_ref.timer_handle {
             let t = &self.pc_system.timers[handle];
-            eprintln!("  pc_system_timer[{}]: active={} continuous={} time_to_fire={} period={} ticks_total={}",
-                handle, t.active, t.continuous, t.time_to_fire, t.period,
+            eprintln!("  pc_system_timer[{}]: flags={:?} time_to_fire={} period={} ticks_total={}",
+                handle, t.flags, t.time_to_fire, t.period,
                 self.pc_system.time_ticks());
         }
         lapic_ref.dump_state();
+        // ATA channel diagnostics
+        eprintln!("--- ATA Diag ---");
+        eprintln!("  ch0_reads={} ch1_reads={} total_reads={} total_writes={}",
+            self.device_manager.harddrv.diag_ch0_reads,
+            self.device_manager.harddrv.diag_ch1_reads,
+            self.device_manager.harddrv.read_count,
+            self.device_manager.harddrv.write_count);
+        eprintln!("  cmd_history (last 10):");
+        let hist = &self.device_manager.harddrv.cmd_history;
+        let start = if hist.len() > 10 { hist.len() - 10 } else { 0 };
+        for (ch, cmd, lba) in &hist[start..] {
+            eprintln!("    ch={} cmd={:#04x} lba={}", ch, cmd, lba);
+        }
         // Dump key code addresses from memory
         {
             let ram = self.memory.ram_slice();
@@ -3423,7 +3533,7 @@ mod tests {
         assert!(!emu2.is_initialized());
 
         // Different tick counts
-        emu1.pc_system.tick(1000);
+        emu1.pc_system.tickn(1000);
         assert_eq!(emu1.ticks(), 1000);
         assert_eq!(emu2.ticks(), 0);
     }

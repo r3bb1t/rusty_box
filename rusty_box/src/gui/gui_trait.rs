@@ -151,6 +151,12 @@ pub trait BxGui: Send + Sync {
         Vec::new()
     }
 
+    /// Get pending serial input bytes (ASCII chars to inject into serial port RX)
+    /// Used when console=ttyS0 — keyboard input needs to go to serial, not PS/2
+    fn get_pending_serial_input(&mut self) -> Vec<u8> {
+        Vec::new()
+    }
+
     /// Append text to the serial console log (for display in GUI)
     fn append_serial_log(&self, _text: &str) {
         // Default: no-op

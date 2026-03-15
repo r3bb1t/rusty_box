@@ -16,9 +16,19 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-03-12):**
+**Current Status (2026-03-15):**
 - ✅ **DLX Linux boots to interactive bash shell!** Full boot: BIOS POST → LILO → kernel → init → `dlx login: root` → `dlx:~#` (200M instructions sufficient)
-- ⚠️ **Alpine Linux boots through full kernel init, loads cdrom/sr_mod, detects sr0** — Kernel 6.18.7-0-virt fully initializes: e820 memory map, APIC/IOAPIC, PCI (i440FX/PIIX3/PIIX4), ACPI, ata_piix, serial 16550A, i8042, RTC, IPv6, TCP/UDP, squashfs. Alpine Init 3.13.0-r0 loads cdrom+sr_mod+isofs modules (via `modules=` cmdline). CD-ROM detected as `sr 1:0:0:0: [sr0] scsi3-mmc drive`. **Stalls after sr0 detection**: 12 ATAPI probe commands complete (TUR, INQUIRY, MODE_SENSE, READ_TOC, READ_CAPACITY, READ_DISC_INFO) but zero READ(10) — kernel never reads CD data. `debug_init=1` confirmed the stall occurs inside `nlplug-findfs` (init script line 848). Alpine Init calls `nlplug-findfs -p /sbin/mdev -b /tmp/repositories -a /tmp/apkovls` which uses netlink sockets to receive kernel uevents for device discovery. Without uevent delivery, nlplug-findfs blocks forever waiting for device events. **Next**: investigate netlink/uevent socket support — nlplug-findfs opens `AF_NETLINK`/`NETLINK_KOBJECT_UEVENT` socket via `socket()` syscall. The kernel needs to deliver uevents through this socket for sr0 discovery.
+- ⚠️ **Alpine Linux boots to emergency recovery shell!** Kernel 6.18.7-0-virt fully initializes. Alpine Init 3.13.0-r0 loads all drivers, mounts ISO on `/media/sr0`, installs packages via apk. **Current blockers**: (1) `mount` segfault at `ffffffff81001280` (kernel ELF loader computes wrong entry point for PIE binary — `e_entry + kernel_base` instead of `e_entry + user_load_base`), (2) `apk` crash in libcrypto.so.3 (corrupted pointer in SBB chain, likely residual AVX/SSE instruction bug). Despite errors, system reaches `~ #` emergency shell prompt.
+- ✅ **Session 44-45: Full SSE/MMX/XSAVE parity audit (16 fixes) + serial output fix + decoder fixes**:
+  - **9 legacy SSE→AVX dispatcher misdirections** (ROOT CAUSE of previous "Out of memory"): PADDD, PSUBD, PCMPEQD, PAND, POR, PXOR, PUNPCKLDQ, PUNPCKHDQ, PSHUFB dispatched to VEX handlers reading XMM0 via `instr.src2()` instead of `instr.dst()`.
+  - **7 SSE4.1 PEXTRB/D/Q, PINSRB/D/Q handlers** implemented matching Bochs sse.cc.
+  - **MOVQ 66 0F D6 decoder fix** (ROOT CAUSE of mdev regex failure): Store instruction had swapped src/dst — missing from Ed,Gd list in both decoders. musl's regcomp() returned REG_ESUBREG because XMM stores wrote from wrong register, corrupting regex parser state.
+  - **VINSERTI128/VINSERTF128** (VEX 0F3A 38/18): AVX2 insert instructions added to decoder + handler.
+  - **BMI1/BMI2 decoder entries**: ANDN, BLSI, BLSMSK, BLSR, BEXTR, BZHI, MULX, PDEP, PEXT, SARX, SHLX, SHRX all wired in 0F38 opcode table (handlers already existed).
+  - **HLT icount advancement**: TSC uses icount which froze during HLT → kernel poll() timeouts never expired → nlplug-findfs stuck forever. Fix: advance icount by hlt_ticks after each HLT batch.
+  - **HLT loop optimization**: Process LAPIC timer requests BEFORE countdown lookup. Cap step at 100K ticks. Bochs-style tickn() + periodic tick_devices.
+  - **Serial output headless fix**: `run_interactive()` drained serial TX via `gui.append_serial_log()` which was no-op for NoGui — data silently dropped. Now also writes to stdout. Serial FIFO drain fix for multi-byte writes.
+  - **SSE MIN/MAX NaN**, SSE4.2 prepare_sse, XSAVE 6 bugs, MMX MovqPqEq/MovqEqPq, MASKMOVQ/MASKMOVDQU, SHA/GF2 memory ops, MOVNTI, MONITOR, CR4 long-mode checks, keyboard/serial HW fixes.
 - ✅ **F3 0F 7E decoder convention fix (session 41)**: 0x17E was in Ed,Gd branch for ALL SSE prefixes. F3 0F 7E (MOVQ Vq,Wq) is a LOAD needing Gd,Ed. Swapped operands made musl fdopen() store __stdio_read into wrong XMM register → NULL f->read → modprobe segfault at IP=0. Fixed in both decode64.rs and decode32.rs.
 - ✅ **MONITOR asize_mask fix (session 40)**: MONITOR instruction truncated RAX to 32 bits in 64-bit mode. Fixed with Bochs's `asize_mask()` lookup table. Unblocked mwait_idle — Alpine now enters idle cleanly.
 - ✅ **AVX/AVX-512/BMI2 instructions (session 39-40)**: blake2s_compress_avx512 and sha256_transform_rorx fully working. VPRORD, VPROLD, VEXTRACTI128, VPERM2I128, VPSHUFB 256-bit, RORX all implemented.
@@ -264,20 +274,17 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ### Next Steps
 1. ~~**Reach DLX Linux `dlx login:` prompt**~~ — **DONE** (2026-03-03). Full boot to login prompt achieved.
 2. ~~**Interactive login**~~ — **DONE** (2026-03-04). SHRD/SHLD decoder fix resolved ext2 "directory #12 contains a hole" errors. `root` login → `dlx:~#` bash shell works.
-3. **Boot Alpine Linux** — **IN PROGRESS** (2026-03-12). Kernel boots to Alpine Init, loads CD-ROM modules, detects sr0:
-   - **Session 42 FIX (egui cmdline + ATAPI error handling)**: Added `modules=cdrom,sr_mod,isofs` to egui AlpineDirect cmdline (was only in headless). Fixed ATAPI lazy-load error handling — `read_cdrom_block()` failure now aborts transfer with MEDIUM_ERROR sense instead of returning stale buffer data. Added `MediumError` sense key and `UnrecoveredReadError` ASC.
-   - **Session 41 FIX (F3 0F 7E decoder)**: MOVQ Vq,Wq (F3 0F 7E) had swapped operands in both decoders — 0x17E was unconditionally in Ed,Gd branch. F3 prefix form is a LOAD (Gd,Ed). This caused musl fdopen() to store __stdio_read into wrong XMM → NULL f->read → modprobe segfault at IP=0. Fixed by excluding 0x17E from Ed,Gd when sse_prefix==PrefixF3.
-   - **Session 40 FIX (MONITOR asize_mask)**: MONITOR truncated RAX to 32 bits in 64-bit mode. Fixed with Bochs `asize_mask()` lookup table. Unblocked mwait_idle.
-   - **Result**: `sr 1:0:0:0: [sr0] scsi3-mmc drive: 16x/16x cd/rw xa/form2 tray` detected. Alpine Init loads boot drivers (cdrom, sr_mod, isofs). Stalls inside `nlplug-findfs` which uses `AF_NETLINK`/`NETLINK_KOBJECT_UEVENT` socket to discover devices. Without uevent delivery over netlink, nlplug-findfs blocks forever and never attempts to mount sr0 as boot media.
-   - **Session 43 investigation**: Extracted Alpine initramfs `/init` script. Two paths: (1) `root=` cmdline → "Mounting root" via nlplug-findfs, (2) no root → "Mounting boot media" via nlplug-findfs with `-b repofile -a /tmp/apkovls`. Both call `nlplug-findfs -p /sbin/mdev` which opens netlink socket and waits for uevents. `debug_init=1` cmdline enables shell `set -x` tracing but output stalls before any trace appears — confirming the block is inside the nlplug-findfs C binary, not the shell script.
-   - **nlplug-findfs full flow** (from source analysis): Uses two-phase discovery: (1) **Coldplug**: a trigger thread recursively walks `/sys/bus/` and `/sys/class/`, writing `"add"` to each device's `uevent` file — this makes the kernel re-emit uevents for already-registered devices (including sr0). (2) **Hotplug**: listens on `PF_NETLINK`/`NETLINK_KOBJECT_UEVENT` socket (512KB buffer) via `poll()` for new device events. For each uevent with `DEVNAME`, spawns `mdev` to create `/dev/` node, then calls `blkid` to identify filesystem type. If `iso9660` found on sr0, mounts `/dev/sr0` on `/media/sr0` read-only and scans for `.boot_repository` marker. Timeouts: MAX_EVENT_TIMEOUT=5000ms (initial), DEFAULT_EVENT_TIMEOUT=250ms (after finding boot repo). All 6 steps must work: (1) netlink socket, (2) coldplug `/sys` trigger, (3) mdev creates `/dev/sr0`, (4) blkid reads device, (5) `mount(2)` iso9660, (6) directory scan for `.boot_repository`.
-   - **Next step**: investigate kernel netlink/uevent socket delivery mechanism — the stall is in `poll()` waiting for uevents that never arrive.
-   - **ISOLINUX path**: El Torito boot works, ISOLINUX 6.04 loads + enters PM, but init_func table is empty → iso_init never called. See `docs/ISOLINUX_DEBUG.md`.
+3. **Boot Alpine Linux** — **IN PROGRESS** (2026-03-14). Kernel boots fully, Alpine Init loads all drivers, reaches "Mounting boot media...":
+   - **Session 44-45 FIX (SSE parity audit + serial)**: 9 legacy SSE→AVX dispatcher misdirections fixed (PADDD/PSUBD/PCMPEQD/PAND/POR/PXOR/PUNPCKLDQ/PUNPCKHDQ/PSHUFB). 7 PEXTRB/D/Q+PINSRB/D/Q handlers implemented. XSAVE 6 bugs, MMX 64-bit handlers, MIN/MAX NaN, MONITOR stale address, CR4 long-mode checks, serial headless output fix.
+   - **Previous nlplug-findfs "Out of memory" FIXED**: Root cause was 9 SSE→AVX misdirections causing `PXOR XMM_N, XMM_N` to compute `XMM0 ^ XMM_N` instead of clearing to zero. Leaked stale XMM0 data (0x20000 = DEFAULT_STACK_SIZE) into GPRs → pthread_create mmap with corrupt size → ENOMEM.
+   - **Current blocker: mdev regex failure** — `mdev: bad regex '.*': Invalid back reference`. musl `regcomp(".*", REG_EXTENDED)` returns `REG_ESUBREG` (6). Without mdev, `/dev/` nodes not created → nlplug-findfs can't discover sr0 → boot media never mounted. First error at icount=1766976002. Comprehensive audit of 30+ instruction handlers found no bugs. 64-bit decoder audit in progress.
+   - **Audited clean**: CMP/TEST/MOVZX/MOVSX (8→32/64), all 16 CMOVcc/SETcc/Jcc, CBW/CWDE/CDQE, SUB 8-bit, SCASB/CMPSB, CALL/RET 64-bit, CMPXCHG 64-bit, LEA/resolve_addr64, BSF/BSR/LZCNT/TZCNT, RMW 64-bit, SYSCALL/SYSRET, ENDBR64.
+   - **Hypotheses**: decoder bug (wrong opcode for some byte sequence), heap corruption from subtle memory write bug, XSAVE/XRSTOR context switch issue, or GCC 15.2 auto-vectorized code hitting unimplemented instruction.
 4. **Fix `ide2 at 0x1e8` phantom** — PCI PIIX IDE BAR misconfiguration causes kernel to probe a non-existent 3rd IDE channel
 5. ~~**Fix LDT triple fault**~~ — FIXED: root cause was INT using IVT in PM + XCHG mod_c0 bug
 6. ~~**Fix vsprintf**~~ — FIXED: ADD AL,Ib (opcode 0x04) operated on AH, breaking vsprintf's jump table index computation
 7. ~~**Fix swap init loop**~~ — RESOLVED: "Trying to free nonexistent swap-page" was caused by IDT corruption from the INT dispatch bug
-8. ~~**Fix ext2 "directory #12 contains a hole"**~~ — **FIXED** (2026-03-04): SHRD/SHLD decoder convention bug. Opcodes 0F A4/A5/AC/AD were in ELSE branch instead of Ed,Gd. Operands swapped → shift never applied to destination register.
+8. ~~**Fix ext2 "directory #12 contains a hole"**~~ — **FIXED** (2026-03-04): SHRD/SHLD decoder convention bug.
 
 ### Exact Instruction Threshold: 132,865,700
 
@@ -291,15 +298,23 @@ The kernel first enters HLT idle at **exactly instruction 132,865,700**. Key not
 
 **Key instruction count milestones — use the minimum needed:**
 - `200_000_000` — full boot to `dlx login:` prompt (default). Takes ~8-10 seconds at ~20 MIPS.
+- `2_500_000_000` — Alpine boots to "Mounting boot media..." + mdev regex errors. ~125 seconds.
 - `132_865_710` — kernel first HLT threshold + 10; diagnostics print at run end. Use for ATA/IRQ debugging.
 - `2_000_000` — BIOS POST only (fast check, VGA text visible)
 
 ```bash
-# Build release binary
+# Build release binaries
 cargo build --release --example dlxlinux --features std
+cargo build --release --example alpine_direct --features std
 
-# Run headless — full boot to login prompt (default 200M instructions)
+# DLX: Run headless — full boot to login prompt (default 200M instructions)
 RUSTY_BOX_HEADLESS=1 ./target/release/examples/dlxlinux.exe
+
+# Alpine: Run headless — serial output on stdout, diagnostics on stderr
+RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=2500000000 ./target/release/examples/alpine_direct.exe 2>/dev/null
+
+# Alpine: Run with debug_init=1 for shell tracing
+CMDLINE="console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 nomodeset nokaslr kfence.sample_interval=0 modules=cdrom,sr_mod,isofs debug_init=1" RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=2500000000 ./target/release/examples/alpine_direct.exe
 
 # Run with GUI (egui)
 cargo run --release --example dlxlinux --features "std,gui-egui"
@@ -309,6 +324,7 @@ RUST_LOG=debug RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=500000 ./target/release/exa
 ```
 
 ### Progress Metrics
+- ✅ **Session 44-45 (2026-03-13/14)**: Full SSE/MMX/XSAVE parity audit — 16 fixes applied. 9 SSE→AVX dispatcher misdirections fixed. PEXTRB/D/Q + PINSRB/D/Q implemented. Serial headless output fixed. Alpine advances past thread creation to "Mounting boot media..."
 - ✅ REX byte register mapping: bare REX (0x40) now correctly enables SPL/BPL/SIL/DIL — Alpine kernel enters 64-bit mode
 - ✅ All major decoder bugs fixed (Group 1 opcodes, segment defaults, execute1/execute2)
 - ✅ Protected mode transition works (far jump, GDT, segment loading)

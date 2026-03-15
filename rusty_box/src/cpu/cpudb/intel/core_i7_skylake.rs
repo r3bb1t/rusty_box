@@ -183,7 +183,8 @@ const LEAF1_ECX_BASE: CpuIdStd1Ecx = CpuIdStd1Ecx::SSE3
     .union(CpuIdStd1Ecx::DTES64)       // extra
     .union(CpuIdStd1Ecx::MONITOR_MWAIT)
     .union(CpuIdStd1Ecx::DS_CPL)       // extra
-    .union(CpuIdStd1Ecx::VMX)
+    // VMX removed: handlers not implemented, would crash emulator on VMXON
+    // .union(CpuIdStd1Ecx::VMX)
     .union(CpuIdStd1Ecx::EST)          // extra
     .union(CpuIdStd1Ecx::TM2)          // extra
     .union(CpuIdStd1Ecx::SSSE3)

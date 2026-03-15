@@ -45,6 +45,8 @@ pub struct SharedDisplay {
     pub stop_flag: Arc<AtomicBool>,
     /// Serial console output text (accumulated from serial port TX)
     pub serial_log: String,
+    /// ASCII bytes from GUI to inject into serial port RX (for console input)
+    pub pending_serial_input: Vec<u8>,
 }
 
 impl SharedDisplay {
@@ -72,6 +74,7 @@ impl SharedDisplay {
             reset_requested: false,
             stop_flag: Arc::new(AtomicBool::new(false)),
             serial_log: String::new(),
+            pending_serial_input: Vec::new(),
         }
     }
 

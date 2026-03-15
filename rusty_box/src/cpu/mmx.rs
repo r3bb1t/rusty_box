@@ -432,7 +432,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.mmx_read_op2_qq(instr)?;
         self.prepare_fpu2mmx();
 
-        let shift = (instr.ib() & 0x1f) * 8;
+        let shift = (instr.ib() as u32) * 8;
         let r = if shift == 0 {
             op2
         } else if shift < 64 {
@@ -732,6 +732,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
+    /// MOVQ PqEq (REX.W + 0F 6E) — register form: move 64-bit GPR to MMX
+    /// Bochs mmx.cc:937
+    pub(super) fn movq_pq_eq_r(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let val = self.get_gpr64(instr.src1() as usize);
+        self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: val });
+        Ok(())
+    }
+
+    /// MOVQ PqEq (REX.W + 0F 6E) — memory form: load qword from memory to MMX
+    /// Bochs mmx.cc:949
+    pub(super) fn movq_pq_eq_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr(instr);
+        let val = self.v_read_qword(seg, eaddr)?;
+        self.prepare_fpu2mmx();
+        self.write_mmx_reg(instr.dst(), BxPackedRegister { U64: val });
+        Ok(())
+    }
+
     /// MOVQ PqQq (0F 6F) — register form: MMX to MMX
     /// Bochs mmx.cc:950
     pub(super) fn movq_pq_qq_r(&mut self, instr: &Instruction) -> super::Result<()> {
@@ -864,6 +886,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         self.v_write_dword(seg, eaddr, val)?;
+        self.prepare_fpu2mmx();
+        Ok(())
+    }
+
+    /// MOVQ EqPq (REX.W + 0F 7E) — register form: store MMX to 64-bit GPR
+    /// Bochs mmx.cc:1152
+    pub(super) fn movq_eq_pq_r(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        self.prepare_fpu2mmx();
+        let val = unsafe { self.read_mmx_reg(instr.src1()).U64 };
+        self.set_gpr64(instr.dst() as usize, val);
+        Ok(())
+    }
+
+    /// MOVQ EqPq (REX.W + 0F 7E) — memory form: store MMX qword to memory
+    /// Bochs mmx.cc:1164
+    pub(super) fn movq_eq_pq_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.fpu_check_pending_exceptions()?;
+        let val = unsafe { self.read_mmx_reg(instr.src1()).U64 };
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr(instr);
+        self.v_write_qword(seg, eaddr, val)?;
         self.prepare_fpu2mmx();
         Ok(())
     }
@@ -1533,22 +1577,26 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.fpu_check_pending_exceptions()?;
         self.prepare_fpu2mmx();
 
-        let op = self.read_mmx_reg(instr.src1());
-        let mask = self.read_mmx_reg(instr.dst());
+        let op = self.read_mmx_reg(instr.dst());     // nnn = Pq (data source)
+        let mask = self.read_mmx_reg(instr.src1()); // rm = Nq (mask)
 
         // If mask is all zero, nothing to do
         if unsafe { mask.U64 } == 0 {
             return Ok(());
         }
 
-        let rdi = if self.long64_mode() {
-            self.rdi()
+        // Bochs mmx.cc:2372: bx_address rdi = RDI & i->asize_mask();
+        let asize_mask: u64 = if self.long64_mode() {
+            0xFFFF_FFFF_FFFF_FFFF
+        } else if instr.as32_l() == 0 {
+            0xFFFF
         } else {
-            u64::from(self.edi() as u32)
+            0xFFFF_FFFF
         };
-        let seg = BxSegregs::Ds;
+        let rdi = self.rdi() & asize_mask;
+        let seg = BxSegregs::from(instr.seg());
 
-        // Read-modify-write 8 bytes at [DS:EDI]
+        // Read-modify-write 8 bytes at [seg:rdi]
         let mut tmp = BxPackedRegister {
             U64: self.v_read_qword(seg, rdi)?,
         };
@@ -1858,15 +1906,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOVNTQ: non-temporal store of MMX register to memory
     /// Non-temporal hint is ignored in emulation — same as MOVQ store
+    /// Bochs mmx.cc:1175: "do not cause FPU2MMX transition if memory write faults"
     pub(super) fn movntq_mq_pq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
-        self.prepare_fpu2mmx();
         let op = self.read_mmx_reg(instr.src1());
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
         unsafe {
             self.v_write_qword(seg, eaddr, op.U64)?;
         }
+        // prepare_fpu2mmx after write succeeds — if the write faults,
+        // FPU state must not be corrupted (matches Bochs mmx.cc:1176)
+        self.prepare_fpu2mmx();
         Ok(())
     }
 }

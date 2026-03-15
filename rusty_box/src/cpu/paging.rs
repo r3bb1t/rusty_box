@@ -1374,6 +1374,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         };
 
+        // DIAGNOSTIC: log when page walk resolves to interesting physical pages
+        if ppf >= 0x1436000 && ppf < 0x1437000 && self.icount > 13_000_000 {
+            eprintln!("[TLB-POPULATE-1436] laddr={:#x} ppf={:#x} paddr={:#x} user={} is_write={} icount={} rip={:#x}",
+                laddr, ppf, paddr, user, is_write, self.icount, self.prev_rip);
+        }
+
         {
             let tlb_entry = self.dtlb.get_entry_of(laddr, 0);
             tlb_entry.lpf = lpf;
@@ -1445,6 +1451,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.mem_write_qword(paddr, val);
     }
 
+    /// DIAGNOSTIC: public wrapper for page_walk_read_qword (read-only PTE read)
+    pub(super) fn page_walk_read_qword_diag(&self, paddr: u64) -> u64 {
+        self.page_walk_read_qword(paddr)
+    }
+
     /// Load PDPTE entries from physical memory into the PDPTR cache.
     /// Called when CR3 is written in PAE mode (not long mode).
     /// Based on Bochs CheckPDPTR (paging.cc:958-993).
@@ -1457,6 +1468,37 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Bochs validates reserved bits and returns false on violation,
             // which causes #GP(0). We check reserved bits at walk time.
         }
+    }
+
+    /// DIAGNOSTIC: Read-only 4-level page walk that does NOT modify PTEs or TLB.
+    /// Returns the physical address for the given linear address, or None if not present.
+    /// Used to verify TLB entries against actual page table state.
+    pub(super) fn diag_verify_laddr_ro(&self, laddr: u64) -> Option<u64> {
+        if !self.long_mode() { return None; } // only long mode for now
+        let cr3 = self.cr3;
+        // PML4E
+        let pml4e_addr = (cr3 & 0x000F_FFFF_FFFF_F000) | (((laddr >> 39) & 0x1FF) << 3);
+        let pml4e = self.page_walk_read_qword(pml4e_addr);
+        if pml4e & 1 == 0 { return None; }
+        // PDPE
+        let pdpe_addr = (pml4e & 0x000F_FFFF_FFFF_F000) | (((laddr >> 30) & 0x1FF) << 3);
+        let pdpe = self.page_walk_read_qword(pdpe_addr);
+        if pdpe & 1 == 0 { return None; }
+        if pdpe & 0x80 != 0 { // 1GB page
+            return Some((pdpe & 0x000F_FFFF_C000_0000) | (laddr & 0x3FFF_FFFF));
+        }
+        // PDE
+        let pde_addr = (pdpe & 0x000F_FFFF_FFFF_F000) | (((laddr >> 21) & 0x1FF) << 3);
+        let pde = self.page_walk_read_qword(pde_addr);
+        if pde & 1 == 0 { return None; }
+        if pde & 0x80 != 0 { // 2MB page
+            return Some((pde & 0x000F_FFFF_FFE0_0000) | (laddr & 0x001F_FFFF));
+        }
+        // PTE
+        let pte_addr = (pde & 0x000F_FFFF_FFFF_F000) | (((laddr >> 12) & 0x1FF) << 3);
+        let pte = self.page_walk_read_qword(pte_addr);
+        if pte & 1 == 0 { return None; }
+        Some((pte & 0x000F_FFFF_FFFF_F000) | (laddr & 0xFFF))
     }
 
     /// Perform the actual page table walk for a data access.

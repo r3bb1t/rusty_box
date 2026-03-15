@@ -116,18 +116,6 @@ pub fn CMP_EdId_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
 
     // CMP only sets flags, doesn't write result
     cpu.update_flags_sub32(op1, op2, result);
-    // Trace '%' (0x25=37) comparisons in kernel space
-    if op2 == 0x25 && op1 == 0x25 && cpu.rip() > 0xC0000000 {
-        let zf = (cpu.eflags.bits() >> 6) & 1;
-        tracing::warn!(
-            "CMP Ed=0x25, Id=0x25 at RIP={:#x} ZF={} eflags={:#x} icount={} reg={}",
-            cpu.rip(),
-            zf,
-            cpu.eflags.bits(),
-            cpu.icount,
-            dst_reg
-        );
-    }
 }
 
 /// CMP_EdGd_R: CMP r/m32, r32 (register form)

@@ -2585,6 +2585,18 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 let eflags = self.stack_read_qword(temp_rsp.wrapping_add(16))? as u32;
                 let cs = self.stack_read_qword(temp_rsp.wrapping_add(8))? as u16;
                 let rip = self.stack_read_qword(temp_rsp)?;
+                // DIAG: detect IRET to kernel address from kernel mode (execve returning wrong entry point)
+                if rip >= 0xffff_0000_0000_0000 && (cs & 3) == 3 && self.icount > 1_500_000_000 {
+                    eprintln!("[IRET-KERN-USER] rip={:#x} cs={:#06x} eflags={:#x} rsp={:#x} icount={}",
+                        rip, cs, eflags, temp_rsp, self.icount);
+                    eprintln!("  caller_rip={:#x} (before IRET)", self.rip());
+                    // Dump stack frame
+                    for i in 0..5u64 {
+                        if let Ok(v) = self.stack_read_qword(temp_rsp.wrapping_add(i * 8)) {
+                            eprintln!("  stack[{}]={:#x}", i, v);
+                        }
+                    }
+                }
                 (eflags, cs, rip, 24)
             } else if instr.os32_l() != 0 {
                 let eflags = self.stack_read_dword((temp_rsp as u32).wrapping_add(8))?;

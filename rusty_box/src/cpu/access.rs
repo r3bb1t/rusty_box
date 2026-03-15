@@ -1198,6 +1198,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Write phase of a RMW qword access (uses cached address_xlation).
     pub(crate) fn write_rmw_virtual_qword_back_64(&mut self, val: u64) {
+        // TEMPORARY: catch qword RMW stores with corrupt 0x20000 upper bits
+        if (val >> 32) == 0x20000 && self.prev_rip < 0xffff_0000_0000_0000 && self.icount > 500_000_000 {
+            eprintln!("[QWORD-RMW-CORRUPT] val={:#x} paddr={:#x} rip={:#x} prev_rip={:#x} icount={} opcode={:#06x}",
+                val, self.address_xlation.paddress1, self.rip(), self.prev_rip, self.icount, self.diag_current_opcode);
+        }
         let pages = self.address_xlation.pages;
         if pages == 1 {
             let paddr = self.address_xlation.paddress1;
@@ -1218,6 +1223,34 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // ===== 64-bit Stack access functions =====
+
+    /// Read a word from the stack in 64-bit mode (SS segment).
+    /// Bochs: stack_read_word (long64 path)
+    #[inline]
+    pub(crate) fn stack_read_word_64(&mut self, offset: u64) -> Result<u16> {
+        self.read_virtual_word_64(BxSegregs::Ss, offset)
+    }
+
+    /// Write a word to the stack in 64-bit mode (SS segment).
+    /// Bochs: stack_write_word (long64 path)
+    #[inline]
+    pub(crate) fn stack_write_word_64(&mut self, offset: u64, val: u16) -> Result<()> {
+        self.write_virtual_word_64(BxSegregs::Ss, offset, val)
+    }
+
+    /// Read a dword from the stack in 64-bit mode (SS segment).
+    /// Bochs: stack_read_dword (long64 path)
+    #[inline]
+    pub(crate) fn stack_read_dword_64(&mut self, offset: u64) -> Result<u32> {
+        self.read_virtual_dword_64(BxSegregs::Ss, offset)
+    }
+
+    /// Write a dword to the stack in 64-bit mode (SS segment).
+    /// Bochs: stack_write_dword (long64 path)
+    #[inline]
+    pub(crate) fn stack_write_dword_64(&mut self, offset: u64, val: u32) -> Result<()> {
+        self.write_virtual_dword_64(BxSegregs::Ss, offset, val)
+    }
 
     /// Read a qword from the stack in 64-bit mode (SS segment).
     /// Bochs: stack_read_qword

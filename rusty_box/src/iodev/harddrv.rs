@@ -1247,6 +1247,19 @@ pub struct BxHardDriveC {
     pub(crate) diag_irq14_lower_count: u64,
     /// Diagnostic: command history (last 32 commands)
     pub(crate) cmd_history: Vec<(u8, u8, u32)>, // (channel, command, lba)
+    /// Diagnostic: ATA reads on channel 0 (empty) — tracks empty channel polling
+    pub(crate) diag_ch0_reads: u64,
+    /// Diagnostic: ATA reads on channel 1 (CD-ROM)
+    pub(crate) diag_ch1_reads: u64,
+}
+
+impl BxHardDriveC {
+    /// Check if any ATA channel has pending I/O (IRQ raise/lower pending or busy status).
+    /// Used to skip HLT real-time sync during I/O-heavy phases.
+    pub fn has_pending_io(&self) -> bool {
+        self.irq14_needs_raise || self.irq15_needs_raise
+            || self.irq14_needs_lower || self.irq15_needs_lower
+    }
 }
 
 impl Default for BxHardDriveC {
@@ -1272,6 +1285,8 @@ impl BxHardDriveC {
             write_count: 0,
             diag_irq14_raise_count: 0,
             diag_irq14_lower_count: 0,
+            diag_ch0_reads: 0,
+            diag_ch1_reads: 0,
             cmd_history: Vec::new(),
         }
     }
@@ -1451,6 +1466,10 @@ impl BxHardDriveC {
             Some(c) => c,
             None => return 0xFF,
         };
+        match channel_num {
+            0 => self.diag_ch0_reads += 1,
+            _ => self.diag_ch1_reads += 1,
+        }
 
         let channel = &mut self.channels[channel_num];
         let base = channel.ioaddr1;
@@ -2880,6 +2899,7 @@ impl BxHardDriveC {
         self.cmd_history.push((channel_num as u8, command, lba));
 
         if drive.device_type == DeviceType::None {
+            eprintln!("[ATA-DIAG] cmd {:#04x} to ch{} (empty) — dropped", command, channel_num);
             return;
         }
 

@@ -799,6 +799,20 @@ impl DeviceManager {
             }
         }
 
+        // Serial port: forward pending IRQ raise/lower to PIC + IOAPIC
+        // (Bochs: serial.cc raise_interrupt/lower_interrupt call DEV_pic_raise/lower_irq)
+        for (irq, raise) in self.serial.take_pending_irqs() {
+            if raise {
+                self.pic.raise_irq(irq);
+                #[cfg(feature = "bx_support_apic")]
+                self.ioapic.set_irq_level(irq, true);
+            } else {
+                self.pic.lower_irq(irq);
+                #[cfg(feature = "bx_support_apic")]
+                self.ioapic.set_irq_level(irq, false);
+            }
+        }
+
         self.pic.has_interrupt()
     }
 

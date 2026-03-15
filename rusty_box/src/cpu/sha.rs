@@ -120,7 +120,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Other dwords from src are passed through unchanged.
     pub fn sha1nexte_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let op1 = self.read_xmm_reg(instr.dst());
-        let mut op2 = self.read_xmm_reg(instr.src());
+        let mut op2 = self.sse_read_op2_xmm(instr)?;
 
         unsafe {
             op2.xmm32u[3] = op2.xmm32u[3].wrapping_add(rol32(op1.xmm32u[3], 30));
@@ -135,7 +135,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Performs an intermediate calculation for the next four SHA1 message dwords.
     pub fn sha1msg1_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src());
+        let op2 = self.sse_read_op2_xmm(instr)?;
 
         unsafe {
             op1.xmm32u[3] ^= op1.xmm32u[1];
@@ -153,7 +153,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Performs the final calculation for the next four SHA1 message dwords.
     pub fn sha1msg2_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src());
+        let op2 = self.sse_read_op2_xmm(instr)?;
 
         unsafe {
             op1.xmm32u[3] = rol32(op1.xmm32u[3] ^ op2.xmm32u[2], 1);
@@ -177,7 +177,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Only the lower two dwords of XMM0 (wk[0] and wk[1]) are used.
     pub fn sha256rnds2_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src());
+        let op2 = self.sse_read_op2_xmm(instr)?;
         let wk = self.read_xmm_reg(0); // implicit XMM0
 
         unsafe {
@@ -234,7 +234,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Uses sigma0 transformation: ror(x,7) ^ ror(x,18) ^ (x >> 3)
     pub fn sha256msg1_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut op1 = self.read_xmm_reg(instr.dst());
-        let op2_dword0 = unsafe { self.read_xmm_reg(instr.src()).xmm32u[0] };
+        let op2_dword0 = unsafe { self.sse_read_op2_xmm(instr)?.xmm32u[0] };
 
         unsafe {
             op1.xmm32u[0] = op1.xmm32u[0]
@@ -257,7 +257,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Uses sigma1 transformation: ror(x,17) ^ ror(x,19) ^ (x >> 10)
     pub fn sha256msg2_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src());
+        let op2 = self.sse_read_op2_xmm(instr)?;
 
         unsafe {
             op1.xmm32u[0] = op1.xmm32u[0]
@@ -288,7 +288,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         const SHA_KI: [u32; 4] = [0x5A827999, 0x6ED9EBA1, 0x8F1BBCDC, 0xCA62C1D6];
 
         let mut op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src());
+        let op2 = self.sse_read_op2_xmm(instr)?;
         let imm = (instr.ib() & 0x3) as u32;
         let k = SHA_KI[imm as usize];
 

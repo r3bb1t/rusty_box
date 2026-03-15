@@ -300,7 +300,7 @@ impl_eflag!(rf, 16);
 impl_eflag!(nt, 14);
 impl_eflag!(if, 9); // Interrupt Flag (bit 9)
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum CpuActivityState {
     #[default]
     Active,
@@ -587,10 +587,14 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     /// Stack snapshot at first PM HLT (16 dwords from ESP)
     pub(crate) diag_first_pm_hlt_stack: [u32; 16],
     /// RIP ring buffer for tracing last N instructions before HLT
-    pub(super) diag_rip_ring: [u64; 64],
+    pub(super) diag_rip_ring: [u64; 256],
     /// Opcode ring buffer (parallel to diag_rip_ring)
-    pub(super) diag_opcode_ring: [u16; 64],
+    pub(super) diag_opcode_ring: [u16; 256],
     pub(super) diag_rip_ring_idx: usize,
+    /// Current instruction opcode being executed (for corruption detection)
+    pub(super) diag_current_opcode: u16,
+    /// Count of GPR64 corruption hits (to limit ring dumps)
+    pub(super) diag_gpr64_corrupt_count: u64,
     /// PM→RM transition count (CR0 PE: 1→0)
     pub(crate) diag_pm_to_rm_count: u64,
     /// RM→PM transition count (CR0 PE: 0→1)
@@ -735,6 +739,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Used by emulator.rs to wire I/O APIC → LAPIC interrupt delivery.
     pub(crate) fn lapic_ptr_mut(&mut self) -> *mut crate::cpu::apic::BxLocalApic {
         &mut self.lapic as *mut _
+    }
+
+    /// Check if the LAPIC has a pending interrupt (immutable access).
+    #[cfg(feature = "bx_support_apic")]
+    pub(crate) fn lapic_has_intr(&self) -> bool {
+        self.lapic.intr
     }
 }
 
@@ -980,18 +990,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Write 64-bit qword to memory (matching mem_write_qword)
-    pub(super) fn mem_write_qword(&mut self, laddr: u64, value: u64) {
-
+    pub(super) fn mem_write_qword(&mut self, paddr: u64, value: u64) {
         // Write 8 bytes to memory
         let bytes = value.to_le_bytes();
-        self.mem_write_byte(laddr, bytes[0]);
-        self.mem_write_byte(laddr + 1, bytes[1]);
-        self.mem_write_byte(laddr + 2, bytes[2]);
-        self.mem_write_byte(laddr + 3, bytes[3]);
-        self.mem_write_byte(laddr + 4, bytes[4]);
-        self.mem_write_byte(laddr + 5, bytes[5]);
-        self.mem_write_byte(laddr + 6, bytes[6]);
-        self.mem_write_byte(laddr + 7, bytes[7]);
+        self.mem_write_byte(paddr, bytes[0]);
+        self.mem_write_byte(paddr + 1, bytes[1]);
+        self.mem_write_byte(paddr + 2, bytes[2]);
+        self.mem_write_byte(paddr + 3, bytes[3]);
+        self.mem_write_byte(paddr + 4, bytes[4]);
+        self.mem_write_byte(paddr + 5, bytes[5]);
+        self.mem_write_byte(paddr + 6, bytes[6]);
+        self.mem_write_byte(paddr + 7, bytes[7]);
     }
 }
 
@@ -1485,7 +1494,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // Execute instruction (matching C++ BX_CPU_CALL_METHOD)
                 // SAFETY: i_ptr is valid for the lifetime of this loop iteration (see above).
                 let opcode = unsafe { (*i_ptr).get_ia_opcode() };
-
+                self.diag_current_opcode = opcode as u16;
 
                 match self.execute_instruction(unsafe { &*i_ptr }) {
                     Ok(()) => {}
@@ -1516,12 +1525,35 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.prev_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
                 self.icount += 1;
 
-                // Record RIP + opcode in ring buffer during kernel phase for HLT diagnosis
+                // Record RIP + opcode in ring buffer — separate kernel and userspace rings
                 if self.icount > 620_000_000 && self.long64_mode() {
-                    let ring_slot = self.diag_rip_ring_idx & 63;
-                    self.diag_rip_ring[ring_slot] = self.prev_rip;
+                    let rip = self.prev_rip;
+                    // Kernel ring (all instructions)
+                    let ring_slot = self.diag_rip_ring_idx & 255;
+                    self.diag_rip_ring[ring_slot] = rip;
                     self.diag_opcode_ring[ring_slot] = opcode as u16;
                     self.diag_rip_ring_idx += 1;
+
+                    // Check if mdev regex error was detected — dump KERNEL ring
+                    // (userspace instructions are only visible before SYSCALL)
+                    if crate::iodev::serial::MDEV_REGEX_TRIGGERED.swap(false, core::sync::atomic::Ordering::Relaxed) {
+                        eprintln!("[MDEV-TRIGGER] icount={} rip={:#x}", self.icount, rip);
+                        // Dump last 256 instructions (both kernel and userspace)
+                        eprintln!("[MDEV-TRIGGER] Last 256 instructions:");
+                        let end = self.diag_rip_ring_idx;
+                        let start = if end >= 256 { end - 256 } else { 0 };
+                        for i in (start..end).rev().take(80) {
+                            let slot = i & 255;
+                            let r = self.diag_rip_ring[slot];
+                            let opc = self.diag_opcode_ring[slot];
+                            eprintln!("  [{}] rip={:#x} opcode={:#06x}", i, r, opc);
+                        }
+                        // Dump GPR state
+                        for r in 0..16u8 {
+                            let v = unsafe { self.gen_reg[r as usize].rrx };
+                            eprintln!("  r{}={:#018x}", r, v);
+                        }
+                    }
                 }
 
 

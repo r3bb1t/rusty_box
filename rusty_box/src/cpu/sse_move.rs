@@ -543,7 +543,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOVNTI — mem32 = GPR (non-temporal hint ignored in emulation)
     /// Bochs: MOV32_EdGdM
     pub(super) fn movnti_md_gd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
         let val = self.get_gpr32(instr.src1().into());
@@ -557,7 +556,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOVNTI Op64 — mem32 = GPR32 (non-temporal hint, 64-bit addressing)
     pub(super) fn movnti_op64_md_gd(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr64(instr);
         let val = self.get_gpr32(instr.src1().into());
@@ -567,7 +565,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOVNTI — mem64 = GPR64 (non-temporal hint, 64-bit)
     pub(super) fn movnti_mq_gq(&mut self, instr: &Instruction) -> super::Result<()> {
-        self.prepare_sse()?;
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr64(instr);
         let val = self.get_gpr64(instr.src1() as usize);

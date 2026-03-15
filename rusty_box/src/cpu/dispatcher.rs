@@ -2174,6 +2174,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     self.movd_pq_ed_m(instr)
                 }
             }
+            // MOVQ Pq, Eq (REX.W + 0F 6E) — 64-bit GPR/mem to MMX
+            Opcode::MovqPqEq => {
+                if instr.mod_c0() {
+                    self.movq_pq_eq_r(instr)
+                } else {
+                    self.movq_pq_eq_m(instr)
+                }
+            }
             // MOVQ Pq, Qq — check mod_c0 for register vs memory form
             Opcode::MovqPqQq => {
                 if instr.mod_c0() {
@@ -2192,6 +2200,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     self.movd_ed_pq_r(instr)
                 } else {
                     self.movd_ed_pq_m(instr)
+                }
+            }
+            // MOVQ Eq, Pq (REX.W + 0F 7E) — MMX to 64-bit GPR/mem
+            Opcode::MovqEqPq => {
+                if instr.mod_c0() {
+                    self.movq_eq_pq_r(instr)
+                } else {
+                    self.movq_eq_pq_m(instr)
                 }
             }
             // MOVQ Qq, Pq — check mod_c0 for register vs memory form
@@ -2624,11 +2640,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Arithmetic
             Opcode::PaddbVdqWdq => self.paddb_vdq_wdq(instr),
             Opcode::PaddwVdqWdq => self.paddw_vdq_wdq(instr),
-            Opcode::PadddVdqWdq => self.vpaddd(instr),
+            Opcode::PadddVdqWdq => self.paddd_vdq_wdq(instr),
             Opcode::PaddqVdqWdq => self.paddq_vdq_wdq(instr),
             Opcode::PsubbVdqWdq => self.psubb_vdq_wdq(instr),
             Opcode::PsubwVdqWdq => self.psubw_vdq_wdq(instr),
-            Opcode::PsubdVdqWdq => self.vpsubd(instr),
+            Opcode::PsubdVdqWdq => self.psubd_vdq_wdq(instr),
             Opcode::PsubqVdqWdq => self.psubq_vdq_wdq(instr),
             Opcode::PaddsbVdqWdq => self.paddsb_vdq_wdq(instr),
             Opcode::PaddswVdqWdq => self.paddsw_vdq_wdq(instr),
@@ -2647,16 +2663,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Compare
             Opcode::PcmpeqbVdqWdq => self.pcmpeqb_vdq_wdq(instr),
             Opcode::PcmpeqwVdqWdq => self.pcmpeqw_vdq_wdq(instr),
-            Opcode::PcmpeqdVdqWdq => self.vpcmpeqd(instr),
+            Opcode::PcmpeqdVdqWdq => self.pcmpeqd_vdq_wdq(instr),
             Opcode::PcmpgtbVdqWdq => self.pcmpgtb_vdq_wdq(instr),
             Opcode::PcmpgtwVdqWdq => self.pcmpgtw_vdq_wdq(instr),
             Opcode::PcmpgtdVdqWdq => self.pcmpgtd_vdq_wdq(instr),
 
             // Logical
-            Opcode::PandVdqWdq => self.vpand(instr),
+            Opcode::PandVdqWdq => self.pand_vdq_wdq(instr),
             Opcode::PandnVdqWdq => self.pandn_vdq_wdq(instr),
-            Opcode::PorVdqWdq => self.vpor(instr),
-            Opcode::PxorVdqWdq => self.vpxor(instr),
+            Opcode::PorVdqWdq => self.por_vdq_wdq(instr),
+            Opcode::PxorVdqWdq => self.pxor_vdq_wdq(instr),
 
             // Shift by XMM register
             Opcode::PsrlwVdqWdq => self.psrlw_vdq_wdq(instr),
@@ -2683,11 +2699,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Unpack/interleave
             Opcode::PunpcklbwVdqWdq => self.punpcklbw_vdq_wdq(instr),
             Opcode::PunpcklwdVdqWdq => self.punpcklwd_vdq_wdq(instr),
-            Opcode::PunpckldqVdqWdq => self.vpunpckldq(instr),
+            Opcode::PunpckldqVdqWdq => self.punpckldq_vdq_wdq(instr),
             Opcode::PunpcklqdqVdqWdq => self.punpcklqdq_vdq_wdq(instr),
             Opcode::PunpckhbwVdqWdq => self.punpckhbw_vdq_wdq(instr),
             Opcode::PunpckhwdVdqWdq => self.punpckhwd_vdq_wdq(instr),
-            Opcode::PunpckhdqVdqWdq => self.vpunpckhdq(instr),
+            Opcode::PunpckhdqVdqWdq => self.punpckhdq_vdq_wdq(instr),
             Opcode::PunpckhqdqVdqWdq => self.punpckhqdq_vdq_wdq(instr),
 
             // Pack
@@ -2696,7 +2712,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::PackuswbVdqWdq => self.packuswb_vdq_wdq(instr),
 
             // Shuffle
-            Opcode::PshufdVdqWdqIb => self.vpshufd(instr),
+            Opcode::PshufdVdqWdqIb => self.pshufd_vdq_wdq_ib(instr),
             Opcode::PshufhwVdqWdqIb => self.pshufhw_vdq_wdq_ib(instr),
             Opcode::PshuflwVdqWdqIb => self.pshuflw_vdq_wdq_ib(instr),
 
@@ -2720,7 +2736,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // =========================================================================
             // SSSE3 128-bit Packed Integer (sse.rs)
             // =========================================================================
-            Opcode::PshufbVdqWdq => self.vpshufb(instr),
+            Opcode::PshufbVdqWdq => self.pshufb_vdq_wdq(instr),
             Opcode::PmaddubswVdqWdq => self.pmaddubsw_vdq_wdq(instr),
             Opcode::PsignbVdqWdq => self.psignb_vdq_wdq(instr),
             Opcode::PsignwVdqWdq => self.psignw_vdq_wdq(instr),
@@ -2737,6 +2753,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::PmaxudVdqWdq => self.pmaxud_vdq_wdq(instr),
             Opcode::PmulldVdqWdq => self.pmulld_vdq_wdq(instr),
             Opcode::PblendwVdqWdqIb => self.pblendw_vdq_wdq_ib(instr),
+
+            // SSE4.1 Insert/Extract (PEXTRB/D/Q, PINSRB/D/Q)
+            Opcode::PextrbEdVdqIbR => self.pextrb_ed_vdq_ib_r(instr),
+            Opcode::PextrbMbVdqIbM => self.pextrb_mb_vdq_ib_m(instr),
+            Opcode::PextrdEdVdqIb => self.pextrd_ed_vdq_ib(instr),
+            Opcode::PextrqEqVdqIb => self.pextrq_eq_vdq_ib(instr),
+            Opcode::PinsrbVdqEbIb => self.pinsrb_vdq_eb_ib(instr),
+            Opcode::PinsrdVdqEdIb => self.pinsrd_vdq_ed_ib(instr),
+            Opcode::PinsrqVdqEqIb => self.pinsrq_vdq_eq_ib(instr),
 
             // =========================================================================
             // SSE4.1 Sign/Zero Extend (sse_move.rs)
@@ -2790,7 +2815,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     self.pmovzxbw_vdq_wq_m(instr)
                 }
             }
-            Opcode::PmovzxbdVdqWd => self.vpmovzxbd(instr),
+            Opcode::PmovzxbdVdqWd => {
+                if instr.mod_c0() {
+                    self.pmovzxbd_vdq_wd_r(instr)
+                } else {
+                    self.pmovzxbd_vdq_wd_m(instr)
+                }
+            }
             Opcode::PmovzxbqVdqWw => {
                 if instr.mod_c0() {
                     self.pmovzxbq_vdq_ww_r(instr)
@@ -2922,8 +2953,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::EvexVpermi2dVdqHdqWdqKmask => self.vpermi2d(instr),
             Opcode::EvexVprordUdqIb | Opcode::EvexVprordUdqIbKmask => self.vprord(instr),
             Opcode::EvexVproldUdqIb | Opcode::EvexVproldUdqIbKmask => self.vprold(instr),
+            Opcode::V256Vinsertf128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
+            Opcode::V256Vinserti128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vextracti128WdqVdqIb => self.vextracti128(instr),
             Opcode::V256Vperm2i128VdqHdqWdqIb => self.vperm2i128(instr),
+
+            // AVX2 VPBROADCAST
+            Opcode::VpbroadcastbVdqWb => self.vpbroadcastb(instr),
+            Opcode::VpbroadcastwVdqWw => self.vpbroadcastw(instr),
+            Opcode::VpbroadcastdVdqWd => self.vpbroadcastd(instr),
+            Opcode::VpbroadcastqVdqWq => self.vpbroadcastq(instr),
+            // AVX2 VPERMD
+            Opcode::V256VpermdVdqHdqWdq => self.vpermd(instr),
 
             // UD0/UD1/UD2 — intentional #UD exceptions (Linux uses UD2 for BUG()/WARN())
             Opcode::Ud0 | Opcode::Ud1 | Opcode::Ud2 => {

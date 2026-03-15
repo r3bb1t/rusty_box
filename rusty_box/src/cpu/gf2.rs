@@ -217,7 +217,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// with the byte, then XOR with immediate byte.
     pub(super) fn gf2p8affineqb_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut dst = self.read_xmm_reg(instr.dst());
-        let src = self.read_xmm_reg(instr.src());
+        let src = self.sse_read_op2_xmm(instr)?;
 
         xmm_gf2p8affineqb(&mut dst, &src, instr.ib());
 
@@ -232,7 +232,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// to each source byte.
     pub(super) fn gf2p8affineinvqb_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut dst = self.read_xmm_reg(instr.dst());
-        let src = self.read_xmm_reg(instr.src());
+        let src = self.sse_read_op2_xmm(instr)?;
 
         xmm_gf2p8affineinvqb(&mut dst, &src, instr.ib());
 
@@ -247,7 +247,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// the AES reduction polynomial (0x11B).
     pub(super) fn gf2p8mulb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut dst = self.read_xmm_reg(instr.dst());
-        let src = self.read_xmm_reg(instr.src());
+        let src = self.sse_read_op2_xmm(instr)?;
 
         unsafe {
             for n in 0..16 {

@@ -726,12 +726,7 @@ impl BxKeyboardC {
                 }
 
                 let value = self.system_control_b;
-                // Temporary diagnostic for Alpine boot debugging
-                static P61_RD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-                let rc = P61_RD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if rc < 20 || (rc < 500 && rc % 100 == 0) {
-                    eprintln!("[P61-RD#{}] val={:#04x} bit5={}", rc, value, (value >> 5) & 1);
-                }
+                tracing::trace!("Keyboard: port 0x61 read val={:#04x} bit5={}", value, (value >> 5) & 1);
                 value as u32
             }
             _ => {
@@ -849,12 +844,7 @@ impl BxKeyboardC {
             KBD_DATA_PORT => self.write_port_60(value_u8),
             KBD_COMMAND_PORT => self.write_port_64(value_u8),
             SYSTEM_CONTROL_B => {
-                // Temporary diagnostic
-                static P61_WR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-                let wc = P61_WR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if wc < 20 {
-                    eprintln!("[P61-WR#{}] val={:#04x} gate2={}", wc, value_u8, value_u8 & 1);
-                }
+                tracing::trace!("Keyboard: port 0x61 write val={:#04x} gate2={}", value_u8, value_u8 & 1);
                 // Bit 0 controls PIT counter 2 GATE (Bochs keyboard.cc write handler)
                 if let Some(pit_ptr) = self.pit_ptr {
                     let pit = unsafe { &mut *pit_ptr };
@@ -877,6 +867,10 @@ impl BxKeyboardC {
         tracing::debug!("Keyboard: Write port 0x60 = {:#04x}", value);
 
         if self.kbd_controller.expecting_port60h != 0 {
+            // Bochs keyboard.cc:389 — warn if input buffer still full
+            if self.kbd_controller.inpb {
+                tracing::warn!("Keyboard: port 0x60 write while inpb set");
+            }
             self.kbd_controller.expecting_port60h = 0;
             // data byte written to port 60h
             self.kbd_controller.c_d = false;
@@ -1175,6 +1169,11 @@ impl BxKeyboardC {
     ///
     /// Bypasses internal buffer — used for LED-write ACK (0xFA).
     fn kbd_enq_imm(&mut self, val: u8) {
+        // Bochs keyboard.cc:788 — check buffer capacity before writing
+        if self.kbd_internal_buffer.num_elements >= BX_KBD_ELEMENTS {
+            tracing::warn!("Keyboard: kbd_enq_imm buffer full, ignoring {:#04x}", val);
+            return;
+        }
         self.kbd_controller.kbd_output_buffer = val;
         self.kbd_controller.outb = true;
         if self.kbd_controller.allow_irq1 {
@@ -1575,13 +1574,21 @@ impl BxKeyboardC {
                 self.controller_enq(KBD_RESP_ACK, 1);
                 self.controller_enq(MOUSE_ID_STANDARD, 1);
             }
+            0xBB => {
+                // OS/2 Warp 3 compatibility — Bochs logs and ignores this command
+                tracing::debug!("Keyboard: mouse command 0xBB (OS/2 Warp 3 compat), ignoring");
+                self.controller_enq(KBD_RESP_ACK, 1);
+            }
             MOUSE_CMD_READ_DATA => {
                 // Read data (remote mode)
                 self.controller_enq(KBD_RESP_ACK, 1);
-                // Send empty packet
+                // Send empty packet (3 bytes standard, 4 bytes in IntelliMouse mode)
                 self.controller_enq(0x08 | (self.mouse.button_status & 0x0F), 1);
                 self.controller_enq(0x00, 1);
                 self.controller_enq(0x00, 1);
+                if self.mouse.im_mode {
+                    self.controller_enq(0x00, 1); // 4th byte: scroll wheel Z delta
+                }
             }
             _ => {
                 if is_ps2 {

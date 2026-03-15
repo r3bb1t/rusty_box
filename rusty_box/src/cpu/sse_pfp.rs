@@ -439,9 +439,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
+        // SSE MIN: if either is NaN, return op2 (source); else return smaller
         unsafe {
             for i in 0..4 {
-                result.xmm32f[i] = if op2.xmm32f[i] < op1.xmm32f[i] {
+                result.xmm32f[i] = if op1.xmm32f[i].is_nan() || op2.xmm32f[i].is_nan() || op2.xmm32f[i] < op1.xmm32f[i] {
                     op2.xmm32f[i]
                 } else {
                     op1.xmm32f[i]
@@ -458,9 +459,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
+        // SSE MIN: if either is NaN, return op2 (source); else return smaller
         unsafe {
             for i in 0..2 {
-                result.xmm64f[i] = if op2.xmm64f[i] < op1.xmm64f[i] {
+                result.xmm64f[i] = if op1.xmm64f[i].is_nan() || op2.xmm64f[i].is_nan() || op2.xmm64f[i] < op1.xmm64f[i] {
                     op2.xmm64f[i]
                 } else {
                     op1.xmm64f[i]
@@ -476,8 +478,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
+        // SSE MIN: if either is NaN, return op2 (source); else return smaller
         unsafe {
-            result.xmm32f[0] = if op2 < result.xmm32f[0] {
+            result.xmm32f[0] = if result.xmm32f[0].is_nan() || op2.is_nan() || op2 < result.xmm32f[0] {
                 op2
             } else {
                 result.xmm32f[0]
@@ -492,8 +495,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
+        // SSE MIN: if either is NaN, return op2 (source); else return smaller
         unsafe {
-            result.xmm64f[0] = if op2 < result.xmm64f[0] {
+            result.xmm64f[0] = if result.xmm64f[0].is_nan() || op2.is_nan() || op2 < result.xmm64f[0] {
                 op2
             } else {
                 result.xmm64f[0]
@@ -516,9 +520,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
+        // SSE MAX: if either is NaN, return op2 (source); else return larger
         unsafe {
             for i in 0..4 {
-                result.xmm32f[i] = if op2.xmm32f[i] > op1.xmm32f[i] {
+                result.xmm32f[i] = if op1.xmm32f[i].is_nan() || op2.xmm32f[i].is_nan() || op2.xmm32f[i] > op1.xmm32f[i] {
                     op2.xmm32f[i]
                 } else {
                     op1.xmm32f[i]
@@ -535,9 +540,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
+        // SSE MAX: if either is NaN, return op2 (source); else return larger
         unsafe {
             for i in 0..2 {
-                result.xmm64f[i] = if op2.xmm64f[i] > op1.xmm64f[i] {
+                result.xmm64f[i] = if op1.xmm64f[i].is_nan() || op2.xmm64f[i].is_nan() || op2.xmm64f[i] > op1.xmm64f[i] {
                     op2.xmm64f[i]
                 } else {
                     op1.xmm64f[i]
@@ -553,8 +559,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
+        // SSE MAX: if either is NaN, return op2 (source); else return larger
         unsafe {
-            result.xmm32f[0] = if op2 > result.xmm32f[0] {
+            result.xmm32f[0] = if result.xmm32f[0].is_nan() || op2.is_nan() || op2 > result.xmm32f[0] {
                 op2
             } else {
                 result.xmm32f[0]
@@ -569,8 +576,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
+        // SSE MAX: if either is NaN, return op2 (source); else return larger
         unsafe {
-            result.xmm64f[0] = if op2 > result.xmm64f[0] {
+            result.xmm64f[0] = if result.xmm64f[0].is_nan() || op2.is_nan() || op2 > result.xmm64f[0] {
                 op2
             } else {
                 result.xmm64f[0]

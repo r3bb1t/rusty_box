@@ -393,8 +393,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         &mut self,
         instr: &Instruction,
     ) -> super::Result<()> {
+        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src1());
+        let op2 = self.sse_read_op2_xmm(instr)?;
         let imm8 = instr.ib();
 
         // Compare all pairs of Ai, Bj
@@ -476,8 +477,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         &mut self,
         instr: &Instruction,
     ) -> super::Result<()> {
+        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src1());
+        let op2 = self.sse_read_op2_xmm(instr)?;
         let imm8 = instr.ib();
 
         // Compare all pairs of Ai, Bj
@@ -558,8 +560,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         &mut self,
         instr: &Instruction,
     ) -> super::Result<()> {
+        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src1());
+        let op2 = self.sse_read_op2_xmm(instr)?;
         let imm8 = instr.ib();
 
         // Compare all pairs of Ai, Bj
@@ -630,8 +633,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         &mut self,
         instr: &Instruction,
     ) -> super::Result<()> {
+        self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
-        let op2 = self.read_xmm_reg(instr.src1());
+        let op2 = self.sse_read_op2_xmm(instr)?;
         let imm8 = instr.ib();
 
         // Compare all pairs of Ai, Bj

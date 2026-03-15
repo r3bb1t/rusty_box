@@ -12,6 +12,10 @@
 use alloc::collections::VecDeque;
 use core::ffi::c_void;
 
+/// Global flag set when mdev regex error is detected in serial output.
+/// Used by CPU tracing to dump instruction history at the right moment.
+pub static MDEV_REGEX_TRIGGERED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+
 /// UART crystal oscillator frequency (Hz) — Bochs BX_PC_CLOCK_XTL
 const UART_CLOCK_XTL: f64 = 1_843_200.0;
 
@@ -320,6 +324,10 @@ impl BxSerialC {
     #[allow(dead_code)]
     pub fn drain_tx_output(&mut self, port_index: usize) -> impl Iterator<Item = u8> + '_ {
         self.ports[port_index].tx_output.drain(..)
+    }
+
+    pub fn tx_output_len(&self, port_index: usize) -> usize {
+        self.ports[port_index].tx_output.len()
     }
 
     /// Check if any IRQ actions are pending, and return them
@@ -705,12 +713,28 @@ impl BxSerialC {
                     s.divisor_lsb = val;
                 } else {
                     // DLAB=0: write THR
-                    // Temporary: trace serial writes
-                    static SER_WR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-                    let sc = SER_WR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    if sc < 200 {
-                        eprintln!("[SERIAL-TX#{}] port={} ch={:#04x} '{}'", sc, port_idx, val,
-                            if val >= 0x20 && val < 0x7F { val as char } else { '.' });
+                    // DIAG: detect "bad r" pattern to trigger CPU dump when mdev prints regex error
+                    {
+                        static MATCH_STATE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
+                        static TRIGGER_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                        let state = MATCH_STATE.load(core::sync::atomic::Ordering::Relaxed);
+                        let next = match (state, val) {
+                            (0, b'b') => 1,
+                            (1, b'a') => 2,
+                            (2, b'd') => 3,
+                            (3, b' ') => 4,
+                            (4, b'r') => 5, // "bad r" detected
+                            _ => 0,
+                        };
+                        MATCH_STATE.store(next, core::sync::atomic::Ordering::Relaxed);
+                        if next == 5 {
+                            let tc = TRIGGER_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                            if tc == 0 {
+                                // Store trigger flag for CPU to pick up
+                                MDEV_REGEX_TRIGGERED.store(true, core::sync::atomic::Ordering::Relaxed);
+                                eprintln!("[MDEV-REGEX-ERROR] 'bad r' detected at serial write — trigger instruction dump");
+                            }
+                        }
                     }
                     let bitmask: u8 = 0xFF >> (3u8.saturating_sub(s.line_cntl.wordlen_sel));
                     let data = val & bitmask;
@@ -750,12 +774,7 @@ impl BxSerialC {
                             } else {
                                 // "Transmit" immediately — we're an emulator
                                 let s = &mut self.ports[port_idx];
-                                // Temporary: log serial TX for ISOLINUX debugging
                                 let ch = s.tsrbuffer;
-                                if port_idx == 0 {
-                                    tracing::warn!("SERIAL_TX: {:02x} '{}'", ch,
-                                        if ch >= 0x20 && ch < 0x7F { ch as char } else { '.' });
-                                }
                                 s.tx_output.push_back(ch);
                                 s.line_status.tsr_empty = true;
                             }
@@ -766,11 +785,18 @@ impl BxSerialC {
                             self.lower_interrupt(port_idx);
                         }
                     } else if s.fifo_cntl.enable {
-                        // THR already has data, FIFO mode
+                        // THR already has data, FIFO mode — queue the byte
                         if s.tx_fifo.len() < FIFO_SIZE {
                             s.tx_fifo.push_back(data);
                         }
-                        // else: overflow, silently drop
+                        // Drain FIFO immediately — we're an emulator, no real baud timing
+                        let s = &mut self.ports[port_idx];
+                        while let Some(byte) = s.tx_fifo.pop_front() {
+                            s.tx_output.push_back(byte);
+                        }
+                        s.line_status.thr_empty = true;
+                        s.line_status.tsr_empty = true;
+                        self.raise_interrupt(port_idx, IntSource::TxHold);
                     }
                 }
             }

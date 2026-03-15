@@ -371,7 +371,7 @@ fn detect_boot_profile(workspace_root: &std::path::Path) -> BootProfile {
             let ram_mb: usize = std::env::var("ALPINE_RAM_MB")
                 .ok()
                 .and_then(|s| s.parse().ok())
-                .unwrap_or(128);
+                .unwrap_or(256);
 
             let iso_path = find_alpine_iso(workspace_root);
             println!("Boot profile: Alpine Linux Direct Boot ({} MB RAM)", ram_mb);

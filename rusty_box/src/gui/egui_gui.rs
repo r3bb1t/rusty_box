@@ -156,6 +156,14 @@ mod bridge_impl {
             self.local_scancodes.drain(..).collect()
         }
 
+        fn get_pending_serial_input(&mut self) -> Vec<u8> {
+            if let Ok(mut display) = self.shared.lock() {
+                display.pending_serial_input.drain(..).collect()
+            } else {
+                Vec::new()
+            }
+        }
+
         fn append_serial_log(&self, text: &str) {
             if let Ok(mut display) = self.shared.lock() {
                 display.serial_log.push_str(text);

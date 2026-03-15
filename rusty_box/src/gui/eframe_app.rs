@@ -54,6 +54,7 @@ impl RustyBoxApp {
     /// and also serves as a fallback for letters when Text events aren't produced.
     fn process_input(&mut self, ctx: &egui::Context) {
         let mut scancodes = Vec::new();
+        let mut serial_bytes = Vec::new();
 
         ctx.input(|i| {
             // Pass 1: check if any Text or Ime::Commit events exist in this frame.
@@ -74,6 +75,10 @@ impl RustyBoxApp {
                         for ch in text.chars() {
                             let seq = char_to_scancode_sequence(ch);
                             scancodes.extend_from_slice(&seq);
+                            // Also send ASCII to serial console
+                            if ch.is_ascii() && ch as u32 <= 127 {
+                                serial_bytes.push(ch as u8);
+                            }
                         }
                     }
                     egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
@@ -81,6 +86,9 @@ impl RustyBoxApp {
                         for ch in text.chars() {
                             let seq = char_to_scancode_sequence(ch);
                             scancodes.extend_from_slice(&seq);
+                            if ch.is_ascii() && ch as u32 <= 127 {
+                                serial_bytes.push(ch as u8);
+                            }
                         }
                     }
                     egui::Event::Key { key, pressed, .. } => {
@@ -94,6 +102,19 @@ impl RustyBoxApp {
                             if let Some(ch) = egui_key_to_char(*key) {
                                 let seq = char_to_scancode_sequence(ch);
                                 scancodes.extend_from_slice(&seq);
+                                if ch.is_ascii() && ch as u32 <= 127 {
+                                    serial_bytes.push(ch as u8);
+                                }
+                            }
+                        }
+                        // Send Enter/Backspace to serial as control chars
+                        if *pressed {
+                            match key {
+                                egui::Key::Enter => serial_bytes.push(b'\r'),
+                                egui::Key::Backspace => serial_bytes.push(0x7F),
+                                egui::Key::Tab => serial_bytes.push(b'\t'),
+                                egui::Key::Escape => serial_bytes.push(0x1B),
+                                _ => {}
                             }
                         }
                     }
@@ -102,9 +123,10 @@ impl RustyBoxApp {
             }
         });
 
-        if !scancodes.is_empty() {
+        if !scancodes.is_empty() || !serial_bytes.is_empty() {
             if let Ok(mut display) = self.shared.lock() {
                 display.pending_scancodes.extend_from_slice(&scancodes);
+                display.pending_serial_input.extend_from_slice(&serial_bytes);
             }
         }
     }

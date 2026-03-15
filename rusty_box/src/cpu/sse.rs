@@ -72,7 +72,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Read the second operand for SSE packed integer instructions.
     /// If mod_c0, reads an XMM register; otherwise reads 128 bits from memory.
     #[inline]
-    fn sse_read_op2_xmm(&mut self, instr: &Instruction) -> super::Result<BxPackedXmmRegister> {
+    pub(super) fn sse_read_op2_xmm(&mut self, instr: &Instruction) -> super::Result<BxPackedXmmRegister> {
         if instr.mod_c0() {
             Ok(self.read_xmm_reg(instr.src1()))
         } else {
@@ -1344,6 +1344,115 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // ========================================================================
+    // SSE4.1 Insert/Extract (PEXTRB/D/Q, PINSRB/D/Q)
+    // ========================================================================
+
+    /// PEXTRB EdVdqIbR — extract byte from XMM at imm8 & 0xF position to GPR32 (register form)
+    pub(super) fn pextrb_ed_vdq_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.read_xmm_reg(instr.src1());
+        let result = unsafe { op.xmmubyte[(instr.ib() & 0xF) as usize] } as u32;
+        self.set_gpr32(instr.dst().into(), result);
+        Ok(())
+    }
+
+    /// PEXTRB MbVdqIbM — extract byte from XMM at imm8 & 0xF position to memory (memory form)
+    pub(super) fn pextrb_mb_vdq_ib_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.read_xmm_reg(instr.src1());
+        let result = unsafe { op.xmmubyte[(instr.ib() & 0xF) as usize] };
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr(instr);
+        self.v_write_byte(seg, eaddr, result)?;
+        Ok(())
+    }
+
+    /// PEXTRD EdVdqIb — extract dword from XMM at imm8 & 3 position (combined R/M form)
+    pub(super) fn pextrd_ed_vdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.read_xmm_reg(instr.src1());
+        let result = unsafe { op.xmm32u[(instr.ib() & 3) as usize] };
+        if instr.mod_c0() {
+            self.set_gpr32(instr.dst().into(), result);
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_write_dword(seg, eaddr, result)?;
+        }
+        Ok(())
+    }
+
+    /// PEXTRQ EqVdqIb — extract qword from XMM at imm8 & 1 position (combined R/M form)
+    pub(super) fn pextrq_eq_vdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op = self.read_xmm_reg(instr.src1());
+        let result = unsafe { op.xmm64u[(instr.ib() & 1) as usize] };
+        if instr.mod_c0() {
+            self.set_gpr64(instr.dst().into(), result);
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_write_qword(seg, eaddr, result)?;
+        }
+        Ok(())
+    }
+
+    /// PINSRB VdqEbIb — insert byte from GPR/memory into XMM at imm8 & 0xF position (combined R/M)
+    pub(super) fn pinsrb_vdq_eb_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        let op2 = if instr.mod_c0() {
+            // BX_READ_8BIT_REGL — always low byte, never AH/CH/DH/BH
+            unsafe { self.gen_reg[instr.src1() as usize].word.byte.rl }
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_byte(seg, eaddr)?
+        };
+        unsafe {
+            op1.xmmubyte[(instr.ib() & 0xF) as usize] = op2;
+        }
+        self.write_xmm_reg_lo128(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// PINSRD VdqEdIb — insert dword from GPR/memory into XMM at imm8 & 3 position (combined R/M)
+    pub(super) fn pinsrd_vdq_ed_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        let op2 = if instr.mod_c0() {
+            self.get_gpr32(instr.src1().into())
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_dword(seg, eaddr)?
+        };
+        unsafe {
+            op1.xmm32u[(instr.ib() & 3) as usize] = op2;
+        }
+        self.write_xmm_reg_lo128(instr.dst(), op1);
+        Ok(())
+    }
+
+    /// PINSRQ VdqEqIb — insert qword from GPR/memory into XMM at imm8 & 1 position (combined R/M)
+    pub(super) fn pinsrq_vdq_eq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let mut op1 = self.read_xmm_reg(instr.dst());
+        let op2 = if instr.mod_c0() {
+            self.get_gpr64(instr.src1().into())
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            self.v_read_qword(seg, eaddr)?
+        };
+        unsafe {
+            op1.xmm64u[(instr.ib() & 1) as usize] = op2;
+        }
+        self.write_xmm_reg_lo128(instr.dst(), op1);
+        Ok(())
+    }
+
+    // ========================================================================
     // Min/Max/Average (PMINUB, PMAXUB, PMINSW, PMAXSW, PAVGB, PAVGW)
     // ========================================================================
 
@@ -1491,29 +1600,54 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MASKMOVDQU VdqUdq — masked store bytes using DS:EDI
     /// For each byte where mask bit 7 is set, store the corresponding byte
-    /// from the source XMM register to memory at [DS:EDI].
+    /// from the source XMM register to memory at [DS:(E/R)DI].
+    /// Bochs: sse_move.cc:614 MASKMOVDQU_VdqUdq
     pub(super) fn maskmovdqu_vdq_udq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
 
-        let op = self.read_xmm_reg(instr.src1());
-        let mask = self.read_xmm_reg(instr.dst());
+        let op = self.read_xmm_reg(instr.dst());     // nnn = Vdq (data source)
+        let mask = self.read_xmm_reg(instr.src1()); // rm = Udq (mask)
 
-        // Check if any byte needs to be written
+        // Bochs: bx_address rdi = RDI & i->asize_mask();
+        const ASIZE_MASK: [u64; 4] = [
+            0xFFFF,
+            0xFFFF_FFFF,
+            0xFFFF_FFFF_FFFF_FFFF,
+            0xFFFF_FFFF_FFFF_FFFF,
+        ];
+        let asize = (instr.as32_l() != 0) as usize | (((instr.as64_l() != 0) as usize) << 1);
+        let rdi = self.rdi() & ASIZE_MASK[asize];
+
+        // Bochs: i->seg() — allow segment override prefixes
+        let seg = BxSegregs::from(instr.seg());
+
+        // Bochs reads the full 16 bytes BEFORE checking the mask to ensure
+        // page fault even if mask is all zeros (sse_move.cc:622-623)
+        let mut temp = super::xmm::BxPackedXmmRegister::default();
+        unsafe {
+            temp.xmm64u[0] = self.v_read_qword(seg, rdi)?;
+            temp.xmm64u[1] = self.v_read_qword(seg, (rdi.wrapping_add(8)) & ASIZE_MASK[asize])?;
+        }
+
+        // No data will be written to memory if mask is all 0s (Bochs sse_move.cc:626)
         let any_set = unsafe { (mask.xmm64u[0] | mask.xmm64u[1]) & 0x8080808080808080 != 0 };
         if !any_set {
             return Ok(());
         }
 
-        let rdi = self.edi();
-        let seg = BxSegregs::Ds;
-
-        // Write individual bytes where mask bit 7 is set
+        // Merge masked bytes into temp
         unsafe {
-            for i in 0..16 {
-                if mask.xmmubyte[i] & 0x80 != 0 {
-                    self.write_virtual_byte(seg, rdi.wrapping_add(i as u32), op.xmmubyte[i])?;
+            for j in 0..16usize {
+                if mask.xmmubyte[j] & 0x80 != 0 {
+                    temp.xmmubyte[j] = op.xmmubyte[j];
                 }
             }
+        }
+
+        // Write result back to memory (Bochs sse_move.cc:634-637)
+        unsafe {
+            self.v_write_qword(seg, (rdi.wrapping_add(8)) & ASIZE_MASK[asize], temp.xmm64u[1])?;
+            self.v_write_qword(seg, rdi, temp.xmm64u[0])?;
         }
         Ok(())
     }
@@ -1540,7 +1674,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
             }
         }
-        self.write_xmm_reg(instr.dst(), result);
+        self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
 
@@ -1559,7 +1693,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 result.xmm16s[n] = saturate_dword_s_to_word_s(temp);
             }
         }
-        self.write_xmm_reg(instr.dst(), result);
+        self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
 
@@ -1577,7 +1711,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 result.xmm_sbyte[n] = ((op1.xmm_sbyte[n] as i32) * sign) as i8;
             }
         }
-        self.write_xmm_reg(instr.dst(), result);
+        self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
 
@@ -1595,7 +1729,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 result.xmm16s[n] = ((op1.xmm16s[n] as i32) * sign) as i16;
             }
         }
-        self.write_xmm_reg(instr.dst(), result);
+        self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
 
@@ -1613,7 +1747,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 result.xmm32s[n] = ((op1.xmm32s[n] as i64) * sign) as i32;
             }
         }
-        self.write_xmm_reg(instr.dst(), result);
+        self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
 
@@ -1677,7 +1811,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         // shift == 0: result = op2 (already set)
 
-        self.write_xmm_reg(instr.dst(), result);
+        self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
 
@@ -1701,7 +1835,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
             }
         }
-        self.write_xmm_reg(instr.dst(), op1);
+        self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
     }
 
@@ -1745,7 +1879,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             result.xmm64s[0] = (op1.xmm32s[0] as i64) * (op2.xmm32s[0] as i64);
             result.xmm64s[1] = (op1.xmm32s[2] as i64) * (op2.xmm32s[2] as i64);
         }
-        self.write_xmm_reg(instr.dst(), result);
+        self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
 
@@ -1763,7 +1897,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
             }
         }
-        self.write_xmm_reg(instr.dst(), op1);
+        self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
     }
 
@@ -1781,7 +1915,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
             }
         }
-        self.write_xmm_reg(instr.dst(), op1);
+        self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
     }
 
@@ -1797,7 +1931,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 op1.xmm32s[n] = op1.xmm32s[n].wrapping_mul(op2.xmm32s[n]);
             }
         }
-        self.write_xmm_reg(instr.dst(), op1);
+        self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
     }
 
@@ -1817,7 +1951,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 mask >>= 1;
             }
         }
-        self.write_xmm_reg(instr.dst(), op1);
+        self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
     }
+
 }

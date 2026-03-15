@@ -89,6 +89,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val64 = self.read_virtual_qword_64(seg, eaddr)?;
         let dst_reg = instr.dst() as usize;
 
+        // TEMPORARY: trace memory source of corrupt 0x20000 upper bits
+        if (val64 >> 32) == 0x20000 && self.prev_rip < 0xffff_0000_0000_0000 && self.icount > 500_000_000 {
+            let laddr = self.get_laddr64(seg as usize, eaddr);
+            eprintln!("[MOV64-LOAD-CORRUPT] dst=r{} val={:#x} laddr={:#x} eaddr={:#x} seg={:?} icount={}",
+                dst_reg, val64, laddr, eaddr, seg, self.icount);
+        }
+
         self.set_gpr64(dst_reg, val64);
         Ok(())
     }

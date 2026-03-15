@@ -1436,6 +1436,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     #[inline(always)]
     pub(super) fn mem_write_byte(&mut self, addr: u64, value: u8) {
+        // DIAGNOSTIC: watch for writes to the upper dword of first corrupt qword
+        // Bytes 4-7 at paddr 0x14364b0 = addresses 0x14364b4..0x14364b7
+        if addr >= 0x14364b4 && addr <= 0x14364b7 && self.icount > 0 {
+            eprintln!("[BYTE-WATCH] addr={:#x} val={:#02x} rip={:#x} prev_rip={:#x} icount={} opcode={:#06x}",
+                addr, value, self.rip(), self.prev_rip, self.icount, self.diag_current_opcode);
+        }
 
         // Fast path: direct host pointer for plain RAM (bypass get_host_mem_addr).
         let a20_addr = (addr & self.a20_mask) as usize;
@@ -1528,6 +1534,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     #[inline(always)]
     pub(super) fn mem_write_word(&mut self, addr: u64, value: u16) {
+        // DIAGNOSTIC: watch for ANY word write overlapping bytes 0x14364b4..0x14364b7
+        if addr >= 0x14364b3 && addr <= 0x14364b7 && self.icount > 0 {
+            eprintln!("[WORD-WATCH] addr={:#x} val={:#x} rip={:#x} prev_rip={:#x} icount={} opcode={:#06x}",
+                addr, value, self.rip(), self.prev_rip, self.icount, self.diag_current_opcode);
+            // Dump instruction bytes at the instruction address (prev_rip = current instr addr)
+            let instr_addr = self.prev_rip;
+            let b: Vec<u8> = (0..10).map(|i| self.mem_read_byte(instr_addr + i)).collect();
+            eprintln!("  instr bytes at {:#x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                instr_addr, b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7], b[8], b[9]);
+            // Dump the full qword at the target 8-byte-aligned address
+            let base = addr & !7;
+            let q: Vec<u8> = (0..8).map(|i| self.mem_read_byte(base + i)).collect();
+            eprintln!("  qword at {:#x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                base, q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7]);
+        }
         // Fast path: direct host pointer for plain RAM
         let a20_addr = (addr & self.a20_mask) as usize;
         let host_base = self.mem_host_base;
@@ -1578,6 +1599,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     pub(super) fn mem_write_dword(&mut self, addr: u64, value: u32) {
+        // DIAGNOSTIC: watch for ANY dword write overlapping bytes 0x14364b4..0x14364b7
+        // (upper dword of first corrupt qword at paddr 0x14364b0)
+        // Dword write at addr covers bytes addr..addr+3
+        if addr >= 0x14364b1 && addr <= 0x14364b7 && self.icount > 0 {
+            eprintln!("[DWORD-WATCH] addr={:#x} val={:#x} rip={:#x} prev_rip={:#x} icount={} opcode={:#06x}",
+                addr, value, self.rip(), self.prev_rip, self.icount, self.diag_current_opcode);
+        }
 
         // Fast path: direct host pointer for plain RAM
         let a20_addr = (addr & self.a20_mask) as usize;
@@ -2462,6 +2490,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn stosq64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let rdi = self.rdi();
         let rax = self.rax();
+        // DIAGNOSTIC: TLB verification — compare TLB-cached paddr vs fresh page walk
+        if rax == 0 && self.long_mode() && self.icount > 100_000_000 {
+            let laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+            let lpf = laddr & super::tlb::LPF_MASK;
+            // Read TLB entry directly (non-mutating index lookup)
+            let tlb_idx = self.dtlb.get_index_of(laddr, 0);
+            let tlb_lpf = self.dtlb.entries[tlb_idx].lpf;
+            let tlb_ppf = self.dtlb.entries[tlb_idx].ppf;
+            let tlb_access = self.dtlb.entries[tlb_idx].access_bits;
+            let write_bit = 1u32 << ((1u32 << 1) | (self.user_pl as u32));
+            if tlb_lpf == lpf && (tlb_access & write_bit) != 0 {
+                // TLB would hit — verify against fresh page walk
+                if let Some(walk_paddr) = self.diag_verify_laddr_ro(laddr) {
+                    let walk_ppf = walk_paddr & super::tlb::LPF_MASK;
+                    if tlb_ppf != walk_ppf {
+                        eprintln!("[TLB-MISMATCH] laddr={:#x} tlb_ppf={:#x} walk_ppf={:#x} rdi={:#x} icount={}",
+                            laddr, tlb_ppf, walk_ppf, rdi, self.icount);
+                        self.diag_gpr64_corrupt_count += 1;
+                    }
+                }
+            }
+        }
         self.write_virtual_qword_64(BxSegregs::Es, rdi, rax)?;
         let delta: u64 = if self.get_df() { (-8i64) as u64 } else { 8 };
         self.set_rdi(rdi.wrapping_add(delta));

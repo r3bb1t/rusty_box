@@ -1501,6 +1501,15 @@ impl BxLocalApic {
         self.lvt[LocalVectorTableEntry::Timer as usize].timer_mode_field() == 1
     }
 
+    /// Diagnostic: return timer state for HLT debugging.
+    /// Returns (timer_active, timer_initial, period_ticks, timer_vector, activate_pending, deactivate_pending)
+    pub(crate) fn hlt_timer_diag(&self) -> (bool, u32, u64, u8, bool, bool) {
+        let vec = self.lvt[LocalVectorTableEntry::Timer as usize].vector();
+        let period = self.timer_initial as u64 * self.timer_divide_factor as u64;
+        (self.timer_active, self.timer_initial, period, vec,
+         self.timer_activate_request.is_some(), self.timer_deactivate_request)
+    }
+
     // ─── TSC-Deadline timer ──────────────────────────────────────────────
 
     /// Set the TSC-Deadline timer value.

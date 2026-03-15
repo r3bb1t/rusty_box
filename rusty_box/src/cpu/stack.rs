@@ -30,8 +30,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// Push a 16-bit value onto the stack.
+    /// Bochs stack.h:27-42 — three paths: long64 (RSP), d_b=1 (ESP), d_b=0 (SP)
     pub fn push_16(&mut self, value: u16) -> super::Result<()> {
-        if self.is_stack_32bit() {
+        if self.long64_mode() {
+            let rsp = self.rsp();
+            let new_rsp = rsp.wrapping_sub(2);
+            self.stack_write_word_64(new_rsp, value)?;
+            self.set_rsp(new_rsp);
+        } else if self.is_stack_32bit() {
             let esp = self.esp();
             let new_esp = esp.wrapping_sub(2);
             self.stack_write_word(new_esp as u32, value)?;
@@ -46,8 +52,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Pop a 16-bit value from the stack.
+    /// Bochs stack.h:81-100 — three paths: long64 (RSP), d_b=1 (ESP), d_b=0 (SP)
     pub fn pop_16(&mut self) -> super::Result<u16> {
-        if self.is_stack_32bit() {
+        if self.long64_mode() {
+            let rsp = self.rsp();
+            let value = self.stack_read_word_64(rsp)?;
+            self.set_rsp(rsp.wrapping_add(2));
+            Ok(value)
+        } else if self.is_stack_32bit() {
             let esp = self.esp();
             let value = self.stack_read_word(esp as u32)?;
             self.set_esp(esp.wrapping_add(2));
@@ -65,8 +77,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// Push a 32-bit value onto the stack.
+    /// Bochs stack.h:49-65 — three paths: long64 (RSP), d_b=1 (ESP), d_b=0 (SP)
     pub fn push_32(&mut self, value: u32) -> super::Result<()> {
-        if self.is_stack_32bit() {
+        if self.long64_mode() {
+            let rsp = self.rsp();
+            let new_rsp = rsp.wrapping_sub(4);
+            self.stack_write_dword_64(new_rsp, value)?;
+            self.set_rsp(new_rsp);
+        } else if self.is_stack_32bit() {
             let esp = self.esp();
             let new_esp = esp.wrapping_sub(4);
             self.stack_write_dword(new_esp, value)?;
@@ -81,8 +99,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Pop a 32-bit value from the stack.
+    /// Bochs stack.h:105-126 — three paths: long64 (RSP), d_b=1 (ESP), d_b=0 (SP)
     pub fn pop_32(&mut self) -> super::Result<u32> {
-        if self.is_stack_32bit() {
+        if self.long64_mode() {
+            let rsp = self.rsp();
+            let value = self.stack_read_dword_64(rsp)?;
+            self.set_rsp(rsp.wrapping_add(4));
+            Ok(value)
+        } else if self.is_stack_32bit() {
             let esp = self.esp();
             let value = self.stack_read_dword(esp)?;
             self.set_esp(esp.wrapping_add(4));

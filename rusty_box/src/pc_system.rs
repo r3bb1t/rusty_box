@@ -1,19 +1,41 @@
 //! PC System - Instance-based timer and system control
 //!
 //! This module provides the PC system infrastructure including:
-//! - Timer management for scheduling events
+//! - Timer management for scheduling events (Bochs-exact `tickn`/`countdownEvent` mechanism)
 //! - A20 line control for memory addressing
 //! - System reset coordination
 //!
 //! Each `BxPcSystemC` instance is fully independent, allowing multiple
 //! emulator instances to run concurrently without conflicts.
+//!
+//! ## Timer Architecture (matching Bochs pc_system.cc)
+//!
+//! The timer system uses a countdown mechanism:
+//! - `curr_countdown` decrements toward 0 as ticks are consumed by `tickn()`
+//! - When it reaches 0, `countdown_event()` fires all expired timers
+//! - `countdown_event()` recalculates the next countdown period
+//! - `time_ticks()` returns precise current time including partial countdown
 
 use core::ffi::c_void;
 
+use bitflags::bitflags;
 use thiserror::Error;
 
 use crate::config::BxPhyAddress;
 use crate::cpu::ResetReason;
+
+bitflags! {
+    /// Timer state flags (replaces individual `in_use`, `active`, `continuous` bools).
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct TimerFlags: u8 {
+        /// Timer slot is allocated
+        const IN_USE     = 0x01;
+        /// Timer is counting down and will fire
+        const ACTIVE     = 0x02;
+        /// Timer repeats after firing (vs one-shot)
+        const CONTINUOUS = 0x04;
+    }
+}
 
 /// Errors from PC system timer operations.
 ///
@@ -39,10 +61,9 @@ const BX_MAX_TIMER_ID_LEN: usize = 32;
 const BX_MAX_TIMERS: usize = 64;
 
 /// Default null timer interval (in ticks).
-/// Bochs uses 0xFFFFFFFF (u32::MAX). We use u64::MAX so the null timer
-/// effectively never fires, matching Bochs behavior where it just serves
-/// as a sentinel to keep the timer array non-empty.
-const NULL_TIMER_INTERVAL: u64 = u64::MAX;
+/// Bochs pc_system.cc:39 — `const Bit64u NullTimerInterval = 0xffffffff;`
+/// This ensures the countdown always fits in a u32 (Bochs uses Bit32u for countdown).
+const NULL_TIMER_INTERVAL: u64 = 0xFFFF_FFFF;
 
 /// Minimum allowable timer period in ticks.
 /// Bochs pc_system.cc:37 — prevents ridiculously low timer frequencies
@@ -55,16 +76,12 @@ pub type BxTimerHandlerT = fn(this_ptr: *mut c_void);
 /// Individual timer structure
 #[derive(Debug, Clone)]
 pub struct Timer {
-    /// Whether this timer slot is in use
-    pub(crate) in_use: bool,
+    /// Timer state flags (in_use, active, continuous)
+    pub(crate) flags: TimerFlags,
     /// Timer period in ticks
     pub(crate) period: u64,
     /// Absolute tick count when timer should fire
     pub(crate) time_to_fire: u64,
-    /// Whether timer is currently active
-    pub(crate) active: bool,
-    /// Whether timer repeats continuously
-    pub(crate) continuous: bool,
     /// Handler function to call when timer fires
     pub(crate) handler: Option<BxTimerHandlerT>,
     /// Timer identifier string
@@ -76,11 +93,9 @@ pub struct Timer {
 impl Default for Timer {
     fn default() -> Self {
         Self {
-            in_use: false,
+            flags: TimerFlags::empty(),
             period: 0,
             time_to_fire: 0,
-            active: false,
-            continuous: false,
             handler: None,
             id: [0; BX_MAX_TIMER_ID_LEN],
             param: core::ptr::null_mut(),
@@ -104,11 +119,11 @@ pub struct BxPcSystemC {
     num_timers: usize,
     /// Index of most recently triggered timer
     triggered_timer: usize,
-    /// Current countdown value
-    curr_countdown: u64,
-    /// Period for current countdown
-    curr_countdown_period: u64,
-    /// Total ticks since emulator started
+    /// Current countdown value (Bochs: Bit32u currCountdown)
+    curr_countdown: u32,
+    /// Period for current countdown (Bochs: Bit32u currCountdownPeriod)
+    curr_countdown_period: u32,
+    /// Total ticks since emulator started (Bochs: Bit64u ticksTotal)
     ticks_total: u64,
     /// Last time in microseconds
     last_time_usec: u64,
@@ -142,8 +157,8 @@ impl BxPcSystemC {
             timers,
             num_timers: 0,
             triggered_timer: 0,
-            curr_countdown: NULL_TIMER_INTERVAL,
-            curr_countdown_period: NULL_TIMER_INTERVAL,
+            curr_countdown: NULL_TIMER_INTERVAL as u32,
+            curr_countdown_period: NULL_TIMER_INTERVAL as u32,
             ticks_total: 0,
             last_time_usec: 0,
             usec_since_last: 0,
@@ -157,11 +172,9 @@ impl BxPcSystemC {
         };
 
         // Register the null timer as timer 0
-        sys.timers[0].in_use = true;
+        sys.timers[0].flags = TimerFlags::IN_USE | TimerFlags::ACTIVE | TimerFlags::CONTINUOUS;
         sys.timers[0].period = NULL_TIMER_INTERVAL;
         sys.timers[0].time_to_fire = NULL_TIMER_INTERVAL;
-        sys.timers[0].active = true;
-        sys.timers[0].continuous = true;
         sys.timers[0].handler = Some(Self::null_timer_handler);
         sys.num_timers = 1;
 
@@ -171,12 +184,12 @@ impl BxPcSystemC {
     /// Initialize the PC system with the given instructions-per-second value
     ///
     /// This sets up timer infrastructure and IPS-based timing.
-    /// Corresponds to `bx_pc_system_c::initialize()` in Bochs.
+    /// Corresponds to `bx_pc_system_c::initialize()` in Bochs (pc_system.cc:61-77).
     pub fn initialize(&mut self, ips: u32) {
         self.ticks_total = 0;
         self.timers[0].time_to_fire = NULL_TIMER_INTERVAL;
-        self.curr_countdown = NULL_TIMER_INTERVAL;
-        self.curr_countdown_period = NULL_TIMER_INTERVAL;
+        self.curr_countdown = NULL_TIMER_INTERVAL as u32;
+        self.curr_countdown_period = NULL_TIMER_INTERVAL as u32;
         self.last_time_usec = 0;
         self.usec_since_last = 0;
         self.triggered_timer = 0;
@@ -188,6 +201,107 @@ impl BxPcSystemC {
 
         tracing::debug!("PC system initialized with ips = {}", ips);
     }
+
+    // ========================================================================
+    // Timer tick mechanism — matches Bochs pc_system.h:106-121
+    // ========================================================================
+
+    /// Advance virtual time by `n` ticks, firing any expired timers.
+    /// This is the core timing primitive — matches Bochs pc_system.h:111-121.
+    ///
+    /// Replaces the old `tick()` + `check_timers()` pair with exact Bochs logic:
+    /// decrements `curr_countdown`, triggers `countdown_event()` at 0.
+    #[inline]
+    pub fn tickn(&mut self, n: u32) {
+        let mut remaining = n;
+        while remaining >= self.curr_countdown {
+            remaining -= self.curr_countdown;
+            self.curr_countdown = 0;
+            self.countdown_event();
+            // curr_countdown is reset by countdown_event()
+        }
+        // remaining < curr_countdown — just decrement
+        self.curr_countdown -= remaining;
+    }
+
+    /// Advance by exactly 1 tick (hot path optimization).
+    /// Matches Bochs pc_system.h:106-110.
+    #[inline]
+    pub fn tick1(&mut self) {
+        self.curr_countdown -= 1;
+        if self.curr_countdown == 0 {
+            self.countdown_event();
+        }
+    }
+
+    /// Handle countdown reaching zero. Checks all timers, fires expired ones,
+    /// and recalculates next countdown period.
+    /// Matches Bochs pc_system.cc:322-386 exactly.
+    fn countdown_event(&mut self) {
+        let mut first = self.num_timers;
+        let mut last = 0usize;
+        let mut min_time_to_fire: u64 = u64::MAX;
+        let mut triggered = [false; BX_MAX_TIMERS];
+
+        // Step 1: Advance total ticks by the countdown period
+        // Bochs pc_system.cc:337
+        self.ticks_total += self.curr_countdown_period as u64;
+
+        // Step 2: Scan all timers for fires and find next event
+        for i in 0..self.num_timers {
+            triggered[i] = false;
+            if self.timers[i].flags.contains(TimerFlags::ACTIVE) {
+                if self.ticks_total == self.timers[i].time_to_fire {
+                    // Timer is ready to fire
+                    triggered[i] = true;
+                    if !self.timers[i].flags.contains(TimerFlags::CONTINUOUS) {
+                        // One-shot: deactivate
+                        self.timers[i].flags.remove(TimerFlags::ACTIVE);
+                    } else {
+                        // Continuous: advance time_to_fire by period
+                        self.timers[i].time_to_fire += self.timers[i].period;
+                        if self.timers[i].time_to_fire < min_time_to_fire {
+                            min_time_to_fire = self.timers[i].time_to_fire;
+                        }
+                    }
+                    if i < first {
+                        first = i;
+                    }
+                    last = i;
+                } else {
+                    // Not ready yet — track for next countdown calculation
+                    if self.timers[i].time_to_fire < min_time_to_fire {
+                        min_time_to_fire = self.timers[i].time_to_fire;
+                    }
+                }
+            }
+        }
+
+        // Step 3: Calculate next countdown period BEFORE firing callbacks
+        // Callbacks may call activate_timer_ticks which needs the new countdown.
+        // Bochs pc_system.cc:374-375
+        let next_period = (min_time_to_fire - self.ticks_total) as u32;
+        self.curr_countdown = next_period;
+        self.curr_countdown_period = next_period;
+
+        // Step 4: Fire all triggered callbacks (in timer index order)
+        // Bochs pc_system.cc:377-385
+        if first <= last {
+            for i in first..=last {
+                if triggered[i] {
+                    if let Some(handler) = self.timers[i].handler {
+                        self.triggered_timer = i;
+                        handler(self.timers[i].param);
+                        self.triggered_timer = 0;
+                    }
+                }
+            }
+        }
+    }
+
+    // ========================================================================
+    // A20 line control
+    // ========================================================================
 
     /// Enable or disable the A20 address line
     ///
@@ -234,24 +348,33 @@ impl BxPcSystemC {
         addr & self.a20_mask
     }
 
-    /// Get total ticks elapsed since emulator start
+    // ========================================================================
+    // Time queries — matches Bochs pc_system.h:130-133 and pc_system.cc:462-469
+    // ========================================================================
+
+    /// Get precise current time in ticks, including partial countdown.
+    /// Matches Bochs pc_system.h:130-133:
+    /// `ticksTotal + (currCountdownPeriod - currCountdown)`
+    #[inline]
     pub fn time_ticks(&self) -> u64 {
-        self.ticks_total
+        self.ticks_total + (self.curr_countdown_period - self.curr_countdown) as u64
     }
 
     /// Convert ticks to microseconds using IPS setting.
-    ///
-    /// Corresponds to `bx_pc_system_c::time_usec()` in Bochs (pc_system.cc:462).
+    /// Matches Bochs pc_system.cc:462-465.
     pub fn time_usec(&self) -> u64 {
-        ((self.ticks_total as f64) / self.m_ips) as u64
+        ((self.time_ticks() as f64) / self.m_ips) as u64
     }
 
     /// Convert ticks to nanoseconds using IPS setting.
-    ///
-    /// Corresponds to `bx_pc_system_c::time_nsec()` in Bochs (pc_system.cc:467).
+    /// Matches Bochs pc_system.cc:467-469.
     pub fn time_nsec(&self) -> u64 {
-        ((self.ticks_total as f64) / self.m_ips * 1000.0) as u64
+        ((self.time_ticks() as f64) / self.m_ips * 1000.0) as u64
     }
+
+    // ========================================================================
+    // DMA and system control
+    // ========================================================================
 
     /// Set the Hardware Request (DMA) line
     pub fn set_hrq(&mut self, value: bool) {
@@ -283,16 +406,15 @@ impl BxPcSystemC {
         tracing::debug!("PC system state registered");
     }
 
-    /// Start all registered timers
+    /// Start all registered timers. No-op — matches Bochs pc_system.cc:472.
+    /// Timer time_to_fire is set correctly during register_timer/activate_timer.
     pub fn start_timers(&mut self) {
-        tracing::debug!("Starting {} timers", self.num_timers);
-        // Activate all registered timers
-        for i in 0..self.num_timers {
-            if self.timers[i].in_use && self.timers[i].active {
-                self.timers[i].time_to_fire = self.ticks_total + self.timers[i].period;
-            }
-        }
+        tracing::debug!("start_timers: no-op (timers started during registration)");
     }
+
+    // ========================================================================
+    // Timer registration and management
+    // ========================================================================
 
     /// Validate a timer index (must be in range, in use, and not null timer).
     fn validate_timer_index(&self, timer_index: usize) -> Result<(), PcSystemError> {
@@ -302,7 +424,7 @@ impl BxPcSystemC {
         if timer_index == 0 {
             return Err(PcSystemError::NullTimerModification);
         }
-        if !self.timers[timer_index].in_use {
+        if !self.timers[timer_index].flags.contains(TimerFlags::IN_USE) {
             return Err(PcSystemError::TimerNotInUse(timer_index));
         }
         Ok(())
@@ -310,7 +432,7 @@ impl BxPcSystemC {
 
     /// Register a new timer with period in ticks.
     ///
-    /// Corresponds to `bx_pc_system_c::register_timer_ticks()` in Bochs (pc_system.cc:262).
+    /// Corresponds to `bx_pc_system_c::register_timer_ticks()` in Bochs (pc_system.cc:262-320).
     /// Returns the timer index on success, or `PcSystemError::NoFreeTimerSlots` if full.
     pub fn register_timer(
         &mut self,
@@ -327,12 +449,18 @@ impl BxPcSystemC {
         // Search for free timer slot (i = 0 is reserved for NullTimer)
         // Bochs pc_system.cc:276
         for i in 1..BX_MAX_TIMERS {
-            if !self.timers[i].in_use {
-                self.timers[i].in_use = true;
+            if !self.timers[i].flags.contains(TimerFlags::IN_USE) {
+                self.timers[i].flags = TimerFlags::IN_USE;
+                self.timers[i].flags.set(TimerFlags::ACTIVE, active);
+                self.timers[i].flags.set(TimerFlags::CONTINUOUS, continuous);
                 self.timers[i].period = period;
-                self.timers[i].time_to_fire = if active { self.ticks_total + period } else { 0 };
-                self.timers[i].active = active;
-                self.timers[i].continuous = continuous;
+                // Bochs pc_system.cc:294:
+                // timeToFire = (ticksTotal + Bit64u(currCountdownPeriod-currCountdown)) + ticks
+                self.timers[i].time_to_fire = if active {
+                    self.time_ticks() + period
+                } else {
+                    0
+                };
                 self.timers[i].handler = Some(handler);
                 self.timers[i].param = param;
 
@@ -341,6 +469,13 @@ impl BxPcSystemC {
                 let copy_len = id_bytes.len().min(BX_MAX_TIMER_ID_LEN - 1);
                 self.timers[i].id[..copy_len].copy_from_slice(&id_bytes[..copy_len]);
                 self.timers[i].id[copy_len] = 0;
+
+                // Adjust countdown if this timer fires sooner than current countdown
+                // Bochs pc_system.cc:303-310
+                if active && period < self.curr_countdown as u64 {
+                    self.curr_countdown_period -= self.curr_countdown - period as u32;
+                    self.curr_countdown = period as u32;
+                }
 
                 if i >= self.num_timers {
                     self.num_timers = i + 1;
@@ -374,7 +509,7 @@ impl BxPcSystemC {
 
     /// Activate a timer with period in ticks.
     ///
-    /// Corresponds to `bx_pc_system_c::activate_timer_ticks()` in Bochs (pc_system.cc:474).
+    /// Corresponds to `bx_pc_system_c::activate_timer_ticks()` in Bochs (pc_system.cc:474-506).
     pub fn activate_timer(
         &mut self,
         timer_index: usize,
@@ -385,9 +520,18 @@ impl BxPcSystemC {
         // Enforce minimum timer period (Bochs pc_system.cc:488)
         let period = period.max(MIN_ALLOWABLE_TIMER_PERIOD);
         self.timers[timer_index].period = period;
-        self.timers[timer_index].time_to_fire = self.ticks_total + period;
-        self.timers[timer_index].active = true;
-        self.timers[timer_index].continuous = continuous;
+        // Bochs pc_system.cc:495:
+        // timeToFire = (ticksTotal + Bit64u(currCountdownPeriod-currCountdown)) + ticks
+        self.timers[timer_index].time_to_fire = self.time_ticks() + period;
+        self.timers[timer_index].flags.insert(TimerFlags::ACTIVE);
+        self.timers[timer_index].flags.set(TimerFlags::CONTINUOUS, continuous);
+
+        // Adjust countdown if this timer fires sooner than current countdown
+        // Bochs pc_system.cc:499-504
+        if period < self.curr_countdown as u64 {
+            self.curr_countdown_period -= self.curr_countdown - period as u32;
+            self.curr_countdown = period as u32;
+        }
         Ok(())
     }
 
@@ -435,10 +579,9 @@ impl BxPcSystemC {
 
     /// Reactivate a periodic timer relative to its previous fire time.
     ///
-    /// Unlike `activate_timer` which sets `time_to_fire = ticks_total + period`,
-    /// this adds `period` to the existing `time_to_fire`. This enables catch-up:
-    /// if the batch advanced ticks_total past multiple fire points, calling this
-    /// + `check_timers()` in a loop will fire the timer for each missed period.
+    /// Unlike `activate_timer` which sets `time_to_fire = time_ticks() + period`,
+    /// this adds `period` to the existing `time_to_fire`. Used for LAPIC catch-up:
+    /// after processing a timer fire, re-arm relative to the previous fire point.
     pub fn reactivate_timer_relative(
         &mut self,
         timer_index: usize,
@@ -448,8 +591,18 @@ impl BxPcSystemC {
         let period = period.max(MIN_ALLOWABLE_TIMER_PERIOD);
         self.timers[timer_index].period = period;
         self.timers[timer_index].time_to_fire += period;
-        self.timers[timer_index].active = true;
-        self.timers[timer_index].continuous = false;
+        self.timers[timer_index].flags.insert(TimerFlags::ACTIVE);
+        self.timers[timer_index].flags.remove(TimerFlags::CONTINUOUS);
+
+        // Adjust countdown if this timer fires sooner
+        let ticks_until_fire = self.timers[timer_index]
+            .time_to_fire
+            .saturating_sub(self.time_ticks());
+        if ticks_until_fire < self.curr_countdown as u64 {
+            let ticks_u32 = ticks_until_fire as u32;
+            self.curr_countdown_period -= self.curr_countdown - ticks_u32;
+            self.curr_countdown = ticks_u32;
+        }
         Ok(())
     }
 
@@ -458,7 +611,7 @@ impl BxPcSystemC {
     /// Corresponds to `bx_pc_system_c::deactivate_timer()` in Bochs (pc_system.cc:563).
     pub fn deactivate_timer(&mut self, timer_index: usize) -> Result<(), PcSystemError> {
         self.validate_timer_index(timer_index)?;
-        self.timers[timer_index].active = false;
+        self.timers[timer_index].flags.remove(TimerFlags::ACTIVE);
         Ok(())
     }
 
@@ -468,13 +621,12 @@ impl BxPcSystemC {
     /// The timer must be deactivated first.
     pub fn unregister_timer(&mut self, timer_index: usize) -> Result<(), PcSystemError> {
         self.validate_timer_index(timer_index)?;
-        if self.timers[timer_index].active {
+        if self.timers[timer_index].flags.contains(TimerFlags::ACTIVE) {
             return Err(PcSystemError::TimerStillActive(timer_index));
         }
-        self.timers[timer_index].in_use = false;
+        self.timers[timer_index].flags = TimerFlags::empty();
         self.timers[timer_index].period = u64::MAX;
         self.timers[timer_index].time_to_fire = u64::MAX;
-        self.timers[timer_index].continuous = false;
         self.timers[timer_index].handler = None;
         self.timers[timer_index].param = core::ptr::null_mut();
         self.timers[timer_index].id = [0; BX_MAX_TIMER_ID_LEN];
@@ -500,36 +652,61 @@ impl BxPcSystemC {
         Ok(())
     }
 
-    /// Null timer handler (does nothing, just maintains timing)
-    fn null_timer_handler(_param: *mut c_void) {
-        // The null timer exists just to keep the timing system running
+    /// Get the number of ticks until next timer event.
+    /// Matches Bochs pc_system.h:135-137 `getNumCpuTicksLeftNextEvent()`.
+    #[inline]
+    pub fn get_num_cpu_ticks_left_next_event(&self) -> u32 {
+        self.curr_countdown
     }
 
-    /// Tick the system by the given number of ticks
-    pub fn tick(&mut self, ticks: u64) {
-        self.ticks_total += ticks;
+    /// Check if a timer is active (for diagnostics).
+    pub fn is_timer_active(&self, timer_index: usize) -> bool {
+        if timer_index >= self.num_timers {
+            return false;
+        }
+        self.timers[timer_index].flags.contains(TimerFlags::ACTIVE)
     }
 
-    /// Check and fire any expired timers
-    pub fn check_timers(&mut self) {
+    /// Get ticks remaining until a timer fires (for diagnostics).
+    /// Returns 0 if timer is inactive or index is out of bounds.
+    pub fn timer_countdown(&self, timer_index: usize) -> u64 {
+        if timer_index >= self.num_timers {
+            return 0;
+        }
+        if !self.timers[timer_index].flags.contains(TimerFlags::ACTIVE) {
+            return 0;
+        }
+        let now = self.time_ticks();
+        self.timers[timer_index].time_to_fire.saturating_sub(now)
+    }
+
+    /// Return ticks until next countdown event (Bochs getNumCpuTicksLeftNextEvent).
+    #[inline]
+    pub fn get_num_ticks_left_next_event(&self) -> u32 {
+        self.curr_countdown
+    }
+
+    /// Return minimum ticks until any active timer fires.
+    /// Returns u64::MAX if no timers are active.
+    pub fn min_ticks_to_fire(&self) -> u64 {
+        let now = self.time_ticks();
+        let mut min = u64::MAX;
         for i in 0..self.num_timers {
-            if self.timers[i].in_use
-                && self.timers[i].active
-                && self.ticks_total >= self.timers[i].time_to_fire
-            {
-                self.triggered_timer = i;
-
-                if let Some(handler) = self.timers[i].handler {
-                    handler(self.timers[i].param);
-                }
-
-                if self.timers[i].continuous {
-                    self.timers[i].time_to_fire = self.ticks_total + self.timers[i].period;
-                } else {
-                    self.timers[i].active = false;
+            if self.timers[i].flags.contains(TimerFlags::ACTIVE) {
+                let remaining = self.timers[i].time_to_fire.saturating_sub(now);
+                if remaining < min {
+                    min = remaining;
                 }
             }
         }
+        min
+    }
+
+    /// Null timer handler (does nothing, just maintains timing).
+    /// Bochs pc_system.cc:388-411.
+    fn null_timer_handler(_param: *mut c_void) {
+        // The null timer exists to keep the timing system running and
+        // ensure countdown always fits in a u32.
     }
 }
 
@@ -544,6 +721,9 @@ mod tests {
         assert!(!pc.enable_a20);
         assert_eq!(pc.a20_mask, 0xFFFF_FFFF_FFEF_FFFFu64);
         assert_eq!(pc.num_timers, 1); // null timer
+        // Countdown should be NULL_TIMER_INTERVAL (u32::MAX)
+        assert_eq!(pc.curr_countdown, 0xFFFF_FFFF);
+        assert_eq!(pc.curr_countdown_period, 0xFFFF_FFFF);
     }
 
     #[test]
@@ -578,7 +758,7 @@ mod tests {
 
         // Modify pc1
         pc1.set_enable_a20(false);
-        pc1.tick(1000);
+        pc1.tickn(1000);
 
         // pc2 should be unaffected — A20 starts disabled for both
         assert!(!pc2.get_enable_a20());
@@ -593,16 +773,21 @@ mod tests {
         pc.initialize(15_000_000); // 15 MIPS
 
         // Register a timer — should get slot 1 (slot 0 is null timer)
-        let idx = pc.register_timer(
-            dummy_handler,
-            core::ptr::null_mut(),
-            1000,
-            true,
-            true,
-            "test_timer",
-        ).unwrap();
+        let idx = pc
+            .register_timer(
+                dummy_handler,
+                core::ptr::null_mut(),
+                1000,
+                true,
+                true,
+                "test_timer",
+            )
+            .unwrap();
         assert_eq!(idx, 1);
         assert_eq!(pc.num_timers, 2);
+
+        // Countdown should be adjusted to 1000 (since 1000 < NULL_TIMER_INTERVAL)
+        assert_eq!(pc.curr_countdown, 1000);
     }
 
     #[test]
@@ -611,16 +796,43 @@ mod tests {
         pc.initialize(15_000_000); // 15 MIPS → m_ips = 15.0
 
         // 1000 usec at 15 MIPS = 15000 ticks
-        let idx = pc.register_timer_usec(
-            dummy_handler,
-            core::ptr::null_mut(),
-            1000,
-            true,
-            true,
-            "usec_timer",
-        ).unwrap();
+        let idx = pc
+            .register_timer_usec(
+                dummy_handler,
+                core::ptr::null_mut(),
+                1000,
+                true,
+                true,
+                "usec_timer",
+            )
+            .unwrap();
         assert_eq!(idx, 1);
         assert_eq!(pc.timers[1].period, 15000);
+    }
+
+    #[test]
+    fn test_time_ticks_partial() {
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(10_000_000); // 10 MIPS
+
+        // Register a timer with period 100
+        let _idx = pc
+            .register_timer(
+                dummy_handler,
+                core::ptr::null_mut(),
+                100,
+                true,
+                true,
+                "partial_test",
+            )
+            .unwrap();
+
+        // Advance 50 ticks — should NOT fire yet
+        pc.tickn(50);
+        // time_ticks() should be 50 (partial countdown)
+        assert_eq!(pc.time_ticks(), 50);
+        // ticks_total should still be 0 (no countdown_event yet)
+        assert_eq!(pc.ticks_total, 0);
     }
 
     #[test]
@@ -628,7 +840,7 @@ mod tests {
         let mut pc = BxPcSystemC::new();
         pc.initialize(10_000_000); // 10 MIPS → m_ips = 10.0
 
-        pc.tick(10_000_000); // 10M ticks = 1 second at 10 MIPS
+        pc.tickn(10_000_000); // 10M ticks = 1 second at 10 MIPS
         assert_eq!(pc.time_usec(), 1_000_000); // 1 second in microseconds
         assert_eq!(pc.time_nsec(), 1_000_000_000); // 1 second in nanoseconds
     }
@@ -638,42 +850,115 @@ mod tests {
         let mut pc = BxPcSystemC::new();
         pc.initialize(1_000_000); // 1 MIPS
 
-        let idx = pc.register_timer(
-            dummy_handler,
-            core::ptr::null_mut(),
-            100,
-            false, // one-shot
-            true,
-            "oneshot",
-        ).unwrap();
+        let idx = pc
+            .register_timer(
+                dummy_handler,
+                core::ptr::null_mut(),
+                100,
+                false, // one-shot
+                true,
+                "oneshot",
+            )
+            .unwrap();
 
-        // Not yet time to fire
-        pc.tick(50);
-        pc.check_timers();
-        assert!(pc.timers[idx].active);
+        // Advance 50 ticks — not yet fired
+        pc.tickn(50);
+        assert!(pc.timers[idx].flags.contains(TimerFlags::ACTIVE));
 
-        // Now fire
-        pc.tick(50);
-        pc.check_timers();
-        assert!(!pc.timers[idx].active); // one-shot deactivated
+        // Advance 50 more — fires at 100
+        pc.tickn(50);
+        assert!(!pc.timers[idx].flags.contains(TimerFlags::ACTIVE)); // one-shot deactivated
+    }
+
+    #[test]
+    fn test_continuous_timer_fires_multiple() {
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(1_000_000);
+
+        static FIRE_COUNT: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        FIRE_COUNT.store(0, core::sync::atomic::Ordering::SeqCst);
+
+        fn counting_handler(_: *mut c_void) {
+            FIRE_COUNT.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
+        }
+
+        let _idx = pc
+            .register_timer(
+                counting_handler,
+                core::ptr::null_mut(),
+                100,
+                true, // continuous
+                true,
+                "continuous",
+            )
+            .unwrap();
+
+        // Advance 500 ticks — should fire 5 times (at 100, 200, 300, 400, 500)
+        pc.tickn(500);
+        assert_eq!(
+            FIRE_COUNT.load(core::sync::atomic::Ordering::SeqCst),
+            5
+        );
     }
 
     #[test]
     fn test_unregister_timer() {
         let mut pc = BxPcSystemC::new();
-        let idx = pc.register_timer(
-            dummy_handler,
-            core::ptr::null_mut(),
-            1000,
-            true,
-            false, // inactive
-            "unreg",
-        ).unwrap();
+        let idx = pc
+            .register_timer(
+                dummy_handler,
+                core::ptr::null_mut(),
+                1000,
+                true,
+                false, // inactive
+                "unreg",
+            )
+            .unwrap();
 
         pc.unregister_timer(idx).unwrap();
-        assert!(!pc.timers[idx].in_use);
+        assert!(!pc.timers[idx].flags.contains(TimerFlags::IN_USE));
 
         // Can't unregister null timer
         assert!(pc.unregister_timer(0).is_err());
+    }
+
+    #[test]
+    fn test_countdown_adjustment() {
+        let mut pc = BxPcSystemC::new();
+        pc.initialize(15_000_000);
+
+        // Register timer with period 1000
+        let _t1 = pc
+            .register_timer(
+                dummy_handler,
+                core::ptr::null_mut(),
+                1000,
+                true,
+                true,
+                "t1",
+            )
+            .unwrap();
+        assert_eq!(pc.curr_countdown, 1000);
+
+        // Advance 200 ticks
+        pc.tickn(200);
+        assert_eq!(pc.curr_countdown, 800);
+
+        // Now activate a second timer with period 500 — should adjust countdown
+        let t2 = pc
+            .register_timer(
+                dummy_handler,
+                core::ptr::null_mut(),
+                500,
+                true,
+                true,
+                "t2",
+            )
+            .unwrap();
+        // curr_countdown was 800, new timer needs 500 < 800
+        // So countdown adjusted to 500
+        assert_eq!(pc.curr_countdown, 500);
+        assert!(pc.timers[t2].flags.contains(TimerFlags::ACTIVE));
     }
 }

@@ -137,6 +137,10 @@ pub struct BxDevicesC {
     /// Last I/O read port and value (for stuck-loop diagnostics)
     pub(crate) last_io_read_port: u16,
     pub(crate) last_io_read_value: u32,
+    /// Total I/O port reads (for progress diagnostics)
+    pub(crate) diag_io_reads: u64,
+    /// Total I/O port writes
+    pub(crate) diag_io_writes: u64,
 }
 
 impl Default for BxDevicesC {
@@ -167,6 +171,8 @@ impl BxDevicesC {
             port80_output: VecDeque::new(),
             last_io_read_port: 0,
             last_io_read_value: 0,
+            diag_io_reads: 0,
+            diag_io_writes: 0,
         }
     }
 
@@ -242,6 +248,7 @@ impl BxDevicesC {
     /// # Returns
     /// The value read from the port
     pub fn inp(&mut self, port: u16, io_len: u8) -> u32 {
+        self.diag_io_reads += 1;
         let entry = &self.read_handlers[port as usize];
 
         let value = if let Some(handler) = entry.handler {
@@ -272,6 +279,7 @@ impl BxDevicesC {
     /// * `value` - Value to write
     /// * `io_len` - Length of I/O operation (1, 2, or 4 bytes)
     pub fn outp(&mut self, port: u16, value: u32, io_len: u8) {
+        self.diag_io_writes += 1;
         let entry = &self.write_handlers[port as usize];
 
         if let Some(handler) = entry.write_handler {

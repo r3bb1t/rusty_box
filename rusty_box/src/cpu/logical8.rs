@@ -272,18 +272,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = instr.ib();
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_8(op1, op2, result);
-        // Trace '%' comparisons in kernel space to debug vsprintf
-        if op2 == 0x25 && op1 == 0x25 && self.rip() > 0xC0000000 {
-            let zf = (self.eflags.bits() >> 6) & 1;
-            tracing::warn!(
-                "CMP [mem]=0x25, Ib=0x25 at RIP={:#x} eaddr={:#x} ZF={} eflags={:#x} icount={}",
-                self.rip(),
-                eaddr,
-                zf,
-                self.eflags.bits(),
-                self.icount
-            );
-        }
         Ok(())
     }
 
