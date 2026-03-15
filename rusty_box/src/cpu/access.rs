@@ -1217,11 +1217,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Write phase of a RMW qword access (uses cached address_xlation).
     pub(crate) fn write_rmw_virtual_qword_back_64(&mut self, val: u64) {
-        // TEMPORARY: catch qword RMW stores with corrupt 0x20000 upper bits
-        if (val >> 32) == 0x20000 && self.prev_rip < 0xffff_0000_0000_0000 && self.icount > 500_000_000 {
-            eprintln!("[QWORD-RMW-CORRUPT] val={:#x} paddr={:#x} rip={:#x} prev_rip={:#x} icount={} opcode={:#06x}",
-                val, self.address_xlation.paddress1, self.rip(), self.prev_rip, self.icount, self.diag_current_opcode);
-        }
         let pages = self.address_xlation.pages;
         if pages == 1 {
             let paddr = self.address_xlation.paddress1;
