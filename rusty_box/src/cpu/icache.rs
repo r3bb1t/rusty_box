@@ -738,7 +738,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 Ok(()) => {
 
                     // Instruction is already in mpool[current_mpindex] — get its length
-                    let i_len = { self.i_cache.mpool[current_mpindex].length as u32 };
+                    let i_len = { self.i_cache.mpool[current_mpindex].ilen() as u32 };
 
                     // Call assignHandler during trace creation (matching C++ line 169)
                     // This checks feature flags and determines if trace should stop

@@ -131,7 +131,7 @@ pub fn ADD_EwIbR<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let dst = instr.operands.dst as usize;
+    let dst = instr.dst() as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = instr.ib() as i8 as i16 as u16;
     let result = op1.wrapping_add(op2);
@@ -311,7 +311,7 @@ pub fn ADC_EwIbR<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let dst = instr.operands.dst as usize;
+    let dst = instr.dst() as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = instr.ib() as i8 as i16 as u16;
     let cf = cpu.get_cf() as u16;
@@ -750,7 +750,7 @@ pub fn SUB_EwIbR<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let dst = instr.operands.dst as usize;
+    let dst = instr.dst() as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = instr.ib() as i8 as i16 as u16;
     let result = op1.wrapping_sub(op2);
@@ -807,7 +807,7 @@ pub fn ADC_EwIwR<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let dst = instr.operands.dst as usize;
+    let dst = instr.dst() as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = instr.iw();
     let cf = cpu.get_cf() as u16;
@@ -864,7 +864,7 @@ pub fn SBB_EwIwR<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let dst = instr.operands.dst as usize;
+    let dst = instr.dst() as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = instr.iw();
     let cf = cpu.get_cf() as u16;
@@ -907,7 +907,7 @@ pub fn SBB_EwIbR<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
 ) -> Result<(), crate::cpu::CpuError> {
-    let dst = instr.operands.dst as usize;
+    let dst = instr.dst() as usize;
     let op1 = cpu.get_gpr16(dst);
     let op2 = instr.ib() as i8 as i16 as u16;
     let cf = cpu.get_cf() as u16;

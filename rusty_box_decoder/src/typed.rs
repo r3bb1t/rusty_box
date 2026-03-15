@@ -154,9 +154,8 @@ impl Opcode {
             return OpcodeCategory::Avx;
         }
 
-        // EVEX: EvexVaddpsVpsHpsWps(2337)..one before AAS
-        // AAS is the very last variant at 3670; EVEX ends just before it
-        if d >= O::EvexVaddpsVpsHpsWps as u16 && d < O::AAS as u16 {
+        // EVEX: EvexVaddpsVpsHpsWps..=EvexVmovrsqVdqWdqKmask (last EVEX variant)
+        if d >= O::EvexVaddpsVpsHpsWps as u16 && d <= O::EvexVmovrsqVdqWdqKmask as u16 {
             return OpcodeCategory::Evex;
         }
 
@@ -11487,7 +11486,6 @@ impl Instruction {
 
             // Previously missed opcodes
             O::IaError => T::IaError,
-            O::AAS => T::Aas,
             O::PrefetchwMb => T::PrefetchwMb { mem: self.memory_operand() },
             O::Gf2p8mulbVdqWdq => simd!(Gf2p8mulbVdqWdqR, Gf2p8mulbVdqWdqM, self),
             O::VphsubdqVdqWdq => simd!(VphsubdqVdqWdqR, VphsubdqVdqWdqM, self),

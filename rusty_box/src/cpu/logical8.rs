@@ -117,10 +117,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Opcode 0x30: reg (operands.dst) = SOURCE, rm (operands.src1) = DESTINATION
     pub fn xor_eb_gb_r(&mut self, instr: &Instruction) {
         let extend8bit_l = instr.extend8bit_l();
-        let op1 = self.read_8bit_regx(instr.operands.src1 as usize, extend8bit_l); // rm = destination
-        let op2 = self.read_8bit_regx(instr.operands.dst as usize, extend8bit_l); // reg = source
+        let op1 = self.read_8bit_regx(instr.src1() as usize, extend8bit_l); // rm = destination
+        let op2 = self.read_8bit_regx(instr.dst() as usize, extend8bit_l); // reg = source
         let result = op1 ^ op2;
-        self.write_8bit_regx(instr.operands.src1 as usize, extend8bit_l, result);
+        self.write_8bit_regx(instr.src1() as usize, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
     }
 
@@ -330,10 +330,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Opcode 0x20: reg (operands.dst) = SOURCE, rm (operands.src1) = DESTINATION
     pub fn and_eb_gb_r(&mut self, instr: &Instruction) {
         let extend8bit_l = instr.extend8bit_l();
-        let op1 = self.read_8bit_regx(instr.operands.src1 as usize, extend8bit_l); // rm = destination
-        let op2 = self.read_8bit_regx(instr.operands.dst as usize, extend8bit_l); // reg = source
+        let op1 = self.read_8bit_regx(instr.src1() as usize, extend8bit_l); // rm = destination
+        let op2 = self.read_8bit_regx(instr.dst() as usize, extend8bit_l); // reg = source
         let result = op1 & op2;
-        self.write_8bit_regx(instr.operands.src1 as usize, extend8bit_l, result);
+        self.write_8bit_regx(instr.src1() as usize, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
     }
 
@@ -367,10 +367,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Opcode 0x08: reg (operands.dst) = SOURCE, rm (operands.src1) = DESTINATION
     pub fn or_eb_gb_r(&mut self, instr: &Instruction) {
         let extend8bit_l = instr.extend8bit_l();
-        let op1 = self.read_8bit_regx(instr.operands.src1 as usize, extend8bit_l); // rm = destination
-        let op2 = self.read_8bit_regx(instr.operands.dst as usize, extend8bit_l); // reg = source
+        let op1 = self.read_8bit_regx(instr.src1() as usize, extend8bit_l); // rm = destination
+        let op2 = self.read_8bit_regx(instr.dst() as usize, extend8bit_l); // reg = source
         let result = op1 | op2;
-        self.write_8bit_regx(instr.operands.src1 as usize, extend8bit_l, result);
+        self.write_8bit_regx(instr.src1() as usize, extend8bit_l, result);
         self.set_flags_oszapc_logic_8(result);
     }
 

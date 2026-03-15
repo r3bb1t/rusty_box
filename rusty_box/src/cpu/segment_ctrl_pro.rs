@@ -2592,13 +2592,30 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 }
                 // DIAG: detect IRET to kernel address from kernel mode (execve returning wrong entry point)
                 if rip >= 0xffff_0000_0000_0000 && (cs & 3) == 3 && self.icount > 1_500_000_000 {
-                    eprintln!("[IRET-KERN-USER] rip={:#x} cs={:#06x} eflags={:#x} rsp={:#x} icount={}",
-                        rip, cs, eflags, temp_rsp, self.icount);
-                    eprintln!("  caller_rip={:#x} (before IRET)", self.rip());
-                    // Dump stack frame
-                    for i in 0..5u64 {
-                        if let Ok(v) = self.stack_read_qword(temp_rsp.wrapping_add(i * 8)) {
-                            eprintln!("  stack[{}]={:#x}", i, v);
+                    static IRET_KERN_USER_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                    let cnt = IRET_KERN_USER_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if cnt < 1 { // Only dump first occurrence
+                        eprintln!("[IRET-KERN-USER] rip={:#x} cs={:#06x} eflags={:#x} rsp={:#x} icount={}",
+                            rip, cs, eflags, temp_rsp, self.icount);
+                        eprintln!("  caller_rip={:#x} (before IRET)", self.rip());
+                        // Dump last 32 RIP ring entries with instruction bytes
+                        let end = self.diag_rip_ring_idx;
+                        let start = if end > 32 { end - 32 } else { 0 };
+                        for idx in start..end {
+                            let r = self.diag_rip_ring[idx & 255];
+                            if r < 0xffff_0000_0000_0000 { // user-mode
+                                let mut bytes = [0u8; 16];
+                                for i in 0..16u64 {
+                                    bytes[i as usize] = self.v_read_byte(
+                                        super::decoder::BxSegregs::Ds, r.wrapping_add(i)
+                                    ).unwrap_or(0xCC);
+                                }
+                                let bstr: alloc::vec::Vec<alloc::string::String> = bytes.iter()
+                                    .map(|b| alloc::format!("{:02x}", b)).collect();
+                                eprintln!("  ring[{}] RIP={:#x} bytes=[{}]", idx, r, bstr.join(" "));
+                            } else {
+                                eprintln!("  ring[{}] RIP={:#x} (kernel)", idx, r);
+                            }
                         }
                     }
                 }

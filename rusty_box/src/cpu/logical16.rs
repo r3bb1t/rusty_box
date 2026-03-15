@@ -137,7 +137,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Opcode: XOR_EwGw_ZERO_IDIOM or XOR_GwEw_ZERO_IDIOM
     /// Matches BX_CPU_C::ZERO_IDIOM_GwR
     pub fn zero_idiom_gw_r(&mut self, instr: &Instruction) {
-        let dst = instr.operands.dst as usize;
+        let dst = instr.dst() as usize;
         self.set_gpr16(dst, 0);
         self.set_flags_oszapc_logic_16(0);
     }
@@ -244,10 +244,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// AND_EwGwR: AND r/m16, r16 (register form, store-direction)
     /// Opcode 0x21: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
     pub fn and_ew_gw_r(&mut self, instr: &Instruction) {
-        let op1 = self.get_gpr16(instr.operands.dst as usize); // rm = destination
-        let op2 = self.get_gpr16(instr.operands.src1 as usize); // nnn = source
+        let op1 = self.get_gpr16(instr.dst() as usize); // rm = destination
+        let op2 = self.get_gpr16(instr.src1() as usize); // nnn = source
         let result = op1 & op2;
-        self.set_gpr16(instr.operands.dst as usize, result);
+        self.set_gpr16(instr.dst() as usize, result);
         self.set_flags_oszapc_logic_16(result);
     }
 
@@ -289,10 +289,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// XOR_EwGwR: XOR r/m16, r16 (register form, store-direction)
     /// Opcode 0x31: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
     pub fn xor_ew_gw_r(&mut self, instr: &Instruction) {
-        let op1 = self.get_gpr16(instr.operands.dst as usize); // rm = destination
-        let op2 = self.get_gpr16(instr.operands.src1 as usize); // nnn = source
+        let op1 = self.get_gpr16(instr.dst() as usize); // rm = destination
+        let op2 = self.get_gpr16(instr.src1() as usize); // nnn = source
         let result = op1 ^ op2;
-        self.set_gpr16(instr.operands.dst as usize, result);
+        self.set_gpr16(instr.dst() as usize, result);
         self.set_flags_oszapc_logic_16(result);
     }
 
@@ -335,10 +335,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// OR_EwGwR: OR r/m16, r16 (register form, store-direction)
     /// Opcode 0x09: decoder swaps: [0]=rm=DEST, [1]=nnn=SOURCE
     pub fn or_ew_gw_r(&mut self, instr: &Instruction) {
-        let op1 = self.get_gpr16(instr.operands.dst as usize); // rm = destination
-        let op2 = self.get_gpr16(instr.operands.src1 as usize); // nnn = source
+        let op1 = self.get_gpr16(instr.dst() as usize); // rm = destination
+        let op2 = self.get_gpr16(instr.src1() as usize); // nnn = source
         let result = op1 | op2;
-        self.set_gpr16(instr.operands.dst as usize, result);
+        self.set_gpr16(instr.dst() as usize, result);
         self.set_flags_oszapc_logic_16(result);
     }
 

@@ -300,7 +300,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Used by the PopOp16Sw opcode
     pub fn pop_op16_sw(&mut self, instr: &Instruction) -> super::Result<()> {
         let selector_value = self.pop_16()?;
-        let seg = super::decoder::BxSegregs::from(instr.operands.dst);
+        let seg = super::decoder::BxSegregs::from(instr.dst());
 
         self.load_seg_reg(seg, selector_value)?;
 

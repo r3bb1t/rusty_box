@@ -461,7 +461,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         instr: &Instruction,
     ) -> Result<()> {
         // CMP r/m8, imm8 - implemented inline in execute_instruction
-        let dst = instr.operands.dst as usize;
+        let dst = instr.dst() as usize;
         let op1 = cpu.read_8bit_regx(dst, instr.extend8bit_l());
         let op2 = instr.ib();
         let result = op1.wrapping_sub(op2);
@@ -968,7 +968,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         cpu: &mut BxCpuC<'_, I>,
         instr: &Instruction,
     ) -> Result<()> {
-        let seg = instr.operands.dst as usize;
+        let seg = instr.dst() as usize;
         let val = cpu.sregs[seg].selector.value;
         cpu.push_16(val)?;
         Ok(())
@@ -980,7 +980,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
     ) -> Result<()> {
         use crate::cpu::decoder::BxSegregs;
         use crate::cpu::segment_ctrl_pro::parse_selector;
-        let seg = instr.operands.dst as usize;
+        let seg = instr.dst() as usize;
         let val = cpu.pop_16()?;
         // Don't allow loading CS
         if seg != BxSegregs::Cs as usize {

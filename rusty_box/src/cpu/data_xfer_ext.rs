@@ -22,7 +22,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// LEA r16, m - Load effective address into 16-bit register
     pub fn lea_gw_m(&mut self, instr: &Instruction) {
-        let dst = instr.operands.dst as usize;
+        let dst = instr.dst() as usize;
         let eaddr = self.resolve_addr(instr) as u16;
         self.set_gpr16(dst, eaddr);
     }
@@ -31,7 +31,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// In 64-bit mode, uses 64-bit address calculation then truncates to 32 bits
     /// Matching Bochs data_xfer32.cc LEA_GdM
     pub fn lea_gd_m(&mut self, instr: &Instruction) {
-        let dst = instr.operands.dst as usize;
+        let dst = instr.dst() as usize;
         let eaddr = if self.long64_mode() {
             self.resolve_addr64(instr)
         } else {
@@ -46,8 +46,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XCHG r8, r/m8 - Exchange 8-bit values
     pub fn xchg_eb_gb(&mut self, instr: &Instruction) {
-        let dst = instr.operands.dst as usize;
-        let src = instr.operands.src1 as usize;
+        let dst = instr.dst() as usize;
+        let src = instr.src1() as usize;
         let ext = instr.extend8bit_l();
         let val_dst = self.read_8bit_regx(dst, ext);
         let val_src = self.read_8bit_regx(src, ext);
@@ -57,8 +57,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XCHG r16, r/m16 - Exchange 16-bit values
     pub fn xchg_ew_gw(&mut self, instr: &Instruction) {
-        let dst = instr.operands.dst as usize;
-        let src = instr.operands.src1 as usize;
+        let dst = instr.dst() as usize;
+        let src = instr.src1() as usize;
         let val_dst = self.get_gpr16(dst);
         let val_src = self.get_gpr16(src);
         self.set_gpr16(dst, val_src);
@@ -67,8 +67,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XCHG r32, r/m32 - Exchange 32-bit values
     pub fn xchg_ed_gd(&mut self, instr: &Instruction) {
-        let dst = instr.operands.dst as usize;
-        let src = instr.operands.src1 as usize;
+        let dst = instr.dst() as usize;
+        let src = instr.src1() as usize;
         let val_dst = self.get_gpr32(dst);
         let val_src = self.get_gpr32(src);
         self.set_gpr32(dst, val_src);
@@ -77,7 +77,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XCHG AX, r16 - Exchange AX with 16-bit register (short forms)
     pub fn xchg_ax_rw(&mut self, instr: &Instruction) {
-        let reg = instr.operands.dst as usize;
+        let reg = instr.dst() as usize;
         let ax = self.ax();
         let val = self.get_gpr16(reg);
         self.set_ax(val);
@@ -86,7 +86,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// XCHG EAX, r32 - Exchange EAX with 32-bit register (short forms)
     pub fn xchg_eax_rd(&mut self, instr: &Instruction) {
-        let reg = instr.operands.dst as usize;
+        let reg = instr.dst() as usize;
         let eax = self.eax();
         let val = self.get_gpr32(reg);
         self.set_eax(val);
@@ -133,7 +133,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r/m16, Sreg - Move segment register to r/m16
     pub fn mov_ew_sw(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src_seg = instr.operands.src1 as usize;
+        let src_seg = instr.src1() as usize;
 
         // Decoder should never give us invalid segment registers (6-7)
         // Valid segment registers: ES(0), CS(1), SS(2), DS(3), FS(4), GS(5)
@@ -148,7 +148,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() {
             // Register form: MOV r16/r32, sreg
             // Bochs data_xfer16.cc:77-82: os32L → 32-bit zero-extended write
-            let dst = instr.operands.dst as usize;
+            let dst = instr.dst() as usize;
             if instr.os32_l() != 0 {
                 self.set_gpr32(dst, seg_val as u32);
             } else {
@@ -165,7 +165,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV Sreg, r/m16 - Move r/m16 to segment register
     pub fn mov_sw_ew(&mut self, instr: &Instruction) -> Result<()> {
-        let dst_seg = instr.operands.dst as usize;
+        let dst_seg = instr.dst() as usize;
 
         // Decoder should never give us invalid segment registers (6-7)
         // Valid segment registers: ES(0), CS(1), SS(2), DS(3), FS(4), GS(5)
@@ -177,7 +177,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let new_sel = if instr.mod_c0() {
             // Register form: MOV sreg, r16
-            let src = instr.operands.src1 as usize;
+            let src = instr.src1() as usize;
             self.get_gpr16(src)
         } else {
             // Memory form: MOV sreg, [mem]
@@ -293,7 +293,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r16, imm16
     pub fn mov_rw_iw(&mut self, instr: &Instruction) {
-        let dst = instr.operands.dst as usize;
+        let dst = instr.dst() as usize;
         let imm = instr.iw();
 
         self.set_gpr16(dst, imm);
@@ -301,15 +301,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOV r8, imm8
     pub fn mov_rb_ib(&mut self, instr: &Instruction) {
-        let dst = instr.operands.dst as usize;
+        let dst = instr.dst() as usize;
         let imm = instr.ib();
         self.write_8bit_regx(dst, instr.extend8bit_l(), imm);
     }
 
     /// MOV r16, r/m16 (register to register)
     pub fn mov_gw_ew_r(&mut self, instr: &Instruction) {
-        let dst = instr.operands.dst as usize;
-        let src = instr.operands.src1 as usize;
+        let dst = instr.dst() as usize;
+        let src = instr.src1() as usize;
         let val = self.get_gpr16(src);
         self.set_gpr16(dst, val);
     }
@@ -317,14 +317,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MOV r/m16, r16 (register to register)
     /// Opcode 0x89 (16-bit): decoder swaps: operands.dst = rm (DEST), operands.src1 = nnn (SOURCE)
     pub fn mov_ew_gw_r(&mut self, instr: &Instruction) {
-        let val = self.get_gpr16(instr.operands.src1 as usize); // nnn = source
-        self.set_gpr16(instr.operands.dst as usize, val); // rm = destination
+        let val = self.get_gpr16(instr.src1() as usize); // nnn = source
+        self.set_gpr16(instr.dst() as usize, val); // rm = destination
     }
 
     /// MOV r8, r/m8 (register to register)
     pub fn mov_gb_eb_r(&mut self, instr: &Instruction) {
-        let dst = instr.operands.dst as usize;
-        let src = instr.operands.src1 as usize;
+        let dst = instr.dst() as usize;
+        let src = instr.src1() as usize;
         let ext = instr.extend8bit_l();
         let val = self.read_8bit_regx(src, ext);
         self.write_8bit_regx(dst, ext, val);
@@ -334,8 +334,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Opcode 0x88: 8-bit does NOT match decoder swap — operands.dst=nnn=source, operands.src1=rm=dest
     pub fn mov_eb_gb_r(&mut self, instr: &Instruction) {
         let ext = instr.extend8bit_l();
-        let val = self.read_8bit_regx(instr.operands.dst as usize, ext); // nnn = source
-        self.write_8bit_regx(instr.operands.src1 as usize, ext, val); // rm = destination
+        let val = self.read_8bit_regx(instr.dst() as usize, ext); // nnn = source
+        self.write_8bit_regx(instr.src1() as usize, ext, val); // rm = destination
     }
 
     // =========================================================================
@@ -422,16 +422,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOVZX r32, r/m8 - Move with zero-extend
     pub fn movzx_gd_eb(&mut self, instr: &Instruction) {
-        let dst = instr.operands.dst as usize;
-        let src = instr.operands.src1 as usize;
+        let dst = instr.dst() as usize;
+        let src = instr.src1() as usize;
         let val = self.read_8bit_regx(src, instr.extend8bit_l()) as u32;
         self.set_gpr32(dst, val);
     }
 
     /// MOVZX r32, r/m16 - Move with zero-extend
     pub fn movzx_gd_ew(&mut self, instr: &Instruction) {
-        let dst = instr.operands.dst as usize;
-        let src = instr.operands.src1 as usize;
+        let dst = instr.dst() as usize;
+        let src = instr.src1() as usize;
         let val = self.get_gpr16(src) as u32;
         self.set_gpr32(dst, val);
     }
@@ -448,8 +448,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOVSX r32, r/m8 - Move with sign-extend (legacy operands form, superseded by _r/_m variants)
     pub fn movsx_gd_eb_legacy(&mut self, instr: &Instruction) {
-        let dst = instr.operands.dst as usize;
-        let src = instr.operands.src1 as usize;
+        let dst = instr.dst() as usize;
+        let src = instr.src1() as usize;
         let val = self.read_8bit_regx(src, instr.extend8bit_l()) as i8 as i32 as u32;
         self.set_gpr32(dst, val);
     }

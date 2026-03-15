@@ -206,21 +206,21 @@ bitflags! {
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Operands {
     /// Destination register index (see `GprIndex`)
-    pub dst: u8,
+    pub(crate) dst: u8,
     /// Source register 1 (or opcode extension for Group instructions)
-    pub src1: u8,
+    pub(crate) src1: u8,
     /// Source register 2 (VEX.vvv)
-    pub src2: u8,
+    pub(crate) src2: u8,
     /// Source register 3 / CET segment override (shared slot)
-    pub src3: u8,
+    pub(crate) src3: u8,
     /// Segment register override (see `BxSegregs`)
-    pub segment: u8,
+    pub(crate) segment: u8,
     /// Memory base register index (see `GprIndex`; Nil = no base)
-    pub base: u8,
+    pub(crate) base: u8,
     /// Memory index register index (Rsp/4 = no index)
-    pub index: u8,
+    pub(crate) index: u8,
     /// SIB scale factor (0=×1, 1=×2, 2=×4, 3=×8)
-    pub scale: u8,
+    pub(crate) scale: u8,
 }
 
 // ============================================================================
@@ -245,17 +245,17 @@ pub struct Operands {
 #[derive(Debug, Copy, Clone, Default, PartialEq, Eq, Hash)]
 pub struct Instruction {
     /// Decoded opcode identifying the instruction
-    pub opcode: Opcode,
+    pub(crate) opcode: Opcode,
     /// Instruction byte length (1-15)
-    pub length: u8,
+    pub(crate) length: u8,
     /// Prefix and mode flags (address/operand size, lock/rep, ModC0, extend8bit)
-    pub flags: InstructionFlags,
+    pub(crate) flags: InstructionFlags,
     /// Register operands and memory addressing components
-    pub operands: Operands,
+    pub(crate) operands: Operands,
     /// Primary immediate value (also stores AVX attributes in upper bytes)
-    pub immediate: u32,
+    pub(crate) immediate: u32,
     /// Displacement value (also used as second immediate or upper half of 64-bit immediate)
-    pub displacement: u32,
+    pub(crate) displacement: u32,
 }
 
 

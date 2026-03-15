@@ -1,4 +1,4 @@
-use crate::cpu::decoder::X86FeatureName;
+use crate::cpu::decoder::features::X86Feature;
 use alloc::vec::Vec;
 
 #[derive(Debug, Clone)]
@@ -8,8 +8,8 @@ pub struct BxParams {
     pub(crate) cpu_nprocessors: u32,
 
     // TODO: use bitflags
-    pub(crate) cpu_include_features: Vec<X86FeatureName>,
-    pub(crate) cpu_exclude_features: Vec<X86FeatureName>,
+    pub(crate) cpu_include_features: Vec<X86Feature>,
+    pub(crate) cpu_exclude_features: Vec<X86Feature>,
 }
 
 impl Default for BxParams {

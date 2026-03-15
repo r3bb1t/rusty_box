@@ -468,6 +468,256 @@ fn test_segment_prefix_before_rex() {
 }
 
 // =============================================================================
+// Regression tests for previously discovered decoder bugs
+// =============================================================================
+
+// -- SHRD/SHLD Ed,Gd direction (session 13 fix) --
+// These opcodes (0F A4/A5/AC/AD) must be in the Ed,Gd branch:
+// dst()=rm (destination register), src1()=nnn (shift source register).
+// Bug: they were in the ELSE branch, swapping dst/src1, causing ext2
+// "directory #12 contains a hole" errors during DLX boot.
+
+#[test]
+fn test_shld_reg_imm8_direction() {
+    // SHLD EBX, ECX, 5 = 0F A4 CB 05
+    // ModRM CB = 11 001 011: mod=3, reg=1(ECX), rm=3(EBX)
+    // Ed,Gd: dst=rm=3(EBX), src1=nnn=1(ECX)
+    let i = fetch_decode32(&[0x0F, 0xA4, 0xCB, 0x05], true).unwrap();
+    assert_eq!(i.ilen(), 4);
+    assert_eq!(i.dst(), 3, "SHLD dst should be rm=EBX(3)");
+    assert_eq!(i.src1(), 1, "SHLD src1 should be nnn=ECX(1)");
+}
+
+#[test]
+fn test_shrd_reg_imm8_direction() {
+    // SHRD EBX, ECX, 5 = 0F AC CB 05
+    let i = fetch_decode32(&[0x0F, 0xAC, 0xCB, 0x05], true).unwrap();
+    assert_eq!(i.ilen(), 4);
+    assert_eq!(i.dst(), 3, "SHRD dst should be rm=EBX(3)");
+    assert_eq!(i.src1(), 1, "SHRD src1 should be nnn=ECX(1)");
+}
+
+#[test]
+fn test_shld_reg_cl_direction() {
+    // SHLD EBX, ECX, CL = 0F A5 CB
+    let i = fetch_decode32(&[0x0F, 0xA5, 0xCB], true).unwrap();
+    assert_eq!(i.ilen(), 3);
+    assert_eq!(i.dst(), 3, "SHLD-CL dst should be rm=EBX(3)");
+    assert_eq!(i.src1(), 1, "SHLD-CL src1 should be nnn=ECX(1)");
+}
+
+#[test]
+fn test_shrd_reg_cl_direction() {
+    // SHRD EBX, ECX, CL = 0F AD CB
+    let i = fetch_decode32(&[0x0F, 0xAD, 0xCB], true).unwrap();
+    assert_eq!(i.ilen(), 3);
+    assert_eq!(i.dst(), 3, "SHRD-CL dst should be rm=EBX(3)");
+    assert_eq!(i.src1(), 1, "SHRD-CL src1 should be nnn=ECX(1)");
+}
+
+#[test]
+fn test_shld_64bit_direction() {
+    // 64-bit: SHLD RBX, RCX, 5 = 48 0F A4 CB 05
+    let i = fetch_decode64(&[0x48, 0x0F, 0xA4, 0xCB, 0x05]).unwrap();
+    assert_eq!(i.ilen(), 5);
+    assert_eq!(i.dst(), 3, "64-bit SHLD dst should be rm=RBX(3)");
+    assert_eq!(i.src1(), 1, "64-bit SHLD src1 should be nnn=RCX(1)");
+}
+
+// -- MOVQ 66 0F D6 Ed,Gd direction (session 44-45 fix) --
+// 66 0F D6 is MOVQ xmm/m64, xmm — a STORE instruction.
+// Must be Ed,Gd: dst=rm (destination), src1=nnn (source XMM).
+
+#[test]
+fn test_movq_66_0f_d6_store_direction() {
+    // 66 0F D6 D1 = MOVQ XMM1, XMM2
+    // ModRM D1 = 11 010 001: reg=2(XMM2), rm=1(XMM1)
+    // Store: dst=rm=1, src1=nnn=2
+    let i = fetch_decode32(&[0x66, 0x0F, 0xD6, 0xD1], true).unwrap();
+    assert_eq!(i.ilen(), 4);
+    assert_eq!(i.dst(), 1, "MOVQ store dst should be rm=XMM1(1)");
+    assert_eq!(i.src1(), 2, "MOVQ store src1 should be nnn=XMM2(2)");
+}
+
+#[test]
+fn test_movq_66_0f_d6_store_direction_64bit() {
+    let i = fetch_decode64(&[0x66, 0x0F, 0xD6, 0xD1]).unwrap();
+    assert_eq!(i.ilen(), 4);
+    assert_eq!(i.dst(), 1, "64-bit MOVQ store dst should be rm=XMM1(1)");
+    assert_eq!(i.src1(), 2, "64-bit MOVQ store src1 should be nnn=XMM2(2)");
+}
+
+// -- F3 0F 7E MOVQ Vq,Wq exclusion from Ed,Gd (session 39 fix) --
+// F3 0F 7E is MOVQ xmm, xmm/m64 — a LOAD instruction.
+// Must NOT be Ed,Gd: dst=nnn (destination XMM), src1=rm (source).
+// Bug: 0x17E was in Ed,Gd branch for ALL SSE prefix variants.
+
+#[test]
+fn test_movq_f3_0f_7e_load_direction() {
+    // F3 0F 7E D1 = MOVQ XMM2, XMM1
+    // ModRM D1 = 11 010 001: reg=2(XMM2), rm=1(XMM1)
+    // Load: dst=nnn=2, src1=rm=1
+    let i = fetch_decode32(&[0xF3, 0x0F, 0x7E, 0xD1], true).unwrap();
+    assert_eq!(i.ilen(), 4);
+    assert_eq!(i.dst(), 2, "F3 0F 7E MOVQ load dst should be nnn=XMM2(2)");
+    assert_eq!(i.src1(), 1, "F3 0F 7E MOVQ load src1 should be rm=XMM1(1)");
+}
+
+#[test]
+fn test_movq_f3_0f_7e_load_direction_64bit() {
+    let i = fetch_decode64(&[0xF3, 0x0F, 0x7E, 0xD1]).unwrap();
+    assert_eq!(i.ilen(), 4);
+    assert_eq!(i.dst(), 2, "64-bit F3 0F 7E dst should be nnn=2");
+    assert_eq!(i.src1(), 1, "64-bit F3 0F 7E src1 should be rm=1");
+}
+
+// -- PUSH imm8 sign-extension (session 10 fix) --
+// Opcode 0x6A (PUSH imm8): the byte immediate must be SIGN-extended.
+// Bug: was zero-extended, so PUSH 0xFF pushed 255 instead of -1,
+// breaking wait4(-1) in Linux init.
+
+#[test]
+fn test_push_imm8_sign_extension() {
+    // 6A FF = PUSH -1 (sign-extended from 0xFF to 0xFFFFFFFF)
+    let i = fetch_decode32(&[0x6A, 0xFF], true).unwrap();
+    assert_eq!(i.ilen(), 2);
+    assert_eq!(
+        i.id() as i32, -1,
+        "PUSH imm8 0xFF should sign-extend to 0xFFFFFFFF (-1)"
+    );
+}
+
+#[test]
+fn test_push_imm8_positive() {
+    // 6A 7F = PUSH 127
+    let i = fetch_decode32(&[0x6A, 0x7F], true).unwrap();
+    assert_eq!(i.ilen(), 2);
+    assert_eq!(i.id(), 0x7F, "PUSH imm8 0x7F should remain 127");
+}
+
+#[test]
+fn test_push_imm8_0x80() {
+    // 6A 80 = PUSH -128
+    let i = fetch_decode32(&[0x6A, 0x80], true).unwrap();
+    assert_eq!(i.ilen(), 2);
+    assert_eq!(
+        i.id() as i32, -128,
+        "PUSH imm8 0x80 should sign-extend to 0xFFFFFF80 (-128)"
+    );
+}
+
+// -- Group 3 TEST immediate (0xF6/0xF7 nnn=0) --
+// TEST r/m8, imm8 (F6 /0 ib) and TEST r/m32, imm32 (F7 /0 id) include
+// an immediate that the decoder must account for in instruction length.
+
+#[test]
+fn test_group3_test_byte_immediate_length() {
+    // F6 C3 42 = TEST BL, 0x42
+    // ModRM C3 = 11 000 011: nnn=0(TEST), rm=3(BL)
+    let i = fetch_decode32(&[0xF6, 0xC3, 0x42], true).unwrap();
+    assert_eq!(i.ilen(), 3, "TEST BL, imm8 should be 3 bytes");
+    assert_eq!(i.ib(), 0x42);
+}
+
+#[test]
+fn test_group3_test_dword_immediate_length() {
+    // F7 C3 78 56 34 12 = TEST EBX, 0x12345678
+    // ModRM C3 = 11 000 011: nnn=0(TEST), rm=3(EBX)
+    let i = fetch_decode32(&[0xF7, 0xC3, 0x78, 0x56, 0x34, 0x12], true).unwrap();
+    assert_eq!(i.ilen(), 6, "TEST EBX, imm32 should be 6 bytes");
+    assert_eq!(i.id(), 0x12345678);
+}
+
+// -- REX byte register mapping (session 25 fix) --
+// Bare REX (0x40, no R/X/B/W bits) must still enable SPL/BPL/SIL/DIL
+// register mapping by setting the Extend8bit flag.
+// Bug: decoder stored rex_prefix = b & 0x0F, which gave 0 for 0x40,
+// so Extend8bit was never set.
+
+#[test]
+fn test_bare_rex_enables_extend8bit() {
+    // 40 C6 C6 00 = MOV SIL, 0 (bare REX enables SIL instead of DH)
+    // REX=0x40, C6=MOV r/m8,imm8, ModRM C6=11 000 110: nnn=0, rm=6
+    // With Extend8bit set, rm=6 maps to SIL (not DH)
+    let i = fetch_decode64(&[0x40, 0xC6, 0xC6, 0x00]).unwrap();
+    assert_eq!(i.ilen(), 4);
+    assert_ne!(
+        i.extend8bit_l(),
+        0,
+        "Bare REX (0x40) must set Extend8bit flag"
+    );
+    assert_eq!(i.dst(), 6, "rm should be 6 (SIL with Extend8bit)");
+}
+
+#[test]
+fn test_no_rex_no_extend8bit() {
+    // C6 C6 00 = MOV DH, 0 (no REX — register 6 is DH)
+    let i = fetch_decode64(&[0xC6, 0xC6, 0x00]).unwrap();
+    assert_eq!(i.ilen(), 3);
+    assert_eq!(
+        i.extend8bit_l(),
+        0,
+        "Without REX, Extend8bit should NOT be set"
+    );
+    assert_eq!(i.dst(), 6, "rm should be 6 (DH without Extend8bit)");
+}
+
+// -- Ed,Gd convention: two-byte opcodes should NOT be affected by
+//    single-byte (b1 & 0x0F) == 0x01/0x09 matching (session 28 fix) --
+
+#[test]
+fn test_cmovno_not_swapped() {
+    // 0F 41 C1 = CMOVNO ECX, ECX (two-byte 0F 41)
+    // ModRM C1 = 11 000 001: reg=0(EAX), rm=1(ECX)
+    // This is NOT in Ed,Gd: dst=nnn=0, src1=rm=1 (default convention)
+    let i = fetch_decode32(&[0x0F, 0x41, 0xC1], true).unwrap();
+    assert_eq!(i.ilen(), 3);
+    // CMOVcc uses Gd,Ed convention: dst=nnn, src1=rm
+    assert_eq!(i.dst(), 0, "CMOVNO dst should be nnn=EAX(0)");
+    assert_eq!(i.src1(), 1, "CMOVNO src1 should be rm=ECX(1)");
+}
+
+// -- LEAVE (0xC9) must be in no-ModRM list --
+
+#[test]
+fn test_leave_no_modrm_32bit() {
+    // C9 = LEAVE
+    let i = fetch_decode32(&[0xC9], true).unwrap();
+    assert_eq!(i.ilen(), 1, "LEAVE should be 1 byte (no ModRM)");
+}
+
+#[test]
+fn test_leave_no_modrm_64bit() {
+    let i = fetch_decode64(&[0xC9]).unwrap();
+    assert_eq!(i.ilen(), 1, "64-bit LEAVE should be 1 byte (no ModRM)");
+}
+
+// -- Short jump sign-extension (session fix) --
+// Opcodes 0x70-0x7F, 0xEB, 0xE0-0xE3: byte immediates must be sign-extended.
+
+#[test]
+fn test_short_jump_negative_displacement() {
+    // EB FE = JMP -2 (infinite loop)
+    let i = fetch_decode32(&[0xEB, 0xFE], true).unwrap();
+    assert_eq!(i.ilen(), 2);
+    assert_eq!(
+        i.id() as i32, -2,
+        "JMP short 0xFE should sign-extend to -2"
+    );
+}
+
+#[test]
+fn test_conditional_jump_negative_displacement() {
+    // 75 F0 = JNZ -16
+    let i = fetch_decode32(&[0x75, 0xF0], true).unwrap();
+    assert_eq!(i.ilen(), 2);
+    assert_eq!(
+        i.id() as i32, -16,
+        "JNZ short 0xF0 should sign-extend to -16"
+    );
+}
+
+// =============================================================================
 // RIP-relative addressing tests
 // =============================================================================
 

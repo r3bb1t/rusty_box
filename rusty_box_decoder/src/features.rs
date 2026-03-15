@@ -3,7 +3,7 @@
 //! Matches Bochs `cpu/decoder/features.h`.
 
 /// x86 ISA feature enumeration used for CPU feature bitmask indexing.
-/// Variant order must match `X86FeatureName` in lib.rs exactly.
+/// Canonical type — re-exported from `lib.rs` as the public API.
 /// Comments from Bochs `cpu/decoder/features.h`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum X86Feature {

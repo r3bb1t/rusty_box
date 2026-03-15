@@ -150,15 +150,6 @@ impl core::fmt::Display for BxDecodeError {
                 write!(f, "EVEX illegal zero masking memory destination")
             }
             Self::BxAmxIllegalTileRegister => write!(f, "AMX illegal tile register"),
-            Self::Other => write!(f, "other decode error"),
-            Self::NoMoreLen => write!(f, "no more length available"),
-            Self::U32toUsize => write!(f, "u32 to usize conversion failed"),
-            Self::Ud32 => write!(f, "undefined 32-bit instruction"),
-            Self::ModRmParseFail => write!(f, "ModRM parse failed"),
-            Self::ThreeDNow => write!(f, "3DNow! instruction error"),
-            Self::DecodeModrm32 => write!(f, "decode ModRM32 failed"),
-            Self::ParseModrm32 => write!(f, "parse ModRM32 failed"),
-            Self::Execute1NotImplemented => write!(f, "execute1 not implemented"),
         }
     }
 }

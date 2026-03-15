@@ -1,0 +1,25 @@
+BIOS BUILD DATE: 05/15/25
+Starting rombios32
+Shutdown flag 0
+ram_size=0x02000000
+ram_end=32MB
+Found 1 cpu(s)
+bios_table_addr: 0x000fa1d8 end=0x000fcc00
+PIIX3/PIIX4 init: elcr=00 0a
+PCI: bus=0 devfn=0x00: vendor_id=0x8086 device_id=0x1237 class=0x0600
+PCI: bus=0 devfn=0x08: vendor_id=0x8086 device_id=0x7000 class=0x0601
+PCI: bus=0 devfn=0x09: vendor_id=0x8086 device_id=0x7010 class=0x0101
+region 4: 0x0000c000
+PCI: bus=0 devfn=0x0b: vendor_id=0x8086 device_id=0x7113 class=0x0680
+MP table addr=0x000fa2b0 MPC table addr=0x000fa1e0 size=0xc8
+SMBIOS table addr=0x000fa2c0
+ACPI tables: RSDP addr=0x000fa3f0 ACPI DATA addr=0x01ff0000 size=0xfba
+Firmware waking vector 0x1ff00cc
+bios_table_cur_addr: 0x000fa414
+VGABios ID: vgabios.c 2025-01-08
+VBE Bios ID: vbe.c 2025-01-08
+ata0-0: PCHS=306/4/17 translation=none LCHS=306/4/17
+Booting from 0000:7c00
+int13_harddisk: function 15, unmapped device for ELDL=81
+KBD: unsupported int 16h function 03
+int13_harddisk: function 15, unmapped device for ELDL=81

@@ -72,8 +72,10 @@ pub(super) const BxOpcodeTable0F3A38: [u64; 1] = [last_opcode(
 )];
 
 // VEXTRACTI128 — VEX.256.66.0F3A.W0 39 /r ib
-pub(super) const BxOpcodeTable0F3A39: [u64; 1] =
-    [last_opcode(ATTR_SSE_PREFIX_66, Opcode::V256Vextracti128WdqVdqIb)];
+pub(super) const BxOpcodeTable0F3A39: [u64; 1] = [last_opcode(
+    ATTR_SSE_PREFIX_66 | ATTR_VL256 | ATTR_VEX_W0,
+    Opcode::V256Vextracti128WdqVdqIb,
+)];
 
 pub(super) const BxOpcodeTable0F3A40: [u64; 1] =
     [last_opcode(ATTR_SSE_PREFIX_66, Opcode::DppsVpsWpsIb)];

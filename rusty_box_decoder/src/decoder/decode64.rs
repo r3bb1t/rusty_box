@@ -279,6 +279,10 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         pos += 1;
 
         // Valid VEX maps: 1 (0F), 2 (0F38), 3 (0F3A)
+        // Bochs fetchdecode64.cc: maps 0, 4, 5, 6 are invalid.
+        // Map 7 exists in Bochs but has its OWN 256-entry table section
+        // (indices 768-1023 in BxOpcodeTableVEX). We don't have those
+        // entries, so accepting map 7 would decode wrong instructions.
         match vex_opc_map {
             1 => {
                 b1 = 0x100 | opcode_byte;

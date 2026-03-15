@@ -3,8 +3,6 @@
 //! The [`Opcode`] enum is `#[repr(u16)]` with sequential discriminants,
 //! enabling efficient table lookups and range-based category checks.
 
-use super::decoder::OpFlags;
-
 macro_rules! back_to_enum {
     ($(#[$meta:meta])* $vis:vis enum $name:ident {
         $($(#[$vmeta:meta])* $vname:ident $(= $val:expr)?,)*
@@ -4381,19 +4379,6 @@ back_to_enum! {
         EvexVmovrsdVdqWdqKmask,
         EvexVmovrsqVdqWdq,
         EvexVmovrsqVdqWdqKmask,
-        AAS,
-    }
-}
-
-//impl Default for Opcode {
-//    fn default() -> Self {
-//        Self::Vmcall
-//    }
-//}
-
-impl From<Opcode> for OpFlags {
-    fn from(_value: Opcode) -> Self {
-        todo!()
     }
 }
 
