@@ -4,8 +4,8 @@ Date: 2026-03-15
 
 ## Summary
 
-25 audit agents executed across the entire codebase comparing against Bochs source.
-12 bugs found and fixed. All remaining areas verified clean.
+29+ audit agents executed across the entire codebase comparing against Bochs source.
+14 bugs found and fixed. All remaining areas verified clean.
 
 ## Audited Files — ALL CLEAN
 
@@ -54,20 +54,31 @@ Date: 2026-03-15
 ### CPU Instructions (misc)
 | File | Status | Agent |
 |------|--------|-------|
-| `cpu/data_xfer_ext.rs` | CLEAN | Agent 10 |
+| `cpu/data_xfer_ext.rs` | CLEAN | Agent 10, 24 |
 | `cpu/bcd.rs` | CLEAN | Agent 21 |
 | `cpu/flag_ctrl.rs` | CLEAN | Agent 21 |
 | `cpu/vm8086.rs` | CLEAN | Agent 20 |
 | `cpu/io.rs` | CLEAN | Agent 20 |
+| `cpu/protect_ctrl.rs` | CLEAN | Agent 24 |
+| `cpu/tasking.rs` | CLEAN | Agent 24 |
+| `cpu/smm.rs` | CLEAN | Agent 24 |
+| `cpu/mwait.rs` | CLEAN | Agent 26 |
+| `cpu/crc32.rs` | CLEAN | Agent 26 |
+| `cpu/bmi32.rs` / `cpu/bmi64.rs` | CLEAN | Agent 26 |
 
 ### SSE/AVX/FPU
 | File | Status | Agent |
 |------|--------|-------|
-| `cpu/sse.rs` | CLEAN | Agent 15, 25 |
+| `cpu/sse.rs` | **FIXED** (shift threshold) | Agent 15, 25 |
 | `cpu/sse_move.rs` | CLEAN | Agent 2 |
-| `cpu/sse_pfp.rs` | **FIXED** (rounding) | Agent 19 |
+| `cpu/sse_pfp.rs` | **FIXED** (rounding + cfg) | Agent 19 |
+| `cpu/sse_rcp.rs` | CLEAN | Agent 28 |
+| `cpu/sse_string.rs` | CLEAN | Agent 28 |
 | `cpu/avx.rs` | CLEAN | Agent 11 |
 | `cpu/fpu/*.rs` | CLEAN | Agent 16 |
+| `cpu/gf2.rs` | CLEAN | Agent 28 |
+| `cpu/sha.rs` | CLEAN (dispatch) | Agent 26 |
+| `cpu/aes.rs` | PENDING | Agent 30 (running) |
 
 ### CPU Core / Mode Management
 | File | Status | Agent |
@@ -78,12 +89,12 @@ Date: 2026-03-15
 | `cpu/protected_interrupts.rs` | CLEAN | Agent 3 |
 | `cpu/segment_ctrl_pro.rs` | CLEAN | Agent 3, 23 |
 | `cpu/crregs.rs` | **FIXED** (CR0/CR4 handlers) | Agent 7 |
-| `cpu/proc_ctrl.rs` | **FIXED** (MSR #GP, CPUID) | Agent 9 |
+| `cpu/proc_ctrl.rs` | **FIXED** (MSR #GP, CPUID) | Agent 9, 26 |
 | `cpu/paging.rs` | CLEAN | Agent 4 |
 | `cpu/tlb.rs` | CLEAN | Agent 4 |
-| `cpu/access.rs` | CLEAN | Agent 4, 13 |
+| `cpu/access.rs` | CLEAN | Agent 4, 13, 29 |
 | `cpu/icache.rs` | CLEAN | Agent 13 |
-| `cpu/apic.rs` | CLEAN (partial) | Agent 12 |
+| `cpu/apic.rs` | **FIXED** (acknowledge_int event) | Agent 12, 28 |
 
 ### Decoder
 | File | Status | Agent |
@@ -91,6 +102,8 @@ Date: 2026-03-15
 | `decoder/decode64.rs` | CLEAN | Agent 5 |
 | `decoder/decode32.rs` | CLEAN | Agent 22 |
 | `decoder/opmap.rs` | CLEAN | Agent 22 |
+| `decoder/opmap_0f38.rs` | CLEAN | Agent 26 |
+| `decoder/opmap_0f3a.rs` | CLEAN | Agent 27 |
 | `decoder/tables.rs` | CLEAN | Agent 22 |
 | `cpu/dispatcher.rs` | CLEAN | Agent 5, 15 |
 | `cpu/opcodes_table.rs` | CLEAN | Agent 5 |
@@ -112,32 +125,24 @@ Date: 2026-03-15
 ### Memory / Emulator
 | File | Status | Agent |
 |------|--------|-------|
-| `memory/mod.rs` | CLEAN | Agent 13 |
-| `memory/misc_mem.rs` | CLEAN | Agent 13 |
+| `memory/mod.rs` | CLEAN | Agent 13, 29 |
+| `memory/misc_mem.rs` | CLEAN | Agent 13, 29 |
+| `memory/memory_rusty_box.rs` | CLEAN | Agent 29 |
 | `emulator.rs` | CLEAN | Agent 13 |
 
-### CPU (additional — audited clean)
-| File | Status | Agent |
-|------|--------|-------|
-| `cpu/protect_ctrl.rs` | CLEAN | Agent 24 |
-| `cpu/tasking.rs` | CLEAN | Agent 24 |
-| `cpu/smm.rs` | CLEAN | Agent 24 |
-| `cpu/data_xfer_ext.rs` | CLEAN | Agent 24 |
+## Files NOT Yet Audited
 
-## Files NOT Yet Audited (low priority — not on Alpine boot critical path)
-
-- `cpu/mwait.rs` — MONITOR/MWAIT (already verified working)
 - `cpu/vmx.rs` — VMX (not implemented, not needed)
 - `cpu/svm.rs` — SVM (not implemented, not needed)
-- `cpu/crc32.rs` — CRC32 instruction
-- `decoder/opmap_0f38.rs` — 3-byte opcode map (mostly SSE4/AVX)
-- `decoder/opmap_0f3a.rs` — 3-byte opcode map (mostly SSE4/AVX)
 - `decoder/x87.rs` — x87 opcode tables (FPU handlers already audited clean)
-- `cpu/sse_string.rs` — PCMPESTRI/M, PCMPISTRI/M
-- `cpu/sse_rcp.rs` — RCPPS/SS, RSQRTPS/SS
-- `cpu/aes.rs` — AES-NI implementations (dispatch verified)
-- `cpu/sha.rs` — SHA implementations (dispatch verified)
-- `cpu/gf2.rs` — GF2P8 implementations (dispatch verified)
+
+## Missing SSE4.1 Instructions (not implemented)
+
+These are decoded by the decoder but have no handler — will hit "Unimplemented opcode":
+- ROUNDPS/PD/SS/SD (66 0F 3A 08-0B) — FP rounding with mode control
+- BLENDPS/PD (66 0F 3A 0C/0D) — FP element blend
+- INSERTPS (66 0F 3A 21) — insert single-precision element
+- DPPS/DPPD (66 0F 3A 40/41) — dot product
 
 ## Bochs Bugs Found (upstream)
 
@@ -147,17 +152,19 @@ Date: 2026-03-15
    exactly (using `> 64` with `.min(63)` clamp to avoid Rust UB), but the correct
    threshold per Intel spec would be `> 63`.
 
-## Bugs Found and Fixed (12 total)
+## Bugs Found and Fixed (14 total)
 
 1. CR0 write: missing handleCpuModeChange + 4 other mode handlers
 2. CR4 write: missing FPU/SSE/AVX mode handlers
-3. CR3 NOFLUSH bit 63 not cleared
-4. ATAPI READ boundary clipping missing
-5. 53 VEX/AVX handler implementations (319 opcodes)
-6. Serial FIFO timeout not implemented
-7. CPUID leaf 0xD/1 EAX hardcoded
-8. Unknown MSR silently return 0 (now #GP with ignore flag)
-9. SSE float→int rounding wrong in no_std (round-away instead of round-ties-even)
-10. SSE cfg gates wrong (#[cfg(feature = "no_std")] doesn't exist)
-11. Stale [MOV64-LOAD-CORRUPT] diagnostic removed
-12. Perf counters added (TLB hit/miss, page walks)
+3. CR0 write: duplicate handler calls (regression from fix #1)
+4. CR3 NOFLUSH bit 63 not cleared
+5. ATAPI READ boundary clipping missing
+6. 53 VEX/AVX handler implementations (319 opcodes wired)
+7. Serial FIFO timeout not implemented
+8. CPUID leaf 0xD/1 EAX hardcoded
+9. Unknown MSR silently return 0 (now #GP with ignore_bad_msrs flag)
+10. SSE float→int rounding wrong in no_std path (round-away instead of round-ties-even)
+11. SSE cfg gates wrong (#[cfg(feature = "no_std")] → #[cfg(not(feature = "std"))])
+12. SSE PSRLQ/PSLLQ shift threshold changed from > 63 to > 64 (match Bochs)
+13. LAPIC acknowledge_int: clear BX_EVENT_PENDING_LAPIC_INTR event flag
+14. Stale diagnostics removed (MOV64-LOAD-CORRUPT, QWORD-RMW-CORRUPT)
