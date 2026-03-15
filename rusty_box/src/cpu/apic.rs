@@ -1057,6 +1057,15 @@ impl BxLocalApic {
     /// be signaled to the CPU.
     /// Sets self.intr = true if an interrupt is deliverable.
     /// Bochs: service_local_apic (apic.cc:801-827)
+    /// Clear BX_EVENT_PENDING_LAPIC_INTR from CPU event system.
+    /// Bochs: cpu->clear_event(BX_EVENT_PENDING_LAPIC_INTR)
+    fn clear_pending_lapic_event(&mut self) {
+        const BX_EVENT_PENDING_LAPIC_INTR: u32 = 1 << 2;
+        if let Some(ptr) = self.pending_event_ptr {
+            unsafe { *ptr &= !BX_EVENT_PENDING_LAPIC_INTR; }
+        }
+    }
+
     pub(crate) fn service_local_apic(&mut self) {
         // If INTR already raised, nothing to do (apic.cc:808)
         if self.intr {
@@ -1198,7 +1207,9 @@ impl BxLocalApic {
         let vector = self.highest_priority_int(&self.irr);
         if vector < 0 || ((vector as u32) & 0xF0) <= (self.get_ppr() as u32) {
             // No deliverable interrupt — return spurious vector
+            // Bochs apic.cc:909 — clear PENDING_LAPIC_INTR event
             self.intr = false;
+            self.clear_pending_lapic_event();
             return self.spurious_vector;
         }
 
@@ -1210,7 +1221,9 @@ impl BxLocalApic {
         Self::set_vector(&mut self.isr, vec_u32);
 
         // Clear INTR and re-check for more interrupts (apic.cc:923-924)
+        // Bochs: cpu->clear_event(BX_EVENT_PENDING_LAPIC_INTR)
         self.intr = false;
+        self.clear_pending_lapic_event();
         self.service_local_apic(); // may set intr=true again
 
         vector as u8
