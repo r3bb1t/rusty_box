@@ -116,28 +116,28 @@ Date: 2026-03-15
 | `memory/misc_mem.rs` | CLEAN | Agent 13 |
 | `emulator.rs` | CLEAN | Agent 13 |
 
-## Files NOT Yet Audited
+### CPU (additional — audited clean)
+| File | Status | Agent |
+|------|--------|-------|
+| `cpu/protect_ctrl.rs` | CLEAN | Agent 24 |
+| `cpu/tasking.rs` | CLEAN | Agent 24 |
+| `cpu/smm.rs` | CLEAN | Agent 24 |
+| `cpu/data_xfer_ext.rs` | CLEAN | Agent 24 |
 
-### CPU (pending agents)
-- `cpu/protect_ctrl.rs` — LGDT/LIDT/SGDT/SIDT, LAR/LSL (audit 24 in progress)
-- `cpu/tasking.rs` — task_switch full audit (audit 24 in progress)
-- `cpu/smm.rs` — SMM/RSM (audit 24 in progress)
-- `cpu/mwait.rs` — MONITOR/MWAIT
+## Files NOT Yet Audited (low priority — not on Alpine boot critical path)
+
+- `cpu/mwait.rs` — MONITOR/MWAIT (already verified working)
 - `cpu/vmx.rs` — VMX (not implemented, not needed)
 - `cpu/svm.rs` — SVM (not implemented, not needed)
 - `cpu/crc32.rs` — CRC32 instruction
-
-### Decoder (not yet audited)
-- `decoder/opmap_0f38.rs` — 3-byte opcode map (0F 38 xx)
-- `decoder/opmap_0f3a.rs` — 3-byte opcode map (0F 3A xx)
-- `decoder/x87.rs` — x87 opcode tables
-
-### SSE (specific handlers not yet audited)
+- `decoder/opmap_0f38.rs` — 3-byte opcode map (mostly SSE4/AVX)
+- `decoder/opmap_0f3a.rs` — 3-byte opcode map (mostly SSE4/AVX)
+- `decoder/x87.rs` — x87 opcode tables (FPU handlers already audited clean)
 - `cpu/sse_string.rs` — PCMPESTRI/M, PCMPISTRI/M
 - `cpu/sse_rcp.rs` — RCPPS/SS, RSQRTPS/SS
-- `cpu/aes.rs` — AES-NI handlers (audit 15 checked dispatch, not implementation)
-- `cpu/sha.rs` — SHA handlers
-- `cpu/gf2.rs` — GF2P8 handlers
+- `cpu/aes.rs` — AES-NI implementations (dispatch verified)
+- `cpu/sha.rs` — SHA implementations (dispatch verified)
+- `cpu/gf2.rs` — GF2P8 implementations (dispatch verified)
 
 ## Bochs Bugs Found (upstream)
 
