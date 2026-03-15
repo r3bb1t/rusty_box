@@ -1530,8 +1530,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.icount += 1;
                 self.perf_instructions += 1;
 
-                // DIAG: when prefetch detects user-mode at kernel RIP, dump instruction bytes
-                // from the last few RIP ring entries (the user-mode code before the fault)
+                // DIAG: when user-mode RIP is kernel address, dump instruction state
                 if self.user_pl && self.prev_rip >= 0xffff_8000_0000_0000 && self.icount > 1_500_000_000 {
                     static FAULT_DUMP_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
                     if !FAULT_DUMP_DONE.swap(true, core::sync::atomic::Ordering::Relaxed) {

@@ -262,10 +262,9 @@ impl BxICache {
     }
 
     pub(super) fn hash(p_addr: BxPhyAddress, fetch_mode_mask: u64) -> u32 {
-        // Hash function matching C++ implementation
-        let addr = p_addr as u64;
-        let hash = (addr >> 4) ^ (fetch_mode_mask << 8);
-        (hash as u32) & ((BX_ICACHE_ENTRIES - 1) as u32)
+        // Bochs icache.h:143 — (pAddr & (BxICacheEntries-1)) ^ fetchModeMask
+        let hash = (p_addr as u32) ^ (fetch_mode_mask as u32);
+        hash & ((BX_ICACHE_ENTRIES - 1) as u32)
     }
 
     pub(super) fn find_trace_start(
