@@ -101,7 +101,7 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             in_smm: Default::default(),
             cpu_mode: Default::default(),
             user_pl: Default::default(),
-            ignore_bad_msrs: Default::default(),
+            ignore_bad_msrs: true, // Bochs default: silently ignore unknown MSRs
             a20_mask: 0xFFFF_FFFF_FFFF_FFFF,
             cpu_state_use_ok: Default::default(),
             last_exception_type: Default::default(),
