@@ -1142,6 +1142,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(crate) fn write_virtual_qword_64(&mut self, seg: BxSegregs, offset: u64, val: u64) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
+        // DIAG: catch kernel writing the corrupted entry point or RSP to pt_regs
+        if (val == 0xffffffff81001280 || val == 0xfffffe0000002fd0) && self.icount > 1_500_000_000 {
+            eprintln!("[WRITE-WATCH] val={:#x} laddr={:#x} offset={:#x} seg={:?} RIP={:#x} icount={}",
+                val, laddr, offset, seg, self.prev_rip, self.icount);
+            // Dump caller context
+            let end = self.diag_rip_ring_idx;
+            let start = if end > 8 { end - 8 } else { 0 };
+            for i in start..end {
+                eprintln!("  caller_rip_ring[{}]={:#x}", i, self.diag_rip_ring[i & 255]);
+            }
+        }
         let page_offset = laddr & 0xFFF;
         if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
