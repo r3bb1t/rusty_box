@@ -338,6 +338,21 @@ impl BxICache {
         }
     }
 
+    /// Bochs icache.h:191 — breakLinks()
+    /// Called on every TLB flush (CR3 write, INVLPG, CR0/CR4 write).
+    /// Invalidates page-split icache entries so page-boundary instructions
+    /// don't serve stale bytes from old physical pages after remapping.
+    pub fn break_links(&mut self) {
+        // Bochs: invalidatePageSplitICacheEntries()
+        for entry in &mut self.page_split_index {
+            if entry.ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
+                entry.ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
+                flush_smc(&mut entry.e);
+            }
+        }
+        self.next_page_split_index = 0;
+    }
+
     pub fn flush_all(&mut self) {
         for entry in &mut self.entry {
             flush_smc(entry);

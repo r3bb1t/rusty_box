@@ -458,6 +458,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.invalidate_stack_cache();
         self.dtlb.flush();
         self.itlb.flush();
+        // Bochs paging.cc:412 — iCache.breakLinks()
+        // Invalidates page-split icache entries and increments trace link timestamp.
+        // Without this, page-boundary instructions survive TLB flush and serve
+        // stale bytes from old physical pages after page remapping.
+        self.i_cache.break_links();
     }
 
     /// Flush non-global TLB entries only (preserves entries with G bit set).
@@ -468,6 +473,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.invalidate_stack_cache();
         self.dtlb.flush_non_global();
         self.itlb.flush_non_global();
+        // Bochs paging.cc:433 — iCache.breakLinks()
+        self.i_cache.break_links();
     }
 
     pub(super) fn invalidate_prefetch_q(&mut self) {

@@ -241,11 +241,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             self.get_laddr32(seg as usize, eaddr as u32) as u64
         };
-        // Bochs paging.cc TLB_invlpg: invalidate prefetch, stack cache, TLB entries
+        // Bochs paging.cc TLB_invlpg: invalidate prefetch, stack cache, TLB entries, icache links
         self.invalidate_prefetch_q();
         self.invalidate_stack_cache();
         self.dtlb.invlpg(laddr);
         self.itlb.invlpg(laddr);
+        // Bochs paging.cc:453 — iCache.breakLinks()
+        self.i_cache.break_links();
 
         Ok(())
     }
