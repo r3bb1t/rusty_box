@@ -1356,7 +1356,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         {
             let nr = self.rax();
             // Trace execve(59) to see what binaries are being run
-            if nr == 59 && self.icount > 3_230_000_000 {
+            if nr == 59 && self.icount > 3_000_000_000 {
                 let path_addr = self.rdi();
                 let mut path_buf = alloc::vec::Vec::new();
                 for i in 0..128u64 {
@@ -1367,7 +1367,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
                 static EXEC_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
                 let ec = EXEC_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if ec < 30 {
+                if ec < 100 {
                     eprintln!("[EXECVE#{}] path={:?} icount={}",
                         ec, alloc::string::String::from_utf8_lossy(&path_buf), self.icount);
                 }
@@ -1430,8 +1430,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         self.r10(), self.icount);
                 }
             }
-            // Also trace mmap (nr=9) to find library mappings
-            if nr == 9 && self.icount > 1_700_000_000 && self.icount < 1_770_000_000 {
+            // Also trace mmap (nr=9) to find library mappings near mount/apk crash
+            if nr == 9 && self.icount > 3_100_000_000 && self.icount < 3_400_000_000 {
                 let addr = self.rdi();
                 let len = self.rsi();
                 let prot = self.rdx();
