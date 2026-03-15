@@ -1142,8 +1142,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(crate) fn write_virtual_qword_64(&mut self, seg: BxSegregs, offset: u64, val: u64) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
+        // DIAG: watch ALL writes to pt_regs->ip location during execve window
+        if laddr == 0xffffc9000019ffc8 && self.icount > 3_322_100_000 && self.icount < 3_323_000_000 {
+            eprintln!("[PT_REGS_IP_WRITE] val={:#x} RIP={:#x} icount={}", val, self.prev_rip, self.icount);
+        }
+        // DIAG: also watch pt_regs->sp and pt_regs->flags locations
+        if (laddr == 0xffffc9000019ffe0 || laddr == 0xffffc9000019ffd0) && self.icount > 3_322_100_000 && self.icount < 3_323_000_000 {
+            eprintln!("[PT_REGS_SP/FL_WRITE] laddr={:#x} val={:#x} RIP={:#x} icount={}", laddr, val, self.prev_rip, self.icount);
+        }
         // DIAG: catch kernel writing the corrupted entry point or RSP to pt_regs
-        if (val == 0xffffffff81001280 || val == 0xfffffe0000002fd0) && self.icount > 1_500_000_000 {
+        if (val == 0xffffffff81001280 || val == 0xfffffe0000002fd0) && self.icount > 3_300_000_000 {
             eprintln!("[WRITE-WATCH] val={:#x} laddr={:#x} offset={:#x} seg={:?} RIP={:#x} icount={}",
                 val, laddr, offset, seg, self.prev_rip, self.icount);
             // Dump caller context

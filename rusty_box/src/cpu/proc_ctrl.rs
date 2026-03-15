@@ -1815,6 +1815,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             eprintln!("[SYSRET-KERNEL] temp_rip={:#x} rcx={:#x} r11={:#x} os64={} icount={}",
                 temp_rip, self.rcx(), self.r11(), instr.os64_l(), self.icount);
         }
+        // DIAG: trace ALL SYSRETs in the narrow crash window
+        if self.icount > 3_322_888_000 && self.icount < 3_322_893_000 {
+            eprintln!("[SYSRET-TRACE] temp_rip={:#x} rcx={:#x} r11={:#x} os64={} icount={}",
+                temp_rip, self.rcx(), self.r11(), instr.os64_l(), self.icount);
+        }
         self.set_rip(temp_rip);
 
         Ok(())

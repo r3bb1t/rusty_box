@@ -2585,6 +2585,11 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 let eflags = self.stack_read_qword(temp_rsp.wrapping_add(16))? as u32;
                 let cs = self.stack_read_qword(temp_rsp.wrapping_add(8))? as u16;
                 let rip = self.stack_read_qword(temp_rsp)?;
+                // DIAG: trace ALL IRETs in the narrow crash window
+                if self.icount > 3_322_888_000 && self.icount < 3_322_893_000 {
+                    eprintln!("[IRET-TRACE] rip={:#x} cs={:#06x} eflags={:#x} rsp={:#x} icount={}",
+                        rip, cs, eflags, temp_rsp, self.icount);
+                }
                 // DIAG: detect IRET to kernel address from kernel mode (execve returning wrong entry point)
                 if rip >= 0xffff_0000_0000_0000 && (cs & 3) == 3 && self.icount > 1_500_000_000 {
                     eprintln!("[IRET-KERN-USER] rip={:#x} cs={:#06x} eflags={:#x} rsp={:#x} icount={}",

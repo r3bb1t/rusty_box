@@ -1530,6 +1530,34 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.icount += 1;
                 self.perf_instructions += 1;
 
+                // DIAG: catch first appearance of wrong entry point in any GPR
+                if self.icount > 3_322_888_000 && self.icount < 3_322_893_000 {
+                    static ENTRY_WATCH_FIRED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+                    if !ENTRY_WATCH_FIRED.load(core::sync::atomic::Ordering::Relaxed) {
+                        for reg_idx in 0..16usize {
+                            let val = unsafe { self.gen_reg[reg_idx].rrx };
+                            if val == 0xffffffff81001280 {
+                                ENTRY_WATCH_FIRED.store(true, core::sync::atomic::Ordering::Relaxed);
+                                eprintln!("[GPR-ENTRY-WATCH] reg[{}]={:#x} RIP={:#x} icount={}",
+                                    reg_idx, val, self.prev_rip, self.icount);
+                                // Dump all GPRs
+                                for j in 0..16usize {
+                                    eprintln!("  r{}={:#x}", j, unsafe { self.gen_reg[j].rrx });
+                                }
+                                // Dump RIP ring (last 128 instructions)
+                                let end = self.diag_rip_ring_idx;
+                                let start = if end > 128 { end - 128 } else { 0 };
+                                for i in start..end {
+                                    eprintln!("  rip_ring[{}]={:#x} op={:?}", i,
+                                        self.diag_rip_ring[i & 255],
+                                        rusty_box_decoder::opcode::Opcode::try_from(self.diag_opcode_ring[i & 255]).ok());
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+
                 // Record RIP + opcode in ring buffer — separate kernel and userspace rings
                 if self.icount > 620_000_000 && self.long64_mode() {
                     let rip = self.prev_rip;
