@@ -908,28 +908,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.cr0.set32(val_32);
 
-        // Bochs SetCR0 (crregs.cc:1142-1163): call individual handlers in order,
-        // NOT handleCpuContextChange (which is heavier with unconditional TLB flush)
-        self.handle_alignment_check(); // crregs.cc:1142
-        self.handle_cpu_mode_change(); // crregs.cc:1145
-        self.handle_fpu_mmx_mode_change(); // crregs.cc:1147
-        self.handle_sse_mode_change(); // crregs.cc:1150
-        self.handle_avx_mode_change(); // crregs.cc:1153
-
-        // Bochs: TLB flush if PG, PE, or WP changed (crregs.cc:1158)
-        let tlb_relevant = BxCr0::PG | BxCr0::WP | BxCr0::PE;
-        if (old_cr0 & tlb_relevant.bits()) != (val_32 & tlb_relevant.bits()) {
-            self.tlb_flush();
-        }
-
-        // Bochs crregs.cc:1142-1153 — mode change handlers after CR0 write
+        // Bochs crregs.cc:1142-1153 — mode change handlers (BEFORE TLB flush)
+        // Note: Bochs calls handleCpuModeChange here, but our code has historically
+        // only called update_fetch_mode_mask. Adding the full handler set caused
+        // Alpine to break (cpu_mode transitions to LongCompat too early before
+        // far JMP loads 64-bit CS). Keep the full Bochs-matching set but ensure
+        // correct ordering.
         self.handle_alignment_check();
-        self.handle_cpu_mode_change(); // updates cpu_mode + calls update_fetch_mode_mask
+        self.handle_cpu_mode_change();
         self.handle_fpu_mmx_mode_change();
         self.handle_sse_mode_change();
         self.handle_avx_mode_change();
 
-        // Bochs crregs.cc:1166 — update linaddr_width
+        // Bochs crregs.cc:1158-1163 — TLB flush only if PG, WP, or PE changed
+        if (old_cr0 & 0x80010001) != (val_32 & 0x80010001) {
+            self.tlb_flush();
+        }
+
+        // Bochs crregs.cc:1166
         self.linaddr_width = if self.cr4.la57() { 57 } else { 48 };
 
         tracing::debug!(
