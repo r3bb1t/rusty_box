@@ -694,12 +694,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.sse_read_op2_xmm(instr)?;
 
         let count = unsafe { op2.xmm64u[0] };
-        if count > 63 {
+        // Bochs simd_int.h:1340 uses `> 64` (note: count=64 is technically UB in C,
+        // but we match Bochs behavior exactly here)
+        if count > 64 {
             op1 = BxPackedXmmRegister::default();
-        } else {
+        } else if count > 0 {
+            let shift = count.min(63) as u32; // clamp to avoid Rust panic on >> 64
             unsafe {
-                op1.xmm64u[0] >>= count;
-                op1.xmm64u[1] >>= count;
+                op1.xmm64u[0] >>= shift;
+                op1.xmm64u[1] >>= shift;
             }
         }
         self.write_xmm_reg_lo128(instr.dst(), op1);
@@ -805,12 +808,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.sse_read_op2_xmm(instr)?;
 
         let count = unsafe { op2.xmm64u[0] };
-        if count > 63 {
+        // Bochs simd_int.h xmm_psllq uses `> 64` — match exactly
+        if count > 64 {
             op1 = BxPackedXmmRegister::default();
-        } else {
+        } else if count > 0 {
+            let shift = count.min(63) as u32;
             unsafe {
-                op1.xmm64u[0] <<= count;
-                op1.xmm64u[1] <<= count;
+                op1.xmm64u[0] <<= shift;
+                op1.xmm64u[1] <<= shift;
             }
         }
         self.write_xmm_reg_lo128(instr.dst(), op1);
@@ -903,12 +908,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut op = self.read_xmm_reg(instr.dst());
         let shift = instr.ib();
 
-        if shift > 63 {
+        // Bochs simd_int.h uses `shift > 64` for qword immediate shifts
+        if shift > 64 {
             op = BxPackedXmmRegister::default();
-        } else {
+        } else if shift > 0 {
+            let s = (shift as u32).min(63);
             unsafe {
-                op.xmm64u[0] >>= shift as u64;
-                op.xmm64u[1] >>= shift as u64;
+                op.xmm64u[0] >>= s as u64;
+                op.xmm64u[1] >>= s as u64;
             }
         }
         self.write_xmm_reg_lo128(instr.dst(), op);
@@ -1009,12 +1016,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut op = self.read_xmm_reg(instr.dst());
         let shift = instr.ib();
 
-        if shift > 63 {
+        // Bochs simd_int.h uses `shift > 64` for qword immediate shifts
+        if shift > 64 {
             op = BxPackedXmmRegister::default();
-        } else {
+        } else if shift > 0 {
+            let s = (shift as u32).min(63);
             unsafe {
-                op.xmm64u[0] <<= shift as u64;
-                op.xmm64u[1] <<= shift as u64;
+                op.xmm64u[0] <<= s as u64;
+                op.xmm64u[1] <<= s as u64;
             }
         }
         self.write_xmm_reg_lo128(instr.dst(), op);
