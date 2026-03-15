@@ -1544,6 +1544,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if self.long_mode() {
             // Long mode SYSCALL (Bochs proc_ctrl.cc:1096-1148)
             let saved_rip = self.rip();
+            // DIAG: verify SYSCALL saved_rip is user-space
+            if saved_rip >= 0xffff_0000_0000_0000 && self.icount > 1_500_000_000 {
+                eprintln!("[SYSCALL-BAD-RIP] saved_rip={:#x} prev_rip={:#x} icount={} rax={}",
+                    saved_rip, self.prev_rip, self.icount, self.rax());
+            }
             self.set_rcx(saved_rip);
             let saved_rflags = self.eflags.bits() & !EFlags::RF.bits();
             self.set_r11(saved_rflags as u64);
