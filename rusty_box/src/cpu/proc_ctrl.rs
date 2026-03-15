@@ -1830,10 +1830,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             eprintln!("[SYSRET-KERNEL] temp_rip={:#x} rcx={:#x} r11={:#x} os64={} icount={}",
                 temp_rip, self.rcx(), self.r11(), instr.os64_l(), self.icount);
         }
-        // DIAG: trace ALL SYSRETs in the narrow crash window
-        if self.icount > 3_322_888_000 && self.icount < 3_322_893_000 {
-            eprintln!("[SYSRET-TRACE] temp_rip={:#x} rcx={:#x} r11={:#x} os64={} icount={}",
-                temp_rip, self.rcx(), self.r11(), instr.os64_l(), self.icount);
+        // DIAG: check XMM registers for the corruption value at every SYSRET
+        if self.icount > 1_600_000_000 && temp_rip < 0xffff_0000_0000_0000 {
+            for xmm_idx in 0..16usize {
+                let lo = unsafe { self.vmm[xmm_idx].zmm64u[0] };
+                let hi = unsafe { self.vmm[xmm_idx].zmm64u[1] };
+                if lo == 0xffffffff81001280 || hi == 0xffffffff81001280
+                    || lo == 0x81001280 || hi == 0x81001280 {
+                    static XMM_HIT_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                    let c = XMM_HIT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if c < 5 {
+                        eprintln!("[XMM-CORRUPTION] XMM{}=[{:#x}, {:#x}] temp_rip={:#x} icount={}",
+                            xmm_idx, lo, hi, temp_rip, self.icount);
+                    }
+                    break;
+                }
+            }
         }
         self.set_rip(temp_rip);
 

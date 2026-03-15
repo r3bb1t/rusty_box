@@ -2598,6 +2598,14 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                         eprintln!("[IRET-KERN-USER] rip={:#x} cs={:#06x} eflags={:#x} rsp={:#x} icount={}",
                             rip, cs, eflags, temp_rsp, self.icount);
                         eprintln!("  caller_rip={:#x} (before IRET)", self.rip());
+                        // Dump ALL XMM registers to check for corruption source
+                        for xmm_idx in 0..16usize {
+                            let lo = unsafe { self.vmm[xmm_idx].zmm64u[0] };
+                            let hi = unsafe { self.vmm[xmm_idx].zmm64u[1] };
+                            if lo != 0 || hi != 0 {
+                                eprintln!("  XMM{}=[{:#018x}, {:#018x}]", xmm_idx, lo, hi);
+                            }
+                        }
                         // Dump last 32 RIP ring entries with instruction bytes
                         let end = self.diag_rip_ring_idx;
                         let start = if end > 32 { end - 32 } else { 0 };

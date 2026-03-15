@@ -54,7 +54,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // RSP_SPECULATIVE — mark speculative RSP so exceptions during delivery
         // can restore the original value (matches Bochs line 807)
         self.speculative_rsp = true;
-        self.prev_rsp = self.esp() as u64;
+        self.prev_rsp = self.rsp(); // Bochs: prev_rsp = RSP (full 64-bit)
         self.prev_ssp = 0; // no shadow stack
 
         if self.real_mode() {
@@ -260,7 +260,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // RSP_SPECULATIVE before all mode branches (Bochs ctrl_xfer16.cc:552)
         self.speculative_rsp = true;
-        self.prev_rsp = self.esp() as u64;
+        self.prev_rsp = self.rsp(); // Bochs: prev_rsp = RSP (full 64-bit)
 
         // Protected mode dispatch (Bochs ctrl_xfer16.cc:554)
         // Bochs checks protected_mode() first, which includes protected+long modes
@@ -336,7 +336,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // RSP_SPECULATIVE before all mode branches (Bochs ctrl_xfer32.cc:574)
         self.speculative_rsp = true;
-        self.prev_rsp = self.esp() as u64;
+        self.prev_rsp = self.rsp(); // Bochs: prev_rsp = RSP (full 64-bit)
 
         // Protected mode dispatch (Bochs ctrl_xfer32.cc:576)
         if self.protected_mode() {
@@ -453,7 +453,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // RSP_SPECULATIVE (Bochs iret.cc:107)
         self.speculative_rsp = true;
-        self.prev_rsp = self.esp() as u64;
+        self.prev_rsp = self.rsp(); // Bochs: prev_rsp = RSP (full 64-bit)
 
         // Peek at stack without modifying ESP
         let temp_esp = if self.is_stack_32bit() {
@@ -697,7 +697,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // RSP_SPECULATIVE
         self.speculative_rsp = true;
-        self.prev_rsp = self.esp() as u64;
+        self.prev_rsp = self.rsp(); // Bochs: prev_rsp = RSP (full 64-bit)
 
         // Peek at stack — 16-bit reads (6 bytes total)
         let temp_esp = if self.is_stack_32bit() {
