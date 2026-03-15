@@ -1045,6 +1045,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     ebx = self.xsave_max_size_for_features(self.xcr0.get32());
                     ecx = self.xsave_max_size_for_features(self.xcr0_suppmask);
                 } else if sub_function == 1 {
+                    // Subleaf 1 EAX: XSAVE feature flags (Bochs cpuid.cc:234-240)
+                    // Bit 0: XSAVEOPT, Bit 1: XSAVEC, Bit 2: XGETBV_ECX1, Bit 3: XSAVES
+                    eax = 0x0000000F; // Skylake-X supports all four
                     // Subleaf 1 EBX: size for XSAVES (XCR0 | IA32_XSS)
                     // Bochs cpuid.cc:244-245
                     ebx = self.xsave_compacted_size_for_features(

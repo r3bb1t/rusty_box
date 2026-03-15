@@ -556,7 +556,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             BX_MSR_KERNELGSBASE => self.msr.kernelgsbase,
             BX_MSR_TSC_AUX => self.msr.tsc_aux as u64,
             _ => {
-
+                // Bochs: unknown MSRs raise #GP(0)
+                if !self.ignore_bad_msrs {
+                    tracing::debug!("RDMSR: unknown MSR={:#010x}, #GP(0)", msr);
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
                 0
             }
         };
@@ -691,7 +695,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
             BX_MSR_TSC_AUX => self.msr.tsc_aux = val as u32,
             _ => {
-
+                // Bochs: unknown MSRs raise #GP(0)
+                if !self.ignore_bad_msrs {
+                    tracing::debug!("WRMSR: unknown MSR={:#010x}, #GP(0)", msr);
+                    return self.exception(super::cpu::Exception::Gp, 0);
+                }
             }
         }
         tracing::debug!("WRMSR: MSR={:#010x} = {:#018x}", msr, val);

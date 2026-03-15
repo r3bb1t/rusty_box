@@ -199,6 +199,11 @@ struct SerialPort {
     divisor_lsb: u8,
     divisor_msb: u8,
 
+    // FIFO timeout: 16550 fires timeout interrupt after 4 character times
+    // with no new data and RX FIFO below trigger level. We track ticks since
+    // last RX byte; tick() checks and fires the timeout.
+    fifo_timeout_ticks: u32,
+
     // TX output buffer — bytes written by guest, drained by host
     tx_output: VecDeque<u8>,
 }
@@ -237,6 +242,8 @@ impl SerialPort {
             divisor_lsb: 1, // Default divisor=1 → 115200 baud
             divisor_msb: 0,
 
+            fifo_timeout_ticks: 0,
+
             tx_output: VecDeque::with_capacity(256),
         };
         // Simulate connected device
@@ -273,6 +280,7 @@ impl SerialPort {
         self.scratch = 0;
         self.divisor_lsb = 1;
         self.divisor_msb = 0;
+        self.fifo_timeout_ticks = 0;
 
         // Simulate connected device
         self.modem_status.cts = true;
@@ -447,8 +455,22 @@ impl BxSerialC {
                 s.line_status.rxdata_ready = true;
                 self.raise_interrupt(port_idx, IntSource::RxData);
             }
-            // If trigger not reached, a real 16550 would start the FIFO timeout timer.
-            // We skip the timer for simplicity — data is immediately available.
+            // FIFO timeout: 16550 fires timeout after 4 character times with no new
+            // data when FIFO has data below trigger level. Since we're not cycle-accurate,
+            // fire timeout immediately — data is available for the guest to read.
+            // Note: must drop borrow of `s` before calling raise_interrupt
+            else if !s.rx_fifo.is_empty() {
+                s.line_status.rxdata_ready = true;
+                s.fifo_ipending = true;
+                if s.int_enable.rxdata_enable {
+                    s.fifo_interrupt = true;
+                }
+                // Drop s borrow, then raise interrupt
+                let need_raise = self.ports[port_idx].int_enable.rxdata_enable;
+                if need_raise {
+                    self.raise_interrupt(port_idx, IntSource::Fifo);
+                }
+            }
         } else {
             if s.line_status.rxdata_ready {
                 s.line_status.overrun_error = true;
