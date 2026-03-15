@@ -1530,18 +1530,32 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.icount += 1;
                 self.perf_instructions += 1;
 
-                // DIAG: trace RCX in the 125-instruction crash window
-                // SYSRET at icount=3322892487, fault at icount=3322892612
-                if self.icount > 3_322_892_480 && self.icount < 3_322_892_620 {
-                    let rcx = self.rcx();
-                    let rip = self.prev_rip;
-                    // Log every instruction with RCX value
-                    if rip < 0xffff_0000_0000_0000 { // user mode only
-                        static USER_TRACE_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                        let c = USER_TRACE_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                        if c < 200 {
-                            eprintln!("[USER-TRACE] RIP={:#x} RCX={:#x} RAX={:#x} RDI={:#x} RSI={:#x} RDX={:#x} RSP={:#x} icount={}",
-                                rip, rcx, self.rax(), self.rdi(), self.rsi(), self.rdx(), self.rsp(), self.icount);
+                // DIAG: when prefetch detects user-mode at kernel RIP, dump instruction bytes
+                // from the last few RIP ring entries (the user-mode code before the fault)
+                if self.user_pl && self.prev_rip >= 0xffff_8000_0000_0000 && self.icount > 1_500_000_000 {
+                    static FAULT_DUMP_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+                    if !FAULT_DUMP_DONE.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                        eprintln!("[FAULT-INSTR-DUMP] fault_rip={:#x} icount={}", self.prev_rip, self.icount);
+                        eprintln!("  RAX={:#x} RCX={:#x} RDX={:#x} RBX={:#x} RSP={:#x} RBP={:#x} RSI={:#x} RDI={:#x}",
+                            self.rax(), self.rcx(), self.rdx(), self.rbx(), self.rsp(), self.rbp(), self.rsi(), self.rdi());
+                        eprintln!("  R8={:#x} R9={:#x} R10={:#x} R11={:#x} R12={:#x} R13={:#x} R14={:#x} R15={:#x}",
+                            self.r8(), self.r9(), self.r10(), self.r11(), self.r12(), self.r13(), self.r14(), self.r15());
+                        // Dump last 8 RIP ring entries with their instruction bytes
+                        let end = self.diag_rip_ring_idx;
+                        let start = if end > 8 { end - 8 } else { 0 };
+                        for idx in start..end {
+                            let r = self.diag_rip_ring[idx & 255];
+                            if r < 0xffff_0000_0000_0000 { // user-mode only
+                                let mut bytes = [0u8; 16];
+                                for i in 0..16u64 {
+                                    bytes[i as usize] = self.v_read_byte(
+                                        super::decoder::BxSegregs::Ds, r.wrapping_add(i)
+                                    ).unwrap_or(0xFF);
+                                }
+                                let byte_str: alloc::vec::Vec<alloc::string::String> = bytes.iter()
+                                    .map(|b| alloc::format!("{:02x}", b)).collect();
+                                eprintln!("  ring[{}] RIP={:#x} bytes=[{}]", idx, r, byte_str.join(" "));
+                            }
                         }
                     }
                 }
