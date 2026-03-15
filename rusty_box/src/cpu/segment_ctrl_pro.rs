@@ -989,6 +989,11 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             self.sregs[seg_idx].cache.u.segment.avl = false;
         }
 
+        // Bochs segment_ctrl_pro.cc:236 — invalidate stack cache after null SS load
+        if seg == BxSegregs::Ss {
+            self.invalidate_stack_cache();
+        }
+
         tracing::debug!(
             "load_null_selector({:?}): selector {:#06x}, cleared all cache fields",
             seg,
