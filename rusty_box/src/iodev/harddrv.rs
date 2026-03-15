@@ -226,7 +226,7 @@ impl DriveGeometry {
         let spt = self.sectors_per_track as u32;
         let heads = self.heads as u32;
 
-        (cylinder as u32 * heads * spt) + (head as u32 * spt) + (sector as u32 - 1)
+        (cylinder as u32 * heads * spt) + (head as u32 * spt) + (sector as u32).wrapping_sub(1)
     }
 }
 
