@@ -409,6 +409,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
+    /// PMULHRSW VdqWdq — packed multiply high with rounding and scale (SSSE3)
+    /// Bochs simd_int.h:988-993: ((a * b >> 14) + 1) >> 1
+    pub(super) fn pmulhrsw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let op1 = self.read_xmm_reg(instr.dst());
+        let op2 = self.sse_read_op2_xmm(instr)?;
+
+        let mut result = BxPackedXmmRegister::default();
+        unsafe {
+            for i in 0..8 {
+                let t = ((op1.xmm16s[i] as i32 * op2.xmm16s[i] as i32) >> 14) + 1;
+                result.xmm16u[i] = (t >> 1) as u16;
+            }
+        }
+        self.write_xmm_reg_lo128(instr.dst(), result);
+        Ok(())
+    }
+
     /// PMULUDQ VdqWdq — packed multiply unsigned dwords to qwords
     /// Multiplies dwords [0] and [2] of each operand, producing two 64-bit results.
     pub(super) fn pmuludq_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {

@@ -1114,7 +1114,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// FIDIVRP dword integer (i32 from memory) -- ST(0) = i32 / ST(0)
-    pub fn fidivrp_dword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
+    pub fn fidivr_dword_integer(&mut self, instr: &Instruction) -> super::super::Result<()> {
         self.fpu_check_pending_exceptions()?;
 
         let eaddr = self.resolve_addr(instr);

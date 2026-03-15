@@ -2072,7 +2072,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::FidivWordInteger => self.fidiv_word_integer(instr),
             Opcode::FidivrWordInteger => self.fidivr_word_integer(instr),
             Opcode::FidivDwordInteger => self.fidiv_dword_integer(instr),
-            Opcode::FidivrDwordInteger => self.fidivrp_dword_integer(instr),
+            Opcode::FidivrDwordInteger => self.fidivr_dword_integer(instr),
             Opcode::Fsqrt => self.fsqrt(instr),
             Opcode::Frndint => self.frndint(instr),
 
