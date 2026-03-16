@@ -1495,9 +1495,26 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // Matching C++ line 202: RIP += i->ilen();
                 // Advance RIP before execution (handlers may read RIP and expect it advanced)
                 // SAFETY: gen_reg is initialized during CPU init; BX_64BIT_REG_RIP is always valid.
-                unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx += (*i_ptr).ilen() as u64 };
+                let ilen_val = unsafe { (*i_ptr).ilen() };
+                debug_assert!(ilen_val > 0 && ilen_val <= 15, "Invalid ilen={} at RIP={:#x}", ilen_val, unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx });
+                unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx += ilen_val as u64 };
                 if is_real {
                     unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx &= 0xFFFF };
+                }
+
+                // DIAG: check RIP after ilen advancement for corruption
+                if unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx } == 0xffffffff81001280
+                    && self.icount > 3_200_000_000
+                {
+                    static RIP_CORRUPT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+                    if !RIP_CORRUPT.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                        let bad_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
+                        let ilen = unsafe { (*i_ptr).ilen() };
+                        let opcode = unsafe { (*i_ptr).get_ia_opcode() };
+                        eprintln!("[RIP-AFTER-ILEN] RIP={:#x} pre_exec_rip={:#x} ilen={} opcode={:?} prev_rip={:#x} icount={}",
+                            bad_rip, pre_exec_rip, ilen, opcode, self.prev_rip, self.icount);
+                        eprintln!("  computed: pre_exec_rip + ilen = {:#x}", pre_exec_rip as u64 + ilen as u64);
+                    }
                 }
 
                 // Execute instruction (matching C++ BX_CPU_CALL_METHOD)
@@ -1536,8 +1553,20 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     }
                 }
 
+                let rip_before_exec = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
                 match self.execute_instruction(unsafe { &*i_ptr }) {
-                    Ok(()) => {}
+                    Ok(()) => {
+                        // DIAG: check if instruction changed RIP to kernel address
+                        let rip_after = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
+                        if rip_after == 0xffffffff81001280 && self.icount > 3_200_000_000 {
+                            static EXEC_RIP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+                            if !EXEC_RIP.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                                let oc = unsafe { (*i_ptr).get_ia_opcode() };
+                                eprintln!("[EXEC-RIP-CORRUPT] rip_before={:#x} rip_after={:#x} opcode={:?} prev_rip={:#x} icount={}",
+                                    rip_before_exec, rip_after, oc, self.prev_rip, self.icount);
+                            }
+                        }
+                    }
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
                         // Exception delivery during execution: restart decode (Bochs longjmp).
                         // Bochs setjmp handler (cpu.cc:141-155): icount++, prev_rip = RIP,
