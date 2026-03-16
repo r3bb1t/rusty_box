@@ -1492,9 +1492,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // TEMPORARY: Trace serial port writes (earlyprintk)
                 // (moved to dispatcher/io level)
 
-                // Note: Bochs sets prev_rip BEFORE RIP += ilen (cpu.cc:204).
-                // Our prev_rip is set AFTER execution (below) for historical reasons.
-                // Changing this order causes decode failures — needs careful analysis.
+                // ROOT CAUSE OF MOUNT CRASH: prev_rip should be set HERE (before ilen)
+                // per Bochs cpu.cc:204, but moving it here causes decode failure at
+                // icount=377M (kernel decompressor). The post-execution assignment below
+                // is wrong for fault recovery when SYSCALL/JMP precedes a faulting instruction
+                // in the same trace. TODO: fix the decode failure to enable this.
+                // self.prev_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
 
                 // Advance RIP before execution (handlers may read RIP and expect it advanced)
                 // SAFETY: gen_reg is initialized during CPU init; BX_64BIT_REG_RIP is always valid.
@@ -1623,7 +1626,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     }
                 }
 
-                // Matching C++ line 204-206: prev_rip = RIP; icount++;
+                // prev_rip = RIP (post-execution) — see ROOT CAUSE comment above
                 self.prev_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
                 self.icount += 1;
                 self.perf_instructions += 1;
