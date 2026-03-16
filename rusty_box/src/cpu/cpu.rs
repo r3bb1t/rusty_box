@@ -1496,7 +1496,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // Advance RIP before execution (handlers may read RIP and expect it advanced)
                 // SAFETY: gen_reg is initialized during CPU init; BX_64BIT_REG_RIP is always valid.
                 let ilen_val = unsafe { (*i_ptr).ilen() };
-                debug_assert!(ilen_val > 0 && ilen_val <= 15, "Invalid ilen={} at RIP={:#x}", ilen_val, unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx });
+                // ilen=0 is valid ONLY for InsertedOpcode (trace boundary marker)
+                if ilen_val == 0 || ilen_val > 15 {
+                    let oc = unsafe { (*i_ptr).get_ia_opcode() };
+                    assert!(ilen_val == 0 && oc == super::decoder::Opcode::InsertedOpcode,
+                        "Invalid ilen={} opcode={:?} at RIP={:#x}", ilen_val, oc, unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx });
+                }
                 unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx += ilen_val as u64 };
                 if is_real {
                     unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx &= 0xFFFF };
