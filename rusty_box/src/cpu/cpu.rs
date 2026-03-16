@@ -1364,6 +1364,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.mem_host_len = host_len;
 
         let mut iteration = 0u64;
+        // Track icount at start for Bochs-compatible IPS measurement.
+        // Bochs counts REP iterations as separate instructions via time_ticks(),
+        // which matches icount (incremented per REP iteration in string.rs).
+        // We return icount delta instead of iteration count to match.
+        let icount_start = self.icount;
         #[cfg(feature = "profiling")]
         let mut prof_assign_ns = 0u64;
         #[cfg(feature = "profiling")]
@@ -1394,7 +1399,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 );
                 if outer_loop_count > 50_000_000 {
                     tracing::error!("[cpu_loop] BAILOUT after {} outer loops", outer_loop_count);
-                    break Ok(iteration);
+                    break Ok(self.icount - icount_start);
                 }
             }
 
@@ -1440,7 +1445,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     self.async_event = 0;
                 } else if self.handle_async_event() {
                     // Slow path: real async event (interrupt, HLT, shutdown, etc.)
-                    break Ok(iteration);
+                    break Ok(self.icount - icount_start);
                 }
             }
 
@@ -1500,6 +1505,34 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 let opcode = unsafe { (*i_ptr).get_ia_opcode() };
                 self.diag_current_opcode = opcode as u16;
 
+                // DIAG: dump instruction details when RCX becomes 0xffffffff81001280
+                if self.rcx() == 0xffffffff81001280 && self.prev_rip < 0xffff_0000_0000_0000
+                    && self.icount > 3_300_000_000
+                {
+                    static RCX_HIT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+                    if !RCX_HIT.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                        let instr = unsafe { &*i_ptr };
+                        eprintln!("[RCX-CORRUPTION] prev_rip={:#x} opcode={:?} ilen={} icount={}",
+                            self.prev_rip, instr.get_ia_opcode(), instr.ilen(), self.icount);
+                        eprintln!("  dst={} src1={} src2={} mod_c0={} seg={}",
+                            instr.dst(), instr.src1(), instr.src2(), instr.mod_c0(), instr.seg());
+                        eprintln!("  RAX={:#x} RCX={:#x} RDX={:#x} RBX={:#x} RSP={:#x}",
+                            self.rax(), self.rcx(), self.rdx(), self.rbx(), self.rsp());
+                        eprintln!("  RBP={:#x} RSI={:#x} RDI={:#x} R8={:#x} R9={:#x}",
+                            self.rbp(), self.rsi(), self.rdi(), self.r8(), self.r9());
+                        // Read raw instruction bytes from memory
+                        if let Some(fp) = self.eip_fetch_ptr {
+                            let offset = (self.prev_rip.wrapping_add(self.eip_page_bias)) as usize;
+                            if offset < fp.len() {
+                                let end = (offset + 16).min(fp.len());
+                                let bytes: alloc::vec::Vec<alloc::string::String> = fp[offset..end].iter()
+                                    .map(|b| alloc::format!("{:02x}", b)).collect();
+                                eprintln!("  raw bytes: [{}]", bytes.join(" "));
+                            }
+                        }
+                    }
+                }
+
                 match self.execute_instruction(unsafe { &*i_ptr }) {
                     Ok(()) => {}
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
@@ -1513,7 +1546,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         // If triple fault set Shutdown, exit cleanly instead of restarting.
                         if matches!(self.activity_state, CpuActivityState::Shutdown) {
                             tracing::debug!("CPU shutdown — exiting cpu_loop");
-                            break 'cpu_loop Ok(iteration);
+                            break 'cpu_loop Ok(self.icount - icount_start);
                         }
                         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
                         continue 'cpu_loop;
@@ -1618,7 +1651,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 if instr_idx >= trace_end {
                     // Check instruction limit at trace boundary (not per-instruction)
                     if iteration >= max_instructions {
-                        break 'cpu_loop Ok(iteration);
+                        break 'cpu_loop Ok(self.icount - icount_start);
                     }
                     // Chain to new trace without breaking to outer loop
                     // (matching C++ line 218-220: entry=getICacheEntry; i=entry->i; last=...)
