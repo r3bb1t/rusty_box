@@ -1492,7 +1492,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // TEMPORARY: Trace serial port writes (earlyprintk)
                 // (moved to dispatcher/io level)
 
-                // Matching C++ line 202: RIP += i->ilen();
+                // Note: Bochs sets prev_rip BEFORE RIP += ilen (cpu.cc:204).
+                // Our prev_rip is set AFTER execution (below) for historical reasons.
+                // Changing this order causes decode failures — needs careful analysis.
+
                 // Advance RIP before execution (handlers may read RIP and expect it advanced)
                 // SAFETY: gen_reg is initialized during CPU init; BX_64BIT_REG_RIP is always valid.
                 let ilen_val = unsafe { (*i_ptr).ilen() };
