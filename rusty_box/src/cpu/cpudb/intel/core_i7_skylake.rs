@@ -389,10 +389,17 @@ impl BxCpuIdTrait for Corei7SkylakeX {
         enable_extension(&mut b, X86Feature::IsaAdx);
         enable_extension(&mut b, X86Feature::IsaSmap);
         enable_extension(&mut b, X86Feature::IsaFdpDeprecation);
-        enable_extension(&mut b, X86Feature::IsaAvx512);
-        enable_extension(&mut b, X86Feature::IsaAvx512Dq);
-        enable_extension(&mut b, X86Feature::IsaAvx512Cd);
-        enable_extension(&mut b, X86Feature::IsaAvx512Bw);
+        // AVX-512 ISA extensions disabled until EVEX opmask handlers are implemented.
+        // CPUID leaf 7 still advertises AVX-512 (matching Bochs), but the kernel won't
+        // enable AVX-512 in XCR0 without these ISA extensions, so userspace (OpenSSL)
+        // sees XCR0 without AVX-512 bits and falls back to AVX2+BMI2 code paths.
+        // Without this, OpenSSL's bn_gather5 uses EVEX VPBROADCASTQ/VPCMPEQQ with
+        // opmask registers, which our decoder maps to wrong legacy/VEX handlers,
+        // silently corrupting RSA-4096 computations ("BAD signature").
+        // enable_extension(&mut b, X86Feature::IsaAvx512);
+        // enable_extension(&mut b, X86Feature::IsaAvx512Dq);
+        // enable_extension(&mut b, X86Feature::IsaAvx512Cd);
+        // enable_extension(&mut b, X86Feature::IsaAvx512Bw);
         enable_extension(&mut b, X86Feature::IsaClflushopt);
         enable_extension(&mut b, X86Feature::IsaClwb);
         b

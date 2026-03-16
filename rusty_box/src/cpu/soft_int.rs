@@ -1036,6 +1036,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     edx &= !(1 << 9); // clear APIC feature bit
                 }
             }
+            0x00000007 if sub_function == 0 => {
+                // DIAG: log leaf 7 CPUID calls from userspace
+                if self.user_pl && self.icount > 1_500_000_000 {
+                    static L7CT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                    let c = L7CT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if c < 3 {
+                        eprintln!("[CPUID-7#{}] EBX={:#010x} ECX={:#010x} at RIP={:#x} ic={}",
+                            c, ebx, ecx, self.prev_rip, self.icount);
+                    }
+                }
+            }
             0x0000000D => {
                 if sub_function == 0 {
                     // Subleaf 0: EAX = xcr0_suppmask, ECX = max size for all features
