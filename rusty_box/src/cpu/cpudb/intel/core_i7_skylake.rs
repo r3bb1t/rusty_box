@@ -253,16 +253,19 @@ const LEAF7_EBX_BASE: CpuIdStd7Ebx = CpuIdStd7Ebx::FSGSBASE
     .union(CpuIdStd7Ebx::ERMS)             // extra
     .union(CpuIdStd7Ebx::INVPCID)
     .union(CpuIdStd7Ebx::DEPRECATE_FCS_FDS)
-    .union(CpuIdStd7Ebx::AVX512F)
-    .union(CpuIdStd7Ebx::AVX512DQ)
+    // AVX-512 disabled: EVEX opmask instructions (VPCMPEQQ k1,..., VPBROADCASTQ ymm22,...)
+    // not fully implemented. OpenSSL's bn_gather5 uses these for RSA table lookups,
+    // producing wrong results. Must implement EVEX opmask handlers before re-enabling.
+    // .union(CpuIdStd7Ebx::AVX512F)
+    // .union(CpuIdStd7Ebx::AVX512DQ)
     .union(CpuIdStd7Ebx::RDSEED)
     .union(CpuIdStd7Ebx::ADX)
     .union(CpuIdStd7Ebx::SMAP)
     .union(CpuIdStd7Ebx::CLFLUSHOPT)
-    .union(CpuIdStd7Ebx::CLWB)
-    .union(CpuIdStd7Ebx::AVX512CD)
-    .union(CpuIdStd7Ebx::AVX512BW)
-    .union(CpuIdStd7Ebx::AVX512VL);
+    .union(CpuIdStd7Ebx::CLWB);
+    // .union(CpuIdStd7Ebx::AVX512CD)
+    // .union(CpuIdStd7Ebx::AVX512BW)
+    // .union(CpuIdStd7Ebx::AVX512VL);
 
 /// Extended leaf 0x80000001 ECX:
 ///   LAHF_SAHF | LZCNT | PREFETCHW
@@ -389,10 +392,11 @@ impl BxCpuIdTrait for Corei7SkylakeX {
         enable_extension(&mut b, X86Feature::IsaAdx);
         enable_extension(&mut b, X86Feature::IsaSmap);
         enable_extension(&mut b, X86Feature::IsaFdpDeprecation);
-        enable_extension(&mut b, X86Feature::IsaAvx512);
-        enable_extension(&mut b, X86Feature::IsaAvx512Dq);
-        enable_extension(&mut b, X86Feature::IsaAvx512Cd);
-        enable_extension(&mut b, X86Feature::IsaAvx512Bw);
+        // AVX-512 disabled: EVEX opmask handlers not implemented
+        // enable_extension(&mut b, X86Feature::IsaAvx512);
+        // enable_extension(&mut b, X86Feature::IsaAvx512Dq);
+        // enable_extension(&mut b, X86Feature::IsaAvx512Cd);
+        // enable_extension(&mut b, X86Feature::IsaAvx512Bw);
         enable_extension(&mut b, X86Feature::IsaClflushopt);
         enable_extension(&mut b, X86Feature::IsaClwb);
         b
