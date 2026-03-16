@@ -1462,10 +1462,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 match self.get_icache_entry(mem_extended, cpus) {
                     Ok((start, tlen)) => (start, start + tlen),
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
-                        // Exception delivery during prefetch/fetch: restart decode (Bochs longjmp).
+                        // Bochs setjmp handler (cpu.cc:141-148): icount++, then
+                        // line 154: prev_rip = RIP; speculative_rsp = false;
+                        self.icount += 1;
+                        iteration += 1;
+                        self.prev_rip = self.rip();
+                        self.speculative_rsp = false;
                         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
-                        // Count restarts to detect infinite prefetch-fault loops
-                        iteration += 1; // Count this as an instruction to prevent infinite loop
                         continue 'cpu_loop;
                     }
                     Err(e) => break 'cpu_loop Err(e),
@@ -1492,12 +1495,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // TEMPORARY: Trace serial port writes (earlyprintk)
                 // (moved to dispatcher/io level)
 
-                // ROOT CAUSE IDENTIFIED: Bochs sets prev_rip HERE (before ilen, cpu.cc:204).
-                // Moving it here causes triple fault at icount=377M because the kernel
-                // decompressor's fault recovery goes to mid-instruction offset 0x35abc92
-                // which has F3 FF FF (undefined) and IDT[6] is empty.
-                // The fix requires understanding WHY the kernel reaches 0x35abc92.
-                // For now, prev_rip is set AFTER execution (below).
+                // Bochs cpu.cc:204 sets prev_rip AFTER execution (not before ilen).
+                // prev_rip is set below, after execute_instruction returns Ok(()).
 
                 // Advance RIP before execution (handlers may read RIP and expect it advanced)
                 // SAFETY: gen_reg is initialized during CPU init; BX_64BIT_REG_RIP is always valid.
@@ -1626,9 +1625,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     }
                 }
 
-                // prev_rip = RIP (post-execution, differs from Bochs cpu.cc:204)
-                // See ROOT CAUSE comment above — moving this before ilen causes triple fault.
+                // Bochs cpu.cc:204 — prev_rip = RIP AFTER execution ("commit new RIP")
                 self.prev_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
+                // Bochs cpu.cc:206 — icount++
                 self.icount += 1;
                 self.perf_instructions += 1;
 
@@ -1729,6 +1728,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         match self.get_icache_entry(mem_reborrowed, cpus) {
                             Ok(v) => v,
                             Err(crate::cpu::CpuError::CpuLoopRestart) => {
+                                // Bochs setjmp handler: icount++, prev_rip = RIP
+                                self.icount += 1;
+                                iteration += 1;
+                                self.prev_rip = self.rip();
+                                self.speculative_rsp = false;
                                 self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
                                 continue 'cpu_loop;
                             }
