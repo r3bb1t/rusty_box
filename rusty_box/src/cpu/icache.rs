@@ -883,23 +883,19 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         use rusty_box_decoder::decoder::tables::BxDecodeError;
                         match &decode_err {
                             DecodeError::Decoder(BxDecodeError::BxIllegalOpcode) => {
+                                // Bochs: store IaError in trace, don't raise #UD here.
+                                // The IaError instruction will be executed normally in the
+                                // inner trace loop, where prev_rip is correctly set.
+                                // This matches Bochs fetchdecode behavior.
                                 tracing::debug!(
-                                    "Illegal opcode detected, generating #UD exception (vector 6)"
+                                    "Illegal opcode at RIP={:#x}, storing IaError in trace",
+                                    self.rip()
                                 );
-                                // Generate #UD exception which will vector through IVT in real mode
-                                // The exception() method will save CS:IP and jump to the #UD handler
-                                let exception_result =
-                                    self.exception(crate::cpu::cpu::Exception::Ud, 0);
-
-                                // If the exception handler returns an error, propagate it
-                                if let Err(e) = exception_result {
-                                    return Err(e);
-                                }
-
-                                // After exception returns successfully, execution has been redirected
-                                // to the exception handler. We return an error to stop this decode path
-                                // and let the CPU continue from the new RIP (the exception handler)
-                                return Err(crate::cpu::CpuError::Exception { vector: 6 });
+                                self.i_cache.mpool[current_mpindex].set_ia_opcode(Opcode::IaError);
+                                self.i_cache.mpool[current_mpindex].set_ilen(1);
+                                // Set trace length to include this IaError entry
+                                self.i_cache.entry[entry_idx].tlen = 1;
+                                return Ok(self.i_cache.entry[entry_idx].clone());
                             }
                             _ => {
                                 // Other decode errors are returned as-is

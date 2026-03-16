@@ -2947,6 +2947,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 Ok(())
             }
 
+            // IaError — illegal/unsupported opcode, raise #UD
+            // Bochs stores IaError in the trace and executes it like any instruction.
+            // The execution raises #UD with prev_rip correctly set to the faulting address.
+            Opcode::IaError => {
+                self.bx_error(instr)?;
+                Ok(())
+            }
+
             // =========================================================================
             // AVX/AVX-512 specific opcodes
             // =========================================================================
