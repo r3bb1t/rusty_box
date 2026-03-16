@@ -708,6 +708,24 @@ impl Instruction {
         self.set_imm_bytes(ib);
     }
 
+    /// Check if instruction has VEX/EVEX prefix
+    #[inline]
+    pub const fn is_vex(&self) -> bool {
+        (self.imm_bytes()[2] & 0x20) != 0
+    }
+
+    /// Set VEX/EVEX flag
+    #[inline]
+    pub const fn set_vex(&mut self, val: bool) {
+        let mut ib = self.imm_bytes();
+        if val {
+            ib[2] |= 0x20;
+        } else {
+            ib[2] &= !0x20;
+        }
+        self.set_imm_bytes(ib);
+    }
+
     /// Get EVEX opmask register
     #[inline]
     pub const fn opmask(&self) -> u8 {

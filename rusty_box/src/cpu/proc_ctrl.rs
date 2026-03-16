@@ -1,16 +1,6 @@
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
-    // TEMPORARY: errno name for syscall debugging
-    fn errno_name(e: u64) -> &'static str {
-        match e {
-            1 => "EPERM", 2 => "ENOENT", 3 => "ESRCH", 9 => "EBADF",
-            11 => "EAGAIN", 12 => "ENOMEM", 13 => "EACCES", 14 => "EFAULT",
-            17 => "EEXIST", 22 => "EINVAL", 28 => "ENOSPC", 38 => "ENOSYS",
-            _ => "?",
-        }
-    }
-
     pub(super) fn handle_cpu_context_change(&mut self) {
         self.tlb_flush();
 
@@ -524,7 +514,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             BX_MSR_APICBASE => self.msr.apicbase as u64,
             #[cfg(not(feature = "bx_support_apic"))]
             BX_MSR_APICBASE => BX_MSR_APICBASE_DEFAULT,
+            BX_MSR_BIOS_SIGN_ID => 0x02000065, // Skylake-X microcode revision
             BX_MSR_MTRRCAP => BX_MSR_MTRRCAP_DEFAULT,
+            BX_MSR_PMC0..=BX_MSR_PMC7 => 0, // Performance counters — return 0
+            BX_MSR_PERFEVTSEL0..=BX_MSR_PERFEVTSEL7 => 0, // Perf event selects — return 0
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr as u64,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr,
             BX_MSR_SYSENTER_EIP => self.msr.sysenter_eip_msr,
@@ -590,12 +583,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let msr = self.ecx();
         let val = ((self.edx() as u64) << 32) | (self.eax() as u64);
 
-        // Temporary: trace WRMSR
-        static MSR_WR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-        let mc = MSR_WR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if mc < 50 || (mc < 500 && mc % 50 == 0) {
-            eprintln!("[WRMSR#{}] MSR={:#010x} val={:#018x} icount={}", mc, msr, val, self.icount);
-        }
         match msr {
             BX_MSR_TSC => self.set_tsc(val, self.icount),
             #[cfg(feature = "bx_support_apic")]
@@ -1101,6 +1088,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_eip(self.msr.sysenter_eip_msr as u32);
         }
 
+        // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1210,6 +1199,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[ss_idx].cache.u.segment.l = false;
         }
 
+        // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1362,184 +1353,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         };
         use super::eflags::EFlags;
 
-        // DIAG: trace execve/mount/write syscalls during Alpine boot
-        {
-            let nr = self.rax();
-            // Trace execve(59) to see what binaries are being run
-            if nr == 59 && self.icount > 3_000_000_000 {
-                let path_addr = self.rdi();
-                let mut path_buf = alloc::vec::Vec::new();
-                for i in 0..128u64 {
-                    if let Ok(b) = self.v_read_byte(super::decoder::BxSegregs::Ds, path_addr + i) {
-                        if b == 0 { break; }
-                        path_buf.push(b);
-                    } else { break; }
-                }
-                static EXEC_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                let ec = EXEC_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if ec < 100 {
-                    eprintln!("[EXECVE#{}] path={:?} icount={}",
-                        ec, alloc::string::String::from_utf8_lossy(&path_buf), self.icount);
-                }
-            }
-            let caller_rip = self.rip(); // RIP of instruction after SYSCALL (saved to RCX)
-            // Trace openat(257), newfstatat(262), faccessat(269) syscalls
-            if (nr == 257 || nr == 262 || nr == 269) && self.icount > 2_260_000_000 {
-                let dirfd = self.rdi() as i64;
-                let path_addr = self.rsi();
-                let mut path_buf = alloc::vec::Vec::new();
-                for i in 0..128u64 {
-                    if let Ok(b) = self.v_read_byte(super::decoder::BxSegregs::Ds, path_addr + i) {
-                        if b == 0 { break; }
-                        path_buf.push(b);
-                    } else { break; }
-                }
-                let path = alloc::string::String::from_utf8_lossy(&path_buf);
-                static OPENAT_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                let oc = OPENAT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if oc < 50 {
-                    eprintln!("[OPENAT#{}] dirfd={} path={:?} flags={:#x} icount={}",
-                        oc, dirfd, path, self.rdx(), self.icount);
-                }
-            }
-            // Trace mount(165) syscalls
-            if nr == 165 && self.icount > 1_500_000_000 {
-                // mount(source, target, fstype, flags, data)
-                let source_addr = self.rdi();
-                let target_addr = self.rsi();
-                let fstype_addr = self.rdx();
-                let mut source_buf = alloc::vec::Vec::new();
-                let mut target_buf = alloc::vec::Vec::new();
-                let mut fstype_buf = alloc::vec::Vec::new();
-                for i in 0..64u64 {
-                    if let Ok(b) = self.v_read_byte(super::decoder::BxSegregs::Ds, source_addr + i) {
-                        if b == 0 { break; }
-                        source_buf.push(b);
-                    } else { break; }
-                }
-                for i in 0..64u64 {
-                    if let Ok(b) = self.v_read_byte(super::decoder::BxSegregs::Ds, target_addr + i) {
-                        if b == 0 { break; }
-                        target_buf.push(b);
-                    } else { break; }
-                }
-                for i in 0..32u64 {
-                    if let Ok(b) = self.v_read_byte(super::decoder::BxSegregs::Ds, fstype_addr + i) {
-                        if b == 0 { break; }
-                        fstype_buf.push(b);
-                    } else { break; }
-                }
-                static MOUNT_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                let mc = MOUNT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if mc < 20 {
-                    eprintln!("[MOUNT#{}] source={:?} target={:?} fstype={:?} flags={:#x} icount={}",
-                        mc,
-                        alloc::string::String::from_utf8_lossy(&source_buf),
-                        alloc::string::String::from_utf8_lossy(&target_buf),
-                        alloc::string::String::from_utf8_lossy(&fstype_buf),
-                        self.r10(), self.icount);
-                }
-            }
-            // Also trace mmap (nr=9) to find library mappings near mount/apk crash
-            if nr == 9 && self.icount > 3_100_000_000 && self.icount < 3_400_000_000 {
-                let addr = self.rdi();
-                let len = self.rsi();
-                let prot = self.rdx();
-                let flags = self.r10();
-                let fd = self.r8() as i64;
-                let off = self.r9();
-                static MMAP_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                let mc = MMAP_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if mc < 30 {
-                    eprintln!("[MMAP#{}] addr={:#x} len={:#x} prot={:#x} flags={:#x} fd={} off={:#x} caller={:#x} icount={}",
-                        mc, addr, len, prot, flags, fd, off, caller_rip, self.icount);
-                }
-            }
-            if nr == 1 && self.icount > 1_500_000_000 {  // write=1 only
-                // write(fd, buf, count): rdi=fd, rsi=buf, rdx=count
-                let fd = self.rdi();
-                let buf_addr = self.rsi();
-                let count = self.rdx();
-                // Log write(2,...) calls after 1.5B instructions (mdev phase)
-                if fd == 2 && count > 0 && count < 500 && buf_addr < 0xffff_0000_0000_0000 {
-                    static WRITE2_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                    let wc = WRITE2_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    if wc < 3 {
-                        let mut buf_str = alloc::vec::Vec::new();
-                        for j in 0..count.min(80) {
-                            if let Ok(b) = self.v_read_byte(super::decoder::BxSegregs::Ds, buf_addr + j) {
-                                buf_str.push(b);
-                            }
-                        }
-                        let text = alloc::string::String::from_utf8_lossy(&buf_str);
-                        eprintln!("[WRITE-STDERR#{}] fd=2 count={} caller={:#x} icount={} text={:?}",
-                            wc, count, caller_rip, self.icount, text);
-                        // If this is the mdev regex error, dump the last 256 instructions
-                        if text.contains("bad regex") {
-                            eprintln!("[MDEV-FOUND] Dumping last 256 instructions from ring:");
-                            let end = self.diag_rip_ring_idx;
-                            let start = if end >= 256 { end - 256 } else { 0 };
-                            for i in (start..end).rev().take(120) {
-                                let slot = i & 255;
-                                let r = self.diag_rip_ring[slot];
-                                let opc = self.diag_opcode_ring[slot];
-                                // Mark userspace RIPs
-                                let marker = if r < 0x0000_8000_0000_0000 && r > 0x1000 { " <USER>" } else { "" };
-                                eprintln!("  [{}] rip={:#x} opcode={:#06x}{}", i, r, opc, marker);
-                            }
-                            // Dump GPR state at SYSCALL entry
-                            eprintln!("[MDEV-FOUND] GPR state at write() SYSCALL:");
-                            for r in 0..16u8 {
-                                let v = unsafe { self.gen_reg[r as usize].rrx };
-                                if v != 0 { eprintln!("  r{}={:#018x}", r, v); }
-                            }
-                        }
-                    }
-                }
-                if count >= 4 && buf_addr < 0xffff_0000_0000_0000 {
-                    // Try to read first 4 bytes of the buffer
-                    if let Ok(b0) = self.v_read_byte(super::decoder::BxSegregs::Ds, buf_addr) {
-                        if let Ok(b1) = self.v_read_byte(super::decoder::BxSegregs::Ds, buf_addr + 1) {
-                            if let Ok(b2) = self.v_read_byte(super::decoder::BxSegregs::Ds, buf_addr + 2) {
-                                if let Ok(b3) = self.v_read_byte(super::decoder::BxSegregs::Ds, buf_addr + 3) {
-                                    if b0 == b'b' && b1 == b'a' && b2 == b'd' && b3 == b' ' {
-                                        static DIAG_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                                        let dc = DIAG_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                                        if dc == 0 {
-                                            eprintln!("[SYSCALL-WRITE-BAD] nr=1 fd={} buf={:#x} count={} caller_rip={:#x} icount={}",
-                                                self.rdi(), buf_addr, count, caller_rip, self.icount);
-                                            // Dump last 64 userspace RIPs from ring
-                                            let end = self.diag_rip_ring_idx;
-                                            let start = if end >= 256 { end - 256 } else { 0 };
-                                            let mut ucount = 0;
-                                            eprintln!("[SYSCALL-WRITE-BAD] Last userspace RIPs before this syscall:");
-                                            for i in (start..end).rev() {
-                                                let slot = i & 255;
-                                                let r = self.diag_rip_ring[slot];
-                                                if r < 0x0000_8000_0000_0000 && r > 0x1000 {
-                                                    eprintln!("  user[{}] rip={:#x} opcode={:#06x}", ucount, r, self.diag_opcode_ring[slot]);
-                                                    ucount += 1;
-                                                    if ucount >= 30 { break; }
-                                                }
-                                            }
-                                            // Read and print the full buffer
-                                            let mut buf_str = alloc::vec::Vec::new();
-                                            for j in 0..count.min(200) {
-                                                if let Ok(b) = self.v_read_byte(super::decoder::BxSegregs::Ds, buf_addr + j) {
-                                                    buf_str.push(b);
-                                                }
-                                            }
-                                            eprintln!("[SYSCALL-WRITE-BAD] buffer: {:?}", alloc::string::String::from_utf8_lossy(&buf_str));
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
         if !self.efer.sce() {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
@@ -1554,16 +1367,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if self.long_mode() {
             // Long mode SYSCALL (Bochs proc_ctrl.cc:1096-1148)
             let saved_rip = self.rip();
-            // DIAG: log ALL SYSCALLs with RAX=0xa5 (NR_mount) near the crash
-            if self.rax() == 0xa5 && self.icount > 3_200_000_000 {
-                let lstar = self.msr.lstar;
-                eprintln!("[SYSCALL-MOUNT] saved_rip={:#x} prev_rip={:#x} RCX_before={:#x} LSTAR={:#x} icount={}",
-                    saved_rip, self.prev_rip, self.rcx(), lstar, self.icount);
-            }
-            if saved_rip >= 0xffff_0000_0000_0000 && self.icount > 1_500_000_000 {
-                eprintln!("[SYSCALL-BAD-RIP] saved_rip={:#x} prev_rip={:#x} icount={} rax={}",
-                    saved_rip, self.prev_rip, self.icount, self.rax());
-            }
             self.set_rcx(saved_rip);
             let saved_rflags = self.eflags.bits() & !EFlags::RF.bits();
             self.set_r11(saved_rflags as u64);
@@ -1676,6 +1479,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_rip(temp_rip as u64);
         }
 
+        // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 
@@ -1830,30 +1635,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.handle_cpu_mode_change();
 
         // Bochs proc_ctrl.cc:1348 — RIP = temp_RIP (set AFTER all mode changes)
-        // DIAG: detect SYSRET returning to kernel address
-        if temp_rip >= 0xffff_0000_0000_0000 && self.icount > 1_500_000_000 {
-            eprintln!("[SYSRET-KERNEL] temp_rip={:#x} rcx={:#x} r11={:#x} os64={} icount={}",
-                temp_rip, self.rcx(), self.r11(), instr.os64_l(), self.icount);
-        }
-        // DIAG: check XMM registers for the corruption value at every SYSRET
-        if self.icount > 1_600_000_000 && temp_rip < 0xffff_0000_0000_0000 {
-            for xmm_idx in 0..16usize {
-                let lo = unsafe { self.vmm[xmm_idx].zmm64u[0] };
-                let hi = unsafe { self.vmm[xmm_idx].zmm64u[1] };
-                if lo == 0xffffffff81001280 || hi == 0xffffffff81001280
-                    || lo == 0x81001280 || hi == 0x81001280 {
-                    static XMM_HIT_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                    let c = XMM_HIT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    if c < 5 {
-                        eprintln!("[XMM-CORRUPTION] XMM{}=[{:#x}, {:#x}] temp_rip={:#x} icount={}",
-                            xmm_idx, lo, hi, temp_rip, self.icount);
-                    }
-                    break;
-                }
-            }
-        }
         self.set_rip(temp_rip);
 
+        // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
+        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
         Ok(())
     }
 

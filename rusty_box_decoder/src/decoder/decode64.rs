@@ -755,6 +755,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         instr.operands.src2 = vex_vvv;
         instr.set_vl(vex_l);
         instr.set_vex_w(vex_w);
+        instr.set_vex(true);
     }
     if is_evex {
         instr.set_opmask(evex_aaa);

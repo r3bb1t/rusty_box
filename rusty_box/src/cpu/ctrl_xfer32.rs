@@ -18,15 +18,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Branch to a near 32-bit address
     /// Matching C++ ctrl_xfer32.cc:29-46 branch_near32
     pub(super) fn branch_near32(&mut self, new_eip: u32) -> Result<()> {
-        // DIAG: detect 32-bit branch in 64-bit mode (would corrupt upper RIP bits)
-        if self.long64_mode() && self.icount > 1_500_000_000 {
-            static B32_IN_64: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-            let c = B32_IN_64.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if c < 5 {
-                eprintln!("[BRANCH32-IN-64] new_eip={:#x} prev_rip={:#x} RIP={:#x} icount={}",
-                    new_eip, self.prev_rip, self.rip(), self.icount);
-            }
-        }
         // Check CS limit (matching C++ line 33-37)
         // Original: Bochs cpu/ctrl_xfer32.cc:33-37
         let limit = self.get_segment_limit(BxSegregs::Cs);

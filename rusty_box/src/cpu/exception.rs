@@ -298,11 +298,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         if matches!(exception_class, ExceptionClass::Fault) {
             // restore RIP/RSP to value before error occurred
-            // DIAG: trace ALL faults near icount=377M to find what leads to 0x35abc92
-            if self.icount >= 377406040 && self.icount <= 377406060 {
-                eprintln!("[FAULT-TRACE] vec={:?} prev_rip={:#x} RIP={:#x} icount={}",
-                    vector, self.prev_rip, self.rip(), self.icount);
-            }
             self.set_rip(self.prev_rip);
             if self.speculative_rsp {
                 self.set_rsp(self.prev_rsp);

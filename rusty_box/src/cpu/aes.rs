@@ -363,12 +363,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// AESENC VdqWdq — 66 0F 38 DC
+    /// Read the AES state operand: for legacy SSE, state is dst (destructive).
+    /// For VEX, state is src2 (vvv, non-destructive 3-operand form).
+    #[inline]
+    fn read_aes_state(&self, instr: &Instruction) -> BxPackedXmmRegister {
+        if instr.is_vex() {
+            self.read_xmm_reg(instr.src2()) // VEX: state = vvv
+        } else {
+            self.read_xmm_reg(instr.dst()) // Legacy: state = dst (destructive)
+        }
+    }
+
+    /// AESENC VdqWdq — 66 0F 38 DC / VEX.128.66.0F38 DC
     ///
     /// Perform one round of AES encryption:
     /// ShiftRows(state), SubBytes(state), MixColumns(state), XOR with round key.
     pub(super) fn aesenc_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        let mut state = self.read_xmm_reg(instr.dst());
+        let mut state = self.read_aes_state(instr);
         let round_key = self.read_xmm_src(instr)?;
 
         aes_shift_rows(&mut state);
@@ -380,12 +391,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// AESENCLAST VdqWdq — 66 0F 38 DD
+    /// AESENCLAST VdqWdq — 66 0F 38 DD / VEX.128.66.0F38 DD
     ///
     /// Perform the last round of AES encryption (no MixColumns):
     /// ShiftRows(state), SubBytes(state), XOR with round key.
     pub(super) fn aesenclast_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        let mut state = self.read_xmm_reg(instr.dst());
+        let mut state = self.read_aes_state(instr);
         let round_key = self.read_xmm_src(instr)?;
 
         aes_shift_rows(&mut state);
@@ -396,12 +407,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// AESDEC VdqWdq — 66 0F 38 DE
+    /// AESDEC VdqWdq — 66 0F 38 DE / VEX.128.66.0F38 DE
     ///
     /// Perform one round of AES decryption:
     /// InverseShiftRows, InverseSubBytes, InverseMixColumns, XOR with round key.
     pub(super) fn aesdec_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        let mut state = self.read_xmm_reg(instr.dst());
+        let mut state = self.read_aes_state(instr);
         let round_key = self.read_xmm_src(instr)?;
 
         aes_inverse_shift_rows(&mut state);
@@ -413,12 +424,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// AESDECLAST VdqWdq — 66 0F 38 DF
+    /// AESDECLAST VdqWdq — 66 0F 38 DF / VEX.128.66.0F38 DF
     ///
     /// Perform the last round of AES decryption (no InverseMixColumns):
     /// InverseShiftRows, InverseSubBytes, XOR with round key.
     pub(super) fn aesdeclast_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
-        let mut state = self.read_xmm_reg(instr.dst());
+        let mut state = self.read_aes_state(instr);
         let round_key = self.read_xmm_src(instr)?;
 
         aes_inverse_shift_rows(&mut state);
@@ -451,13 +462,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// PCLMULQDQ VdqWdqIb — 66 0F 3A 44
+    /// PCLMULQDQ VdqWdqIb — 66 0F 3A 44 / VEX.128.66.0F3A 44
     ///
     /// Carry-less multiplication of two 64-bit values selected by the
     /// immediate byte (bit 0 selects qword from op1, bit 4 from op2).
     pub(super) fn pclmulqdq_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let imm8 = instr.ib();
-        let op1 = self.read_xmm_reg(instr.dst());
+        // VEX: op1 = vvv (src2), legacy: op1 = dst (destructive)
+        let op1 = if instr.is_vex() {
+            self.read_xmm_reg(instr.src2())
+        } else {
+            self.read_xmm_reg(instr.dst())
+        };
         let op2 = self.read_xmm_src(instr)?;
 
         let a = unsafe { op1.xmm64u[(imm8 & 1) as usize] };

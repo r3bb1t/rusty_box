@@ -16,8 +16,19 @@ pub const BX_MSR_APICBASE: u32 = 0x01B;
 /// IA32_TSC_ADJUST
 pub const BX_MSR_TSC_ADJUST: u32 = 0x03B;
 
+/// IA32_BIOS_SIGN_ID (microcode revision)
+pub const BX_MSR_BIOS_SIGN_ID: u32 = 0x08B;
+
 /// MTRR Capability register
 pub const BX_MSR_MTRRCAP: u32 = 0x0FE;
+
+/// IA32_PMC0..7 (Performance Monitoring Counters)
+pub const BX_MSR_PMC0: u32 = 0x0C1;
+pub const BX_MSR_PMC7: u32 = 0x0C8;
+
+/// IA32_PERFEVTSEL0..7 (Performance Event Select)
+pub const BX_MSR_PERFEVTSEL0: u32 = 0x186;
+pub const BX_MSR_PERFEVTSEL7: u32 = 0x18D;
 
 /// SYSENTER_CS
 pub const BX_MSR_SYSENTER_CS: u32 = 0x174;

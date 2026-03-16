@@ -1489,12 +1489,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // instruction execution. So the mpool slot is stable for the duration of this call.
                 let i_ptr: *const Instruction = &raw const self.i_cache.mpool[instr_idx];
 
-                // Save pre-execution RIP for diagnostic address tracking
-                let pre_exec_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx as u32 };
-
-                // TEMPORARY: Trace serial port writes (earlyprintk)
-                // (moved to dispatcher/io level)
-
                 // Bochs cpu.cc:204 sets prev_rip AFTER execution (not before ilen).
                 // prev_rip is set below, after execute_instruction returns Ok(()).
 
@@ -1512,97 +1506,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx &= 0xFFFF };
                 }
 
-                // DIAG: check RIP after ilen advancement for corruption
-                if unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx } == 0xffffffff81001280
-                    && self.icount > 3_200_000_000
-                {
-                    static RIP_CORRUPT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-                    if !RIP_CORRUPT.swap(true, core::sync::atomic::Ordering::Relaxed) {
-                        let bad_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
-                        let ilen = unsafe { (*i_ptr).ilen() };
-                        let opcode = unsafe { (*i_ptr).get_ia_opcode() };
-                        eprintln!("[RIP-AFTER-ILEN] RIP={:#x} pre_exec_rip={:#x} ilen={} opcode={:?} prev_rip={:#x} icount={}",
-                            bad_rip, pre_exec_rip, ilen, opcode, self.prev_rip, self.icount);
-                        eprintln!("  computed: pre_exec_rip + ilen = {:#x}", pre_exec_rip as u64 + ilen as u64);
-                    }
-                }
-
                 // Execute instruction (matching C++ BX_CPU_CALL_METHOD)
                 // SAFETY: i_ptr is valid for the lifetime of this loop iteration (see above).
                 let opcode = unsafe { (*i_ptr).get_ia_opcode() };
                 self.diag_current_opcode = opcode as u16;
 
-                // DIAG: catch instruction that sets RCX from valid to kernel address.
-                // Track previous RCX to detect the transition.
-                {
-                    static PREV_RCX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-                    let cur_rcx = self.rcx();
-                    let prev_rcx_val = PREV_RCX.swap(cur_rcx, core::sync::atomic::Ordering::Relaxed);
-                    if cur_rcx == 0xffffffff81001280 && prev_rcx_val != 0xffffffff81001280
-                        && self.icount > 3_200_000_000
-                    {
-                        static RCX_HIT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-                        if !RCX_HIT.swap(true, core::sync::atomic::Ordering::Relaxed) {
-                            eprintln!("[RCX-TRANSITION] prev_rcx={:#x} → new_rcx={:#x}", prev_rcx_val, cur_rcx);
-                            eprintln!("  prev_rip={:#x} icount={}", self.prev_rip, self.icount);
-                            let instr = unsafe { &*i_ptr };
-                            eprintln!("  NEXT opcode={:?} ilen={} dst={} src1={} src2={} mod_c0={}",
-                                instr.get_ia_opcode(), instr.ilen(), instr.dst(), instr.src1(), instr.src2(), instr.mod_c0());
-                            eprintln!("  RAX={:#x} RDX={:#x} RBX={:#x} RSP={:#x} RBP={:#x} RSI={:#x} RDI={:#x}",
-                                self.rax(), self.rdx(), self.rbx(), self.rsp(), self.rbp(), self.rsi(), self.rdi());
-                            // Dump last 16 RIP ring entries
-                            let end = self.diag_rip_ring_idx;
-                            let start = if end > 16 { end - 16 } else { 0 };
-                            for i in start..end {
-                                let r = self.diag_rip_ring[i & 255];
-                                let op = self.diag_opcode_ring[i & 255];
-                                eprintln!("  ring[{}] {:#x} {:?}", i, r,
-                                    rusty_box_decoder::opcode::Opcode::try_from(op).ok());
-                            }
-                        }
-                    }
-                }
-
-                let rip_before_exec = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
                 match self.execute_instruction(unsafe { &*i_ptr }) {
-                    Ok(()) => {
-                        // DIAG: check if instruction changed RIP to kernel address
-                        let rip_after = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
-                        if rip_after == 0xffffffff81001280 && self.icount > 3_200_000_000 {
-                            static EXEC_RIP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-                            if !EXEC_RIP.swap(true, core::sync::atomic::Ordering::Relaxed) {
-                                let oc = unsafe { (*i_ptr).get_ia_opcode() };
-                                eprintln!("[EXEC-RIP-CORRUPT] rip_before={:#x} rip_after={:#x} opcode={:?} prev_rip={:#x} icount={}",
-                                    rip_before_exec, rip_after, oc, self.prev_rip, self.icount);
-                            }
-                        }
-                    }
+                    Ok(()) => {}
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
-                        // DIAG: check if RIP was corrupted before restart
-                        let rip_after = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
-                        if rip_after == 0xffffffff81001280 && self.icount > 3_200_000_000 {
-                            static RESTART_RIP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-                            if !RESTART_RIP.swap(true, core::sync::atomic::Ordering::Relaxed) {
-                                let oc = unsafe { (*i_ptr).get_ia_opcode() };
-                                eprintln!("[RESTART-RIP-CORRUPT] rip_before={:#x} rip_after={:#x} opcode={:?} prev_rip={:#x} icount={}",
-                                    rip_before_exec, rip_after, oc, self.prev_rip, self.icount);
-                                eprintln!("  IDTR.base={:#x} IDTR.limit={:#x} CR3={:#x}",
-                                    self.idtr.base, self.idtr.limit, self.cr3);
-                                // Read IDT entry for #PF (vector 14) — 16 bytes at IDTR.base + 14*16
-                                let idt_pf_addr = self.idtr.base + 14 * 16;
-                                if let (Ok(lo), Ok(hi)) = (
-                                    self.system_read_qword(idt_pf_addr),
-                                    self.system_read_qword(idt_pf_addr + 8),
-                                ) {
-                                    // 64-bit IDT entry: offset = bits [63:32] of hi | bits [31:16] of lo[31:16] | bits [15:0] of lo
-                                    let offset_lo = lo & 0xFFFF;
-                                    let offset_mid = (lo >> 48) & 0xFFFF;
-                                    let offset_hi = hi & 0xFFFFFFFF;
-                                    let handler = (offset_hi << 32) | (offset_mid << 16) | offset_lo;
-                                    eprintln!("  IDT[14] handler={:#x} lo={:#x} hi={:#x}", handler, lo, hi);
-                                }
-                            }
-                        }
                         // Exception delivery during execution: restart decode (Bochs longjmp).
                         // Bochs setjmp handler (cpu.cc:141-155): icount++, prev_rip = RIP,
                         // speculative_rsp = false, then continue outer loop.
@@ -1631,73 +1542,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.icount += 1;
                 self.perf_instructions += 1;
 
-                // DIAG: when user-mode RIP is kernel address, dump instruction state
-                if self.user_pl && self.prev_rip >= 0xffff_8000_0000_0000 && self.icount > 1_500_000_000 {
-                    static FAULT_DUMP_DONE: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-                    if !FAULT_DUMP_DONE.swap(true, core::sync::atomic::Ordering::Relaxed) {
-                        eprintln!("[FAULT-INSTR-DUMP] fault_rip={:#x} icount={}", self.prev_rip, self.icount);
-                        eprintln!("  RAX={:#x} RCX={:#x} RDX={:#x} RBX={:#x} RSP={:#x} RBP={:#x} RSI={:#x} RDI={:#x}",
-                            self.rax(), self.rcx(), self.rdx(), self.rbx(), self.rsp(), self.rbp(), self.rsi(), self.rdi());
-                        eprintln!("  R8={:#x} R9={:#x} R10={:#x} R11={:#x} R12={:#x} R13={:#x} R14={:#x} R15={:#x}",
-                            self.r8(), self.r9(), self.r10(), self.r11(), self.r12(), self.r13(), self.r14(), self.r15());
-                        // Dump last 8 RIP ring entries with their instruction bytes
-                        let end = self.diag_rip_ring_idx;
-                        let start = if end > 8 { end - 8 } else { 0 };
-                        for idx in start..end {
-                            let r = self.diag_rip_ring[idx & 255];
-                            if r < 0xffff_0000_0000_0000 { // user-mode only
-                                let mut bytes = [0u8; 16];
-                                for i in 0..16u64 {
-                                    bytes[i as usize] = self.v_read_byte(
-                                        super::decoder::BxSegregs::Ds, r.wrapping_add(i)
-                                    ).unwrap_or(0xFF);
-                                }
-                                let byte_str: alloc::vec::Vec<alloc::string::String> = bytes.iter()
-                                    .map(|b| alloc::format!("{:02x}", b)).collect();
-                                eprintln!("  ring[{}] RIP={:#x} bytes=[{}]", idx, r, byte_str.join(" "));
-                            }
-                        }
-                    }
-                }
-
-                // Record RIP + opcode in ring buffer — separate kernel and userspace rings
-                if self.icount > 620_000_000 && self.long64_mode() {
-                    let rip = self.prev_rip;
-                    // Kernel ring (all instructions)
-                    let ring_slot = self.diag_rip_ring_idx & 255;
-                    self.diag_rip_ring[ring_slot] = rip;
-                    self.diag_opcode_ring[ring_slot] = opcode as u16;
-                    self.diag_rip_ring_idx += 1;
-
-                    // Check if mdev regex error was detected — dump KERNEL ring
-                    // (userspace instructions are only visible before SYSCALL)
-                    if crate::iodev::serial::MDEV_REGEX_TRIGGERED.swap(false, core::sync::atomic::Ordering::Relaxed) {
-                        eprintln!("[MDEV-TRIGGER] icount={} rip={:#x}", self.icount, rip);
-                        // Dump last 256 instructions (both kernel and userspace)
-                        eprintln!("[MDEV-TRIGGER] Last 256 instructions:");
-                        let end = self.diag_rip_ring_idx;
-                        let start = if end >= 256 { end - 256 } else { 0 };
-                        for i in (start..end).rev().take(80) {
-                            let slot = i & 255;
-                            let r = self.diag_rip_ring[slot];
-                            let opc = self.diag_opcode_ring[slot];
-                            eprintln!("  [{}] rip={:#x} opcode={:#06x}", i, r, opc);
-                        }
-                        // Dump GPR state
-                        for r in 0..16u8 {
-                            let v = unsafe { self.gen_reg[r as usize].rrx };
-                            eprintln!("  r{}={:#018x}", r, v);
-                        }
-                    }
-                }
-
-
                 iteration += 1;
-
-                // Diagnostic address hit tracking (zero-cost when no watches set)
-                if self.diag_addr_hits[0].0 != 0 {
-                    self.check_addr_hits(pre_exec_rip);
-                }
 
 
 
@@ -2260,25 +2105,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             if !self.is_canonical_access(self.rip(), MemoryAccessType::Execute, self.user_pl()) {
                 tracing::error!("prefetch: #GP(0): RIP crossed canonical boundary");
                 self.exception(Exception::Gp, 0)?;
-            }
-
-            // DIAG: detect ring 3 executing at kernel address (PIE entry point bug)
-            if self.user_pl && self.rip() >= 0xffff_8000_0000_0000 && self.icount > 1_500_000_000 {
-                eprintln!("[RING3-KERNEL] user_pl=true but RIP={:#x} is kernel address! icount={}",
-                    self.rip(), self.icount);
-                eprintln!("  CS.sel={:#06x} CS.rpl={} SS.sel={:#06x} RSP={:#x}",
-                    self.sregs[BxSegregs::Cs as usize].selector.value,
-                    self.sregs[BxSegregs::Cs as usize].selector.rpl,
-                    self.sregs[BxSegregs::Ss as usize].selector.value,
-                    self.rsp());
-                eprintln!("  CR3={:#x} EFLAGS={:#x}", self.cr3, self.eflags.bits());
-                // Dump last 16 RIPs from ring buffer
-                let end = self.diag_rip_ring_idx;
-                let start = if end > 16 { end - 16 } else { 0 };
-                for i in start..end {
-                    let r = self.diag_rip_ring[i & 255];
-                    eprintln!("  rip_ring[{}]={:#x}", i, r);
-                }
             }
 
             // linear address is equal to RIP in 64-bit long mode

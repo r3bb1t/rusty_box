@@ -1142,36 +1142,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(crate) fn write_virtual_qword_64(&mut self, seg: BxSegregs, offset: u64, val: u64) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
-        // DIAG: watch ALL writes to pt_regs->ip location during execve window
-        if laddr == 0xffffc9000019ffc8 && self.icount > 3_322_100_000 && self.icount < 3_323_000_000 {
-            eprintln!("[PT_REGS_IP_WRITE] val={:#x} RIP={:#x} icount={}", val, self.prev_rip, self.icount);
-        }
-        // DIAG: also watch pt_regs->sp and pt_regs->flags locations
-        if (laddr == 0xffffc9000019ffe0 || laddr == 0xffffc9000019ffd0) && self.icount > 3_322_100_000 && self.icount < 3_323_000_000 {
-            eprintln!("[PT_REGS_SP/FL_WRITE] laddr={:#x} val={:#x} RIP={:#x} icount={}", laddr, val, self.prev_rip, self.icount);
-        }
-        // DIAG: catch kernel writing the corrupted entry point to ANY address
-        if val == 0xffffffff81001280 && self.icount > 3_300_000_000 {
-            static WRITE_WATCH_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-            let wc = WRITE_WATCH_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if wc < 3 {
-                eprintln!("[WRITE-WATCH#{}] val={:#x} laddr={:#x} RIP={:#x} icount={}",
-                    wc, val, laddr, self.prev_rip, self.icount);
-                eprintln!("  RAX={:#x} RCX={:#x} RDX={:#x} RBX={:#x}",
-                    self.rax(), self.rcx(), self.rdx(), self.rbx());
-                eprintln!("  RSP={:#x} RBP={:#x} RSI={:#x} RDI={:#x}",
-                    self.rsp(), self.rbp(), self.rsi(), self.rdi());
-                // Last 32 instructions
-                let end = self.diag_rip_ring_idx;
-                let start = if end > 32 { end - 32 } else { 0 };
-                for i in start..end {
-                    let r = self.diag_rip_ring[i & 255];
-                    let op = self.diag_opcode_ring[i & 255];
-                    eprintln!("  ring[{}] RIP={:#x} op={:?}", i, r,
-                        rusty_box_decoder::opcode::Opcode::try_from(op).ok());
-                }
-            }
-        }
         let page_offset = laddr & 0xFFF;
         if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;

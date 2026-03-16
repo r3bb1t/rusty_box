@@ -2590,48 +2590,6 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 let eflags = self.stack_read_qword(temp_rsp.wrapping_add(16))? as u32;
                 let cs = self.stack_read_qword(temp_rsp.wrapping_add(8))? as u16;
                 let rip = self.stack_read_qword(temp_rsp)?;
-                // DIAG: trace ALL IRETs in the narrow crash window
-                if self.icount > 3_322_888_000 && self.icount < 3_322_893_000 {
-                    eprintln!("[IRET-TRACE] rip={:#x} cs={:#06x} eflags={:#x} rsp={:#x} icount={}",
-                        rip, cs, eflags, temp_rsp, self.icount);
-                }
-                // DIAG: detect IRET to kernel address from kernel mode (execve returning wrong entry point)
-                if rip >= 0xffff_0000_0000_0000 && (cs & 3) == 3 && self.icount > 1_500_000_000 {
-                    static IRET_KERN_USER_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                    let cnt = IRET_KERN_USER_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    if cnt < 1 { // Only dump first occurrence
-                        eprintln!("[IRET-KERN-USER] rip={:#x} cs={:#06x} eflags={:#x} rsp={:#x} icount={}",
-                            rip, cs, eflags, temp_rsp, self.icount);
-                        eprintln!("  caller_rip={:#x} (before IRET)", self.rip());
-                        // Dump ALL XMM registers to check for corruption source
-                        for xmm_idx in 0..16usize {
-                            let lo = unsafe { self.vmm[xmm_idx].zmm64u[0] };
-                            let hi = unsafe { self.vmm[xmm_idx].zmm64u[1] };
-                            if lo != 0 || hi != 0 {
-                                eprintln!("  XMM{}=[{:#018x}, {:#018x}]", xmm_idx, lo, hi);
-                            }
-                        }
-                        // Dump last 32 RIP ring entries with instruction bytes
-                        let end = self.diag_rip_ring_idx;
-                        let start = if end > 32 { end - 32 } else { 0 };
-                        for idx in start..end {
-                            let r = self.diag_rip_ring[idx & 255];
-                            if r < 0xffff_0000_0000_0000 { // user-mode
-                                let mut bytes = [0u8; 16];
-                                for i in 0..16u64 {
-                                    bytes[i as usize] = self.v_read_byte(
-                                        super::decoder::BxSegregs::Ds, r.wrapping_add(i)
-                                    ).unwrap_or(0xCC);
-                                }
-                                let bstr: alloc::vec::Vec<alloc::string::String> = bytes.iter()
-                                    .map(|b| alloc::format!("{:02x}", b)).collect();
-                                eprintln!("  ring[{}] RIP={:#x} bytes=[{}]", idx, r, bstr.join(" "));
-                            } else {
-                                eprintln!("  ring[{}] RIP={:#x} (kernel)", idx, r);
-                            }
-                        }
-                    }
-                }
                 (eflags, cs, rip, 24)
             } else if instr.os32_l() != 0 {
                 let eflags = self.stack_read_dword((temp_rsp as u32).wrapping_add(8))?;
