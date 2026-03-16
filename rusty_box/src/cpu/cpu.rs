@@ -1576,6 +1576,31 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         }
                     }
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
+                        // DIAG: check if RIP was corrupted before restart
+                        let rip_after = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
+                        if rip_after == 0xffffffff81001280 && self.icount > 3_200_000_000 {
+                            static RESTART_RIP: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+                            if !RESTART_RIP.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                                let oc = unsafe { (*i_ptr).get_ia_opcode() };
+                                eprintln!("[RESTART-RIP-CORRUPT] rip_before={:#x} rip_after={:#x} opcode={:?} prev_rip={:#x} icount={}",
+                                    rip_before_exec, rip_after, oc, self.prev_rip, self.icount);
+                                eprintln!("  IDTR.base={:#x} IDTR.limit={:#x} CR3={:#x}",
+                                    self.idtr.base, self.idtr.limit, self.cr3);
+                                // Read IDT entry for #PF (vector 14) — 16 bytes at IDTR.base + 14*16
+                                let idt_pf_addr = self.idtr.base + 14 * 16;
+                                if let (Ok(lo), Ok(hi)) = (
+                                    self.system_read_qword(idt_pf_addr),
+                                    self.system_read_qword(idt_pf_addr + 8),
+                                ) {
+                                    // 64-bit IDT entry: offset = bits [63:32] of hi | bits [31:16] of lo[31:16] | bits [15:0] of lo
+                                    let offset_lo = lo & 0xFFFF;
+                                    let offset_mid = (lo >> 48) & 0xFFFF;
+                                    let offset_hi = hi & 0xFFFFFFFF;
+                                    let handler = (offset_hi << 32) | (offset_mid << 16) | offset_lo;
+                                    eprintln!("  IDT[14] handler={:#x} lo={:#x} hi={:#x}", handler, lo, hi);
+                                }
+                            }
+                        }
                         // Exception delivery during execution: restart decode (Bochs longjmp).
                         // Bochs setjmp handler (cpu.cc:141-155): icount++, prev_rip = RIP,
                         // speculative_rsp = false, then continue outer loop.
