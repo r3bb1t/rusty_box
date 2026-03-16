@@ -1399,7 +1399,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 );
                 if outer_loop_count > 50_000_000 {
                     tracing::error!("[cpu_loop] BAILOUT after {} outer loops", outer_loop_count);
-                    break Ok(self.icount - icount_start);
+                    break Ok(iteration);
                 }
             }
 
@@ -1445,7 +1445,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     self.async_event = 0;
                 } else if self.handle_async_event() {
                     // Slow path: real async event (interrupt, HLT, shutdown, etc.)
-                    break Ok(self.icount - icount_start);
+                    break Ok(iteration);
                 }
             }
 
@@ -1506,7 +1506,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.diag_current_opcode = opcode as u16;
 
                 // DIAG: dump instruction details when RCX becomes 0xffffffff81001280
-                if self.rcx() == 0xffffffff81001280 && self.prev_rip < 0xffff_0000_0000_0000
+                // Check in BOTH user and kernel mode
+                if self.rcx() == 0xffffffff81001280
                     && self.icount > 3_300_000_000
                 {
                     static RCX_HIT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
@@ -1546,7 +1547,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         // If triple fault set Shutdown, exit cleanly instead of restarting.
                         if matches!(self.activity_state, CpuActivityState::Shutdown) {
                             tracing::debug!("CPU shutdown — exiting cpu_loop");
-                            break 'cpu_loop Ok(self.icount - icount_start);
+                            break 'cpu_loop Ok(iteration);
                         }
                         self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
                         continue 'cpu_loop;
@@ -1651,7 +1652,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 if instr_idx >= trace_end {
                     // Check instruction limit at trace boundary (not per-instruction)
                     if iteration >= max_instructions {
-                        break 'cpu_loop Ok(self.icount - icount_start);
+                        break 'cpu_loop Ok(iteration);
                     }
                     // Chain to new trace without breaking to outer loop
                     // (matching C++ line 218-220: entry=getICacheEntry; i=entry->i; last=...)

@@ -1392,7 +1392,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         let mut instructions_executed = 0u64;
         let mut last_gui_update = std::time::Instant::now();
         let mut last_ips_update = std::time::Instant::now();
-        let mut last_ips_instructions = 0u64;
+        let mut last_ips_instructions = self.cpu.icount; // Bochs-compatible: track icount for IPS
         // MIPS terminal log: separate tracker fired every 5M instructions.
         // At 20 MIPS (active) fires every 250ms; at 40K IPS (idle) fires every ~125s.
         // This prevents flooding the terminal with "0.04 MIPS" lines during HLT idle.
@@ -2790,13 +2790,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             }
 
             // Update IPS: show_ips() every 1 real second (keeps egui status bar responsive).
-            // MIPS terminal log every 5M instructions (avoids flooding during HLT idle).
+            // Uses icount delta (Bochs-compatible: counts REP iterations as separate ticks).
+            // Bochs main.cc:1472 — ips_count = bx_pc_system.time_ticks() delta
             let ips_elapsed = last_ips_update.elapsed();
             if ips_elapsed >= IPS_SHOW_INTERVAL {
-                let delta_instr = instructions_executed - last_ips_instructions;
-                let mips = (delta_instr as f64 / ips_elapsed.as_secs_f64()) / 1_000_000.0;
+                let current_icount = self.cpu.icount;
+                let delta_ticks = current_icount - last_ips_instructions;
+                let mips = (delta_ticks as f64 / ips_elapsed.as_secs_f64()) / 1_000_000.0;
                 let ips = (mips * 1_000_000.0) as u32;
-                last_ips_instructions = instructions_executed;
+                last_ips_instructions = current_icount;
                 last_ips_update = std::time::Instant::now();
                 if let Some(ref mut gui) = self.gui {
                     gui.show_ips(ips);
@@ -2845,7 +2847,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             let pf = self.cpu.perf_prefetch;
             let tlb_total = tlb_h + tlb_m;
             let tlb_pct = if tlb_total > 0 { tlb_h as f64 / tlb_total as f64 * 100.0 } else { 0.0 };
-            eprintln!("[PERF] instructions={pi} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw} icache_miss={ic_m} prefetch={pf}");
+            // icount = Bochs-compatible tick count (includes REP iterations + HLT ticks)
+            let bochs_ticks = self.cpu.icount;
+            eprintln!("[PERF] dispatches={pi} bochs_ticks={bochs_ticks} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw}");
         }
 
         Ok(instructions_executed)
