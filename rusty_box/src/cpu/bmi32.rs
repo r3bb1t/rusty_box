@@ -63,6 +63,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// BLSI r32, r/m32 — `(-src) & src`, CF = (src != 0)
     /// Bochs bmi32.cc: BLSI_BdEd{R,M}
+    /// Group VEX: dst=rm (source), src2=vvv (destination in Bochs)
     pub fn blsi_bd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         let op1 = self.read_ed32(instr, instr.src())?;
         let tmp_cf = op1 != 0;
@@ -71,7 +72,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if tmp_cf {
             self.eflags.insert(EFlags::CF);
         }
-        self.set_gpr32(instr.dst() as usize, result);
+        self.set_gpr32(instr.src2() as usize, result);
         Ok(())
     }
 
@@ -85,7 +86,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if tmp_cf {
             self.eflags.insert(EFlags::CF);
         }
-        self.set_gpr32(instr.dst() as usize, result);
+        self.set_gpr32(instr.src2() as usize, result);
         Ok(())
     }
 
@@ -99,7 +100,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if tmp_cf {
             self.eflags.insert(EFlags::CF);
         }
-        self.set_gpr32(instr.dst() as usize, result);
+        self.set_gpr32(instr.src2() as usize, result);
         Ok(())
     }
 

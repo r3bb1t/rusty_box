@@ -1,0 +1,1605 @@
+C:Q1kZVWVyo0ZySydq+Guaova5aevA8=
+P:alpine-base
+V:3.23.3-r0
+A:x86_64
+S:1318
+I:0
+T:Meta package for minimal alpine base
+U:https://alpinelinux.org
+L:MIT
+o:alpine-base
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1769548690
+c:18bef9667898195efb5cf29404bdca89f0cae725
+D:alpine-baselayout alpine-conf alpine-release apk-tools busybox busybox-mdev-openrc busybox-openrc busybox-suid musl-utils openrc
+
+C:Q1mhN8PI5zi8q6wTMmyfxUcvpYqvQ=
+P:alpine-baselayout
+V:3.7.1-r8
+A:x86_64
+S:8283
+I:6552
+T:Alpine base dir structure and init scripts
+U:https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout
+L:GPL-2.0-only
+o:alpine-baselayout
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1764413097
+c:dd4f6c3f0557fbcdaa88494e6de30c9aa7530be1
+D:alpine-baselayout-data=3.7.1-r8 /bin/sh
+
+C:Q1mmCw7bRVmrJ5zwBLfmhc/XjdDBU=
+P:alpine-baselayout-data
+V:3.7.1-r8
+A:x86_64
+S:10787
+I:19034
+T:Alpine base dir structure and init scripts
+U:https://git.alpinelinux.org/cgit/aports/tree/main/alpine-baselayout
+L:GPL-2.0-only
+o:alpine-baselayout
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1764413097
+c:dd4f6c3f0557fbcdaa88494e6de30c9aa7530be1
+
+C:Q1YTe08tES6RlqU6U2RHn3KORa/cE=
+P:alpine-conf
+V:3.21.0-r0
+A:x86_64
+S:61562
+I:178598
+T:Alpine configuration management scripts
+U:https://gitlab.alpinelinux.org/alpine/alpine-conf
+L:MIT
+o:alpine-conf
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1764763110
+c:1798762412454877d4e8dc41d63c86defe3eff6a
+D:openrc>=0.24.1-r6 busybox>=1.26.1-r3 so:libc.musl-x86_64.so.1
+p:cmd:copy-modloop=3.21.0-r0 cmd:lbu=3.21.0-r0 cmd:lbu_commit=3.21.0-r0 cmd:lbu_exclude=3.21.0-r0 cmd:lbu_include=3.21.0-r0 cmd:lbu_status=3.21.0-r0 cmd:setup-acf=3.21.0-r0 cmd:setup-alpine=3.21.0-r0 cmd:setup-apkcache=3.21.0-r0 cmd:setup-apkrepos=3.21.0-r0 cmd:setup-bootable=3.21.0-r0 cmd:setup-desktop=3.21.0-r0 cmd:setup-devd=3.21.0-r0 cmd:setup-disk=3.21.0-r0 cmd:setup-dns=3.21.0-r0 cmd:setup-hostname=3.21.0-r0 cmd:setup-interfaces=3.21.0-r0 cmd:setup-keymap=3.21.0-r0 cmd:setup-lbu=3.21.0-r0 cmd:setup-mta=3.21.0-r0 cmd:setup-ntp=3.21.0-r0 cmd:setup-proxy=3.21.0-r0 cmd:setup-sshd=3.21.0-r0 cmd:setup-timezone=3.21.0-r0 cmd:setup-user=3.21.0-r0 cmd:setup-wayland-base=3.21.0-r0 cmd:setup-xen-dom0=3.21.0-r0 cmd:setup-xorg-base=3.21.0-r0 cmd:uniso=3.21.0-r0 cmd:update-conf=3.21.0-r0 cmd:update-kernel=3.21.0-r0
+
+C:Q1XEWoIc1rhNVDu9f/EqfeGFXFzRM=
+P:alpine-keys
+V:2.6-r0
+A:x86_64
+S:12199
+I:12961
+T:Public keys for Alpine Linux packages
+U:https://alpinelinux.org
+L:MIT
+o:alpine-keys
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1758215632
+c:b9f23becced4d7b3ccc0fa0f28530243ccd314a0
+
+C:Q15xFEoaNcSERQfNGjKBpxiQSfNSI=
+P:alpine-release
+V:3.23.3-r0
+A:x86_64
+S:2091
+I:343
+T:Alpine release data
+U:https://alpinelinux.org
+L:MIT
+o:alpine-base
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1769548690
+c:18bef9667898195efb5cf29404bdca89f0cae725
+D:alpine-keys
+
+C:Q1UjyXBKqLp3zhuURAqDuO7Do+r3U=
+P:apk-cron
+V:1.0-r3
+A:x86_64
+S:1755
+I:191
+T:Periodic software updates
+U:https://gitlab.alpinelinux.org/alpine/aports/-/tree/master/main/apk-cron
+L:GPL-2.0-only
+o:apk-cron
+m:Kaarle Ritvanen <kunkku@alpinelinux.org>
+t:1720102284
+c:2d1f9f414de2521837a7a9c7068217b76e3452ca
+D:apk-tools
+
+C:Q1svh35sn7lFwYXPNu1UYGS4s3QkU=
+P:apk-tools
+V:3.0.3-r1
+A:x86_64
+S:54556
+I:115096
+T:Alpine Package Keeper - package manager for alpine
+U:https://gitlab.alpinelinux.org/alpine/apk-tools
+L:GPL-2.0-only
+o:apk-tools
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1765954797
+c:b7ab616ba639f0c93be528dfc4f1e0e906a98449
+D:musl>=1.2.3_git20230424 libcrypto3>=3.5 libapk=3.0.3-r1 ca-certificates-bundle so:libapk.so.3.0.0 so:libc.musl-x86_64.so.1 so:libz.so.1
+p:apk-tools3=3.0.3-r1 cmd:apk=3.0.3-r1
+
+C:Q1SDZlKoKhPUagzCWI/d8P7L8W0MI=
+P:bonding
+V:2.6-r5
+A:x86_64
+S:4272
+I:7095
+T:Scripts for network interface bonding
+U:https://wiki.alpinelinux.org/wiki/Bonding
+L:GPL-2.0-or-later
+o:bonding
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1735923921
+c:8bac74716d06c84627ab02d101fd9d2bafd0a34c
+
+C:Q1KF7AhlIDME/5/0q5ej5qYmfiDm0=
+P:bridge
+V:1.5-r5
+A:x86_64
+S:2867
+I:3016
+T:Scripts for configuring network bridge interfaces
+U:https://wiki.alpinelinux.org/wiki/Bridge
+L:GPL-2.0-or-later
+o:bridge
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1735923921
+c:8bac74716d06c84627ab02d101fd9d2bafd0a34c
+
+C:Q1CBRpRgLzXSdB6Rb9y0yaHg7FC0I=
+P:brotli-libs
+V:1.2.0-r0
+A:x86_64
+S:429601
+I:980488
+T:Generic lossless compressor (libraries)
+U:https://github.com/google/brotli
+L:MIT
+o:brotli
+m:prspkt <prspkt@protonmail.com>
+t:1764636125
+c:e1a74d1bc0c4e0308990de2e9ec9d82529fcac8f
+D:so:libc.musl-x86_64.so.1
+p:so:libbrotlicommon.so.1=1.2.0 so:libbrotlidec.so.1=1.2.0 so:libbrotlienc.so.1=1.2.0
+
+C:Q18TR4AbuWsapA0X+CI3w/T/AqRyU=
+P:busybox
+V:1.37.0-r30
+A:x86_64
+S:504726
+I:813480
+T:Size optimized toolbox of many common UNIX utilities
+U:https://busybox.net/
+L:GPL-2.0-only
+o:busybox
+m:Sören Tempel <soeren+alpine@soeren-tempel.net>
+t:1765894768
+c:1e823a60eb85606954b3a5af5f8e5bbd1ea680cf
+D:so:libc.musl-x86_64.so.1
+p:cmd:busybox=1.37.0-r30
+
+C:Q1GI0tARCvpY6KPj5f1CSy2Zbfegk=
+P:busybox-binsh
+V:1.37.0-r30
+A:x86_64
+S:1565
+I:1
+T:busybox ash /bin/sh
+U:https://busybox.net/
+L:GPL-2.0-only
+o:busybox
+m:Sören Tempel <soeren+alpine@soeren-tempel.net>
+t:1765894768
+c:1e823a60eb85606954b3a5af5f8e5bbd1ea680cf
+k:100
+D:busybox=1.37.0-r30
+p:/bin/sh cmd:sh=1.37.0-r30
+
+C:Q1XeQ0ISEJXTYCCSf31wx/iP18xQY=
+P:busybox-mdev-openrc
+V:1.37.0-r30
+A:x86_64
+S:2034
+I:745
+T:Size optimized toolbox of many common UNIX utilities
+U:https://busybox.net/
+L:GPL-2.0-only
+o:busybox
+m:Sören Tempel <soeren+alpine@soeren-tempel.net>
+t:1765894768
+c:1e823a60eb85606954b3a5af5f8e5bbd1ea680cf
+k:30
+D:openrc>=0.24.1-r6 mdev-conf
+p:dev-openrc
+
+C:Q1jc/GNghy88+9JjkeaP194xbyxDA=
+P:busybox-openrc
+V:1.37.0-r30
+A:x86_64
+S:3751
+I:2615
+T:Size optimized toolbox of many common UNIX utilities
+U:https://busybox.net/
+L:GPL-2.0-only
+o:busybox
+m:Sören Tempel <soeren+alpine@soeren-tempel.net>
+t:1765894768
+c:1e823a60eb85606954b3a5af5f8e5bbd1ea680cf
+D:openrc>=0.24.1-r6
+
+C:Q1t77DDs0CZVtJ6kPaVjGd6IHfGGg=
+P:busybox-suid
+V:1.37.0-r30
+A:x86_64
+S:3925
+I:14224
+T:suid binaries of Busybox
+U:https://busybox.net/
+L:GPL-2.0-only
+o:busybox
+m:Sören Tempel <soeren+alpine@soeren-tempel.net>
+t:1765894768
+c:1e823a60eb85606954b3a5af5f8e5bbd1ea680cf
+D:busybox=1.37.0-r30 so:libc.musl-x86_64.so.1
+p:cmd:bbsuid=1.37.0-r30
+
+C:Q1Y+vnK6efVIts3IqYlOFqkNgPQrA=
+P:ca-certificates-bundle
+V:20251003-r0
+A:x86_64
+S:131156
+I:222204
+T:Pre generated bundle of Mozilla certificates
+U:https://www.mozilla.org/en-US/about/governance/policies/security-group/certs/
+L:MPL-2.0 AND MIT
+o:ca-certificates
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1762759166
+c:48290b09546213c31c074a3438180e0a2e454a94
+p:ca-certificates-cacert=20251003-r0
+
+C:Q12zOxBBniZzCcuib81FBaKGi8wfs=
+P:chrony
+V:4.8-r1
+A:x86_64
+S:173095
+I:333305
+T:NTP client and server programs
+U:https://chrony-project.org/
+L:GPL-2.0-or-later
+o:chrony
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1762858381
+c:dbd360d6938f77f81a05fb17bed8ad7b9e519028
+D:/bin/sh so:libc.musl-x86_64.so.1 so:libcap.so.2 so:libgnutls.so.30 so:libnettle.so.8 so:libseccomp.so.2
+p:cmd:chronyc=4.8-r1 cmd:chronyd=4.8-r1
+
+C:Q12z5KY70uQr0x6JnnhwF9Q0CzHjA=
+P:chrony-openrc
+V:4.8-r1
+A:x86_64
+S:2547
+I:1581
+T:NTP client and server programs (OpenRC init scripts)
+U:https://chrony-project.org/
+L:GPL-2.0-or-later
+o:chrony
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1762858381
+c:dbd360d6938f77f81a05fb17bed8ad7b9e519028
+i:openrc chrony=4.8-r1
+
+C:Q1T9KntWOGwzcjeLh/uN4O8IOyARs=
+P:dbus-libs
+V:1.16.2-r1
+A:x86_64
+S:130204
+I:296952
+T:D-BUS access libraries
+U:https://www.freedesktop.org/Software/dbus
+L:AFL-2.1 OR GPL-2.0-or-later
+o:dbus
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1746823694
+c:6bd45b53fb316dc01bda59f5feaf1e127eb64f22
+D:so:libc.musl-x86_64.so.1
+p:so:libdbus-1.so.3=3.38.3
+
+C:Q1enVu1PaEBxCJa63Ya7EWGbST/DQ=
+P:dhcpcd
+V:10.3.0-r0
+A:x86_64
+S:168886
+I:341187
+T:RFC2131 compliant DHCP client
+U:https://roy.marples.name/projects/dhcpcd
+L:BSD-2-Clause
+o:dhcpcd
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1763687343
+c:307629e2b28a49604df4ba8cbd8353ea6ee018cb
+D:/bin/sh so:libc.musl-x86_64.so.1
+p:cmd:dhcpcd=10.3.0-r0
+
+C:Q1vD3kl+8RbC1HrzJ4wF+PqtcENl4=
+P:dhcpcd-openrc
+V:10.3.0-r0
+A:x86_64
+S:1806
+I:311
+T:RFC2131 compliant DHCP client (OpenRC init scripts)
+U:https://roy.marples.name/projects/dhcpcd
+L:BSD-2-Clause
+o:dhcpcd
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1763687343
+c:307629e2b28a49604df4ba8cbd8353ea6ee018cb
+i:openrc dhcpcd=10.3.0-r0
+
+C:Q1SgLwsbBRXSX3yLRajyhqid7lOBU=
+P:doas
+V:6.8.2-r8
+A:x86_64
+S:16558
+I:35037
+T:OpenBSD's temporary privilege escalation tool
+U:https://github.com/Duncaen/OpenDoas
+L:ISC
+o:doas
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1728635393
+c:3a55d7eb7b4b1e865bb0742590c2090e16f25fb9
+D:/bin/sh so:libc.musl-x86_64.so.1
+p:cmd:doas=6.8.2-r8
+
+C:Q1Kx6gkBCLzQTVkmv7xUMOOF6WnYU=
+P:e2fsprogs
+V:1.47.3-r0
+A:x86_64
+S:180511
+I:401378
+T:Standard Ext2/3/4 filesystem utilities
+U:https://e2fsprogs.sourceforge.net/
+L:GPL-2.0-or-later AND LGPL-2.0-or-later AND BSD-3-Clause AND MIT
+o:e2fsprogs
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1759845213
+c:00f1c5f4b16e16ff5dc6ac6dc97e8445e842fecb
+D:so:libblkid.so.1 so:libc.musl-x86_64.so.1 so:libcom_err.so.2 so:libe2p.so.2 so:libext2fs.so.2 so:libuuid.so.1
+p:cmd:e2fsck=1.47.3-r0 cmd:fsck.ext2=1.47.3-r0 cmd:fsck.ext3=1.47.3-r0 cmd:fsck.ext4=1.47.3-r0 cmd:mke2fs=1.47.3-r0 cmd:mkfs.ext2=1.47.3-r0 cmd:mkfs.ext3=1.47.3-r0 cmd:mkfs.ext4=1.47.3-r0
+
+C:Q18iTlnOOHLJWhzQzJketgPxTA22A=
+P:e2fsprogs-extra
+V:1.47.3-r0
+A:x86_64
+S:214319
+I:588971
+T:Ext2/3/4 filesystem extra utilities
+U:https://e2fsprogs.sourceforge.net/
+L:GPL-2.0-or-later AND LGPL-2.0-or-later AND BSD-3-Clause AND MIT
+o:e2fsprogs
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1759845213
+c:00f1c5f4b16e16ff5dc6ac6dc97e8445e842fecb
+D:e2fsprogs=1.47.3-r0 so:libblkid.so.1 so:libc.musl-x86_64.so.1 so:libcom_err.so.2 so:libe2p.so.2 so:libext2fs.so.2 so:libss.so.2 so:libuuid.so.1
+p:cmd:badblocks=1.47.3-r0 cmd:chattr=1.47.3-r0 cmd:debugfs=1.47.3-r0 cmd:dumpe2fs=1.47.3-r0 cmd:e2freefrag=1.47.3-r0 cmd:e2image=1.47.3-r0 cmd:e2label=1.47.3-r0 cmd:e2mmpstatus=1.47.3-r0 cmd:e2scrub=1.47.3-r0 cmd:e2scrub_all=1.47.3-r0 cmd:e2undo=1.47.3-r0 cmd:e4crypt=1.47.3-r0 cmd:e4defrag=1.47.3-r0 cmd:filefrag=1.47.3-r0 cmd:logsave=1.47.3-r0 cmd:lsattr=1.47.3-r0 cmd:mklost+found=1.47.3-r0 cmd:resize2fs=1.47.3-r0 cmd:tune2fs=1.47.3-r0
+
+C:Q1I0BcUvYXy1nYp5vLaEdhPp7m/yo=
+P:e2fsprogs-libs
+V:1.47.3-r0
+A:x86_64
+S:209132
+I:451824
+T:Standard Ext2/3/4 filesystem utilities (libraries)
+U:https://e2fsprogs.sourceforge.net/
+L:GPL-2.0-or-later AND LGPL-2.0-or-later AND BSD-3-Clause AND MIT
+o:e2fsprogs
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1759845213
+c:00f1c5f4b16e16ff5dc6ac6dc97e8445e842fecb
+D:so:libc.musl-x86_64.so.1 so:libcom_err.so.2
+p:so:libe2p.so.2=2.3 so:libext2fs.so.2=2.4 so:libss.so.2=2.0
+
+C:Q1HJ+QnV2G3LsuS9vP0jE3iIu1UYE=
+P:gmp
+V:6.3.0-r4
+A:x86_64
+S:220080
+I:423880
+T:free library for arbitrary precision arithmetic
+U:https://gmplib.org/
+L:LGPL-3.0-or-later OR GPL-2.0-or-later
+o:gmp
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1750798243
+c:8bfc27fafbf6c27761b150c571c3075a5a3db0de
+D:so:libc.musl-x86_64.so.1
+p:so:libgmp.so.10=10.5.0
+
+C:Q1Fmpc5m17KRMiTbvzwU3NBa5YM9Y=
+P:gnutls
+V:3.8.11-r0
+A:x86_64
+S:948513
+I:1962064
+T:TLS protocol implementation
+U:https://www.gnutls.org/
+L:LGPL-2.1-or-later
+o:gnutls
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1764193319
+c:551543889184c28ca9d6212fc6c4fa353fe13bd4
+D:so:libbrotlidec.so.1 so:libbrotlienc.so.1 so:libc.musl-x86_64.so.1 so:libgmp.so.10 so:libhogweed.so.6 so:libidn2.so.0 so:libnettle.so.8 so:libp11-kit.so.0 so:libtasn1.so.6 so:libunistring.so.5 so:libz.so.1 so:libzstd.so.1
+p:so:libgnutls.so.30=30.41.0
+
+C:Q1kMf1Yul/fEkfEvE9ee0cPUaQScg=
+P:ifupdown-ng
+V:0.12.1-r7
+A:x86_64
+S:29167
+I:72961
+T:tools for managing network configuration
+U:https://github.com/ifupdown-ng/ifupdown-ng
+L:ISC
+o:ifupdown-ng
+m:Ariadne Conill <ariadne@dereferenced.org>
+t:1734208142
+c:969e89a6a004de66a1d67babd247cb366a7811ec
+k:900
+D:!vlan bridge so:libc.musl-x86_64.so.1
+p:ifupdown-any cmd:ifctrstat=0.12.1-r7 cmd:ifdown=0.12.1-r7 cmd:ifparse=0.12.1-r7 cmd:ifquery=0.12.1-r7 cmd:ifup=0.12.1-r7 cmd:ifupdown=0.12.1-r7
+
+C:Q1KtZXVrlwbo9ORJ0vkk5VTjgkF3g=
+P:ifupdown-ng-ppp
+V:0.12.1-r7
+A:x86_64
+S:1749
+I:191
+T:ifupdown-ng integration for ppp
+U:https://github.com/ifupdown-ng/ifupdown-ng
+L:ISC
+o:ifupdown-ng
+m:Ariadne Conill <ariadne@dereferenced.org>
+t:1734208142
+c:969e89a6a004de66a1d67babd247cb366a7811ec
+k:900
+D:ppp-daemon
+i:ifupdown-ng=0.12.1-r7 ppp-daemon
+
+C:Q1n1lv+vWoFp3oPuog4+gN6+E44gA=
+P:ifupdown-ng-wifi
+V:0.12.1-r7
+A:x86_64
+S:3090
+I:3542
+T:ifupdown-ng integration for wifi
+U:https://github.com/ifupdown-ng/ifupdown-ng
+L:ISC
+o:ifupdown-ng
+m:Ariadne Conill <ariadne@dereferenced.org>
+t:1734208142
+c:969e89a6a004de66a1d67babd247cb366a7811ec
+k:900
+D:wpa_supplicant
+i:ifupdown-ng=0.12.1-r7 wpa_supplicant
+
+C:Q1blIEQnUyE11ZLpjsEaaLGxwwBUI=
+P:iw
+V:6.17-r0
+A:x86_64
+S:102983
+I:245536
+T:nl80211 based CLI configuration utility for wireless devices
+U:https://wireless.docs.kernel.org/en/latest/en/users/documentation/iw.html
+L:ISC
+o:iw
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760624396
+c:a035abb86237303106f41c29c843288e1a2466d4
+D:so:libc.musl-x86_64.so.1 so:libnl-3.so.200 so:libnl-genl-3.so.200
+p:cmd:iw=6.17-r0
+
+C:Q1mL/lgD20RKWfmxbAlItEh8PX9SQ=
+P:kbd-bkeymaps
+V:2.8.0-r0
+A:x86_64
+S:746912
+I:860113
+T:X.org-derived binary keymaps
+U:https://kbd-project.org/
+L:GPL-2.0-or-later
+o:kbd
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1755518944
+c:8b9313df10ed04f8840a6437d3187341a1cbdaa5
+p:bkeymaps
+
+C:Q1F9DBjjeetBGqo+BzkjQ6LdbgmMw=
+P:libapk
+V:3.0.3-r1
+A:x86_64
+S:132856
+I:277184
+T:Alpine Package Keeper - package manager for alpine
+U:https://gitlab.alpinelinux.org/alpine/apk-tools
+L:GPL-2.0-only
+o:apk-tools
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1765954797
+c:b7ab616ba639f0c93be528dfc4f1e0e906a98449
+D:so:libc.musl-x86_64.so.1 so:libcrypto.so.3 so:libssl.so.3 so:libz.so.1
+p:libapk2=3.0.3-r1 so:libapk.so.3.0.0=3.0.0
+
+C:Q1mZb4rbCj9aNsGZylyPaC08rgYD0=
+P:libblkid
+V:2.41.2-r0
+A:x86_64
+S:94561
+I:195368
+T:Block device identification library from util-linux
+U:https://git.kernel.org/cgit/utils/util-linux/util-linux.git
+L:LGPL-2.1-or-later
+o:util-linux
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760625780
+c:9d3cf80b16f3800d8185e277273d3e72b7ba3ba8
+D:so:libc.musl-x86_64.so.1 so:libeconf.so.0
+p:so:libblkid.so.1=1.1.0
+
+C:Q1+/ZvDh/nOE/9LdS3X3/34CaAdWk=
+P:libcap2
+V:2.77-r0
+A:x86_64
+S:21415
+I:48616
+T:POSIX 1003.1e capabilities (libraries)
+U:https://sites.google.com/site/fullycapable/
+L:BSD-3-Clause OR GPL-2.0-only
+o:libcap
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1761521909
+c:d0630ee51a4c63a199ba216c9e93d42e2b7fbcde
+D:so:libc.musl-x86_64.so.1
+p:so:libcap.so.2=2.77 so:libpsx.so.2=2.77
+
+C:Q1M9IPB4xi3qxvlswPHl9T9Hjjjbo=
+P:libcom_err
+V:1.47.3-r0
+A:x86_64
+S:6098
+I:18112
+T:Common error description library
+U:https://e2fsprogs.sourceforge.net/
+L:GPL-2.0-or-later AND LGPL-2.0-or-later AND BSD-3-Clause AND MIT
+o:e2fsprogs
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1759845213
+c:00f1c5f4b16e16ff5dc6ac6dc97e8445e842fecb
+D:so:libc.musl-x86_64.so.1
+p:so:libcom_err.so.2=2.1
+
+C:Q1nr9plegUus/wwEqGiwsnw+ggkPQ=
+P:libcrypto3
+V:3.5.5-r0
+A:x86_64
+S:1974339
+I:5205590
+T:Crypto library from openssl
+U:https://www.openssl.org/
+L:Apache-2.0
+o:openssl
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1769531737
+c:9e1970e03323430e65dfe64e6cefd4b74aa223f0
+k:100
+D:so:libc.musl-x86_64.so.1
+p:so:libcrypto.so.3=3
+
+C:Q1lpOQqxbo8nP5flINBpoMd5ir1BA=
+P:libeconf
+V:0.8.3-r0
+A:x86_64
+S:26053
+I:65672
+T:Enhanced Config File Parser
+U:https://github.com/openSUSE/libeconf
+L:MIT
+o:libeconf
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1769107670
+c:36b72fb9c0502028e6dd976e5ec5ee852fac39be
+D:so:libc.musl-x86_64.so.1
+p:cmd:econftool=0.8.3-r0 so:libeconf.so.0=0.8.3
+
+C:Q1Rj9pM1oyI7HOaFbOO+9cA/7nIb8=
+P:libedit
+V:20251016.3.1-r0
+A:x86_64
+S:76561
+I:178016
+T:BSD line editing library
+U:https://www.thrysoee.dk/editline
+L:BSD-3-Clause
+o:libedit
+m:Celeste <cielesti@protonmail.com>
+t:1760678660
+c:211d61660b4b7daefe3bb0fff0e99264234c63fe
+D:so:libc.musl-x86_64.so.1 so:libncursesw.so.6
+p:so:libedit.so.0=0.0.76
+
+C:Q1oawhPBD0K91Pmly4aJbIZewhoVo=
+P:libfdisk
+V:2.41.2-r0
+A:x86_64
+S:125133
+I:272400
+T:Partitioning library for fdisk-like programs
+U:https://git.kernel.org/cgit/utils/util-linux/util-linux.git
+L:LGPL-2.1-or-later
+o:util-linux
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760625780
+c:9d3cf80b16f3800d8185e277273d3e72b7ba3ba8
+D:so:libblkid.so.1 so:libc.musl-x86_64.so.1 so:libuuid.so.1
+p:so:libfdisk.so.1=1.1.0
+
+C:Q1+lG/Ao9Adov+HH70lLH+P4WQwZ8=
+P:libffi
+V:3.5.2-r0
+A:x86_64
+S:18342
+I:38960
+T:portable, high level programming interface to various calling conventions.
+U:https://sourceware.org/libffi/
+L:MIT
+o:libffi
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1754158064
+c:23e88e3bbd62064573a028ed8f6acef216a829b6
+D:so:libc.musl-x86_64.so.1
+p:so:libffi.so.8=8.2.0
+
+C:Q1uMW/o2XaXDYKASMNtNceZa+Urz0=
+P:libidn2
+V:2.3.8-r0
+A:x86_64
+S:104625
+I:198632
+T:Encode/Decode library for internationalized domain names
+U:https://www.gnu.org/software/libidn#libidn2
+L:GPL-2.0-or-later OR LGPL-3.0-or-later
+o:libidn2
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1751290607
+c:8240e09aa2fdd8f9979b2016be082273965aff0c
+D:so:libc.musl-x86_64.so.1 so:libunistring.so.5
+p:so:libidn2.so.0=0.4.0
+
+C:Q1ZJ0wQcUrgGIPtQqY9ZedJeu+FSM=
+P:libncursesw
+V:6.5_p20251123-r0
+A:x86_64
+S:158748
+I:342888
+T:Console display library (libncursesw)
+U:https://invisible-island.net/ncurses/
+L:X11
+o:ncurses
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1763986573
+c:f7479f62dcb52ace52d99650c80de275010ec3ac
+D:ncurses-terminfo-base=6.5_p20251123-r0 so:libc.musl-x86_64.so.1
+p:so:libncursesw.so.6=6.5
+
+C:Q1gF8VkcSgPbISYUzr+v+Bu1IdPLE=
+P:libnl3
+V:3.11.0-r0
+A:x86_64
+S:332609
+I:868934
+T:Library for applications dealing with netlink sockets
+U:http://www.infradead.org/~tgr/libnl/
+L:LGPL-2.1-or-later
+o:libnl3
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1732101951
+c:4084996615c2a6601e26eedde99e3ae66e7d6ab7
+D:so:libc.musl-x86_64.so.1
+p:so:libnl-3.so.200=200.26.0 so:libnl-genl-3.so.200=200.26.0 so:libnl-idiag-3.so.200=200.26.0 so:libnl-nf-3.so.200=200.26.0 so:libnl-route-3.so.200=200.26.0 so:libnl-xfrm-3.so.200=200.26.0
+
+C:Q1oigGJn4gswexdEmkNtVpYt1oRzY=
+P:libpcap
+V:1.10.5-r1
+A:x86_64
+S:108251
+I:243824
+T:A system-independent interface for user-level packet capture
+U:https://www.tcpdump.org/
+L:BSD-3-Clause
+o:libpcap
+m:Celeste <cielesti@protonmail.com>
+t:1747304947
+c:be0833caee3020f089f02c5d7223e971a9a11ffb
+D:so:libc.musl-x86_64.so.1
+p:so:libpcap.so.1=1.10.5
+
+C:Q1vTn1Y2omNouAhdB+hdufn9SRSxc=
+P:libseccomp
+V:2.6.0-r1
+A:x86_64
+S:50302
+I:167584
+T:interface to the Linux Kernel's syscall filtering mechanism
+U:https://github.com/seccomp/libseccomp
+L:LGPL-2.1-or-later
+o:libseccomp
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1764088667
+c:7a7fabcfc3c54c6c564a173068ddb9f654c984be
+D:so:libc.musl-x86_64.so.1
+p:cmd:scmp_sys_resolver=2.6.0-r1 so:libseccomp.so.2=2.6.0
+
+C:Q1LBKLd+j5iO5GZm9jO8kyoEl1X2I=
+P:libsmartcols
+V:2.41.2-r0
+A:x86_64
+S:55152
+I:120664
+T:Formatting library for ls-like programs
+U:https://git.kernel.org/cgit/utils/util-linux/util-linux.git
+L:LGPL-2.1-or-later
+o:util-linux
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760625780
+c:9d3cf80b16f3800d8185e277273d3e72b7ba3ba8
+D:so:libc.musl-x86_64.so.1
+p:so:libsmartcols.so.1=1.1.0
+
+C:Q1EiNIlbZXfN3L40UEBvNXYA6KaVE=
+P:libssl3
+V:3.5.5-r0
+A:x86_64
+S:378646
+I:839544
+T:SSL shared libraries
+U:https://www.openssl.org/
+L:Apache-2.0
+o:openssl
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1769531737
+c:9e1970e03323430e65dfe64e6cefd4b74aa223f0
+k:100
+D:libcrypto3=3.5.5-r0 so:libc.musl-x86_64.so.1 so:libcrypto.so.3
+p:so:libssl.so.3=3
+
+C:Q189mS4yrl5ElU3SrIvKleddzZ6qc=
+P:libtasn1
+V:4.21.0-r0
+A:x86_64
+S:33224
+I:67424
+T:The ASN.1 library used in GNUTLS
+U:https://www.gnu.org/software/gnutls/
+L:LGPL-2.1-or-later
+o:libtasn1
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1768294639
+c:d24da2882e7c664f0896af597d09a6ec0c6d1658
+D:so:libc.musl-x86_64.so.1
+p:so:libtasn1.so.6=6.6.5
+
+C:Q1blZWK95Fa+5ZcXh9PZXDToTO15c=
+P:libunistring
+V:1.4.1-r0
+A:x86_64
+S:743482
+I:1922880
+T:Library for manipulating Unicode strings and C strings
+U:https://www.gnu.org/software/libunistring/
+L:GPL-2.0-or-later OR LGPL-3.0-or-later
+o:libunistring
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1764335951
+c:cd5407e1341869af38d836fe83f9dbc98799f43a
+D:so:libc.musl-x86_64.so.1
+p:so:libunistring.so.5=5.2.1
+
+C:Q1Lu19H99/GhQExtLXLqzU8sN0YrQ=
+P:libusb
+V:1.0.29-r0
+A:x86_64
+S:47998
+I:104224
+T:Library that enables userspace access to USB devices
+U:https://libusb.info/
+L:LGPL-2.1-or-later
+o:libusb
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1751256752
+c:416309f5123c6a53eeb9d241a542772b1d4f0b3c
+D:so:libc.musl-x86_64.so.1
+p:so:libusb-1.0.so.0=0.5.0
+
+C:Q1AFDpp2N81xWWvquZlq/Q4zVIkBY=
+P:libuuid
+V:2.41.2-r0
+A:x86_64
+S:14256
+I:30624
+T:DCE compatible Universally Unique Identifier library
+U:https://git.kernel.org/cgit/utils/util-linux/util-linux.git
+L:BSD-3-Clause
+o:util-linux
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760625780
+c:9d3cf80b16f3800d8185e277273d3e72b7ba3ba8
+D:so:libc.musl-x86_64.so.1
+p:so:libuuid.so.1=1.3.0
+
+C:Q1t51Vo85Wb2nlffpTCVpG8zuO9Eg=
+P:mdev-conf
+V:4.9-r0
+A:x86_64
+S:5252
+I:9645
+T:Configuration files for mdev and mdevd
+U:https://gitlab.alpinelinux.org/alpine/mdev-conf
+L:MIT
+o:mdev-conf
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1764335992
+c:11877d6400f684cbb835ee9967b8a3f721a39b4b
+
+C:Q10Fp17BPhp6i6tWznzT3Hm9cn5pg=
+P:musl
+V:1.2.5-r21
+A:x86_64
+S:413303
+I:666216
+T:the musl c library (libc) implementation
+U:https://musl.libc.org/
+L:MIT
+o:musl
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760380328
+c:f2036bfe000ab05e1f300c6fce57be3da9db426e
+p:so:libc.musl-x86_64.so.1=1
+
+C:Q12qeVKNLPh39tZWIHqBjUPI3qmjA=
+P:musl-utils
+V:1.2.5-r21
+A:x86_64
+S:13598
+I:55421
+T:the musl c library (libc) implementation
+U:https://musl.libc.org/
+L:MIT AND BSD-2-Clause AND GPL-2.0-or-later
+o:musl
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760380328
+c:f2036bfe000ab05e1f300c6fce57be3da9db426e
+D:scanelf so:libc.musl-x86_64.so.1
+p:libc-utils=1.2.5-r21 cmd:getconf=1.2.5-r21 cmd:getent=1.2.5-r21 cmd:iconv=1.2.5-r21 cmd:ldconfig=1.2.5-r21 cmd:ldd=1.2.5-r21
+
+C:Q1V70dgSTslX7v6iMUvfRbDtEGjO4=
+P:ncurses-terminfo-base
+V:6.5_p20251123-r0
+A:x86_64
+S:21855
+I:101351
+T:Descriptions of common terminals
+U:https://invisible-island.net/ncurses/
+L:X11
+o:ncurses
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1763986573
+c:f7479f62dcb52ace52d99650c80de275010ec3ac
+
+C:Q1uVVUTE4ZeAR9ExCGIH8l5GpAuno=
+P:nettle
+V:3.10.2-r0
+A:x86_64
+S:343066
+I:597872
+T:Low-level cryptographic library
+U:https://www.lysator.liu.se/~nisse/nettle/
+L:GPL-2.0-or-later OR LGPL-3.0-or-later
+o:nettle
+m:Patrycja Rosa <alpine@ptrcnull.me>
+t:1753179968
+c:bf898e6d067c1c0ecc0f5ff39c79fc893399acd8
+D:so:libc.musl-x86_64.so.1 so:libgmp.so.10
+p:so:libhogweed.so.6=6.11 so:libnettle.so.8=8.11
+
+C:Q1V1+k03/TlryydsVAD1jbBqAMITQ=
+P:network-extras
+V:2.1-r0
+A:x86_64
+S:1386
+I:0
+T:Meta package to pull in ppp, vlan, bonding, bridge and wifi support
+U:https://alpinelinux.org/
+L:GPL-2.0-only
+o:network-extras
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1736113420
+c:7b34792896c5d0d10de446a859d78b9d4acfb495
+D:bridge bonding vlan wpa_supplicant iw ppp-atm ppp-chat ppp-daemon ppp-l2tp ppp-minconn ppp-passwordfd ppp-pppoe ppp-radius ppp-winbind usb-modeswitch
+
+C:Q17kfMweMhflumPXbcpA79DGXv/Mg=
+P:openntpd
+V:6.8_p1-r11
+A:x86_64
+S:39586
+I:80338
+T:Lightweight NTP server ported from OpenBSD
+U:https://openntpd.org/
+L:ISC
+o:openntpd
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1759088115
+c:4b8b9513f00d5d87b58dd51535768032735d98e4
+D:so:libc.musl-x86_64.so.1
+p:cmd:ntpctl=6.8_p1-r11 cmd:ntpd=6.8_p1-r11
+
+C:Q1ITBVaYQap2J3CEAK86bd834Zgcg=
+P:openntpd-openrc
+V:6.8_p1-r11
+A:x86_64
+S:1881
+I:290
+T:Lightweight NTP server ported from OpenBSD (OpenRC init scripts)
+U:https://openntpd.org/
+L:ISC
+o:openntpd
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1759088115
+c:4b8b9513f00d5d87b58dd51535768032735d98e4
+i:openrc openntpd=6.8_p1-r11
+
+C:Q11FWyiJsRpKp05TNaATuSYdKbPCY=
+P:openrc
+V:0.63-r1
+A:x86_64
+S:218197
+I:1368229
+T:OpenRC manages the services, startup and shutdown of a host
+U:https://github.com/OpenRC/openrc
+L:BSD-2-Clause
+o:openrc
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1763411392
+c:4954d5e94172e7ab07a290a028bc7b98c0a5bc1d
+D:ifupdown-any openrc-user=0.63-r1 /bin/sh so:libc.musl-x86_64.so.1 so:libcap.so.2
+p:ifupdown-ng-openrc=0.12.1-r4 cmd:mkmntdirs=0.63-r1 cmd:openrc-run=0.63-r1 cmd:openrc=0.63-r1 cmd:rc-service=0.63-r1 cmd:rc-sstat=0.63-r1 cmd:rc-status=0.63-r1 cmd:rc-update=0.63-r1 cmd:service=0.63-r1 cmd:start-stop-daemon=0.63-r1 cmd:supervise-daemon=0.63-r1 so:libeinfo.so.1=1 so:librc.so.1=1
+
+C:Q1QGiTCxu1VQYuq64D7sGXZXe3W5M=
+P:openrc-user
+V:0.63-r1
+A:x86_64
+S:5867
+I:15291
+T:OpenRC user services without PAM support
+U:https://github.com/OpenRC/openrc
+L:BSD-2-Clause
+o:openrc
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1763411392
+c:4954d5e94172e7ab07a290a028bc7b98c0a5bc1d
+k:100
+D:so:libc.musl-x86_64.so.1 so:libeinfo.so.1
+
+C:Q1cX8/h7qI0aL/K6aQ9fln1xy+To8=
+P:openssh
+V:10.2_p1-r0
+A:x86_64
+S:140136
+I:338056
+T:Port of OpenBSD's free SSH release
+U:https://www.openssh.com/portable.html
+L:SSH-OpenSSH
+o:openssh
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760095318
+c:eb5354e7d78b417145004210caea9035a58598ab
+D:openssh-client openssh-sftp-server openssh-server so:libc.musl-x86_64.so.1 so:libcrypto.so.3
+
+C:Q1ZcQNh1bp4cvmzQ7Y5GLdJ/Sq5Xc=
+P:openssh-client-common
+V:10.2_p1-r0
+A:x86_64
+S:870943
+I:2561474
+T:OpenBSD's SSH client common files
+U:https://www.openssh.com/portable.html
+L:SSH-OpenSSH
+o:openssh
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760095318
+c:eb5354e7d78b417145004210caea9035a58598ab
+D:libcrypto3>=3.1.0 so:libc.musl-x86_64.so.1 so:libcrypto.so.3 so:libedit.so.0 so:libz.so.1
+p:cmd:findssl.sh=10.2_p1-r0 cmd:scp=10.2_p1-r0 cmd:sftp=10.2_p1-r0 cmd:ssh-add=10.2_p1-r0 cmd:ssh-agent=10.2_p1-r0 cmd:ssh-copy-id=10.2_p1-r0 cmd:ssh-keyscan=10.2_p1-r0 cmd:ssh-pkcs11-helper=10.2_p1-r0
+
+C:Q1VK8JGwPQ8Di/vMFhKI5fes7GY68=
+P:openssh-client-default
+V:10.2_p1-r0
+A:x86_64
+S:377036
+I:842560
+T:OpenBSD's SSH client
+U:https://www.openssh.com/portable.html
+L:SSH-OpenSSH
+o:openssh
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760095318
+c:eb5354e7d78b417145004210caea9035a58598ab
+k:2
+D:openssh-keygen=10.2_p1-r0 openssh-client-common=10.2_p1-r0 !openssh-client-krb5 so:libc.musl-x86_64.so.1 so:libcrypto.so.3 so:libz.so.1
+p:openssh-client=10.2_p1-r0 cmd:ssh=10.2_p1-r0
+
+C:Q14sDG6FkBbVqoK93GWoFMBiyUwhk=
+P:openssh-keygen
+V:10.2_p1-r0
+A:x86_64
+S:207568
+I:477480
+T:ssh helper program for generating keys
+U:https://www.openssh.com/portable.html
+L:SSH-OpenSSH
+o:openssh
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760095318
+c:eb5354e7d78b417145004210caea9035a58598ab
+D:libcrypto3>=3.1.0 so:libc.musl-x86_64.so.1 so:libcrypto.so.3
+p:cmd:ssh-keygen=10.2_p1-r0
+
+C:Q19+/Oz0D/lqsCw7OXL16axT+pEpk=
+P:openssh-server
+V:10.2_p1-r0
+A:x86_64
+S:987424
+I:2220904
+T:OpenSSH server
+U:https://www.openssh.com/portable.html
+L:SSH-OpenSSH
+o:openssh
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760095318
+c:eb5354e7d78b417145004210caea9035a58598ab
+D:openssh-keygen=10.2_p1-r0 openssh-server-common=10.2_p1-r0 /bin/sh so:libc.musl-x86_64.so.1 so:libcrypto.so.3 so:libz.so.1
+p:cmd:sshd=10.2_p1-r0
+
+C:Q1iBcfh+83oyq0bnE8ussx+xj2k90=
+P:openssh-server-common
+V:10.2_p1-r0
+A:x86_64
+S:3191
+I:3542
+T:OpenSSH server configuration files
+U:https://www.openssh.com/portable.html
+L:SSH-OpenSSH
+o:openssh
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760095318
+c:eb5354e7d78b417145004210caea9035a58598ab
+
+C:Q1nZL4a7yhTNOz7KZ5lqQyx9WSfbI=
+P:openssh-server-common-openrc
+V:10.2_p1-r0
+A:x86_64
+S:3619
+I:4592
+T:Port of OpenBSD's free SSH release (OpenRC init scripts)
+U:https://www.openssh.com/portable.html
+L:SSH-OpenSSH
+o:openssh
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760095318
+c:eb5354e7d78b417145004210caea9035a58598ab
+i:openrc openssh-server-common=10.2_p1-r0
+
+C:Q1+pq1iT3pP32qijKRErFRz2CRSyI=
+P:openssh-sftp-server
+V:10.2_p1-r0
+A:x86_64
+S:61875
+I:133096
+T:ssh sftp server module
+U:https://www.openssh.com/portable.html
+L:SSH-OpenSSH
+o:openssh
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760095318
+c:eb5354e7d78b417145004210caea9035a58598ab
+D:so:libc.musl-x86_64.so.1
+
+C:Q1cODqKachQOtoISjcGb3uHDW9pLQ=
+P:openssl
+V:3.5.5-r0
+A:x86_64
+S:339907
+I:820320
+T:Toolkit for Transport Layer Security (TLS)
+U:https://www.openssl.org/
+L:Apache-2.0
+o:openssl
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1769531737
+c:9e1970e03323430e65dfe64e6cefd4b74aa223f0
+k:100
+D:libssl3=3.5.5-r0 libcrypto3=3.5.5-r0 so:libc.musl-x86_64.so.1 so:libcrypto.so.3 so:libssl.so.3
+p:openssl3=3.5.5-r0 cmd:openssl=3.5.5-r0
+
+C:Q1sDycSY/IuHXWlGWYJ8OeeRsNzlE=
+P:p11-kit
+V:0.25.5-r2
+A:x86_64
+S:356683
+I:1379151
+T:Library for loading and sharing PKCS#11 modules
+U:https://p11-glue.freedesktop.org/
+L:BSD-3-Clause
+o:p11-kit
+m:Patrycja Rosa <alpine@ptrcnull.me>
+t:1746823694
+c:6bd45b53fb316dc01bda59f5feaf1e127eb64f22
+D:so:libc.musl-x86_64.so.1 so:libffi.so.8 so:libtasn1.so.6
+p:cmd:p11-kit=0.25.5-r2 so:libp11-kit.so.0=0.4.1
+
+C:Q1vwUSB+QeFGjp2yz+u3QHg5HFojs=
+P:partx
+V:2.41.2-r0
+A:x86_64
+S:21732
+I:51248
+T:Tell the kernel about disk partition changes from util-linux
+U:https://git.kernel.org/cgit/utils/util-linux/util-linux.git
+L:GPL-2.0-or-later
+o:util-linux
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760625780
+c:9d3cf80b16f3800d8185e277273d3e72b7ba3ba8
+D:so:libblkid.so.1 so:libc.musl-x86_64.so.1 so:libsmartcols.so.1
+p:cmd:partx=2.41.2-r0
+i:util-linux=2.41.2-r0
+
+C:Q1VJBZlYFRYnuw9Uab3tlFmIsbwks=
+P:pcre2
+V:10.47-r0
+A:x86_64
+S:319854
+I:794272
+T:Perl-compatible regular expression library
+U:https://pcre.org/
+L:BSD-3-Clause
+o:pcre2
+m:Jakub Jirutka <jakub@jirutka.cz>
+t:1762730811
+c:91bb31c9d95cf6addc2fb2454bc484f7d3a27ec7
+D:so:libc.musl-x86_64.so.1
+p:so:libpcre2-8.so.0=0.15.0 so:libpcre2-posix.so.3=3.0.7
+
+C:Q1tjpOfM0wRkRVE01uzt2ZVoJSFIU=
+P:pcsc-lite-libs
+V:2.4.0-r1
+A:x86_64
+S:22760
+I:56864
+T:Middleware to access a smart card using SCard API (PC/SC) (libraries)
+U:https://pcsclite.apdu.fr/
+L:BSD-3-Clause AND BSD-2-Clause AND ISC
+o:pcsc-lite
+m:Timo Teräs <timo.teras@iki.fi>
+t:1760942061
+c:9b439c50bcf8e04dae0b2b54c5b10599d807ece1
+D:so:libc.musl-x86_64.so.1
+p:so:libpcsclite.so.1=1 so:libpcsclite_real.so.1=1
+
+C:Q1+smnaz1QUHduzIv5R6qw1lwcsvo=
+P:ppp-atm
+V:2.5.2-r1
+A:x86_64
+S:8135
+I:18528
+T:pppd plugin to implement PPPoATM protocol
+U:https://ppp.samba.org/
+L:GPL-2.0-or-later AND LGPL-2.0-or-later
+o:ppp
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1753856110
+c:de0bf50b73c37ce0434aeaec700682dd1f1ba28f
+D:ppp-daemon so:libc.musl-x86_64.so.1
+
+C:Q1l6gGlH6x0UxsdBq7atKp0ASWOGc=
+P:ppp-chat
+V:2.5.2-r1
+A:x86_64
+S:11550
+I:22432
+T:a program for automatic ppp session establishment
+U:https://ppp.samba.org/
+L:Public-Domain
+o:ppp
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1753856110
+c:de0bf50b73c37ce0434aeaec700682dd1f1ba28f
+D:so:libc.musl-x86_64.so.1
+p:cmd:chat=2.5.2-r1
+
+C:Q10vwHIqymLPd7Hu6nLHT/Orz7Cuc=
+P:ppp-daemon
+V:2.5.2-r1
+A:x86_64
+S:167767
+I:376678
+T:A daemon which implements the PPP protocol
+U:https://ppp.samba.org/
+L:BSD-3-Clause AND BSD-4-Clause AND BSD-4-Clause-Shortened AND GPL-2.0-or-later AND LGPL-2.0-or-later AND Public-Domain AND RSA-MD
+o:ppp
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1753856110
+c:de0bf50b73c37ce0434aeaec700682dd1f1ba28f
+D:so:libc.musl-x86_64.so.1 so:libcrypto.so.3 so:libpcap.so.1 so:libssl.so.3
+p:cmd:poff=2.5.2-r1 cmd:pon=2.5.2-r1 cmd:pppd=2.5.2-r1 cmd:pppdump=2.5.2-r1 cmd:pppstats=2.5.2-r1
+
+C:Q1vK3uU1mX83a0BLhkjgmD0eKO0Go=
+P:ppp-l2tp
+V:2.5.2-r1
+A:x86_64
+S:8844
+I:32824
+T:pppd plugin to implement PPPoL2TP protocol
+U:https://ppp.samba.org/
+L:GPL-2.0-or-later
+o:ppp
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1753856110
+c:de0bf50b73c37ce0434aeaec700682dd1f1ba28f
+D:ppp-daemon so:libc.musl-x86_64.so.1
+
+C:Q1DXkfqtK4NWq9yc3bxa/riZfkYFE=
+P:ppp-minconn
+V:2.5.2-r1
+A:x86_64
+S:3178
+I:14104
+T:pppd plugin to implement a 'minconnect' option
+U:https://ppp.samba.org/
+L:BSD-4-Clause
+o:ppp
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1753856110
+c:de0bf50b73c37ce0434aeaec700682dd1f1ba28f
+D:ppp-daemon
+
+C:Q1I5pSk51G8taA1I7+QfcJPuRb4Uk=
+P:ppp-openrc
+V:2.5.2-r1
+A:x86_64
+S:1917
+I:233
+T:A daemon which implements the PPP protocol for dial-up networking (OpenRC init scripts)
+U:https://ppp.samba.org/
+L:BSD-3-Clause AND BSD-4-Clause AND BSD-4-Clause-Shortened AND GPL-2.0-or-later AND HPND AND LGPL-2.0-or-later AND Public-Domain AND RSA-MD
+o:ppp
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1753856110
+c:de0bf50b73c37ce0434aeaec700682dd1f1ba28f
+i:ppp-daemon=2.5.2-r1 openrc
+
+C:Q1tJow2YlDOLV+PzCnIDQwJqnVSYU=
+P:ppp-passwordfd
+V:2.5.2-r1
+A:x86_64
+S:3654
+I:14104
+T:pppd plugin let's you pass the password via a file descriptor
+U:https://ppp.samba.org/
+L:BSD-3-Clause AND BSD-4-Clause AND BSD-4-Clause-Shortened AND GPL-2.0-or-later AND HPND AND LGPL-2.0-or-later AND Public-Domain AND RSA-MD
+o:ppp
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1753856110
+c:de0bf50b73c37ce0434aeaec700682dd1f1ba28f
+D:ppp-daemon so:libc.musl-x86_64.so.1
+
+C:Q1Kmn0oTOxQqPh3BlmHw0IFd9zlsk=
+P:ppp-pppoe
+V:2.5.2-r1
+A:x86_64
+S:20617
+I:58048
+T:pppd plugin for kernel-mode PPPoE on Linux
+U:https://ppp.samba.org/
+L:GPL-2.0-or-later
+o:ppp
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1753856110
+c:de0bf50b73c37ce0434aeaec700682dd1f1ba28f
+D:ppp-daemon so:libc.musl-x86_64.so.1
+p:cmd:pppoe-discovery=2.5.2-r1
+
+C:Q1KAonwqbSEeyTvc9h/1NiMAaT2go=
+P:ppp-radius
+V:2.5.2-r1
+A:x86_64
+S:36136
+I:114150
+T:RADIUS plugin for pppd
+U:https://ppp.samba.org/
+L:GPL-2.0-or-later AND HPND
+o:ppp
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1753856110
+c:de0bf50b73c37ce0434aeaec700682dd1f1ba28f
+D:ppp-daemon so:libc.musl-x86_64.so.1
+
+C:Q1r5kW6lUR1gYBjcaVcEOCYqf+nTw=
+P:ppp-winbind
+V:2.5.2-r1
+A:x86_64
+S:6773
+I:18200
+T:WINBIND plugin for pppd
+U:https://ppp.samba.org/
+L:GPL-2.0-or-later
+o:ppp
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1753856110
+c:de0bf50b73c37ce0434aeaec700682dd1f1ba28f
+D:ppp-daemon so:libc.musl-x86_64.so.1
+
+C:Q1bqNt1E759jZPDN+r4J6hXS/b4ik=
+P:scanelf
+V:1.3.8-r2
+A:x86_64
+S:32368
+I:67504
+T:Scan ELF binaries for stuff
+U:https://wiki.gentoo.org/wiki/Hardened/PaX_Utilities
+L:GPL-2.0-only
+o:pax-utils
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1752564361
+c:3912b4fa83437852312ad3c37a00229ff59fab1c
+D:so:libc.musl-x86_64.so.1
+p:cmd:scanelf=1.3.8-r2
+
+C:Q1j1lxTe5LMlcVKn0Ua9DadxpdhYs=
+P:sfdisk
+V:2.41.2-r0
+A:x86_64
+S:34512
+I:84016
+T:Partition table manipulator from util-linux
+U:https://git.kernel.org/cgit/utils/util-linux/util-linux.git
+L:GPL-1.0-or-later
+o:util-linux
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1760625780
+c:9d3cf80b16f3800d8185e277273d3e72b7ba3ba8
+D:so:libc.musl-x86_64.so.1 so:libfdisk.so.1 so:libncursesw.so.6 so:libsmartcols.so.1
+p:cmd:sfdisk=2.41.2-r0
+i:util-linux=2.41.2-r0
+
+C:Q1W27Ak5z8m+R9lnejFSxUfMGLXt0=
+P:ssl_client
+V:1.37.0-r30
+A:x86_64
+S:4681
+I:14384
+T:External ssl_client for busybox wget
+U:https://busybox.net/
+L:GPL-2.0-only
+o:busybox
+m:Sören Tempel <soeren+alpine@soeren-tempel.net>
+t:1765894768
+c:1e823a60eb85606954b3a5af5f8e5bbd1ea680cf
+D:so:libc.musl-x86_64.so.1 so:libcrypto.so.3 so:libssl.so.3
+p:cmd:ssl_client=1.37.0-r30
+i:busybox=1.37.0-r30 libssl3
+
+C:Q1hzfbw7djkJwBao4EvzyPkOEBx1E=
+P:tiny-cloud
+V:3.2.3-r0
+A:x86_64
+S:17965
+I:43184
+T:Tiny Cloud instance bootstrapper
+U:https://gitlab.alpinelinux.org/alpine/cloud/tiny-cloud
+L:MIT
+o:tiny-cloud
+m:Jake Buchholz Göktürk <tomalok@gmail.com>
+t:1765125366
+c:3a077beb98acf6e3afa672ba0432d812540af663
+D:e2fsprogs-extra partx sfdisk yx openssh-server /bin/sh
+p:tiny-cloud-allclouds=3.2.3-r0 cmd:imds=3.2.3-r0 cmd:tiny-cloud=3.2.3-r0
+
+C:Q1ZfxcYFWEXseUgResH+WTsZIbfFs=
+P:tiny-cloud-nocloud
+V:3.2.3-r0
+A:x86_64
+S:1445
+I:1
+T:Tiny Cloud - NoCloud module
+U:https://gitlab.alpinelinux.org/alpine/cloud/tiny-cloud
+L:MIT
+o:tiny-cloud
+m:Jake Buchholz Göktürk <tomalok@gmail.com>
+t:1765125366
+c:3a077beb98acf6e3afa672ba0432d812540af663
+D:tiny-cloud=3.2.3-r0 /bin/sh
+p:tiny-cloud-alpine=3.2.3-r0
+
+C:Q17AAOaP8ESosqbZJMtuNlk3+9olQ=
+P:tiny-cloud-openrc
+V:3.2.3-r0
+A:x86_64
+S:2291
+I:924
+T:Tiny Cloud instance bootstrapper (OpenRC init scripts)
+U:https://gitlab.alpinelinux.org/alpine/cloud/tiny-cloud
+L:MIT
+o:tiny-cloud
+m:Jake Buchholz Göktürk <tomalok@gmail.com>
+t:1765125366
+c:3a077beb98acf6e3afa672ba0432d812540af663
+D:/bin/sh
+i:openrc tiny-cloud=3.2.3-r0
+
+C:Q14GfO0IszYh7a7BtSx4HqNNqc5ZY=
+P:tzdata
+V:2025c-r0
+A:x86_64
+S:187243
+I:446922
+T:Timezone data
+U:https://www.iana.org/time-zones
+L:Public-Domain
+o:tzdata
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1765574619
+c:e96746e2a8770a60fefba5f62ffcf60a6bb9c1e0
+
+C:Q1vLsHnpooywUUvw5XBaR8q91lmi8=
+P:usb-modeswitch
+V:2.6.1-r5
+A:x86_64
+S:68233
+I:139022
+T:A mode switching tool for controlling flip flop (multiple device) USB gear
+U:https://www.draisberghof.de/usb_modeswitch/
+L:GPL-2.0-or-later
+o:usb-modeswitch
+m:Leonardo Arena <rnalrd@alpinelinux.org>
+t:1753853734
+c:248b659dc81a2883a4124425bdcdd30aa71ed27a
+D:so:libc.musl-x86_64.so.1 so:libusb-1.0.so.0
+p:cmd:usb_modeswitch=2.6.1-r5
+
+C:Q1FF27p1XU73CYtun8+2omfK6zXLY=
+P:vlan
+V:2.3-r1
+A:x86_64
+S:2415
+I:2211
+T:Scripts for configuring VLAN network interfaces
+U:https://wiki.alpinelinux.org/wiki/Vlan
+L:GPL-2.0-only
+o:vlan
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1735923921
+c:8bac74716d06c84627ab02d101fd9d2bafd0a34c
+
+C:Q1j43WYzuOZURmY3xkcD50V9ZLUAs=
+P:wget
+V:1.25.0-r2
+A:x86_64
+S:211601
+I:417457
+T:Network utility to retrieve files from the Web
+U:https://www.gnu.org/software/wget/wget.html
+L:GPL-3.0-or-later WITH OpenSSL-Exception
+o:wget
+m:Celeste <cielesti@protonmail.com>
+t:1750403215
+c:32f05f08efb09381817814c2c4ba965b9a700351
+D:so:libc.musl-x86_64.so.1 so:libcrypto.so.3 so:libidn2.so.0 so:libpcre2-8.so.0 so:libssl.so.3 so:libz.so.1
+p:cmd:wget=1.25.0-r2
+
+C:Q1J82iirwfYGt9RFMNWICyrTLoBWQ=
+P:wpa_supplicant
+V:2.11-r3
+A:x86_64
+S:1933647
+I:4171938
+T:utility providing key negotiation for WPA wireless networks
+U:https://w1.fi/wpa_supplicant/
+L:BSD-3-Clause
+o:wpa_supplicant
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1762419223
+c:46858fe29eb75d3c87f21ee14d455a38c121c42c
+k:10
+D:so:libc.musl-x86_64.so.1 so:libcrypto.so.3 so:libdbus-1.so.3 so:libnl-3.so.200 so:libnl-genl-3.so.200 so:libpcsclite.so.1 so:libssl.so.3
+p:nm-wifi-backend cmd:eapol_test=2.11-r3 cmd:wpa_cli=2.11-r3 cmd:wpa_passphrase=2.11-r3 cmd:wpa_supplicant=2.11-r3
+
+C:Q1BxkFiwgRRXdM7xe/CN4nuEGdStE=
+P:wpa_supplicant-openrc
+V:2.11-r3
+A:x86_64
+S:3171
+I:2948
+T:utility providing key negotiation for WPA wireless networks (OpenRC init scripts)
+U:https://w1.fi/wpa_supplicant/
+L:BSD-3-Clause
+o:wpa_supplicant
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1762419223
+c:46858fe29eb75d3c87f21ee14d455a38c121c42c
+k:10
+i:openrc wpa_supplicant=2.11-r3
+
+C:Q119uzVkZKCxHbtGK4exwsxN3XkfQ=
+P:yaml
+V:0.2.5-r2
+A:x86_64
+S:45096
+I:108280
+T:YAML 1.1 parser and emitter written in C
+U:https://pyyaml.org/wiki/LibYAML
+L:MIT
+o:yaml
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1735923921
+c:8bac74716d06c84627ab02d101fd9d2bafd0a34c
+D:so:libc.musl-x86_64.so.1
+p:so:libyaml-0.so.2=2.0.9
+
+C:Q1nLXK/67nfY4J5EznfD9C0V7hpQU=
+P:yx
+V:1.0.2-r0
+A:x86_64
+S:6165
+I:14152
+T:A small shell tool that allows extraction of targeted data from YAML
+U:https://gitlab.com/tomalok/yx
+L:MIT
+o:yx
+m:Jake Buchholz Göktürk <tomalok@gmail.com>
+t:1706394474
+c:2a0e6f502943853710c29edebb15fcb55a6cfb59
+D:so:libc.musl-x86_64.so.1 so:libyaml-0.so.2
+p:cmd:yx=1.0.2-r0
+
+C:Q1Po6Odt/vtO/SdlitpteS5muid14=
+P:zlib
+V:1.3.1-r2
+A:x86_64
+S:54526
+I:104280
+T:A compression/decompression Library
+U:https://zlib.net/
+L:Zlib
+o:zlib
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1726658779
+c:4c2722e7ecc1c5e3ba882429044a101497121223
+D:so:libc.musl-x86_64.so.1
+p:so:libz.so.1=1.3.1
+
+C:Q11Qe4rDxDNaQEBawg5JusnUNkK+Y=
+P:zstd-libs
+V:1.5.7-r2
+A:x86_64
+S:373813
+I:710336
+T:Zstandard - Fast real-time compression algorithm (libraries)
+U:https://facebook.github.io/zstd/
+L:BSD-3-Clause OR GPL-2.0-or-later
+o:zstd
+m:Natanael Copa <ncopa@alpinelinux.org>
+t:1753704404
+c:3c6e2ee2b16f403d53eab39c4426eb61f003c322
+D:so:libc.musl-x86_64.so.1
+p:so:libzstd.so.1=1.5.7
+
