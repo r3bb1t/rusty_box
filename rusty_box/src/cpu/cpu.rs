@@ -1492,10 +1492,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // TEMPORARY: Trace serial port writes (earlyprintk)
                 // (moved to dispatcher/io level)
 
-                // Bochs cpu.cc:204 — prev_rip = RIP BEFORE ilen advancement.
-                // This is the address of the instruction about to execute.
-                // Fault recovery (exception.cc:299) uses prev_rip to retry the faulting instruction.
-                self.prev_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
+                // ROOT CAUSE IDENTIFIED: Bochs sets prev_rip HERE (before ilen, cpu.cc:204).
+                // Moving it here causes triple fault at icount=377M because the kernel
+                // decompressor's fault recovery goes to mid-instruction offset 0x35abc92
+                // which has F3 FF FF (undefined) and IDT[6] is empty.
+                // The fix requires understanding WHY the kernel reaches 0x35abc92.
+                // For now, prev_rip is set AFTER execution (below).
 
                 // Advance RIP before execution (handlers may read RIP and expect it advanced)
                 // SAFETY: gen_reg is initialized during CPU init; BX_64BIT_REG_RIP is always valid.
@@ -1624,7 +1626,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     }
                 }
 
-                // icount++ (prev_rip set before ilen advancement, matching Bochs cpu.cc:204)
+                // prev_rip = RIP (post-execution, differs from Bochs cpu.cc:204)
+                // See ROOT CAUSE comment above — moving this before ilen causes triple fault.
+                self.prev_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
                 self.icount += 1;
                 self.perf_instructions += 1;
 

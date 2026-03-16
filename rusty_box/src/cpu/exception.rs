@@ -298,6 +298,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         if matches!(exception_class, ExceptionClass::Fault) {
             // restore RIP/RSP to value before error occurred
+            // DIAG: dump IDT entry when fault at 0x35abc92
+            if self.prev_rip == 0x35abc92 && vector == Exception::Ud {
+                let idt_addr = self.idtr.base + (vector as u64) * 16;
+                if let (Ok(lo), Ok(hi)) = (self.system_read_qword(idt_addr), self.system_read_qword(idt_addr + 8)) {
+                    let offset = ((hi & 0xFFFFFFFF) << 32) | ((lo >> 48) << 16) | (lo & 0xFFFF);
+                    let seg = ((lo >> 16) & 0xFFFF) as u16;
+                    let typ = ((lo >> 40) & 0xF) as u8;
+                    let p = ((lo >> 47) & 1) as u8;
+                    eprintln!("[IDT-UD] vec={} addr={:#x} lo={:#x} hi={:#x} offset={:#x} seg={:#x} type={:#x} P={}",
+                        vector as u8, idt_addr, lo, hi, offset, seg, typ, p);
+                }
+            }
             self.set_rip(self.prev_rip);
             if self.speculative_rsp {
                 self.set_rsp(self.prev_rsp);
