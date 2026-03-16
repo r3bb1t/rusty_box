@@ -1554,7 +1554,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if self.long_mode() {
             // Long mode SYSCALL (Bochs proc_ctrl.cc:1096-1148)
             let saved_rip = self.rip();
-            // DIAG: verify SYSCALL saved_rip is user-space
+            // DIAG: log ALL SYSCALLs with RAX=0xa5 (NR_mount) near the crash
+            if self.rax() == 0xa5 && self.icount > 3_200_000_000 {
+                eprintln!("[SYSCALL-MOUNT] saved_rip={:#x} prev_rip={:#x} RCX_before={:#x} icount={}",
+                    saved_rip, self.prev_rip, self.rcx(), self.icount);
+            }
             if saved_rip >= 0xffff_0000_0000_0000 && self.icount > 1_500_000_000 {
                 eprintln!("[SYSCALL-BAD-RIP] saved_rip={:#x} prev_rip={:#x} icount={} rax={}",
                     saved_rip, self.prev_rip, self.icount, self.rax());

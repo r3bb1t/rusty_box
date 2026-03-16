@@ -1505,30 +1505,32 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 let opcode = unsafe { (*i_ptr).get_ia_opcode() };
                 self.diag_current_opcode = opcode as u16;
 
-                // DIAG: dump instruction details when RCX becomes 0xffffffff81001280
-                // Check in BOTH user and kernel mode
-                if self.rcx() == 0xffffffff81001280
-                    && self.icount > 3_300_000_000
+                // DIAG: catch instruction that sets RCX from valid to kernel address.
+                // Track previous RCX to detect the transition.
                 {
-                    static RCX_HIT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-                    if !RCX_HIT.swap(true, core::sync::atomic::Ordering::Relaxed) {
-                        let instr = unsafe { &*i_ptr };
-                        eprintln!("[RCX-CORRUPTION] prev_rip={:#x} opcode={:?} ilen={} icount={}",
-                            self.prev_rip, instr.get_ia_opcode(), instr.ilen(), self.icount);
-                        eprintln!("  dst={} src1={} src2={} mod_c0={} seg={}",
-                            instr.dst(), instr.src1(), instr.src2(), instr.mod_c0(), instr.seg());
-                        eprintln!("  RAX={:#x} RCX={:#x} RDX={:#x} RBX={:#x} RSP={:#x}",
-                            self.rax(), self.rcx(), self.rdx(), self.rbx(), self.rsp());
-                        eprintln!("  RBP={:#x} RSI={:#x} RDI={:#x} R8={:#x} R9={:#x}",
-                            self.rbp(), self.rsi(), self.rdi(), self.r8(), self.r9());
-                        // Read raw instruction bytes from memory
-                        if let Some(fp) = self.eip_fetch_ptr {
-                            let offset = (self.prev_rip.wrapping_add(self.eip_page_bias)) as usize;
-                            if offset < fp.len() {
-                                let end = (offset + 16).min(fp.len());
-                                let bytes: alloc::vec::Vec<alloc::string::String> = fp[offset..end].iter()
-                                    .map(|b| alloc::format!("{:02x}", b)).collect();
-                                eprintln!("  raw bytes: [{}]", bytes.join(" "));
+                    static PREV_RCX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+                    let cur_rcx = self.rcx();
+                    let prev_rcx_val = PREV_RCX.swap(cur_rcx, core::sync::atomic::Ordering::Relaxed);
+                    if cur_rcx == 0xffffffff81001280 && prev_rcx_val != 0xffffffff81001280
+                        && self.icount > 3_200_000_000
+                    {
+                        static RCX_HIT: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+                        if !RCX_HIT.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                            eprintln!("[RCX-TRANSITION] prev_rcx={:#x} → new_rcx={:#x}", prev_rcx_val, cur_rcx);
+                            eprintln!("  prev_rip={:#x} icount={}", self.prev_rip, self.icount);
+                            let instr = unsafe { &*i_ptr };
+                            eprintln!("  NEXT opcode={:?} ilen={} dst={} src1={} src2={} mod_c0={}",
+                                instr.get_ia_opcode(), instr.ilen(), instr.dst(), instr.src1(), instr.src2(), instr.mod_c0());
+                            eprintln!("  RAX={:#x} RDX={:#x} RBX={:#x} RSP={:#x} RBP={:#x} RSI={:#x} RDI={:#x}",
+                                self.rax(), self.rdx(), self.rbx(), self.rsp(), self.rbp(), self.rsi(), self.rdi());
+                            // Dump last 16 RIP ring entries
+                            let end = self.diag_rip_ring_idx;
+                            let start = if end > 16 { end - 16 } else { 0 };
+                            for i in start..end {
+                                let r = self.diag_rip_ring[i & 255];
+                                let op = self.diag_opcode_ring[i & 255];
+                                eprintln!("  ring[{}] {:#x} {:?}", i, r,
+                                    rusty_box_decoder::opcode::Opcode::try_from(op).ok());
                             }
                         }
                     }
