@@ -162,6 +162,8 @@ bitflags! {
         const ModC0 = 1 << 4;
         /// REX prefix present — enables SPL/BPL/SIL/DIL register mapping
         const Extend8bit = 1 << 5;
+        /// VEX prefix present (reliable flag, unlike is_vex() which shares immediate field)
+        const VexPresent = 1 << 6;
     }
 }
 
@@ -274,6 +276,12 @@ impl Instruction {
     #[inline]
     pub const fn ilen(&self) -> u8 {
         self.length
+    }
+
+    /// Get instruction flags
+    #[inline]
+    pub const fn flags(&self) -> InstructionFlags {
+        self.flags
     }
 
     /// Set instruction length

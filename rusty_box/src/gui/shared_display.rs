@@ -210,11 +210,14 @@ impl SharedDisplay {
 
         {
             let fb = &mut self.framebuffer;
+            let text_len = text.len();
             for row in 0..rows {
                 for col in 0..cols {
                     // Use CRTC start_address and line_offset, matching Bochs gui.cc:1311-1314
-                    let text_idx = (start_address + row * line_offset + col * 2) as usize;
-                    if text_idx + 1 >= text.len() {
+                    // Wrap within text buffer (VGA text memory is 32KB, kernel scrolls by
+                    // advancing start_address and wraps around)
+                    let text_idx = ((start_address + row * line_offset + col * 2) as usize) % text_len;
+                    if text_idx + 1 >= text_len {
                         continue;
                     }
                     let ch = text[text_idx] as usize;

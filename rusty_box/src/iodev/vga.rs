@@ -731,6 +731,114 @@ impl BxVgaC {
         *self = Self::new();
     }
 
+    /// Initialize VGA to standard text mode 3 (80x25 color text).
+    /// Used for direct kernel boot where no BIOS/VGA BIOS runs.
+    /// Programs CRTC, Sequencer, Graphics, and Attribute registers to
+    /// standard mode 3 values so the kernel's vgacon driver works.
+    pub(crate) fn init_text_mode3(&mut self) {
+        // Standard VGA mode 3 CRTC register values (80x25, 16-pixel font, 400 scanlines)
+        let crtc_mode3: [u8; 25] = [
+            0x5F, // 00: Horizontal Total
+            0x4F, // 01: Horizontal Display End (80 columns - 1 = 79)
+            0x50, // 02: Start Horizontal Blanking
+            0x82, // 03: End Horizontal Blanking
+            0x55, // 04: Start Horizontal Retrace
+            0x81, // 05: End Horizontal Retrace
+            0xBF, // 06: Vertical Total
+            0x1F, // 07: Overflow (VDE bit 8 = 1, bit 9 from 0x40)
+            0x00, // 08: Preset Row Scan
+            0x4F, // 09: Maximum Scan Line (16-1=15, bit 6=0x40 for VDE bit 9)
+            0x0D, // 0A: Cursor Start (line 13)
+            0x0E, // 0B: Cursor End (line 14)
+            0x00, // 0C: Start Address High
+            0x00, // 0D: Start Address Low
+            0x00, // 0E: Cursor Location High
+            0x00, // 0F: Cursor Location Low
+            0x9C, // 10: Vertical Retrace Start
+            0x8E, // 11: Vertical Retrace End
+            0x8F, // 12: Vertical Display End (400-1=399 low 8 bits)
+            0x28, // 13: Offset (80/2 = 40)
+            0x1F, // 14: Underline Location
+            0x96, // 15: Start Vertical Blanking
+            0xB9, // 16: End Vertical Blanking
+            0xA3, // 17: Mode Control
+            0xFF, // 18: Line Compare
+        ];
+        self.crtc_regs[..25].copy_from_slice(&crtc_mode3);
+
+        // Sequencer registers for mode 3
+        self.seq_regs[0] = 0x03; // Reset: both resets deasserted
+        self.seq_regs[1] = 0x00; // Clocking Mode: 9-dot chars, no shift
+        self.seq_regs[2] = 0x03; // Map Mask: planes 0+1 enabled (text)
+        self.seq_regs[3] = 0x00; // Character Map Select: font A=B=0
+        self.seq_regs[4] = 0x02; // Memory Mode: extended memory, odd/even
+
+        // Graphics controller for color text mode
+        self.graphics_regs[0] = 0x00; // Set/Reset
+        self.graphics_regs[1] = 0x00; // Enable Set/Reset
+        self.graphics_regs[2] = 0x00; // Color Compare
+        self.graphics_regs[3] = 0x00; // Data Rotate
+        self.graphics_regs[4] = 0x00; // Read Map Select
+        self.graphics_regs[5] = 0x10; // Mode: odd/even addressing
+        self.graphics_regs[6] = 0x0E; // Misc: color text mode (bits 2-3=11), not graphics
+        self.graphics_regs[7] = 0x00; // Color Don't Care
+        self.graphics_regs[8] = 0xFF; // Bit Mask
+
+        // Attribute controller for mode 3 (standard 16-color palette + mode)
+        // Palette registers 0-15: standard EGA/VGA color mapping
+        let palette: [u8; 16] = [
+            0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x14, 0x07,
+            0x38, 0x39, 0x3A, 0x3B, 0x3C, 0x3D, 0x3E, 0x3F,
+        ];
+        self.attr_regs[..16].copy_from_slice(&palette);
+        self.attr_regs[0x10] = 0x0C; // Mode Control: blink enable + line graphics
+        self.attr_regs[0x11] = 0x00; // Overscan Color
+        self.attr_regs[0x12] = 0x0F; // Color Plane Enable: all 4 planes
+        self.attr_regs[0x13] = 0x08; // Horizontal Pixel Panning
+        self.attr_regs[0x14] = 0x00; // Color Select
+
+        // Misc output register fields
+        self.misc_color_emulation = true;
+        self.misc_enable_ram = true;
+        self.misc_clock_select = 0;
+        self.misc_horiz_sync_pol = true;
+        self.misc_vert_sync_pol = false; // 400-line mode (negative vsync)
+
+        // Enable video output
+        self.video_enabled = true;
+
+        // Initialize standard VGA DAC palette (first 16 entries for text mode)
+        let dac_colors: [[u8; 3]; 16] = [
+            [0x00, 0x00, 0x00], // 0: black
+            [0x00, 0x00, 0x2A], // 1: blue
+            [0x00, 0x2A, 0x00], // 2: green
+            [0x00, 0x2A, 0x2A], // 3: cyan
+            [0x2A, 0x00, 0x00], // 4: red
+            [0x2A, 0x00, 0x2A], // 5: magenta
+            [0x2A, 0x15, 0x00], // 6: brown
+            [0x2A, 0x2A, 0x2A], // 7: light gray
+            [0x15, 0x15, 0x15], // 8: dark gray
+            [0x15, 0x15, 0x3F], // 9: light blue
+            [0x15, 0x3F, 0x15], // A: light green
+            [0x15, 0x3F, 0x3F], // B: light cyan
+            [0x3F, 0x15, 0x15], // C: light red
+            [0x3F, 0x15, 0x3F], // D: light magenta
+            [0x3F, 0x3F, 0x15], // E: yellow
+            [0x3F, 0x3F, 0x3F], // F: white
+        ];
+        for (i, color) in dac_colors.iter().enumerate() {
+            self.pel_data[i] = *color;
+        }
+        // Also set entries for bright colors (palette indices 0x38-0x3F)
+        for i in 0..8 {
+            self.pel_data[0x38 + i] = dac_colors[8 + i];
+        }
+
+        // Force text buffer refresh
+        self.text_buffer_update = true;
+        self.vga_mem_updated = 1;
+    }
+
     /// Read from I/O port
     pub(crate) fn read_port(&mut self, port: u16, _io_len: u8) -> u32 {
         // Bochs vgacore.cc:487-494: port gating based on color_emulation

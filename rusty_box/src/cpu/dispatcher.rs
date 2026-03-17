@@ -22,7 +22,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         #[allow(unused_imports)]
         use crate::cpu::data_xfer_ext;
 
-
         match instr.get_ia_opcode() {
             // =========================================================================
             // Data transfer (MOV) instructions - 32-bit
@@ -2907,6 +2906,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::V256Vextracti128WdqVdqIb => self.vextracti128(instr),
             Opcode::V256Vperm2i128VdqHdqWdqIb => self.vperm2i128(instr),
 
+            // AVX1/AVX2 VBROADCAST (F128/I128 share handler, SS reuses D, SD reuses Q)
+            Opcode::V256Vbroadcastf128VdqMdq | Opcode::V256Vbroadcasti128VdqMdq => self.vbroadcast_f128_i128(instr),
+            Opcode::VbroadcastssVpsMss | Opcode::VbroadcastssVpsWss => self.vpbroadcastd(instr),
+            Opcode::V256VbroadcastsdVpdMsd | Opcode::V256VbroadcastsdVpdWsd => self.vpbroadcastq(instr),
             // AVX2 VPBROADCAST
             Opcode::VpbroadcastbVdqWb => self.vpbroadcastb(instr),
             Opcode::VpbroadcastwVdqWw => self.vpbroadcastw(instr),

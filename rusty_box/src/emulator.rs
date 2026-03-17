@@ -1071,16 +1071,24 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // heap_end_ptr: relative to setup header start (unused for direct boot)
         boot_params[0x224..0x226].copy_from_slice(&0xFE00u16.to_le_bytes());
 
-        // screen_info: minimal text mode setup
-        boot_params[0x00] = 0;   // orig_x (cursor column)
-        boot_params[0x01] = 0;   // orig_y (cursor row)
-        boot_params[0x06] = 80;  // orig_video_cols
-        boot_params[0x07] = 25;  // orig_video_lines (at offset 0x07 for 2.x)
-        boot_params[0x0F] = 16;  // orig_video_points (font height)
-        // orig_video_mode = 3 (80x25 color text)
-        boot_params[0x0E] = 0x03;
-        // orig_video_isVGA = 1
-        boot_params[0x0D] = 0x01;
+        // screen_info (struct screen_info at boot_params offset 0x000):
+        //   0x00: orig_x           (cursor column)
+        //   0x01: orig_y           (cursor row)
+        //   0x02: ext_mem_k        (u16, extended memory in KB)
+        //   0x04: orig_video_page  (u16, active display page)
+        //   0x06: orig_video_mode  (video mode number)
+        //   0x07: orig_video_cols  (text columns)
+        //   0x0a: orig_video_ega_bx (u16, EGA/VGA info)
+        //   0x0e: orig_video_lines (text rows)
+        //   0x0f: orig_video_isVGA (0=no, 1=VGA, 0x22=EGA/VGA)
+        //   0x10: orig_video_points (u16, font height in pixels)
+        boot_params[0x00] = 0;    // orig_x
+        boot_params[0x01] = 0;    // orig_y
+        boot_params[0x06] = 0x03; // orig_video_mode = 3 (80x25 color text)
+        boot_params[0x07] = 80;   // orig_video_cols
+        boot_params[0x0E] = 25;   // orig_video_lines
+        boot_params[0x0F] = 0x01; // orig_video_isVGA = 1
+        boot_params[0x10..0x12].copy_from_slice(&16u16.to_le_bytes()); // orig_video_points = 16
 
         // vid_mode at 0x1FA (in setup header, but also used by kernel)
         boot_params[0x1FA..0x1FC].copy_from_slice(&0xFFFFu16.to_le_bytes()); // NORMAL_VGA
@@ -3171,6 +3179,12 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     /// Force VGA to generate an initial update (call before first `update_display`).
     pub fn force_vga_update(&mut self) {
         self.device_manager.vga.force_initial_update();
+    }
+
+    /// Initialize VGA to standard text mode 3 (80x25 color).
+    /// Must be called for direct kernel boot where no BIOS runs.
+    pub fn init_vga_text_mode3(&mut self) {
+        self.device_manager.vga.init_text_mode3();
     }
 
     /// Get VGA memory handler probe summary for diagnostics.

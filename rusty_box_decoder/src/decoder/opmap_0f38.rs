@@ -345,6 +345,29 @@ pub const BxOpcodeTable0F38FC: [u64; 8] = [
     last_opcode(ATTR_MOD_MEM | ATTR_SSE_PREFIX_F3, Opcode::AxorEdGd),
 ];
 
+// 0F38 18 — VBROADCASTSS (AVX1 mem, AVX2 reg)
+// Bochs fetchdecode_opmap_avx.cc
+pub(super) const BxOpcodeTable0F3818_AVX: [u64; 2] = [
+    form_opcode(ATTR_SSE_PREFIX_66 | ATTR_VEX_W0 | ATTR_MODC0, Opcode::VbroadcastssVpsWss),
+    last_opcode(ATTR_SSE_PREFIX_66 | ATTR_VEX_W0 | ATTR_MOD_MEM, Opcode::VbroadcastssVpsMss),
+];
+
+// 0F38 19 — VBROADCASTSD (AVX1 mem, AVX2 reg, 256-only)
+pub(super) const BxOpcodeTable0F3819_AVX: [u64; 2] = [
+    form_opcode(ATTR_SSE_PREFIX_66 | ATTR_VEX_W0 | ATTR_VL256 | ATTR_MODC0, Opcode::V256VbroadcastsdVpdWsd),
+    last_opcode(ATTR_SSE_PREFIX_66 | ATTR_VEX_W0 | ATTR_VL256 | ATTR_MOD_MEM, Opcode::V256VbroadcastsdVpdMsd),
+];
+
+// 0F38 1A — VBROADCASTF128 (AVX1, 256-only, memory-only)
+pub(super) const BxOpcodeTable0F381A_AVX: [u64; 1] = [
+    last_opcode(ATTR_SSE_PREFIX_66 | ATTR_VEX_W0 | ATTR_VL256 | ATTR_MOD_MEM, Opcode::V256Vbroadcastf128VdqMdq),
+];
+
+// 0F38 5A — VBROADCASTI128 (AVX2, 256-only, memory-only)
+pub(super) const BxOpcodeTable0F385A_AVX: [u64; 1] = [
+    last_opcode(ATTR_SSE_PREFIX_66 | ATTR_VEX_W0 | ATTR_VL256 | ATTR_MOD_MEM, Opcode::V256Vbroadcasti128VdqMdq),
+];
+
 // AVX2 broadcast/permute (VEX 0F38 36/58/59/78/79)
 // Matching Bochs fetchdecode_opmap_avx.cc
 pub(super) const BxOpcodeTable0F3836_AVX: [u64; 1] = [
@@ -391,9 +414,9 @@ pub(super) const BxOpcodeTable0F38: [&[u64]; 256] = [
     /* 0F 38 15 */ &BxOpcodeTable0F3815,
     /* 0F 38 16 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 17 */ &BxOpcodeTable0F3817,
-    /* 0F 38 18 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 19 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 38 1A */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 18 */ &BxOpcodeTable0F3818_AVX,
+    /* 0F 38 19 */ &BxOpcodeTable0F3819_AVX,
+    /* 0F 38 1A */ &BxOpcodeTable0F381A_AVX,
     /* 0F 38 1B */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 1C */ &BxOpcodeTable0F381C,
     /* 0F 38 1D */ &BxOpcodeTable0F381D,
@@ -457,7 +480,7 @@ pub(super) const BxOpcodeTable0F38: [&[u64]; 256] = [
     /* 0F 38 57 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 58 */ &BxOpcodeTable0F3858_AVX,
     /* 0F 38 59 */ &BxOpcodeTable0F3859_AVX,
-    /* 0F 38 5A */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 38 5A */ &BxOpcodeTable0F385A_AVX,
     /* 0F 38 5B */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 5C */ &BX_OPCODE_GROUP_ERR,
     /* 0F 38 5D */ &BX_OPCODE_GROUP_ERR,

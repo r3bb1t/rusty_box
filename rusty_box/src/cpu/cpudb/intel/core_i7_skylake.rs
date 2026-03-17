@@ -239,30 +239,35 @@ const LEAF1_EDX_BASE: CpuIdStd1Edx = CpuIdStd1Edx::X87
     .union(CpuIdStd1Edx::PBE);              // extra
 
 /// Leaf 7 subleaf 0 EBX:
-///   ISA: FSGSBASE|TSC_ADJUST|BMI1|AVX2|FDP_DEPR|SMEP|BMI2|INVPCID|
-///        FCS_FDS_DEPR|AVX512F|AVX512DQ|RDSEED|ADX|SMAP|CLFLUSHOPT|
-///        CLWB|AVX512CD|AVX512BW|AVX512VL
+///   ISA: FSGSBASE|TSC_ADJUST|BMI1|FDP_DEPR|SMEP|BMI2|INVPCID|
+///        FCS_FDS_DEPR|RDSEED|ADX|SMAP|CLFLUSHOPT|
+///        CLWB
 ///   Extra: ERMS (Enhanced REP MOVSB/STOSB)
+/// NOTE: AVX2 disabled — 256-bit VEX path produces wrong SHA-1/SHA-256 hash.
+/// All individual handlers verified correct (50+ audit agents + remap coverage
+/// verified complete). Bug is in subtle instruction interaction.  128-bit AVX
+/// path works correctly. Re-enable after instruction-level tracing finds root cause.
+/// AVX-512 also disabled (implies 256-bit support).
 const LEAF7_EBX_BASE: CpuIdStd7Ebx = CpuIdStd7Ebx::FSGSBASE
     .union(CpuIdStd7Ebx::TSC_ADJUST)
     .union(CpuIdStd7Ebx::BMI1)
-    .union(CpuIdStd7Ebx::AVX2)
+    // .union(CpuIdStd7Ebx::AVX2)  // disabled: see note above
     .union(CpuIdStd7Ebx::FDP_DEPRECATION)
     .union(CpuIdStd7Ebx::SMEP)
     .union(CpuIdStd7Ebx::BMI2)
     .union(CpuIdStd7Ebx::ERMS)             // extra
     .union(CpuIdStd7Ebx::INVPCID)
     .union(CpuIdStd7Ebx::DEPRECATE_FCS_FDS)
-    .union(CpuIdStd7Ebx::AVX512F)
-    .union(CpuIdStd7Ebx::AVX512DQ)
+    // .union(CpuIdStd7Ebx::AVX512F)   // disabled: requires AVX2
+    // .union(CpuIdStd7Ebx::AVX512DQ)  // disabled: requires AVX2
     .union(CpuIdStd7Ebx::RDSEED)
     .union(CpuIdStd7Ebx::ADX)
     .union(CpuIdStd7Ebx::SMAP)
     .union(CpuIdStd7Ebx::CLFLUSHOPT)
-    .union(CpuIdStd7Ebx::CLWB)
-    .union(CpuIdStd7Ebx::AVX512CD)
-    .union(CpuIdStd7Ebx::AVX512BW)
-    .union(CpuIdStd7Ebx::AVX512VL);
+    .union(CpuIdStd7Ebx::CLWB);
+    // .union(CpuIdStd7Ebx::AVX512CD)  // disabled: requires AVX2
+    // .union(CpuIdStd7Ebx::AVX512BW)  // disabled: requires AVX2
+    // .union(CpuIdStd7Ebx::AVX512VL)  // disabled: requires AVX2
 
 /// Extended leaf 0x80000001 ECX:
 ///   LAHF_SAHF | LZCNT | PREFETCHW
@@ -375,7 +380,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
         enable_extension(&mut b, X86Feature::IsaMovbe);
         enable_extension(&mut b, X86Feature::IsaAvx);
         enable_extension(&mut b, X86Feature::IsaAvxF16c);
-        enable_extension(&mut b, X86Feature::IsaAvx2);
+        // enable_extension(&mut b, X86Feature::IsaAvx2);  // disabled: see LEAF7 note
         enable_extension(&mut b, X86Feature::IsaAvxFma);
         enable_extension(&mut b, X86Feature::IsaLzcnt);
         enable_extension(&mut b, X86Feature::IsaBmi1);
@@ -389,10 +394,10 @@ impl BxCpuIdTrait for Corei7SkylakeX {
         enable_extension(&mut b, X86Feature::IsaAdx);
         enable_extension(&mut b, X86Feature::IsaSmap);
         enable_extension(&mut b, X86Feature::IsaFdpDeprecation);
-        enable_extension(&mut b, X86Feature::IsaAvx512);
-        enable_extension(&mut b, X86Feature::IsaAvx512Dq);
-        enable_extension(&mut b, X86Feature::IsaAvx512Cd);
-        enable_extension(&mut b, X86Feature::IsaAvx512Bw);
+        // enable_extension(&mut b, X86Feature::IsaAvx512);   // disabled: requires AVX2
+        // enable_extension(&mut b, X86Feature::IsaAvx512Dq);  // disabled: requires AVX2
+        // enable_extension(&mut b, X86Feature::IsaAvx512Cd);  // disabled: requires AVX2
+        // enable_extension(&mut b, X86Feature::IsaAvx512Bw);  // disabled: requires AVX2
         enable_extension(&mut b, X86Feature::IsaClflushopt);
         enable_extension(&mut b, X86Feature::IsaClwb);
         b

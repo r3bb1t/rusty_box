@@ -267,6 +267,7 @@ fn run_emulator(
             emu.init_gui(0, &[])?;
             emu.reset(ResetReason::Hardware)?;
             emu.init_gui_signal_handlers();
+            emu.init_vga_text_mode3(); // No BIOS runs — initialize VGA for kernel vgacon
             emu.start();
             emu.setup_direct_linux_boot(&kernel, Some(&initramfs), &cmdline)?;
             // Skip the common init_gui/reset/start below

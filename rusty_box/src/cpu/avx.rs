@@ -1354,6 +1354,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
+    /// VBROADCASTF128 / VBROADCASTI128 — load 128-bit from memory, copy to both YMM lanes
+    /// Bochs: avx.cc VBROADCASTF128_VdqMdq (shared handler for both F128 and I128)
+    pub(super) fn vbroadcast_f128_i128(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let seg = BxSegregs::from(instr.seg());
+        let eaddr = self.resolve_addr(instr);
+        let src = self.v_read_xmmword(seg, eaddr)?;
+
+        let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+        unsafe {
+            result.ymm128[0] = src;
+            result.ymm128[1] = src;
+        }
+        self.write_ymm_reg(instr.dst(), result);
+        Ok(())
+    }
+
     /// VPERMD — Permute dwords in YMM using index from another YMM (AVX2)
     /// Bochs: avx2.cc V256_VPERMD_VdqHdqWdq
     pub(super) fn vpermd(&mut self, instr: &Instruction) -> super::Result<()> {

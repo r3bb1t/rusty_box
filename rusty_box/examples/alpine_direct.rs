@@ -243,6 +243,7 @@ fn run_alpine_direct() -> Result<()> {
 
     // Do a normal reset first (initializes all device state)
     emu.reset(ResetReason::Hardware)?;
+    emu.init_vga_text_mode3(); // No BIOS runs — initialize VGA for kernel vgacon
 
     // =========================================================================
     // Set up direct kernel boot (overrides CPU state from reset)

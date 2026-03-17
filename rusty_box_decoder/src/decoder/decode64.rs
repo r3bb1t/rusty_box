@@ -756,6 +756,9 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         instr.set_vl(vex_l);
         instr.set_vex_w(vex_w);
         instr.set_vex(true);
+        instr.flags = crate::instruction::InstructionFlags::from_bits_truncate(
+            instr.flags.bits() | crate::instruction::InstructionFlags::VexPresent.bits()
+        );
     }
     if is_evex {
         instr.set_opmask(evex_aaa);
@@ -1068,6 +1071,64 @@ const fn remap_sse_to_vex(op: Opcode, vl: u8) -> Opcode {
 
         // ===== PALIGNR =====
         PalignrVdqWdqIb => if vl == 0 { V128VpalignrVdqHdqWdqIb } else { V256VpalignrVdqHdqWdqIb },
+
+        // ===== Pack =====
+        PacksswbVdqWdq  => if vl == 0 { V128VpacksswbVdqHdqWdq }  else { V256VpacksswbVdqHdqWdq },
+        PackuswbVdqWdq  => if vl == 0 { V128VpackuswbVdqHdqWdq }  else { V256VpackuswbVdqHdqWdq },
+        PackssdwVdqWdq  => if vl == 0 { V128VpackssdwVdqHdqWdq }  else { V256VpackssdwVdqHdqWdq },
+        PackusdwVdqWdq  => if vl == 0 { V128VpackusdwVdqHdqWdq }  else { V256VpackusdwVdqHdqWdq },
+
+        // ===== Min/Max (SSE2 + SSE4.1) =====
+        PminubVdqWdq  => if vl == 0 { V128VpminubVdqHdqWdq }  else { V256VpminubVdqHdqWdq },
+        PminswVdqWdq  => if vl == 0 { V128VpminswVdqHdqWdq }  else { V256VpminswVdqHdqWdq },
+        PmaxubVdqWdq  => if vl == 0 { V128VpmaxubVdqHdqWdq }  else { V256VpmaxubVdqHdqWdq },
+        PmaxswVdqWdq  => if vl == 0 { V128VpmaxswVdqHdqWdq }  else { V256VpmaxswVdqHdqWdq },
+        PminsbVdqWdq  => if vl == 0 { V128VpminsbVdqHdqWdq }  else { V256VpminsbVdqHdqWdq },
+        PminsdVdqWdq  => if vl == 0 { V128VpminsdVdqHdqWdq }  else { V256VpminsdVdqHdqWdq },
+        PminuwVdqWdq  => if vl == 0 { V128VpminuwVdqHdqWdq }  else { V256VpminuwVdqHdqWdq },
+        PminudVdqWdq  => if vl == 0 { V128VpminudVdqHdqWdq }  else { V256VpminudVdqHdqWdq },
+        PmaxsbVdqWdq  => if vl == 0 { V128VpmaxsbVdqHdqWdq }  else { V256VpmaxsbVdqHdqWdq },
+        PmaxsdVdqWdq  => if vl == 0 { V128VpmaxsdVdqHdqWdq }  else { V256VpmaxsdVdqHdqWdq },
+        PmaxuwVdqWdq  => if vl == 0 { V128VpmaxuwVdqHdqWdq }  else { V256VpmaxuwVdqHdqWdq },
+        PmaxudVdqWdq  => if vl == 0 { V128VpmaxudVdqHdqWdq }  else { V256VpmaxudVdqHdqWdq },
+
+        // ===== Average / SAD =====
+        PavgbVdqWdq   => if vl == 0 { V128VpavgbVdqWdq }      else { V256VpavgbVdqWdq },
+        PavgwVdqWdq   => if vl == 0 { V128VpavgwVdqWdq }      else { V256VpavgwVdqWdq },
+        PsadbwVdqWdq  => if vl == 0 { V128VpsadbwVdqHdqWdq }  else { V256VpsadbwVdqHdqWdq },
+
+        // ===== PMADDWD / PMADDUBSW =====
+        PmaddwdVdqWdq   => if vl == 0 { V128VpmaddwdVdqHdqWdq }   else { V256VpmaddwdVdqHdqWdq },
+        PmaddubswVdqWdq => if vl == 0 { V128VpmaddubswVdqHdqWdq } else { V256VpmaddubswVdqHdqWdq },
+
+        // ===== SSSE3: PHADD/PHSUB/PSIGN =====
+        PhaddwVdqWdq   => if vl == 0 { V128VphaddwVdqHdqWdq }   else { V256VphaddwVdqHdqWdq },
+        PhadddVdqWdq   => if vl == 0 { V128VphadddVdqHdqWdq }   else { V256VphadddVdqHdqWdq },
+        PhaddswVdqWdq  => if vl == 0 { V128VphaddswVdqHdqWdq }  else { V256VphaddswVdqHdqWdq },
+        PhsubwVdqWdq   => if vl == 0 { V128VphsubwVdqHdqWdq }   else { V256VphsubwVdqHdqWdq },
+        PhsubdVdqWdq   => if vl == 0 { V128VphsubdVdqHdqWdq }   else { V256VphsubdVdqHdqWdq },
+        PhsubswVdqWdq  => if vl == 0 { V128VphsubswVdqHdqWdq }  else { V256VphsubswVdqHdqWdq },
+        PsignbVdqWdq   => if vl == 0 { V128VpsignbVdqHdqWdq }   else { V256VpsignbVdqHdqWdq },
+        PsignwVdqWdq   => if vl == 0 { V128VpsignwVdqHdqWdq }   else { V256VpsignwVdqHdqWdq },
+        PsigndVdqWdq   => if vl == 0 { V128VpsigndVdqHdqWdq }   else { V256VpsigndVdqHdqWdq },
+
+        // ===== Floating-point bitwise (VEX handler checks get_vl()) =====
+        AndpsVpsWps   => VandpsVpsHpsWps,
+        AndnpsVpsWps  => VandnpsVpsHpsWps,
+        OrpsVpsWps    => VorpsVpsHpsWps,
+        XorpsVpsWps   => VxorpsVpsHpsWps,
+        AddpsVpsWps   => VaddpsVpsHpsWps,
+        MulpsVpsWps   => VmulpsVpsHpsWps,
+        SubpsVpsWps   => VsubpsVpsHpsWps,
+        DivpsVpsWps   => VdivpsVpsHpsWps,
+        AndpdVpdWpd   => VandpdVpdHpdWpd,
+        AndnpdVpdWpd  => VandnpdVpdHpdWpd,
+        OrpdVpdWpd    => VorpdVpdHpdWpd,
+        XorpdVpdWpd   => VxorpdVpdHpdWpd,
+        AddpdVpdWpd   => VaddpdVpdHpdWpd,
+        MulpdVpdWpd   => VmulpdVpdHpdWpd,
+        SubpdVpdWpd   => VsubpdVpdHpdWpd,
+        DivpdVpdWpd   => VdivpdVpdHpdWpd,
 
         // ===== Store-form moves (VEX handler does VL-aware stores + register form) =====
         MovdquWdqVdq  => if vl == 0 { V128VmovdquWdqVdq }  else { V256VmovdquWdqVdq },
