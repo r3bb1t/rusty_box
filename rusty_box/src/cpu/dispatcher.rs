@@ -2319,76 +2319,34 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // SSE/SSE2 Data Movement (sse_move.rs)
             // =========================================================================
 
-            // MOVUPS (unaligned packed single) — load (VEX.L aware)
-            Opcode::MovupsVpsWps => {
-                if instr.mod_c0() {
-                    self.vmovdqa_reg(instr)
-                } else {
-                    self.vmovdqu_load(instr)
-                }
-            }
-            // MOVUPS (unaligned packed single) — store (VEX.L aware)
+            // MOVUPS load — legacy SSE (preserves upper YMM)
+            Opcode::MovupsVpsWps => self.movdqu_load_sse(instr),
+            // MOVUPS store — legacy SSE
             Opcode::MovupsWpsVps => {
                 if instr.mod_c0() {
-                    self.vmovdqa_reg(instr)
+                    self.movdqu_load_sse(instr) // reg-to-reg
                 } else {
                     self.vmovdqu_store(instr)
                 }
             }
-            // MOVUPD (unaligned packed double) — load
-            Opcode::MovupdVpdWpd => {
-                if instr.mod_c0() {
-                    self.prepare_sse()?;
-                    let val = self.read_xmm_reg(instr.src1());
-                    self.write_xmm_reg_lo128(instr.dst(), val);
-                    Ok(())
-                } else {
-                    self.movupd_vpd_wpd_m(instr)
-                }
-            }
-            // MOVUPD (unaligned packed double) — store
+            // MOVUPD load — legacy SSE (preserves upper YMM)
+            Opcode::MovupdVpdWpd => self.movdqu_load_sse(instr),
+            // MOVUPD store — legacy SSE
             Opcode::MovupdWpdVpd => {
                 if instr.mod_c0() {
-                    self.prepare_sse()?;
-                    let val = self.read_xmm_reg(instr.dst());
-                    self.write_xmm_reg_lo128(instr.src1(), val);
-                    Ok(())
+                    self.movdqu_load_sse(instr) // reg-to-reg
                 } else {
-                    self.movupd_wpd_vpd_m(instr)
+                    self.vmovdqu_store(instr)
                 }
             }
-            // MOVAPS (aligned packed single) — load (VEX.L aware)
-            Opcode::MovapsVpsWps => {
-                if instr.mod_c0() {
-                    self.vmovdqa_reg(instr)
-                } else {
-                    self.vmovdqa_load(instr)
-                }
-            }
-            // MOVAPS (aligned packed single) — store (VEX.L aware)
-            Opcode::MovapsWpsVps => {
-                if instr.mod_c0() {
-                    self.vmovdqa_reg(instr)
-                } else {
-                    self.vmovdqa_store(instr)
-                }
-            }
-            // MOVAPD (aligned packed double) — load (VEX.L aware)
-            Opcode::MovapdVpdWpd => {
-                if instr.mod_c0() {
-                    self.vmovdqa_reg(instr)
-                } else {
-                    self.vmovdqa_load(instr)
-                }
-            }
-            // MOVAPD (aligned packed double) — store (VEX.L aware)
-            Opcode::MovapdWpdVpd => {
-                if instr.mod_c0() {
-                    self.vmovdqa_reg(instr)
-                } else {
-                    self.vmovdqa_store(instr)
-                }
-            }
+            // MOVAPS load — legacy SSE (preserves upper YMM)
+            Opcode::MovapsVpsWps => self.movdqa_load_sse(instr),
+            // MOVAPS store — legacy SSE
+            Opcode::MovapsWpsVps => self.movdqa_store_sse(instr),
+            // MOVAPD load — legacy SSE (preserves upper YMM)
+            Opcode::MovapdVpdWpd => self.movdqa_load_sse(instr),
+            // MOVAPD store — legacy SSE
+            Opcode::MovapdWpdVpd => self.movdqa_store_sse(instr),
             // MOVDQA load — legacy SSE (preserves upper YMM)
             Opcode::MovdqaVdqWdq => self.movdqa_load_sse(instr),
             // MOVDQA store — legacy SSE
