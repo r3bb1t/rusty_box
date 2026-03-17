@@ -402,7 +402,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[inline]
     pub(super) fn read_virtual_byte_at_laddr(&mut self, laddr: u64) -> Result<u8> {
         if self.cr0.pg() {
-            let lpf = laddr & 0xFFFF_F000;
+            let lpf = laddr & super::tlb::LPF_MASK;
             let needed_bit = 1u32 << (self.user_pl as u32);
             let tlb = self.dtlb.get_entry_of(laddr, 0);
             if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
@@ -629,7 +629,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[inline]
     pub(super) fn write_virtual_byte_at_laddr(&mut self, laddr: u64, val: u8) -> Result<()> {
         if self.cr0.pg() {
-            let lpf = laddr & 0xFFFF_F000;
+            let lpf = laddr & super::tlb::LPF_MASK;
             let needed_bit = 1u32 << (2 + self.user_pl as u32);
             let tlb = self.dtlb.get_entry_of(laddr, 0);
             if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
