@@ -16,9 +16,10 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-03-16):**
+**Current Status (2026-03-17):**
 - ✅ **DLX Linux boots to interactive bash shell!** Full boot: BIOS POST → LILO → kernel → init → `dlx login: root` → `dlx:~#` (200M instructions sufficient)
-- ⚠️ **Alpine Linux boots to emergency recovery shell!** Kernel 6.18.7-0-virt fully initializes. Alpine Init 3.13.0-r0 loads all drivers, mounts ISO on `/media/sr0`, installs packages via apk. **Current blocker**: `APKINDEX.tar.gz: BAD signature` prevents package installation → `/sbin/init not found`. Mount works, apk runs to completion but can't verify signatures. Emergency shell reached cleanly. See **BAD Signature Investigation** section below.
+- ⚠️ **Alpine Linux: packages install but with integrity errors!** BAD signature ROOT CAUSE FOUND: OpenSSL's SHA-1 AVX2 path (`sha1_block_data_order_avx2`, selected when SSSE3+AVX2+BMI1+BMI2 present) produces wrong hash. **Workaround**: disable BMI1 in CPUID → forces AVX 128-bit SHA-1 path → signature verifies OK, 28 packages install. **Remaining**: individual package "v2 package integrity error" (different checksums), then `/sbin/init` should work.
+- 🔍 **BAD signature investigation**: 50+ parallel audit agents verified ALL individual 256-bit VEX instructions match Bochs. The bug is a subtle interaction in the AVX2 SHA-1 loop — possibly a 256-bit instruction not yet audited (VPBLENDD? VBROADCASTI128?) or a register clobbering issue between loop iterations. See **BAD Signature Investigation** section below.
 - ✅ **Session 49: VEX decoder architecture fix + VPALIGNR + VPBLENDD + comprehensive instruction audit**:
   - **CRITICAL FIX: SSE→VEX opcode remapping** (`decode64.rs`): Decoder shared opcode tables between SSE and VEX. ALL ~100 VEX 3-operand instructions matched SSE entries and dispatched to 2-operand handlers that **silently ignored VEX.vvvv**. Added `remap_sse_to_vex(op, vl)` function covering integer ALU, logical, multiply, compare, shifts, shuffles, unpacks, PALIGNR, loads, stores, PMOVMSKB.
   - **VPALIGNR VEX handler** (`avx.rs`): Per-lane aligned-right-shift, 128/256-bit. `result = [op1:op2] >> (imm8*8)`.
@@ -346,41 +347,18 @@ RUST_LOG=debug RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=500000 ./target/release/exa
 - **Fix**: Added `remap_sse_to_vex(op, vl)` in `decode64.rs` — ~100 SSE opcodes remapped to VEX equivalents when `is_vex && !is_evex`. Covers all integer ALU, logical, multiply, compare, shifts, shuffles, loads, stores.
 - **Impact**: VEX instructions now correctly use 3-operand handlers. Fixed blake2s_compress_avx512 crash. But **BAD signature persists** (was present before VEX fix and after).
 
-**Key finding**: BAD signature persists with ALL CPUID configs (tested session 48: with/without AES, AVX, BMI2, ADX). This means the bug affects the **generic C code path** in libcrypto, not just SIMD optimizations.
+**ROOT CAUSE FOUND (Session 50, 2026-03-17):**
+OpenSSL's SHA-1 AVX2 code path (`sha1_block_data_order_avx2`) produces wrong hash.
+- **Trigger**: CPUID reports SSSE3+AVX2+BMI1+BMI2 → OpenSSL selects AVX2 SHA-1 (256-bit YMM)
+- **Workaround**: Disable BMI1 in CPUID → OpenSSL uses AVX 128-bit path → correct hash → packages install
+- **Verified**: CDROM data delivery correct (all 7 sectors checksums match host), PIO transfer correct, instruction handlers individually correct vs Bochs (50+ parallel audit agents)
+- **Bug location**: Subtle interaction between 256-bit VEX instructions in the SHA-1 AVX2 loop. All individual instructions (VPSHUFB 256, VPADDD 256, VPALIGNR 256, VPSLLD/VPSRLD 256 imm, VPSLLDQ/VPSRLDQ 256, VINSERTI128, RORX) verified correct individually — the bug emerges only in combination.
+- **Possible causes**: (a) A 256-bit instruction not yet audited (VPBLENDD? VBROADCASTI128? VPERM2I128?), (b) decoder mapping a specific byte pattern to wrong opcode, (c) VZEROUPPER interaction at function boundaries.
+- **Next step**: Instruction trace of SHA-1 AVX2 hot loop comparing our output vs Bochs/real hardware.
 
-**Comprehensive instruction audit (session 49)** — 7 parallel agents + manual + Unicorn:
-
-| Audit Area | Result | Details |
-|------------|--------|---------|
-| SHL/SHR/SAR/ROL/ROR/RCL/RCR (8/16/32/64) | **CLEAN** | All match Bochs shift32.cc/shift64.cc exactly |
-| Paging + 4-level page walks | **CLEAN** | PTE extraction, A/D bits, NX, SMAP all correct |
-| Cross-page qword read/write | **CLEAN** | Byte order correct, boundary checks correct |
-| MUL/IMUL/DIV/IDIV 64-bit | **CLEAN** | Group 3 convention, u128 math, overflow detect |
-| MULX/ADCX/ADOX/RORX (BMI2/ADX) | **CLEAN** | Operand order correct despite Bochs naming diff |
-| BSWAP, INC/DEC CF preservation, Logic CF | **CLEAN** | INC/DEC use OSZAP (preserves CF), Logic clears CF |
-| ADC/SBB flag computation | **CLEAN** | ADD_COUT_VEC formula correct for ADC (sum includes CF) |
-| XSAVE/XRSTOR YMM state | **CLEAN** | Saves/restores ymm_hi128[0..15] at offset 576 |
-| RDRAND/RDSEED | **Implemented** | PRNG from icount, CF=1 always; not used by verify |
-| Unicorn reference (ROL, MULX) | **PASS** | Identical results |
-| 517 unique opcodes executed | **All dispatched** | Full opcode set collected and verified |
-
-**Executed VEX/crypto opcodes during Alpine boot**: V128/V256 VPADDD, VPADDQ, VPXOR, VPOR, VPSHUFB, VPSHUFD, VPALIGNR, VPSLLD/VPSRLD/VPSLLQ/VPSRLQ/VPSLLDQ/VPSRLDQ (imm), VMOVDQA/VMOVDQU load+store, VPERM2I128, VINSERTI128, VEXTRACTI128. BMI2/ADX: MULX, ADCX, ADOX, RORX, ANDN. One EVEX: VPERMI2D.
-
-**What the audit rules OUT**:
-- Individual instruction arithmetic bugs (all match Bochs)
-- Flag computation errors (ADD_COUT_VEC, SUB_COUT_VEC, OSZAP all correct)
-- Cross-page memory corruption (byte order verified)
-- Page walk errors (PTE parsing, A/D bits correct)
-- XSAVE/XRSTOR YMM corruption (implementation matches Bochs)
-- VEX operand ordering (all VEX handlers use correct src1/src2/dst mapping)
-
-**Remaining hypotheses** (NOT yet tested):
-1. **Data delivery corruption**: File bytes correct at CDROM sector level but corrupted between kernel block layer → userspace `read()`. Test: dump SHA-1 of the 12330 signed bytes inside emulator at CDROM read and at userspace read, compare with host `1d05af162e68c9f7b8ad6a83537d9563273142d7`.
-2. **Decoder producing wrong opcode for specific byte pattern**: All individual handlers are correct, but if the decoder maps a specific byte sequence to the wrong handler, the wrong computation runs. Test: instruction trace comparison between Bochs and our emulator at the apk signature verification call.
-3. **Systemic interaction**: Interrupt/exception delivery corrupting register state during crypto computation. TLB coherency issue causing wrong physical page mapping for specific virtual address patterns.
-4. **Library loading**: Dynamic linker (ld-musl) misapplying relocations in libcrypto.so.3, causing function pointers to point to wrong code.
-
-**Recommended next debugging step**: Add data integrity check — compute SHA-1 of APKINDEX signed data (12330 bytes at gzip offset 720) as seen by the emulator at different points in the data path (CDROM read → kernel buffer → userspace). Compare with host-computed hash to isolate WHERE corruption occurs.
+**Session 50 comprehensive audit (50+ agents)**:
+Ruled out: ALL individual instruction handlers (MUL/IMUL/ADC/SBB/ADCX/ADOX, BSWAP, CMOV, SETcc, NEG, TEST/CMP, BT, ROL/ROR/SHL/SHR/SAR, MOVZX/MOVSX/MOVSXD, all 256-bit VEX SHA-1 instructions), XSAVE/XRSTOR context switch, SYSCALL/SYSRET, exception/interrupt RFLAGS, TLB/paging, dynamic linker relocations, PIO data transfer, CPUID feature flags.
+Fixed: shift32 count==0 upper bits, get_laddr64 segment bases, AF flags, BT 67h, PEXTRB/D/Q operands, 19 legacy SSE XMM write handlers, MOVAPS/MOVUPS/MOVAPD upper bits, prev_rip after interrupt, POP RSP_SPECULATIVE, TLB 64-bit LPF mask, decoder CALL/JMP 66h prefix.
 
 ### Progress Metrics
 - ✅ **Session 49 (2026-03-16)**: VEX decoder SSE→VEX remapping (~100 opcodes). VPALIGNR + VPBLENDD implemented. VEX load/store register form fixed. blake2s crash fixed. 7-agent instruction audit — all CLEAN. BAD signature persists (not in instruction handlers).
