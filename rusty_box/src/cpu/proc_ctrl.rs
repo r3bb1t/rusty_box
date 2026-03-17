@@ -910,21 +910,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.the_i387.st_space[i as usize].sign_exp = sign_exp;
         }
 
-        // Restore XMM registers (XMM0-XMM7 in 32-bit mode)
-        for i in 0..8u64 {
-            let offset = eaddr.wrapping_add(160 + i * 16);
-            let lo = self.v_read_qword(seg, offset)?;
-            let hi = self.v_read_qword(seg, offset.wrapping_add(8))?;
-            unsafe {
-                self.vmm[i as usize].zmm64u[0] = lo;
-                self.vmm[i as usize].zmm64u[1] = hi;
-                // Clear upper bits
-                self.vmm[i as usize].zmm64u[2] = 0;
-                self.vmm[i as usize].zmm64u[3] = 0;
-                self.vmm[i as usize].zmm64u[4] = 0;
-                self.vmm[i as usize].zmm64u[5] = 0;
-                self.vmm[i as usize].zmm64u[6] = 0;
-                self.vmm[i as usize].zmm64u[7] = 0;
+        // Restore XMM registers only if CR4.OSFXSR is set (Bochs sse_move.cc:370)
+        if self.cr4.osfxsr() {
+            for i in 0..8u64 {
+                let offset = eaddr.wrapping_add(160 + i * 16);
+                let lo = self.v_read_qword(seg, offset)?;
+                let hi = self.v_read_qword(seg, offset.wrapping_add(8))?;
+                unsafe {
+                    self.vmm[i as usize].zmm64u[0] = lo;
+                    self.vmm[i as usize].zmm64u[1] = hi;
+                    // Clear upper bits
+                    self.vmm[i as usize].zmm64u[2] = 0;
+                    self.vmm[i as usize].zmm64u[3] = 0;
+                    self.vmm[i as usize].zmm64u[4] = 0;
+                    self.vmm[i as usize].zmm64u[5] = 0;
+                    self.vmm[i as usize].zmm64u[6] = 0;
+                    self.vmm[i as usize].zmm64u[7] = 0;
+                }
             }
         }
 

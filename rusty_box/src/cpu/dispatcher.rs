@@ -4,8 +4,6 @@
 //! This is the central dispatch table, equivalent to Bochs cpu.cc's
 //! BX_CPU_C::cpu_loop() switch statement.
 
-use alloc::format;
-
 use super::{
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
@@ -2194,6 +2192,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::PcmpeqwPqQq => self.pcmpeqw_pq_qq(instr),
             Opcode::PcmpeqdPqQq => self.pcmpeqd_pq_qq(instr),
             Opcode::Emms => self.emms(instr),
+            Opcode::Vzeroupper => self.vzeroupper(instr),
+            Opcode::Vzeroall => self.vzeroall(instr),
             // MOVD Ed, Pq — check mod_c0 for register vs memory form
             Opcode::MovdEdPq => {
                 if instr.mod_c0() {
@@ -2658,6 +2658,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::PmulhwVdqWdq => self.pmulhw_vdq_wdq(instr),
             Opcode::PmulhuwVdqWdq => self.pmulhuw_vdq_wdq(instr),
             Opcode::PmuludqVdqWdq => self.pmuludq_vdq_wdq(instr),
+            Opcode::PmulhrswVdqWdq => self.pmulhrsw_vdq_wdq(instr),
             Opcode::PmaddwdVdqWdq => self.pmaddwd_vdq_wdq(instr),
 
             // Compare
@@ -3013,7 +3014,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::V128VpmullwVdqHdqWdq | Opcode::V256VpmullwVdqHdqWdq => self.vpmullw(instr),
             Opcode::V128VpmulhwVdqHdqWdq | Opcode::V256VpmulhwVdqHdqWdq => self.vpmulhw(instr),
             Opcode::V128VpmulhuwVdqHdqWdq | Opcode::V256VpmulhuwVdqHdqWdq => self.vpmulhuw(instr),
-            Opcode::V128VpmulhrswVdqHdqWdq | Opcode::V256VpmulhrswVdqHdqWdq => self.vpmulhw(instr), // TODO: rounding
+            Opcode::V128VpmulhrswVdqHdqWdq | Opcode::V256VpmulhrswVdqHdqWdq => self.vpmulhrsw(instr),
 
             // =====================================================================
             // VEX-encoded integer compare
@@ -3058,6 +3059,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::V128VpshufhwVdqWdqIb | Opcode::V256VpshufhwVdqWdqIb => self.vpshufhw(instr),
             Opcode::V128VpshuflwVdqWdqIb | Opcode::V256VpshuflwVdqWdqIb => self.vpshuflw(instr),
             Opcode::V128VpshufbVdqHdqWdq | Opcode::V256VpshufbVdqHdqWdq => self.vpshufb(instr),
+            Opcode::V128VpalignrVdqHdqWdqIb | Opcode::V256VpalignrVdqHdqWdqIb => self.vpalignr(instr),
+            Opcode::VpblenddVdqHdqWdqIb => self.vpblendd(instr),
             Opcode::V128VpunpckldqVdqHdqWdq | Opcode::V256VpunpckldqVdqHdqWdq => self.vpunpckldq(instr),
             Opcode::V128VpunpckhdqVdqHdqWdq | Opcode::V256VpunpckhdqVdqHdqWdq => self.vpunpckhdq(instr),
             Opcode::V128VpunpcklbwVdqHdqWdq | Opcode::V256VpunpcklbwVdqHdqWdq => self.vpunpcklbw(instr),
@@ -3106,7 +3109,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.diag_ia_error_last_rip = self.prev_rip;
                 tracing::error!("Unimplemented opcode: {:?} at RIP={:#x}", instr.get_ia_opcode(), self.prev_rip);
                 Err(crate::cpu::CpuError::UnimplementedOpcode {
-                    opcode: format!("{:?}", instr.get_ia_opcode()),
+                    opcode: alloc::format!("{:?}", instr.get_ia_opcode()),
                 })
             }
         }

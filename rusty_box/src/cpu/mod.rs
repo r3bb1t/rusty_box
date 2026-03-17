@@ -70,6 +70,7 @@ pub(super) mod rdrand;
 pub(super) mod rusty_box;
 pub(super) mod segment_ctrl_pro;
 pub(super) mod sha;
+pub mod snapshot;
 pub(super) mod shift16;
 pub(super) mod shift32;
 pub(super) mod shift64;

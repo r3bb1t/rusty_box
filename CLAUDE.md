@@ -16,9 +16,15 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-03-15):**
+**Current Status (2026-03-16):**
 - ✅ **DLX Linux boots to interactive bash shell!** Full boot: BIOS POST → LILO → kernel → init → `dlx login: root` → `dlx:~#` (200M instructions sufficient)
-- ⚠️ **Alpine Linux boots to emergency recovery shell!** Kernel 6.18.7-0-virt fully initializes. Alpine Init 3.13.0-r0 loads all drivers, mounts ISO on `/media/sr0`, installs packages via apk. **Current blockers**: (1) `mount` segfault at `ffffffff81001280` (kernel ELF loader computes wrong entry point for PIE binary — `e_entry + kernel_base` instead of `e_entry + user_load_base`), (2) `apk` crash in libcrypto.so.3 (corrupted pointer in SBB chain, likely residual AVX/SSE instruction bug). Despite errors, system reaches `~ #` emergency shell prompt.
+- ⚠️ **Alpine Linux boots to emergency recovery shell!** Kernel 6.18.7-0-virt fully initializes. Alpine Init 3.13.0-r0 loads all drivers, mounts ISO on `/media/sr0`, installs packages via apk. **Current blocker**: `APKINDEX.tar.gz: BAD signature` prevents package installation → `/sbin/init not found`. Mount works, apk runs to completion but can't verify signatures. Emergency shell reached cleanly. See **BAD Signature Investigation** section below.
+- ✅ **Session 49: VEX decoder architecture fix + VPALIGNR + VPBLENDD + comprehensive instruction audit**:
+  - **CRITICAL FIX: SSE→VEX opcode remapping** (`decode64.rs`): Decoder shared opcode tables between SSE and VEX. ALL ~100 VEX 3-operand instructions matched SSE entries and dispatched to 2-operand handlers that **silently ignored VEX.vvvv**. Added `remap_sse_to_vex(op, vl)` function covering integer ALU, logical, multiply, compare, shifts, shuffles, unpacks, PALIGNR, loads, stores, PMOVMSKB.
+  - **VPALIGNR VEX handler** (`avx.rs`): Per-lane aligned-right-shift, 128/256-bit. `result = [op1:op2] >> (imm8*8)`.
+  - **VPBLENDD** (`avx.rs` + `opmap_0f3a.rs`): AVX2 blend packed dwords by immediate mask. New decoder table entry `BxOpcodeTable0F3A02`.
+  - **VEX load/store register form** (`avx.rs`): `vmovdqu_load/store` and `vmovdqa_load/store` now check `mod_c0()` for register-to-register moves. Fixed blake2s_compress_avx512 null-pointer crash (CR2=0x0000000000000000).
+  - **Comprehensive instruction audit** (7 parallel agents + manual + Unicorn): ALL CLEAN. See BAD Signature Investigation below.
 - ✅ **Session 44-45: Full SSE/MMX/XSAVE parity audit (16 fixes) + serial output fix + decoder fixes**:
   - **9 legacy SSE→AVX dispatcher misdirections** (ROOT CAUSE of previous "Out of memory"): PADDD, PSUBD, PCMPEQD, PAND, POR, PXOR, PUNPCKLDQ, PUNPCKHDQ, PSHUFB dispatched to VEX handlers reading XMM0 via `instr.src2()` instead of `instr.dst()`.
   - **7 SSE4.1 PEXTRB/D/Q, PINSRB/D/Q handlers** implemented matching Bochs sse.cc.
@@ -274,12 +280,11 @@ This copies the AP startup trampoline from ROM to RAM. After the copy, smp_probe
 ### Next Steps
 1. ~~**Reach DLX Linux `dlx login:` prompt**~~ — **DONE** (2026-03-03). Full boot to login prompt achieved.
 2. ~~**Interactive login**~~ — **DONE** (2026-03-04). SHRD/SHLD decoder fix resolved ext2 "directory #12 contains a hole" errors. `root` login → `dlx:~#` bash shell works.
-3. **Boot Alpine Linux** — **IN PROGRESS** (2026-03-14). Kernel boots fully, Alpine Init loads all drivers, reaches "Mounting boot media...":
-   - **Session 44-45 FIX (SSE parity audit + serial)**: 9 legacy SSE→AVX dispatcher misdirections fixed (PADDD/PSUBD/PCMPEQD/PAND/POR/PXOR/PUNPCKLDQ/PUNPCKHDQ/PSHUFB). 7 PEXTRB/D/Q+PINSRB/D/Q handlers implemented. XSAVE 6 bugs, MMX 64-bit handlers, MIN/MAX NaN, MONITOR stale address, CR4 long-mode checks, serial headless output fix.
-   - **Previous nlplug-findfs "Out of memory" FIXED**: Root cause was 9 SSE→AVX misdirections causing `PXOR XMM_N, XMM_N` to compute `XMM0 ^ XMM_N` instead of clearing to zero. Leaked stale XMM0 data (0x20000 = DEFAULT_STACK_SIZE) into GPRs → pthread_create mmap with corrupt size → ENOMEM.
-   - **Current blocker: mdev regex failure** — `mdev: bad regex '.*': Invalid back reference`. musl `regcomp(".*", REG_EXTENDED)` returns `REG_ESUBREG` (6). Without mdev, `/dev/` nodes not created → nlplug-findfs can't discover sr0 → boot media never mounted. First error at icount=1766976002. Comprehensive audit of 30+ instruction handlers found no bugs. 64-bit decoder audit in progress.
-   - **Audited clean**: CMP/TEST/MOVZX/MOVSX (8→32/64), all 16 CMOVcc/SETcc/Jcc, CBW/CWDE/CDQE, SUB 8-bit, SCASB/CMPSB, CALL/RET 64-bit, CMPXCHG 64-bit, LEA/resolve_addr64, BSF/BSR/LZCNT/TZCNT, RMW 64-bit, SYSCALL/SYSRET, ENDBR64.
-   - **Hypotheses**: decoder bug (wrong opcode for some byte sequence), heap corruption from subtle memory write bug, XSAVE/XRSTOR context switch issue, or GCC 15.2 auto-vectorized code hitting unimplemented instruction.
+3. **Boot Alpine Linux** — **IN PROGRESS** (2026-03-16). Kernel boots fully, Alpine Init loads all drivers, mounts boot media, reaches `apk` package installation. **Current blocker**: `APKINDEX.tar.gz: BAD signature`.
+   - **Session 49 FIX (VEX decoder architecture)**: SSE→VEX opcode remapping for ~100 instructions. VPALIGNR + VPBLENDD implemented. VEX load/store register form fixed (blake2s crash gone).
+   - **Session 48 FIX**: STOP_TRACE for SYSCALL/SYSRET, BMI operand swaps, VEX AES state. Mount + apk no longer crash.
+   - **BAD signature persists** — see dedicated investigation section below.
+   - **Previous blockers FIXED**: mount segfault (session 48), apk crash (session 48), mdev regex (session 45), nlplug-findfs OOM (session 44).
 4. **Fix `ide2 at 0x1e8` phantom** — PCI PIIX IDE BAR misconfiguration causes kernel to probe a non-existent 3rd IDE channel
 5. ~~**Fix LDT triple fault**~~ — FIXED: root cause was INT using IVT in PM + XCHG mod_c0 bug
 6. ~~**Fix vsprintf**~~ — FIXED: ADD AL,Ib (opcode 0x04) operated on AH, breaking vsprintf's jump table index computation
@@ -298,7 +303,7 @@ The kernel first enters HLT idle at **exactly instruction 132,865,700**. Key not
 
 **Key instruction count milestones — use the minimum needed:**
 - `200_000_000` — full boot to `dlx login:` prompt (default). Takes ~8-10 seconds at ~20 MIPS.
-- `2_500_000_000` — Alpine boots to "Mounting boot media..." + mdev regex errors. ~125 seconds.
+- `2_500_000_000` — Alpine boots to emergency shell (BAD signature, no packages installed). ~63 seconds at ~40 MIPS.
 - `132_865_710` — kernel first HLT threshold + 10; diagnostics print at run end. Use for ATA/IRQ debugging.
 - `2_000_000` — BIOS POST only (fast check, VGA text visible)
 
@@ -323,7 +328,62 @@ cargo run --release --example dlxlinux --features "std,gui-egui"
 RUST_LOG=debug RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=500000 ./target/release/examples/dlxlinux.exe 2>&1 | grep -E "0x0402|0x0080|port_out.*402|BIOS output"
 ```
 
+### BAD Signature Investigation (Session 49, 2026-03-16)
+
+**Problem**: `WARNING: opening /media/sr0/apks/x86_64/APKINDEX.tar.gz: BAD signature` prevents Alpine package installation. Signature verified OK on host with `openssl dgst -sha1 -verify`. VMware and Bochs boot the same ISO without issues.
+
+**Signature details**:
+- APKINDEX.tar.gz: 13050 bytes at ISO LBA 2835 (3 gzip members: offsets 0, 720, 9806)
+- Member 1 (0-719): contains `.SIGN.RSA.alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub` (512-byte RSA-4096 signature)
+- Signed data: bytes 720-13049 (12330 bytes, members 2+3)
+- Signature algorithm: RSA PKCS#1 v1.5 with SHA-1
+- SHA-1 of signed data: `1d05af162e68c9f7b8ad6a83537d9563273142d7`
+- Host verification: `openssl dgst -sha1 -verify key -signature sig signed_data` → **Verified OK**
+- Public key: `alpine-devel@lists.alpinelinux.org-6165ee59.rsa.pub` (4096-bit, from alpinelinux.org/keys/)
+
+**Session 49 architectural fix (VEX SSE→VEX remapping)**:
+- **Root cause found**: Decoder shared opcode tables between SSE and VEX. VEX instructions matched SSE entries because the `ignmsk` in `find_opcode_in_table` doesn't check VEX attributes. ALL VEX 3-operand instructions used 2-operand SSE handlers that silently ignored VEX.vvvv.
+- **Fix**: Added `remap_sse_to_vex(op, vl)` in `decode64.rs` — ~100 SSE opcodes remapped to VEX equivalents when `is_vex && !is_evex`. Covers all integer ALU, logical, multiply, compare, shifts, shuffles, loads, stores.
+- **Impact**: VEX instructions now correctly use 3-operand handlers. Fixed blake2s_compress_avx512 crash. But **BAD signature persists** (was present before VEX fix and after).
+
+**Key finding**: BAD signature persists with ALL CPUID configs (tested session 48: with/without AES, AVX, BMI2, ADX). This means the bug affects the **generic C code path** in libcrypto, not just SIMD optimizations.
+
+**Comprehensive instruction audit (session 49)** — 7 parallel agents + manual + Unicorn:
+
+| Audit Area | Result | Details |
+|------------|--------|---------|
+| SHL/SHR/SAR/ROL/ROR/RCL/RCR (8/16/32/64) | **CLEAN** | All match Bochs shift32.cc/shift64.cc exactly |
+| Paging + 4-level page walks | **CLEAN** | PTE extraction, A/D bits, NX, SMAP all correct |
+| Cross-page qword read/write | **CLEAN** | Byte order correct, boundary checks correct |
+| MUL/IMUL/DIV/IDIV 64-bit | **CLEAN** | Group 3 convention, u128 math, overflow detect |
+| MULX/ADCX/ADOX/RORX (BMI2/ADX) | **CLEAN** | Operand order correct despite Bochs naming diff |
+| BSWAP, INC/DEC CF preservation, Logic CF | **CLEAN** | INC/DEC use OSZAP (preserves CF), Logic clears CF |
+| ADC/SBB flag computation | **CLEAN** | ADD_COUT_VEC formula correct for ADC (sum includes CF) |
+| XSAVE/XRSTOR YMM state | **CLEAN** | Saves/restores ymm_hi128[0..15] at offset 576 |
+| RDRAND/RDSEED | **Implemented** | PRNG from icount, CF=1 always; not used by verify |
+| Unicorn reference (ROL, MULX) | **PASS** | Identical results |
+| 517 unique opcodes executed | **All dispatched** | Full opcode set collected and verified |
+
+**Executed VEX/crypto opcodes during Alpine boot**: V128/V256 VPADDD, VPADDQ, VPXOR, VPOR, VPSHUFB, VPSHUFD, VPALIGNR, VPSLLD/VPSRLD/VPSLLQ/VPSRLQ/VPSLLDQ/VPSRLDQ (imm), VMOVDQA/VMOVDQU load+store, VPERM2I128, VINSERTI128, VEXTRACTI128. BMI2/ADX: MULX, ADCX, ADOX, RORX, ANDN. One EVEX: VPERMI2D.
+
+**What the audit rules OUT**:
+- Individual instruction arithmetic bugs (all match Bochs)
+- Flag computation errors (ADD_COUT_VEC, SUB_COUT_VEC, OSZAP all correct)
+- Cross-page memory corruption (byte order verified)
+- Page walk errors (PTE parsing, A/D bits correct)
+- XSAVE/XRSTOR YMM corruption (implementation matches Bochs)
+- VEX operand ordering (all VEX handlers use correct src1/src2/dst mapping)
+
+**Remaining hypotheses** (NOT yet tested):
+1. **Data delivery corruption**: File bytes correct at CDROM sector level but corrupted between kernel block layer → userspace `read()`. Test: dump SHA-1 of the 12330 signed bytes inside emulator at CDROM read and at userspace read, compare with host `1d05af162e68c9f7b8ad6a83537d9563273142d7`.
+2. **Decoder producing wrong opcode for specific byte pattern**: All individual handlers are correct, but if the decoder maps a specific byte sequence to the wrong handler, the wrong computation runs. Test: instruction trace comparison between Bochs and our emulator at the apk signature verification call.
+3. **Systemic interaction**: Interrupt/exception delivery corrupting register state during crypto computation. TLB coherency issue causing wrong physical page mapping for specific virtual address patterns.
+4. **Library loading**: Dynamic linker (ld-musl) misapplying relocations in libcrypto.so.3, causing function pointers to point to wrong code.
+
+**Recommended next debugging step**: Add data integrity check — compute SHA-1 of APKINDEX signed data (12330 bytes at gzip offset 720) as seen by the emulator at different points in the data path (CDROM read → kernel buffer → userspace). Compare with host-computed hash to isolate WHERE corruption occurs.
+
 ### Progress Metrics
+- ✅ **Session 49 (2026-03-16)**: VEX decoder SSE→VEX remapping (~100 opcodes). VPALIGNR + VPBLENDD implemented. VEX load/store register form fixed. blake2s crash fixed. 7-agent instruction audit — all CLEAN. BAD signature persists (not in instruction handlers).
 - ✅ **Session 44-45 (2026-03-13/14)**: Full SSE/MMX/XSAVE parity audit — 16 fixes applied. 9 SSE→AVX dispatcher misdirections fixed. PEXTRB/D/Q + PINSRB/D/Q implemented. Serial headless output fixed. Alpine advances past thread creation to "Mounting boot media..."
 - ✅ REX byte register mapping: bare REX (0x40) now correctly enables SPL/BPL/SIL/DIL — Alpine kernel enters 64-bit mode
 - ✅ All major decoder bugs fixed (Group 1 opcodes, segment defaults, execute1/execute2)

@@ -123,11 +123,17 @@ pub(super) const BxOpcodeTable0F3AF0: [u64; 2] = [
 
 /* ************************************************************************ */
 
+// VPBLENDD — AVX2 Blend Packed Dwords (VEX.66.0F3A.W0 02 /r ib)
+// Bochs: ATTR_SSE_PREFIX_66 | ATTR_VEX_W0 → BX_IA_VPBLENDD_VdqHdqWdqIb
+// Works for both VL128 and VL256 (handler checks get_vl)
+pub(super) const BxOpcodeTable0F3A02: [u64; 1] =
+    [last_opcode(ATTR_SSE_PREFIX_66 | ATTR_VEX_W0, Opcode::VpblenddVdqHdqWdqIb)];
+
 pub(super) const BxOpcodeTable0F3A: [&[u64]; 256] = [
     // 3-byte opcode 0x0F 0x3A
     /* 0F 3A 00 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 01 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 3A 02 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 3A 02 */ &BxOpcodeTable0F3A02,
     /* 0F 3A 03 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 04 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 05 */ &BX_OPCODE_GROUP_ERR,

@@ -1539,6 +1539,8 @@ impl BxHardDriveC {
                                 if drive.read_cdrom_block(next_lba, &mut temp_buf) {
                                     drive.controller.buffer[..buf_size]
                                         .copy_from_slice(&temp_buf[..buf_size]);
+
+
                                     drive.cdrom.next_lba += 1;
                                     drive.cdrom.remaining_blocks -= 1;
                                     drive.controller.buffer_index = 0;
@@ -1638,6 +1640,7 @@ impl BxHardDriveC {
                                         if drive.read_cdrom_block(next_lba, &mut temp_buf) {
                                             drive.controller.buffer[..buf_size]
                                                 .copy_from_slice(&temp_buf[..buf_size]);
+
                                         }
                                         drive.cdrom.next_lba += 1;
                                         drive.cdrom.remaining_blocks -= 1;

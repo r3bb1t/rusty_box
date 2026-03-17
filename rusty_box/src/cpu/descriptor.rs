@@ -316,7 +316,7 @@ impl SegmentType {
 
 #[derive(Debug, Clone, Default)]
 pub(super) enum SystemAndGateDescriptorEnum {
-    #[default] // FIXME: delete this
+    #[default]
     BxGateTypeNone = 0x0,
     BxSysSegmentAvail286Tss = 0x1,
     BxSysSegmentLdt = 0x2,

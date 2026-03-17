@@ -903,6 +903,16 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         instr.opcode = lookup_opcode_64(b1, opcode_map, decmask, nnn);
     }
 
+    // VEX SSE→VEX opcode remapping: When VEX prefix is present, the opcode table
+    // may return an SSE opcode (e.g. PshufbVdqWdq) because SSE and VEX share the
+    // same tables and SSE entries lack VEX attribute checks. SSE handlers are
+    // 2-operand (dst=src1, ignore VEX.vvvv), but VEX instructions are 3-operand
+    // (dst, vvv, rm). Remap to the proper VEX opcode so the 3-operand VEX handler
+    // is dispatched. EVEX has its own tables and doesn't need this.
+    if is_vex && !is_evex {
+        instr.opcode = remap_sse_to_vex(instr.opcode, vex_l);
+    }
+
     // Check if opcode lookup failed
     if matches!(instr.opcode, Opcode::IaError) {
         return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
@@ -962,6 +972,132 @@ const fn lookup_opcode_64(b1: u32, opcode_map: u8, decmask: u32, _nnn: u32) -> O
         }
     } else {
         Opcode::IaError
+    }
+}
+
+/// Remap SSE opcodes to VEX opcodes when VEX prefix is active.
+///
+/// The opcode tables are shared between SSE and VEX instructions. When a VEX
+/// prefix is present, the table lookup may return an SSE opcode (2-operand form
+/// that ignores VEX.vvvv). This function remaps to the proper VEX opcode so the
+/// 3-operand VEX handler is dispatched.
+///
+/// `vl`: VEX.L field — 0 = 128-bit (XMM), 1 = 256-bit (YMM)
+const fn remap_sse_to_vex(op: Opcode, vl: u8) -> Opcode {
+    use Opcode::*;
+    match op {
+        // ===== Integer arithmetic =====
+        PadddVdqWdq   => if vl == 0 { V128VpadddVdqHdqWdq }   else { V256VpadddVdqHdqWdq },
+        PaddqVdqWdq   => if vl == 0 { V128VpaddqVdqHdqWdq }   else { V256VpaddqVdqHdqWdq },
+        PaddwVdqWdq   => if vl == 0 { V128VpaddwVdqHdqWdq }   else { V256VpaddwVdqHdqWdq },
+        PaddbVdqWdq   => if vl == 0 { V128VpaddbVdqHdqWdq }   else { V256VpaddbVdqHdqWdq },
+        PsubdVdqWdq   => if vl == 0 { V128VpsubdVdqHdqWdq }   else { V256VpsubdVdqHdqWdq },
+        PsubqVdqWdq   => if vl == 0 { V128VpsubqVdqHdqWdq }   else { V256VpsubqVdqHdqWdq },
+        PsubwVdqWdq   => if vl == 0 { V128VpsubwVdqHdqWdq }   else { V256VpsubwVdqHdqWdq },
+        PsubbVdqWdq   => if vl == 0 { V128VpsubbVdqHdqWdq }   else { V256VpsubbVdqHdqWdq },
+        // Saturating
+        PaddsbVdqWdq  => if vl == 0 { V128VpaddsbVdqHdqWdq }  else { V256VpaddsbVdqHdqWdq },
+        PaddswVdqWdq  => if vl == 0 { V128VpaddswVdqHdqWdq }  else { V256VpaddswVdqHdqWdq },
+        PsubsbVdqWdq  => if vl == 0 { V128VpsubsbVdqHdqWdq }  else { V256VpsubsbVdqHdqWdq },
+        PsubswVdqWdq  => if vl == 0 { V128VpsubswVdqHdqWdq }  else { V256VpsubswVdqHdqWdq },
+        PsubusbVdqWdq => if vl == 0 { V128VpsubusbVdqHdqWdq } else { V256VpsubusbVdqHdqWdq },
+        PsubuswVdqWdq => if vl == 0 { V128VpsubuswVdqHdqWdq } else { V256VpsubuswVdqHdqWdq },
+        PaddusbVdqWdq => if vl == 0 { V128VpaddusbVdqHdqWdq } else { V256VpaddusbVdqHdqWdq },
+        PadduswVdqWdq => if vl == 0 { V128VpadduswVdqHdqWdq } else { V256VpadduswVdqHdqWdq },
+
+        // ===== Logical =====
+        PxorVdqWdq  => if vl == 0 { V128VpxorVdqHdqWdq }  else { V256VpxorVdqHdqWdq },
+        PandVdqWdq  => if vl == 0 { V128VpandVdqHdqWdq }  else { V256VpandVdqHdqWdq },
+        PorVdqWdq   => if vl == 0 { V128VporVdqHdqWdq }   else { V256VporVdqHdqWdq },
+        PandnVdqWdq => if vl == 0 { V128VpandnVdqHdqWdq } else { V256VpandnVdqHdqWdq },
+
+        // ===== Multiply =====
+        PmuludqVdqWdq => if vl == 0 { V128VpmuludqVdqHdqWdq } else { V256VpmuludqVdqHdqWdq },
+        PmuldqVdqWdq  => if vl == 0 { V128VpmuldqVdqHdqWdq }  else { V256VpmuldqVdqHdqWdq },
+        PmulldVdqWdq  => if vl == 0 { V128VpmulldVdqHdqWdq }  else { V256VpmulldVdqHdqWdq },
+        PmullwVdqWdq  => if vl == 0 { V128VpmullwVdqHdqWdq }  else { V256VpmullwVdqHdqWdq },
+        PmulhwVdqWdq  => if vl == 0 { V128VpmulhwVdqHdqWdq }  else { V256VpmulhwVdqHdqWdq },
+        PmulhuwVdqWdq => if vl == 0 { V128VpmulhuwVdqHdqWdq } else { V256VpmulhuwVdqHdqWdq },
+        PmulhrswVdqWdq=> if vl == 0 { V128VpmulhrswVdqHdqWdq }else { V256VpmulhrswVdqHdqWdq },
+
+        // ===== Compare =====
+        PcmpeqbVdqWdq => if vl == 0 { V128VpcmpeqbVdqHdqWdq } else { V256VpcmpeqbVdqHdqWdq },
+        PcmpeqwVdqWdq => if vl == 0 { V128VpcmpeqwVdqHdqWdq } else { V256VpcmpeqwVdqHdqWdq },
+        PcmpeqdVdqWdq => if vl == 0 { V128VpcmpeqdVdqHdqWdq } else { V256VpcmpeqdVdqHdqWdq },
+        PcmpeqqVdqWdq => if vl == 0 { V128VpcmpeqqVdqHdqWdq } else { V256VpcmpeqqVdqHdqWdq },
+        PcmpgtbVdqWdq => if vl == 0 { V128VpcmpgtbVdqHdqWdq } else { V256VpcmpgtbVdqHdqWdq },
+        PcmpgtwVdqWdq => if vl == 0 { V128VpcmpgtwVdqHdqWdq } else { V256VpcmpgtwVdqHdqWdq },
+        PcmpgtdVdqWdq => if vl == 0 { V128VpcmpgtdVdqHdqWdq } else { V256VpcmpgtdVdqHdqWdq },
+        PcmpgtqVdqWdq => if vl == 0 { V128VpcmpgtqVdqHdqWdq } else { V256VpcmpgtqVdqHdqWdq },
+
+        // ===== Shift by register =====
+        PsrlwVdqWdq => if vl == 0 { V128VpsrlwVdqHdqWdq } else { V256VpsrlwVdqHdqWdq },
+        PsrldVdqWdq => if vl == 0 { V128VpsrldVdqHdqWdq } else { V256VpsrldVdqHdqWdq },
+        PsrlqVdqWdq => if vl == 0 { V128VpsrlqVdqHdqWdq } else { V256VpsrlqVdqHdqWdq },
+        PsrawVdqWdq => if vl == 0 { V128VpsrawVdqHdqWdq } else { V256VpsrawVdqHdqWdq },
+        PsradVdqWdq => if vl == 0 { V128VpsradVdqHdqWdq } else { V256VpsradVdqHdqWdq },
+        PsllwVdqWdq => if vl == 0 { V128VpsllwVdqHdqWdq } else { V256VpsllwVdqHdqWdq },
+        PslldVdqWdq => if vl == 0 { V128VpslldVdqHdqWdq } else { V256VpslldVdqHdqWdq },
+        PsllqVdqWdq => if vl == 0 { V128VpsllqVdqHdqWdq } else { V256VpsllqVdqHdqWdq },
+
+        // ===== Shift by immediate (Group 12/13/14) =====
+        PsrlwUdqIb  => if vl == 0 { V128VpsrlwUdqIb }  else { V256VpsrlwUdqIb },
+        PsrldUdqIb  => if vl == 0 { V128VpsrldUdqIb }  else { V256VpsrldUdqIb },
+        PsrlqUdqIb  => if vl == 0 { V128VpsrlqUdqIb }  else { V256VpsrlqUdqIb },
+        PsrawUdqIb  => if vl == 0 { V128VpsrawUdqIb }  else { V256VpsrawUdqIb },
+        PsradUdqIb  => if vl == 0 { V128VpsradUdqIb }  else { V256VpsradUdqIb },
+        PsllwUdqIb  => if vl == 0 { V128VpsllwUdqIb }  else { V256VpsllwUdqIb },
+        PslldUdqIb  => if vl == 0 { V128VpslldUdqIb }  else { V256VpslldUdqIb },
+        PsllqUdqIb  => if vl == 0 { V128VpsllqUdqIb }  else { V256VpsllqUdqIb },
+        PsrldqUdqIb => if vl == 0 { V128VpsrldqUdqIb } else { V256VpsrldqUdqIb },
+        PslldqUdqIb => if vl == 0 { V128VpslldqUdqIb } else { V256VpslldqUdqIb },
+
+        // ===== Shuffle / Unpack =====
+        PshufbVdqWdq     => if vl == 0 { V128VpshufbVdqHdqWdq }     else { V256VpshufbVdqHdqWdq },
+        PshufdVdqWdqIb   => if vl == 0 { V128VpshufdVdqWdqIb }      else { V256VpshufdVdqWdqIb },
+        PshufhwVdqWdqIb  => if vl == 0 { V128VpshufhwVdqWdqIb }     else { V256VpshufhwVdqWdqIb },
+        PshuflwVdqWdqIb  => if vl == 0 { V128VpshuflwVdqWdqIb }     else { V256VpshuflwVdqWdqIb },
+        PunpckldqVdqWdq  => if vl == 0 { V128VpunpckldqVdqHdqWdq }  else { V256VpunpckldqVdqHdqWdq },
+        PunpckhdqVdqWdq  => if vl == 0 { V128VpunpckhdqVdqHdqWdq }  else { V256VpunpckhdqVdqHdqWdq },
+        PunpcklbwVdqWdq  => if vl == 0 { V128VpunpcklbwVdqHdqWdq }  else { V256VpunpcklbwVdqHdqWdq },
+        PunpckhbwVdqWdq  => if vl == 0 { V128VpunpckhbwVdqHdqWdq }  else { V256VpunpckhbwVdqHdqWdq },
+        PunpcklwdVdqWdq  => if vl == 0 { V128VpunpcklwdVdqHdqWdq }  else { V256VpunpcklwdVdqHdqWdq },
+        PunpckhwdVdqWdq  => if vl == 0 { V128VpunpckhwdVdqHdqWdq }  else { V256VpunpckhwdVdqHdqWdq },
+        PunpcklqdqVdqWdq => if vl == 0 { V128VpunpcklqdqVdqHdqWdq } else { V256VpunpcklqdqVdqHdqWdq },
+        PunpckhqdqVdqWdq => if vl == 0 { V128VpunpckhqdqVdqHdqWdq } else { V256VpunpckhqdqVdqHdqWdq },
+
+        // ===== PALIGNR =====
+        PalignrVdqWdqIb => if vl == 0 { V128VpalignrVdqHdqWdqIb } else { V256VpalignrVdqHdqWdqIb },
+
+        // ===== Store-form moves (VEX handler does VL-aware stores + register form) =====
+        MovdquWdqVdq  => if vl == 0 { V128VmovdquWdqVdq }  else { V256VmovdquWdqVdq },
+        MovdqaWdqVdq  => if vl == 0 { V128VmovdqaWdqVdq }  else { V256VmovdqaWdqVdq },
+        MovupsWpsVps  => if vl == 0 { V128VmovupsWpsVps }   else { V256VmovupsWpsVps },
+        MovapsWpsVps  => if vl == 0 { V128VmovapsWpsVps }   else { V256VmovapsWpsVps },
+        MovupdWpdVpd  => if vl == 0 { V128VmovupdWpdVpd }   else { V256VmovupdWpdVpd },
+        MovapdWpdVpd  => if vl == 0 { V128VmovapdWpdVpd }   else { V256VmovapdWpdVpd },
+        MovntdqMdqVdq => if vl == 0 { V128VmovntdqMdqVdq }  else { V256VmovntdqMdqVdq },
+        MovntpsMpsVps => if vl == 0 { V128VmovntpsMpsVps }   else { V256VmovntpsMpsVps },
+        MovntpdMpdVpd => if vl == 0 { V128VmovntpdMpdVpd }   else { V256VmovntpdMpdVpd },
+
+        // ===== Load-form moves (SSE handler only reads 128-bit; VEX handler is VL-aware) =====
+        // These use a single VEX opcode (no V128/V256 prefix) — handler checks get_vl()
+        MovdquVdqWdq  => VmovdquVdqWdq,
+        MovdqaVdqWdq  => VmovdqaVdqWdq,
+        MovupsVpsWps  => VmovupsVpsWps,
+        MovapsVpsWps  => VmovapsVpsWps,
+        MovupdVpdWpd  => VmovupdVpdWpd,
+        MovapdVpdWpd  => VmovapdVpdWpd,
+
+        // ===== Misc =====
+        PmovmskbGdUdq => if vl == 0 { V128VpmovmskbGdUdq } else { V256VpmovmskbGdUdq },
+
+        // ===== EMMS → VZEROUPPER/VZEROALL (VEX.0F 77) =====
+        Emms => if vl == 0 { Vzeroupper } else { Vzeroall },
+
+        // No remap — instruction either has no VEX form, is already VEX, or
+        // works correctly as-is (e.g. 2-operand loads where VEX.vvvv must be 1111b)
+        _ => op,
     }
 }
 

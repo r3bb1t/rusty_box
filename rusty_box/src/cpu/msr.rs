@@ -99,7 +99,12 @@ pub const BX_MSR_APICBASE_DEFAULT: u64 = 0xFEE00900;
 pub const BX_MSR_MTRRCAP_DEFAULT: u64 = 0x0508;
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    /// Initialize MSR infrastructure before reset.
+    /// Bochs init.cc:145-183: zeros configurable MSR array.
+    /// Actual MSR default values are set in reset() matching Bochs init.cc:1099-1157.
     pub(super) fn init_msrs(&mut self) {
-        // TODO: implement later
+        // Bochs zeroes the configurable MSR array here (BX_MSR_MAX_INDEX entries).
+        // Our MSR struct fields are initialized via Default, so no additional work needed.
+        // The #[cfg(feature = "bx_configure_msrs")] path in reset() handles re-zeroing.
     }
 }

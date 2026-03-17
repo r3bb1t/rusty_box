@@ -534,7 +534,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
 
     pub(super) cpu_state_use_ok: u32, // format of BX_FETCH_MODE_*
 
-    // FIXME: skipped   static jmp_buf jmp_buf_env;
+    // Bochs uses jmp_buf for exception longjmp; we use CpuLoopRestart instead
     pub(super) last_exception_type: u32,
 
     pub(super) cpuloop_stack_anchor: Option<&'c [u8]>,
@@ -931,10 +931,6 @@ pub struct BxRegsMsr {
 
     pub(crate) ia32_umwait_ctrl: u32,
     pub(crate) ia32_spec_ctrl: u32, // SCA
-
-                                    // note from bochs source code:
-                                    /* TODO finish of the others */
-                                    //
 }
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -1306,9 +1302,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         self.cpuloop_stack_anchor = None;
 
-        // FIXME: setjmp
-
-        // We get here either by a normal function call, or by a longjmp
+        // Bochs uses setjmp here; we use CpuLoopRestart via Rust error propagation.
+        // We get here either by a normal function call, or by a CpuLoopRestart
         // back from an exception() call.  In either case, commit the
         // new EIP/ESP, and set up other environmental fields.  This code
         // mirrors similar code below, after the interrupt() call.
@@ -2085,8 +2080,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     fn before_execution(&mut self, _cpu_id: u32) {
-        // FIXME: Implement actual before-execution logic
-        // This would include things like checking for traps, updating state, etc.
+        // Bochs instrumentation hook (BX_INSTR_BEFORE_EXECUTION) — no-op without instrumentation.
     }
 
     // boundaries of consideration:
@@ -2296,7 +2290,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 unsafe { core::slice::from_raw_parts(fetch_ptr as *mut u8, 4096) };
             self.eip_fetch_ptr = Some(fetch_ptr_as_ptr);
         } else {
-            // FIXME: Add here
             let mem_len = mem.get_memory_len();
 
             let p_addr_fetch_page = self.p_addr_fetch_page.clone();

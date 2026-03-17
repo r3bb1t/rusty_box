@@ -130,9 +130,9 @@ pub struct BxPcSystemC {
     /// Microseconds since last sync
     usec_since_last: u64,
     /// A20 address mask (controls A20 line gating)
-    a20_mask: BxPhyAddress,
+    pub(crate) a20_mask: BxPhyAddress,
     /// Whether A20 line is enabled
-    enable_a20: bool,
+    pub(crate) enable_a20: bool,
     /// Instructions per second (in millions)
     m_ips: f64,
     /// Hardware Request (DMA)
@@ -400,9 +400,9 @@ impl BxPcSystemC {
         Ok(())
     }
 
-    /// Register state for save/restore functionality
+    /// Register state for save/restore functionality.
+    /// Bochs uses parameter tree nodes. Our snapshot uses snapshot.rs instead.
     pub fn register_state(&self) {
-        // TODO: Implement state registration for save/restore
         tracing::debug!("PC system state registered");
     }
 
@@ -657,6 +657,11 @@ impl BxPcSystemC {
     #[inline]
     pub fn get_num_cpu_ticks_left_next_event(&self) -> u32 {
         self.curr_countdown
+    }
+
+    /// Get the number of registered timers.
+    pub fn num_timers(&self) -> usize {
+        self.num_timers
     }
 
     /// Check if a timer is active (for diagnostics).

@@ -29,36 +29,92 @@ pub struct AMX {
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ========================================================================
+    // VZEROUPPER / VZEROALL (VEX.0F 77)
+    // ========================================================================
+
+    /// VZEROUPPER — Zero upper 128 bits of all YMM registers.
+    /// Bochs avx.cc: for i in 0..nregs { vmm[i].ymm128(1) = 0; }
+    pub(super) fn vzeroupper(&mut self, _instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let nregs = if self.long64_mode() { 16 } else { 8 };
+        for i in 0..nregs {
+            // Clear upper 128 bits (ymm128[1]) and ZMM upper 256 bits
+            unsafe {
+                self.vmm[i].zmm128[1] = BxPackedXmmRegister { xmm64u: [0, 0] };
+                self.vmm[i].zmm128[2] = BxPackedXmmRegister { xmm64u: [0, 0] };
+                self.vmm[i].zmm128[3] = BxPackedXmmRegister { xmm64u: [0, 0] };
+            }
+        }
+        Ok(())
+    }
+
+    /// VZEROALL — Zero all YMM registers (all 256 bits).
+    /// Bochs avx.cc: for i in 0..nregs { vmm[i] = 0; }
+    pub(super) fn vzeroall(&mut self, _instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let nregs = if self.long64_mode() { 16 } else { 8 };
+        for i in 0..nregs {
+            self.vmm[i].clear();
+        }
+        Ok(())
+    }
+
+    // ========================================================================
     // VEX.L-aware dispatch wrappers
     // These check VEX.L and dispatch to 128-bit (SSE) or 256-bit (AVX) handlers
     // ========================================================================
 
     /// VMOVDQU load — VEX.L=0: XMM <- M128, VEX.L=1: YMM <- M256
+    /// Also handles register form (mod=11): dst_reg <- src_reg
     pub(super) fn vmovdqu_load(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        if instr.get_vl() >= 1 {
-            let val = self.v_read_ymmword(seg, eaddr)?;
-            self.write_ymm_reg(instr.dst(), val);
+        if instr.mod_c0() {
+            // Register form: copy src1 (rm) to dst (nnn)
+            if instr.get_vl() >= 1 {
+                let val = self.read_ymm_reg(instr.src1());
+                self.write_ymm_reg(instr.dst(), val);
+            } else {
+                let val = self.read_xmm_reg(instr.src1());
+                self.write_xmm_reg(instr.dst(), val);
+            }
         } else {
-            let val = self.v_read_xmmword(seg, eaddr)?;
-            self.write_xmm_reg(instr.dst(), val);
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            if instr.get_vl() >= 1 {
+                let val = self.v_read_ymmword(seg, eaddr)?;
+                self.write_ymm_reg(instr.dst(), val);
+            } else {
+                let val = self.v_read_xmmword(seg, eaddr)?;
+                self.write_xmm_reg(instr.dst(), val);
+            }
         }
         Ok(())
     }
 
     /// VMOVDQU store — VEX.L=0: M128 <- XMM, VEX.L=1: M256 <- YMM
+    /// Also handles register form (mod=11): dst_reg <- src_reg
     pub(super) fn vmovdqu_store(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        if instr.get_vl() >= 1 {
-            let val = self.read_ymm_reg(instr.src1());
-            self.v_write_ymmword(seg, eaddr, &val)?;
+        if instr.mod_c0() {
+            // Register form: copy src1 (nnn) to dst (rm)
+            if instr.get_vl() >= 1 {
+                let val = self.read_ymm_reg(instr.src1());
+                self.write_ymm_reg(instr.dst(), val);
+            } else {
+                let val = self.read_xmm_reg(instr.src1());
+                self.write_xmm_reg(instr.dst(), val);
+            }
         } else {
-            let val = self.read_xmm_reg(instr.src1());
-            self.v_write_xmmword(seg, eaddr, &val)?;
+            // Memory form: store to memory
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            if instr.get_vl() >= 1 {
+                let val = self.read_ymm_reg(instr.src1());
+                self.v_write_ymmword(seg, eaddr, &val)?;
+            } else {
+                let val = self.read_xmm_reg(instr.src1());
+                self.v_write_xmmword(seg, eaddr, &val)?;
+            }
         }
         Ok(())
     }
@@ -77,37 +133,56 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// VMOVDQA/VMOVAPS load — VEX.L=0: XMM <- M128, VEX.L=1: YMM <- M256 (aligned)
+    /// Also handles register form (mod=11): dst_reg <- src_reg
     pub(super) fn vmovdqa_load(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        if instr.get_vl() >= 1 {
-            // TODO: 32-byte alignment check for YMM — VMOVDQA requires 32-byte aligned
-            // access for 256-bit operands. Should raise #GP(0) if eaddr % 32 != 0.
-            // v_read_ymmword_aligned does not exist yet; using unaligned read as fallback.
-            let val = self.v_read_ymmword(seg, eaddr)?;
-            self.write_ymm_reg(instr.dst(), val);
+        if instr.mod_c0() {
+            // Register form: copy src1 (rm) to dst (nnn)
+            if instr.get_vl() >= 1 {
+                let val = self.read_ymm_reg(instr.src1());
+                self.write_ymm_reg(instr.dst(), val);
+            } else {
+                let val = self.read_xmm_reg(instr.src1());
+                self.write_xmm_reg(instr.dst(), val);
+            }
         } else {
-            let val = self.v_read_xmmword_aligned(seg, eaddr)?;
-            self.write_xmm_reg(instr.dst(), val);
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            if instr.get_vl() >= 1 {
+                let val = self.v_read_ymmword(seg, eaddr)?;
+                self.write_ymm_reg(instr.dst(), val);
+            } else {
+                let val = self.v_read_xmmword_aligned(seg, eaddr)?;
+                self.write_xmm_reg(instr.dst(), val);
+            }
         }
         Ok(())
     }
 
     /// VMOVDQA store — VEX.L=0: M128 <- XMM, VEX.L=1: M256 <- YMM (aligned)
+    /// Also handles register form (mod=11): dst_reg <- src_reg
     pub(super) fn vmovdqa_store(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let seg = BxSegregs::from(instr.seg());
-        let eaddr = self.resolve_addr(instr);
-        if instr.get_vl() >= 1 {
-            // TODO: 32-byte alignment check for YMM — VMOVDQA requires 32-byte aligned
-            // access for 256-bit operands. Should raise #GP(0) if eaddr % 32 != 0.
-            // v_write_ymmword_aligned does not exist yet; using unaligned write as fallback.
-            let val = self.read_ymm_reg(instr.src1());
-            self.v_write_ymmword(seg, eaddr, &val)?;
+        if instr.mod_c0() {
+            // Register form: copy src1 (nnn) to dst (rm)
+            if instr.get_vl() >= 1 {
+                let val = self.read_ymm_reg(instr.src1());
+                self.write_ymm_reg(instr.dst(), val);
+            } else {
+                let val = self.read_xmm_reg(instr.src1());
+                self.write_xmm_reg(instr.dst(), val);
+            }
         } else {
-            let val = self.read_xmm_reg(instr.src1());
-            self.v_write_xmmword_aligned(seg, eaddr, &val)?;
+            // Memory form: store to memory
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            if instr.get_vl() >= 1 {
+                let val = self.read_ymm_reg(instr.src1());
+                self.v_write_ymmword(seg, eaddr, &val)?;
+            } else {
+                let val = self.read_xmm_reg(instr.src1());
+                self.v_write_xmmword_aligned(seg, eaddr, &val)?;
+            }
         }
         Ok(())
     }
@@ -1007,6 +1082,173 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         result.xmmubyte[i] = 0;
                     } else {
                         result.xmmubyte[i] = data.xmmubyte[(m & 0xf) as usize];
+                    }
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    // =========================================================================
+    // VPALIGNR — Packed Align Right (AVX/AVX2)
+    // Bochs: avx2.cc VPALIGNR_VdqHdqWdqIbR
+    // =========================================================================
+
+    /// VPALIGNR — Packed Align Right (VEX.L aware, 3-operand)
+    /// VEX.128/256.66.0F3A 0F /r ib
+    /// Per 128-bit lane: result = [src1:src2] >> (imm8 * 8), where src1 is high.
+    /// Bochs: op1 = src1 (vvv), op2 = src2 (rm); xmm_palignr(&op2, &op1, imm8);
+    ///        write op2 to dst.
+    pub(super) fn vpalignr(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let shift = instr.ib() as usize;
+
+        if instr.get_vl() >= 1 {
+            // 256-bit: two independent 128-bit lane align-right operations
+            let op1 = self.read_ymm_reg(instr.src2()); // VEX.vvvv = high part
+            let op2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            // Process each 128-bit lane independently
+            for lane in 0..2usize {
+                let base = lane * 16;
+                Self::palignr_lane(
+                    &op1, &op2, base, shift, &mut result,
+                );
+            }
+            self.write_ymm_reg(instr.dst(), result);
+        } else {
+            // 128-bit: single lane
+            let op1 = self.read_xmm_reg(instr.src2()); // VEX.vvvv = high part
+            let op2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            // Concatenate [op1:op2] (32 bytes, but only 16 bytes each)
+            // and extract 16 bytes starting at byte offset `shift`
+            if shift >= 32 {
+                // All zeros — result already zeroed
+            } else if shift >= 16 {
+                // Only op1 bytes contribute, shifted right
+                let s = shift - 16;
+                unsafe {
+                    for i in 0..(16 - s) {
+                        result.xmmubyte[i] = op1.xmmubyte[i + s];
+                    }
+                }
+            } else {
+                // Both op2 and op1 contribute
+                unsafe {
+                    for i in 0..16usize {
+                        let src_idx = i + shift;
+                        if src_idx < 16 {
+                            result.xmmubyte[i] = op2.xmmubyte[src_idx];
+                        } else {
+                            result.xmmubyte[i] = op1.xmmubyte[src_idx - 16];
+                        }
+                    }
+                }
+            }
+            self.write_xmm_reg(instr.dst(), result);
+        }
+        Ok(())
+    }
+
+    /// Helper: PALIGNR for one 128-bit lane within a YMM register.
+    /// op1[base..base+16] is high, op2[base..base+16] is low.
+    fn palignr_lane(
+        op1: &BxPackedYmmRegister,
+        op2: &BxPackedYmmRegister,
+        base: usize,
+        shift: usize,
+        result: &mut BxPackedYmmRegister,
+    ) {
+        if shift >= 32 {
+            // All zeros — result bytes already 0
+        } else if shift >= 16 {
+            let s = shift - 16;
+            unsafe {
+                for i in 0..(16 - s) {
+                    result.ymmubyte[base + i] = op1.ymmubyte[base + i + s];
+                }
+            }
+        } else {
+            unsafe {
+                for i in 0..16usize {
+                    let src_idx = i + shift;
+                    if src_idx < 16 {
+                        result.ymmubyte[base + i] = op2.ymmubyte[base + src_idx];
+                    } else {
+                        result.ymmubyte[base + i] = op1.ymmubyte[base + src_idx - 16];
+                    }
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // VPBLENDD — Blend Packed Dwords (AVX2)
+    // Bochs: VPBLENDD_VdqHdqWdqIbR → uses same logic as VBLENDPS
+    // =========================================================================
+
+    /// VPBLENDD — Blend packed dwords by immediate mask (VEX.L aware)
+    /// VEX.128/256.66.0F3A.W0 02 /r ib
+    /// For each dword lane i: dst[i] = (imm8 & (1<<i)) ? src2[i] : src1[i]
+    /// src1 = VEX.vvvv (src2()), src2 = rm (src1())
+    pub(super) fn vpblendd(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let imm8 = instr.ib();
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+
+        if instr.get_vl() >= 1 {
+            // 256-bit: 8 dwords
+            let src1 = self.read_ymm_reg(src1_idx);
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..8usize {
+                    if (imm8 & (1 << i)) != 0 {
+                        result.ymm32u[i] = src2.ymm32u[i];
+                    } else {
+                        result.ymm32u[i] = src1.ymm32u[i];
+                    }
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            // 128-bit: 4 dwords (only bits 0-3 of imm8 matter)
+            let src1 = self.read_xmm_reg(src1_idx);
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..4usize {
+                    if (imm8 & (1 << i)) != 0 {
+                        result.xmm32u[i] = src2.xmm32u[i];
+                    } else {
+                        result.xmm32u[i] = src1.xmm32u[i];
                     }
                 }
             }
@@ -1994,6 +2236,50 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 for i in 0..8 {
                     let prod = (src1.xmm16u[i] as u32) * (src2.xmm16u[i] as u32);
                     result.xmm16u[i] = (prod >> 16) as u16;
+                }
+            }
+            self.write_xmm_reg(dst_idx, result);
+        }
+        Ok(())
+    }
+
+    /// VPMULHRSW — Packed Multiply High with Round and Scale (VEX.L aware)
+    /// Bochs simd_int.h:988-993: result[i] = (((src1[i] * src2[i]) >> 14) + 1) >> 1
+    pub(super) fn vpmulhrsw(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        let dst_idx = instr.dst();
+        let src1_idx = instr.src2(); // VEX.vvvv
+        if instr.get_vl() >= 1 {
+            let src2 = if instr.mod_c0() {
+                self.read_ymm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_ymmword(seg, eaddr)?
+            };
+            let src1 = self.read_ymm_reg(src1_idx);
+            let mut result = BxPackedYmmRegister { ymm64u: [0; 4] };
+            unsafe {
+                for i in 0..16 {
+                    let t = ((src1.ymm16s[i] as i32 * src2.ymm16s[i] as i32) >> 14) + 1;
+                    result.ymm16u[i] = (t >> 1) as u16;
+                }
+            }
+            self.write_ymm_reg(dst_idx, result);
+        } else {
+            let src2 = if instr.mod_c0() {
+                self.read_xmm_reg(instr.src1())
+            } else {
+                let seg = BxSegregs::from(instr.seg());
+                let eaddr = self.resolve_addr(instr);
+                self.v_read_xmmword(seg, eaddr)?
+            };
+            let src1 = self.read_xmm_reg(src1_idx);
+            let mut result = BxPackedXmmRegister { xmm64u: [0; 2] };
+            unsafe {
+                for i in 0..8 {
+                    let t = ((src1.xmm16s[i] as i32 * src2.xmm16s[i] as i32) >> 14) + 1;
+                    result.xmm16u[i] = (t >> 1) as u16;
                 }
             }
             self.write_xmm_reg(dst_idx, result);

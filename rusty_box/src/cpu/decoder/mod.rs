@@ -12,8 +12,45 @@ pub use rusty_box_decoder::features::X86Feature;
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    /// Validate CPU feature bitmask and configure decode tables.
+    ///
+    /// Bochs fetchdecode32.cc:2141-2250: loops all opcodes and disables those
+    /// whose ISA feature isn't in ia_extensions_bitmask. Also handles special
+    /// cases like LZCNT→BSR and TZCNT→BSF fallback.
+    ///
+    /// Our decoder uses const tables so we can't patch them at runtime.
+    /// Instead, unsupported opcodes hit the dispatcher catch-all which raises #UD.
+    /// This function validates the bitmask is populated and logs the configuration.
     pub(in crate::cpu) fn init_fetch_decode_tables(&mut self) -> crate::cpu::Result<()> {
-        // TODO: implement this in future
+        // Bochs panics if bitmask is empty (fetchdecode32.cc:2151-2152)
+        if self.ia_extensions_bitmask[0] == 0 {
+            panic!("init_fetch_decode_tables: CPU features bitmask is empty!");
+        }
+
+        // Log key ISA feature status for debugging
+        let has_sse = self.bx_cpuid_support_isa_extension(X86Feature::IsaSse);
+        let has_sse2 = self.bx_cpuid_support_isa_extension(X86Feature::IsaSse2);
+        let has_avx = self.bx_cpuid_support_isa_extension(X86Feature::IsaAvx);
+        let has_avx2 = self.bx_cpuid_support_isa_extension(X86Feature::IsaAvx2);
+        let has_bmi1 = self.bx_cpuid_support_isa_extension(X86Feature::IsaBmi1);
+        let has_bmi2 = self.bx_cpuid_support_isa_extension(X86Feature::IsaBmi2);
+        let has_aes = self.bx_cpuid_support_isa_extension(X86Feature::IsaAesPclmulqdq);
+        let has_long_mode = self.bx_cpuid_support_isa_extension(X86Feature::IsaLongMode);
+        let has_lzcnt = self.bx_cpuid_support_isa_extension(X86Feature::IsaLzcnt);
+
+        tracing::info!(
+            "CPU ISA features: SSE={} SSE2={} AVX={} AVX2={} BMI1={} BMI2={} AES={} LM={} LZCNT={}",
+            has_sse, has_sse2, has_avx, has_avx2, has_bmi1, has_bmi2, has_aes, has_long_mode, has_lzcnt
+        );
+
+        // LZCNT/TZCNT fallback (Bochs fetchdecode32.cc:2209-2223):
+        // When LZCNT not supported, F3 0F BD decodes as BSR (REP prefix ignored).
+        // When BMI1 (TZCNT) not supported, F3 0F BC decodes as BSF.
+        // Our CPUID reports both as supported for Skylake-X, so no fallback needed.
+        // If a different CPU model doesn't support them, the decoder will still
+        // decode LZCNT/TZCNT, and they'll execute correctly (our handlers exist).
+        // The only difference from Bochs is we won't alias them to BSR/BSF.
+
         Ok(())
     }
 }

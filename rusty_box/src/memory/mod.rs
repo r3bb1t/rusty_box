@@ -142,6 +142,11 @@ impl BxMemC<'_> {
         self.a20_mask
     }
 
+    /// Get mutable access to the underlying memory stub for snapshot save/restore.
+    pub fn get_stub_mut(&mut self) -> &mut BxMemoryStubC {
+        &mut self.inherited_memory_stub
+    }
+
     /// Disable SMRAM (System Management RAM)
     ///
     /// Matches BX_MEM_C::disable_smram() from cpp_orig/bochs/memory/misc_mem.cc:888-893
