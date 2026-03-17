@@ -463,7 +463,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Store result to XMM0
-        self.write_xmm_reg(0, result);
+        self.write_xmm_reg_lo128(0, result);
 
         Ok(())
     }
@@ -619,7 +619,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Store result to XMM0
-        self.write_xmm_reg(0, result);
+        self.write_xmm_reg_lo128(0, result);
 
         Ok(())
     }

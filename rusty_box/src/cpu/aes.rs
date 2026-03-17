@@ -359,8 +359,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         aes_inverse_mix_columns(&mut op);
 
-        self.write_xmm_reg(instr.dst(), op);
+        self.write_xmm_result(instr, instr.dst(), op);
         Ok(())
+    }
+
+    /// Write XMM result: VEX clears upper YMM, legacy SSE preserves it.
+    /// Bochs: VEX uses BX_WRITE_XMM_REG_CLEAR_HIGH, legacy uses BX_WRITE_XMM_REG.
+    #[inline]
+    fn write_xmm_result(&mut self, instr: &Instruction, idx: u8, val: BxPackedXmmRegister) {
+        if instr.is_vex() {
+            self.write_xmm_reg(idx, val); // VEX: clear upper YMM/ZMM
+        } else {
+            self.write_xmm_reg_lo128(idx, val); // Legacy SSE: preserve upper
+        }
     }
 
     /// Read the AES state operand: for legacy SSE, state is dst (destructive).
@@ -387,7 +398,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         aes_mix_columns(&mut state);
         xmm_xorps(&mut state, &round_key);
 
-        self.write_xmm_reg(instr.dst(), state);
+        self.write_xmm_result(instr, instr.dst(), state);
         Ok(())
     }
 
@@ -403,7 +414,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         aes_substitute_bytes(&mut state);
         xmm_xorps(&mut state, &round_key);
 
-        self.write_xmm_reg(instr.dst(), state);
+        self.write_xmm_result(instr, instr.dst(), state);
         Ok(())
     }
 
@@ -420,7 +431,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         aes_inverse_mix_columns(&mut state);
         xmm_xorps(&mut state, &round_key);
 
-        self.write_xmm_reg(instr.dst(), state);
+        self.write_xmm_result(instr, instr.dst(), state);
         Ok(())
     }
 
@@ -436,7 +447,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         aes_inverse_substitute_bytes(&mut state);
         xmm_xorps(&mut state, &round_key);
 
-        self.write_xmm_reg(instr.dst(), state);
+        self.write_xmm_result(instr, instr.dst(), state);
         Ok(())
     }
 
@@ -458,7 +469,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             result.xmm32u[3] = aes_rot_word(result.xmm32u[2]) ^ rcon32;
         }
 
-        self.write_xmm_reg(instr.dst(), result);
+        self.write_xmm_result(instr, instr.dst(), result);
         Ok(())
     }
 
@@ -481,7 +492,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let result = xmm_pclmulqdq(a, b);
 
-        self.write_xmm_reg(instr.dst(), result);
+        self.write_xmm_result(instr, instr.dst(), result);
         Ok(())
     }
 }

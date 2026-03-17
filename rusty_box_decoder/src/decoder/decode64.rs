@@ -1644,9 +1644,13 @@ const fn get_immediate_size_64(b1: u32, map: u8, _sse_prefix: u8, metainfo1: u8,
             // Iw
             0xC2 | 0xCA => 2,
 
+            // CALL/JMP rel32 — always 4-byte displacement in 64-bit mode
+            // (0x66 prefix is ignored for near branches per Intel SDM)
+            0xE8 | 0xE9 => 4,
+
             // Iv/Id (operand-size dependent)
-            0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D | 0x68 | 0x69 | 0xA9 | 0xE8
-            | 0xE9 | 0x81 | 0xC7 => {
+            0x05 | 0x0D | 0x15 | 0x1D | 0x25 | 0x2D | 0x35 | 0x3D | 0x68 | 0x69 | 0xA9
+            | 0x81 | 0xC7 => {
                 if os32 {
                     4
                 } else {

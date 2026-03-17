@@ -221,7 +221,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         xmm_gf2p8affineqb(&mut dst, &src, instr.ib());
 
-        self.write_xmm_reg(instr.dst(), dst);
+        self.write_xmm_reg_lo128(instr.dst(), dst);
         Ok(())
     }
 
@@ -236,7 +236,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         xmm_gf2p8affineinvqb(&mut dst, &src, instr.ib());
 
-        self.write_xmm_reg(instr.dst(), dst);
+        self.write_xmm_reg_lo128(instr.dst(), dst);
         Ok(())
     }
 
@@ -255,7 +255,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        self.write_xmm_reg(instr.dst(), dst);
+        self.write_xmm_reg_lo128(instr.dst(), dst);
         Ok(())
     }
 }

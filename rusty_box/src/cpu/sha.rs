@@ -126,7 +126,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op2.xmm32u[3] = op2.xmm32u[3].wrapping_add(rol32(op1.xmm32u[3], 30));
         }
 
-        self.write_xmm_reg(instr.dst(), op2);
+        self.write_xmm_reg_lo128(instr.dst(), op2);
         Ok(())
     }
 
@@ -144,7 +144,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op1.xmm32u[0] ^= op2.xmm32u[2];
         }
 
-        self.write_xmm_reg(instr.dst(), op1);
+        self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
     }
 
@@ -163,7 +163,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op1.xmm32u[0] = rol32(op1.xmm32u[0] ^ op1.xmm32u[3], 1);
         }
 
-        self.write_xmm_reg(instr.dst(), op1);
+        self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
     }
 
@@ -223,7 +223,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             result.xmm32u[2] = b[2];
             result.xmm32u[3] = a[2];
 
-            self.write_xmm_reg(instr.dst(), result);
+            self.write_xmm_reg_lo128(instr.dst(), result);
         }
         Ok(())
     }
@@ -247,7 +247,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 op1.xmm32u[3].wrapping_add(sha256_transformation_rrs(op2_dword0, 7, 18, 3));
         }
 
-        self.write_xmm_reg(instr.dst(), op1);
+        self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
     }
 
@@ -271,7 +271,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 .wrapping_add(sha256_transformation_rrs(op1.xmm32u[1], 17, 19, 10));
         }
 
-        self.write_xmm_reg(instr.dst(), op1);
+        self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
     }
 
@@ -321,7 +321,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             op1.xmm32u[0] = d;
         }
 
-        self.write_xmm_reg(instr.dst(), op1);
+        self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
     }
 }
