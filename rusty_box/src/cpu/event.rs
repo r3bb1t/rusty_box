@@ -80,9 +80,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     self.prev_rip = self.rip() as u64;
                 }
                 Err(super::error::CpuError::CpuLoopRestart) => {
+                    self.prev_rip = self.rip() as u64;
                     return false;
                 }
-                Err(_) => {}
+                Err(e) => {
+                    tracing::warn!("NMI delivery failed: {:?}", e);
+                }
             }
         } else if self.is_unmasked_event_pending(
             Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR,
@@ -107,12 +110,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     delivered = true;
                     match result {
                         Ok(()) => {
+                            // Bochs event.cc:183 — update prev_rip after delivery
                             self.prev_rip = self.rip() as u64;
                         }
                         Err(super::error::CpuError::CpuLoopRestart) => {
+                            // interrupt() delivered via exception path (CpuLoopRestart).
+                            // Bochs event.cc:183: prev_rip = RIP after successful delivery.
+                            self.prev_rip = self.rip() as u64;
                             return false;
                         }
-                        Err(_) => {}
+                        Err(e) => {
+                            tracing::warn!("LAPIC interrupt delivery failed: {:?}", e);
+                        }
                     }
                 }
             }
@@ -145,9 +154,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                             self.prev_rip = self.rip() as u64;
                         }
                         Err(super::error::CpuError::CpuLoopRestart) => {
-                            return false; // Restart cpu_loop
+                            self.prev_rip = self.rip() as u64;
+                            return false;
                         }
-                        Err(_) => {}
+                        Err(e) => {
+                            tracing::warn!("PIC interrupt delivery failed: {:?}", e);
+                        }
                     }
                 } else {
                     self.diag_hae_intr_pic_empty += 1;

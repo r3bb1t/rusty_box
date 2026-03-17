@@ -968,9 +968,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         (unsafe { self.sregs[seg].cache.u.segment.base } + u64::from(offset)) as u32
     }
 
-    /// Get linear address in 64-bit mode (matching get_laddr64)
+    /// Get linear address in 64-bit mode (matching Bochs get_laddr64 — cpu.h:5534-5540)
+    /// In 64-bit mode, ES/CS/SS/DS bases are forced to 0 per Intel SDM.
+    /// Only FS and GS may have non-zero bases (loaded via MSR).
     pub(super) fn get_laddr64(&self, seg: usize, offset: u64) -> u64 {
-        unsafe { self.sregs[seg].cache.u.segment.base.wrapping_add(offset) }
+        // BxSegregs: ES=0, CS=1, SS=2, DS=3, FS=4, GS=5
+        if seg < 4 {
+            // ES, CS, SS, DS — base is always 0 in 64-bit mode
+            offset
+        } else {
+            // FS, GS — use actual segment base from MSR
+            unsafe { self.sregs[seg].cache.u.segment.base.wrapping_add(offset) }
+        }
     }
 
     /// Read 64-bit qword from memory (matching mem_read_qword)
@@ -2016,14 +2025,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     pub(super) fn update_flags_logic8(&mut self, result: u8) {
-        self.eflags.remove(EFlags::OF | EFlags::CF); // OF=0, CF=0
+        // Bochs SET_FLAGS_OSZAPC_LOGIC clears OF, CF, AF
+        self.eflags.remove(EFlags::OF | EFlags::CF | EFlags::AF);
         self.eflags.set(EFlags::SF, (result & 0x80) != 0);
         self.eflags.set(EFlags::ZF, result == 0);
         self.eflags.set(EFlags::PF, (result.count_ones() % 2) == 0);
     }
 
     pub(super) fn update_flags_logic16(&mut self, result: u16) {
-        self.eflags.remove(EFlags::OF | EFlags::CF); // OF=0, CF=0
+        self.eflags.remove(EFlags::OF | EFlags::CF | EFlags::AF);
         self.eflags.set(EFlags::SF, (result & 0x8000) != 0);
         self.eflags.set(EFlags::ZF, result == 0);
         self.eflags
@@ -2065,8 +2075,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     pub(super) fn update_flags_logic32(&mut self, result: u32) {
-        // Clear OF, CF (always 0 for logical operations)
-        self.eflags.remove(EFlags::OF | EFlags::CF);
+        // Bochs SET_FLAGS_OSZAPC_LOGIC clears OF, CF, AF
+        self.eflags.remove(EFlags::OF | EFlags::CF | EFlags::AF);
 
         // Set SF (sign flag) - bit 31 of result for 32-bit
         self.eflags.set(EFlags::SF, (result & 0x80000000) != 0);

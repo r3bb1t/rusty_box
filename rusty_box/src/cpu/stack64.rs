@@ -82,13 +82,24 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// POP m64 - Pop into 64-bit memory location
-    /// Based on Bochs stack64.cc POP_EqM
+    /// Based on Bochs stack64.cc POP_EqM — uses RSP_SPECULATIVE
     pub fn pop_eq_m(&mut self, instr: &Instruction) -> super::Result<()> {
+        let prev_rsp = self.rsp();
+        self.speculative_rsp = true;
         let val64 = self.pop_64()?;
         let eaddr = self.resolve_addr64(instr);
         let seg = crate::cpu::decoder::BxSegregs::from(instr.seg());
-        self.write_virtual_qword_64(seg, eaddr, val64)?;
-        Ok(())
+        match self.write_virtual_qword_64(seg, eaddr, val64) {
+            Ok(()) => {
+                self.speculative_rsp = false;
+                Ok(())
+            }
+            Err(e) => {
+                self.set_rsp(prev_rsp);
+                self.speculative_rsp = false;
+                Err(e)
+            }
+        }
     }
 
     /// PUSH r/m64 - Unified dispatch based on mod_c0()
@@ -226,12 +237,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// POP segment selector (64-bit) — pops 64-bit value, loads low 16 bits as selector
+    /// POP segment selector (64-bit) — Bochs stack64.cc POP64_Sw
+    /// Bochs reads 16-bit from RSP, calls load_seg_reg, THEN increments RSP.
+    /// We use RSP_SPECULATIVE: pop first, restore RSP on load_seg_reg failure.
     pub fn pop_op64_sw(&mut self, instr: &Instruction) -> super::Result<()> {
+        let prev_rsp = self.rsp();
+        self.speculative_rsp = true;
         let selector_64 = self.pop_64()?;
         let seg_idx = BxSegregs::from(instr.dst());
-        self.load_seg_reg(seg_idx, selector_64 as u16)?;
-        Ok(())
+        match self.load_seg_reg(seg_idx, selector_64 as u16) {
+            Ok(()) => {
+                self.speculative_rsp = false;
+                Ok(())
+            }
+            Err(e) => {
+                self.set_rsp(prev_rsp);
+                self.speculative_rsp = false;
+                Err(e)
+            }
+        }
     }
 
     /// PUSH imm8 sign-extended to 64-bit
