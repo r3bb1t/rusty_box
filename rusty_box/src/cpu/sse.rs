@@ -1375,18 +1375,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ========================================================================
 
     /// PEXTRB EdVdqIbR — extract byte from XMM at imm8 & 0xF position to GPR32 (register form)
+    /// Decoder: 0F 3A map → dst=nnn (XMM source), src1=rm (GPR destination)
     pub(super) fn pextrb_ed_vdq_ib_r(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op = self.read_xmm_reg(instr.src1());
+        let op = self.read_xmm_reg(instr.dst()); // nnn = XMM source
         let result = unsafe { op.xmmubyte[(instr.ib() & 0xF) as usize] } as u32;
-        self.set_gpr32(instr.dst().into(), result);
+        self.set_gpr32(instr.src1().into(), result); // rm = GPR destination
         Ok(())
     }
 
     /// PEXTRB MbVdqIbM — extract byte from XMM at imm8 & 0xF position to memory (memory form)
     pub(super) fn pextrb_mb_vdq_ib_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op = self.read_xmm_reg(instr.src1());
+        let op = self.read_xmm_reg(instr.dst()); // nnn = XMM source
         let result = unsafe { op.xmmubyte[(instr.ib() & 0xF) as usize] };
         let seg = BxSegregs::from(instr.seg());
         let eaddr = self.resolve_addr(instr);
@@ -1395,12 +1396,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PEXTRD EdVdqIb — extract dword from XMM at imm8 & 3 position (combined R/M form)
+    /// Decoder: 0F 3A map → dst=nnn (XMM source), src1=rm (GPR/mem destination)
     pub(super) fn pextrd_ed_vdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op = self.read_xmm_reg(instr.src1());
+        let op = self.read_xmm_reg(instr.dst()); // nnn = XMM source
         let result = unsafe { op.xmm32u[(instr.ib() & 3) as usize] };
         if instr.mod_c0() {
-            self.set_gpr32(instr.dst().into(), result);
+            self.set_gpr32(instr.src1().into(), result); // rm = GPR destination
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
@@ -1410,12 +1412,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PEXTRQ EqVdqIb — extract qword from XMM at imm8 & 1 position (combined R/M form)
+    /// Decoder: 0F 3A map → dst=nnn (XMM source), src1=rm (GPR/mem destination)
     pub(super) fn pextrq_eq_vdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op = self.read_xmm_reg(instr.src1());
+        let op = self.read_xmm_reg(instr.dst()); // nnn = XMM source
         let result = unsafe { op.xmm64u[(instr.ib() & 1) as usize] };
         if instr.mod_c0() {
-            self.set_gpr64(instr.dst().into(), result);
+            self.set_gpr64(instr.src1().into(), result); // rm = GPR destination
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);

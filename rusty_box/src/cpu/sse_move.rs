@@ -148,6 +148,48 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.movaps_wps_vps_m(instr)
     }
 
+    /// MOVDQA load — legacy SSE (preserves upper YMM, matching Bochs BX_WRITE_XMM_REG)
+    pub(super) fn movdqa_load_sse(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.mod_c0() {
+            let val = self.read_xmm_reg(instr.src1());
+            self.write_xmm_reg_lo128(instr.dst(), val);
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            let val = self.v_read_xmmword_aligned(seg, eaddr)?;
+            self.write_xmm_reg_lo128(instr.dst(), val);
+        }
+        Ok(())
+    }
+
+    /// MOVDQA store — legacy SSE
+    pub(super) fn movdqa_store_sse(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.mod_c0() {
+            let val = self.read_xmm_reg(instr.src1());
+            self.write_xmm_reg_lo128(instr.dst(), val);
+        } else {
+            self.movdqa_wdq_vdq_m(instr)?;
+        }
+        Ok(())
+    }
+
+    /// MOVDQU load — legacy SSE (preserves upper YMM)
+    pub(super) fn movdqu_load_sse(&mut self, instr: &Instruction) -> super::Result<()> {
+        self.prepare_sse()?;
+        if instr.mod_c0() {
+            let val = self.read_xmm_reg(instr.src1());
+            self.write_xmm_reg_lo128(instr.dst(), val);
+        } else {
+            let seg = BxSegregs::from(instr.seg());
+            let eaddr = self.resolve_addr(instr);
+            let val = self.v_read_xmmword(seg, eaddr)?;
+            self.write_xmm_reg_lo128(instr.dst(), val);
+        }
+        Ok(())
+    }
+
     /// MOVNTPS store — M128 <- XMM (aligned, non-temporal hint ignored)
     #[inline]
     pub(super) fn movntps_mps_vps(&mut self, instr: &Instruction) -> super::Result<()> {

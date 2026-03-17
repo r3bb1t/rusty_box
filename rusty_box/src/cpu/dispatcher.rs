@@ -2389,34 +2389,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     self.vmovdqa_store(instr)
                 }
             }
-            // MOVDQA (aligned packed integer) — load (VEX.L aware)
-            Opcode::MovdqaVdqWdq => {
-                if instr.mod_c0() {
-                    self.vmovdqa_reg(instr)
-                } else {
-                    self.vmovdqa_load(instr)
-                }
-            }
-            // MOVDQA (aligned packed integer) — store (VEX.L aware)
-            Opcode::MovdqaWdqVdq => {
-                if instr.mod_c0() {
-                    self.vmovdqa_reg(instr)
-                } else {
-                    self.vmovdqa_store(instr)
-                }
-            }
-            // MOVDQU (unaligned packed integer) — load (VEX.L aware)
-            Opcode::MovdquVdqWdq => {
-                if instr.mod_c0() {
-                    self.vmovdqa_reg(instr)
-                } else {
-                    self.vmovdqu_load(instr)
-                }
-            }
-            // MOVDQU (unaligned packed integer) — store (VEX.L aware)
+            // MOVDQA load — legacy SSE (preserves upper YMM)
+            Opcode::MovdqaVdqWdq => self.movdqa_load_sse(instr),
+            // MOVDQA store — legacy SSE
+            Opcode::MovdqaWdqVdq => self.movdqa_store_sse(instr),
+            // MOVDQU load — legacy SSE (preserves upper YMM)
+            Opcode::MovdquVdqWdq => self.movdqu_load_sse(instr),
+            // MOVDQU store — legacy SSE
             Opcode::MovdquWdqVdq => {
                 if instr.mod_c0() {
-                    self.vmovdqa_reg(instr) // reg-to-reg is same as MOVDQA
+                    self.movdqu_load_sse(instr) // reg-to-reg same as load
                 } else {
                     self.vmovdqu_store(instr)
                 }
