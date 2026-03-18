@@ -2990,6 +2990,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::EvexVpmulldVdqHdqWdq | Opcode::EvexVpmulldVdqHdqWdqKmask => self.evex_vpmulld(instr),
             Opcode::EvexVpminsdVdqHdqWdq | Opcode::EvexVpminsdVdqHdqWdqKmask => self.evex_vpminsd(instr),
             Opcode::EvexVpmaxsdVdqHdqWdq | Opcode::EvexVpmaxsdVdqHdqWdqKmask => self.evex_vpmaxsd(instr),
+            // Rotate by immediate
+            Opcode::EvexVproldUdqIb | Opcode::EvexVproldUdqIbKmask => self.evex_vprold_imm(instr),
+            Opcode::EvexVprordUdqIb | Opcode::EvexVprordUdqIbKmask => self.evex_vprord_imm(instr),
+            Opcode::EvexVprolqUdqIb | Opcode::EvexVprolqUdqIbKmask => self.evex_vprolq_imm(instr),
+            Opcode::EvexVprorqUdqIb | Opcode::EvexVprorqUdqIbKmask => self.evex_vprorq_imm(instr),
+            // Permute
+            Opcode::EvexVpermdVdqHdqWdqKmask => self.evex_vpermd(instr),
+            Opcode::EvexVpermqVdqHdqWdqKmask => self.evex_vpermq_reg(instr),
+            Opcode::EvexVpermqVdqWdqIbKmask => self.evex_vpermq_imm(instr),
+            // Unpack
+            Opcode::EvexVpunpckldqVdqHdqWdq | Opcode::EvexVpunpckldqVdqHdqWdqKmask => self.evex_vpunpckldq(instr),
+            Opcode::EvexVpunpckhdqVdqHdqWdq | Opcode::EvexVpunpckhdqVdqHdqWdqKmask => self.evex_vpunpckhdq(instr),
 
             Opcode::V256Vinsertf128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vinserti128VdqHdqWdqIb => self.vinsert_f128_i128(instr),

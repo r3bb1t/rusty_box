@@ -1272,4 +1272,253 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
     }
+
+    // ========================================================================
+    // VPROLD/VPRORD — Rotate left/right packed dwords by immediate
+    // AVX-512F specific — no VEX equivalent (Bochs avx512.cc:1344-1375)
+    // ========================================================================
+
+    /// VPROLD Vdq{k}, Hdq, Ib — EVEX.66.0F.W0 72 /1
+    pub fn evex_vprold_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = dword_elements(vl);
+        let src = read_zmm(self, instr.src());
+        let count = (instr.ib() & 0x1F) as u32; // modulo 32
+        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe {
+            for i in 0..nelements {
+                result.zmm32u[i] = src.zmm32u[i].rotate_left(count);
+            }
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPRORD Vdq{k}, Hdq, Ib — EVEX.66.0F.W0 72 /0
+    pub fn evex_vprord_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = dword_elements(vl);
+        let src = read_zmm(self, instr.src());
+        let count = (instr.ib() & 0x1F) as u32;
+        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe {
+            for i in 0..nelements {
+                result.zmm32u[i] = src.zmm32u[i].rotate_right(count);
+            }
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPROLQ Vdq{k}, Hdq, Ib — EVEX.66.0F.W1 72 /1
+    pub fn evex_vprolq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let src = read_zmm(self, instr.src());
+        let count = (instr.ib() & 0x3F) as u32; // modulo 64
+        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe {
+            for i in 0..nelements {
+                result.zmm64u[i] = src.zmm64u[i].rotate_left(count);
+            }
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPRORQ Vdq{k}, Hdq, Ib — EVEX.66.0F.W1 72 /0
+    pub fn evex_vprorq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let src = read_zmm(self, instr.src());
+        let count = (instr.ib() & 0x3F) as u32;
+        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe {
+            for i in 0..nelements {
+                result.zmm64u[i] = src.zmm64u[i].rotate_right(count);
+            }
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    // ========================================================================
+    // VPERMD — Permute packed dwords (EVEX)
+    // ========================================================================
+
+    /// VPERMD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 36
+    pub fn evex_vpermd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = dword_elements(vl);
+        let idx = read_zmm(self, instr.src1());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src2())
+        } else {
+            let mut tmp = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let laddr = self.resolve_addr(instr);
+            let seg = BxSegregs::from(instr.seg());
+            for i in 0..nelements {
+                unsafe { tmp.zmm32u[i] = self.v_read_dword(seg, laddr + (i * 4) as u64)?; }
+            }
+            tmp
+        };
+        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe {
+            for i in 0..nelements {
+                let sel = (idx.zmm32u[i] & (nelements as u32 - 1)) as usize;
+                result.zmm32u[i] = src.zmm32u[sel];
+            }
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPERMQ Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 36
+    pub fn evex_vpermq_reg(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let idx = read_zmm(self, instr.src1());
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src2())
+        } else {
+            let mut tmp = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let laddr = self.resolve_addr(instr);
+            let seg = BxSegregs::from(instr.seg());
+            for i in 0..nelements {
+                let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
+                let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
+                unsafe { tmp.zmm64u[i] = lo | (hi << 32); }
+            }
+            tmp
+        };
+        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe {
+            for i in 0..nelements {
+                let sel = (idx.zmm64u[i] & (nelements as u64 - 1)) as usize;
+                result.zmm64u[i] = src.zmm64u[sel];
+            }
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPERMQ Vdq{k}, Wdq, Ib — EVEX.66.0F3A.W1 00 (immediate form)
+    pub fn evex_vpermq_imm(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let nelements = qword_elements(vl);
+        let src = if instr.mod_c0() {
+            read_zmm(self, instr.src())
+        } else {
+            let mut tmp = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let laddr = self.resolve_addr(instr);
+            let seg = BxSegregs::from(instr.seg());
+            for i in 0..nelements {
+                let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
+                let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
+                unsafe { tmp.zmm64u[i] = lo | (hi << 32); }
+            }
+            tmp
+        };
+        let imm8 = instr.ib();
+        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
+        // Per 256-bit lane, select from 4 qwords using imm8
+        let lanes = nelements / 4;
+        for lane in 0..lanes.max(1) {
+            let base = lane * 4;
+            unsafe {
+                for j in 0..4.min(nelements) {
+                    let sel = ((imm8 >> (j * 2)) & 0x03) as usize;
+                    result.zmm64u[base + j] = src.zmm64u[base + sel];
+                }
+            }
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    // ========================================================================
+    // VPUNPCKLDQ/VPUNPCKHDQ — Unpack and interleave dwords
+    // ========================================================================
+
+    /// VPUNPCKLDQ Vdq{k}, Hdq, Wdq — EVEX.66.0F.W0 62
+    pub fn evex_vpunpckldq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let src1 = read_zmm(self, instr.src1());
+        let src2 = if instr.mod_c0() {
+            read_zmm(self, instr.src2())
+        } else {
+            let mut tmp = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let laddr = self.resolve_addr(instr);
+            let seg = BxSegregs::from(instr.seg());
+            let nelements = dword_elements(vl);
+            for i in 0..nelements {
+                unsafe { tmp.zmm32u[i] = self.v_read_dword(seg, laddr + (i * 4) as u64)?; }
+            }
+            tmp
+        };
+        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
+        let lanes = vl_bytes(vl) / 16;
+        for lane in 0..lanes {
+            let base = lane * 4;
+            unsafe {
+                // Interleave low halves of each 128-bit lane
+                result.zmm32u[base + 0] = src1.zmm32u[base + 0];
+                result.zmm32u[base + 1] = src2.zmm32u[base + 0];
+                result.zmm32u[base + 2] = src1.zmm32u[base + 1];
+                result.zmm32u[base + 3] = src2.zmm32u[base + 1];
+            }
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
+
+    /// VPUNPCKHDQ Vdq{k}, Hdq, Wdq — EVEX.66.0F.W0 6A
+    pub fn evex_vpunpckhdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let src1 = read_zmm(self, instr.src1());
+        let src2 = if instr.mod_c0() {
+            read_zmm(self, instr.src2())
+        } else {
+            let mut tmp = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let laddr = self.resolve_addr(instr);
+            let seg = BxSegregs::from(instr.seg());
+            let nelements = dword_elements(vl);
+            for i in 0..nelements {
+                unsafe { tmp.zmm32u[i] = self.v_read_dword(seg, laddr + (i * 4) as u64)?; }
+            }
+            tmp
+        };
+        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
+        let lanes = vl_bytes(vl) / 16;
+        for lane in 0..lanes {
+            let base = lane * 4;
+            unsafe {
+                // Interleave high halves of each 128-bit lane
+                result.zmm32u[base + 0] = src1.zmm32u[base + 2];
+                result.zmm32u[base + 1] = src2.zmm32u[base + 2];
+                result.zmm32u[base + 2] = src1.zmm32u[base + 3];
+                result.zmm32u[base + 3] = src2.zmm32u[base + 3];
+            }
+        }
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
+        Ok(())
+    }
 }

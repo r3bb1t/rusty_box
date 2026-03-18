@@ -1051,6 +1051,10 @@ const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -
                 (0xDF, 1, 1) => Some(Opcode::EvexVpandnqVdqHdqWdq),
                 // VPSHUFD — EVEX.66.0F.W0 70
                 (0x70, 1, 0) => Some(Opcode::EvexVpshufdVdqWdqIb),
+                // VPUNPCKLDQ — EVEX.66.0F.W0 62
+                (0x62, 1, 0) => Some(Opcode::EvexVpunpckldqVdqHdqWdq),
+                // VPUNPCKHDQ — EVEX.66.0F.W0 6A
+                (0x6A, 1, 0) => Some(Opcode::EvexVpunpckhdqVdqHdqWdq),
                 // Shift by XMM register
                 (0xF2, 1, 0) => Some(Opcode::EvexVpslldVdqHdqWdq),  // VPSLLD
                 (0xF3, 1, 1) => Some(Opcode::EvexVpsllqVdqHdqWdq),  // VPSLLQ
@@ -1080,6 +1084,10 @@ const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -
                 (0x39, 1, 0) => Some(Opcode::EvexVpminsdVdqHdqWdq),
                 // VPMAXSD — EVEX.66.0F38.W0 3D
                 (0x3D, 1, 0) => Some(Opcode::EvexVpmaxsdVdqHdqWdq),
+                // VPERMD — EVEX.66.0F38.W0 36
+                (0x36, 1, 0) => Some(Opcode::EvexVpermdVdqHdqWdqKmask),
+                // VPERMQ — EVEX.66.0F38.W1 36
+                (0x36, 1, 1) => Some(Opcode::EvexVpermqVdqHdqWdqKmask),
                 _ => None,
             }
         }
@@ -1096,6 +1104,8 @@ const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -
                 (0x18, 1, 0) => Some(Opcode::EvexVinsertf32x4VpsHpsWpsIb),
                 // VEXTRACTI32x4 — EVEX.66.0F3A.W0 39
                 (0x39, 1, 0) => Some(Opcode::EvexVextracti32x4WdqVdqIb),
+                // VPERMQ imm — EVEX.66.0F3A.W1 00
+                (0x00, 1, 1) => Some(Opcode::EvexVpermqVdqWdqIbKmask),
                 // VEXTRACTF32x4 — EVEX.66.0F3A.W0 19
                 (0x19, 1, 0) => Some(Opcode::EvexVextractf32x4WpsVpsIb),
                 // VPCMPD — EVEX.66.0F3A.W0 1F
