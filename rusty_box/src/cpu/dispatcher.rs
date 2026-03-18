@@ -1404,6 +1404,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::Hlt => self.hlt(instr),
             Opcode::Wbinvd => self.wbinvd(instr),
             Opcode::Invd => self.invd(instr),
+            // VMX stubs — #GP(0) in VMX root, #UD outside VMX
+            Opcode::VmxonMq | Opcode::Vmxoff | Opcode::Vmlaunch | Opcode::Vmresume
+            | Opcode::VmclearMq | Opcode::VmptrldMq
+            | Opcode::VmreadEdGd | Opcode::VmwriteGdEd
+            | Opcode::VmreadEqGq | Opcode::VmwriteGqEq => {
+                // VMX not implemented — raise #UD (matches hardware behavior
+                // when CR4.VMXE is not set or LOCK prefix missing)
+                self.exception(super::cpu::Exception::Ud, 0)
+            }
             Opcode::Invlpg => self.invlpg(instr),
             Opcode::Invpcid => self.invpcid(instr),
             Opcode::Clts => self.clts(instr),

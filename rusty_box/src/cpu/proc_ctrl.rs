@@ -550,6 +550,30 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
             BX_MSR_KERNELGSBASE => self.msr.kernelgsbase,
             BX_MSR_TSC_AUX => self.msr.tsc_aux as u64,
+            // VMX capability MSRs (Bochs msr.cc:432-460)
+            // Return Bochs-compatible default values so kernel VMX probing doesn't #GP
+            0x480 => {
+                // IA32_VMX_BASIC: VMCS revision=1, VMCS size=4096, memory type=WB(6)
+                // Bits 48=1 (true controls supported), bit 55=1 (INS/OUTS exit info)
+                0x0001_0006_0000_0001u64
+            }
+            0x481 => 0x0000_003F_0000_003Fu64, // IA32_VMX_PINBASED_CTLS
+            0x482 => 0x0401_E172_0401_E172u64, // IA32_VMX_PROCBASED_CTLS
+            0x483 => 0x0003_6FFF_0000_0000u64, // IA32_VMX_EXIT_CTLS
+            0x484 => 0x0000_FFFF_0000_0011u64, // IA32_VMX_ENTRY_CTLS
+            0x485 => 0x0000_0000_0000_0000u64, // IA32_VMX_MISC
+            0x486 => 0x0000_0000_8000_0000u64, // IA32_VMX_CR0_FIXED0
+            0x487 => 0x0000_0000_FFFF_FFFFu64, // IA32_VMX_CR0_FIXED1
+            0x488 => 0x0000_0000_0000_2000u64, // IA32_VMX_CR4_FIXED0
+            0x489 => 0x0000_0000_003F_27FFu64, // IA32_VMX_CR4_FIXED1
+            0x48A => 0x0000_002C_0000_0000u64, // IA32_VMX_VMCS_ENUM
+            0x48B => 0x0000_0000_0000_0000u64, // IA32_VMX_PROCBASED_CTLS2
+            0x48C => 0x0000_003F_0000_003Fu64, // IA32_VMX_TRUE_PINBASED_CTLS
+            0x48D => 0x0401_E172_0401_E172u64, // IA32_VMX_TRUE_PROCBASED_CTLS
+            0x48E => 0x0003_6FFF_0000_0000u64, // IA32_VMX_TRUE_EXIT_CTLS
+            0x48F => 0x0000_FFFF_0000_0011u64, // IA32_VMX_TRUE_ENTRY_CTLS
+            0x490 => 0x0000_0000_0000_0000u64, // IA32_VMX_VMFUNC
+            0x491 => 0x0000_0000_0000_0000u64, // IA32_VMX_PROCBASED_CTLS3
             _ => {
                 // Bochs: unknown MSRs raise #GP(0)
                 if !self.ignore_bad_msrs {
