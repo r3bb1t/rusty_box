@@ -700,7 +700,9 @@ impl AtaDrive {
         }
 
         // Word 48: Dword I/O support (Bochs harddrv.cc:2968)
-        self.id_drive[48] = 1;
+        // NOTE: Disabled for now — REP INSD bulk path has data corruption bug.
+        // When enabled, kernel uses INSD for ATAPI PIO, which corrupts APKINDEX.
+        self.id_drive[48] = 0;
 
         // Word 49: Capabilities — LBA supported
         self.id_drive[49] = 1 << 9;
