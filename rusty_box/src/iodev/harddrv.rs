@@ -699,11 +699,6 @@ impl AtaDrive {
             self.id_drive[27 + i] = (hi << 8) | lo;
         }
 
-        // Word 48: Dword I/O support (Bochs harddrv.cc:2968)
-        // NOTE: Disabled for now — REP INSD bulk path has data corruption bug.
-        // When enabled, kernel uses INSD for ATAPI PIO, which corrupts APKINDEX.
-        self.id_drive[48] = 0;
-
         // Word 49: Capabilities — LBA supported
         self.id_drive[49] = 1 << 9;
 
@@ -716,23 +711,8 @@ impl AtaDrive {
         // Word 64: PIO modes supported — PIO mode 0
         self.id_drive[64] = 1;
 
-        // Word 65: Minimum PIO cycle time without IORDY (Bochs: 0xB4 = 180ns)
-        self.id_drive[65] = 0x00B4;
-
-        // Word 66: Minimum PIO cycle time with IORDY (Bochs: 0xB4 = 180ns)
-        self.id_drive[66] = 0x00B4;
-
-        // Word 67: Minimum DMA cycle time (Bochs: 0x12C = 300ns)
-        self.id_drive[67] = 0x012C;
-
-        // Word 68: Minimum DMA cycle time with flow control (Bochs: 0xB4 = 180ns)
-        self.id_drive[68] = 0x00B4;
-
-        // Word 71: Packet-to-bus-release time (Bochs: 30µs)
-        self.id_drive[71] = 30;
-
-        // Word 72: Service-to-BSY-clear time (Bochs: 30µs)
-        self.id_drive[72] = 30;
+        // Word 65: Minimum PIO transfer cycle time
+        self.id_drive[65] = 0x02E8; // 746 ns
 
         // Word 73: ATAPI byte count 0 limit
         self.id_drive[73] = 1; // number of bytes for ATAPI
