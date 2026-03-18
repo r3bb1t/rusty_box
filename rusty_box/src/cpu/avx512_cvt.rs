@@ -160,40 +160,57 @@ fn read_src_qword<I: BxCpuIdTrait>(
 /// Round an f32 to nearest integer as i32, matching MXCSR rounding mode.
 /// MXCSR RC: 0=nearest, 1=down, 2=up, 3=truncate
 #[inline]
+/// Intel integer indefinite: 0x80000000 for ALL out-of-range signed conversions
+/// (positive overflow, negative overflow, NaN). Matches Bochs SoftFloat behavior.
+const I32_INDEFINITE: i32 = i32::MIN; // 0x80000000
+
+/// Intel integer indefinite: 0xFFFFFFFF for ALL out-of-range unsigned conversions.
+const U32_INDEFINITE: u32 = u32::MAX; // 0xFFFFFFFF
+
 fn round_f32_to_i32(val: f32, rc: u8) -> i32 {
-    match rc {
-        0 => val.round_ties_even() as i32, // round to nearest even
-        1 => val.floor() as i32,           // round down
-        2 => val.ceil() as i32,            // round up
-        _ => val as i32,                   // truncate (3)
-    }
-}
-
-/// Round an f64 to nearest integer as i32, matching MXCSR rounding mode.
-#[inline]
-fn round_f64_to_i32(val: f64, rc: u8) -> i32 {
-    match rc {
-        0 => val.round_ties_even() as i32,
-        1 => val.floor() as i32,
-        2 => val.ceil() as i32,
-        _ => val as i32,
-    }
-}
-
-/// Round an f32 to nearest unsigned integer as u32, matching MXCSR rounding mode.
-/// Negative values clamp to 0, values > u32::MAX clamp to u32::MAX.
-#[inline]
-fn round_f32_to_u32(val: f32, rc: u8) -> u32 {
+    if val.is_nan() { return I32_INDEFINITE; }
     let rounded = match rc {
         0 => val.round_ties_even(),
         1 => val.floor(),
         2 => val.ceil(),
-        _ => val.trunc(), // truncate (3)
+        _ => val.trunc(),
     };
-    if rounded.is_nan() || rounded < 0.0 {
-        0
-    } else if rounded > u32::MAX as f32 {
-        u32::MAX
+    // Check overflow BEFORE cast (Rust saturates, Intel returns 0x80000000)
+    if rounded >= (i32::MAX as f32 + 1.0) || rounded < (i32::MIN as f32) {
+        I32_INDEFINITE
+    } else {
+        rounded as i32
+    }
+}
+
+#[inline]
+fn round_f64_to_i32(val: f64, rc: u8) -> i32 {
+    if val.is_nan() { return I32_INDEFINITE; }
+    let rounded = match rc {
+        0 => val.round_ties_even(),
+        1 => val.floor(),
+        2 => val.ceil(),
+        _ => val.trunc(),
+    };
+    if rounded >= (i32::MAX as f64 + 1.0) || rounded < (i32::MIN as f64) {
+        I32_INDEFINITE
+    } else {
+        rounded as i32
+    }
+}
+
+/// Intel: ALL invalid unsigned conversions (NaN, negative, overflow) return 0xFFFFFFFF.
+#[inline]
+fn round_f32_to_u32(val: f32, rc: u8) -> u32 {
+    if val.is_nan() { return U32_INDEFINITE; }
+    let rounded = match rc {
+        0 => val.round_ties_even(),
+        1 => val.floor(),
+        2 => val.ceil(),
+        _ => val.trunc(),
+    };
+    if rounded < 0.0 || rounded >= (u32::MAX as f32 + 1.0) {
+        U32_INDEFINITE
     } else {
         rounded as u32
     }
@@ -258,7 +275,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                result.zmm32s[i] = src.zmm32f[i] as i32;
+                let v = src.zmm32f[i];
+                result.zmm32s[i] = if v.is_nan() || v >= (i32::MAX as f32 + 1.0) || v < (i32::MIN as f32) {
+                    I32_INDEFINITE
+                } else {
+                    v as i32
+                };
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -343,7 +365,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                result.zmm32s[i] = src.zmm64f[i] as i32;
+                let v = src.zmm64f[i];
+                result.zmm32s[i] = if v.is_nan() || v >= (i32::MAX as f64 + 1.0) || v < (i32::MIN as f64) {
+                    I32_INDEFINITE
+                } else {
+                    v as i32
+                };
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -468,10 +495,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         unsafe {
             for i in 0..nelements {
                 let val = src.zmm32f[i];
-                result.zmm32u[i] = if val.is_nan() || val < 0.0 {
-                    0
-                } else if val > u32::MAX as f32 {
-                    u32::MAX
+                result.zmm32u[i] = if val.is_nan() || val < 0.0 || val >= (u32::MAX as f32 + 1.0) {
+                    U32_INDEFINITE
                 } else {
                     val as u32
                 };
