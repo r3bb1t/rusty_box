@@ -1779,4 +1779,358 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         write_zmm_masked(self, instr.dst(), &result, mask, zmask, vl);
         Ok(())
     }
+
+    // ========================================================================
+    // Variable shifts — VPSLLVD/Q, VPSRLVD/Q, VPSRAVD/Q
+    // Per-element shift counts from src2 (Bochs avx512.cc)
+    // ========================================================================
+
+    /// VPSLLVD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 47
+    pub fn evex_vpsllvd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = dword_elements(vl);
+        let s1 = read_zmm(self, instr.src1());
+        let s2 = if instr.mod_c0() { read_zmm(self, instr.src2()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { unsafe { t.zmm32u[i] = self.v_read_dword(seg, la + (i*4) as u64)?; } } t
+        };
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { let c = s2.zmm32u[i]; r.zmm32u[i] = if c >= 32 { 0 } else { s1.zmm32u[i] << c }; } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+
+    /// VPSLLVQ Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 47
+    pub fn evex_vpsllvq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = qword_elements(vl);
+        let s1 = read_zmm(self, instr.src1());
+        let s2 = if instr.mod_c0() { read_zmm(self, instr.src2()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { let lo = self.v_read_dword(seg, la+(i*8) as u64)? as u64; let hi = self.v_read_dword(seg, la+(i*8+4) as u64)? as u64; unsafe { t.zmm64u[i] = lo|(hi<<32); } } t
+        };
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { let c = s2.zmm64u[i]; r.zmm64u[i] = if c >= 64 { 0 } else { s1.zmm64u[i] << c }; } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+
+    /// VPSRLVD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 45
+    pub fn evex_vpsrlvd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = dword_elements(vl);
+        let s1 = read_zmm(self, instr.src1());
+        let s2 = if instr.mod_c0() { read_zmm(self, instr.src2()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { unsafe { t.zmm32u[i] = self.v_read_dword(seg, la + (i*4) as u64)?; } } t
+        };
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { let c = s2.zmm32u[i]; r.zmm32u[i] = if c >= 32 { 0 } else { s1.zmm32u[i] >> c }; } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+
+    /// VPSRLVQ Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 45
+    pub fn evex_vpsrlvq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = qword_elements(vl);
+        let s1 = read_zmm(self, instr.src1());
+        let s2 = if instr.mod_c0() { read_zmm(self, instr.src2()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { let lo = self.v_read_dword(seg, la+(i*8) as u64)? as u64; let hi = self.v_read_dword(seg, la+(i*8+4) as u64)? as u64; unsafe { t.zmm64u[i] = lo|(hi<<32); } } t
+        };
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { let c = s2.zmm64u[i]; r.zmm64u[i] = if c >= 64 { 0 } else { s1.zmm64u[i] >> c }; } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+
+    /// VPSRAVD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 46
+    pub fn evex_vpsravd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = dword_elements(vl);
+        let s1 = read_zmm(self, instr.src1());
+        let s2 = if instr.mod_c0() { read_zmm(self, instr.src2()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { unsafe { t.zmm32u[i] = self.v_read_dword(seg, la + (i*4) as u64)?; } } t
+        };
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne {
+            let c = s2.zmm32u[i];
+            r.zmm32u[i] = if c >= 32 { ((s1.zmm32u[i] as i32) >> 31) as u32 } else { ((s1.zmm32u[i] as i32) >> c) as u32 };
+        } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+
+    /// VPSRAVQ Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 46
+    pub fn evex_vpsravq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = qword_elements(vl);
+        let s1 = read_zmm(self, instr.src1());
+        let s2 = if instr.mod_c0() { read_zmm(self, instr.src2()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { let lo = self.v_read_dword(seg, la+(i*8) as u64)? as u64; let hi = self.v_read_dword(seg, la+(i*8+4) as u64)? as u64; unsafe { t.zmm64u[i] = lo|(hi<<32); } } t
+        };
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne {
+            let c = s2.zmm64u[i];
+            r.zmm64u[i] = if c >= 64 { ((s1.zmm64u[i] as i64) >> 63) as u64 } else { ((s1.zmm64u[i] as i64) >> c) as u64 };
+        } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+
+    // ========================================================================
+    // Variable rotates — VPROLVD/Q, VPRORVD/Q
+    // ========================================================================
+
+    /// VPROLVD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 15
+    pub fn evex_vprolvd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = dword_elements(vl);
+        let s1 = read_zmm(self, instr.src1());
+        let s2 = if instr.mod_c0() { read_zmm(self, instr.src2()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { unsafe { t.zmm32u[i] = self.v_read_dword(seg, la + (i*4) as u64)?; } } t
+        };
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm32u[i] = s1.zmm32u[i].rotate_left(s2.zmm32u[i] & 31); } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+
+    /// VPROLVQ Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 15
+    pub fn evex_vprolvq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = qword_elements(vl);
+        let s1 = read_zmm(self, instr.src1());
+        let s2 = if instr.mod_c0() { read_zmm(self, instr.src2()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { let lo = self.v_read_dword(seg, la+(i*8) as u64)? as u64; let hi = self.v_read_dword(seg, la+(i*8+4) as u64)? as u64; unsafe { t.zmm64u[i] = lo|(hi<<32); } } t
+        };
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm64u[i] = s1.zmm64u[i].rotate_left((s2.zmm64u[i] & 63) as u32); } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+
+    /// VPRORVD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 14
+    pub fn evex_vprorvd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = dword_elements(vl);
+        let s1 = read_zmm(self, instr.src1());
+        let s2 = if instr.mod_c0() { read_zmm(self, instr.src2()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { unsafe { t.zmm32u[i] = self.v_read_dword(seg, la + (i*4) as u64)?; } } t
+        };
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm32u[i] = s1.zmm32u[i].rotate_right(s2.zmm32u[i] & 31); } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+
+    /// VPRORVQ Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 14
+    pub fn evex_vprorvq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = qword_elements(vl);
+        let s1 = read_zmm(self, instr.src1());
+        let s2 = if instr.mod_c0() { read_zmm(self, instr.src2()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { let lo = self.v_read_dword(seg, la+(i*8) as u64)? as u64; let hi = self.v_read_dword(seg, la+(i*8+4) as u64)? as u64; unsafe { t.zmm64u[i] = lo|(hi<<32); } } t
+        };
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm64u[i] = s1.zmm64u[i].rotate_right((s2.zmm64u[i] & 63) as u32); } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+
+    // ========================================================================
+    // VPMULUDQ — Unsigned multiply packed dwords → qword results
+    // ========================================================================
+
+    /// VPMULUDQ Vdq{k}, Hdq, Wdq — EVEX.66.0F.W1 F4
+    pub fn evex_vpmuludq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = qword_elements(vl);
+        let s1 = read_zmm(self, instr.src1());
+        let s2 = if instr.mod_c0() { read_zmm(self, instr.src2()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { let lo = self.v_read_dword(seg, la+(i*8) as u64)? as u64; let hi = self.v_read_dword(seg, la+(i*8+4) as u64)? as u64; unsafe { t.zmm64u[i] = lo|(hi<<32); } } t
+        };
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne {
+            // Multiply low 32 bits of each qword element
+            let a = s1.zmm64u[i] & 0xFFFFFFFF;
+            let b = s2.zmm64u[i] & 0xFFFFFFFF;
+            r.zmm64u[i] = a.wrapping_mul(b);
+        } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+
+    // ========================================================================
+    // VPALIGNR — Align right (EVEX, per 128-bit lane)
+    // ========================================================================
+
+    /// VPALIGNR Vdq{k}, Hdq, Wdq, Ib — EVEX.66.0F3A.W0 0F
+    pub fn evex_vpalignr(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let bytes = vl_bytes(vl);
+        let s1 = read_zmm(self, instr.src1());
+        let s2 = if instr.mod_c0() { read_zmm(self, instr.src2()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..bytes { unsafe { t.zmmubyte[i] = self.v_read_byte(seg, la + i as u64)?; } } t
+        };
+        let shift = instr.ib() as usize;
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        let lanes = bytes / 16;
+        for lane in 0..lanes {
+            let base = lane * 16;
+            // Concatenate [src1:src2] as 32 bytes, shift right by imm8 bytes
+            let mut concat = [0u8; 32];
+            unsafe {
+                for j in 0..16 { concat[j] = s2.zmmubyte[base + j]; }
+                for j in 0..16 { concat[16 + j] = s1.zmmubyte[base + j]; }
+            }
+            for j in 0..16 {
+                let idx = j + shift;
+                unsafe { r.zmmubyte[base + j] = if idx < 32 { concat[idx] } else { 0 }; }
+            }
+        }
+        // Byte-granularity masking
+        let mask = read_opmask_for_write(self, instr);
+        let zmask = instr.is_zero_masking() != 0;
+        unsafe {
+            let dst = &mut self.vmm[instr.dst() as usize];
+            for i in 0..bytes {
+                if (mask >> i) & 1 != 0 { dst.zmmubyte[i] = r.zmmubyte[i]; }
+                else if zmask { dst.zmmubyte[i] = 0; }
+            }
+            for i in bytes..64 { dst.zmmubyte[i] = 0; }
+        }
+        Ok(())
+    }
+
+    // ========================================================================
+    // VPMOVZXDQ/VPMOVSXDQ — Zero/Sign extend dwords to qwords
+    // ========================================================================
+
+    /// VPMOVZXDQ Vdq{k}, Wdq — EVEX.66.0F38.W0 35
+    pub fn evex_vpmovzxdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = qword_elements(vl); // output qword count
+        let src = if instr.mod_c0() { read_zmm(self, instr.src()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { unsafe { t.zmm32u[i] = self.v_read_dword(seg, la + (i*4) as u64)?; } } t
+        };
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm64u[i] = src.zmm32u[i] as u64; } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+
+    /// VPMOVSXDQ Vdq{k}, Wdq — EVEX.66.0F38.W0 25
+    pub fn evex_vpmovsxdq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = qword_elements(vl);
+        let src = if instr.mod_c0() { read_zmm(self, instr.src()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { unsafe { t.zmm32u[i] = self.v_read_dword(seg, la + (i*4) as u64)?; } } t
+        };
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm64u[i] = (src.zmm32u[i] as i32) as i64 as u64; } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+
+    // ========================================================================
+    // VPCMPEQD/VPCMPGTD — Compare equal/greater producing opmask
+    // ========================================================================
+
+    /// VPCMPEQD Kk{k}, Hdq, Wdq — EVEX.66.0F.W0 76
+    pub fn evex_vpcmpeqd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = dword_elements(vl);
+        let s1 = read_zmm(self, instr.src1());
+        let s2 = if instr.mod_c0() { read_zmm(self, instr.src2()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { unsafe { t.zmm32u[i] = self.v_read_dword(seg, la + (i*4) as u64)?; } } t
+        };
+        let wmask = read_opmask_for_write(self, instr);
+        let mut result: u64 = 0;
+        unsafe { for i in 0..ne {
+            if s1.zmm32u[i] == s2.zmm32u[i] && ((wmask >> i) & 1 != 0) { result |= 1 << i; }
+        } }
+        self.bx_write_opmask(instr.dst() as usize, result); Ok(())
+    }
+
+    /// VPCMPGTD Kk{k}, Hdq, Wdq — EVEX.66.0F.W0 66
+    pub fn evex_vpcmpgtd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = dword_elements(vl);
+        let s1 = read_zmm(self, instr.src1());
+        let s2 = if instr.mod_c0() { read_zmm(self, instr.src2()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { unsafe { t.zmm32u[i] = self.v_read_dword(seg, la + (i*4) as u64)?; } } t
+        };
+        let wmask = read_opmask_for_write(self, instr);
+        let mut result: u64 = 0;
+        unsafe { for i in 0..ne {
+            if (s1.zmm32u[i] as i32) > (s2.zmm32u[i] as i32) && ((wmask >> i) & 1 != 0) { result |= 1 << i; }
+        } }
+        self.bx_write_opmask(instr.dst() as usize, result); Ok(())
+    }
+
+    /// VPCMPEQQ Kk{k}, Hdq, Wdq — EVEX.66.0F.W1 29 (0F38 29 actually)
+    pub fn evex_vpcmpeqq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = qword_elements(vl);
+        let s1 = read_zmm(self, instr.src1());
+        let s2 = if instr.mod_c0() { read_zmm(self, instr.src2()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { let lo = self.v_read_dword(seg, la+(i*8) as u64)? as u64; let hi = self.v_read_dword(seg, la+(i*8+4) as u64)? as u64; unsafe { t.zmm64u[i] = lo|(hi<<32); } } t
+        };
+        let wmask = read_opmask_for_write(self, instr);
+        let mut result: u64 = 0;
+        unsafe { for i in 0..ne {
+            if s1.zmm64u[i] == s2.zmm64u[i] && ((wmask >> i) & 1 != 0) { result |= 1 << i; }
+        } }
+        self.bx_write_opmask(instr.dst() as usize, result); Ok(())
+    }
+
+    /// VPCMPGTQ Kk{k}, Hdq, Wdq — EVEX.66.0F38.W1 37
+    pub fn evex_vpcmpgtq(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
+        let ne = qword_elements(vl);
+        let s1 = read_zmm(self, instr.src1());
+        let s2 = if instr.mod_c0() { read_zmm(self, instr.src2()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { let lo = self.v_read_dword(seg, la+(i*8) as u64)? as u64; let hi = self.v_read_dword(seg, la+(i*8+4) as u64)? as u64; unsafe { t.zmm64u[i] = lo|(hi<<32); } } t
+        };
+        let wmask = read_opmask_for_write(self, instr);
+        let mut result: u64 = 0;
+        unsafe { for i in 0..ne {
+            if (s1.zmm64u[i] as i64) > (s2.zmm64u[i] as i64) && ((wmask >> i) & 1 != 0) { result |= 1 << i; }
+        } }
+        self.bx_write_opmask(instr.dst() as usize, result); Ok(())
+    }
 }

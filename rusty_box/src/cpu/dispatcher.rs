@@ -3010,6 +3010,30 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::EvexVpabsqVdqWdq | Opcode::EvexVpabsqVdqWdqKmask => self.evex_vpabsq(instr),
             Opcode::EvexVpslldqUdqIb => self.evex_vpslldq(instr),
             Opcode::EvexVpsrldqUdqIb => self.evex_vpsrldq(instr),
+            // Variable shifts
+            Opcode::EvexVpsllvdVdqHdqWdq | Opcode::EvexVpsllvdVdqHdqWdqKmask => self.evex_vpsllvd(instr),
+            Opcode::EvexVpsllvqVdqHdqWdq | Opcode::EvexVpsllvqVdqHdqWdqKmask => self.evex_vpsllvq(instr),
+            Opcode::EvexVpsrlvdVdqHdqWdq | Opcode::EvexVpsrlvdVdqHdqWdqKmask => self.evex_vpsrlvd(instr),
+            Opcode::EvexVpsrlvqVdqHdqWdq | Opcode::EvexVpsrlvqVdqHdqWdqKmask => self.evex_vpsrlvq(instr),
+            Opcode::EvexVpsravdVdqHdqWdq | Opcode::EvexVpsravdVdqHdqWdqKmask => self.evex_vpsravd(instr),
+            Opcode::EvexVpsravqVdqHdqWdq | Opcode::EvexVpsravqVdqHdqWdqKmask => self.evex_vpsravq(instr),
+            // Variable rotates
+            Opcode::EvexVprolvdVdqHdqWdq | Opcode::EvexVprolvdVdqHdqWdqKmask => self.evex_vprolvd(instr),
+            Opcode::EvexVprolvqVdqHdqWdq | Opcode::EvexVprolvqVdqHdqWdqKmask => self.evex_vprolvq(instr),
+            Opcode::EvexVprorvdVdqHdqWdq | Opcode::EvexVprorvdVdqHdqWdqKmask => self.evex_vprorvd(instr),
+            Opcode::EvexVprorvqVdqHdqWdq | Opcode::EvexVprorvqVdqHdqWdqKmask => self.evex_vprorvq(instr),
+            // VPMULUDQ
+            Opcode::EvexVpmuludqVdqHdqWdq | Opcode::EvexVpmuludqVdqHdqWdqKmask => self.evex_vpmuludq(instr),
+            // Compare → opmask
+            Opcode::EvexVpcmpeqdKgwHdqWdq => self.evex_vpcmpeqd(instr),
+            Opcode::EvexVpcmpgtdKgwHdqWdq => self.evex_vpcmpgtd(instr),
+            Opcode::EvexVpcmpeqqKgbHdqWdq => self.evex_vpcmpeqq(instr),
+            Opcode::EvexVpcmpgtqKgbHdqWdq => self.evex_vpcmpgtq(instr),
+            // Sign/zero extend
+            Opcode::EvexVpmovsxdqVdqWdq | Opcode::EvexVpmovsxdqVdqWdqKmask => self.evex_vpmovsxdq(instr),
+            Opcode::EvexVpmovzxdqVdqWdq | Opcode::EvexVpmovzxdqVdqWdqKmask => self.evex_vpmovzxdq(instr),
+            // VPALIGNR EVEX
+            Opcode::EvexVpalignrVdqHdqWdqIb | Opcode::EvexVpalignrVdqHdqWdqIbKmask => self.evex_vpalignr(instr),
             // VMOVUPS/VMOVUPD/VMOVAPS/VMOVAPD (EVEX) — all reuse VMOVDQU32 handlers
             Opcode::EvexVmovupsVpsWps | Opcode::EvexVmovupsVpsWpsKmask
             | Opcode::EvexVmovapsVpsWps | Opcode::EvexVmovapsVpsWpsKmask => {

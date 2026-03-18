@@ -1051,6 +1051,12 @@ const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -
                 (0xDF, 1, 1) => Some(Opcode::EvexVpandnqVdqHdqWdq),
                 // VPSHUFD — EVEX.66.0F.W0 70
                 (0x70, 1, 0) => Some(Opcode::EvexVpshufdVdqWdqIb),
+                // VPCMPEQD → opmask — EVEX.66.0F.W0 76
+                (0x76, 1, 0) => Some(Opcode::EvexVpcmpeqdKgwHdqWdq),
+                // VPCMPGTD → opmask — EVEX.66.0F.W0 66
+                (0x66, 1, 0) => Some(Opcode::EvexVpcmpgtdKgwHdqWdq),
+                // VPMULUDQ — EVEX.66.0F.W1 F4
+                (0xF4, 1, 1) => Some(Opcode::EvexVpmuludqVdqHdqWdq),
                 // VMOVUPS load — EVEX.0F.W0 10 (no prefix)
                 (0x10, 0, 0) => Some(Opcode::EvexVmovupsVpsWps),
                 // VMOVUPD load — EVEX.66.0F.W1 10
@@ -1108,6 +1114,25 @@ const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -
                 (0x1F, 1, 1) => Some(Opcode::EvexVpabsqVdqWdq),
                 // VPMAXSD — EVEX.66.0F38.W0 3D
                 (0x3D, 1, 0) => Some(Opcode::EvexVpmaxsdVdqHdqWdq),
+                // Variable rotates
+                (0x14, 1, 0) => Some(Opcode::EvexVprorvdVdqHdqWdq),
+                (0x14, 1, 1) => Some(Opcode::EvexVprorvqVdqHdqWdq),
+                (0x15, 1, 0) => Some(Opcode::EvexVprolvdVdqHdqWdq),
+                (0x15, 1, 1) => Some(Opcode::EvexVprolvqVdqHdqWdq),
+                // Sign/zero extend dword→qword
+                (0x25, 1, 0) => Some(Opcode::EvexVpmovsxdqVdqWdq),
+                (0x35, 1, 0) => Some(Opcode::EvexVpmovzxdqVdqWdq),
+                // VPCMPEQQ — EVEX.66.0F38.W1 29
+                (0x29, 1, 1) => Some(Opcode::EvexVpcmpeqqKgbHdqWdq),
+                // VPCMPGTQ — EVEX.66.0F38.W1 37
+                (0x37, 1, 1) => Some(Opcode::EvexVpcmpgtqKgbHdqWdq),
+                // Variable shifts
+                (0x45, 1, 0) => Some(Opcode::EvexVpsrlvdVdqHdqWdq),
+                (0x45, 1, 1) => Some(Opcode::EvexVpsrlvqVdqHdqWdq),
+                (0x46, 1, 0) => Some(Opcode::EvexVpsravdVdqHdqWdq),
+                (0x46, 1, 1) => Some(Opcode::EvexVpsravqVdqHdqWdq),
+                (0x47, 1, 0) => Some(Opcode::EvexVpsllvdVdqHdqWdq),
+                (0x47, 1, 1) => Some(Opcode::EvexVpsllvqVdqHdqWdq),
                 // VPBLENDMD — EVEX.66.0F38.W0 64
                 (0x64, 1, 0) => Some(Opcode::EvexVpblendmdVdqHdqWdq),
                 // VPBLENDMQ — EVEX.66.0F38.W1 64
@@ -1122,6 +1147,8 @@ const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -
         3 => {
             // Map 3 (0F 3A xx)
             match (opcode, sse_prefix, w) {
+                // VPALIGNR — EVEX.66.0F3A.W0 0F
+                (0x0F, 1, 0) => Some(Opcode::EvexVpalignrVdqHdqWdqIb),
                 // VPTERNLOGD — EVEX.66.0F3A.W0 25
                 (0x25, 1, 0) => Some(Opcode::EvexVpternlogdVdqHdqWdqIb),
                 // VPTERNLOGQ — EVEX.66.0F3A.W1 25
