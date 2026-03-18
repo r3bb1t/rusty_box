@@ -3064,6 +3064,219 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 else { self.evex_vmovdqu64_store_m(instr) }
             }
 
+            // --- EVEX FP scalar (avx512_scalar.rs) ---
+            Opcode::EvexVaddssVssHpsWss | Opcode::EvexVaddssVssHpsWssKmask => self.evex_vaddss(instr),
+            Opcode::EvexVaddsdVsdHpdWsd | Opcode::EvexVaddsdVsdHpdWsdKmask => self.evex_vaddsd(instr),
+            Opcode::EvexVsubssVssHpsWss | Opcode::EvexVsubssVssHpsWssKmask => self.evex_vsubss(instr),
+            Opcode::EvexVsubsdVsdHpdWsd | Opcode::EvexVsubsdVsdHpdWsdKmask => self.evex_vsubsd(instr),
+            Opcode::EvexVmulssVssHpsWss | Opcode::EvexVmulssVssHpsWssKmask => self.evex_vmulss(instr),
+            Opcode::EvexVmulsdVsdHpdWsd | Opcode::EvexVmulsdVsdHpdWsdKmask => self.evex_vmulsd(instr),
+            Opcode::EvexVdivssVssHpsWss | Opcode::EvexVdivssVssHpsWssKmask => self.evex_vdivss(instr),
+            Opcode::EvexVdivsdVsdHpdWsd | Opcode::EvexVdivsdVsdHpdWsdKmask => self.evex_vdivsd(instr),
+            Opcode::EvexVminssVssHpsWss | Opcode::EvexVminssVssHpsWssKmask => self.evex_vminss(instr),
+            Opcode::EvexVminsdVsdHpdWsd | Opcode::EvexVminsdVsdHpdWsdKmask => self.evex_vminsd(instr),
+            Opcode::EvexVmaxssVssHpsWss | Opcode::EvexVmaxssVssHpsWssKmask => self.evex_vmaxss(instr),
+            Opcode::EvexVmaxsdVsdHpdWsd | Opcode::EvexVmaxsdVsdHpdWsdKmask => self.evex_vmaxsd(instr),
+            Opcode::EvexVsqrtssVssHpsWss | Opcode::EvexVsqrtssVssHpsWssKmask => self.evex_vsqrtss(instr),
+            Opcode::EvexVsqrtsdVsdHpdWsd | Opcode::EvexVsqrtsdVsdHpdWsdKmask => self.evex_vsqrtsd(instr),
+            // VMOVSS/VMOVSD load/store
+            Opcode::EvexVmovssVssWss | Opcode::EvexVmovssVssWssKmask
+            | Opcode::EvexVmovssVssHpsWss | Opcode::EvexVmovssVssHpsWssKmask => self.evex_vmovss_load(instr),
+            Opcode::EvexVmovssWssVss | Opcode::EvexVmovssWssVssKmask
+            | Opcode::EvexVmovssWssHpsVss | Opcode::EvexVmovssWssHpsVssKmask => self.evex_vmovss_store(instr),
+            Opcode::EvexVmovsdVsdWsd | Opcode::EvexVmovsdVsdWsdKmask
+            | Opcode::EvexVmovsdVsdHpdWsd | Opcode::EvexVmovsdVsdHpdWsdKmask => self.evex_vmovsd_load(instr),
+            Opcode::EvexVmovsdWsdVsd | Opcode::EvexVmovsdWsdVsdKmask
+            | Opcode::EvexVmovsdWsdHpdVsd | Opcode::EvexVmovsdWsdHpdVsdKmask => self.evex_vmovsd_store(instr),
+
+            // --- EVEX FP conversions (avx512_cvt.rs) ---
+            Opcode::EvexVcvtdq2psVpsWdq | Opcode::EvexVcvtdq2psVpsWdqKmask => self.evex_vcvtdq2ps(instr),
+            Opcode::EvexVcvtps2dqVdqWps | Opcode::EvexVcvtps2dqVdqWpsKmask => self.evex_vcvtps2dq(instr),
+            Opcode::EvexVcvttps2dqVdqWps | Opcode::EvexVcvttps2dqVdqWpsKmask => self.evex_vcvttps2dq(instr),
+            Opcode::EvexVcvtdq2pdVpdWdq | Opcode::EvexVcvtdq2pdVpdWdqKmask => self.evex_vcvtdq2pd(instr),
+            Opcode::EvexVcvtpd2dqVdqWpd | Opcode::EvexVcvtpd2dqVdqWpdKmask => self.evex_vcvtpd2dq(instr),
+            Opcode::EvexVcvttpd2dqVdqWpd | Opcode::EvexVcvttpd2dqVdqWpdKmask => self.evex_vcvttpd2dq(instr),
+            Opcode::EvexVcvtps2pdVpdWps | Opcode::EvexVcvtps2pdVpdWpsKmask => self.evex_vcvtps2pd(instr),
+            Opcode::EvexVcvtpd2psVpsWpd | Opcode::EvexVcvtpd2psVpsWpdKmask => self.evex_vcvtpd2ps(instr),
+            Opcode::EvexVcvtudq2psVpsWdq | Opcode::EvexVcvtudq2psVpsWdqKmask => self.evex_vcvtudq2ps(instr),
+            Opcode::EvexVcvtps2udqVdqWps | Opcode::EvexVcvtps2udqVdqWpsKmask => self.evex_vcvtps2udq(instr),
+            Opcode::EvexVcvttps2udqVdqWps | Opcode::EvexVcvttps2udqVdqWpsKmask => self.evex_vcvttps2udq(instr),
+
+            // --- EVEX FMA (avx512_fma.rs) ---
+            Opcode::EvexVfmadd132psVpsHpsWps | Opcode::EvexVfmadd132psVpsHpsWpsKmask => self.evex_vfmadd132ps(instr),
+            Opcode::EvexVfmadd132pdVpdHpdWpd | Opcode::EvexVfmadd132pdVpdHpdWpdKmask => self.evex_vfmadd132pd(instr),
+            Opcode::EvexVfmadd213psVpsHpsWps | Opcode::EvexVfmadd213psVpsHpsWpsKmask => self.evex_vfmadd213ps(instr),
+            Opcode::EvexVfmadd213pdVpdHpdWpd | Opcode::EvexVfmadd213pdVpdHpdWpdKmask => self.evex_vfmadd213pd(instr),
+            Opcode::EvexVfmadd231psVpsHpsWps | Opcode::EvexVfmadd231psVpsHpsWpsKmask => self.evex_vfmadd231ps(instr),
+            Opcode::EvexVfmadd231pdVpdHpdWpd | Opcode::EvexVfmadd231pdVpdHpdWpdKmask => self.evex_vfmadd231pd(instr),
+            Opcode::EvexVfmsub132psVpsHpsWps | Opcode::EvexVfmsub132psVpsHpsWpsKmask => self.evex_vfmsub132ps(instr),
+            Opcode::EvexVfmsub132pdVpdHpdWpd | Opcode::EvexVfmsub132pdVpdHpdWpdKmask => self.evex_vfmsub132pd(instr),
+            Opcode::EvexVfmsub213psVpsHpsWps | Opcode::EvexVfmsub213psVpsHpsWpsKmask => self.evex_vfmsub213ps(instr),
+            Opcode::EvexVfmsub213pdVpdHpdWpd | Opcode::EvexVfmsub213pdVpdHpdWpdKmask => self.evex_vfmsub213pd(instr),
+            Opcode::EvexVfmsub231psVpsHpsWps | Opcode::EvexVfmsub231psVpsHpsWpsKmask => self.evex_vfmsub231ps(instr),
+            Opcode::EvexVfmsub231pdVpdHpdWpd | Opcode::EvexVfmsub231pdVpdHpdWpdKmask => self.evex_vfmsub231pd(instr),
+            Opcode::EvexVfnmadd132psVpsHpsWps | Opcode::EvexVfnmadd132psVpsHpsWpsKmask => self.evex_vfnmadd132ps(instr),
+            Opcode::EvexVfnmadd132pdVpdHpdWpd | Opcode::EvexVfnmadd132pdVpdHpdWpdKmask => self.evex_vfnmadd132pd(instr),
+            Opcode::EvexVfnmadd213psVpsHpsWps | Opcode::EvexVfnmadd213psVpsHpsWpsKmask => self.evex_vfnmadd213ps(instr),
+            Opcode::EvexVfnmadd213pdVpdHpdWpd | Opcode::EvexVfnmadd213pdVpdHpdWpdKmask => self.evex_vfnmadd213pd(instr),
+            Opcode::EvexVfnmadd231psVpsHpsWps | Opcode::EvexVfnmadd231psVpsHpsWpsKmask => self.evex_vfnmadd231ps(instr),
+            Opcode::EvexVfnmadd231pdVpdHpdWpd | Opcode::EvexVfnmadd231pdVpdHpdWpdKmask => self.evex_vfnmadd231pd(instr),
+            Opcode::EvexVfnmsub132psVpsHpsWps | Opcode::EvexVfnmsub132psVpsHpsWpsKmask => self.evex_vfnmsub132ps(instr),
+            Opcode::EvexVfnmsub132pdVpdHpdWpd | Opcode::EvexVfnmsub132pdVpdHpdWpdKmask => self.evex_vfnmsub132pd(instr),
+            Opcode::EvexVfnmsub213psVpsHpsWps | Opcode::EvexVfnmsub213psVpsHpsWpsKmask => self.evex_vfnmsub213ps(instr),
+            Opcode::EvexVfnmsub213pdVpdHpdWpd | Opcode::EvexVfnmsub213pdVpdHpdWpdKmask => self.evex_vfnmsub213pd(instr),
+            Opcode::EvexVfnmsub231psVpsHpsWps | Opcode::EvexVfnmsub231psVpsHpsWpsKmask => self.evex_vfnmsub231ps(instr),
+            Opcode::EvexVfnmsub231pdVpdHpdWpd | Opcode::EvexVfnmsub231pdVpdHpdWpdKmask => self.evex_vfnmsub231pd(instr),
+
+            // --- EVEX FP compare (avx512_cmp.rs) ---
+            Opcode::EvexVcmppsKgwHpsWpsIb => {
+                if instr.mod_c0() { self.evex_vcmpps_r(instr) }
+                else { self.evex_vcmpps_m(instr) }
+            }
+            Opcode::EvexVcmppdKgbHpdWpdIb => {
+                if instr.mod_c0() { self.evex_vcmppd_r(instr) }
+                else { self.evex_vcmppd_m(instr) }
+            }
+            Opcode::EvexVptestmdKgwHdqWdq => {
+                if instr.mod_c0() { self.evex_vptestmd_r(instr) }
+                else { self.evex_vptestmd_m(instr) }
+            }
+            Opcode::EvexVptestmqKgbHdqWdq => {
+                if instr.mod_c0() { self.evex_vptestmq_r(instr) }
+                else { self.evex_vptestmq_m(instr) }
+            }
+            Opcode::EvexVptestnmdKgwHdqWdq => {
+                if instr.mod_c0() { self.evex_vptestnmd_r(instr) }
+                else { self.evex_vptestnmd_m(instr) }
+            }
+            Opcode::EvexVptestnmqKgbHdqWdq => {
+                if instr.mod_c0() { self.evex_vptestnmq_r(instr) }
+                else { self.evex_vptestnmq_m(instr) }
+            }
+            Opcode::EvexVpmovm2dVdqKew => self.evex_vpmovm2d(instr),
+            Opcode::EvexVpmovm2qVdqKeb => self.evex_vpmovm2q(instr),
+            Opcode::EvexVpmovd2mKgwWdq => self.evex_vpmovd2m(instr),
+            Opcode::EvexVpmovq2mKgbWdq => self.evex_vpmovq2m(instr),
+
+            // --- EVEX BW byte/word ops (avx512_bw.rs) ---
+            Opcode::EvexVpaddbVdqHdqWdq | Opcode::EvexVpaddbVdqHdqWdqKmask => self.evex_vpaddb(instr),
+            Opcode::EvexVpaddwVdqHdqWdq | Opcode::EvexVpaddwVdqHdqWdqKmask => self.evex_vpaddw(instr),
+            Opcode::EvexVpsubbVdqHdqWdq | Opcode::EvexVpsubbVdqHdqWdqKmask => self.evex_vpsubb(instr),
+            Opcode::EvexVpsubwVdqHdqWdq | Opcode::EvexVpsubwVdqHdqWdqKmask => self.evex_vpsubw(instr),
+            Opcode::EvexVpmullwVdqHdqWdq | Opcode::EvexVpmullwVdqHdqWdqKmask => self.evex_vpmullw(instr),
+            Opcode::EvexVpavgbVdqHdqWdq | Opcode::EvexVpavgbVdqHdqWdqKmask => self.evex_vpavgb(instr),
+            Opcode::EvexVpavgwVdqHdqWdq | Opcode::EvexVpavgwVdqHdqWdqKmask => self.evex_vpavgw(instr),
+            Opcode::EvexVpmaxubVdqHdqWdq | Opcode::EvexVpmaxubVdqHdqWdqKmask => self.evex_vpmaxub(instr),
+            Opcode::EvexVpminubVdqHdqWdq | Opcode::EvexVpminubVdqHdqWdqKmask => self.evex_vpminub(instr),
+            Opcode::EvexVpmaxswVdqHdqWdq | Opcode::EvexVpmaxswVdqHdqWdqKmask => self.evex_vpmaxsw(instr),
+            Opcode::EvexVpminswVdqHdqWdq | Opcode::EvexVpminswVdqHdqWdqKmask => self.evex_vpminsw(instr),
+            Opcode::EvexVpackssdwVdqHdqWdq | Opcode::EvexVpackssdwVdqHdqWdqKmask => self.evex_vpackssdw(instr),
+            Opcode::EvexVpackusdwVdqHdqWdq | Opcode::EvexVpackusdwVdqHdqWdqKmask => self.evex_vpackusdw(instr),
+            Opcode::EvexVpunpcklbwVdqHdqWdq | Opcode::EvexVpunpcklbwVdqHdqWdqKmask => self.evex_vpunpcklbw(instr),
+            Opcode::EvexVpunpckhbwVdqHdqWdq | Opcode::EvexVpunpckhbwVdqHdqWdqKmask => self.evex_vpunpckhbw(instr),
+            Opcode::EvexVpunpcklwdVdqHdqWdq | Opcode::EvexVpunpcklwdVdqHdqWdqKmask => self.evex_vpunpcklwd(instr),
+            Opcode::EvexVpunpckhwdVdqHdqWdq | Opcode::EvexVpunpckhwdVdqHdqWdqKmask => self.evex_vpunpckhwd(instr),
+
+            // --- EVEX integer (avx512_int.rs) ---
+            Opcode::EvexVpmuldqVdqHdqWdq | Opcode::EvexVpmuldqVdqHdqWdqKmask => self.evex_vpmuldq(instr),
+            Opcode::EvexVpmulhuwVdqHdqWdq | Opcode::EvexVpmulhuwVdqHdqWdqKmask => self.evex_vpmulhuw(instr),
+            Opcode::EvexVpmulhwVdqHdqWdq | Opcode::EvexVpmulhwVdqHdqWdqKmask => self.evex_vpmulhw(instr),
+            Opcode::EvexVpmaddwdVdqHdqWdq | Opcode::EvexVpmaddwdVdqHdqWdqKmask => self.evex_vpmaddwd(instr),
+            Opcode::EvexVpmaddubswVdqHdqWdq | Opcode::EvexVpmaddubswVdqHdqWdqKmask => self.evex_vpmaddubsw(instr),
+            Opcode::EvexVpsadbwVdqHdqWdq => self.evex_vpsadbw(instr),
+            Opcode::EvexVpminudVdqHdqWdq | Opcode::EvexVpminudVdqHdqWdqKmask => self.evex_vpminud(instr),
+            Opcode::EvexVpmaxudVdqHdqWdq | Opcode::EvexVpmaxudVdqHdqWdqKmask => self.evex_vpmaxud(instr),
+            Opcode::EvexVpminuqVdqHdqWdq | Opcode::EvexVpminuqVdqHdqWdqKmask => self.evex_vpminuq(instr),
+            Opcode::EvexVpmaxuqVdqHdqWdq | Opcode::EvexVpmaxuqVdqHdqWdqKmask => self.evex_vpmaxuq(instr),
+            Opcode::EvexVpminsqVdqHdqWdq | Opcode::EvexVpminsqVdqHdqWdqKmask => self.evex_vpminsq(instr),
+            Opcode::EvexVpmaxsqVdqHdqWdq | Opcode::EvexVpmaxsqVdqHdqWdqKmask => self.evex_vpmaxsq(instr),
+
+            // --- EVEX rounding/scale/getexp/getmant (avx512_round.rs) ---
+            Opcode::EvexVrndscalepsVpsWpsIbKmask => self.evex_vrndscaleps(instr),
+            Opcode::EvexVrndscalepdVpdWpdIbKmask => self.evex_vrndscalepd(instr),
+            Opcode::EvexVrndscalessVssHpsWssIbKmask => self.evex_vrndscaless(instr),
+            Opcode::EvexVrndscalesdVsdHpdWsdIbKmask => self.evex_vrndscalesd(instr),
+            Opcode::EvexVscalefpsVpsHpsWps | Opcode::EvexVscalefpsVpsHpsWpsKmask => self.evex_vscalefps(instr),
+            Opcode::EvexVscalefpdVpdHpdWpd | Opcode::EvexVscalefpdVpdHpdWpdKmask => self.evex_vscalefpd(instr),
+            Opcode::EvexVgetexppsVpsWps | Opcode::EvexVgetexppsVpsWpsKmask => self.evex_vgetexpps(instr),
+            Opcode::EvexVgetexppdVpdWpd | Opcode::EvexVgetexppdVpdWpdKmask => self.evex_vgetexppd(instr),
+            Opcode::EvexVgetmantpsVpsWpsIbKmask => self.evex_vgetmantps(instr),
+            Opcode::EvexVgetmantpdVpdWpdIbKmask => self.evex_vgetmantpd(instr),
+
+            // --- EVEX shuffle/permute (avx512_perm.rs) ---
+            Opcode::EvexVshuff32x4VpsHpsWpsIbKmask => self.evex_vshuff32x4(instr),
+            Opcode::EvexVshuff64x2VpdHpdWpdIbKmask => self.evex_vshuff64x2(instr),
+            Opcode::EvexVshufi32x4VdqHdqWdqIbKmask => self.evex_vshuff32x4(instr),
+            Opcode::EvexVshufi64x2VdqHdqWdqIbKmask => self.evex_vshuff64x2(instr),
+            Opcode::EvexVpermilpsVpsWpsIb | Opcode::EvexVpermilpsVpsWpsIbKmask => self.evex_vpermilps_imm(instr),
+            Opcode::EvexVpermilpdVpdWpdIb | Opcode::EvexVpermilpdVpdWpdIbKmask => self.evex_vpermilpd_imm(instr),
+            Opcode::EvexVpermilpsVpsHpsWps | Opcode::EvexVpermilpsVpsHpsWpsKmask => self.evex_vpermilps_reg(instr),
+            Opcode::EvexVpermpdVpdWpdIbKmask => self.evex_vpermpd_imm(instr),
+            Opcode::EvexVpermpsVpsHpsWpsKmask => self.evex_vpermps(instr),
+            Opcode::EvexVshufpsVpsHpsWpsIb | Opcode::EvexVshufpsVpsHpsWpsIbKmask => self.evex_vshufps(instr),
+            Opcode::EvexVshufpdVpdHpdWpdIb | Opcode::EvexVshufpdVpdHpdWpdIbKmask => self.evex_vshufpd(instr),
+            Opcode::EvexVunpcklpsVpsHpsWps | Opcode::EvexVunpcklpsVpsHpsWpsKmask => self.evex_vunpcklps(instr),
+            Opcode::EvexVunpckhpsVpsHpsWps | Opcode::EvexVunpckhpsVpsHpsWpsKmask => self.evex_vunpckhps(instr),
+            Opcode::EvexVunpcklpdVpdHpdWpd | Opcode::EvexVunpcklpdVpdHpdWpdKmask => self.evex_vunpcklpd(instr),
+            Opcode::EvexVunpckhpdVpdHpdWpd | Opcode::EvexVunpckhpdVpdHpdWpdKmask => self.evex_vunpckhpd(instr),
+
+            // --- EVEX insert/extract (avx512_insert.rs) ---
+            Opcode::EvexVinserti64x2VdqHdqWdqIb | Opcode::EvexVinserti64x2VdqHdqWdqIbKmask => self.evex_vinserti64x2(instr),
+            Opcode::EvexVinsertf64x2VpdHpdWpdIb | Opcode::EvexVinsertf64x2VpdHpdWpdIbKmask => self.evex_vinsertf64x2(instr),
+            Opcode::EvexVinserti32x8VdqHdqWdqIb | Opcode::EvexVinserti32x8VdqHdqWdqIbKmask => self.evex_vinserti32x8(instr),
+            Opcode::EvexVinsertf32x8VpsHpsWpsIb | Opcode::EvexVinsertf32x8VpsHpsWpsIbKmask => self.evex_vinsertf32x8(instr),
+            Opcode::EvexVinserti64x4VdqHdqWdqIb | Opcode::EvexVinserti64x4VdqHdqWdqIbKmask => self.evex_vinserti64x4(instr),
+            Opcode::EvexVinsertf64x4VpdHpdWpdIb | Opcode::EvexVinsertf64x4VpdHpdWpdIbKmask => self.evex_vinsertf64x4(instr),
+            Opcode::EvexVextracti64x2WdqVdqIb | Opcode::EvexVextracti64x2WdqVdqIbKmask => self.evex_vextracti64x2(instr),
+            Opcode::EvexVextractf64x2WpdVpdIb | Opcode::EvexVextractf64x2WpdVpdIbKmask => self.evex_vextractf64x2(instr),
+            Opcode::EvexVextracti32x8WdqVdqIb | Opcode::EvexVextracti32x8WdqVdqIbKmask => self.evex_vextracti32x8(instr),
+            Opcode::EvexVextractf32x8WpsVpsIb | Opcode::EvexVextractf32x8WpsVpsIbKmask => self.evex_vextractf32x8(instr),
+            Opcode::EvexVextracti64x4WdqVdqIb | Opcode::EvexVextracti64x4WdqVdqIbKmask => self.evex_vextracti64x4(instr),
+            Opcode::EvexVextractf64x4WpdVpdIb | Opcode::EvexVextractf64x4WpdVpdIbKmask => self.evex_vextractf64x4(instr),
+            Opcode::EvexVextractpsEdVpsIb => self.evex_vextractps(instr),
+
+            // --- EVEX broadcast (avx512_bcast.rs) ---
+            Opcode::EvexVbroadcastssVpsWss | Opcode::EvexVbroadcastssVpsWssKmask => self.evex_vbroadcastss(instr),
+            Opcode::EvexVbroadcastsdVpdWsd | Opcode::EvexVbroadcastsdVpdWsdKmask => self.evex_vbroadcastsd(instr),
+            Opcode::EvexVbroadcasti32x4VdqWdq | Opcode::EvexVbroadcasti32x4VdqWdqKmask => self.evex_vbroadcasti32x4(instr),
+            Opcode::EvexVbroadcastf32x4VpsWps | Opcode::EvexVbroadcastf32x4VpsWpsKmask => self.evex_vbroadcastf32x4(instr),
+            Opcode::EvexVbroadcasti64x2VdqWdq | Opcode::EvexVbroadcasti64x2VdqWdqKmask => self.evex_vbroadcasti64x2(instr),
+            Opcode::EvexVbroadcastf64x2VpdWpd | Opcode::EvexVbroadcastf64x2VpdWpdKmask => self.evex_vbroadcastf64x2(instr),
+            Opcode::EvexVbroadcasti32x8VdqWdq | Opcode::EvexVbroadcasti32x8VdqWdqKmask => self.evex_vbroadcasti32x8(instr),
+            Opcode::EvexVbroadcastf32x8VpsWps | Opcode::EvexVbroadcastf32x8VpsWpsKmask => self.evex_vbroadcastf32x8(instr),
+            Opcode::EvexVbroadcasti64x4VdqWdq | Opcode::EvexVbroadcasti64x4VdqWdqKmask => self.evex_vbroadcasti64x4(instr),
+            Opcode::EvexVbroadcastf64x4VpdWpd | Opcode::EvexVbroadcastf64x4VpdWpdKmask => self.evex_vbroadcastf64x4(instr),
+            Opcode::EvexVpbroadcastbVdqWb | Opcode::EvexVpbroadcastbVdqWbKmask => self.evex_vpbroadcastb(instr),
+            Opcode::EvexVpbroadcastwVdqWw | Opcode::EvexVpbroadcastwVdqWwKmask => self.evex_vpbroadcastw(instr),
+
+            // --- EVEX misc (avx512_misc.rs) ---
+            Opcode::EvexVpcompressdWdqVdq | Opcode::EvexVpcompressdWdqVdqKmask => self.evex_vpcompressd(instr),
+            Opcode::EvexVpcompressqWdqVdq | Opcode::EvexVpcompressqWdqVdqKmask => self.evex_vpcompressq(instr),
+            Opcode::EvexVpexpanddVdqWdq | Opcode::EvexVpexpanddVdqWdqKmask => self.evex_vpexpandd(instr),
+            Opcode::EvexVpexpandqVdqWdq | Opcode::EvexVpexpandqVdqWdqKmask => self.evex_vpexpandq(instr),
+            Opcode::EvexVpmovdbWdqVdq | Opcode::EvexVpmovdbWdqVdqKmask => self.evex_vpmovdb_r(instr),
+            Opcode::EvexVpmovdwWdqVdq | Opcode::EvexVpmovdwWdqVdqKmask => self.evex_vpmovdw_r(instr),
+            Opcode::EvexVpmovqdWdqVdq | Opcode::EvexVpmovqdWdqVdqKmask => self.evex_vpmovqd_r(instr),
+            Opcode::EvexVpconflictdVdqWdqKmask => self.evex_vpconflictd(instr),
+            Opcode::EvexVplzcntdVdqWdqKmask => self.evex_vplzcntd(instr),
+            Opcode::EvexVplzcntqVdqWdqKmask => self.evex_vplzcntq(instr),
+
+            // --- EVEX gather (avx512_gather.rs) ---
+            Opcode::EvexVgatherddVdqVsib => self.evex_vpgatherdd(instr),
+            Opcode::EvexVgatherdqVdqVsib => self.evex_vpgatherdq(instr),
+            Opcode::EvexVgatherqdVdqVsib => self.evex_vpgatherqd(instr),
+            Opcode::EvexVgatherqqVdqVsib => self.evex_vpgatherqq(instr),
+
+            // --- EVEX FP logical (reuse integer bitwise handlers) ---
+            Opcode::EvexVandpsVpsHpsWps | Opcode::EvexVandpsVpsHpsWpsKmask => self.evex_vpandd(instr),
+            Opcode::EvexVandpdVpdHpdWpd | Opcode::EvexVandpdVpdHpdWpdKmask => self.evex_vpandd(instr),
+            Opcode::EvexVandnpsVpsHpsWps | Opcode::EvexVandnpsVpsHpsWpsKmask => self.evex_vpandnd(instr),
+            Opcode::EvexVandnpdVpdHpdWpd | Opcode::EvexVandnpdVpdHpdWpdKmask => self.evex_vpandnd(instr),
+            Opcode::EvexVorpsVpsHpsWps | Opcode::EvexVorpsVpsHpsWpsKmask => self.evex_vpord(instr),
+            Opcode::EvexVorpdVpdHpdWpd | Opcode::EvexVorpdVpdHpdWpdKmask => self.evex_vpord(instr),
+            Opcode::EvexVxorpsVpsHpsWps | Opcode::EvexVxorpsVpsHpsWpsKmask => self.evex_vpxord(instr),
+            Opcode::EvexVxorpdVpdHpdWpd | Opcode::EvexVxorpdVpdHpdWpdKmask => self.evex_vpxord(instr),
+
             Opcode::V256Vinsertf128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vinserti128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vextracti128WdqVdqIb => self.vextracti128(instr),

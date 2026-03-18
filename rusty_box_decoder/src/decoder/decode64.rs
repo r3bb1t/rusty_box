@@ -1097,40 +1097,26 @@ const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -
                 (0xE2, 1, 0) => Some(Opcode::EvexVpsradVdqHdqWdq),  // VPSRAD
                 (0xE2, 1, 1) => Some(Opcode::EvexVpsraqVdqHdqWdq),  // VPSRAQ
 
-                // --- FP arithmetic (avx512.rs packed, avx512_scalar.rs scalar) ---
-                // VADDPS/PD — EVEX.0F 58
-                (0x58, 0, 0) => Some(Opcode::EvexVaddpsVpsHpsWps),
-                (0x58, 1, 1) => Some(Opcode::EvexVaddpdVpdHpdWpd),
+                // --- FP scalar arithmetic (avx512_scalar.rs) ---
+                // VADDSS/SD — EVEX.0F 58
                 (0x58, 2, 0) => Some(Opcode::EvexVaddssVssHpsWss),
                 (0x58, 3, 1) => Some(Opcode::EvexVaddsdVsdHpdWsd),
-                // VSUBPS/PD — EVEX.0F 5C
-                (0x5C, 0, 0) => Some(Opcode::EvexVsubpsVpsHpsWps),
-                (0x5C, 1, 1) => Some(Opcode::EvexVsubpdVpdHpdWpd),
+                // VSUBSS/SD — EVEX.0F 5C
                 (0x5C, 2, 0) => Some(Opcode::EvexVsubssVssHpsWss),
                 (0x5C, 3, 1) => Some(Opcode::EvexVsubsdVsdHpdWsd),
-                // VMULPS/PD — EVEX.0F 59
-                (0x59, 0, 0) => Some(Opcode::EvexVmulpsVpsHpsWps),
-                (0x59, 1, 1) => Some(Opcode::EvexVmulpdVpdHpdWpd),
+                // VMULSS/SD — EVEX.0F 59
                 (0x59, 2, 0) => Some(Opcode::EvexVmulssVssHpsWss),
                 (0x59, 3, 1) => Some(Opcode::EvexVmulsdVsdHpdWsd),
-                // VDIVPS/PD — EVEX.0F 5E
-                (0x5E, 0, 0) => Some(Opcode::EvexVdivpsVpsHpsWps),
-                (0x5E, 1, 1) => Some(Opcode::EvexVdivpdVpdHpdWpd),
+                // VDIVSS/SD — EVEX.0F 5E
                 (0x5E, 2, 0) => Some(Opcode::EvexVdivssVssHpsWss),
                 (0x5E, 3, 1) => Some(Opcode::EvexVdivsdVsdHpdWsd),
-                // VMINPS/PD — EVEX.0F 5D
-                (0x5D, 0, 0) => Some(Opcode::EvexVminpsVpsHpsWps),
-                (0x5D, 1, 1) => Some(Opcode::EvexVminpdVpdHpdWpd),
+                // VMINSS/SD — EVEX.0F 5D
                 (0x5D, 2, 0) => Some(Opcode::EvexVminssVssHpsWss),
                 (0x5D, 3, 1) => Some(Opcode::EvexVminsdVsdHpdWsd),
-                // VMAXPS/PD — EVEX.0F 5F
-                (0x5F, 0, 0) => Some(Opcode::EvexVmaxpsVpsHpsWps),
-                (0x5F, 1, 1) => Some(Opcode::EvexVmaxpdVpdHpdWpd),
+                // VMAXSS/SD — EVEX.0F 5F
                 (0x5F, 2, 0) => Some(Opcode::EvexVmaxssVssHpsWss),
                 (0x5F, 3, 1) => Some(Opcode::EvexVmaxsdVsdHpdWsd),
-                // VSQRTPS/PD — EVEX.0F 51
-                (0x51, 0, 0) => Some(Opcode::EvexVsqrtpsVpsWps),
-                (0x51, 1, 1) => Some(Opcode::EvexVsqrtpdVpdWpd),
+                // VSQRTSS/SD — EVEX.0F 51
                 (0x51, 2, 0) => Some(Opcode::EvexVsqrtssVssHpsWss),
                 (0x51, 3, 1) => Some(Opcode::EvexVsqrtsdVsdHpdWsd),
 

@@ -159,7 +159,6 @@ fn read_src_qword<I: BxCpuIdTrait>(
 
 /// Round an f32 to nearest integer as i32, matching MXCSR rounding mode.
 /// MXCSR RC: 0=nearest, 1=down, 2=up, 3=truncate
-#[inline]
 /// Intel integer indefinite: 0x80000000 for ALL out-of-range signed conversions
 /// (positive overflow, negative overflow, NaN). Matches Bochs SoftFloat behavior.
 const I32_INDEFINITE: i32 = i32::MIN; // 0x80000000
