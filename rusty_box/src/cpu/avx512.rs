@@ -973,11 +973,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = dword_elements(vl);
         let src = read_zmm(self, instr.src1());
         let count_reg = read_zmm(self, instr.src2());
-        let count = unsafe { count_reg.zmm64u[0] } as u32;
+        let count64 = unsafe { count_reg.zmm64u[0] };
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                result.zmm32u[i] = if count >= 32 { 0 } else { src.zmm32u[i] << count };
+                result.zmm32u[i] = if count64 >= 32 { 0 } else { src.zmm32u[i] << (count64 as u32) };
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -992,11 +992,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = dword_elements(vl);
         let src = read_zmm(self, instr.src1());
         let count_reg = read_zmm(self, instr.src2());
-        let count = unsafe { count_reg.zmm64u[0] } as u32;
+        let count64 = unsafe { count_reg.zmm64u[0] };
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                result.zmm32u[i] = if count >= 32 { 0 } else { src.zmm32u[i] >> count };
+                result.zmm32u[i] = if count64 >= 32 { 0 } else { src.zmm32u[i] >> (count64 as u32) };
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -1011,14 +1011,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = dword_elements(vl);
         let src = read_zmm(self, instr.src1());
         let count_reg = read_zmm(self, instr.src2());
-        let count = unsafe { count_reg.zmm64u[0] } as u32;
+        let count64 = unsafe { count_reg.zmm64u[0] };
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                result.zmm32u[i] = if count >= 32 {
+                result.zmm32u[i] = if count64 >= 32 {
                     ((src.zmm32u[i] as i32) >> 31) as u32
                 } else {
-                    ((src.zmm32u[i] as i32) >> count) as u32
+                    ((src.zmm32u[i] as i32) >> (count64 as u32)) as u32
                 };
             }
         }
@@ -1034,11 +1034,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = qword_elements(vl);
         let src = read_zmm(self, instr.src1());
         let count_reg = read_zmm(self, instr.src2());
-        let count = unsafe { count_reg.zmm64u[0] } as u32;
+        let count64 = unsafe { count_reg.zmm64u[0] };
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                result.zmm64u[i] = if count >= 64 { 0 } else { src.zmm64u[i] << count };
+                result.zmm64u[i] = if count64 >= 64 { 0 } else { src.zmm64u[i] << (count64 as u32) };
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -1053,11 +1053,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = qword_elements(vl);
         let src = read_zmm(self, instr.src1());
         let count_reg = read_zmm(self, instr.src2());
-        let count = unsafe { count_reg.zmm64u[0] } as u32;
+        let count64 = unsafe { count_reg.zmm64u[0] };
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                result.zmm64u[i] = if count >= 64 { 0 } else { src.zmm64u[i] >> count };
+                result.zmm64u[i] = if count64 >= 64 { 0 } else { src.zmm64u[i] >> (count64 as u32) };
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -1072,14 +1072,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = qword_elements(vl);
         let src = read_zmm(self, instr.src1());
         let count_reg = read_zmm(self, instr.src2());
-        let count = unsafe { count_reg.zmm64u[0] } as u32;
+        let count64 = unsafe { count_reg.zmm64u[0] };
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                result.zmm64u[i] = if count >= 64 {
+                result.zmm64u[i] = if count64 >= 64 {
                     ((src.zmm64u[i] as i64) >> 63) as u64
                 } else {
-                    ((src.zmm64u[i] as i64) >> count) as u64
+                    ((src.zmm64u[i] as i64) >> (count64 as u32)) as u64
                 };
             }
         }
