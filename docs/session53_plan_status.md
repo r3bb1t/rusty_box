@@ -63,7 +63,7 @@
 | BW operations | Clean | No bugs found |
 | Compress/misc | Clean | No bugs found (Bochs has off-by-one!) |
 | Broadcast | Clean | Dead code noted |
-| Packed FP arith | Clean | Operands correct |
+| Packed FP arith | **Operands swapped** | Fixed — s1=vvvv(src2), s2=rm(src1); SUB/DIV/MIN/MAX were wrong |
 | Opmask | Clean | No bugs found |
 
 ### Bochs Bugs Documented (docs/bochs_bugs_found.md)
@@ -88,8 +88,15 @@
 
 ## Session Statistics
 
-- **34 commits**
+- **36 commits**
 - **~12,000 lines added** (AVX-512 + fixes + docs)
+- **320 AVX-512 handler functions** across 14 files (9,321 lines)
+- **258 EVEX decoder entries** in lookup_evex_opcode()
+- **275+ EVEX dispatcher match arms**
 - **20+ parallel agents** used for implementation and auditing
+- **14 audit agents** verified all 320 handlers against Bochs source
+- **10 operand/logic bugs found and fixed** across audits
+- **4 Bochs bugs documented** (VPCONFLICTD, KSHIFTLW, VPSRLQ, VPSRAVQ)
+- **Zero compiler warnings**
 - **DLX regression**: PASS on every commit
 - **Alpine**: Boots to OpenRC with 28/28 packages, AVX-512 XSAVE features detected
