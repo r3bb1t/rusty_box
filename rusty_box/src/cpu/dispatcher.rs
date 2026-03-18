@@ -2899,8 +2899,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // AVX/AVX-512 specific opcodes
             // =========================================================================
             Opcode::EvexVpermi2dVdqHdqWdqKmask => self.vpermi2d(instr),
-            Opcode::EvexVprordUdqIb | Opcode::EvexVprordUdqIbKmask => self.vprord(instr),
-            Opcode::EvexVproldUdqIb | Opcode::EvexVproldUdqIbKmask => self.vprold(instr),
+            // VPRORD/VPROLD: dispatched below with other EVEX rotate handlers
 
             // EVEX AVX-512F integer instructions (avx512.rs handlers)
             Opcode::EvexVmovdqu32VdqWdq | Opcode::EvexVmovdqu32VdqWdqKmask => {
