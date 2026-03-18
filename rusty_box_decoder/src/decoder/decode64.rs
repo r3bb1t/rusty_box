@@ -1099,6 +1099,22 @@ const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -
 
                 // --- FP scalar arithmetic (avx512_scalar.rs) ---
                 // VADDSS/SD — EVEX.0F 58
+                // Packed FP arithmetic — EVEX.0F no-prefix/W0 (PS) and EVEX.66.0F/W1 (PD)
+                (0x51, 0, 0) => Some(Opcode::EvexVsqrtpsVpsWps),
+                (0x51, 1, 1) => Some(Opcode::EvexVsqrtpdVpdWpd),
+                (0x58, 0, 0) => Some(Opcode::EvexVaddpsVpsHpsWps),
+                (0x58, 1, 1) => Some(Opcode::EvexVaddpdVpdHpdWpd),
+                (0x59, 0, 0) => Some(Opcode::EvexVmulpsVpsHpsWps),
+                (0x59, 1, 1) => Some(Opcode::EvexVmulpdVpdHpdWpd),
+                (0x5C, 0, 0) => Some(Opcode::EvexVsubpsVpsHpsWps),
+                (0x5C, 1, 1) => Some(Opcode::EvexVsubpdVpdHpdWpd),
+                (0x5D, 0, 0) => Some(Opcode::EvexVminpsVpsHpsWps),
+                (0x5D, 1, 1) => Some(Opcode::EvexVminpdVpdHpdWpd),
+                (0x5E, 0, 0) => Some(Opcode::EvexVdivpsVpsHpsWps),
+                (0x5E, 1, 1) => Some(Opcode::EvexVdivpdVpdHpdWpd),
+                (0x5F, 0, 0) => Some(Opcode::EvexVmaxpsVpsHpsWps),
+                (0x5F, 1, 1) => Some(Opcode::EvexVmaxpdVpdHpdWpd),
+                // Scalar FP arithmetic — EVEX.F3.0F/W0 (SS) and EVEX.F2.0F/W1 (SD)
                 (0x58, 2, 0) => Some(Opcode::EvexVaddssVssHpsWss),
                 (0x58, 3, 1) => Some(Opcode::EvexVaddsdVsdHpdWsd),
                 // VSUBSS/SD — EVEX.0F 5C

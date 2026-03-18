@@ -3089,6 +3089,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::EvexVmovsdWsdVsd | Opcode::EvexVmovsdWsdVsdKmask
             | Opcode::EvexVmovsdWsdHpdVsd | Opcode::EvexVmovsdWsdHpdVsdKmask => self.evex_vmovsd_store(instr),
 
+            // Packed FP arithmetic (EVEX)
+            Opcode::EvexVaddpsVpsHpsWps | Opcode::EvexVaddpsVpsHpsWpsKmask => self.evex_vaddps(instr),
+            Opcode::EvexVaddpdVpdHpdWpd | Opcode::EvexVaddpdVpdHpdWpdKmask => self.evex_vaddpd(instr),
+            Opcode::EvexVsubpsVpsHpsWps | Opcode::EvexVsubpsVpsHpsWpsKmask => self.evex_vsubps(instr),
+            Opcode::EvexVsubpdVpdHpdWpd | Opcode::EvexVsubpdVpdHpdWpdKmask => self.evex_vsubpd(instr),
+            Opcode::EvexVmulpsVpsHpsWps | Opcode::EvexVmulpsVpsHpsWpsKmask => self.evex_vmulps(instr),
+            Opcode::EvexVmulpdVpdHpdWpd | Opcode::EvexVmulpdVpdHpdWpdKmask => self.evex_vmulpd(instr),
+            Opcode::EvexVdivpsVpsHpsWps | Opcode::EvexVdivpsVpsHpsWpsKmask => self.evex_vdivps(instr),
+            Opcode::EvexVdivpdVpdHpdWpd | Opcode::EvexVdivpdVpdHpdWpdKmask => self.evex_vdivpd(instr),
+            Opcode::EvexVmaxpsVpsHpsWps | Opcode::EvexVmaxpsVpsHpsWpsKmask => self.evex_vmaxps(instr),
+            Opcode::EvexVmaxpdVpdHpdWpd | Opcode::EvexVmaxpdVpdHpdWpdKmask => self.evex_vmaxpd(instr),
+            Opcode::EvexVminpsVpsHpsWps | Opcode::EvexVminpsVpsHpsWpsKmask => self.evex_vminps(instr),
+            Opcode::EvexVminpdVpdHpdWpd | Opcode::EvexVminpdVpdHpdWpdKmask => self.evex_vminpd(instr),
+            Opcode::EvexVsqrtpsVpsWps | Opcode::EvexVsqrtpsVpsWpsKmask => self.evex_vsqrtps(instr),
+            Opcode::EvexVsqrtpdVpdWpd | Opcode::EvexVsqrtpdVpdWpdKmask => self.evex_vsqrtpd(instr),
+            // Scalar FP: already wired above (lines ~3068-3081)
+
             // --- EVEX FP conversions (avx512_cvt.rs) ---
             Opcode::EvexVcvtdq2psVpsWdq | Opcode::EvexVcvtdq2psVpsWdqKmask => self.evex_vcvtdq2ps(instr),
             Opcode::EvexVcvtps2dqVdqWps | Opcode::EvexVcvtps2dqVdqWpsKmask => self.evex_vcvtps2dq(instr),
