@@ -5,6 +5,16 @@
 //!
 //! Uses `f32::mul_add` / `f64::mul_add` for fused multiply-add precision.
 //!
+//! Decoder convention:
+//!   dst()  = nnn = V (destination register, also an input)
+//!   src1() = rm  = W (ModRM r/m operand - register or memory)
+//!   src2() = vvvv = H (VEX.vvvv operand)
+//!
+//! FMA operand forms:
+//!   132: result = V * W + H
+//!   213: result = H * V + W
+//!   231: result = H * W + V
+//!
 //! Mirrors Bochs `cpu/avx/avx512_fma.cc`.
 
 use super::{
@@ -31,16 +41,6 @@ fn qword_elements(vl: u8) -> usize {
         0 => 2,
         1 => 4,
         _ => 8,
-    }
-}
-
-/// Byte size for vector length: VL0=16, VL1=32, VL2=64
-#[inline]
-fn vl_bytes(vl: u8) -> usize {
-    match vl {
-        0 => 16,
-        1 => 32,
-        _ => 64,
     }
 }
 
@@ -114,14 +114,16 @@ fn write_zmm_masked_q<I: BxCpuIdTrait>(
     }
 }
 
-/// Read src2 as packed dwords from register or memory
-fn read_src2_ps<I: BxCpuIdTrait>(
+/// Read rm operand (W) as packed dwords from register or memory.
+/// Register form: reads src1() (rm register = W).
+/// Memory form: reads from memory at resolved address.
+fn read_rm_ps<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'_, I>,
     instr: &Instruction,
     vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
-        Ok(read_zmm(cpu, instr.src2()))
+        Ok(read_zmm(cpu, instr.src1()))
     } else {
         let nelements = dword_elements(vl);
         let mut tmp = BxPackedZmmRegister { zmm64u: [0; 8] };
@@ -135,14 +137,16 @@ fn read_src2_ps<I: BxCpuIdTrait>(
     }
 }
 
-/// Read src2 as packed qwords from register or memory
-fn read_src2_pd<I: BxCpuIdTrait>(
+/// Read rm operand (W) as packed qwords from register or memory.
+/// Register form: reads src1() (rm register = W).
+/// Memory form: reads from memory at resolved address.
+fn read_rm_pd<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'_, I>,
     instr: &Instruction,
     vl: u8,
 ) -> super::Result<BxPackedZmmRegister> {
     if instr.mod_c0() {
-        Ok(read_zmm(cpu, instr.src2()))
+        Ok(read_zmm(cpu, instr.src1()))
     } else {
         let nelements = qword_elements(vl);
         let mut tmp = BxPackedZmmRegister { zmm64u: [0; 8] };
@@ -159,24 +163,27 @@ fn read_src2_pd<I: BxCpuIdTrait>(
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ========================================================================
-    // VFMADD — Fused Multiply-Add: dst = a * b + c
+    // VFMADD — Fused Multiply-Add
+    //   132: V * W + H
+    //   213: H * V + W
+    //   231: H * W + V
     // ========================================================================
 
-    /// VFMADD132PS Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 98
-    /// dst[i] = dst[i] * src2[i] + src1[i]
+    /// VFMADD132PS — EVEX.66.0F38.W0 98
+    /// result[i] = V[i] * W[i] + H[i]
     pub fn evex_vfmadd132ps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_ps(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());       // V = nnn (destination)
+        let h = read_zmm(self, instr.src2());       // H = vvvv
+        let w = read_rm_ps(self, instr, vl)?;       // W = rm/memory
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f32::from_bits(dst_val.zmm32u[i]);
-                let b = f32::from_bits(src2.zmm32u[i]);
-                let c = f32::from_bits(src1.zmm32u[i]);
-                result.zmm32u[i] = a.mul_add(b, c).to_bits();
+                let vf = f32::from_bits(v.zmm32u[i]);
+                let wf = f32::from_bits(w.zmm32u[i]);
+                let hf = f32::from_bits(h.zmm32u[i]);
+                result.zmm32u[i] = vf.mul_add(wf, hf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -185,21 +192,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFMADD132PD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 98
-    /// dst[i] = dst[i] * src2[i] + src1[i]
+    /// VFMADD132PD — EVEX.66.0F38.W1 98
+    /// result[i] = V[i] * W[i] + H[i]
     pub fn evex_vfmadd132pd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_pd(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_pd(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f64::from_bits(dst_val.zmm64u[i]);
-                let b = f64::from_bits(src2.zmm64u[i]);
-                let c = f64::from_bits(src1.zmm64u[i]);
-                result.zmm64u[i] = a.mul_add(b, c).to_bits();
+                let vf = f64::from_bits(v.zmm64u[i]);
+                let wf = f64::from_bits(w.zmm64u[i]);
+                let hf = f64::from_bits(h.zmm64u[i]);
+                result.zmm64u[i] = vf.mul_add(wf, hf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -208,21 +215,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFMADD213PS Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 A8
-    /// dst[i] = src1[i] * dst[i] + src2[i]
+    /// VFMADD213PS — EVEX.66.0F38.W0 A8
+    /// result[i] = H[i] * V[i] + W[i]
     pub fn evex_vfmadd213ps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_ps(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_ps(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f32::from_bits(src1.zmm32u[i]);
-                let b = f32::from_bits(dst_val.zmm32u[i]);
-                let c = f32::from_bits(src2.zmm32u[i]);
-                result.zmm32u[i] = a.mul_add(b, c).to_bits();
+                let hf = f32::from_bits(h.zmm32u[i]);
+                let vf = f32::from_bits(v.zmm32u[i]);
+                let wf = f32::from_bits(w.zmm32u[i]);
+                result.zmm32u[i] = hf.mul_add(vf, wf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -231,21 +238,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFMADD213PD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 A8
-    /// dst[i] = src1[i] * dst[i] + src2[i]
+    /// VFMADD213PD — EVEX.66.0F38.W1 A8
+    /// result[i] = H[i] * V[i] + W[i]
     pub fn evex_vfmadd213pd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_pd(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_pd(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f64::from_bits(src1.zmm64u[i]);
-                let b = f64::from_bits(dst_val.zmm64u[i]);
-                let c = f64::from_bits(src2.zmm64u[i]);
-                result.zmm64u[i] = a.mul_add(b, c).to_bits();
+                let hf = f64::from_bits(h.zmm64u[i]);
+                let vf = f64::from_bits(v.zmm64u[i]);
+                let wf = f64::from_bits(w.zmm64u[i]);
+                result.zmm64u[i] = hf.mul_add(vf, wf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -254,21 +261,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFMADD231PS Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 B8
-    /// dst[i] = src1[i] * src2[i] + dst[i]
+    /// VFMADD231PS — EVEX.66.0F38.W0 B8
+    /// result[i] = H[i] * W[i] + V[i]
     pub fn evex_vfmadd231ps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_ps(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_ps(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f32::from_bits(src1.zmm32u[i]);
-                let b = f32::from_bits(src2.zmm32u[i]);
-                let c = f32::from_bits(dst_val.zmm32u[i]);
-                result.zmm32u[i] = a.mul_add(b, c).to_bits();
+                let hf = f32::from_bits(h.zmm32u[i]);
+                let wf = f32::from_bits(w.zmm32u[i]);
+                let vf = f32::from_bits(v.zmm32u[i]);
+                result.zmm32u[i] = hf.mul_add(wf, vf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -277,21 +284,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFMADD231PD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 B8
-    /// dst[i] = src1[i] * src2[i] + dst[i]
+    /// VFMADD231PD — EVEX.66.0F38.W1 B8
+    /// result[i] = H[i] * W[i] + V[i]
     pub fn evex_vfmadd231pd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_pd(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_pd(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f64::from_bits(src1.zmm64u[i]);
-                let b = f64::from_bits(src2.zmm64u[i]);
-                let c = f64::from_bits(dst_val.zmm64u[i]);
-                result.zmm64u[i] = a.mul_add(b, c).to_bits();
+                let hf = f64::from_bits(h.zmm64u[i]);
+                let wf = f64::from_bits(w.zmm64u[i]);
+                let vf = f64::from_bits(v.zmm64u[i]);
+                result.zmm64u[i] = hf.mul_add(wf, vf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -301,24 +308,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // ========================================================================
-    // VFMSUB — Fused Multiply-Subtract: dst = a * b - c
+    // VFMSUB — Fused Multiply-Subtract (negate the addend)
+    //   132: V * W - H    = V * W + (-H)
+    //   213: H * V - W    = H * V + (-W)
+    //   231: H * W - V    = H * W + (-V)
     // ========================================================================
 
-    /// VFMSUB132PS Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 9A
-    /// dst[i] = dst[i] * src2[i] - src1[i]
+    /// VFMSUB132PS — EVEX.66.0F38.W0 9A
+    /// result[i] = V[i] * W[i] - H[i]
     pub fn evex_vfmsub132ps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_ps(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_ps(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f32::from_bits(dst_val.zmm32u[i]);
-                let b = f32::from_bits(src2.zmm32u[i]);
-                let c = f32::from_bits(src1.zmm32u[i]);
-                result.zmm32u[i] = a.mul_add(b, -c).to_bits();
+                let vf = f32::from_bits(v.zmm32u[i]);
+                let wf = f32::from_bits(w.zmm32u[i]);
+                let hf = f32::from_bits(h.zmm32u[i]);
+                result.zmm32u[i] = vf.mul_add(wf, -hf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -327,21 +337,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFMSUB132PD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 9A
-    /// dst[i] = dst[i] * src2[i] - src1[i]
+    /// VFMSUB132PD — EVEX.66.0F38.W1 9A
+    /// result[i] = V[i] * W[i] - H[i]
     pub fn evex_vfmsub132pd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_pd(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_pd(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f64::from_bits(dst_val.zmm64u[i]);
-                let b = f64::from_bits(src2.zmm64u[i]);
-                let c = f64::from_bits(src1.zmm64u[i]);
-                result.zmm64u[i] = a.mul_add(b, -c).to_bits();
+                let vf = f64::from_bits(v.zmm64u[i]);
+                let wf = f64::from_bits(w.zmm64u[i]);
+                let hf = f64::from_bits(h.zmm64u[i]);
+                result.zmm64u[i] = vf.mul_add(wf, -hf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -350,21 +360,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFMSUB213PS Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 AA
-    /// dst[i] = src1[i] * dst[i] - src2[i]
+    /// VFMSUB213PS — EVEX.66.0F38.W0 AA
+    /// result[i] = H[i] * V[i] - W[i]
     pub fn evex_vfmsub213ps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_ps(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_ps(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f32::from_bits(src1.zmm32u[i]);
-                let b = f32::from_bits(dst_val.zmm32u[i]);
-                let c = f32::from_bits(src2.zmm32u[i]);
-                result.zmm32u[i] = a.mul_add(b, -c).to_bits();
+                let hf = f32::from_bits(h.zmm32u[i]);
+                let vf = f32::from_bits(v.zmm32u[i]);
+                let wf = f32::from_bits(w.zmm32u[i]);
+                result.zmm32u[i] = hf.mul_add(vf, -wf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -373,21 +383,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFMSUB213PD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 AA
-    /// dst[i] = src1[i] * dst[i] - src2[i]
+    /// VFMSUB213PD — EVEX.66.0F38.W1 AA
+    /// result[i] = H[i] * V[i] - W[i]
     pub fn evex_vfmsub213pd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_pd(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_pd(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f64::from_bits(src1.zmm64u[i]);
-                let b = f64::from_bits(dst_val.zmm64u[i]);
-                let c = f64::from_bits(src2.zmm64u[i]);
-                result.zmm64u[i] = a.mul_add(b, -c).to_bits();
+                let hf = f64::from_bits(h.zmm64u[i]);
+                let vf = f64::from_bits(v.zmm64u[i]);
+                let wf = f64::from_bits(w.zmm64u[i]);
+                result.zmm64u[i] = hf.mul_add(vf, -wf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -396,21 +406,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFMSUB231PS Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 BA
-    /// dst[i] = src1[i] * src2[i] - dst[i]
+    /// VFMSUB231PS — EVEX.66.0F38.W0 BA
+    /// result[i] = H[i] * W[i] - V[i]
     pub fn evex_vfmsub231ps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_ps(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_ps(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f32::from_bits(src1.zmm32u[i]);
-                let b = f32::from_bits(src2.zmm32u[i]);
-                let c = f32::from_bits(dst_val.zmm32u[i]);
-                result.zmm32u[i] = a.mul_add(b, -c).to_bits();
+                let hf = f32::from_bits(h.zmm32u[i]);
+                let wf = f32::from_bits(w.zmm32u[i]);
+                let vf = f32::from_bits(v.zmm32u[i]);
+                result.zmm32u[i] = hf.mul_add(wf, -vf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -419,21 +429,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFMSUB231PD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 BA
-    /// dst[i] = src1[i] * src2[i] - dst[i]
+    /// VFMSUB231PD — EVEX.66.0F38.W1 BA
+    /// result[i] = H[i] * W[i] - V[i]
     pub fn evex_vfmsub231pd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_pd(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_pd(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f64::from_bits(src1.zmm64u[i]);
-                let b = f64::from_bits(src2.zmm64u[i]);
-                let c = f64::from_bits(dst_val.zmm64u[i]);
-                result.zmm64u[i] = a.mul_add(b, -c).to_bits();
+                let hf = f64::from_bits(h.zmm64u[i]);
+                let wf = f64::from_bits(w.zmm64u[i]);
+                let vf = f64::from_bits(v.zmm64u[i]);
+                result.zmm64u[i] = hf.mul_add(wf, -vf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -443,24 +453,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // ========================================================================
-    // VFNMADD — Fused Negative Multiply-Add: dst = -(a * b) + c
+    // VFNMADD — Fused Negative Multiply-Add (negate the product)
+    //   132: -(V * W) + H  = (-V) * W + H
+    //   213: -(H * V) + W  = (-H) * V + W
+    //   231: -(H * W) + V  = (-H) * W + V
     // ========================================================================
 
-    /// VFNMADD132PS Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 9C
-    /// dst[i] = -(dst[i] * src2[i]) + src1[i]
+    /// VFNMADD132PS — EVEX.66.0F38.W0 9C
+    /// result[i] = -(V[i] * W[i]) + H[i]
     pub fn evex_vfnmadd132ps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_ps(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_ps(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f32::from_bits(dst_val.zmm32u[i]);
-                let b = f32::from_bits(src2.zmm32u[i]);
-                let c = f32::from_bits(src1.zmm32u[i]);
-                result.zmm32u[i] = (-a).mul_add(b, c).to_bits();
+                let vf = f32::from_bits(v.zmm32u[i]);
+                let wf = f32::from_bits(w.zmm32u[i]);
+                let hf = f32::from_bits(h.zmm32u[i]);
+                result.zmm32u[i] = (-vf).mul_add(wf, hf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -469,21 +482,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFNMADD132PD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 9C
-    /// dst[i] = -(dst[i] * src2[i]) + src1[i]
+    /// VFNMADD132PD — EVEX.66.0F38.W1 9C
+    /// result[i] = -(V[i] * W[i]) + H[i]
     pub fn evex_vfnmadd132pd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_pd(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_pd(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f64::from_bits(dst_val.zmm64u[i]);
-                let b = f64::from_bits(src2.zmm64u[i]);
-                let c = f64::from_bits(src1.zmm64u[i]);
-                result.zmm64u[i] = (-a).mul_add(b, c).to_bits();
+                let vf = f64::from_bits(v.zmm64u[i]);
+                let wf = f64::from_bits(w.zmm64u[i]);
+                let hf = f64::from_bits(h.zmm64u[i]);
+                result.zmm64u[i] = (-vf).mul_add(wf, hf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -492,21 +505,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFNMADD213PS Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 AC
-    /// dst[i] = -(src1[i] * dst[i]) + src2[i]
+    /// VFNMADD213PS — EVEX.66.0F38.W0 AC
+    /// result[i] = -(H[i] * V[i]) + W[i]
     pub fn evex_vfnmadd213ps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_ps(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_ps(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f32::from_bits(src1.zmm32u[i]);
-                let b = f32::from_bits(dst_val.zmm32u[i]);
-                let c = f32::from_bits(src2.zmm32u[i]);
-                result.zmm32u[i] = (-a).mul_add(b, c).to_bits();
+                let hf = f32::from_bits(h.zmm32u[i]);
+                let vf = f32::from_bits(v.zmm32u[i]);
+                let wf = f32::from_bits(w.zmm32u[i]);
+                result.zmm32u[i] = (-hf).mul_add(vf, wf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -515,21 +528,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFNMADD213PD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 AC
-    /// dst[i] = -(src1[i] * dst[i]) + src2[i]
+    /// VFNMADD213PD — EVEX.66.0F38.W1 AC
+    /// result[i] = -(H[i] * V[i]) + W[i]
     pub fn evex_vfnmadd213pd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_pd(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_pd(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f64::from_bits(src1.zmm64u[i]);
-                let b = f64::from_bits(dst_val.zmm64u[i]);
-                let c = f64::from_bits(src2.zmm64u[i]);
-                result.zmm64u[i] = (-a).mul_add(b, c).to_bits();
+                let hf = f64::from_bits(h.zmm64u[i]);
+                let vf = f64::from_bits(v.zmm64u[i]);
+                let wf = f64::from_bits(w.zmm64u[i]);
+                result.zmm64u[i] = (-hf).mul_add(vf, wf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -538,21 +551,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFNMADD231PS Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 BC
-    /// dst[i] = -(src1[i] * src2[i]) + dst[i]
+    /// VFNMADD231PS — EVEX.66.0F38.W0 BC
+    /// result[i] = -(H[i] * W[i]) + V[i]
     pub fn evex_vfnmadd231ps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_ps(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_ps(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f32::from_bits(src1.zmm32u[i]);
-                let b = f32::from_bits(src2.zmm32u[i]);
-                let c = f32::from_bits(dst_val.zmm32u[i]);
-                result.zmm32u[i] = (-a).mul_add(b, c).to_bits();
+                let hf = f32::from_bits(h.zmm32u[i]);
+                let wf = f32::from_bits(w.zmm32u[i]);
+                let vf = f32::from_bits(v.zmm32u[i]);
+                result.zmm32u[i] = (-hf).mul_add(wf, vf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -561,21 +574,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFNMADD231PD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 BC
-    /// dst[i] = -(src1[i] * src2[i]) + dst[i]
+    /// VFNMADD231PD — EVEX.66.0F38.W1 BC
+    /// result[i] = -(H[i] * W[i]) + V[i]
     pub fn evex_vfnmadd231pd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_pd(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_pd(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f64::from_bits(src1.zmm64u[i]);
-                let b = f64::from_bits(src2.zmm64u[i]);
-                let c = f64::from_bits(dst_val.zmm64u[i]);
-                result.zmm64u[i] = (-a).mul_add(b, c).to_bits();
+                let hf = f64::from_bits(h.zmm64u[i]);
+                let wf = f64::from_bits(w.zmm64u[i]);
+                let vf = f64::from_bits(v.zmm64u[i]);
+                result.zmm64u[i] = (-hf).mul_add(wf, vf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -585,24 +598,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // ========================================================================
-    // VFNMSUB — Fused Negative Multiply-Subtract: dst = -(a * b) - c
+    // VFNMSUB — Fused Negative Multiply-Subtract (negate both product and addend)
+    //   132: -(V * W) - H  = (-V) * W + (-H)
+    //   213: -(H * V) - W  = (-H) * V + (-W)
+    //   231: -(H * W) - V  = (-H) * W + (-V)
     // ========================================================================
 
-    /// VFNMSUB132PS Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 9E
-    /// dst[i] = -(dst[i] * src2[i]) - src1[i]
+    /// VFNMSUB132PS — EVEX.66.0F38.W0 9E
+    /// result[i] = -(V[i] * W[i]) - H[i]
     pub fn evex_vfnmsub132ps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_ps(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_ps(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f32::from_bits(dst_val.zmm32u[i]);
-                let b = f32::from_bits(src2.zmm32u[i]);
-                let c = f32::from_bits(src1.zmm32u[i]);
-                result.zmm32u[i] = (-a).mul_add(b, -c).to_bits();
+                let vf = f32::from_bits(v.zmm32u[i]);
+                let wf = f32::from_bits(w.zmm32u[i]);
+                let hf = f32::from_bits(h.zmm32u[i]);
+                result.zmm32u[i] = (-vf).mul_add(wf, -hf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -611,21 +627,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFNMSUB132PD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 9E
-    /// dst[i] = -(dst[i] * src2[i]) - src1[i]
+    /// VFNMSUB132PD — EVEX.66.0F38.W1 9E
+    /// result[i] = -(V[i] * W[i]) - H[i]
     pub fn evex_vfnmsub132pd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_pd(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_pd(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f64::from_bits(dst_val.zmm64u[i]);
-                let b = f64::from_bits(src2.zmm64u[i]);
-                let c = f64::from_bits(src1.zmm64u[i]);
-                result.zmm64u[i] = (-a).mul_add(b, -c).to_bits();
+                let vf = f64::from_bits(v.zmm64u[i]);
+                let wf = f64::from_bits(w.zmm64u[i]);
+                let hf = f64::from_bits(h.zmm64u[i]);
+                result.zmm64u[i] = (-vf).mul_add(wf, -hf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -634,21 +650,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFNMSUB213PS Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 AE
-    /// dst[i] = -(src1[i] * dst[i]) - src2[i]
+    /// VFNMSUB213PS — EVEX.66.0F38.W0 AE
+    /// result[i] = -(H[i] * V[i]) - W[i]
     pub fn evex_vfnmsub213ps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_ps(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_ps(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f32::from_bits(src1.zmm32u[i]);
-                let b = f32::from_bits(dst_val.zmm32u[i]);
-                let c = f32::from_bits(src2.zmm32u[i]);
-                result.zmm32u[i] = (-a).mul_add(b, -c).to_bits();
+                let hf = f32::from_bits(h.zmm32u[i]);
+                let vf = f32::from_bits(v.zmm32u[i]);
+                let wf = f32::from_bits(w.zmm32u[i]);
+                result.zmm32u[i] = (-hf).mul_add(vf, -wf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -657,21 +673,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFNMSUB213PD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 AE
-    /// dst[i] = -(src1[i] * dst[i]) - src2[i]
+    /// VFNMSUB213PD — EVEX.66.0F38.W1 AE
+    /// result[i] = -(H[i] * V[i]) - W[i]
     pub fn evex_vfnmsub213pd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_pd(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_pd(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f64::from_bits(src1.zmm64u[i]);
-                let b = f64::from_bits(dst_val.zmm64u[i]);
-                let c = f64::from_bits(src2.zmm64u[i]);
-                result.zmm64u[i] = (-a).mul_add(b, -c).to_bits();
+                let hf = f64::from_bits(h.zmm64u[i]);
+                let vf = f64::from_bits(v.zmm64u[i]);
+                let wf = f64::from_bits(w.zmm64u[i]);
+                result.zmm64u[i] = (-hf).mul_add(vf, -wf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -680,21 +696,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFNMSUB231PS Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W0 BE
-    /// dst[i] = -(src1[i] * src2[i]) - dst[i]
+    /// VFNMSUB231PS — EVEX.66.0F38.W0 BE
+    /// result[i] = -(H[i] * W[i]) - V[i]
     pub fn evex_vfnmsub231ps(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_ps(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_ps(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f32::from_bits(src1.zmm32u[i]);
-                let b = f32::from_bits(src2.zmm32u[i]);
-                let c = f32::from_bits(dst_val.zmm32u[i]);
-                result.zmm32u[i] = (-a).mul_add(b, -c).to_bits();
+                let hf = f32::from_bits(h.zmm32u[i]);
+                let wf = f32::from_bits(w.zmm32u[i]);
+                let vf = f32::from_bits(v.zmm32u[i]);
+                result.zmm32u[i] = (-hf).mul_add(wf, -vf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -703,21 +719,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// VFNMSUB231PD Vdq{k}, Hdq, Wdq — EVEX.66.0F38.W1 BE
-    /// dst[i] = -(src1[i] * src2[i]) - dst[i]
+    /// VFNMSUB231PD — EVEX.66.0F38.W1 BE
+    /// result[i] = -(H[i] * W[i]) - V[i]
     pub fn evex_vfnmsub231pd(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        let dst_val = read_zmm(self, instr.dst());
-        let src1 = read_zmm(self, instr.src1());
-        let src2 = read_src2_pd(self, instr, vl)?;
+        let v = read_zmm(self, instr.dst());
+        let h = read_zmm(self, instr.src2());
+        let w = read_rm_pd(self, instr, vl)?;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                let a = f64::from_bits(src1.zmm64u[i]);
-                let b = f64::from_bits(src2.zmm64u[i]);
-                let c = f64::from_bits(dst_val.zmm64u[i]);
-                result.zmm64u[i] = (-a).mul_add(b, -c).to_bits();
+                let hf = f64::from_bits(h.zmm64u[i]);
+                let wf = f64::from_bits(w.zmm64u[i]);
+                let vf = f64::from_bits(v.zmm64u[i]);
+                result.zmm64u[i] = (-hf).mul_add(wf, -vf).to_bits();
             }
         }
         let mask = read_opmask_for_write(self, instr);
