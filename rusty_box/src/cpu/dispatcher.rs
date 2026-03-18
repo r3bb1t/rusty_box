@@ -3041,6 +3041,113 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // VEX-encoded zero/sign extend
             Opcode::V128VpmovzxbdVdqWd | Opcode::V256VpmovzxbdVdqWq => self.vpmovzxbd(instr),
 
+            // =========================================================================
+            // AVX-512 Opmask (k-register) instructions (avx512_mask.rs)
+            // =========================================================================
+
+            // KMOV load (K←K register form, K←M memory form)
+            Opcode::KmovwKgwKew => {
+                if instr.mod_c0() { self.kmovw_kgw_kew_r(instr) } else { self.kmovw_kgw_kew_m(instr) }
+            }
+            Opcode::KmovqKgqKeq => {
+                if instr.mod_c0() { self.kmovq_kgq_keq_r(instr) } else { self.kmovq_kgq_keq_m(instr) }
+            }
+            Opcode::KmovbKgbKeb => {
+                if instr.mod_c0() { self.kmovb_kgb_keb_r(instr) } else { self.kmovb_kgb_keb_m(instr) }
+            }
+            Opcode::KmovdKgdKed => {
+                if instr.mod_c0() { self.kmovd_kgd_ked_r(instr) } else { self.kmovd_kgd_ked_m(instr) }
+            }
+
+            // KMOV store (M←K)
+            Opcode::KmovwKewKgw => self.kmovw_kew_kgw_m(instr),
+            Opcode::KmovqKeqKgq => self.kmovq_keq_kgq_m(instr),
+            Opcode::KmovbKebKgb => self.kmovb_keb_kgb_m(instr),
+            Opcode::KmovdKedKgd => self.kmovd_ked_kgd_m(instr),
+
+            // KMOV GPR→K
+            Opcode::KmovwKgwEw => self.kmovw_kgw_ew_r(instr),
+            Opcode::KmovbKgbEb => self.kmovb_kgb_eb_r(instr),
+            Opcode::KmovdKgdEd => self.kmovd_kgd_ed_r(instr),
+            Opcode::KmovqKgqEq => self.kmovq_kgq_eq_r(instr),
+
+            // KMOV K→GPR
+            Opcode::KmovwGdKew => self.kmovw_gd_kew_r(instr),
+            Opcode::KmovbGdKeb => self.kmovb_gd_keb_r(instr),
+            Opcode::KmovdGdKed => self.kmovd_gd_ked_r(instr),
+            Opcode::KmovqGqKeq => self.kmovq_gq_keq_r(instr),
+
+            // KAND
+            Opcode::KandwKgwKhwKew => self.kandw_kgw_khw_kew_r(instr),
+            Opcode::KandqKgqKhqKeq => self.kandq_kgq_khq_keq_r(instr),
+            Opcode::KandbKgbKhbKeb => self.kandb_kgb_khb_keb_r(instr),
+            Opcode::KanddKgdKhdKed => self.kandd_kgd_khd_ked_r(instr),
+
+            // KANDN
+            Opcode::KandnwKgwKhwKew => self.kandnw_kgw_khw_kew_r(instr),
+            Opcode::KandnqKgqKhqKeq => self.kandnq_kgq_khq_keq_r(instr),
+            Opcode::KandnbKgbKhbKeb => self.kandnb_kgb_khb_keb_r(instr),
+            Opcode::KandndKgdKhdKed => self.kandnd_kgd_khd_ked_r(instr),
+
+            // KOR
+            Opcode::KorwKgwKhwKew => self.korw_kgw_khw_kew_r(instr),
+            Opcode::KorqKgqKhqKeq => self.korq_kgq_khq_keq_r(instr),
+            Opcode::KorbKgbKhbKeb => self.korb_kgb_khb_keb_r(instr),
+            Opcode::KordKgdKhdKed => self.kord_kgd_khd_ked_r(instr),
+
+            // KXOR
+            Opcode::KxorwKgwKhwKew => self.kxorw_kgw_khw_kew_r(instr),
+            Opcode::KxorqKgqKhqKeq => self.kxorq_kgq_khq_keq_r(instr),
+            Opcode::KxorbKgbKhbKeb => self.kxorb_kgb_khb_keb_r(instr),
+            Opcode::KxordKgdKhdKed => self.kxord_kgd_khd_ked_r(instr),
+
+            // KXNOR
+            Opcode::KxnorwKgwKhwKew => self.kxnorw_kgw_khw_kew_r(instr),
+            Opcode::KxnorqKgqKhqKeq => self.kxnorq_kgq_khq_keq_r(instr),
+            Opcode::KxnorbKgbKhbKeb => self.kxnorb_kgb_khb_keb_r(instr),
+            Opcode::KxnordKgdKhdKed => self.kxnord_kgd_khd_ked_r(instr),
+
+            // KNOT
+            Opcode::KnotwKgwKew => self.knotw_kgw_kew_r(instr),
+            Opcode::KnotqKgqKeq => self.knotq_kgq_keq_r(instr),
+            Opcode::KnotbKgbKeb => self.knotb_kgb_keb_r(instr),
+            Opcode::KnotdKgdKed => self.knotd_kgd_ked_r(instr),
+
+            // KADD
+            Opcode::KaddwKgwKhwKew => self.kaddw_kgw_khw_kew_r(instr),
+            Opcode::KaddqKgqKhqKeq => self.kaddq_kgq_khq_keq_r(instr),
+            Opcode::KaddbKgbKhbKeb => self.kaddb_kgb_khb_keb_r(instr),
+            Opcode::KadddKgdKhdKed => self.kaddd_kgd_khd_ked_r(instr),
+
+            // KUNPCK
+            Opcode::KunpckbwKgwKhbKeb => self.kunpckbw_kgw_khb_keb_r(instr),
+            Opcode::KunpckwdKgdKhwKew => self.kunpckwd_kgd_khw_kew_r(instr),
+            Opcode::KunpckdqKgqKhdKed => self.kunpckdq_kgq_khd_ked_r(instr),
+
+            // KORTEST
+            Opcode::KortestwKgwKew => self.kortestw_kgw_kew_r(instr),
+            Opcode::KortestqKgqKeq => self.kortestq_kgq_keq_r(instr),
+            Opcode::KortestbKgbKeb => self.kortestb_kgb_keb_r(instr),
+            Opcode::KortestdKgdKed => self.kortestd_kgd_ked_r(instr),
+
+            // KTEST
+            Opcode::KtestwKgwKew => self.ktestw_kgw_kew_r(instr),
+            Opcode::KtestqKgqKeq => self.ktestq_kgq_keq_r(instr),
+            Opcode::KtestbKgbKeb => self.ktestb_kgb_keb_r(instr),
+            Opcode::KtestdKgdKed => self.ktestd_kgd_ked_r(instr),
+
+            // KSHIFT left
+            Opcode::KshiftlbKgbKebIb => self.kshiftlb_kgb_keb_ib_r(instr),
+            Opcode::KshiftlwKgwKewIb => self.kshiftlw_kgw_kew_ib_r(instr),
+            Opcode::KshiftldKgdKedIb => self.kshiftld_kgd_ked_ib_r(instr),
+            Opcode::KshiftlqKgqKeqIb => self.kshiftlq_kgq_keq_ib_r(instr),
+
+            // KSHIFT right
+            Opcode::KshiftrbKgbKebIb => self.kshiftrb_kgb_keb_ib_r(instr),
+            Opcode::KshiftrwKgwKewIb => self.kshiftrw_kgw_kew_ib_r(instr),
+            Opcode::KshiftrdKgdKedIb => self.kshiftrd_kgd_ked_ib_r(instr),
+            Opcode::KshiftrqKgqKeqIb => self.kshiftrq_kgq_keq_ib_r(instr),
+
             // UD0/UD1/UD2 — intentional #UD exceptions (Linux uses UD2 for BUG()/WARN())
             Opcode::Ud0 | Opcode::Ud1 | Opcode::Ud2 => {
                 self.exception(super::cpu::Exception::Ud, 0)?;

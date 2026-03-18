@@ -1642,15 +1642,23 @@ pub(super) const BxOpcodeTable0F40: [u64; 3] = [
     last_opcode(ATTR_OS16, Opcode::CmovoGwEw),
 ];
 
-// opcode 0F 41
-pub(super) const BxOpcodeTable0F41: [u64; 3] = [
+// opcode 0F 41 — KAND (VEX.L1) + CMOVno (non-VEX)
+pub(super) const BxOpcodeTable0F41: [u64; 7] = [
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W0 | ATTR_SSE_NO_PREFIX, Opcode::KandwKgwKhwKew),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W1 | ATTR_SSE_NO_PREFIX, Opcode::KandqKgqKhqKeq),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KandbKgbKhbKeb),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_66, Opcode::KanddKgdKhdKed),
     form_opcode(ATTR_OS64, Opcode::CmovnoGqEq),
     form_opcode(ATTR_OS32, Opcode::CmovnoGdEd),
     last_opcode(ATTR_OS16, Opcode::CmovnoGwEw),
 ];
 
-// opcode 0F 42
-pub(super) const BxOpcodeTable0F42: [u64; 3] = [
+// opcode 0F 42 — KANDN (VEX.L1) + CMOVb (non-VEX)
+pub(super) const BxOpcodeTable0F42: [u64; 7] = [
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W0 | ATTR_SSE_NO_PREFIX, Opcode::KandnwKgwKhwKew),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W1 | ATTR_SSE_NO_PREFIX, Opcode::KandnqKgqKhqKeq),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KandnbKgbKhbKeb),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_66, Opcode::KandndKgdKhdKed),
     form_opcode(ATTR_OS64, Opcode::CmovbGqEq),
     form_opcode(ATTR_OS32, Opcode::CmovbGdEd),
     last_opcode(ATTR_OS16, Opcode::CmovbGwEw),
@@ -1663,29 +1671,45 @@ pub(super) const BxOpcodeTable0F43: [u64; 3] = [
     last_opcode(ATTR_OS16, Opcode::CmovnbGwEw),
 ];
 
-// opcode 0F 44
-pub(super) const BxOpcodeTable0F44: [u64; 3] = [
+// opcode 0F 44 — KNOT (VEX.L0, 2-operand) + CMOVz (non-VEX)
+pub(super) const BxOpcodeTable0F44: [u64; 7] = [
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_NO_PREFIX, Opcode::KnotwKgwKew),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_SSE_NO_PREFIX, Opcode::KnotqKgqKeq),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KnotbKgbKeb),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_66, Opcode::KnotdKgdKed),
     form_opcode(ATTR_OS64, Opcode::CmovzGqEq),
     form_opcode(ATTR_OS32, Opcode::CmovzGdEd),
     last_opcode(ATTR_OS16, Opcode::CmovzGwEw),
 ];
 
-// opcode 0F 45
-pub(super) const BxOpcodeTable0F45: [u64; 3] = [
+// opcode 0F 45 — KOR (VEX.L1) + CMOVnz (non-VEX)
+pub(super) const BxOpcodeTable0F45: [u64; 7] = [
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W0 | ATTR_SSE_NO_PREFIX, Opcode::KorwKgwKhwKew),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W1 | ATTR_SSE_NO_PREFIX, Opcode::KorqKgqKhqKeq),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KorbKgbKhbKeb),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_66, Opcode::KordKgdKhdKed),
     form_opcode(ATTR_OS64, Opcode::CmovnzGqEq),
     form_opcode(ATTR_OS32, Opcode::CmovnzGdEd),
     last_opcode(ATTR_OS16, Opcode::CmovnzGwEw),
 ];
 
-// opcode 0F 46
-pub(super) const BxOpcodeTable0F46: [u64; 3] = [
+// opcode 0F 46 — KXNOR (VEX.L1) + CMOVbe (non-VEX)
+pub(super) const BxOpcodeTable0F46: [u64; 7] = [
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W0 | ATTR_SSE_NO_PREFIX, Opcode::KxnorwKgwKhwKew),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W1 | ATTR_SSE_NO_PREFIX, Opcode::KxnorqKgqKhqKeq),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KxnorbKgbKhbKeb),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_66, Opcode::KxnordKgdKhdKed),
     form_opcode(ATTR_OS64, Opcode::CmovbeGqEq),
     form_opcode(ATTR_OS32, Opcode::CmovbeGdEd),
     last_opcode(ATTR_OS16, Opcode::CmovbeGwEw),
 ];
 
-// opcode 0F 47
-pub(super) const BxOpcodeTable0F47: [u64; 3] = [
+// opcode 0F 47 — KXOR (VEX.L1) + CMOVnbe (non-VEX)
+pub(super) const BxOpcodeTable0F47: [u64; 7] = [
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W0 | ATTR_SSE_NO_PREFIX, Opcode::KxorwKgwKhwKew),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W1 | ATTR_SSE_NO_PREFIX, Opcode::KxorqKgqKhqKeq),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KxorbKgbKhbKeb),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_66, Opcode::KxordKgdKhdKed),
     form_opcode(ATTR_OS64, Opcode::CmovnbeGqEq),
     form_opcode(ATTR_OS32, Opcode::CmovnbeGdEd),
     last_opcode(ATTR_OS16, Opcode::CmovnbeGwEw),
@@ -1705,15 +1729,22 @@ pub(super) const BxOpcodeTable0F49: [u64; 3] = [
     last_opcode(ATTR_OS16, Opcode::CmovnsGwEw),
 ];
 
-// opcode 0F 4A
-pub(super) const BxOpcodeTable0F4A: [u64; 3] = [
+// opcode 0F 4A — KADD (VEX.L1) + CMOVp (non-VEX)
+pub(super) const BxOpcodeTable0F4A: [u64; 7] = [
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W0 | ATTR_SSE_NO_PREFIX, Opcode::KaddwKgwKhwKew),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W1 | ATTR_SSE_NO_PREFIX, Opcode::KaddqKgqKhqKeq),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KaddbKgbKhbKeb),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_66, Opcode::KadddKgdKhdKed),
     form_opcode(ATTR_OS64, Opcode::CmovpGqEq),
     form_opcode(ATTR_OS32, Opcode::CmovpGdEd),
     last_opcode(ATTR_OS16, Opcode::CmovpGwEw),
 ];
 
-// opcode 0F 4B
-pub(super) const BxOpcodeTable0F4B: [u64; 3] = [
+// opcode 0F 4B — KUNPCK (VEX.L1) + CMOVnp (non-VEX)
+pub(super) const BxOpcodeTable0F4B: [u64; 6] = [
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W0 | ATTR_SSE_NO_PREFIX, Opcode::KunpckbwKgwKhbKeb),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W1 | ATTR_SSE_NO_PREFIX, Opcode::KunpckdqKgqKhdKed),
+    form_opcode(ATTR_VEX | ATTR_VL256 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KunpckwdKgdKhwKew),
     form_opcode(ATTR_OS64, Opcode::CmovnpGqEq),
     form_opcode(ATTR_OS32, Opcode::CmovnpGdEd),
     last_opcode(ATTR_OS16, Opcode::CmovnpGwEw),
@@ -2258,16 +2289,58 @@ pub(super) const BxOpcodeTable0F8F_32: [u64; 2] = [
 pub(super) const BxOpcodeTable0F8F_64: [u64; 1] = [last_opcode(0, Opcode::JnleJq)];
 
 // opcode 0F 90 - 0F 9F
-pub(super) const BxOpcodeTable0F90: [u64; 1] = [last_opcode(0, Opcode::SetoEb)];
-pub(super) const BxOpcodeTable0F91: [u64; 1] = [last_opcode(0, Opcode::SetnoEb)];
-pub(super) const BxOpcodeTable0F92: [u64; 1] = [last_opcode(0, Opcode::SetbEb)];
-pub(super) const BxOpcodeTable0F93: [u64; 1] = [last_opcode(0, Opcode::SetnbEb)];
+// opcode 0F 90 — KMOV load (VEX.L0) + SETcc (non-VEX)
+pub(super) const BxOpcodeTable0F90: [u64; 5] = [
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_NO_PREFIX, Opcode::KmovwKgwKew),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_SSE_NO_PREFIX, Opcode::KmovqKgqKeq),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KmovbKgbKeb),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_66, Opcode::KmovdKgdKed),
+    last_opcode(0, Opcode::SetoEb),
+];
+// opcode 0F 91 — KMOV store (VEX.L0) + SETcc (non-VEX)
+pub(super) const BxOpcodeTable0F91: [u64; 5] = [
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_NO_PREFIX, Opcode::KmovwKewKgw),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_SSE_NO_PREFIX, Opcode::KmovqKeqKgq),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KmovbKebKgb),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_66, Opcode::KmovdKedKgd),
+    last_opcode(0, Opcode::SetnoEb),
+];
+// opcode 0F 92 — KMOV GPR→K (VEX.L0) + SETcc (non-VEX)
+pub(super) const BxOpcodeTable0F92: [u64; 5] = [
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_NO_PREFIX, Opcode::KmovwKgwEw),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KmovbKgbEb),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_F2, Opcode::KmovdKgdEd),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_F2, Opcode::KmovqKgqEq),
+    last_opcode(0, Opcode::SetbEb),
+];
+// opcode 0F 93 — KMOV K→GPR (VEX.L0) + SETcc (non-VEX)
+pub(super) const BxOpcodeTable0F93: [u64; 5] = [
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_NO_PREFIX, Opcode::KmovwGdKew),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KmovbGdKeb),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_F2, Opcode::KmovdGdKed),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_F2, Opcode::KmovqGqKeq),
+    last_opcode(0, Opcode::SetnbEb),
+];
 pub(super) const BxOpcodeTable0F94: [u64; 1] = [last_opcode(0, Opcode::SetzEb)];
 pub(super) const BxOpcodeTable0F95: [u64; 1] = [last_opcode(0, Opcode::SetnzEb)];
 pub(super) const BxOpcodeTable0F96: [u64; 1] = [last_opcode(0, Opcode::SetbeEb)];
 pub(super) const BxOpcodeTable0F97: [u64; 1] = [last_opcode(0, Opcode::SetnbeEb)];
-pub(super) const BxOpcodeTable0F98: [u64; 1] = [last_opcode(0, Opcode::SetsEb)];
-pub(super) const BxOpcodeTable0F99: [u64; 1] = [last_opcode(0, Opcode::SetnsEb)];
+// opcode 0F 98 — KORTEST (VEX.L0) + SETcc (non-VEX)
+pub(super) const BxOpcodeTable0F98: [u64; 5] = [
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_NO_PREFIX, Opcode::KortestwKgwKew),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_SSE_NO_PREFIX, Opcode::KortestqKgqKeq),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KortestbKgbKeb),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_66, Opcode::KortestdKgdKed),
+    last_opcode(0, Opcode::SetsEb),
+];
+// opcode 0F 99 — KTEST (VEX.L0) + SETcc (non-VEX)
+pub(super) const BxOpcodeTable0F99: [u64; 5] = [
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_NO_PREFIX, Opcode::KtestwKgwKew),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_SSE_NO_PREFIX, Opcode::KtestqKgqKeq),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KtestbKgbKeb),
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_66, Opcode::KtestdKgdKed),
+    last_opcode(0, Opcode::SetnsEb),
+];
 pub(super) const BxOpcodeTable0F9A: [u64; 1] = [last_opcode(0, Opcode::SetpEb)];
 pub(super) const BxOpcodeTable0F9B: [u64; 1] = [last_opcode(0, Opcode::SetnpEb)];
 pub(super) const BxOpcodeTable0F9C: [u64; 1] = [last_opcode(0, Opcode::SetlEb)];

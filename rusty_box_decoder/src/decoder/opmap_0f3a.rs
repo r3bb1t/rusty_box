@@ -129,6 +129,24 @@ pub(super) const BxOpcodeTable0F3AF0: [u64; 2] = [
 pub(super) const BxOpcodeTable0F3A02: [u64; 1] =
     [last_opcode(ATTR_SSE_PREFIX_66 | ATTR_VEX_W0, Opcode::VpblenddVdqHdqWdqIb)];
 
+// KSHIFTL/KSHIFTR — VEX.L0.66.0F3A.W0/W1 30-33 /r ib
+pub(super) const BxOpcodeTable0F3A30: [u64; 2] = [
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KshiftlbKgbKebIb),
+    last_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_66, Opcode::KshiftrbKgbKebIb),
+];
+pub(super) const BxOpcodeTable0F3A31: [u64; 2] = [
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KshiftlwKgwKewIb),
+    last_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_66, Opcode::KshiftrwKgwKewIb),
+];
+pub(super) const BxOpcodeTable0F3A32: [u64; 2] = [
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KshiftldKgdKedIb),
+    last_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_66, Opcode::KshiftrdKgdKedIb),
+];
+pub(super) const BxOpcodeTable0F3A33: [u64; 2] = [
+    form_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W0 | ATTR_SSE_PREFIX_66, Opcode::KshiftlqKgqKeqIb),
+    last_opcode(ATTR_VEX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_SSE_PREFIX_66, Opcode::KshiftrqKgqKeqIb),
+];
+
 pub(super) const BxOpcodeTable0F3A: [&[u64]; 256] = [
     // 3-byte opcode 0x0F 0x3A
     /* 0F 3A 00 */ &BX_OPCODE_GROUP_ERR,
@@ -179,10 +197,10 @@ pub(super) const BxOpcodeTable0F3A: [&[u64]; 256] = [
     /* 0F 3A 2D */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 2E */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 2F */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 3A 30 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 3A 31 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 3A 32 */ &BX_OPCODE_GROUP_ERR,
-    /* 0F 3A 33 */ &BX_OPCODE_GROUP_ERR,
+    /* 0F 3A 30 */ &BxOpcodeTable0F3A30,
+    /* 0F 3A 31 */ &BxOpcodeTable0F3A31,
+    /* 0F 3A 32 */ &BxOpcodeTable0F3A32,
+    /* 0F 3A 33 */ &BxOpcodeTable0F3A33,
     /* 0F 3A 34 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 35 */ &BX_OPCODE_GROUP_ERR,
     /* 0F 3A 36 */ &BX_OPCODE_GROUP_ERR,
