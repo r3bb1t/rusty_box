@@ -1049,6 +1049,8 @@ const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -
                 (0xDF, 1, 0) => Some(Opcode::EvexVpandndVdqHdqWdq),
                 // VPANDNQ — EVEX.66.0F.W1 DF
                 (0xDF, 1, 1) => Some(Opcode::EvexVpandnqVdqHdqWdq),
+                // VPSHUFD — EVEX.66.0F.W0 70
+                (0x70, 1, 0) => Some(Opcode::EvexVpshufdVdqWdqIb),
                 _ => None,
             }
         }
@@ -1063,6 +1065,26 @@ const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -
                 (0x7C, 1, 0) => Some(Opcode::EvexVpbroadcastdVdqEd),
                 // VPBROADCASTQ from GPR — EVEX.66.0F38.W1 7C
                 (0x7C, 1, 1) => Some(Opcode::EvexVpbroadcastqVdqEq),
+                // VPSHUFB — EVEX.66.0F38.W0 00
+                (0x00, 1, 0) => Some(Opcode::EvexVpshufbVdqHdqWdq),
+                _ => None,
+            }
+        }
+        3 => {
+            // Map 3 (0F 3A xx)
+            match (opcode, sse_prefix, w) {
+                // VPTERNLOGD — EVEX.66.0F3A.W0 25
+                (0x25, 1, 0) => Some(Opcode::EvexVpternlogdVdqHdqWdqIb),
+                // VPTERNLOGQ — EVEX.66.0F3A.W1 25
+                (0x25, 1, 1) => Some(Opcode::EvexVpternlogqVdqHdqWdqIb),
+                // VINSERTI32x4 — EVEX.66.0F3A.W0 38
+                (0x38, 1, 0) => Some(Opcode::EvexVinserti32x4VdqHdqWdqIb),
+                // VINSERTF32x4 — EVEX.66.0F3A.W0 18
+                (0x18, 1, 0) => Some(Opcode::EvexVinsertf32x4VpsHpsWpsIb),
+                // VEXTRACTI32x4 — EVEX.66.0F3A.W0 39
+                (0x39, 1, 0) => Some(Opcode::EvexVextracti32x4WdqVdqIb),
+                // VEXTRACTF32x4 — EVEX.66.0F3A.W0 19
+                (0x19, 1, 0) => Some(Opcode::EvexVextractf32x4WpsVpsIb),
                 _ => None,
             }
         }

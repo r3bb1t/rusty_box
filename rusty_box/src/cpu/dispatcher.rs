@@ -2961,6 +2961,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::EvexVpbroadcastdVdqEd | Opcode::EvexVpbroadcastdVdqEdKmask => self.evex_vpbroadcastd_gpr(instr),
             Opcode::EvexVpbroadcastqVdqEq | Opcode::EvexVpbroadcastqVdqEqKmask => self.evex_vpbroadcastq_gpr(instr),
 
+            // AVX-512F: VPTERNLOG, VPSHUFB, VPSHUFD, shifts, insert/extract
+            Opcode::EvexVpternlogdVdqHdqWdqIb | Opcode::EvexVpternlogdVdqHdqWdqIbKmask => self.evex_vpternlogd(instr),
+            Opcode::EvexVpternlogqVdqHdqWdqIb | Opcode::EvexVpternlogqVdqHdqWdqIbKmask => self.evex_vpternlogq(instr),
+            Opcode::EvexVpshufdVdqWdqIb | Opcode::EvexVpshufdVdqWdqIbKmask => self.evex_vpshufd(instr),
+            Opcode::EvexVpshufbVdqHdqWdq | Opcode::EvexVpshufbVdqHdqWdqKmask => self.evex_vpshufb(instr),
+            Opcode::EvexVinserti32x4VdqHdqWdqIb | Opcode::EvexVinserti32x4VdqHdqWdqIbKmask => self.evex_vinserti32x4(instr),
+            Opcode::EvexVinsertf32x4VpsHpsWpsIb | Opcode::EvexVinsertf32x4VpsHpsWpsIbKmask => self.evex_vinserti32x4(instr),
+            Opcode::EvexVextracti32x4WdqVdqIb | Opcode::EvexVextracti32x4WdqVdqIbKmask => self.evex_vextracti32x4(instr),
+            Opcode::EvexVextractf32x4WpsVpsIb | Opcode::EvexVextractf32x4WpsVpsIbKmask => self.evex_vextracti32x4(instr),
+            Opcode::EvexVpslldUdqIb | Opcode::EvexVpslldUdqIbKmask => self.evex_vpslld_imm(instr),
+            Opcode::EvexVpsllqUdqIb | Opcode::EvexVpsllqUdqIbKmask => self.evex_vpsllq_imm(instr),
+            Opcode::EvexVpsrldUdqIb | Opcode::EvexVpsrldUdqIbKmask => self.evex_vpsrld_imm(instr),
+            Opcode::EvexVpsrlqUdqIb | Opcode::EvexVpsrlqUdqIbKmask => self.evex_vpsrlq_imm(instr),
+            Opcode::EvexVpsradUdqIb | Opcode::EvexVpsradUdqIbKmask => self.evex_vpsrad_imm(instr),
+            Opcode::EvexVpsraqUdqIb | Opcode::EvexVpsraqUdqIbKmask => self.evex_vpsraq_imm(instr),
+
             Opcode::V256Vinsertf128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vinserti128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vextracti128WdqVdqIb => self.vextracti128(instr),
