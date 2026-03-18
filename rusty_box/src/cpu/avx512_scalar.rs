@@ -109,9 +109,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Register form: returns zmm32f[0] of src2.
     /// Memory form: reads 4 bytes from memory.
     #[inline]
-    fn evex_read_src2_ss(&mut self, instr: &Instruction) -> super::Result<f32> {
+    /// Read scalar f32 from rm operand (src1 in our convention).
+    /// Register form: XMM element [0] of src1 (rm).
+    /// Memory form: reads 4 bytes from memory.
+    fn evex_read_rm_ss(&mut self, instr: &Instruction) -> super::Result<f32> {
         if instr.mod_c0() {
-            Ok(unsafe { self.vmm[instr.src2() as usize].zmm32f[0] })
+            Ok(unsafe { self.vmm[instr.src1() as usize].zmm32f[0] })
         } else {
             let laddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
@@ -124,9 +127,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Register form: returns zmm64f[0] of src2.
     /// Memory form: reads 8 bytes from memory.
     #[inline]
-    fn evex_read_src2_sd(&mut self, instr: &Instruction) -> super::Result<f64> {
+    /// Read scalar f64 from rm operand (src1 in our convention).
+    fn evex_read_rm_sd(&mut self, instr: &Instruction) -> super::Result<f64> {
         if instr.mod_c0() {
-            Ok(unsafe { self.vmm[instr.src2() as usize].zmm64f[0] })
+            Ok(unsafe { self.vmm[instr.src1() as usize].zmm64f[0] })
         } else {
             let laddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
@@ -143,8 +147,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VADDSS xmm1{k1}{z}, xmm2, xmm3/m32
     pub fn evex_vaddss(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src1());
-        let src2_val = self.evex_read_src2_ss(instr)?;
+        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+        let src2_val = self.evex_read_rm_ss(instr)?;
         let result = unsafe { src1.zmm32f[0] + src2_val };
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -154,8 +158,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VADDSD xmm1{k1}{z}, xmm2, xmm3/m64
     pub fn evex_vaddsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src1());
-        let src2_val = self.evex_read_src2_sd(instr)?;
+        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+        let src2_val = self.evex_read_rm_sd(instr)?;
         let result = unsafe { src1.zmm64f[0] + src2_val };
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -170,8 +174,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VSUBSS xmm1{k1}{z}, xmm2, xmm3/m32
     pub fn evex_vsubss(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src1());
-        let src2_val = self.evex_read_src2_ss(instr)?;
+        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+        let src2_val = self.evex_read_rm_ss(instr)?;
         let result = unsafe { src1.zmm32f[0] - src2_val };
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -181,8 +185,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VSUBSD xmm1{k1}{z}, xmm2, xmm3/m64
     pub fn evex_vsubsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src1());
-        let src2_val = self.evex_read_src2_sd(instr)?;
+        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+        let src2_val = self.evex_read_rm_sd(instr)?;
         let result = unsafe { src1.zmm64f[0] - src2_val };
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -197,8 +201,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VMULSS xmm1{k1}{z}, xmm2, xmm3/m32
     pub fn evex_vmulss(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src1());
-        let src2_val = self.evex_read_src2_ss(instr)?;
+        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+        let src2_val = self.evex_read_rm_ss(instr)?;
         let result = unsafe { src1.zmm32f[0] * src2_val };
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -208,8 +212,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VMULSD xmm1{k1}{z}, xmm2, xmm3/m64
     pub fn evex_vmulsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src1());
-        let src2_val = self.evex_read_src2_sd(instr)?;
+        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+        let src2_val = self.evex_read_rm_sd(instr)?;
         let result = unsafe { src1.zmm64f[0] * src2_val };
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -224,8 +228,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VDIVSS xmm1{k1}{z}, xmm2, xmm3/m32
     pub fn evex_vdivss(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src1());
-        let src2_val = self.evex_read_src2_ss(instr)?;
+        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+        let src2_val = self.evex_read_rm_ss(instr)?;
         let result = unsafe { src1.zmm32f[0] / src2_val };
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -235,8 +239,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VDIVSD xmm1{k1}{z}, xmm2, xmm3/m64
     pub fn evex_vdivsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src1());
-        let src2_val = self.evex_read_src2_sd(instr)?;
+        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+        let src2_val = self.evex_read_rm_sd(instr)?;
         let result = unsafe { src1.zmm64f[0] / src2_val };
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -251,8 +255,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VSQRTSS xmm1{k1}{z}, xmm2, xmm3/m32
     pub fn evex_vsqrtss(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src1());
-        let src2_val = self.evex_read_src2_ss(instr)?;
+        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+        let src2_val = self.evex_read_rm_ss(instr)?;
         let result = src2_val.sqrt();
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -262,8 +266,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VSQRTSD xmm1{k1}{z}, xmm2, xmm3/m64
     pub fn evex_vsqrtsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src1());
-        let src2_val = self.evex_read_src2_sd(instr)?;
+        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+        let src2_val = self.evex_read_rm_sd(instr)?;
         let result = src2_val.sqrt();
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -281,8 +285,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VMAXSS xmm1{k1}{z}, xmm2, xmm3/m32
     pub fn evex_vmaxss(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src1());
-        let src2_val = self.evex_read_src2_ss(instr)?;
+        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+        let src2_val = self.evex_read_rm_ss(instr)?;
         let src1_val = unsafe { src1.zmm32f[0] };
         let result = if src1_val.is_nan() || src2_val.is_nan() || src2_val > src1_val {
             src2_val
@@ -297,8 +301,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VMAXSD xmm1{k1}{z}, xmm2, xmm3/m64
     pub fn evex_vmaxsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src1());
-        let src2_val = self.evex_read_src2_sd(instr)?;
+        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+        let src2_val = self.evex_read_rm_sd(instr)?;
         let src1_val = unsafe { src1.zmm64f[0] };
         let result = if src1_val.is_nan() || src2_val.is_nan() || src2_val > src1_val {
             src2_val
@@ -321,8 +325,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VMINSS xmm1{k1}{z}, xmm2, xmm3/m32
     pub fn evex_vminss(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src1());
-        let src2_val = self.evex_read_src2_ss(instr)?;
+        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+        let src2_val = self.evex_read_rm_ss(instr)?;
         let src1_val = unsafe { src1.zmm32f[0] };
         let result = if src1_val.is_nan() || src2_val.is_nan() || src2_val < src1_val {
             src2_val
@@ -337,8 +341,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VMINSD xmm1{k1}{z}, xmm2, xmm3/m64
     pub fn evex_vminsd(&mut self, instr: &Instruction) -> super::Result<()> {
-        let src1 = read_zmm(self, instr.src1());
-        let src2_val = self.evex_read_src2_sd(instr)?;
+        let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
+        let src2_val = self.evex_read_rm_sd(instr)?;
         let src1_val = unsafe { src1.zmm64f[0] };
         let result = if src1_val.is_nan() || src2_val.is_nan() || src2_val < src1_val {
             src2_val
@@ -369,7 +373,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         if instr.mod_c0() {
             // Register form: dst[0] = src2[0], dst[1..3] = src1[1..3], zero upper
-            let src1 = read_zmm(self, instr.src1());
+            let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
             let src2 = read_zmm(self, instr.src2());
             let val = unsafe { src2.zmm32f[0] };
             write_scalar_ss(self, instr.dst(), &src1, val, mask, zmask);
@@ -405,7 +409,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         if instr.mod_c0() {
             // Register form: dst[0] = src2[0], dst[1] = src1[1], zero upper
-            let src1 = read_zmm(self, instr.src1());
+            let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
             let src2 = read_zmm(self, instr.src2());
             let val = unsafe { src2.zmm64f[0] };
             write_scalar_sd(self, instr.dst(), &src1, val, mask, zmask);
@@ -442,7 +446,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() {
             // Register form store: dst[0] = src[0], dst[1..3] = src1[1..3], zero upper
             let src = read_zmm(self, instr.src());
-            let src1 = read_zmm(self, instr.src1());
+            let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
             let zmask = instr.is_zero_masking() != 0;
             let val = unsafe { src.zmm32f[0] };
             write_scalar_ss(self, instr.dst(), &src1, val, mask, zmask);
@@ -467,7 +471,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() {
             // Register form store: dst[0] = src[0], dst[1] = src1[1], zero upper
             let src = read_zmm(self, instr.src());
-            let src1 = read_zmm(self, instr.src1());
+            let src1 = read_zmm(self, instr.src2()); // vvvv — provides upper elements
             let zmask = instr.is_zero_masking() != 0;
             let val = unsafe { src.zmm64f[0] };
             write_scalar_sd(self, instr.dst(), &src1, val, mask, zmask);

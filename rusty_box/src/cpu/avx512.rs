@@ -808,8 +808,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VEXTRACTI32x4 Wdq{k}, Vdq, Ib — EVEX.66.0F3A.W0 39
     pub fn evex_vextracti32x4(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
         let src = read_zmm(self, instr.src());
-        let imm = (instr.ib() & 0x03) as usize; // lane index (0-3)
+        let num_lanes = vl_bytes(vl) / 16; // 1/2/4 lanes
+        let imm = (instr.ib() as usize) & (num_lanes - 1); // Bochs: imm & (len-1)
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             // Copy 128-bit lane
@@ -841,7 +843,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// VINSERTI32x4 Vdq{k}, Hdq, Wdq, Ib — EVEX.66.0F3A.W0 38
     pub fn evex_vinserti32x4(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let imm = (instr.ib() & 0x03) as usize;
+        let num_lanes = vl_bytes(vl) / 16;
+        let imm = (instr.ib() as usize) & (num_lanes - 1);
         // Start with src1 (the full vector)
         let mut result = read_zmm(self, instr.src1());
         // Read 128-bit insert value

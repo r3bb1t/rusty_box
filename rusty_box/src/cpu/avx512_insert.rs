@@ -12,6 +12,12 @@ use super::{
     xmm::BxPackedZmmRegister,
 };
 
+/// Byte size for vector length
+#[inline]
+fn vl_bytes(vl: u8) -> usize {
+    match vl { 0 => 16, 1 => 32, _ => 64 }
+}
+
 /// Number of 32-bit elements per vector length: VL0=4, VL1=8, VL2=16
 #[inline]
 fn dword_elements(vl: u8) -> usize {
@@ -112,8 +118,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Register form: write 128 bits to XMM + zero upper.
     /// Memory form: write 16 bytes with per-qword masking.
     pub fn evex_vextracti64x2(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl();
         let src = read_zmm(self, instr.src());
-        let imm = (instr.ib() & 0x03) as usize;
+        let num_lanes = vl_bytes(vl) / 16;
+        let imm = (instr.ib() as usize) & (num_lanes - 1);
         // Extract 128-bit lane (2 qwords)
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
@@ -243,7 +251,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// src1 = full vector (VEX.vvvv), src2 = 128-bit value to insert (rm).
     pub fn evex_vinserti64x2(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
-        let imm = (instr.ib() & 0x03) as usize;
+        let num_lanes = vl_bytes(vl) / 16;
+        let imm = (instr.ib() as usize) & (num_lanes - 1);
         // Start with src1 (the full vector from VEX.vvvv)
         let mut result = read_zmm(self, instr.src1());
         // Read 128-bit insert value (2 qwords)
