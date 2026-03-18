@@ -3002,6 +3002,27 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Unpack
             Opcode::EvexVpunpckldqVdqHdqWdq | Opcode::EvexVpunpckldqVdqHdqWdqKmask => self.evex_vpunpckldq(instr),
             Opcode::EvexVpunpckhdqVdqHdqWdq | Opcode::EvexVpunpckhdqVdqHdqWdqKmask => self.evex_vpunpckhdq(instr),
+            // VMOVUPS/VMOVUPD/VMOVAPS/VMOVAPD (EVEX) — all reuse VMOVDQU32 handlers
+            Opcode::EvexVmovupsVpsWps | Opcode::EvexVmovupsVpsWpsKmask
+            | Opcode::EvexVmovapsVpsWps | Opcode::EvexVmovapsVpsWpsKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu32_load_r(instr) }
+                else { self.evex_vmovdqu32_load_m(instr) }
+            }
+            Opcode::EvexVmovupsWpsVps | Opcode::EvexVmovupsWpsVpsKmask
+            | Opcode::EvexVmovapsWpsVps | Opcode::EvexVmovapsWpsVpsKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu32_store_r(instr) }
+                else { self.evex_vmovdqu32_store_m(instr) }
+            }
+            Opcode::EvexVmovupdVpdWpd | Opcode::EvexVmovupdVpdWpdKmask
+            | Opcode::EvexVmovapdVpdWpd | Opcode::EvexVmovapdVpdWpdKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu64_load_r(instr) }
+                else { self.evex_vmovdqu64_load_m(instr) }
+            }
+            Opcode::EvexVmovupdWpdVpd | Opcode::EvexVmovupdWpdVpdKmask
+            | Opcode::EvexVmovapdWpdVpd | Opcode::EvexVmovapdWpdVpdKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu64_store_r(instr) }
+                else { self.evex_vmovdqu64_store_m(instr) }
+            }
 
             Opcode::V256Vinsertf128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vinserti128VdqHdqWdqIb => self.vinsert_f128_i128(instr),

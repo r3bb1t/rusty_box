@@ -1051,6 +1051,22 @@ const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -
                 (0xDF, 1, 1) => Some(Opcode::EvexVpandnqVdqHdqWdq),
                 // VPSHUFD — EVEX.66.0F.W0 70
                 (0x70, 1, 0) => Some(Opcode::EvexVpshufdVdqWdqIb),
+                // VMOVUPS load — EVEX.0F.W0 10 (no prefix)
+                (0x10, 0, 0) => Some(Opcode::EvexVmovupsVpsWps),
+                // VMOVUPD load — EVEX.66.0F.W1 10
+                (0x10, 1, 1) => Some(Opcode::EvexVmovupdVpdWpd),
+                // VMOVUPS store — EVEX.0F.W0 11
+                (0x11, 0, 0) => Some(Opcode::EvexVmovupsWpsVps),
+                // VMOVUPD store — EVEX.66.0F.W1 11
+                (0x11, 1, 1) => Some(Opcode::EvexVmovupdWpdVpd),
+                // VMOVAPS load — EVEX.0F.W0 28 (no prefix)
+                (0x28, 0, 0) => Some(Opcode::EvexVmovapsVpsWps),
+                // VMOVAPD load — EVEX.66.0F.W1 28
+                (0x28, 1, 1) => Some(Opcode::EvexVmovapdVpdWpd),
+                // VMOVAPS store — EVEX.0F.W0 29
+                (0x29, 0, 0) => Some(Opcode::EvexVmovapsWpsVps),
+                // VMOVAPD store — EVEX.66.0F.W1 29
+                (0x29, 1, 1) => Some(Opcode::EvexVmovapdWpdVpd),
                 // VPUNPCKLDQ — EVEX.66.0F.W0 62
                 (0x62, 1, 0) => Some(Opcode::EvexVpunpckldqVdqHdqWdq),
                 // VPUNPCKHDQ — EVEX.66.0F.W0 6A
