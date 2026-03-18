@@ -532,37 +532,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     fn rep_insd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
-        if ecx == 0 {
-            return Ok(());
-        }
-        let port = self.dx();
-
-        // Bulk I/O for IDE data ports
-        if (port == 0x1F0 || port == 0x170) && !self.get_df() {
-            if self.allow_io(port, 4)? {
-                while ecx != 0 {
-                    let chunk_dwords = (ecx as usize).min(512);
-                    let chunk_bytes = chunk_dwords * 4;
-                    let mut tmp = [0u8; 2048];
-                    let got = self.bulk_port_in(port, &mut tmp[..chunk_bytes]);
-                    if got == 0 {
-                        break;
-                    }
-                    let dwords_got = got / 4;
-                    let mut edi = self.edi();
-                    for i in 0..dwords_got {
-                        let off = i * 4;
-                        let val = u32::from_le_bytes([tmp[off], tmp[off+1], tmp[off+2], tmp[off+3]]);
-                        self.v_write_dword(BxSegregs::Es, edi, val)?;
-                        edi = edi.wrapping_add(4);
-                    }
-                    self.set_rdi(edi as u64);
-                    ecx -= dwords_got as u32;
-                    self.set_ecx(ecx);
-                }
-            }
-        }
-
         while ecx != 0 {
             self.insd32(instr)?;
             ecx -= 1;
@@ -812,37 +781,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     fn rep_insd64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
-        if rcx == 0 {
-            return Ok(());
-        }
-        let port = self.dx();
-
-        // Bulk I/O for IDE data ports
-        if (port == 0x1F0 || port == 0x170) && !self.get_df() {
-            if self.allow_io(port, 4)? {
-                while rcx != 0 {
-                    let chunk_dwords = (rcx as usize).min(512);
-                    let chunk_bytes = chunk_dwords * 4;
-                    let mut tmp = [0u8; 2048];
-                    let got = self.bulk_port_in(port, &mut tmp[..chunk_bytes]);
-                    if got == 0 {
-                        break;
-                    }
-                    let dwords_got = got / 4;
-                    let mut rdi = self.rdi();
-                    for i in 0..dwords_got {
-                        let off = i * 4;
-                        let val = u32::from_le_bytes([tmp[off], tmp[off+1], tmp[off+2], tmp[off+3]]);
-                        self.write_virtual_dword_64(BxSegregs::Es, rdi, val)?;
-                        rdi = rdi.wrapping_add(4);
-                    }
-                    self.set_rdi(rdi);
-                    rcx -= dwords_got as u64;
-                    self.set_rcx(rcx);
-                }
-            }
-        }
-
         while rcx != 0 {
             self.insd64(instr)?;
             rcx -= 1;
