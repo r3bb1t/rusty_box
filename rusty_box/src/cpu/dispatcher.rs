@@ -2901,6 +2901,66 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::EvexVpermi2dVdqHdqWdqKmask => self.vpermi2d(instr),
             Opcode::EvexVprordUdqIb | Opcode::EvexVprordUdqIbKmask => self.vprord(instr),
             Opcode::EvexVproldUdqIb | Opcode::EvexVproldUdqIbKmask => self.vprold(instr),
+
+            // EVEX AVX-512F integer instructions (avx512.rs handlers)
+            Opcode::EvexVmovdqu32VdqWdq | Opcode::EvexVmovdqu32VdqWdqKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu32_load_r(instr) }
+                else { self.evex_vmovdqu32_load_m(instr) }
+            }
+            Opcode::EvexVmovdqu32WdqVdq | Opcode::EvexVmovdqu32WdqVdqKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu32_store_r(instr) }
+                else { self.evex_vmovdqu32_store_m(instr) }
+            }
+            Opcode::EvexVmovdqu64VdqWdq | Opcode::EvexVmovdqu64VdqWdqKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu64_load_r(instr) }
+                else { self.evex_vmovdqu64_load_m(instr) }
+            }
+            Opcode::EvexVmovdqu64WdqVdq | Opcode::EvexVmovdqu64WdqVdqKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu64_store_r(instr) }
+                else { self.evex_vmovdqu64_store_m(instr) }
+            }
+            Opcode::EvexVmovdqa32VdqWdq | Opcode::EvexVmovdqa32VdqWdqKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu32_load_r(instr) }
+                else { self.evex_vmovdqu32_load_m(instr) }
+            }
+            Opcode::EvexVmovdqa32WdqVdq | Opcode::EvexVmovdqa32WdqVdqKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu32_store_r(instr) }
+                else { self.evex_vmovdqu32_store_m(instr) }
+            }
+            Opcode::EvexVmovdqa64VdqWdq | Opcode::EvexVmovdqa64VdqWdqKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu64_load_r(instr) }
+                else { self.evex_vmovdqu64_load_m(instr) }
+            }
+            Opcode::EvexVmovdqa64WdqVdq | Opcode::EvexVmovdqa64WdqVdqKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu64_store_r(instr) }
+                else { self.evex_vmovdqu64_store_m(instr) }
+            }
+            Opcode::EvexVpadddVdqHdqWdq | Opcode::EvexVpadddVdqHdqWdqKmask => self.evex_vpaddd(instr),
+            Opcode::EvexVpaddqVdqHdqWdq | Opcode::EvexVpaddqVdqHdqWdqKmask => self.evex_vpaddq(instr),
+            Opcode::EvexVpsubdVdqHdqWdq | Opcode::EvexVpsubdVdqHdqWdqKmask => self.evex_vpsubd(instr),
+            Opcode::EvexVpsubqVdqHdqWdq | Opcode::EvexVpsubqVdqHdqWdqKmask => self.evex_vpsubq(instr),
+            Opcode::EvexVpxordVdqHdqWdq | Opcode::EvexVpxordVdqHdqWdqKmask => self.evex_vpxord(instr),
+            Opcode::EvexVpxorqVdqHdqWdq | Opcode::EvexVpxorqVdqHdqWdqKmask => self.evex_vpxorq(instr),
+            Opcode::EvexVpordVdqHdqWdq | Opcode::EvexVpordVdqHdqWdqKmask => self.evex_vpord(instr),
+            Opcode::EvexVporqVdqHdqWdq | Opcode::EvexVporqVdqHdqWdqKmask => {
+                // VPORQ uses qword masking granularity but the bitwise OR operation is identical
+                self.evex_vpord(instr)
+            }
+            Opcode::EvexVpanddVdqHdqWdq | Opcode::EvexVpanddVdqHdqWdqKmask => self.evex_vpandd(instr),
+            Opcode::EvexVpandqVdqHdqWdq | Opcode::EvexVpandqVdqHdqWdqKmask => {
+                // VPANDQ uses qword masking granularity — same bitwise AND, different mask element size
+                self.evex_vpandd(instr)
+            }
+            Opcode::EvexVpandndVdqHdqWdq | Opcode::EvexVpandndVdqHdqWdqKmask => self.evex_vpandnd(instr),
+            Opcode::EvexVpandnqVdqHdqWdq | Opcode::EvexVpandnqVdqHdqWdqKmask => {
+                // VPANDNQ uses qword masking granularity
+                self.evex_vpandnd(instr)
+            }
+            Opcode::EvexVpbroadcastdVdqWd | Opcode::EvexVpbroadcastdVdqWdKmask => self.evex_vpbroadcastd(instr),
+            Opcode::EvexVpbroadcastqVdqWq | Opcode::EvexVpbroadcastqVdqWqKmask => self.evex_vpbroadcastq(instr),
+            Opcode::EvexVpbroadcastdVdqEd | Opcode::EvexVpbroadcastdVdqEdKmask => self.evex_vpbroadcastd_gpr(instr),
+            Opcode::EvexVpbroadcastqVdqEq | Opcode::EvexVpbroadcastqVdqEqKmask => self.evex_vpbroadcastq_gpr(instr),
+
             Opcode::V256Vinsertf128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vinserti128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vextracti128WdqVdqIb => self.vextracti128(instr),

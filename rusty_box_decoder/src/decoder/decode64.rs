@@ -911,6 +911,18 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         instr.opcode = lookup_opcode_64(b1, opcode_map, decmask, nnn);
     }
 
+    // EVEX opcode remapping: When EVEX prefix is present, try a direct EVEX
+    // opcode lookup before falling back to the SSE/VEX tables. EVEX instructions
+    // use distinct opcodes (e.g. VPXORD vs VPXOR) with per-element masking
+    // granularity determined by EVEX.W. If the EVEX lookup succeeds, use it
+    // directly — no SSE→VEX remapping needed.
+    if is_evex {
+        let w_bit = vex_w;
+        if let Some(evex_op) = lookup_evex_opcode(opcode_map, (b1 & 0xFF) as u8, sse_prefix, w_bit) {
+            instr.opcode = evex_op;
+        }
+    }
+
     // VEX SSE→VEX opcode remapping: When VEX prefix is present, the opcode table
     // may return an SSE opcode (e.g. PshufbVdqWdq) because SSE and VEX share the
     // same tables and SSE entries lack VEX attribute checks. SSE handlers are
@@ -980,6 +992,81 @@ const fn lookup_opcode_64(b1: u32, opcode_map: u8, decmask: u32, _nnn: u32) -> O
         }
     } else {
         Opcode::IaError
+    }
+}
+
+/// Look up EVEX-specific opcode from the opcode map, opcode byte, SSE prefix, and W bit.
+///
+/// EVEX instructions have distinct opcodes from SSE/VEX (e.g. VPXORD/VPXORQ vs VPXOR)
+/// because they support per-element masking with dword/qword granularity selected by EVEX.W.
+/// This lookup is called before the normal SSE/VEX table so that EVEX-encoded instructions
+/// get routed to the correct EVEX handlers in avx512.rs.
+///
+/// Returns `Some(opcode)` if a matching EVEX instruction is found, `None` otherwise.
+///
+/// `opcode_map`: 1=0F, 2=0F38, 3=0F3A
+/// `opcode`: the opcode byte within the map
+/// `sse_prefix`: 0=none, 1=66, 2=F3, 3=F2
+/// `w`: EVEX.W bit (0 or 1)
+const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -> Option<Opcode> {
+    match opcode_map {
+        1 => {
+            // Map 1 (0F xx)
+            match (opcode, sse_prefix, w) {
+                // VMOVDQU32/64 load — EVEX.F3.0F 6F
+                (0x6F, 2, 0) => Some(Opcode::EvexVmovdqu32VdqWdq),
+                (0x6F, 2, 1) => Some(Opcode::EvexVmovdqu64VdqWdq),
+                // VMOVDQU32/64 store — EVEX.F3.0F 7F
+                (0x7F, 2, 0) => Some(Opcode::EvexVmovdqu32WdqVdq),
+                (0x7F, 2, 1) => Some(Opcode::EvexVmovdqu64WdqVdq),
+                // VMOVDQA32/64 load — EVEX.66.0F 6F
+                (0x6F, 1, 0) => Some(Opcode::EvexVmovdqa32VdqWdq),
+                (0x6F, 1, 1) => Some(Opcode::EvexVmovdqa64VdqWdq),
+                // VMOVDQA32/64 store — EVEX.66.0F 7F
+                (0x7F, 1, 0) => Some(Opcode::EvexVmovdqa32WdqVdq),
+                (0x7F, 1, 1) => Some(Opcode::EvexVmovdqa64WdqVdq),
+                // VPADDD — EVEX.66.0F.W0 FE
+                (0xFE, 1, 0) => Some(Opcode::EvexVpadddVdqHdqWdq),
+                // VPADDQ — EVEX.66.0F.W1 D4
+                (0xD4, 1, 1) => Some(Opcode::EvexVpaddqVdqHdqWdq),
+                // VPSUBD — EVEX.66.0F.W0 FA
+                (0xFA, 1, 0) => Some(Opcode::EvexVpsubdVdqHdqWdq),
+                // VPSUBQ — EVEX.66.0F.W1 FB
+                (0xFB, 1, 1) => Some(Opcode::EvexVpsubqVdqHdqWdq),
+                // VPXORD — EVEX.66.0F.W0 EF
+                (0xEF, 1, 0) => Some(Opcode::EvexVpxordVdqHdqWdq),
+                // VPXORQ — EVEX.66.0F.W1 EF
+                (0xEF, 1, 1) => Some(Opcode::EvexVpxorqVdqHdqWdq),
+                // VPORD — EVEX.66.0F.W0 EB
+                (0xEB, 1, 0) => Some(Opcode::EvexVpordVdqHdqWdq),
+                // VPORQ — EVEX.66.0F.W1 EB
+                (0xEB, 1, 1) => Some(Opcode::EvexVporqVdqHdqWdq),
+                // VPANDD — EVEX.66.0F.W0 DB
+                (0xDB, 1, 0) => Some(Opcode::EvexVpanddVdqHdqWdq),
+                // VPANDQ — EVEX.66.0F.W1 DB
+                (0xDB, 1, 1) => Some(Opcode::EvexVpandqVdqHdqWdq),
+                // VPANDND — EVEX.66.0F.W0 DF
+                (0xDF, 1, 0) => Some(Opcode::EvexVpandndVdqHdqWdq),
+                // VPANDNQ — EVEX.66.0F.W1 DF
+                (0xDF, 1, 1) => Some(Opcode::EvexVpandnqVdqHdqWdq),
+                _ => None,
+            }
+        }
+        2 => {
+            // Map 2 (0F 38 xx)
+            match (opcode, sse_prefix, w) {
+                // VPBROADCASTD — EVEX.66.0F38.W0 58
+                (0x58, 1, 0) => Some(Opcode::EvexVpbroadcastdVdqWd),
+                // VPBROADCASTQ — EVEX.66.0F38.W1 59
+                (0x59, 1, 1) => Some(Opcode::EvexVpbroadcastqVdqWq),
+                // VPBROADCASTD from GPR — EVEX.66.0F38.W0 7C
+                (0x7C, 1, 0) => Some(Opcode::EvexVpbroadcastdVdqEd),
+                // VPBROADCASTQ from GPR — EVEX.66.0F38.W1 7C
+                (0x7C, 1, 1) => Some(Opcode::EvexVpbroadcastqVdqEq),
+                _ => None,
+            }
+        }
+        _ => None,
     }
 }
 
