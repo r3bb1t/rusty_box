@@ -175,13 +175,21 @@ impl BxCmosC {
         // Final: 0x06 = FPU + mouse port, no floppy, EGA/VGA
         self.ram[REG_EQUIPMENT as usize] = 0x06;
 
-        // Set a default time (2025-01-01 12:00:00)
-        // timeval = Unix timestamp for 2025-01-01 12:00:00 UTC
-        // 2025-01-01 00:00:00 = 1735689600, + 12*3600 = 1735732800
-        self.timeval = 1_735_732_800;
+        // Use current system time when available, else fall back to 2025-01-01 12:00:00
+        #[cfg(feature = "std")]
+        {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            self.timeval = SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(1_735_732_800);
+        }
+        #[cfg(not(feature = "std"))]
+        {
+            self.timeval = 1_735_732_800;
+        }
         self.update_clock();
-        self.ram[REG_CENTURY as usize] = 0x20; // 20xx
-        self.ram[REG_WEEK_DAY as usize] = 4; // Wednesday (1=Sunday in Bochs)
+        // Century and weekday are computed by update_clock() from timeval
 
         // Base memory: 640KB
         self.ram[0x15] = 0x80;

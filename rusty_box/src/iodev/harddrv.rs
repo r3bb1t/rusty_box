@@ -641,6 +641,33 @@ impl AtaDrive {
         false
     }
 
+    /// Read multiple consecutive CD-ROM blocks in one file I/O call.
+    /// Returns the number of blocks successfully read.
+    #[cfg(feature = "std")]
+    fn read_cdrom_blocks(&mut self, start_lba: u32, count: usize, buf: &mut [u8]) -> usize {
+        let offset = start_lba as u64 * CDROM_SECTOR_SIZE as u64;
+        let file = match self.cdrom_file.as_mut() {
+            Some(f) => f,
+            None => return 0,
+        };
+        if file.seek(SeekFrom::Start(offset)).is_err() {
+            return 0;
+        }
+        let total_bytes = count * CDROM_SECTOR_SIZE;
+        if buf.len() < total_bytes {
+            return 0;
+        }
+        match file.read_exact(&mut buf[..total_bytes]) {
+            Ok(()) => count,
+            Err(_) => 0,
+        }
+    }
+
+    #[cfg(not(feature = "std"))]
+    fn read_cdrom_blocks(&mut self, _start_lba: u32, _count: usize, _buf: &mut [u8]) -> usize {
+        0
+    }
+
     /// Fill the IDENTIFY PACKET DEVICE response (Bochs identify_ATAPI_drive, harddrv.cc:2946-3032)
     fn identify_atapi_drive(&mut self) {
         self.id_drive = [0u16; 256];
@@ -672,6 +699,9 @@ impl AtaDrive {
             self.id_drive[27 + i] = (hi << 8) | lo;
         }
 
+        // Word 48: Dword I/O support (Bochs harddrv.cc:2968)
+        self.id_drive[48] = 1;
+
         // Word 49: Capabilities — LBA supported
         self.id_drive[49] = 1 << 9;
 
@@ -684,8 +714,23 @@ impl AtaDrive {
         // Word 64: PIO modes supported — PIO mode 0
         self.id_drive[64] = 1;
 
-        // Word 65: Minimum PIO transfer cycle time
-        self.id_drive[65] = 0x02E8; // 746 ns
+        // Word 65: Minimum PIO cycle time without IORDY (Bochs: 0xB4 = 180ns)
+        self.id_drive[65] = 0x00B4;
+
+        // Word 66: Minimum PIO cycle time with IORDY (Bochs: 0xB4 = 180ns)
+        self.id_drive[66] = 0x00B4;
+
+        // Word 67: Minimum DMA cycle time (Bochs: 0x12C = 300ns)
+        self.id_drive[67] = 0x012C;
+
+        // Word 68: Minimum DMA cycle time with flow control (Bochs: 0xB4 = 180ns)
+        self.id_drive[68] = 0x00B4;
+
+        // Word 71: Packet-to-bus-release time (Bochs: 30µs)
+        self.id_drive[71] = 30;
+
+        // Word 72: Service-to-BSY-clear time (Bochs: 30µs)
+        self.id_drive[72] = 30;
 
         // Word 73: ATAPI byte count 0 limit
         self.id_drive[73] = 1; // number of bytes for ATAPI
@@ -1791,6 +1836,170 @@ impl BxHardDriveC {
             }
             _ => 0xFF,
         }
+    }
+
+    /// Bulk-read up to `buf.len()` bytes from the IDE data port.
+    ///
+    /// Equivalent to calling `read(port, 2)` in a loop but avoids per-word
+    /// handler dispatch overhead. Returns the number of bytes actually copied.
+    /// Handles ATAPI lazy-load, sector transitions, and DRQ completion.
+    pub fn bulk_read_data(&mut self, port: u16, buf: &mut [u8]) -> usize {
+        let channel_num = match self.port_to_channel(port) {
+            Some(c) => c,
+            None => return 0,
+        };
+
+        let selected = self.channels[channel_num].drive_select;
+        let drive = &mut self.channels[channel_num].drives[selected as usize];
+
+        if drive.device_type == DeviceType::None {
+            return 0;
+        }
+        if !drive.controller.status.contains(AtaStatus::DRQ) {
+            return 0;
+        }
+
+        let current_command = drive.controller.current_command;
+        let mut total_copied = 0;
+        let mut need_raise_irq = false;
+        let mut need_abort_cmd: Option<u8> = None;
+
+        while total_copied < buf.len() {
+            // ATAPI lazy-load: pre-fill buffer if exhausted
+            if current_command == ATA_CMD_PACKET
+                && drive.controller.buffer_index >= drive.controller.buffer_size
+            {
+                let atapi_cmd = drive.atapi.command;
+                match atapi_cmd {
+                    0x28 | 0xa8 | 0xbe => {
+                        if drive.cdrom.remaining_blocks > 0 {
+                            let buf_size = drive.controller.buffer_size;
+                            let next_lba = drive.cdrom.next_lba;
+                            let mut temp_buf = [0u8; 2352];
+                            if drive.read_cdrom_block(next_lba, &mut temp_buf) {
+                                drive.controller.buffer[..buf_size]
+                                    .copy_from_slice(&temp_buf[..buf_size]);
+                                drive.cdrom.next_lba += 1;
+                                drive.cdrom.remaining_blocks -= 1;
+                                drive.controller.buffer_index = 0;
+                            } else {
+                                break;
+                            }
+                        } else {
+                            break;
+                        }
+                    }
+                    _ => break,
+                }
+            }
+
+            // Copy available bytes from buffer
+            let available = drive.controller.buffer_size.saturating_sub(drive.controller.buffer_index);
+            if available == 0 {
+                break;
+            }
+            let wanted = buf.len() - total_copied;
+            let to_copy = available.min(wanted);
+
+            let idx = drive.controller.buffer_index;
+            buf[total_copied..total_copied + to_copy]
+                .copy_from_slice(&drive.controller.buffer[idx..idx + to_copy]);
+            drive.controller.buffer_index += to_copy;
+            drive.controller.drq_index += to_copy as u32;
+            total_copied += to_copy;
+
+            // Handle buffer drain
+            if drive.controller.buffer_index >= drive.controller.buffer_size {
+                match current_command {
+                    ATA_CMD_READ_SECTORS | 0x21 | ATA_CMD_READ_SECTORS_EXT | ATA_CMD_READ_MULTIPLE => {
+                        if current_command == ATA_CMD_READ_MULTIPLE {
+                            let ms = drive.controller.multiple_sectors as u32;
+                            if drive.controller.num_sectors > ms {
+                                drive.controller.buffer_size = ms as usize * SECTOR_SIZE;
+                            } else {
+                                drive.controller.buffer_size =
+                                    drive.controller.num_sectors as usize * SECTOR_SIZE;
+                            }
+                        }
+                        drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC;
+                        drive.controller.error = AtaError::empty();
+                        if drive.controller.num_sectors == 0 {
+                            // Transfer complete
+                            break;
+                        } else {
+                            drive.controller.status.insert(AtaStatus::DRQ);
+                            if drive.ide_read_sector() {
+                                drive.controller.buffer_index = 0;
+                                need_raise_irq = true;
+                            } else {
+                                need_abort_cmd = Some(current_command);
+                                break;
+                            }
+                        }
+                    }
+                    ATA_CMD_IDENTIFY | ATA_CMD_IDENTIFY_PACKET => {
+                        drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC;
+                        drive.controller.error = AtaError::empty();
+                        break;
+                    }
+                    ATA_CMD_PACKET => {
+                        let atapi_cmd = drive.atapi.command;
+                        match atapi_cmd {
+                            0x28 | 0xa8 | 0xbe => {
+                                if drive.cdrom.remaining_blocks > 0 {
+                                    // Next block will be loaded at top of loop
+                                }
+                                drive.controller.buffer_index = 0;
+                            }
+                            _ => {
+                                drive.controller.buffer_index = 0;
+                            }
+                        }
+                    }
+                    _ => {
+                        drive.controller.status.remove(AtaStatus::DRQ);
+                        break;
+                    }
+                }
+            }
+
+            // ATAPI DRQ cycle completion check
+            if current_command == ATA_CMD_PACKET
+                && drive.controller.drq_index >= drive.atapi.drq_bytes as u32
+            {
+                drive.controller.status.remove(AtaStatus::DRQ);
+                drive.controller.drq_index = 0;
+                drive.atapi.total_bytes_remaining -= drive.atapi.drq_bytes;
+                if drive.atapi.total_bytes_remaining > 0 {
+                    drive.controller.sector_count =
+                        (drive.controller.sector_count & 0xF8) | 0x02;
+                    drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::DRQ);
+                    drive.controller.status.remove(AtaStatus::BSY | AtaStatus::ERR);
+                    if drive.atapi.total_bytes_remaining < drive.controller.cylinder_no as i32 {
+                        drive.controller.cylinder_no =
+                            drive.atapi.total_bytes_remaining as u16;
+                    }
+                    drive.atapi.drq_bytes = drive.controller.cylinder_no as i32;
+                } else {
+                    drive.controller.sector_count =
+                        (drive.controller.sector_count & 0xF8) | 0x03;
+                    drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
+                    drive.controller.status.insert(AtaStatus::DRDY);
+                }
+                need_raise_irq = true;
+                // Stop after DRQ completion — caller should check status before continuing
+                break;
+            }
+        }
+
+        // Raise interrupt after drive borrow is released
+        if let Some(cmd) = need_abort_cmd {
+            self.command_aborted(channel_num, cmd);
+        } else if need_raise_irq {
+            self.raise_interrupt(channel_num);
+        }
+
+        total_copied
     }
 
     /// Write to ATA I/O port (Bochs `bx_hard_drive_c::write`, harddrv.cc:1157-2500+).

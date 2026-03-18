@@ -487,6 +487,40 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     fn rep_insw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
+        if ecx == 0 {
+            return Ok(());
+        }
+        let port = self.dx();
+
+        // Try bulk I/O for IDE data ports
+        if (port == 0x1F0 || port == 0x170) && !self.get_df() {
+            if self.allow_io(port, 2)? {
+                while ecx != 0 {
+                    // Read a chunk from the IDE buffer
+                    let chunk_words = (ecx as usize).min(1024);
+                    let chunk_bytes = chunk_words * 2;
+                    let mut tmp = [0u8; 2048];
+                    let got = self.bulk_port_in(port, &mut tmp[..chunk_bytes]);
+                    if got == 0 {
+                        break;
+                    }
+                    // Write to guest memory word-by-word
+                    let words_got = got / 2;
+                    let mut edi = self.edi();
+                    for i in 0..words_got {
+                        let val = u16::from_le_bytes([tmp[i * 2], tmp[i * 2 + 1]]);
+                        self.v_write_word(BxSegregs::Es, edi, val)?;
+                        edi = edi.wrapping_add(2);
+                    }
+                    self.set_rdi(edi as u64);
+                    ecx -= words_got as u32;
+                    self.set_ecx(ecx);
+                }
+                // Fall through to per-word path for any remainder
+            }
+        }
+
+        // Per-word fallback (handles DF=1, non-IDE ports, or remainder)
         while ecx != 0 {
             self.insw32(instr)?;
             ecx -= 1;
@@ -705,6 +739,37 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     fn rep_insw64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
+        if rcx == 0 {
+            return Ok(());
+        }
+        let port = self.dx();
+
+        // Try bulk I/O for IDE data ports
+        if (port == 0x1F0 || port == 0x170) && !self.get_df() {
+            if self.allow_io(port, 2)? {
+                while rcx != 0 {
+                    let chunk_words = (rcx as usize).min(1024);
+                    let chunk_bytes = chunk_words * 2;
+                    let mut tmp = [0u8; 2048];
+                    let got = self.bulk_port_in(port, &mut tmp[..chunk_bytes]);
+                    if got == 0 {
+                        break;
+                    }
+                    let words_got = got / 2;
+                    let mut rdi = self.rdi();
+                    for i in 0..words_got {
+                        let val = u16::from_le_bytes([tmp[i * 2], tmp[i * 2 + 1]]);
+                        self.write_virtual_word_64(BxSegregs::Es, rdi, val)?;
+                        rdi = rdi.wrapping_add(2);
+                    }
+                    self.set_rdi(rdi);
+                    rcx -= words_got as u64;
+                    self.set_rcx(rcx);
+                }
+            }
+        }
+
+        // Per-word fallback
         while rcx != 0 {
             self.insw64(instr)?;
             rcx -= 1;
@@ -858,6 +923,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ========================================================================
     // Port I/O helpers
     // ========================================================================
+
+    /// Bulk-read from an I/O port into `buf`.
+    /// Returns the number of bytes actually read. If the port doesn't support
+    /// bulk reads (or no IO bus is wired), returns 0.
+    fn bulk_port_in(&mut self, port: u16, buf: &mut [u8]) -> usize {
+        if let Some(mut io_bus) = self.io_bus {
+            let devices = unsafe { io_bus.as_mut() };
+            return devices.inp_bulk(port, buf);
+        }
+        0
+    }
 
     /// Read from I/O port.
     ///

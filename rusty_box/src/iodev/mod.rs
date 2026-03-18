@@ -295,6 +295,32 @@ impl BxDevicesC {
         self.default_write_handler(port, value, io_len);
     }
 
+    /// Bulk-read from an I/O port.
+    ///
+    /// For IDE data ports (0x1F0, 0x170), this copies up to `buf.len()` bytes
+    /// directly from the ATA controller buffer in one call, avoiding per-word
+    /// handler dispatch overhead. Returns the number of bytes actually read.
+    /// For other ports, returns 0 (caller should fall back to per-word I/O).
+    pub fn inp_bulk(&mut self, port: u16, buf: &mut [u8]) -> usize {
+        // Only optimize IDE data ports (base + 0 = data register)
+        if port != 0x1F0 && port != 0x170 {
+            return 0;
+        }
+        let entry = &self.read_handlers[port as usize];
+        if entry.handler.is_none() {
+            return 0;
+        }
+        // Get the HardDriveC pointer from the handler entry
+        let hd_ptr = entry.this_ptr;
+        if hd_ptr.is_null() {
+            return 0;
+        }
+        // SAFETY: this_ptr was set to &mut BxHardDriveC during handler registration
+        // and is only accessed in single-threaded emulator context.
+        let hd = unsafe { &mut *(hd_ptr as *mut harddrv::BxHardDriveC) };
+        hd.bulk_read_data(port, buf)
+    }
+
     /// Default read handler - returns 0xFFFFFFFF for unhandled ports
     fn default_read_handler(&self, address: u16, io_len: u8) -> u32 {
         // Bochs port 0xE9 hack (mirrors `cpp_orig/bochs/iodev/unmapped.cc` behavior when enabled):

@@ -1413,7 +1413,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         const MIPS_LOG_INTERVAL: u64 = 5_000_000;
         let mut last_port92_value: u8 = self.system_control.value;
 
-        const INSTRUCTION_BATCH_SIZE: u64 = 10000;
+        const INSTRUCTION_BATCH_SIZE: u64 = 100_000;
 
         tracing::info!("Starting interactive execution loop");
         tracing::debug!(
@@ -2166,8 +2166,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             }
                             // Efficient HLT: advance to next countdown event, capped at 100K ticks
                             // (~6.7ms at 15M IPS) to prevent huge tick_devices calls.
-                            // Max 3M ticks total per HLT batch (~200ms).
-                            while !self.has_interrupt() && hlt_ticks < 3_000_000 {
+                            // Max 10M ticks total per HLT batch (~667us at 15M IPS).
+                            // Increased from 3M to reduce HLT entry/exit overhead during
+                            // sustained I/O (e.g. ATAPI CD-ROM reads for modloop mount).
+                            while !self.has_interrupt() && hlt_ticks < 10_000_000 {
                                 // 1. Process pending LAPIC requests FIRST so timers are active
                                 #[cfg(feature = "bx_support_apic")]
                                 {

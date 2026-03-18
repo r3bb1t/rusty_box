@@ -248,18 +248,24 @@ impl BxPcSystemC {
         self.ticks_total += self.curr_countdown_period as u64;
 
         // Step 2: Scan all timers for fires and find next event
+        // Bochs pc_system.cc:349 uses `<=` (timeToFire <= ticksTotal), not `==`.
+        // With `==`, if ticks_total overshoots time_to_fire (countdown period > timer
+        // period), the timer is permanently missed. This was the root cause of LAPIC
+        // timer interrupts never firing during HLT.
         for i in 0..self.num_timers {
             triggered[i] = false;
             if self.timers[i].flags.contains(TimerFlags::ACTIVE) {
-                if self.ticks_total == self.timers[i].time_to_fire {
-                    // Timer is ready to fire
+                if self.ticks_total >= self.timers[i].time_to_fire {
+                    // Timer is ready to fire (may be overdue)
                     triggered[i] = true;
                     if !self.timers[i].flags.contains(TimerFlags::CONTINUOUS) {
                         // One-shot: deactivate
                         self.timers[i].flags.remove(TimerFlags::ACTIVE);
                     } else {
-                        // Continuous: advance time_to_fire by period
-                        self.timers[i].time_to_fire += self.timers[i].period;
+                        // Continuous: advance time_to_fire past ticks_total
+                        while self.timers[i].time_to_fire <= self.ticks_total {
+                            self.timers[i].time_to_fire += self.timers[i].period;
+                        }
                         if self.timers[i].time_to_fire < min_time_to_fire {
                             min_time_to_fire = self.timers[i].time_to_fire;
                         }
