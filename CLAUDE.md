@@ -16,13 +16,19 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-03-17):**
-- ✅ **DLX Linux boots to interactive bash shell!** Full boot: BIOS POST → LILO → kernel → init → `dlx login: root` → `dlx:~#` (200M instructions sufficient)
-- ✅ **Alpine Linux: BAD signature FIXED!** Packages install (28/28 installing). Fix: disabled AVX2+AVX-512 in CPUID (subtle 256-bit VEX instruction interaction bug, all individual handlers verified correct by 50+ audit agents). 128-bit AVX path produces correct SHA-1/SHA-256 hashes. BMI1/BMI2 remain enabled.
-- ✅ **Session 51: VBROADCAST instructions + AVX2 CPUID fix**:
-  - **VBROADCASTSS/SD/F128/I128** (4 instructions): Decoder tables + handlers + dispatcher. VBROADCASTI128 is load-128-bit-broadcast-to-both-YMM-lanes (used by OpenSSL SHA-1 AVX2). VBROADCASTSS/SD reuse vpbroadcastd/q handlers.
-  - **AVX2+AVX-512 CPUID disabled**: Removed AVX2, AVX512F/DQ/CD/BW/VL from CPUID leaf 7 EBX and ISA extensions. Forces OpenSSL to use 128-bit AVX SHA-1 path which works correctly. Root cause of 256-bit bug unknown — all individual handlers verified correct against Bochs, bug is in instruction interaction.
-  - **DLX regression**: PASS — boots to `dlx:~#`.
+**Current Status (2026-03-18):**
+- ✅ **DLX Linux boots to interactive bash shell!** Full boot: BIOS POST → LILO → kernel → init → `dlx login: root` → `dlx:~#` (250M instructions)
+- ✅ **Alpine Linux: OpenRC boots!** BAD signature FIXED. 28/28 packages install. OpenRC starts services, modloop mounting in progress. VGA screen shows OpenRC output.
+- ✅ **Session 52: Decoder VL clobber fix (ROOT CAUSE of BAD signature) + VGA screen clear + diagnostic cleanup**:
+  - **CRITICAL FIX: Decoder immediate parsing clobbered VEX VL** (`decode64.rs:799`, `decode32.rs:604`): `instr.immediate = byte_val as u32` overwrote the entire 32-bit `immediate` field, destroying VL (vector length) stored in byte 1 and VEX flags in byte 2. All VEX instructions with imm8 (VPALIGNR, VPBLENDD, VPSHUFD, VPSLLD/VPSRLD imm, VPSRLDQ/VPSLLDQ imm, etc.) had their VL silently clobbered to 0, causing 256-bit instructions to execute as 128-bit. Fix: write only byte 0 of `immediate` for non-sign-extended immediates, preserving bytes 1-3. This was THE root cause of the AVX2 SHA-1 hash bug — SHA-1 message schedule rotations (VPALIGNR, shift-by-immediate) operated on 128 bits instead of 256, producing wrong hash.
+  - **VGA screen clear fix** (`vga.rs`): CRTC Start Address High/Low (0x0C/0x0D) writes now set `text_buffer_update = true`. OpenRC screen clear now properly refreshes the VGA display.
+  - **AVX2 re-enabled in CPUID**: AVX2 bit restored in leaf 7 EBX + ISA extensions. No CPUID workarounds needed — the actual instruction bug is fixed.
+  - **Egui console order**: Changed to `console=ttyS0,115200 console=tty0` so VGA (tty0) is the primary console and shows OpenRC output.
+  - **Diagnostic cleanup**: Removed 20 `eprintln!` calls from 9 files (pic.rs, pit.rs, string.rs, serial.rs, soft_int.rs, event.rs, paging.rs, ioapic.rs, harddrv.rs). Remaining eprintlns are in dump_state() diagnostic functions (intentional).
+  - **Tracing level**: Changed from `release_max_level_error` to `release_max_level_warn` for better runtime diagnostics.
+  - **DLX default instructions**: Bumped from 135M to 250M (AVX2 CPUID adds XSAVE overhead per context switch).
+  - **DLX regression**: PASS — boots to `dlx login:` at 138M instructions.
+  - **Remaining disabled CPUID features**: AVX-512 (F/DQ/CD/BW/VL) — 512-bit instruction handlers not implemented. VMX — virtualization not implemented. These are legitimate feature gaps, not workarounds. Alpine adapts via CPUID.
 - ✅ **Session 49: VEX decoder architecture fix + VPALIGNR + VPBLENDD + comprehensive instruction audit**:
   - **CRITICAL FIX: SSE→VEX opcode remapping** (`decode64.rs`): Decoder shared opcode tables between SSE and VEX. ALL ~100 VEX 3-operand instructions matched SSE entries and dispatched to 2-operand handlers that **silently ignored VEX.vvvv**. Added `remap_sse_to_vex(op, vl)` function covering integer ALU, logical, multiply, compare, shifts, shuffles, unpacks, PALIGNR, loads, stores, PMOVMSKB.
   - **VPALIGNR VEX handler** (`avx.rs`): Per-lane aligned-right-shift, 128/256-bit. `result = [op1:op2] >> (imm8*8)`.
@@ -306,7 +312,7 @@ The kernel first enters HLT idle at **exactly instruction 132,865,700**. Key not
 ### Quick Debug Commands
 
 **Key instruction count milestones — use the minimum needed:**
-- `200_000_000` — full boot to `dlx login:` prompt (default). Takes ~8-10 seconds at ~20 MIPS.
+- `250_000_000` — full boot to `dlx login:` prompt (default). Takes ~9 seconds at ~27 MIPS.
 - `2_500_000_000` — Alpine boots to emergency shell (BAD signature, no packages installed). ~63 seconds at ~40 MIPS.
 - `132_865_710` — kernel first HLT threshold + 10; diagnostics print at run end. Use for ATA/IRQ debugging.
 - `2_000_000` — BIOS POST only (fast check, VGA text visible)

@@ -759,29 +759,9 @@ impl BxPitC {
         // This ensures the kernel's PIT-polling calibration loops see the counter decrement.
         self.sync_to_icount();
         match port {
-            PIT_COUNTER0 => {
-                let v = self.counters[0].read() as u32;
-                // Temporary diagnostic
-                static RD_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-                let rc = RD_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if rc < 20 || (rc < 200 && rc % 50 == 0) {
-                    eprintln!("[PIT-RD#{}] C0={} mode={} count={}", rc, v, self.counters[0].mode, self.counters[0].count);
-                }
-                v
-            }
+            PIT_COUNTER0 => self.counters[0].read() as u32,
             PIT_COUNTER1 => self.counters[1].read() as u32,
-            PIT_COUNTER2 => {
-                let v = self.counters[2].read() as u32;
-                static RD2_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-                let rc = RD2_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if rc < 30 || (rc < 300 && rc % 50 == 0) {
-                    eprintln!("[PIT-RD2#{}] C2={} mode={} count={} gate={} cw={} output={}", rc, v,
-                        self.counters[2].mode, self.counters[2].count,
-                        self.counters[2].gate, self.counters[2].count_written,
-                        self.counters[2].output);
-                }
-                v
-            }
+            PIT_COUNTER2 => self.counters[2].read() as u32,
             PIT_CONTROL => 0xFF, // Control port is write-only
             _ => {
                 tracing::warn!("PIT: Unknown read port {:#06x}", port);
@@ -793,12 +773,6 @@ impl BxPitC {
     /// Write to PIT I/O port
     pub fn write(&mut self, port: u16, value: u32, _io_len: u8) {
         let value = value as u8;
-        // Temporary diagnostic
-        static PIT_WR: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-        let wc = PIT_WR.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if wc < 30 || (wc < 300 && wc % 30 == 0) {
-            eprintln!("[PIT-WR#{}] port={:#06x} val={:#04x}", wc, port, value);
-        }
         match port {
             PIT_COUNTER0 => self.counters[0].write(value),
             PIT_COUNTER1 => self.counters[1].write(value),

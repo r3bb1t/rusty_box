@@ -501,14 +501,6 @@ impl BxSerialC {
             None => return 0xFF,
         };
         let offset = port & 0x07;
-        // Temporary diagnostic: track first serial reads
-        if port_idx == 0 {
-            static SER_RD: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-            let rc = SER_RD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if rc < 10 {
-                eprintln!("[SER-RD#{}] port={:#06x} offset={}", rc, port, offset);
-            }
-        }
 
         // Use direct indexing instead of a long-lived mutable borrow to allow
         // calling self.lower_interrupt() within branches.
@@ -754,7 +746,7 @@ impl BxSerialC {
                             if tc == 0 {
                                 // Store trigger flag for CPU to pick up
                                 MDEV_REGEX_TRIGGERED.store(true, core::sync::atomic::Ordering::Relaxed);
-                                eprintln!("[MDEV-REGEX-ERROR] 'bad r' detected at serial write — trigger instruction dump");
+                                tracing::debug!("[MDEV-REGEX-ERROR] 'bad r' detected at serial write — trigger instruction dump");
                             }
                         }
                     }

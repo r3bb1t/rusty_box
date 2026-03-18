@@ -702,6 +702,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     pub fn prepare_run(&mut self) {
         tracing::info!("Starting CPU execution at RIP={:#x}", self.cpu.rip());
 
+
+
         // Wire PIT icount sync so PIT counter reads advance with CPU time.
         // This is critical for kernel PIT-polling calibration loops (e.g., Alpine Linux).
         let ips = self.config.ips as u64;

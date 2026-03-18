@@ -601,11 +601,16 @@ pub const fn fetch_decode32_inplace(
                 //   dispatchers route *EdsIb opcodes to *EdId handlers that read id()
                 let needs_sign_ext = opcode_map == 0
                     && matches!(b1 as u8, 0x70..=0x7F | 0xE0..=0xE3 | 0xEB | 0x83 | 0x6A | 0x6B);
-                instr.immediate = if needs_sign_ext {
-                    byte_val as i8 as i32 as u32
+                if needs_sign_ext {
+                    // Sign-extended: overwrites full immediate (non-VEX branch/arith opcodes)
+                    instr.immediate = byte_val as i8 as i32 as u32;
                 } else {
-                    byte_val as u32
-                };
+                    // Write only byte 0, preserving bytes 1-3 (VL, VEX.W, VEX flags)
+                    // This is critical for VEX instructions with imm8 (VPALIGNR, VPBLENDD, etc.)
+                    let mut ib = instr.immediate.to_ne_bytes();
+                    ib[0] = byte_val;
+                    instr.immediate = u32::from_ne_bytes(ib);
+                }
                 pos += 1;
             }
             2 => {

@@ -131,14 +131,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 let pic = unsafe { &mut *self.pic_ptr };
                 if pic.has_interrupt() {
                     let vector = pic.iac();
-                    self.diag_hae_intr_delivered += 1;
-                    self.diag_iac_vectors[vector as usize] += 1;
-                    if self.diag_hae_intr_delivered <= 5 {
-                        eprintln!("IRQ-DELIVER #{}: vector={:#04x} RIP={:#x} CS={:#06x} mode={:?} IF={} icount={}",
-                            self.diag_hae_intr_delivered, vector, self.rip(), self.sregs[0].selector.value,
-                            self.cpu_mode, self.eflags.contains(super::eflags::EFlags::IF_),
-                            self.icount);
-                    }
                     tracing::debug!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
                         vector, self.rip(), self.sregs[0].selector.value,
                         self.cpu_mode, self.eflags.contains(super::eflags::EFlags::IF_));

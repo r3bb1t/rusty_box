@@ -986,6 +986,9 @@ impl BxVgaC {
                             (cursor_addr as usize / BYTES_PER_ROW),
                             (cursor_addr as usize % BYTES_PER_ROW) / BYTES_PER_CHAR,
                         );
+                    } else if self.crtc_index as usize == CRTC_START_ADDR_HIGH
+                           || self.crtc_index as usize == CRTC_START_ADDR_LOW {
+                        self.text_buffer_update = true;
                     }
                 }
             }

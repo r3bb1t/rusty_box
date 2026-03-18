@@ -3044,7 +3044,7 @@ impl BxHardDriveC {
         self.cmd_history.push((channel_num as u8, command, lba));
 
         if drive.device_type == DeviceType::None {
-            eprintln!("[ATA-DIAG] cmd {:#04x} to ch{} (empty) — dropped", command, channel_num);
+            tracing::debug!("[ATA-DIAG] cmd {:#04x} to ch{} (empty) — dropped", command, channel_num);
             return;
         }
 

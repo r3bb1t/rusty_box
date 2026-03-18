@@ -1376,12 +1376,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         };
 
-        // DIAGNOSTIC: log when page walk resolves to interesting physical pages
-        if ppf >= 0x1436000 && ppf < 0x1437000 && self.icount > 13_000_000 {
-            eprintln!("[TLB-POPULATE-1436] laddr={:#x} ppf={:#x} paddr={:#x} user={} is_write={} icount={} rip={:#x}",
-                laddr, ppf, paddr, user, is_write, self.icount, self.prev_rip);
-        }
-
         {
             let tlb_entry = self.dtlb.get_entry_of(laddr, 0);
             tlb_entry.lpf = lpf;

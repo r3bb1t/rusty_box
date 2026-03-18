@@ -796,12 +796,12 @@ impl BxIoApic {
 
     /// Dump IOAPIC state for HLT diagnostics.
     pub fn dump_hlt_state(&self) {
-        eprintln!("[HLT-STATE] IOAPIC: irr={:#010x} intin={:#010x}", self.irr, self.intin);
+        tracing::debug!("[HLT-STATE] IOAPIC: irr={:#010x} intin={:#010x}", self.irr, self.intin);
         for pin in 0..IOAPIC_NUM_PINS {
             let entry = &self.ioredtbl[pin];
             // Only show non-default entries (unmasked or configured)
             if !entry.is_masked() || entry.vector() != 0 {
-                eprintln!("[HLT-STATE]   pin {:2}: lo={:#010x} hi={:#010x} vec={:#04x} masked={} trigger={} deliv={}",
+                tracing::debug!("[HLT-STATE]   pin {:2}: lo={:#010x} hi={:#010x} vec={:#04x} masked={} trigger={} deliv={}",
                     pin, entry.get_lo_part(), entry.get_hi_part(), entry.vector(),
                     entry.is_masked(), entry.trigger_mode(), entry.delivery_mode());
             }
