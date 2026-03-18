@@ -1561,15 +1561,22 @@ impl BxHardDriveC {
                         0x28 | 0xa8 | 0xbe => {
                             if drive.cdrom.remaining_blocks > 0 {
                                 let next_lba = drive.cdrom.next_lba;
-                                let buf_size = drive.controller.buffer_size;
-                                let mut temp_buf = [0u8; 2352];
-                                if drive.read_cdrom_block(next_lba, &mut temp_buf) {
-                                    drive.controller.buffer[..buf_size]
-                                        .copy_from_slice(&temp_buf[..buf_size]);
-
-
-                                    drive.cdrom.next_lba += 1;
-                                    drive.cdrom.remaining_blocks -= 1;
+                                // Multi-sector pre-read: read up to 32 sectors in one
+                                // file I/O call to reduce syscalls (~32x fewer seeks).
+                                let max_blocks = 32usize.min(drive.cdrom.remaining_blocks as usize);
+                                // Heap-allocate temp buffer to avoid borrow checker issue
+                                // (read_cdrom_blocks needs &mut self + we need &mut buffer)
+                                let mut temp = vec![0u8; max_blocks * CDROM_SECTOR_SIZE];
+                                let sectors_read = drive.read_cdrom_blocks(
+                                    next_lba, max_blocks, &mut temp,
+                                );
+                                if sectors_read > 0 {
+                                    let total_bytes = sectors_read * CDROM_SECTOR_SIZE;
+                                    drive.controller.buffer[..total_bytes]
+                                        .copy_from_slice(&temp[..total_bytes]);
+                                    drive.controller.buffer_size = total_bytes;
+                                    drive.cdrom.next_lba += sectors_read as u32;
+                                    drive.cdrom.remaining_blocks -= sectors_read as i32;
                                     drive.controller.buffer_index = 0;
                                 } else {
                                     // Abort ATAPI transfer on read failure
@@ -1662,15 +1669,19 @@ impl BxHardDriveC {
                                 0x28 | 0xa8 | 0xbe => {
                                     if drive.cdrom.remaining_blocks > 0 {
                                         let next_lba = drive.cdrom.next_lba;
-                                        let buf_size = drive.controller.buffer_size;
-                                        let mut temp_buf = [0u8; 2352];
-                                        if drive.read_cdrom_block(next_lba, &mut temp_buf) {
-                                            drive.controller.buffer[..buf_size]
-                                                .copy_from_slice(&temp_buf[..buf_size]);
-
+                                        let max_blocks = 32usize.min(drive.cdrom.remaining_blocks as usize);
+                                        let mut temp = vec![0u8; max_blocks * CDROM_SECTOR_SIZE];
+                                        let sectors_read = drive.read_cdrom_blocks(
+                                            next_lba, max_blocks, &mut temp,
+                                        );
+                                        if sectors_read > 0 {
+                                            let total_bytes = sectors_read * CDROM_SECTOR_SIZE;
+                                            drive.controller.buffer[..total_bytes]
+                                                .copy_from_slice(&temp[..total_bytes]);
+                                            drive.controller.buffer_size = total_bytes;
+                                            drive.cdrom.next_lba += sectors_read as u32;
+                                            drive.cdrom.remaining_blocks -= sectors_read as i32;
                                         }
-                                        drive.cdrom.next_lba += 1;
-                                        drive.cdrom.remaining_blocks -= 1;
                                     }
                                     drive.controller.buffer_index = 0;
                                 }
@@ -1855,14 +1866,19 @@ impl BxHardDriveC {
                 match atapi_cmd {
                     0x28 | 0xa8 | 0xbe => {
                         if drive.cdrom.remaining_blocks > 0 {
-                            let buf_size = drive.controller.buffer_size;
                             let next_lba = drive.cdrom.next_lba;
-                            let mut temp_buf = [0u8; 2352];
-                            if drive.read_cdrom_block(next_lba, &mut temp_buf) {
-                                drive.controller.buffer[..buf_size]
-                                    .copy_from_slice(&temp_buf[..buf_size]);
-                                drive.cdrom.next_lba += 1;
-                                drive.cdrom.remaining_blocks -= 1;
+                            let max_blocks = 32usize.min(drive.cdrom.remaining_blocks as usize);
+                            let mut temp = vec![0u8; max_blocks * CDROM_SECTOR_SIZE];
+                            let sectors_read = drive.read_cdrom_blocks(
+                                next_lba, max_blocks, &mut temp,
+                            );
+                            if sectors_read > 0 {
+                                let total_bytes = sectors_read * CDROM_SECTOR_SIZE;
+                                drive.controller.buffer[..total_bytes]
+                                    .copy_from_slice(&temp[..total_bytes]);
+                                drive.controller.buffer_size = total_bytes;
+                                drive.cdrom.next_lba += sectors_read as u32;
+                                drive.cdrom.remaining_blocks -= sectors_read as i32;
                                 drive.controller.buffer_index = 0;
                             } else {
                                 break;
