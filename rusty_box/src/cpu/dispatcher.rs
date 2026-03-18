@@ -3002,6 +3002,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Unpack
             Opcode::EvexVpunpckldqVdqHdqWdq | Opcode::EvexVpunpckldqVdqHdqWdqKmask => self.evex_vpunpckldq(instr),
             Opcode::EvexVpunpckhdqVdqHdqWdq | Opcode::EvexVpunpckhdqVdqHdqWdqKmask => self.evex_vpunpckhdq(instr),
+            Opcode::EvexVpunpcklqdqVdqHdqWdq | Opcode::EvexVpunpcklqdqVdqHdqWdqKmask => self.evex_vpunpcklqdq(instr),
+            Opcode::EvexVpunpckhqdqVdqHdqWdq | Opcode::EvexVpunpckhqdqVdqHdqWdqKmask => self.evex_vpunpckhqdq(instr),
+            Opcode::EvexVpblendmdVdqHdqWdq => self.evex_vpblendmd(instr),
+            Opcode::EvexVpblendmqVdqHdqWdq => self.evex_vpblendmq(instr),
+            Opcode::EvexVpabsdVdqWdq | Opcode::EvexVpabsdVdqWdqKmask => self.evex_vpabsd(instr),
+            Opcode::EvexVpabsqVdqWdq | Opcode::EvexVpabsqVdqWdqKmask => self.evex_vpabsq(instr),
+            Opcode::EvexVpslldqUdqIb => self.evex_vpslldq(instr),
+            Opcode::EvexVpsrldqUdqIb => self.evex_vpsrldq(instr),
             // VMOVUPS/VMOVUPD/VMOVAPS/VMOVAPD (EVEX) — all reuse VMOVDQU32 handlers
             Opcode::EvexVmovupsVpsWps | Opcode::EvexVmovupsVpsWpsKmask
             | Opcode::EvexVmovapsVpsWps | Opcode::EvexVmovapsVpsWpsKmask => {
