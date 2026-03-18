@@ -2136,4 +2136,151 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } }
         self.bx_write_opmask(instr.dst() as usize, result); Ok(())
     }
+
+    // ========================================================================
+    // Packed FP arithmetic (EVEX) — VADD/SUB/MUL/DIV/MAX/MIN/SQRT PS/PD
+    // ========================================================================
+
+    /// Helper: read src2 as packed f32 from register or memory
+    fn read_evex_src2_ps(&mut self, instr: &Instruction, ne: usize) -> super::Result<BxPackedZmmRegister> {
+        if instr.mod_c0() { Ok(read_zmm(self, instr.src2())) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { unsafe { t.zmm32u[i] = self.v_read_dword(seg, la + (i*4) as u64)?; } } Ok(t)
+        }
+    }
+    fn read_evex_src2_pd(&mut self, instr: &Instruction, ne: usize) -> super::Result<BxPackedZmmRegister> {
+        if instr.mod_c0() { Ok(read_zmm(self, instr.src2())) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { let lo = self.v_read_dword(seg, la+(i*8) as u64)? as u64; let hi = self.v_read_dword(seg, la+(i*8+4) as u64)? as u64; unsafe { t.zmm64u[i] = lo|(hi<<32); } } Ok(t)
+        }
+    }
+
+    pub fn evex_vaddps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl(); let ne = dword_elements(vl);
+        let s1 = read_zmm(self, instr.src1()); let s2 = self.read_evex_src2_ps(instr, ne)?;
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm32f[i] = s1.zmm32f[i] + s2.zmm32f[i]; } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+    pub fn evex_vaddpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl(); let ne = qword_elements(vl);
+        let s1 = read_zmm(self, instr.src1()); let s2 = self.read_evex_src2_pd(instr, ne)?;
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm64f[i] = s1.zmm64f[i] + s2.zmm64f[i]; } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+    pub fn evex_vsubps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl(); let ne = dword_elements(vl);
+        let s1 = read_zmm(self, instr.src1()); let s2 = self.read_evex_src2_ps(instr, ne)?;
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm32f[i] = s1.zmm32f[i] - s2.zmm32f[i]; } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+    pub fn evex_vsubpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl(); let ne = qword_elements(vl);
+        let s1 = read_zmm(self, instr.src1()); let s2 = self.read_evex_src2_pd(instr, ne)?;
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm64f[i] = s1.zmm64f[i] - s2.zmm64f[i]; } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+    pub fn evex_vmulps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl(); let ne = dword_elements(vl);
+        let s1 = read_zmm(self, instr.src1()); let s2 = self.read_evex_src2_ps(instr, ne)?;
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm32f[i] = s1.zmm32f[i] * s2.zmm32f[i]; } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+    pub fn evex_vmulpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl(); let ne = qword_elements(vl);
+        let s1 = read_zmm(self, instr.src1()); let s2 = self.read_evex_src2_pd(instr, ne)?;
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm64f[i] = s1.zmm64f[i] * s2.zmm64f[i]; } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+    pub fn evex_vdivps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl(); let ne = dword_elements(vl);
+        let s1 = read_zmm(self, instr.src1()); let s2 = self.read_evex_src2_ps(instr, ne)?;
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm32f[i] = s1.zmm32f[i] / s2.zmm32f[i]; } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+    pub fn evex_vdivpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl(); let ne = qword_elements(vl);
+        let s1 = read_zmm(self, instr.src1()); let s2 = self.read_evex_src2_pd(instr, ne)?;
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm64f[i] = s1.zmm64f[i] / s2.zmm64f[i]; } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+    // x86 MAX: if either NaN, return src2
+    fn x86_maxf32(a: f32, b: f32) -> f32 { if a.is_nan() || b.is_nan() { b } else if a > b { a } else { b } }
+    fn x86_maxf64(a: f64, b: f64) -> f64 { if a.is_nan() || b.is_nan() { b } else if a > b { a } else { b } }
+    fn x86_minf32(a: f32, b: f32) -> f32 { if a.is_nan() || b.is_nan() { b } else if a < b { a } else { b } }
+    fn x86_minf64(a: f64, b: f64) -> f64 { if a.is_nan() || b.is_nan() { b } else if a < b { a } else { b } }
+
+    pub fn evex_vmaxps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl(); let ne = dword_elements(vl);
+        let s1 = read_zmm(self, instr.src1()); let s2 = self.read_evex_src2_ps(instr, ne)?;
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm32f[i] = Self::x86_maxf32(s1.zmm32f[i], s2.zmm32f[i]); } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+    pub fn evex_vmaxpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl(); let ne = qword_elements(vl);
+        let s1 = read_zmm(self, instr.src1()); let s2 = self.read_evex_src2_pd(instr, ne)?;
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm64f[i] = Self::x86_maxf64(s1.zmm64f[i], s2.zmm64f[i]); } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+    pub fn evex_vminps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl(); let ne = dword_elements(vl);
+        let s1 = read_zmm(self, instr.src1()); let s2 = self.read_evex_src2_ps(instr, ne)?;
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm32f[i] = Self::x86_minf32(s1.zmm32f[i], s2.zmm32f[i]); } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+    pub fn evex_vminpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl(); let ne = qword_elements(vl);
+        let s1 = read_zmm(self, instr.src1()); let s2 = self.read_evex_src2_pd(instr, ne)?;
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm64f[i] = Self::x86_minf64(s1.zmm64f[i], s2.zmm64f[i]); } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+    pub fn evex_vsqrtps(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl(); let ne = dword_elements(vl);
+        let src = if instr.mod_c0() { read_zmm(self, instr.src()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { unsafe { t.zmm32u[i] = self.v_read_dword(seg, la + (i*4) as u64)?; } } t
+        };
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm32f[i] = src.zmm32f[i].sqrt(); } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
+    pub fn evex_vsqrtpd(&mut self, instr: &Instruction) -> super::Result<()> {
+        let vl = instr.get_vl(); let ne = qword_elements(vl);
+        let src = if instr.mod_c0() { read_zmm(self, instr.src()) } else {
+            let mut t = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let la = self.resolve_addr(instr); let seg = BxSegregs::from(instr.seg());
+            for i in 0..ne { let lo = self.v_read_dword(seg, la+(i*8) as u64)? as u64; let hi = self.v_read_dword(seg, la+(i*8+4) as u64)? as u64; unsafe { t.zmm64u[i] = lo|(hi<<32); } } t
+        };
+        let mut r = BxPackedZmmRegister { zmm64u: [0; 8] };
+        unsafe { for i in 0..ne { r.zmm64f[i] = src.zmm64f[i].sqrt(); } }
+        let m = read_opmask_for_write(self, instr); let z = instr.is_zero_masking() != 0;
+        write_zmm_masked_q(self, instr.dst(), &r, m, z, vl); Ok(())
+    }
 }
