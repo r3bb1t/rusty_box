@@ -2235,6 +2235,114 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 self.cpu.signal_event(1 << 2); // BX_EVENT_PENDING_LAPIC_INTR
                             }
 
+                            // TIGHT HLT-ISR LOOP: Process HLT→interrupt→ISR→HLT cycles
+                            // without returning to the full main loop. This avoids the
+                            // ~2ms per-iteration overhead that throttles HLT phases to 1 MIPS.
+                            // Includes tick_devices() for ATA/IOAPIC interrupt routing.
+                            // Breaks every 100ms for GUI updates.
+                            let hlt_fast_start = std::time::Instant::now();
+                            while self.has_interrupt()
+                                && instructions_executed < max_instructions
+                                && hlt_fast_start.elapsed().as_millis() < 100
+                            {
+                                // Process ISR
+                                let isr_result = unsafe {
+                                    let mem_extended: &'a mut BxMemC<'a> =
+                                        core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory);
+                                    let io_ptr = core::ptr::NonNull::from(&mut self.devices);
+                                    self.cpu.cpu_loop_n_with_io(mem_extended, &[], 10_000, io_ptr)
+                                };
+                                let isr_executed = match isr_result {
+                                    Ok(n) => n,
+                                    Err(_) => break,
+                                };
+                                instructions_executed += isr_executed;
+
+                                // Full device ticking (PIT, CMOS, ATA IRQ routing, serial, ACPI)
+                                let isr_usec = (isr_executed * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
+                                self.tick_devices(isr_usec);
+                                self.pc_system.tickn(isr_executed as u32);
+
+                                // Process LAPIC timer
+                                #[cfg(feature = "bx_support_apic")]
+                                {
+                                    let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
+                                    if lapic.timer_fired {
+                                        lapic.timer_fired = false;
+                                        lapic.periodic(self.pc_system.time_ticks());
+                                        lapic.diag_timer_fires += 1;
+                                    }
+                                    if let Some(period) = lapic.timer_activate_request.take() {
+                                        if let Some(h) = lapic.timer_handle {
+                                            let _ = self.pc_system.activate_timer(h, period, false);
+                                        }
+                                        lapic.set_ticks_initial(self.pc_system.time_ticks());
+                                    }
+                                    if lapic.timer_deactivate_request {
+                                        lapic.timer_deactivate_request = false;
+                                        if let Some(h) = lapic.timer_handle {
+                                            let _ = self.pc_system.deactivate_timer(h);
+                                        }
+                                    }
+                                    if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
+                                        self.device_manager.ioapic.receive_eoi(eoi_vec);
+                                    }
+                                }
+
+                                // If CPU isn't back in HLT, return to main loop
+                                if !matches!(self.cpu.activity_state,
+                                    crate::cpu::cpu::CpuActivityState::Hlt
+                                    | crate::cpu::cpu::CpuActivityState::Mwait
+                                    | crate::cpu::cpu::CpuActivityState::MwaitIf)
+                                {
+                                    break;
+                                }
+
+                                // Mini HLT: advance to next timer event
+                                let mut inner_ticks = 0u64;
+                                while !self.has_interrupt() && inner_ticks < 10_000_000 {
+                                    #[cfg(feature = "bx_support_apic")]
+                                    {
+                                        let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
+                                        if lapic.timer_fired {
+                                            lapic.timer_fired = false;
+                                            lapic.periodic(self.pc_system.time_ticks());
+                                            lapic.diag_timer_fires += 1;
+                                        }
+                                        if lapic.timer_deactivate_request {
+                                            lapic.timer_deactivate_request = false;
+                                            if let Some(h) = lapic.timer_handle {
+                                                let _ = self.pc_system.deactivate_timer(h);
+                                            }
+                                        }
+                                        if let Some(period) = lapic.timer_activate_request.take() {
+                                            if let Some(h) = lapic.timer_handle {
+                                                let _ = self.pc_system.activate_timer(h, period, false);
+                                            }
+                                            lapic.set_ticks_initial(self.pc_system.time_ticks());
+                                        }
+                                        if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
+                                            self.device_manager.ioapic.receive_eoi(eoi_vec);
+                                        }
+                                        if lapic.intr {
+                                            self.cpu.signal_event(1 << 2);
+                                            break;
+                                        }
+                                    }
+                                    let step = self.pc_system.get_num_ticks_left_next_event()
+                                        .max(1).min(100_000);
+                                    self.pc_system.tickn(step);
+                                    inner_ticks += step as u64;
+                                    let dev_usec = (step as u64 * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
+                                    self.tick_devices(dev_usec);
+                                }
+                                self.cpu.icount += inner_ticks;
+                                #[cfg(feature = "bx_support_apic")]
+                                if self.cpu.lapic_has_intr() {
+                                    self.cpu.signal_event(1 << 2);
+                                }
+                            }
+
                             // Optional: sync to real time if GUI is active
                             if hlt_sync {
                                 if let Some(start) = hlt_real_start {
