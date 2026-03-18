@@ -104,48 +104,38 @@ fn write_zmm_masked_q<I: BxCpuIdTrait>(
 /// Round f32 according to imm8[1:0] rounding mode.
 /// 0 = nearest even, 1 = floor, 2 = ceil, 3 = truncate
 #[inline]
-fn round_f32(val: f32, mode: u8) -> f32 {
-    match mode & 0x3 {
-        0 => {
-            // Round to nearest even: Rust's f32::round() rounds half-away-from-zero,
-            // so use the banker's rounding approach.
-            let rounded = val.round();
-            // Check half-integer case: if fract == 0.5, round to even
-            if (val - val.floor()).abs() == 0.5 {
-                let floor = val.floor();
-                let ceil = val.ceil();
-                if (floor as i64) % 2 == 0 { floor } else { ceil }
-            } else {
-                rounded
-            }
-        }
-        1 => val.floor(),
-        2 => val.ceil(),
-        3 => val.trunc(),
-        _ => unreachable!(),
-    }
+/// Round f32 with scale support (Bochs f32_roundToInt).
+/// `mode`: rounding mode (0=nearest-even, 1=floor, 2=ceil, 3=trunc).
+/// `scale`: number of fraction bits to preserve (imm8[7:4]).
+/// Rounds to nearest multiple of 2^(-scale).
+fn round_f32(val: f32, mode: u8, scale: u8) -> f32 {
+    if val.is_nan() || val.is_infinite() { return val; }
+    // Scale factor: multiply by 2^scale, round to int, divide by 2^scale
+    let factor = (2.0f32).powi(scale as i32);
+    let scaled = val * factor;
+    let rounded = match mode & 0x3 {
+        0 => scaled.round_ties_even(),
+        1 => scaled.floor(),
+        2 => scaled.ceil(),
+        _ => scaled.trunc(),
+    };
+    rounded / factor
 }
 
 /// Round f64 according to imm8[1:0] rounding mode.
 /// 0 = nearest even, 1 = floor, 2 = ceil, 3 = truncate
 #[inline]
-fn round_f64(val: f64, mode: u8) -> f64 {
-    match mode & 0x3 {
-        0 => {
-            let rounded = val.round();
-            if (val - val.floor()).abs() == 0.5 {
-                let floor = val.floor();
-                let ceil = val.ceil();
-                if (floor as i64) % 2 == 0 { floor } else { ceil }
-            } else {
-                rounded
-            }
-        }
-        1 => val.floor(),
-        2 => val.ceil(),
-        3 => val.trunc(),
-        _ => unreachable!(),
-    }
+fn round_f64(val: f64, mode: u8, scale: u8) -> f64 {
+    if val.is_nan() || val.is_infinite() { return val; }
+    let factor = (2.0f64).powi(scale as i32);
+    let scaled = val * factor;
+    let rounded = match mode & 0x3 {
+        0 => scaled.round_ties_even(),
+        1 => scaled.floor(),
+        2 => scaled.ceil(),
+        _ => scaled.trunc(),
+    };
+    rounded / factor
 }
 
 // ============================================================================
@@ -223,11 +213,18 @@ fn scalef_f32(src1: f32, src2: f32) -> f32 {
     if src2.is_nan() || src1.is_nan() {
         return f32::NAN;
     }
+    // Bochs: inf * 2^(-inf) = NaN (invalid), 0 * 2^(+inf) = NaN (invalid)
+    if src1.is_infinite() && src2.is_infinite() && src2.is_sign_negative() {
+        return f32::NAN; // inf * 2^(-inf)
+    }
+    if src1 == 0.0 && src2.is_infinite() && src2.is_sign_positive() {
+        return f32::NAN; // 0 * 2^(+inf)
+    }
     if src1.is_infinite() {
-        return src1; // inf * 2^n = inf (with same sign)
+        return src1;
     }
     if src1 == 0.0 {
-        return src1; // 0 * 2^n = 0 (with same sign)
+        return src1;
     }
     let n = src2.floor();
     // Clamp exponent to prevent overflow in powi
@@ -245,6 +242,12 @@ fn scalef_f32(src1: f32, src2: f32) -> f32 {
 #[inline]
 fn scalef_f64(src1: f64, src2: f64) -> f64 {
     if src2.is_nan() || src1.is_nan() {
+        return f64::NAN;
+    }
+    if src1.is_infinite() && src2.is_infinite() && src2.is_sign_negative() {
+        return f64::NAN;
+    }
+    if src1 == 0.0 && src2.is_infinite() && src2.is_sign_positive() {
         return f64::NAN;
     }
     if src1.is_infinite() {
@@ -376,11 +379,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = dword_elements(vl);
         let src = self.read_src_ps(instr, nelements)?;
         let imm8 = instr.ib();
-        let rc = imm8 & 0x3; // rounding control from bits [1:0]
+        // imm8[1:0] = rounding mode, imm8[2] = RC source (0=imm, 1=MXCSR)
+        // imm8[3] = suppress inexact, imm8[7:4] = scale (fraction bits)
+        let rc = if (imm8 & 0x04) != 0 { 0 } else { imm8 & 0x03 }; // TODO: read MXCSR.RC when bit2=1
+        let scale = (imm8 >> 4) & 0x0F;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                result.zmm32f[i] = round_f32(src.zmm32f[i], rc);
+                result.zmm32f[i] = round_f32(src.zmm32f[i], rc, scale);
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -399,11 +405,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = qword_elements(vl);
         let src = self.read_src_pd(instr, nelements)?;
         let imm8 = instr.ib();
-        let rc = imm8 & 0x3;
+        let rc = if (imm8 & 0x04) != 0 { 0 } else { imm8 & 0x03 };
+        let scale = (imm8 >> 4) & 0x0F;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                result.zmm64f[i] = round_f64(src.zmm64f[i], rc);
+                result.zmm64f[i] = round_f64(src.zmm64f[i], rc, scale);
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -421,8 +428,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn evex_vrndscaless(&mut self, instr: &Instruction) -> super::Result<()> {
         let src_val = self.read_scalar_ss(instr)?;
         let imm8 = instr.ib();
-        let rc = imm8 & 0x3;
-        let rounded = round_f32(src_val, rc);
+        let rc = if (imm8 & 0x04) != 0 { 0 } else { imm8 & 0x03 };
+        let scale = (imm8 >> 4) & 0x0F;
+        let rounded = round_f32(src_val, rc, scale);
 
         // Start with src1 (vvvv) to preserve upper elements
         let mut result = read_zmm(self, instr.src1());
@@ -460,8 +468,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn evex_vrndscalesd(&mut self, instr: &Instruction) -> super::Result<()> {
         let src_val = self.read_scalar_sd(instr)?;
         let imm8 = instr.ib();
-        let rc = imm8 & 0x3;
-        let rounded = round_f64(src_val, rc);
+        let rc = if (imm8 & 0x04) != 0 { 0 } else { imm8 & 0x03 };
+        let scale = (imm8 >> 4) & 0x0F;
+        let rounded = round_f64(src_val, rc, scale);
 
         let mut result = read_zmm(self, instr.src1());
         unsafe {
@@ -590,11 +599,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = dword_elements(vl);
         let src = self.read_src_ps(instr, nelements)?;
         let imm8 = instr.ib();
-        let interval = imm8 & 0x3;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                result.zmm32f[i] = getmant_f32(src.zmm32f[i], interval);
+                result.zmm32f[i] = getmant_f32(src.zmm32f[i], imm8);
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -613,11 +621,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = qword_elements(vl);
         let src = self.read_src_pd(instr, nelements)?;
         let imm8 = instr.ib();
-        let interval = imm8 & 0x3;
         let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
         unsafe {
             for i in 0..nelements {
-                result.zmm64f[i] = getmant_f64(src.zmm64f[i], interval);
+                result.zmm64f[i] = getmant_f64(src.zmm64f[i], imm8);
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -639,118 +646,107 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 ///   3: [0.75, 1.5) — adjust based on mantissa magnitude
 /// Simplified implementation: handles intervals 0 and 2 exactly; 1 and 3 approximate.
 #[inline]
-fn getmant_f32(val: f32, interval: u8) -> f32 {
+/// Get mantissa of f32 (Bochs f32_getMant).
+/// `imm8[1:0]` = interval, `imm8[3:2]` = sign_ctrl.
+/// sign_ctrl: bit 0 = force positive when set, bit 1 = NaN on negative input.
+fn getmant_f32(val: f32, imm8: u8) -> f32 {
+    let interval = imm8 & 0x03;
+    let sign_ctrl = (imm8 >> 2) & 0x03;
     let bits = val.to_bits();
-    let sign = bits & 0x8000_0000;
+    let sign_bit = bits & 0x8000_0000;
+    let is_negative = sign_bit != 0;
     let exp_field = (bits >> 23) & 0xFF;
     let mantissa = bits & 0x007F_FFFF;
 
-    // Special cases
-    if exp_field == 0xFF {
-        // Inf -> 1.0 (with sign), NaN -> NaN
-        if mantissa == 0 {
-            return f32::from_bits(sign | 0x3F80_0000); // +/- 1.0
-        } else {
-            return f32::NAN;
-        }
-    }
-    if exp_field == 0 && mantissa == 0 {
-        // Zero -> zero (with sign)
-        return val;
-    }
+    // Output sign: if sign_ctrl bit 0 set, force positive
+    let out_sign = if (sign_ctrl & 1) != 0 { 0u32 } else { sign_bit };
 
-    match interval {
-        0 | 1 => {
-            // [1, 2): set exponent to 127 (biased), keep mantissa bits
-            if exp_field == 0 {
-                // Denormal: normalize first
-                let normalized = val.abs();
-                let nbits = normalized.to_bits();
-                let nmant = nbits & 0x007F_FFFF;
-                f32::from_bits(sign | (127 << 23) | nmant)
-            } else {
-                f32::from_bits(sign | (127 << 23) | mantissa)
-            }
-        }
-        2 => {
-            // (0.5, 1]: set exponent to 126, keep mantissa
-            if exp_field == 0 {
-                let normalized = val.abs();
-                let nbits = normalized.to_bits();
-                let nmant = nbits & 0x007F_FFFF;
-                f32::from_bits(sign | (126 << 23) | nmant)
-            } else {
-                f32::from_bits(sign | (126 << 23) | mantissa)
-            }
-        }
-        3 | _ => {
-            // [0.75, 1.5): if mantissa >= 0.5 (bit 22 set), use [0.5,1) form (exp=126),
-            // otherwise use [1,2) form (exp=127)
-            let target_exp = if (mantissa & 0x0040_0000) != 0 { 126u32 } else { 127u32 };
-            if exp_field == 0 {
-                let normalized = val.abs();
-                let nbits = normalized.to_bits();
-                let nmant = nbits & 0x007F_FFFF;
-                f32::from_bits(sign | (target_exp << 23) | nmant)
-            } else {
-                f32::from_bits(sign | (target_exp << 23) | mantissa)
-            }
-        }
+    // NaN
+    if exp_field == 0xFF && mantissa != 0 { return f32::NAN; }
+    // Infinity: negative inf with sign_ctrl bit 1 → NaN
+    if exp_field == 0xFF && mantissa == 0 {
+        if is_negative && (sign_ctrl & 2) != 0 { return f32::NAN; }
+        return f32::from_bits(out_sign | 0x3F80_0000); // 1.0 with output sign
     }
+    // Zero → 1.0 with output sign (Bochs: packToF32UI(~sign_ctrl & signA, 0x7F, 0))
+    if exp_field == 0 && mantissa == 0 {
+        return f32::from_bits(out_sign | 0x3F80_0000);
+    }
+    // Negative input with sign_ctrl bit 1 → NaN
+    if is_negative && (sign_ctrl & 2) != 0 { return f32::NAN; }
+
+    // Get normalized exponent and mantissa
+    let (norm_exp, norm_mant) = if exp_field == 0 {
+        // Denormal: normalize
+        let shift = mantissa.leading_zeros() - 8; // leading zeros in 23-bit field
+        let normalized_mant = (mantissa << shift) & 0x007F_FFFF;
+        let norm_exp = 1u32.wrapping_sub(shift); // unbiased exponent
+        (norm_exp, normalized_mant)
+    } else {
+        (exp_field, mantissa)
+    };
+
+    // Select target exponent based on interval
+    let target_exp = match interval {
+        0 => 127u32, // [1, 2)
+        1 => {
+            // [1/2, 2): Bochs: expA -= 0x7F; expA = 0x7F - (expA & 0x1)
+            let unbiased = norm_exp.wrapping_sub(127);
+            127 - (unbiased & 1)
+        }
+        2 => 126, // [0.5, 1)
+        _ => {
+            // [3/4, 3/2): Bochs: expA = 0x7F - ((sigA >> 22) & 0x1)
+            if (norm_mant & 0x0040_0000) != 0 { 126 } else { 127 }
+        }
+    };
+
+    f32::from_bits(out_sign | (target_exp << 23) | norm_mant)
 }
 
 /// Get normalized mantissa of f64.
 #[inline]
-fn getmant_f64(val: f64, interval: u8) -> f64 {
+fn getmant_f64(val: f64, imm8: u8) -> f64 {
+    let interval = imm8 & 0x03;
+    let sign_ctrl = (imm8 >> 2) & 0x03;
     let bits = val.to_bits();
-    let sign = bits & 0x8000_0000_0000_0000;
+    let sign_bit = bits & 0x8000_0000_0000_0000;
+    let is_negative = sign_bit != 0;
     let exp_field = (bits >> 52) & 0x7FF;
     let mantissa = bits & 0x000F_FFFF_FFFF_FFFF;
 
-    if exp_field == 0x7FF {
-        if mantissa == 0 {
-            return f64::from_bits(sign | 0x3FF0_0000_0000_0000); // +/- 1.0
-        } else {
-            return f64::NAN;
-        }
+    let out_sign = if (sign_ctrl & 1) != 0 { 0u64 } else { sign_bit };
+
+    if exp_field == 0x7FF && mantissa != 0 { return f64::NAN; }
+    if exp_field == 0x7FF && mantissa == 0 {
+        if is_negative && (sign_ctrl & 2) != 0 { return f64::NAN; }
+        return f64::from_bits(out_sign | 0x3FF0_0000_0000_0000);
     }
     if exp_field == 0 && mantissa == 0 {
-        return val;
+        return f64::from_bits(out_sign | 0x3FF0_0000_0000_0000);
     }
+    if is_negative && (sign_ctrl & 2) != 0 { return f64::NAN; }
 
-    match interval {
-        0 | 1 => {
-            // [1, 2): exponent = 1023
-            if exp_field == 0 {
-                let normalized = val.abs();
-                let nbits = normalized.to_bits();
-                let nmant = nbits & 0x000F_FFFF_FFFF_FFFF;
-                f64::from_bits(sign | (1023u64 << 52) | nmant)
-            } else {
-                f64::from_bits(sign | (1023u64 << 52) | mantissa)
-            }
+    let (norm_exp, norm_mant) = if exp_field == 0 {
+        let shift = mantissa.leading_zeros() - 11;
+        let normalized_mant = (mantissa << shift) & 0x000F_FFFF_FFFF_FFFF;
+        let norm_exp = 1u64.wrapping_sub(shift as u64);
+        (norm_exp, normalized_mant)
+    } else {
+        (exp_field, mantissa)
+    };
+
+    let target_exp = match interval {
+        0 => 1023u64,
+        1 => {
+            let unbiased = norm_exp.wrapping_sub(1023);
+            1023 - (unbiased & 1)
         }
-        2 => {
-            // (0.5, 1]: exponent = 1022
-            if exp_field == 0 {
-                let normalized = val.abs();
-                let nbits = normalized.to_bits();
-                let nmant = nbits & 0x000F_FFFF_FFFF_FFFF;
-                f64::from_bits(sign | (1022u64 << 52) | nmant)
-            } else {
-                f64::from_bits(sign | (1022u64 << 52) | mantissa)
-            }
+        2 => 1022,
+        _ => {
+            if (norm_mant & 0x0008_0000_0000_0000) != 0 { 1022 } else { 1023 }
         }
-        3 | _ => {
-            let target_exp = if (mantissa & 0x0008_0000_0000_0000) != 0 { 1022u64 } else { 1023u64 };
-            if exp_field == 0 {
-                let normalized = val.abs();
-                let nbits = normalized.to_bits();
-                let nmant = nbits & 0x000F_FFFF_FFFF_FFFF;
-                f64::from_bits(sign | (target_exp << 52) | nmant)
-            } else {
-                f64::from_bits(sign | (target_exp << 52) | mantissa)
-            }
-        }
-    }
+    };
+
+    f64::from_bits(out_sign | (target_exp << 52) | norm_mant)
 }
