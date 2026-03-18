@@ -2976,6 +2976,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Opcode::EvexVpsrlqUdqIb | Opcode::EvexVpsrlqUdqIbKmask => self.evex_vpsrlq_imm(instr),
             Opcode::EvexVpsradUdqIb | Opcode::EvexVpsradUdqIbKmask => self.evex_vpsrad_imm(instr),
             Opcode::EvexVpsraqUdqIb | Opcode::EvexVpsraqUdqIbKmask => self.evex_vpsraq_imm(instr),
+            // Shift by XMM register
+            Opcode::EvexVpslldVdqHdqWdq | Opcode::EvexVpslldVdqHdqWdqKmask => self.evex_vpslld_reg(instr),
+            Opcode::EvexVpsllqVdqHdqWdq | Opcode::EvexVpsllqVdqHdqWdqKmask => self.evex_vpsllq_reg(instr),
+            Opcode::EvexVpsrldVdqHdqWdq | Opcode::EvexVpsrldVdqHdqWdqKmask => self.evex_vpsrld_reg(instr),
+            Opcode::EvexVpsrlqVdqHdqWdq | Opcode::EvexVpsrlqVdqHdqWdqKmask => self.evex_vpsrlq_reg(instr),
+            Opcode::EvexVpsradVdqHdqWdq | Opcode::EvexVpsradVdqHdqWdqKmask => self.evex_vpsrad_reg(instr),
+            Opcode::EvexVpsraqVdqHdqWdq | Opcode::EvexVpsraqVdqHdqWdqKmask => self.evex_vpsraq_reg(instr),
+            // Packed compare → opmask
+            Opcode::EvexVpcmpdKgwHdqWdqIb => self.evex_vpcmpd(instr),
+            Opcode::EvexVpcmpudKgwHdqWdqIb => self.evex_vpcmpud(instr),
+            // Multiply / Min / Max
+            Opcode::EvexVpmulldVdqHdqWdq | Opcode::EvexVpmulldVdqHdqWdqKmask => self.evex_vpmulld(instr),
+            Opcode::EvexVpminsdVdqHdqWdq | Opcode::EvexVpminsdVdqHdqWdqKmask => self.evex_vpminsd(instr),
+            Opcode::EvexVpmaxsdVdqHdqWdq | Opcode::EvexVpmaxsdVdqHdqWdqKmask => self.evex_vpmaxsd(instr),
 
             Opcode::V256Vinsertf128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
             Opcode::V256Vinserti128VdqHdqWdqIb => self.vinsert_f128_i128(instr),

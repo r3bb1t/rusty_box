@@ -1051,6 +1051,13 @@ const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -
                 (0xDF, 1, 1) => Some(Opcode::EvexVpandnqVdqHdqWdq),
                 // VPSHUFD — EVEX.66.0F.W0 70
                 (0x70, 1, 0) => Some(Opcode::EvexVpshufdVdqWdqIb),
+                // Shift by XMM register
+                (0xF2, 1, 0) => Some(Opcode::EvexVpslldVdqHdqWdq),  // VPSLLD
+                (0xF3, 1, 1) => Some(Opcode::EvexVpsllqVdqHdqWdq),  // VPSLLQ
+                (0xD2, 1, 0) => Some(Opcode::EvexVpsrldVdqHdqWdq),  // VPSRLD
+                (0xD3, 1, 1) => Some(Opcode::EvexVpsrlqVdqHdqWdq),  // VPSRLQ
+                (0xE2, 1, 0) => Some(Opcode::EvexVpsradVdqHdqWdq),  // VPSRAD
+                (0xE2, 1, 1) => Some(Opcode::EvexVpsraqVdqHdqWdq),  // VPSRAQ
                 _ => None,
             }
         }
@@ -1067,6 +1074,12 @@ const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -
                 (0x7C, 1, 1) => Some(Opcode::EvexVpbroadcastqVdqEq),
                 // VPSHUFB — EVEX.66.0F38.W0 00
                 (0x00, 1, 0) => Some(Opcode::EvexVpshufbVdqHdqWdq),
+                // VPMULLD — EVEX.66.0F38.W0 40
+                (0x40, 1, 0) => Some(Opcode::EvexVpmulldVdqHdqWdq),
+                // VPMINSD — EVEX.66.0F38.W0 39
+                (0x39, 1, 0) => Some(Opcode::EvexVpminsdVdqHdqWdq),
+                // VPMAXSD — EVEX.66.0F38.W0 3D
+                (0x3D, 1, 0) => Some(Opcode::EvexVpmaxsdVdqHdqWdq),
                 _ => None,
             }
         }
@@ -1085,6 +1098,10 @@ const fn lookup_evex_opcode(opcode_map: u8, opcode: u8, sse_prefix: u8, w: u8) -
                 (0x39, 1, 0) => Some(Opcode::EvexVextracti32x4WdqVdqIb),
                 // VEXTRACTF32x4 — EVEX.66.0F3A.W0 19
                 (0x19, 1, 0) => Some(Opcode::EvexVextractf32x4WpsVpsIb),
+                // VPCMPD — EVEX.66.0F3A.W0 1F
+                (0x1F, 1, 0) => Some(Opcode::EvexVpcmpdKgwHdqWdqIb),
+                // VPCMPUD — EVEX.66.0F3A.W0 1E
+                (0x1E, 1, 0) => Some(Opcode::EvexVpcmpudKgwHdqWdqIb),
                 _ => None,
             }
         }
