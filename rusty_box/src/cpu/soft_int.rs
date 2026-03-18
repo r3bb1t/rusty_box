@@ -1056,8 +1056,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         self.xcr0.get32() | (self.msr.ia32_xss as u32),
                     );
                     ecx = self.ia32_xss_suppmask;
-                } else if sub_function >= 2 && sub_function < 19 {
-                    // Per-component sub-leaves: check if component is supported
+                } else if sub_function >= 2 && sub_function < Self::XSAVE_COMPONENTS.len() as u32 {
+                    // Per-component sub-leaves (Bochs cpuid.cc:254-282):
+                    // EAX = size, EBX = offset, ECX = flags, EDX = 0
                     let support_mask = self.xcr0_suppmask | self.ia32_xss_suppmask;
                     if support_mask & (1 << sub_function) == 0 {
                         eax = 0;
@@ -1065,9 +1066,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         ecx = 0;
                         edx = 0;
                     } else {
+                        let (size, offset) = Self::XSAVE_COMPONENTS[sub_function as usize];
+                        eax = size;
+                        ebx = offset;
                         // ECX bit 0: managed via IA32_XSS (not XCR0)
+                        // Bochs cpuid.cc:275: ecx = (ia32_xss_suppmask & (1 << subfunction)) != 0
                         ecx = u32::from(self.ia32_xss_suppmask & (1 << sub_function) != 0);
+                        edx = 0;
                     }
+                } else if sub_function >= Self::XSAVE_COMPONENTS.len() as u32 && sub_function < 19 {
+                    eax = 0;
+                    ebx = 0;
+                    ecx = 0;
+                    edx = 0;
                 }
             }
             0x80000001 => {
