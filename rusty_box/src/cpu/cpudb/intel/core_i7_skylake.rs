@@ -255,16 +255,16 @@ const LEAF7_EBX_BASE: CpuIdStd7Ebx = CpuIdStd7Ebx::FSGSBASE
     .union(CpuIdStd7Ebx::ERMS)             // extra
     .union(CpuIdStd7Ebx::INVPCID)
     .union(CpuIdStd7Ebx::DEPRECATE_FCS_FDS)
-    // .union(CpuIdStd7Ebx::AVX512F)   // disabled: 512-bit handlers not implemented
-    // .union(CpuIdStd7Ebx::AVX512DQ)  // disabled: 512-bit handlers not implemented
+    .union(CpuIdStd7Ebx::AVX512F)    // enabled: foundation handlers + opmask implemented
+    // .union(CpuIdStd7Ebx::AVX512DQ)  // disabled: DQ-specific handlers not implemented
     .union(CpuIdStd7Ebx::RDSEED)
     .union(CpuIdStd7Ebx::ADX)
     .union(CpuIdStd7Ebx::SMAP)
     .union(CpuIdStd7Ebx::CLFLUSHOPT)
-    .union(CpuIdStd7Ebx::CLWB);
-    // .union(CpuIdStd7Ebx::AVX512CD)  // disabled: 512-bit handlers not implemented
-    // .union(CpuIdStd7Ebx::AVX512BW)  // disabled: 512-bit handlers not implemented
-    // .union(CpuIdStd7Ebx::AVX512VL)  // disabled: 512-bit handlers not implemented
+    .union(CpuIdStd7Ebx::CLWB)
+    // .union(CpuIdStd7Ebx::AVX512CD)  // disabled: CD-specific handlers not implemented
+    // .union(CpuIdStd7Ebx::AVX512BW)  // disabled: BW-specific handlers not implemented
+    .union(CpuIdStd7Ebx::AVX512VL);   // enabled: EVEX 128/256 with opmask
 
 /// Extended leaf 0x80000001 ECX:
 ///   LAHF_SAHF | LZCNT | PREFETCHW
@@ -391,10 +391,10 @@ impl BxCpuIdTrait for Corei7SkylakeX {
         enable_extension(&mut b, X86Feature::IsaAdx);
         enable_extension(&mut b, X86Feature::IsaSmap);
         enable_extension(&mut b, X86Feature::IsaFdpDeprecation);
-        // enable_extension(&mut b, X86Feature::IsaAvx512);   // disabled: 512-bit handlers not implemented
-        // enable_extension(&mut b, X86Feature::IsaAvx512Dq);  // disabled: 512-bit handlers not implemented
-        // enable_extension(&mut b, X86Feature::IsaAvx512Cd);  // disabled: 512-bit handlers not implemented
-        // enable_extension(&mut b, X86Feature::IsaAvx512Bw);  // disabled: 512-bit handlers not implemented
+        enable_extension(&mut b, X86Feature::IsaAvx512);    // foundation handlers implemented
+        // enable_extension(&mut b, X86Feature::IsaAvx512Dq);  // disabled: DQ handlers not implemented
+        // enable_extension(&mut b, X86Feature::IsaAvx512Cd);  // disabled: CD handlers not implemented
+        // enable_extension(&mut b, X86Feature::IsaAvx512Bw);  // disabled: BW handlers not implemented
         enable_extension(&mut b, X86Feature::IsaClflushopt);
         enable_extension(&mut b, X86Feature::IsaClwb);
         b
