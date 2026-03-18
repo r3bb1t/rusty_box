@@ -9,6 +9,7 @@ pub(super) mod arith32;
 pub(super) mod arith64;
 pub(super) mod arith8;
 pub(super) mod avx;
+pub(super) mod avx512_mask;
 pub(super) mod bcd;
 pub(super) mod bit;
 pub(super) mod bit16;
