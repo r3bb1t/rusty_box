@@ -16,9 +16,27 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-03-18):**
+**Current Status (2026-03-19):**
 - ✅ **DLX Linux boots to interactive bash shell!** Full boot: BIOS POST → LILO → kernel → init → `dlx login: root` → `dlx:~#` (250M instructions)
 - ✅ **Alpine Linux: OpenRC boots!** 28/28 packages install. OpenRC starts services, modloop mounting in progress. VGA screen shows OpenRC output.
+- ✅ **Session 55: Modloop stall diagnostics + HLT Bochs parity + ATA DRQ fix + BIOS boot in egui**:
+  - **HLT loop IF check** (`emulator.rs`): Changed `!self.has_interrupt()` to `!(self.has_interrupt() && self.cpu.interrupts_enabled())` matching Bochs `handleWaitForEvent` (event.cc:40-116). When IF=0, loop continues advancing virtual time instead of exiting. Applied to both headless and egui HLT loops. Inner LAPIC break also checks IF.
+  - **ATA DRQ completion fix** (`harddrv.rs`): Post-loop DRQ completion check in `bulk_read_data()`. When lazy-load breaks early (`remaining_blocks==0`), the in-loop DRQ check was skipped — final completion interrupt never fired. Matches Bochs harddrv.cc:986-1020.
+  - **IOAPIC pin 15 diagnostic** (`emulator.rs`): STUCK detector shows both pin 14 (primary IDE) and pin 15 (secondary IDE/CD-ROM) state + ATAPI command count.
+  - **Headless Alpine fix** (`alpine_direct.rs`): Removed `n==0` break that caused premature exit at 1.67B instructions. HLT+IF=0 uses warn-only counter (no break), matching egui behavior.
+  - **Full BIOS boot in egui** (`gui/rusty_box_egui.rs`): Auto-detects Alpine ISO in workspace root/parent/cwd. Defaults to BIOS boot. Full chain: BIOS POST → ISOLINUX 6.04 → `boot:` prompt → kernel → OpenRC → packages install OK → modloop mounting.
+  - **Enter key timing** (`alpine.rs`): Fixed from 2M to 18M instructions (after ISOLINUX boot prompt appears).
+  - **DLX regression**: PASS. **Alpine BIOS boot**: 28/28 packages OK, OpenRC boots, modloop mounting at ~4 MIPS.
+  - **Remaining**: Modloop mount slow (~4 MIPS) due to per-dword PIO. REP INSD bulk fast path attempted but caused data corruption (reverted). Needs correct implementation.
+- ✅ **Session 54: Port ALL Bochs performance speedups — exact code structure match**:
+  - **RULE: All optimizations must match Bochs source code exactly** — no inventions, no structural deviations. Thin wrappers delegate to shared `read_linear_*`/`read_RMW_linear_*` functions matching Bochs `access.h` + `access2.cc`.
+  - **S1: REP INSW direct host memory** (`io.rs`): `rep_insw32/64` bulk path resolves destination to host pointer via `get_host_write_ptr` (Bochs `v2h_write_byte`), then `copy_nonoverlapping`. Falls back to per-word on TLB miss.
+  - **S2: FastRep string ops** (`string.rs`): All REP MOVS/STOS variants (byte/word/dword/qword, 32/64-bit) have fast paths using `get_host_read_ptr`/`get_host_write_ptr` (Bochs `v2h_read_byte`/`v2h_write_byte` + `FastRepMOVSB`/`FastRepSTOSB` in `faststring.cc`). Capped by page boundary. DF=0 only.
+  - **S3: HLT tight loop** (`emulator.rs`): Removed 10M tick cap. Loop runs until interrupt, matching Bochs `handleWaitForEvent` `while(1)` + `BX_TICKN(10)` in `event.cc:40-116`.
+  - **S4+S5: TLB fast paths for 64-bit access** (`access.rs`): Added inline TLB fast paths to all `read/write_virtual_byte/word/dword/qword_64` functions, matching Bochs `read/write_linear_*` in `access2.cc`. Also `read_rmw_linear_byte/word/dword/qword` shared functions with TLB fast paths.
+  - **S5b: 64-bit RMW thin wrappers** (`access.rs`): `read_rmw_virtual_byte/word/dword/qword_64` are now thin wrappers (`get_laddr64` + canonical check + delegate to `read_rmw_linear_*`), matching Bochs `access.h:370-396`.
+  - **`get_host_write_ptr`/`get_host_read_ptr`** (`access.rs`): Matches Bochs `v2h_write_byte`/`v2h_read_byte` in `access.cc:734-771`. Returns host pointer + bytes remaining in page.
+  - **DLX regression**: PASS. **Alpine**: 28/28 packages, OpenRC boots, modloop mounting.
 - ✅ **Session 53: Timer fix + ATAPI bulk I/O + AVX-512 Foundation (320 handlers) + VMX stubs**:
   - **CRITICAL FIX: Timer fire check `==` → `>=`** (`pc_system.rs:254`): ROOT CAUSE of Alpine stalling in HLT. Bochs uses `<=`. Our `==` permanently missed timers when countdown period overshot time_to_fire.
   - **ATAPI REP INSW bulk I/O** (`io.rs`, `harddrv.rs`, `mod.rs`): ~100-1000x speedup on CD-ROM reads.

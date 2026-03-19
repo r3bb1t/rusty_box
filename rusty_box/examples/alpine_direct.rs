@@ -277,12 +277,10 @@ fn run_alpine_direct() -> Result<()> {
         match emu.run_interactive(run_for) {
             Ok(n) => {
                 total_executed += n;
-                if n == 0 {
-                    let (act, ae) = emu.cpu_diag_state();
-                    eprintln!("[EXIT] run_interactive returned 0 at total={} RIP={:#x} activity={} async_event={} IF={}",
-                        total_executed, emu.cpu.rip(), act, ae, emu.cpu.interrupts_enabled());
-                    break;
-                }
+                // Don't break on n==0 — the CPU may be in HLT with IF=0 transiently
+                // (e.g. kernel CLI/HLT before init scripts). The emulator's HLT loop
+                // advances virtual time; eventually the CPU wakes (timer/NMI).
+                // This matches egui behavior which never exits on zero-batch.
             }
             Err(e) => {
                 eprintln!("CPU error at {} instructions: {:?}", total_executed, e);

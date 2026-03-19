@@ -750,8 +750,8 @@ fn run_alpine() -> Result<()> {
             last_rip = rip;
 
             // Inject Enter at boot prompt to unblock ISOLINUX idle loop
-            // Inject early (at 2M) so the key is in BIOS buffer before idle loop starts
-            if total_executed >= 2_000_000 && !enter_injected {
+            // ISOLINUX boot prompt appears at ~17M instructions; inject after that
+            if total_executed >= 18_000_000 && !enter_injected {
                 println!("[{}M] Injecting Enter key to boot prompt", total_executed / 1_000_000);
                 for &sc in ENTER_SCANCODE {
                     emu.send_scancode(sc);

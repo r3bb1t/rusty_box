@@ -370,6 +370,7 @@ pub enum Asc {
     IllegalOpcode = 0x20,
     LogicalBlockOor = 0x21,
     InvFieldInCmdPacket = 0x24,
+    MediumMayHaveChanged = 0x28,
     MediumNotPresent = 0x3a,
 }
 
@@ -474,6 +475,9 @@ pub struct AtaDrive {
     pub(crate) atapi: AtapiState,
     /// CD-ROM state
     pub(crate) cdrom: CdromState,
+    /// Media status_changed state machine (Bochs harddrv.h:258)
+    /// 0 = no change, 1 = newly inserted (tray open sim), -1 = tray close sim
+    pub(crate) status_changed: i32,
     /// IDENTIFY PACKET DEVICE response buffer
     pub(crate) id_drive: [u16; 256],
     /// Whether identify_atapi_drive() has been called
@@ -503,6 +507,7 @@ impl AtaDrive {
             sense: SenseInfo::default(),
             atapi: AtapiState::default(),
             cdrom: CdromState::default(),
+            status_changed: 0,
             id_drive: [0u16; 256],
             identify_set: false,
             device_num: 0,
@@ -528,6 +533,7 @@ impl AtaDrive {
             sense: SenseInfo::default(),
             atapi: AtapiState::default(),
             cdrom: CdromState::default(),
+            status_changed: 0,
             id_drive: [0u16; 256],
             identify_set: false,
             device_num: 0,
@@ -553,6 +559,7 @@ impl AtaDrive {
             sense: SenseInfo::default(),
             atapi: AtapiState::default(),
             cdrom: CdromState::default(),
+            status_changed: 0,
             id_drive: [0u16; 256],
             identify_set: false,
             device_num: 0,
@@ -580,6 +587,9 @@ impl AtaDrive {
         self.cdrom.max_lba = max_lba.saturating_sub(1);
         self.cdrom.curr_lba = 0;
         self.cdrom_file = Some(file);
+        // Bochs cdrom_status_handler (harddrv.cc:3871) sets status_changed=1
+        // when media is inserted, so kernel sees a media-change event on first probe
+        self.status_changed = 1;
         Ok(())
     }
 
@@ -1266,18 +1276,9 @@ impl AtaChannel {
 pub struct BxHardDriveC {
     /// ATA channels
     pub(crate) channels: [AtaChannel; 2],
-    /// IRQ14 needs to be raised at the PIC (fallback for non-immediate path)
-    pub(crate) irq14_needs_raise: bool,
-    /// IRQ15 needs to be raised at the PIC (fallback)
-    pub(crate) irq15_needs_raise: bool,
-    /// IRQ14 needs to be lowered at the PIC (fallback)
-    pub(crate) irq14_needs_lower: bool,
-    /// IRQ15 needs to be lowered at the PIC (fallback)
-    pub(crate) irq15_needs_lower: bool,
-    /// Raw pointer to PIC for IMMEDIATE raise/lower (matching Bochs
+    /// Raw pointer to PIC for immediate raise/lower (matching Bochs
     /// DEV_pic_raise_irq / DEV_pic_lower_irq calls in harddrv.cc).
-    /// When set, raise_interrupt() and status-read lower bypass the deferred
-    /// needs_raise/needs_lower flags and call pic.raise_irq/lower_irq directly.
+    /// PIC now forwards to IOAPIC synchronously (Bochs pic.cc:499-500).
     pub(crate) pic_ptr: *mut super::pic::BxPicC,
     /// Diagnostic: total read() calls
     pub(crate) read_count: u64,
@@ -1293,15 +1294,8 @@ pub struct BxHardDriveC {
     pub(crate) diag_ch0_reads: u64,
     /// Diagnostic: ATA reads on channel 1 (CD-ROM)
     pub(crate) diag_ch1_reads: u64,
-}
-
-impl BxHardDriveC {
-    /// Check if any ATA channel has pending I/O (IRQ raise/lower pending or busy status).
-    /// Used to skip HLT real-time sync during I/O-heavy phases.
-    pub fn has_pending_io(&self) -> bool {
-        self.irq14_needs_raise || self.irq15_needs_raise
-            || self.irq14_needs_lower || self.irq15_needs_lower
-    }
+    /// Diagnostic: total ATAPI commands dispatched
+    pub(crate) diag_atapi_cmd_count: u64,
 }
 
 impl Default for BxHardDriveC {
@@ -1318,10 +1312,6 @@ impl BxHardDriveC {
                 AtaChannel::new(0x1F0, 0x3F0, 14), // Primary
                 AtaChannel::new(0x170, 0x370, 15), // Secondary
             ],
-            irq14_needs_raise: false,
-            irq15_needs_raise: false,
-            irq14_needs_lower: false,
-            irq15_needs_lower: false,
             pic_ptr: core::ptr::null_mut(),
             read_count: 0,
             write_count: 0,
@@ -1329,6 +1319,7 @@ impl BxHardDriveC {
             diag_irq14_lower_count: 0,
             diag_ch0_reads: 0,
             diag_ch1_reads: 0,
+            diag_atapi_cmd_count: 0,
             cmd_history: Vec::new(),
         }
     }
@@ -1357,10 +1348,6 @@ impl BxHardDriveC {
             }
             channel.drive_select = 0;
         }
-        self.irq14_needs_raise = false;
-        self.irq15_needs_raise = false;
-        self.irq14_needs_lower = false;
-        self.irq15_needs_lower = false;
     }
 
     /// Attach a disk image to a drive (requires std feature)
@@ -1450,16 +1437,10 @@ impl BxHardDriveC {
                 _ => 15u8,
             };
             if !self.pic_ptr.is_null() {
-                // Bochs harddrv.cc:3511: just DEV_pic_raise_irq(irq) — no lower first.
+                // Bochs harddrv.cc:3511: DEV_pic_raise_irq(irq)
+                // PIC forwards to IOAPIC synchronously (Bochs pic.cc:499-500).
                 let pic = unsafe { &mut *self.pic_ptr };
                 pic.raise_irq(irq);
-            }
-            // Always set the deferred flag so update_irq_lines_with_ioapic()
-            // can forward to the IOAPIC. In APIC mode the PIC's IRQ may be
-            // masked, so the IOAPIC is the only path to the CPU.
-            match channel_num {
-                0 => self.irq14_needs_raise = true,
-                _ => self.irq15_needs_raise = true,
             }
             if irq == 14 {
                 self.diag_irq14_raise_count += 1;
@@ -1801,17 +1782,9 @@ impl BxHardDriveC {
                         _ => 15u8,
                     };
                     if !self.pic_ptr.is_null() {
-                        // IMMEDIATE PIC lower — matches Bochs DEV_pic_lower_irq()
+                        // Bochs DEV_pic_lower_irq() — PIC forwards to IOAPIC synchronously.
                         let pic = unsafe { &mut *self.pic_ptr };
                         pic.lower_irq(irq);
-                    }
-                    // Always set deferred lower for IOAPIC routing.
-                    // In APIC mode, Bochs DEV_pic_lower_irq() lowers BOTH PIC and IOAPIC.
-                    // Without this, the IOAPIC line stays HIGH after the first interrupt,
-                    // and subsequent raise_interrupt calls see no edge transition → lost IRQs.
-                    match channel_num {
-                        0 => self.irq14_needs_lower = true,
-                        _ => self.irq15_needs_lower = true,
                     }
                     if irq == 14 {
                         self.diag_irq14_lower_count += 1;
@@ -1987,6 +1960,43 @@ impl BxHardDriveC {
                 need_raise_irq = true;
                 // Stop after DRQ completion — caller should check status before continuing
                 break;
+            }
+        }
+
+        // Post-loop DRQ completion check: handles the case where the while loop
+        // breaks early (e.g. remaining_blocks == 0 during lazy-load) but drq_index
+        // has reached drq_bytes. Without this, the final DRQ completion status
+        // transition and interrupt never fire, causing the kernel to poll forever.
+        // Matches Bochs harddrv.cc:986-1020 which checks this on every word read.
+        if !need_raise_irq && need_abort_cmd.is_none()
+            && current_command == ATA_CMD_PACKET
+        {
+            let drive = &mut self.channels[channel_num].drives[selected as usize];
+            if drive.controller.drq_index >= drive.atapi.drq_bytes as u32
+                && drive.atapi.drq_bytes > 0
+            {
+                drive.controller.status.remove(AtaStatus::DRQ);
+                drive.controller.drq_index = 0;
+                drive.atapi.total_bytes_remaining -= drive.atapi.drq_bytes;
+                if drive.atapi.total_bytes_remaining > 0 {
+                    // More DRQ phases remain (Bochs harddrv.cc:992-1006)
+                    drive.controller.sector_count =
+                        (drive.controller.sector_count & 0xF8) | 0x02;
+                    drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::DRQ);
+                    drive.controller.status.remove(AtaStatus::BSY | AtaStatus::ERR);
+                    if drive.atapi.total_bytes_remaining < drive.controller.cylinder_no as i32 {
+                        drive.controller.cylinder_no =
+                            drive.atapi.total_bytes_remaining as u16;
+                    }
+                    drive.atapi.drq_bytes = drive.controller.cylinder_no as i32;
+                } else {
+                    // All bytes read (Bochs harddrv.cc:1007-1018)
+                    drive.controller.sector_count =
+                        (drive.controller.sector_count & 0xF8) | 0x03;
+                    drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
+                    drive.controller.status.insert(AtaStatus::DRDY);
+                }
+                need_raise_irq = true;
             }
         }
 
@@ -2220,14 +2230,9 @@ impl BxHardDriveC {
                         _ => 15u8,
                     };
                     if !self.pic_ptr.is_null() {
-                        // IMMEDIATE PIC lower — matches Bochs DEV_pic_lower_irq()
+                        // Bochs DEV_pic_lower_irq() — PIC forwards to IOAPIC synchronously.
                         let pic = unsafe { &mut *self.pic_ptr };
                         pic.lower_irq(irq);
-                    } else {
-                        match channel_num {
-                            0 => self.irq14_needs_lower = true,
-                            _ => self.irq15_needs_lower = true,
-                        }
                     }
                 }
 
@@ -2433,11 +2438,12 @@ impl BxHardDriveC {
 
     /// Handle an ATAPI command (Bochs harddrv.cc:1304-1830)
     fn handle_atapi_command(&mut self, channel_num: usize) {
+        self.diag_atapi_cmd_count += 1;
         let drive = self.channels[channel_num].selected_drive_mut();
         let atapi_command = drive.controller.buffer[0];
         drive.controller.buffer_size = CDROM_SECTOR_SIZE;
 
-        tracing::debug!("ATAPI: command {:#04x} on ch{}", atapi_command, channel_num);
+        tracing::debug!("ATAPI: cmd={:#04x} ch={} sc={}", atapi_command, channel_num, drive.status_changed);
 
         // Clear sense unless REQUEST SENSE
         if atapi_command != 0x03 {
@@ -2448,15 +2454,25 @@ impl BxHardDriveC {
 
         match atapi_command {
             0x00 => {
-                // TEST UNIT READY
-                if drive.cdrom.ready {
+                // TEST UNIT READY — Bochs harddrv.cc:1335-1352
+                // Three-state media change simulation
+                let sc = drive.status_changed;
+                let ready = drive.cdrom.ready;
+                if sc == 1 {
+                    // Simulate tray open
+                    self.atapi_cmd_error(channel_num, SenseKey::NotReady, Asc::MediumNotPresent);
+                    self.channels[channel_num].selected_drive_mut().status_changed = -1;
+                } else if sc == -1 {
+                    // Simulate tray close — report UNIT_ATTENTION
+                    self.atapi_cmd_error(channel_num, SenseKey::UnitAttention, Asc::MediumMayHaveChanged);
+                    // Set ascq=1 (Bochs harddrv.cc:1343)
+                    let d = self.channels[channel_num].selected_drive_mut();
+                    d.sense.ascq = 1;
+                    d.status_changed = 0;
+                } else if ready {
                     self.atapi_cmd_nop(channel_num);
                 } else {
-                    self.atapi_cmd_error(
-                        channel_num,
-                        SenseKey::NotReady,
-                        Asc::MediumNotPresent,
-                    );
+                    self.atapi_cmd_error(channel_num, SenseKey::NotReady, Asc::MediumNotPresent);
                 }
                 self.raise_interrupt(channel_num);
             }
@@ -2927,8 +2943,17 @@ impl BxHardDriveC {
                         drive.controller.buffer[1] = 4; // MEDIA event is 4 bytes long
                         drive.controller.buffer[2] = (0 << 7) | 4; // 4 = MEDIA event
                         drive.controller.buffer[3] = 1 << 4; // we only support MEDIA event (bit 4)
-                        // Event code: 0 = no change (we don't track status_changed)
-                        drive.controller.buffer[4] = 0;
+                        // Event code based on status_changed (Bochs harddrv.cc:1901-1903)
+                        drive.controller.buffer[4] = if drive.status_changed == 0 {
+                            0 // No change
+                        } else if inserted {
+                            4 // Media changed (inserted)
+                        } else {
+                            3 // Media removed
+                        };
+                        // Clear status_changed after reporting — prevents infinite
+                        // media-change loop when kernel polls GESN without issuing TUR
+                        drive.status_changed = 0;
                         // Media Status: bit 1 = Media Present
                         drive.controller.buffer[5] = if inserted { 1 << 1 } else { 0 };
                         drive.controller.buffer[6] = 0;
@@ -3645,10 +3670,8 @@ impl BxHardDriveC {
             }
         }
         s.push_str(&format!(
-            "  irq14_level={} irq15_level={} irq14_raise={} irq15_raise={} irq14_lower={} irq15_lower={}\n  irq14_raise_count={} irq14_lower_count={}\n",
+            "  irq14_level={} irq15_level={}\n  irq14_raise_count={} irq14_lower_count={}\n",
             self.get_irq_level(0), self.get_irq_level(1),
-            self.irq14_needs_raise, self.irq15_needs_raise,
-            self.irq14_needs_lower, self.irq15_needs_lower,
             self.diag_irq14_raise_count, self.diag_irq14_lower_count,
         ));
         s.push_str(&format!("  cmd_history ({} cmds):", self.cmd_history.len()));
@@ -3662,68 +3685,6 @@ impl BxHardDriveC {
         s
     }
 
-    /// Update PIC IRQ lines based on current ATA interrupt level.
-    ///
-    /// Called by DeviceManager::tick() on every tick. Uses set_irq_level()
-    /// to match Bochs' direct DEV_pic_raise_irq/DEV_pic_lower_irq calls.
-    /// The PIC's internal edge detection ensures raise/lower only fires on transitions.
-    pub fn update_irq_lines(&mut self, pic: &mut crate::iodev::pic::BxPicC) {
-        // Channel 0 (IRQ14): Matches Bochs where raise_interrupt() calls
-        // DEV_pic_raise_irq() immediately and status read / command write calls
-        // DEV_pic_lower_irq() immediately. We process lower FIRST then raise,
-        // so a status-read + new-sector-completion within the same batch
-        // creates a proper edge (low → high).
-        if self.irq14_needs_lower {
-            pic.lower_irq(14);
-            self.irq14_needs_lower = false;
-            self.diag_irq14_lower_count += 1;
-        }
-        if self.irq14_needs_raise {
-            pic.raise_irq(14);
-            self.irq14_needs_raise = false;
-            self.diag_irq14_raise_count += 1;
-        }
-        // Channel 1 (IRQ15)
-        if self.irq15_needs_lower {
-            pic.lower_irq(15);
-            self.irq15_needs_lower = false;
-        }
-        if self.irq15_needs_raise {
-            pic.raise_irq(15);
-            self.irq15_needs_raise = false;
-        }
-    }
-
-    /// Update IRQ lines on both PIC and I/O APIC (Bochs: DEV_pic_raise_irq + DEV_ioapic_set_irq_level)
-    #[cfg(feature = "bx_support_apic")]
-    pub fn update_irq_lines_with_ioapic(
-        &mut self,
-        pic: &mut crate::iodev::pic::BxPicC,
-        ioapic: &mut crate::iodev::ioapic::BxIoApic,
-    ) {
-        if self.irq14_needs_lower {
-            pic.lower_irq(14);
-            ioapic.set_irq_level(14, false);
-            self.irq14_needs_lower = false;
-            self.diag_irq14_lower_count += 1;
-        }
-        if self.irq14_needs_raise {
-            pic.raise_irq(14);
-            ioapic.set_irq_level(14, true);
-            self.irq14_needs_raise = false;
-            self.diag_irq14_raise_count += 1;
-        }
-        if self.irq15_needs_lower {
-            pic.lower_irq(15);
-            ioapic.set_irq_level(15, false);
-            self.irq15_needs_lower = false;
-        }
-        if self.irq15_needs_raise {
-            pic.raise_irq(15);
-            ioapic.set_irq_level(15, true);
-            self.irq15_needs_raise = false;
-        }
-    }
 }
 
 /// Hard drive read handler for I/O port infrastructure

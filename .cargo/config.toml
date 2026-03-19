@@ -4,10 +4,11 @@
 # BIOS_QUIET_MODE="1"
 # RUSTY_BOX_HEADLESS="1"
 
-# MAX_INSTRUCTIONS="3000000000"
+MAX_INSTRUCTIONS="20000000000"
 
 # Boot profile: "dlx", "alpine" (BIOS/ISOLINUX), "alpine-direct" (direct kernel boot)
-RUSTY_BOX_BOOT="alpine-direct"
+# Leave commented for auto-detect (BIOS boot when Alpine ISO found)
+# RUSTY_BOX_BOOT="alpine-direct"
 # ALPINE_ISO="alpine-virt-3.23.3-x86_64.iso"
 # ALPINE_RAM_MB="128"
 # CMDLINE="console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 nomodeset"

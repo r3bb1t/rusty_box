@@ -262,6 +262,13 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.device_manager.harddrv.pic_ptr =
             &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
 
+        // Wire PIC→IOAPIC for synchronous forwarding (Bochs pic.cc:499-500)
+        #[cfg(feature = "bx_support_apic")]
+        unsafe {
+            let ioapic_ptr = &mut self.device_manager.ioapic as *mut crate::iodev::ioapic::BxIoApic;
+            self.device_manager.pic.set_ioapic_ptr(ioapic_ptr);
+        }
+
         // Wire I/O APIC → LAPIC for interrupt delivery (matches Bochs apic_bus_deliver_interrupt)
         #[cfg(feature = "bx_support_apic")]
         {
@@ -418,6 +425,13 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Wire HardDrive→PIC for immediate IRQ raise/lower (matches Bochs DEV_pic_raise_irq)
         self.device_manager.harddrv.pic_ptr =
             &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
+
+        // Wire PIC→IOAPIC for synchronous forwarding (Bochs pic.cc:499-500)
+        #[cfg(feature = "bx_support_apic")]
+        unsafe {
+            let ioapic_ptr = &mut self.device_manager.ioapic as *mut crate::iodev::ioapic::BxIoApic;
+            self.device_manager.pic.set_ioapic_ptr(ioapic_ptr);
+        }
 
         // Wire I/O APIC → LAPIC for interrupt delivery (matches Bochs apic_bus_deliver_interrupt)
         #[cfg(feature = "bx_support_apic")]
@@ -1424,6 +1438,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         let mut last_rip: u64 = u64::MAX;
         let mut stuck_count: u32 = 0;
         let mut stuck_reported = false;
+        // Counter for consecutive HLT+IF=0 zero-batches (transient recovery)
+        let mut hlt_if0_count: u32 = 0;
         while instructions_executed < max_instructions && !self.stop_flag.load(Ordering::Relaxed) {
             // 1. Handle GUI events (keyboard input) - do this first to avoid borrow conflicts
 
@@ -1447,20 +1463,25 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
             // 2. Execute CPU instructions in batches
             let batch_size = (max_instructions - instructions_executed).min(INSTRUCTION_BATCH_SIZE);
-            let batch_start_time = std::time::Instant::now();
             // Use unsafe to work around lifetime issues - the memory borrow is safe because
             // we control the lifetime and the CPU doesn't outlive the memory
             let result = unsafe {
                 let mem_extended: &'a mut BxMemC<'a> =
                     core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory);
                 let io_ptr = core::ptr::NonNull::from(&mut self.devices);
+                let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
                 self.cpu
-                    .cpu_loop_n_with_io(mem_extended, &[], batch_size, io_ptr)
+                    .cpu_loop_n_with_io(mem_extended, &[], batch_size, io_ptr, ps_ptr)
             };
 
             let should_update_gui = match result {
                 Ok(executed) => {
                     instructions_executed += executed;
+
+                    // Reset HLT+IF=0 counter on any non-zero batch
+                    if executed > 0 {
+                        hlt_if0_count = 0;
+                    }
 
                     // Milestone progress print every 500K instructions
                     if instructions_executed % 500_000 < INSTRUCTION_BATCH_SIZE {
@@ -1477,15 +1498,28 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     // Detect zero-return batches (HLT or stuck)
                     if executed == 0 {
                         // HLT with IF=0: CPU is dead (panic or intentional halt)
-                        // Break out to avoid infinite loop
+                        // Use counter-based approach: only break after N consecutive
+                        // zero-batch HLT+IF=0 cycles. This allows transient IF=0 states
+                        // (e.g. kernel cli/hlt sequences before init scripts) to recover.
                         if matches!(self.cpu.activity_state,
                             crate::cpu::cpu::CpuActivityState::Hlt
                             | crate::cpu::cpu::CpuActivityState::Mwait
                             | crate::cpu::cpu::CpuActivityState::MwaitIf)
                             && !self.cpu.interrupts_enabled()
                         {
-                            tracing::debug!("[ZERO-BATCH] HLT with IF=0 — CPU halted, breaking");
-                            break;
+                            hlt_if0_count += 1;
+                            // Warn once at 1000 but DON'T break — match egui behavior.
+                            // The egui path never exits on HLT+IF=0 and eventually the
+                            // kernel recovers (timer/NMI wakes CPU). Breaking here would
+                            // prevent headless Alpine from reaching modloop phase.
+                            if hlt_if0_count == 1000 {
+                                tracing::warn!(
+                                    "[ZERO-BATCH] HLT/MWAIT with IF=0 for 1000 consecutive batches at RIP={:#x} CS={:#06x} activity={:?} — continuing (egui-match)",
+                                    self.cpu.rip(), self.cpu.get_cs_selector(), self.cpu.activity_state,
+                                );
+                            }
+                        } else {
+                            hlt_if0_count = 0;
                         }
                         static ZERO_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
                         let zc = ZERO_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
@@ -1499,23 +1533,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 self.cpu.async_event,
                             );
                         }
-                    }
-
-                    // Batch timing: log when a batch takes >50ms (indicating perf cliff)
-                    let batch_elapsed = batch_start_time.elapsed();
-                    if batch_elapsed.as_millis() > 50 {
-                        tracing::debug!(
-                            "SLOW-BATCH: {}ms for {} instr at {}k total, CS:RIP={:#06x}:{:#x}, icache_miss={}, prefetch={}",
-                            batch_elapsed.as_millis(),
-                            executed,
-                            instructions_executed / 1000,
-                            self.cpu.get_cs_selector(),
-                            self.cpu.rip(),
-                            self.cpu.perf_icache_miss,
-                            self.cpu.perf_prefetch,
-                        );
-                        self.cpu.perf_icache_miss = 0;
-                        self.cpu.perf_prefetch = 0;
                     }
 
                     // If CPU triple-faulted into shutdown, stop emulation loop
@@ -1644,6 +1661,28 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     self.cpu.esi(), self.cpu.edi(), self.cpu.esp(), self.cpu.ebp(),
                                     self.cpu.get_cr0_val(),
                                 );
+                                // IOAPIC IRQ14/15 diagnostic: check if IDE pins are configured
+                                #[cfg(feature = "bx_support_apic")]
+                                {
+                                    let (vec14, masked14, trig14, dmode14) = self.device_manager.ioapic.redirect_entry_diag(14);
+                                    let (intin14, irr14) = self.device_manager.ioapic.pin_state(14);
+                                    let (vec15, masked15, trig15, dmode15) = self.device_manager.ioapic.redirect_entry_diag(15);
+                                    let (intin15, irr15) = self.device_manager.ioapic.pin_state(15);
+                                    let lapic = unsafe { &*self.cpu.lapic_ptr_mut() };
+                                    tracing::warn!(
+                                        "IOAPIC pin14: vec={:#04x} masked={} trig={} dmode={} intin={} irr={} | LAPIC intr={} activity={:?}",
+                                        vec14, masked14, trig14, dmode14, intin14, irr14,
+                                        lapic.intr, self.cpu.activity_state,
+                                    );
+                                    tracing::warn!(
+                                        "IOAPIC pin15: vec={:#04x} masked={} trig={} dmode={} intin={} irr={}",
+                                        vec15, masked15, trig15, dmode15, intin15, irr15,
+                                    );
+                                    tracing::warn!(
+                                        "ATAPI cmds since last STUCK: {}",
+                                        self.device_manager.harddrv.diag_atapi_cmd_count,
+                                    );
+                                }
                                 // For PM stuck points: dump 32-bit stack frame (saved EBP, return addr, args)
                                 let ebp = self.cpu.ebp() as usize;
                                 if ebp + 16 < mem.len() {
@@ -2089,12 +2128,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             out.flush().ok();
                         }
 
-                        #[cfg(not(feature = "std"))]
-                        {
-                            let mut out = std::io::stdout();
-                            out.write_all(&e9).ok();
-                            out.flush().ok();
-                        }
+                        // In no-std builds, port 0xE9 output is silently dropped
+                        // (no stdout available)
                     }
 
                     // Advance virtual time (Bochs-like ticking).
@@ -2123,53 +2158,23 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             //
                             // Without a GUI (headless): spin at full speed; the caller injects
                             // periodic keystrokes to keep the screen alive.
-                            // HLT real-time sync disabled — run at full speed.
-                            // Previous sync caused 6K IPS during I/O phases because
-                            // each HLT batch spin-waited for 0.5-1.5ms of real time.
-                            // The kernel's console blank timer and other timing-sensitive
-                            // code works fine without sync in Alpine boot.
-                            let hlt_sync = false;
-                            let hlt_real_start = if hlt_sync {
-                                Some(std::time::Instant::now())
-                            } else {
-                                None
-                            };
                             let mut hlt_ticks = 0u64;
-                            static HLT_ENTRY_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-                            let hlt_entry = HLT_ENTRY_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                            if hlt_entry < 5 || hlt_entry % 100_000 == 0 {
-                                #[cfg(feature = "bx_support_apic")]
-                                {
-                                    let lapic = unsafe { &*self.cpu.lapic_ptr_mut() };
-                                    let (tmr_active, tmr_initial, tmr_period, tmr_vec, act_req, deact_req) =
-                                        lapic.hlt_timer_diag();
-                                    let tmr_handle_active = lapic.timer_handle
-                                        .map(|h| self.pc_system.is_timer_active(h))
-                                        .unwrap_or(false);
-                                    let tmr_countdown = lapic.timer_handle
-                                        .map(|h| self.pc_system.timer_countdown(h))
-                                        .unwrap_or(0);
-                                    eprintln!("[HLT-DIAG#{}] RIP={:#x} has_intr={} lapic_intr={} ticks={} tmr_active={} tmr_initial={} tmr_period={} vec={:#x} pc_active={} countdown={} act_req={} deact_req={}",
-                                        hlt_entry, self.cpu.rip(),
-                                        self.has_interrupt(),
-                                        self.cpu.lapic_has_intr(),
-                                        self.pc_system.time_ticks(),
-                                        tmr_active, tmr_initial, tmr_period, tmr_vec,
-                                        tmr_handle_active, tmr_countdown,
-                                        act_req, deact_req);
-                                }
-                                #[cfg(not(feature = "bx_support_apic"))]
-                                eprintln!("[HLT-DIAG#{}] RIP={:#x} has_intr={} ticks={}",
-                                    hlt_entry, self.cpu.rip(),
-                                    self.has_interrupt(),
-                                    self.pc_system.time_ticks());
-                            }
                             // Efficient HLT: advance to next countdown event, capped at 100K ticks
-                            // (~6.7ms at 15M IPS) to prevent huge tick_devices calls.
-                            // Max 10M ticks total per HLT batch (~667us at 15M IPS).
-                            // Increased from 3M to reduce HLT entry/exit overhead during
-                            // sustained I/O (e.g. ATAPI CD-ROM reads for modloop mount).
-                            while !self.has_interrupt() && hlt_ticks < 10_000_000 {
+                            // per step to prevent huge tick_devices calls.
+                            // Bochs handleWaitForEvent (event.cc:40-116) uses while(1) + BX_TICKN(10).
+                            // We cap at 100M ticks (~6.7ms at 15M IPS) as a safety limit for
+                            // IF=0 HLT with no timer sources, where Bochs would also spin forever
+                            // but has debugger/SMP escape hatches we don't have.
+                            // Bochs handleWaitForEvent (event.cc:40-116) breaks on:
+                            //   BX_CPU_INTR && get_IF() — maskable interrupt with IF=1
+                            //   pending_NMI / pending_SMI / pending_INIT — always
+                            // We match by requiring has_interrupt() AND interrupts_enabled().
+                            // When IF=0, the loop keeps ticking devices (advancing virtual time)
+                            // until IF is set or the safety cap is reached.
+                            while !(self.has_interrupt() && self.cpu.interrupts_enabled()) && hlt_ticks < 100_000_000 {
+                                if self.stop_flag.load(core::sync::atomic::Ordering::Relaxed) {
+                                    break;
+                                }
                                 // 1. Process pending LAPIC requests FIRST so timers are active
                                 #[cfg(feature = "bx_support_apic")]
                                 {
@@ -2197,7 +2202,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
                                         self.device_manager.ioapic.receive_eoi(eoi_vec);
                                     }
-                                    if lapic.intr {
+                                    if lapic.intr && self.cpu.interrupts_enabled() {
                                         self.cpu.signal_event(1 << 2);
                                         break;
                                     }
@@ -2216,43 +2221,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             // Without this, TSC freezes during HLT and kernel poll() timeouts never expire.
                             self.cpu.icount += hlt_ticks;
 
-                            // Log exit reason for first few
-                            if hlt_entry < 5 || hlt_entry % 100_000 == 0 {
-                                let exit_reason = if self.has_interrupt() {
-                                    "interrupt"
-                                } else {
-                                    "timeout"
-                                };
-                                let hlt_usec = hlt_ticks * 1_000_000 / (self.config.ips as u64).max(1);
-                                eprintln!("[HLT-EXIT#{}] reason={} hlt_ticks={} hlt_usec={} ticks={} lapic_intr={}",
-                                    hlt_entry, exit_reason, hlt_ticks, hlt_usec,
-                                    self.pc_system.time_ticks(),
-                                    self.cpu.lapic_has_intr());
-                            }
                             // If LAPIC has a pending interrupt, signal CPU
                             #[cfg(feature = "bx_support_apic")]
                             if self.cpu.lapic_has_intr() {
                                 self.cpu.signal_event(1 << 2); // BX_EVENT_PENDING_LAPIC_INTR
-                            }
-
-                            // Optional: sync to real time if GUI is active
-                            if hlt_sync {
-                                if let Some(start) = hlt_real_start {
-                                    let hlt_usec = hlt_ticks * 1_000_000 / (self.config.ips as u64).max(1);
-                                    let real_elapsed_us = start.elapsed().as_micros() as u64;
-                                    if hlt_usec > real_elapsed_us {
-                                        let sleep_us = hlt_usec - real_elapsed_us;
-                                        const SPIN_THRESHOLD_US: u64 = 2_000;
-                                        if sleep_us < SPIN_THRESHOLD_US {
-                                            let deadline = start + std::time::Duration::from_micros(hlt_usec);
-                                            while std::time::Instant::now() < deadline {
-                                                std::hint::spin_loop();
-                                            }
-                                        } else {
-                                            std::thread::sleep(std::time::Duration::from_micros(sleep_us));
-                                        }
-                                    }
-                                }
                             }
                         } else {
                             let usec_from_instr =
@@ -2264,8 +2236,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     }
 
                     // Drive pc_system timers via Bochs-exact tickn() mechanism.
-                    // tickn() decrements curr_countdown, fires countdown_event() at 0,
-                    // which fires all expired timer callbacks at exact tick boundaries.
                     self.pc_system.tickn(executed as u32);
 
                     // Handle LAPIC timer fires. With small batches (500 ticks) and
@@ -2883,8 +2853,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             let mem_extended: &'a mut BxMemC<'a> =
                 core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory);
             let io_ptr = core::ptr::NonNull::from(&mut self.devices);
+            let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
             self.cpu
-                .cpu_loop_n_with_io(mem_extended, &[], max_instructions, io_ptr)
+                .cpu_loop_n_with_io(mem_extended, &[], max_instructions, io_ptr, ps_ptr)
         };
 
         match result {
@@ -2897,7 +2868,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 };
                 self.tick_devices(usec);
 
-                // Drive pc_system timers via Bochs-exact tickn() mechanism
+                // Drive pc_system timers via Bochs-exact tickn() mechanism.
                 self.pc_system.tickn(executed as u32);
 
                 // Handle LAPIC timer fires with catch-up (same as main loop)
@@ -2963,13 +2934,62 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     }
                 }
 
-                // When CPU is halted, advance one full PIT cycle so timer
-                // interrupts can fire (Bochs handleWaitForEvent BX_TICKN loop).
+                // When CPU is halted/mwait, advance virtual clock until an
+                // interrupt fires or a budget is exhausted.
+                // Matches run_interactive() HLT loop but bounded for egui responsiveness.
                 if matches!(
                     self.cpu.activity_state,
                     crate::cpu::cpu::CpuActivityState::Hlt
+                    | crate::cpu::cpu::CpuActivityState::Mwait
+                    | crate::cpu::cpu::CpuActivityState::MwaitIf
                 ) {
-                    self.tick_devices(60_000);
+                    let ips = self.config.ips as u64;
+                    let mut hlt_ticks = 0u64;
+                    // Cap at 1M ticks per step_batch call (~67µs at 15M IPS).
+                    // Egui calls us at ~60fps so total HLT throughput ≈ 60M ticks/s.
+                    // Bochs-match: only break when interrupt is deliverable (IF=1)
+                    while !(self.has_interrupt() && self.cpu.interrupts_enabled()) && hlt_ticks < 1_000_000 {
+                        // Process LAPIC requests first
+                        #[cfg(feature = "bx_support_apic")]
+                        {
+                            let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
+                            if lapic.timer_fired {
+                                lapic.timer_fired = false;
+                                lapic.periodic(self.pc_system.time_ticks());
+                            }
+                            if lapic.timer_deactivate_request {
+                                lapic.timer_deactivate_request = false;
+                                if let Some(h) = lapic.timer_handle {
+                                    let _ = self.pc_system.deactivate_timer(h);
+                                }
+                            }
+                            if let Some(period) = lapic.timer_activate_request.take() {
+                                if let Some(h) = lapic.timer_handle {
+                                    let _ = self.pc_system.activate_timer(h, period, false);
+                                }
+                                lapic.set_ticks_initial(self.pc_system.time_ticks());
+                            }
+                            if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
+                                self.device_manager.ioapic.receive_eoi(eoi_vec);
+                            }
+                            if lapic.intr && self.cpu.interrupts_enabled() {
+                                self.cpu.signal_event(1 << 2);
+                                break;
+                            }
+                        }
+                        let step = self.pc_system.get_num_ticks_left_next_event()
+                            .max(1)
+                            .min(100_000);
+                        self.pc_system.tickn(step);
+                        hlt_ticks += step as u64;
+                        let dev_usec = (step as u64 * 1_000_000 / ips.max(1)).max(1);
+                        self.tick_devices(dev_usec);
+                    }
+                    self.cpu.icount += hlt_ticks;
+                    #[cfg(feature = "bx_support_apic")]
+                    if self.cpu.lapic_has_intr() {
+                        self.cpu.signal_event(1 << 2);
+                    }
                 }
 
                 // Deliver pending PIC interrupts — matches run_interactive().
@@ -3008,8 +3028,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 &mut self.memory,
                             );
                         let io_ptr = core::ptr::NonNull::from(&mut self.devices);
+                        let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
                         self.cpu
-                            .cpu_loop_n_with_io(mem_extended, &[], max_instructions, io_ptr)
+                            .cpu_loop_n_with_io(mem_extended, &[], max_instructions, io_ptr, ps_ptr)
                     };
                     if let Ok(executed2) = result2 {
                         executed += executed2;
@@ -3019,6 +3040,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             10
                         };
                         self.tick_devices(usec2);
+                        self.pc_system.tickn(executed2 as u32);
                     }
                 }
 
@@ -3342,6 +3364,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
 impl<I: BxCpuIdTrait> Emulator<'_, I> {
     /// Dump comprehensive diagnostic state (for Alpine debugging).
+    #[cfg(feature = "std")]
     pub fn dump_alpine_diag(&mut self) {
         eprintln!("\n=== DIAGNOSTIC DUMP ===");
         eprintln!("RIP={:#018x} RSP={:#018x} RBP={:#018x}",

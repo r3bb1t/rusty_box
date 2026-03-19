@@ -352,9 +352,21 @@ fn run_emulator(
 // =========================================================================
 
 fn detect_boot_profile(workspace_root: &std::path::Path) -> BootProfile {
+    // Auto-detect: if an Alpine ISO is in the workspace, default to full BIOS boot
+    // Use RUSTY_BOX_BOOT=alpine-direct to bypass BIOS/ISOLINUX
+    let iso_found = try_find_alpine_iso(workspace_root);
+    println!("Workspace root: {}", workspace_root.display());
+    println!("Alpine ISO auto-detect: {:?}", iso_found.as_ref().map(|p| p.display().to_string()));
     let boot_env = std::env::var("RUSTY_BOX_BOOT")
-        .unwrap_or_else(|_| "dlx".to_string())
+        .unwrap_or_else(|_| {
+            if iso_found.is_some() {
+                "alpine".to_string()
+            } else {
+                "dlx".to_string()
+            }
+        })
         .to_lowercase();
+    println!("Selected boot mode: {}", boot_env);
 
     match boot_env.as_str() {
         "alpine" => {
@@ -391,6 +403,52 @@ fn detect_boot_profile(workspace_root: &std::path::Path) -> BootProfile {
             BootProfile::Dlx { disk_path }
         }
     }
+}
+
+/// Non-panicking check for Alpine ISO existence (for auto-detection).
+/// Searches workspace root, parent, and current directory.
+fn try_find_alpine_iso(workspace_root: &std::path::Path) -> Option<std::path::PathBuf> {
+    if let Ok(path) = std::env::var("ALPINE_ISO") {
+        let p = std::path::PathBuf::from(&path);
+        if p.exists() { return Some(p); }
+    }
+    if let Ok(path) = std::env::var("ALPINE_DISK") {
+        let p = std::path::PathBuf::from(&path);
+        if p.exists() { return Some(p); }
+    }
+    // Search workspace root, its parent, and current dir for alpine*.iso
+    let mut search_dirs = vec![workspace_root.to_path_buf()];
+    if let Some(parent) = workspace_root.parent() {
+        search_dirs.push(parent.to_path_buf());
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        if !search_dirs.contains(&cwd) {
+            search_dirs.push(cwd);
+        }
+    }
+    for dir in &search_dirs {
+        if let Some(iso) = find_iso_in_dir(dir) {
+            return Some(iso);
+        }
+    }
+    None
+}
+
+fn find_iso_in_dir(dir: &std::path::Path) -> Option<std::path::PathBuf> {
+    std::fs::read_dir(dir)
+        .ok()
+        .and_then(|entries| {
+            entries
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .find(|p| {
+                    p.extension().map(|ext| ext == "iso").unwrap_or(false)
+                        && p.file_name()
+                            .and_then(|n| n.to_str())
+                            .map(|s| s.to_lowercase().contains("alpine"))
+                            .unwrap_or(false)
+                })
+        })
 }
 
 fn find_alpine_iso(workspace_root: &std::path::Path) -> std::path::PathBuf {
