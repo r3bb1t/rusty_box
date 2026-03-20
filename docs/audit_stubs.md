@@ -137,10 +137,7 @@ Each entry:
 
 ### ~~harddrv.rs — SET MULTIPLE MODE~~ — FALSE POSITIVE (implemented at line 3581, allows 1-128 power-of-2)
 
-### pc_system.rs — Missing isa_bus_delay() method
-- **Bochs does**: Emulates 8 MHz ISA bus timing
-- **Our code does**: Not implemented
-- **Bochs ref**: pc_system.cc
+### ~~pc_system.rs — isa_bus_delay()~~ — FIXED (session 56: stub method added, no-op for PCI systems)
 
 ### pic.rs — Polled mode return format wrong for io_len==2
 - **Bochs does**: Duplicates IRQ byte in high 8 bits
@@ -152,10 +149,7 @@ Each entry:
 - **Our code does**: Only receive_byte() stub exists
 - **Bochs ref**: serial.cc
 
-### vga.rs — Sequencer chain_four/odd_even not tracked as fields
-- **Bochs does**: Extracts and caches these bits for memory access decisions
-- **Our code does**: Raw register stored, bits not extracted
-- **Bochs ref**: vgacore.cc
+### ~~vga.rs — Sequencer chain_four/odd_even~~ — FIXED (session 56: fields added + extracted on reg 4 write)
 
 ### vga.rs — Retrace timing uses simple toggle, not timer calculation
 - **Bochs does**: Calculates from virtual timer and CRTC register values

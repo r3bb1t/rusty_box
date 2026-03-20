@@ -3173,6 +3173,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 update_result.tm_info.line_graphics,
                 update_result.tm_info.start_address as u32,
                 update_result.tm_info.line_offset as u32,
+                &update_result.tm_info.actl_palette,
             );
         } else if dbg % 300 == 1 {
             // VGA returned None — not in text mode or not initialized

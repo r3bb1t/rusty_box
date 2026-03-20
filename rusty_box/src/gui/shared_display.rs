@@ -113,6 +113,7 @@ impl SharedDisplay {
         line_graphics: bool,
         start_address: u32,
         line_offset: u32,
+        actl_palette: &[u8; 16],
     ) {
         let cols = self.screen_cols;
         let rows = self.screen_rows;
@@ -124,8 +125,9 @@ impl SharedDisplay {
         // Helper closure: render a single character cell into framebuffer slice
         let render_cell =
             |fb: &mut [u8], row: u32, col: u32, ch: usize, attr: u8, is_cursor: bool| {
-                let fg_idx = (attr & 0x0F) as usize;
-                let bg_idx = ((attr >> 4) & 0x07) as usize;
+                // ACTL palette indirection (Bochs gui.cc:1355-1361)
+                let fg_idx = actl_palette[(attr & 0x0F) as usize] as usize;
+                let bg_idx = actl_palette[((attr >> 4) & 0x07) as usize] as usize;
                 let fg = if fg_idx < 16 {
                     palette[fg_idx]
                 } else {
