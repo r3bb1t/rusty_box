@@ -527,8 +527,9 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             rm |= 8;
         } // REX.B
 
-        // MOV CR/DR (0F 20-23) always treat as register form regardless of mod field
-        // Matching Bochs decoder_creg64 which calls assertModC0()
+        // MOV CR/DR (0F 20-23) always treat as register form regardless of mod field.
+        // Bochs uses decoder_creg64 for 0F 20-23 only. 0F 24-27 are UD in 64-bit
+        // mode and must NOT be force_modc0 (could alias other encodings).
         let force_modc0 = opcode_map == 1 && matches!(b1 & 0xFF, 0x20..=0x23);
 
         if mod_field == 3 || force_modc0 {

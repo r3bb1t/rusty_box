@@ -1366,7 +1366,7 @@ impl BxKeyboardC {
                 self.kbd_enq(KBD_RESP_ACK);
             }
             0xF7..=0xFD => {
-                // PS/2 extensions — silently ignored with NACK
+                // PS/2 extensions not supported — return error (Bochs returns 0xFE NACK)
                 self.kbd_enq(KBD_RESP_RESEND);
             }
             _ => {

@@ -58,8 +58,8 @@ pub const REG_CSUM_HIGH: u8 = 0x2E;
 pub const REG_CSUM_LOW: u8 = 0x2F;
 pub const REG_CENTURY: u8 = 0x32;
 
-/// CMOS RAM size (standard is 64 or 128 bytes)
-pub const CMOS_SIZE: usize = 128;
+/// CMOS RAM size (256 bytes: standard 128 + extended 128 via ports 0x72/0x73)
+pub const CMOS_SIZE: usize = 256;
 
 /// Days per month (non-leap year)
 const DAYS_IN_MONTH: [u8; 12] = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
@@ -122,6 +122,10 @@ pub struct BxCmosC {
     pub(crate) irq8_pending: bool,
     /// IRQ8 lower pending — set by REG_STAT_C read, consumed by tick_devices
     pub(crate) irq8_lower_pending: bool,
+    /// Extended CMOS address register (port 0x0072 write).
+    /// Bit 7 is forced on so addresses 0x80-0xFF are accessible.
+    /// Matches Bochs cmos.cc `cmos_ext_mem_addr`.
+    cmos_ext_mem_addr: u8,
 }
 
 impl Default for BxCmosC {
@@ -146,6 +150,7 @@ impl BxCmosC {
             irq_enabled: true,
             irq8_pending: false,
             irq8_lower_pending: false,
+            cmos_ext_mem_addr: 0x80,
         };
         cmos.init_defaults();
         cmos
@@ -500,14 +505,18 @@ impl BxCmosC {
         self.ram[REG_CSUM_LOW as usize] = (sum & 0xFF) as u8;
     }
 
-    /// Read from CMOS I/O port (Bochs cmos.cc:383-405)
+    /// Read from CMOS I/O port (Bochs cmos.cc:383-408)
     pub fn read(&mut self, port: u16, _io_len: u8) -> u32 {
         match port {
             CMOS_ADDR | 0x0072 => {
-                // Port 0x70 is write-only on most machines (Bochs cmos.cc:389-394)
+                // Port 0x70/0x72 is write-only on most machines (Bochs cmos.cc:389-394)
                 0xFF
             }
-            CMOS_DATA | 0x0073 => {
+            0x0073 => {
+                // Bochs cmos.cc:407-408 — extended CMOS data port
+                self.ram[self.cmos_ext_mem_addr as usize] as u32
+            }
+            CMOS_DATA => {
                 let addr = (self.address & 0x7F) as usize;
                 let value = match addr as u8 {
                     REG_STAT_A => {
@@ -546,15 +555,24 @@ impl BxCmosC {
         }
     }
 
-    /// Write to CMOS I/O port (Bochs cmos.cc:407-598)
+    /// Write to CMOS I/O port (Bochs cmos.cc:407-685)
     pub fn write(&mut self, port: u16, value: u32, _io_len: u8) {
         let value = value as u8;
         match port {
-            CMOS_ADDR | 0x0072 => {
+            CMOS_ADDR => {
+                // Bochs cmos.cc:436 — standard CMOS address port
                 self.nmi_mask = (value & 0x80) != 0;
                 self.address = value & 0x7F;
             }
-            CMOS_DATA | 0x0073 => {
+            0x0072 => {
+                // Bochs cmos.cc:439-440 — extended CMOS address port
+                self.cmos_ext_mem_addr = value | 0x80;
+            }
+            0x0073 => {
+                // Bochs cmos.cc:681-682 — extended CMOS data port
+                self.ram[self.cmos_ext_mem_addr as usize] = value;
+            }
+            CMOS_DATA => {
                 let addr = (self.address & 0x7F) as usize;
 
                 match addr as u8 {

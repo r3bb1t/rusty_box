@@ -260,10 +260,9 @@ impl BxPciBridge {
                 0x72 => {
                     self.smram_control(value8);
                 }
-                // ERRCMD (pci.cc:380-383)
+                // ERRCMD (pci.cc:380-383) — preserve bits 1,3 from old, write bits 0,2,4-7 from new
                 0x7A => {
-                    self.pci_conf[addr] &= 0x0A;
-                    self.pci_conf[addr] |= value8 & 0xF5;
+                    self.pci_conf[addr] = (value8 & 0xF5) | (self.pci_conf[addr] & 0x0A);
                 }
                 // ERRSTS (pci.cc:417-418) — read-only in i440FX
                 0xB8 => {}

@@ -705,6 +705,10 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     /// It must only be set for the duration of a CPU execution call and cleared afterwards.
     pub(super) io_bus: Option<NonNull<crate::iodev::BxDevicesC>>,
 
+    /// Optional PC system pointer for timer queries (getNumCpuTicksLeftNextEvent).
+    /// Wired by the emulator during execution, cleared afterwards.
+    pub(super) pc_system_ptr: Option<NonNull<crate::pc_system::BxPcSystemC>>,
+
     /// Raw pointer to PIC for interrupt delivery inside handle_async_event().
     ///
     /// Matches Bochs' `DEV_pic_iac()` call in `HandleExtInterrupt()`.
@@ -738,6 +742,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Event bit: LAPIC interrupt pending.
     /// Bochs cpu.h:1177 uses bit 11; we use bit 2.
     pub(crate) const BX_EVENT_PENDING_LAPIC_INTR: u32 = 1 << 2;
+
+    /// Event bit: System Management Interrupt pending.
+    /// Bochs cpu.h:1169 uses bit 1; we use bit 6 (bits 0-2 already taken).
+    /// SMI enters System Management Mode — not implemented for single-CPU Alpine/DLX.
+    #[allow(dead_code)]
+    pub(super) const BX_EVENT_SMI: u32 = 1 << 6;
+
+    /// Event bit: INIT signal pending (CPU reset).
+    /// Bochs cpu.h:1170 uses bit 2; we use bit 7 (bits 0-2 already taken).
+    /// INIT is used by multiprocessor startup (INIT-SIPI-SIPI) — not implemented.
+    #[allow(dead_code)]
+    pub(super) const BX_EVENT_INIT: u32 = 1 << 7;
 
     /// Returns a mutable raw pointer to the Local APIC for cross-module wiring.
     /// Used by emulator.rs to wire I/O APIC → LAPIC interrupt delivery.
@@ -964,6 +980,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
+    #[inline]
     pub(super) fn get_laddr32(&self, seg: usize, offset: u32) -> u32 {
         (unsafe { self.sregs[seg].cache.u.segment.base } + u64::from(offset)) as u32
     }
@@ -971,6 +988,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Get linear address in 64-bit mode (matching Bochs get_laddr64 — cpu.h:5534-5540)
     /// In 64-bit mode, ES/CS/SS/DS bases are forced to 0 per Intel SDM.
     /// Only FS and GS may have non-zero bases (loaded via MSR).
+    #[inline]
     pub(super) fn get_laddr64(&self, seg: usize, offset: u64) -> u64 {
         // BxSegregs: ES=0, CS=1, SS=2, DS=3, FS=4, GS=5
         if seg < 4 {
@@ -1182,6 +1200,44 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     #[inline]
+    pub(crate) fn set_pc_system_ptr(&mut self, ps: NonNull<crate::pc_system::BxPcSystemC>) {
+        self.pc_system_ptr = Some(ps);
+    }
+
+    #[inline]
+    pub(crate) fn clear_pc_system(&mut self) {
+        self.pc_system_ptr = None;
+    }
+
+    /// Bochs `bx_pc_system.getNumCpuTicksLeftNextEvent()` — caps FastRep transfer counts
+    /// so that timers fire on schedule.
+    #[inline]
+    pub(super) fn ticks_left_next_event(&self) -> u32 {
+        if let Some(ps) = self.pc_system_ptr {
+            unsafe { ps.as_ref().get_num_cpu_ticks_left_next_event() }
+        } else {
+            u32::MAX // no cap when not wired (tests)
+        }
+    }
+
+    /// Advance pc_system countdown during FastRep bulk operations.
+    /// Matches Bochs `BX_TICKN(byteCount)` inside `faststring.cc`.
+    /// When countdown expires, sets STOP_TRACE to force trace break
+    /// so the outer emulator loop can fire `countdown_event()`.
+    /// Must use STOP_TRACE (bit 31), NOT bit 0 — the CPU loop fast path
+    /// only clears `async_event` when it equals exactly STOP_TRACE.
+    /// Bit 0 would persist and poison all subsequent instructions.
+    #[inline]
+    pub(super) fn tickn_fastrep(&mut self, n: usize) {
+        if let Some(mut ps) = self.pc_system_ptr {
+            let expired = unsafe { ps.as_mut().sub_countdown(n as u32) };
+            if expired {
+                self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
+            }
+        }
+    }
+
+    #[inline]
     pub(crate) fn set_mem_bus_ptr(&mut self, mem: NonNull<crate::memory::BxMemC<'c>>) {
         self.mem_bus = Some(mem);
     }
@@ -1299,10 +1355,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         cpus: &[&Self],
         max_instructions: u64,
         io: NonNull<crate::iodev::BxDevicesC>,
+        pc_system: NonNull<crate::pc_system::BxPcSystemC>,
     ) -> super::Result<u64> {
         self.set_io_bus_ptr(io);
+        self.set_pc_system_ptr(pc_system);
         let result = self.cpu_loop_n(mem, cpus, max_instructions);
         self.clear_io_bus();
+        self.clear_pc_system();
         result
     }
 

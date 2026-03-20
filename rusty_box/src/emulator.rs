@@ -806,6 +806,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     pub fn sync_a20_state(&mut self) {
         self.pc_system.set_enable_a20(self.system_control.a20_gate);
         self.memory.set_a20_mask(self.pc_system.a20_mask());
+        // Bochs pc_system.cc MemoryMappingChanged() calls BX_CPU(0)->TLB_flush()
+        // after A20 changes, since A20 masking affects physical address translation.
+        self.cpu.tlb_flush();
     }
 
     /// Process a Port 92h write
@@ -1422,7 +1425,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // This prevents flooding the terminal with "0.04 MIPS" lines during HLT idle.
         let mut last_mips_log_update = std::time::Instant::now();
         let mut last_mips_log_instructions = 0u64;
-        const GUI_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(100);
+        // Bochs VGA timer fires every ~40ms (25 fps). Use same interval for display parity.
+        const GUI_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(40);
         const IPS_SHOW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
         const MIPS_LOG_INTERVAL: u64 = 5_000_000;
         let mut last_port92_value: u8 = self.system_control.value;
@@ -2344,6 +2348,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         let a20 = self.device_manager.keyboard.a20_enabled;
                         self.pc_system.set_enable_a20(a20);
                         self.memory.set_a20_mask(self.pc_system.a20_mask());
+                        // Bochs pc_system.cc MemoryMappingChanged() calls BX_CPU(0)->TLB_flush()
+                        // after A20 changes, since A20 masking affects physical address translation.
+                        self.cpu.tlb_flush();
                     }
 
                     // Log batch sizes and check if timer ticking works

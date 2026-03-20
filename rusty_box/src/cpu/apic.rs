@@ -1734,6 +1734,7 @@ impl From<u8> for ApicError {
 
 impl BxLocalApic {
     /// Dump LAPIC state for debugging. Uses eprintln! so it's always visible.
+    #[cfg(feature = "std")]
     pub(crate) fn dump_state(&self) {
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
         let timer_mode = match timervec.timer_mode_field() {

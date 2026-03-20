@@ -292,7 +292,7 @@ impl BxPiix3 {
                         self.pci_conf[addr] = v;
                         tracing::info!(
                             "PCI IRQ routing: PIRQ{}# set to {:#04x}",
-                            (addr as u8 - 0x5F) as char, // A=0x60-0x5F=1 -> 'A' would be 65
+                            (b'A' + (addr as u8 - 0x60)) as char,
                             v
                         );
                     }

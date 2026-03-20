@@ -176,6 +176,35 @@ impl PitCounter {
         }
     }
 
+    /// Fast-path: advance counter by N ticks without calling clock() for each.
+    /// Bochs pit82c54.cc:259-335 clock_multiple().
+    /// Returns true if counter 0 output transitioned (IRQ0 should fire).
+    /// When next_change_time >= ticks, we can just decrement count_binary by ticks.
+    fn clock_multiple(&mut self, ticks: u32) -> bool {
+        if ticks == 0 {
+            return false;
+        }
+        // If next_change_time is 0, state machine needs per-tick evaluation
+        if self.next_change_time == 0 {
+            return false; // Caller must use per-tick clock()
+        }
+        if self.next_change_time > ticks {
+            // No state change within these ticks — just decrement
+            self.next_change_time -= ticks;
+            if !self.bcd_mode {
+                self.count_binary = self.count_binary.wrapping_sub(ticks as u16);
+                self.count = self.count_binary;
+            } else {
+                // BCD: decrement one at a time (rare, keep simple)
+                return false;
+            }
+            return false;
+        }
+        // next_change_time <= ticks: a state change will occur
+        // Fall back to per-tick for the remaining portion
+        false
+    }
+
     /// Latch the current count value — Bochs pit82c54.cc:77-114
     pub fn latch_count(&mut self) {
         if self.count_lsb_latched || self.count_msb_latched {
@@ -318,7 +347,7 @@ impl PitCounter {
         let old_output = self.output;
 
         match self.mode {
-            // ---- Mode 0: Interrupt on Terminal Count (Bochs pit82c54.cc:328-376) ----
+            // ---- Mode 0: Interrupt on Terminal Count (Bochs pit82c54.cc:344-377) ----
             0 => {
                 if self.count_written {
                     if self.null_count {
@@ -333,26 +362,26 @@ impl PitCounter {
                             self.next_change_time = 0;
                         }
                         self.null_count = false;
-                        if self.write_state == RWState::MsByteMultiple {
-                            // Half-loaded count — undefined behavior
-                        }
                     } else {
-                        if self.gate && (self.count_binary != 0) {
+                        // Bochs: GATE && write_state != MSByte_multiple
+                        if self.gate && self.write_state != RWState::MsByteMultiple {
                             self.decrement();
-                            if self.count_binary == 0 {
-                                self.next_change_time = 1;
-                            } else {
+                            if !self.output {
+                                // OUTpin is LOW — count toward terminal count
                                 self.next_change_time = self.count_binary as u32;
-                            }
-                            if self.count == 0 {
-                                self.set_out(true);
+                                if self.count == 0 {
+                                    self.set_out(true);
+                                }
+                            } else {
+                                // OUTpin already HIGH — nothing to do
+                                self.next_change_time = 0;
                             }
                         } else {
-                            self.next_change_time = 0;
+                            self.next_change_time = 0; // clock isn't moving
                         }
                     }
                 } else {
-                    self.next_change_time = 0;
+                    self.next_change_time = 0; // default to 0
                 }
                 self.trigger_gate = false;
             }
@@ -739,14 +768,34 @@ impl BxPitC {
                 let pit_ticks = (self.pit_tick_accumulator / self.ips as u128) as u64;
                 self.pit_tick_accumulator %= self.ips as u128;
 
-                // Cap to avoid long stalls (500K PIT ticks ≈ 419ms)
-                for _ in 0..pit_ticks.min(500_000) {
-                    self.total_ticks += 1;
-                    if self.counters[0].clock() {
-                        self.irq0_pending = true;
+                // Fast path: skip ticks in bulk when no state change is imminent
+                // (Bochs pit82c54.cc:259-335 clock_multiple). Then per-tick for remainder.
+                let mut remaining = pit_ticks.min(500_000) as u32;
+                while remaining > 0 {
+                    // Try bulk skip on all 3 counters
+                    let skip = remaining
+                        .min(self.counters[0].next_change_time.saturating_sub(1).max(1))
+                        .min(self.counters[1].next_change_time.saturating_sub(1).max(1))
+                        .min(self.counters[2].next_change_time.saturating_sub(1).max(1));
+                    if skip > 1 {
+                        let c0_fired = self.counters[0].clock_multiple(skip);
+                        self.counters[1].clock_multiple(skip);
+                        self.counters[2].clock_multiple(skip);
+                        self.total_ticks += skip as u64;
+                        remaining -= skip;
+                        if c0_fired {
+                            self.irq0_pending = true;
+                        }
+                    } else {
+                        // Per-tick fallback
+                        self.total_ticks += 1;
+                        if self.counters[0].clock() {
+                            self.irq0_pending = true;
+                        }
+                        self.counters[1].clock();
+                        self.counters[2].clock();
+                        remaining -= 1;
                     }
-                    self.counters[1].clock();
-                    self.counters[2].clock();
                 }
                 self.icount_at_last_sync = current_icount;
             }

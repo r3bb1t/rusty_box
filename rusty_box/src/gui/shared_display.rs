@@ -6,6 +6,7 @@
 //! for texture upload and pushes scancodes for keyboard input.
 
 use super::vga_font::{VGA_DEFAULT_PALETTE_16, VGA_FONT_8X16};
+use alloc::string::String;
 use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
@@ -151,6 +152,8 @@ impl SharedDisplay {
                         && scanline as u8 <= cs_end;
 
                     for bit in 0..8u32 {
+                        // Font data (VGA_FONT_8X16 from Bochs bx_vgafont) is LSB-first:
+                        // bit 0 = leftmost pixel. Matches Bochs DrawBitmap (rfb.cc:1513).
                         let pixel_on = (font_byte >> bit) & 1 != 0;
                         let color = if cursor_invert {
                             if pixel_on {

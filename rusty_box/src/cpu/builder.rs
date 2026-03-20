@@ -162,6 +162,7 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             mem_host_len: 0,
             mem_bus: None,
             io_bus: None,
+            pc_system_ptr: None,
             pic_ptr: core::ptr::null_mut(),
             boot_debug_flags: 0,
             diag_hae_intr_delivered: 0,

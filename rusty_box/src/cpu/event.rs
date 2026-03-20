@@ -30,9 +30,21 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             self.debug_trap &= !Self::BX_DEBUG_TRAP_TASK_SWITCH_BIT;
         }
 
+        // Priority 3: External Hardware Interventions (Bochs event.cc:250-296)
+        //   FLUSH, STOPCLK, SMI, INIT
+        // SMI: enters System Management Mode (enter_system_management_mode).
+        //   Not implemented — single-CPU Alpine/DLX don't use SMM.
+        // INIT: resets CPU via reset(BX_RESET_SOFTWARE).
+        //   Used by multiprocessor startup (INIT-SIPI-SIPI sequence).
+        //   Not implemented — single-CPU emulation only.
+        // Bochs also checks SVM_GIF gating and VMX INIT vmexit here.
+
         // Priority 4: Debug trap exceptions (TF single-step, data/I/O breakpoints)
         // Bochs event.cc:312-324 — check inhibition FIRST, then debug_trap
         if !self.interrupts_inhibited(Self::BX_INHIBIT_DEBUG) {
+            // Bochs event.cc:316 also checks code_breakpoint_match(prev_rip) here
+            // and ORs result into debug_trap. Not implemented — hardware debug
+            // breakpoints (DR0-DR3 + DR7) not fully supported yet.
             if self.debug_trap & 0xF000 != 0 {
                 // BX_DEBUG_SINGLE_STEP_BIT or BX_DEBUG_DR_ACCESS_BIT set
                 // Bochs: exception() longjmps — propagate restart
@@ -174,6 +186,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Bochs event.cc:428-433: Conditionally clear async_event
         // Only clear when no events remain pending (debug_trap, pending events, HRQ)
+        // Bochs event.cc:428-433 also checks:
+        // - VMX monitor trap flag (BX_EVENT_VMX_MONITOR_TRAP_FLAG — not implemented)
+        // - DMA HRQ (BX_HRQ — not integrated into event handling)
+        // - SVM GIF flag (SVM_GIF — not implemented)
         let has_unmasked_events = (self.pending_event & !self.event_mask) != 0;
         if !has_unmasked_events && self.debug_trap == 0 {
             self.async_event = 0;

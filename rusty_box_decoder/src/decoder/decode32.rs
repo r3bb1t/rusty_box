@@ -301,8 +301,9 @@ pub const fn fetch_decode32_inplace(
         nnn = ((modrm >> 3) & 0x7) as u32;
         rm = (modrm & 0x7) as u32;
 
-        // MOV CR/DR (0F 20-26) always treat as register form regardless of mod field
-        // Matching Bochs decoder_creg32 which calls assertModC0()
+        // MOV CR/DR (0F 20-26) always treat as register form regardless of mod field.
+        // Bochs uses decoder_creg32 for 0F 20-24,26 (0F 25 is decoder_ud32).
+        // Including 0F 25 in the range is harmless since it hits UD anyway.
         let force_modc0 = opcode_map == 1 && matches!(b1 & 0xFF, 0x20..=0x26);
 
         if mod_field == 3 || force_modc0 {

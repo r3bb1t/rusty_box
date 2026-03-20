@@ -273,176 +273,56 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // mem_read_byte() (which goes through get_host_mem_addr()) on TLB hits.
 
     /// Read a byte from virtual memory.
-    /// Bochs: read_virtual_byte_32 -> agen_read32 + read_linear_byte
+    /// Bochs: read_virtual_byte_32 (access.h:109-113) — thin wrapper
     #[inline]
     pub fn read_virtual_byte(&mut self, seg: BxSegregs, offset: u32) -> Result<u8> {
         let laddr = self.agen_read32(seg, offset, 1)? as u64;
-
-        // ---- Inline TLB fast path (Bochs access2.cc pattern) ----
-        if self.cr0.pg() {
-            let lpf = laddr & 0xFFFF_F000;
-            let needed_bit = 1u32 << (self.user_pl as u32); // TLB_SYS_READ_OK or TLB_USER_READ_OK
-            let tlb = self.dtlb.get_entry_of(laddr, 0);
-            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
-                let host = tlb.host_page_addr as *const u8;
-                return Ok(unsafe { *host.add((laddr & 0xFFF) as usize) });
-            }
-        }
-
-        // ---- Slow path ----
-        let paddr = self.translate_data_read(laddr)?;
-        Ok(self.mem_read_byte(paddr))
+        self.read_linear_byte(seg, laddr)
     }
 
-    /// Read a word from virtual memory with cross-page handling.
-    /// Bochs: read_virtual_word_32 -> agen_read32 + read_linear_word
+    /// Read a word from virtual memory.
+    /// Bochs: read_virtual_word_32 (access.h:115-120) — thin wrapper
     #[inline]
     pub fn read_virtual_word(&mut self, seg: BxSegregs, offset: u32) -> Result<u16> {
         let laddr = self.agen_read32(seg, offset, 2)? as u64;
-
-        // ---- Inline TLB fast path (Bochs: BX_DTLB_ENTRY_OF(laddr, 1)) ----
-        // The len=1 trick indexes TLB by the LAST byte. If access crosses a page
-        // boundary, laddr+1 is on the next page → different TLB slot → guaranteed miss.
-        if self.cr0.pg() {
-            let lpf = laddr & 0xFFFF_F000;
-            let needed_bit = 1u32 << (self.user_pl as u32);
-            let tlb = self.dtlb.get_entry_of(laddr, 1);
-            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
-                let page_offset = (laddr & 0xFFF) as usize;
-                let host = tlb.host_page_addr as *const u8;
-                let ptr = unsafe { host.add(page_offset) };
-                return Ok(unsafe { (ptr as *const u16).read_unaligned() });
-            }
-        }
-
-        // ---- Slow path: check cross-page ----
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 2 <= 0x1000 {
-            let paddr = self.translate_data_read(laddr)?;
-            Ok(self.mem_read_word(paddr))
-        } else {
-            let b0 = self.read_virtual_byte_at_laddr(laddr)?;
-            let b1 = self.read_virtual_byte_at_laddr(
-                (laddr & 0xFFFF_F000).wrapping_add(0x1000) & 0xFFFF_FFFF,
-            )?;
-            Ok(u16::from_le_bytes([b0, b1]))
-        }
+        self.read_linear_word(seg, laddr)
     }
 
-    /// Read a dword from virtual memory with cross-page handling.
-    /// Bochs: read_virtual_dword_32 -> agen_read32 + read_linear_dword
+    /// Read a dword from virtual memory.
+    /// Bochs: read_virtual_dword_32 (access.h:122-127) — thin wrapper
     #[inline]
     pub fn read_virtual_dword(&mut self, seg: BxSegregs, offset: u32) -> Result<u32> {
         let laddr = self.agen_read32(seg, offset, 4)? as u64;
-
-        // ---- Inline TLB fast path (Bochs: BX_DTLB_ENTRY_OF(laddr, 3)) ----
-        if self.cr0.pg() {
-            let lpf = laddr & 0xFFFF_F000;
-            let needed_bit = 1u32 << (self.user_pl as u32);
-            let tlb = self.dtlb.get_entry_of(laddr, 3);
-            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
-                let page_offset = (laddr & 0xFFF) as usize;
-                let host = tlb.host_page_addr as *const u8;
-                let ptr = unsafe { host.add(page_offset) };
-                return Ok(unsafe { (ptr as *const u32).read_unaligned() });
-            }
-        }
-
-        // ---- Slow path: check cross-page ----
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 4 <= 0x1000 {
-            let paddr = self.translate_data_read(laddr)?;
-            Ok(self.mem_read_dword(paddr))
-        } else {
-            let mut buf = [0u8; 4];
-            for i in 0..4u64 {
-                buf[i as usize] =
-                    self.read_virtual_byte_at_laddr((laddr.wrapping_add(i)) & 0xFFFF_FFFF)?;
-            }
-            Ok(u32::from_le_bytes(buf))
-        }
+        self.read_linear_dword(seg, laddr)
     }
 
-    /// Read a qword from virtual memory with cross-page handling.
-    /// Bochs: read_virtual_qword_32 -> agen_read32 + read_linear_qword
+    /// Read a qword from virtual memory.
+    /// Bochs: read_virtual_qword_32 (access.h:129-134) — thin wrapper
     #[inline]
     pub(crate) fn read_virtual_qword(&mut self, seg: BxSegregs, offset: u32) -> Result<u64> {
         let laddr = self.agen_read32(seg, offset, 8)? as u64;
-
-        // ---- Inline TLB fast path (Bochs: BX_DTLB_ENTRY_OF(laddr, 7)) ----
-        if self.cr0.pg() {
-            let lpf = laddr & 0xFFFF_F000;
-            let needed_bit = 1u32 << (self.user_pl as u32);
-            let tlb = self.dtlb.get_entry_of(laddr, 7);
-            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
-                let page_offset = (laddr & 0xFFF) as usize;
-                let host = tlb.host_page_addr as *const u8;
-                let ptr = unsafe { host.add(page_offset) };
-                return Ok(unsafe { (ptr as *const u64).read_unaligned() });
-            }
-        }
-
-        // ---- Slow path: check cross-page ----
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 8 <= 0x1000 {
-            let paddr = self.translate_data_read(laddr)?;
-            Ok(self.mem_read_qword(paddr))
-        } else {
-            let mut buf = [0u8; 8];
-            for i in 0..8u64 {
-                buf[i as usize] =
-                    self.read_virtual_byte_at_laddr((laddr.wrapping_add(i)) & 0xFFFF_FFFF)?;
-            }
-            Ok(u64::from_le_bytes(buf))
-        }
+        self.read_linear_qword(seg, laddr)
     }
 
     /// Internal helper: read a single byte at a given linear address.
-    /// Used by cross-page paths to avoid duplicating TLB fast-path code.
+    /// Delegates to read_linear_byte (no segment needed for cross-page helpers).
     #[inline]
     pub(super) fn read_virtual_byte_at_laddr(&mut self, laddr: u64) -> Result<u8> {
-        if self.cr0.pg() {
-            let lpf = laddr & super::tlb::LPF_MASK;
-            let needed_bit = 1u32 << (self.user_pl as u32);
-            let tlb = self.dtlb.get_entry_of(laddr, 0);
-            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
-                let host = tlb.host_page_addr as *const u8;
-                return Ok(unsafe { *host.add((laddr & 0xFFF) as usize) });
-            }
-        }
-        let paddr = self.translate_data_read(laddr)?;
-        Ok(self.mem_read_byte(paddr))
+        self.read_linear_byte(BxSegregs::Ds, laddr)
     }
 
     // ===== Virtual write functions (Bochs access.h + access2.cc) =====
 
     /// Write a byte to virtual memory.
-    /// Bochs: write_virtual_byte_32 -> agen_write32 + write_linear_byte
+    /// Bochs: write_virtual_byte_32 (access.h:182-187) — thin wrapper
     #[inline]
     pub fn write_virtual_byte(&mut self, seg: BxSegregs, offset: u32, val: u8) -> Result<()> {
         let laddr = self.agen_write32(seg, offset, 1)? as u64;
-
-        // ---- Inline TLB fast path ----
-        if self.cr0.pg() {
-            let lpf = laddr & 0xFFFF_F000;
-            let needed_bit = 1u32 << (2 + self.user_pl as u32);
-            let tlb = self.dtlb.get_entry_of(laddr, 0);
-            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
-                let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-                self.i_cache.smc_write_check(paddr, 1); // Bochs: decWriteStamp
-                let host = tlb.host_page_addr as *mut u8;
-                unsafe { *host.add((laddr & 0xFFF) as usize) = val };
-                return Ok(());
-            }
-        }
-
-        let paddr = self.translate_data_write(laddr)?;
-        self.mem_write_byte(paddr, val);
-        Ok(())
+        self.write_linear_byte(seg, laddr, val)
     }
 
-    /// Write a word to virtual memory with cross-page handling.
-    /// Bochs: write_virtual_word_32 -> agen_write32 + write_linear_word
+    /// Write a word to virtual memory.
+    /// Bochs: write_virtual_word_32 (access.h:189-194) — thin wrapper
     #[inline]
     pub(super) fn write_virtual_word(
         &mut self,
@@ -451,39 +331,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         val: u16,
     ) -> Result<()> {
         let laddr = self.agen_write32(seg, offset, 2)? as u64;
-
-        // ---- Inline TLB fast path (Bochs: BX_DTLB_ENTRY_OF(laddr, 1)) ----
-        if self.cr0.pg() {
-            let lpf = laddr & 0xFFFF_F000;
-            let needed_bit = 1u32 << (2 + self.user_pl as u32);
-            let tlb = self.dtlb.get_entry_of(laddr, 1);
-            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
-                let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-                self.i_cache.smc_write_check(paddr, 2); // Bochs: decWriteStamp
-                let page_offset = (laddr & 0xFFF) as usize;
-                let host = tlb.host_page_addr as *mut u8;
-                let ptr = unsafe { host.add(page_offset) };
-                unsafe { (ptr as *mut u16).write_unaligned(val) };
-                return Ok(());
-            }
-        }
-
-        // ---- Slow path: check cross-page ----
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 2 <= 0x1000 {
-            let paddr = self.translate_data_write(laddr)?;
-            self.mem_write_word(paddr, val);
-        } else {
-            let bytes = val.to_le_bytes();
-            self.write_virtual_byte_at_laddr(laddr, bytes[0])?;
-            let laddr2 = (laddr & 0xFFFF_F000).wrapping_add(0x1000) & 0xFFFF_FFFF;
-            self.write_virtual_byte_at_laddr(laddr2, bytes[1])?;
-        }
-        Ok(())
+        self.write_linear_word(seg, laddr, val)
     }
 
-    /// Write a dword to virtual memory with cross-page handling.
-    /// Bochs: write_virtual_dword_32 -> agen_write32 + write_linear_dword
+    /// Write a dword to virtual memory.
+    /// Bochs: write_virtual_dword_32 (access.h:196-201) — thin wrapper
     #[inline]
     pub(super) fn write_virtual_dword(
         &mut self,
@@ -492,40 +344,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         val: u32,
     ) -> Result<()> {
         let laddr = self.agen_write32(seg, offset, 4)? as u64;
-
-        // ---- Inline TLB fast path (Bochs: BX_DTLB_ENTRY_OF(laddr, 3)) ----
-        if self.cr0.pg() {
-            let lpf = laddr & 0xFFFF_F000;
-            let needed_bit = 1u32 << (2 + self.user_pl as u32);
-            let tlb = self.dtlb.get_entry_of(laddr, 3);
-            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
-                let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-                self.i_cache.smc_write_check(paddr, 4); // Bochs: decWriteStamp
-                let page_offset = (laddr & 0xFFF) as usize;
-                let host = tlb.host_page_addr as *mut u8;
-                let ptr = unsafe { host.add(page_offset) };
-                unsafe { (ptr as *mut u32).write_unaligned(val) };
-                return Ok(());
-            }
-        }
-
-        // ---- Slow path: check cross-page ----
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 4 <= 0x1000 {
-            let paddr = self.translate_data_write(laddr)?;
-            self.mem_write_dword(paddr, val);
-        } else {
-            let bytes = val.to_le_bytes();
-            for i in 0..4u64 {
-                let la = (laddr.wrapping_add(i)) & 0xFFFF_FFFF;
-                self.write_virtual_byte_at_laddr(la, bytes[i as usize])?;
-            }
-        }
-        Ok(())
+        self.write_linear_dword(seg, laddr, val)
     }
 
-    /// Write a qword to virtual memory with cross-page handling.
-    /// Bochs: write_virtual_qword_32 -> agen_write32 + write_linear_qword
+    /// Write a qword to virtual memory.
+    /// Bochs: write_virtual_qword_32 (access.h:203-208) — thin wrapper
     #[inline]
     pub(crate) fn write_virtual_qword(
         &mut self,
@@ -534,36 +357,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         val: u64,
     ) -> Result<()> {
         let laddr = self.agen_write32(seg, offset, 8)? as u64;
-
-        // ---- Inline TLB fast path (Bochs: BX_DTLB_ENTRY_OF(laddr, 7)) ----
-        if self.cr0.pg() {
-            let lpf = laddr & 0xFFFF_F000;
-            let needed_bit = 1u32 << (2 + self.user_pl as u32);
-            let tlb = self.dtlb.get_entry_of(laddr, 7);
-            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
-                let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-                self.i_cache.smc_write_check(paddr, 8); // Bochs: decWriteStamp
-                let page_offset = (laddr & 0xFFF) as usize;
-                let host = tlb.host_page_addr as *mut u8;
-                let ptr = unsafe { host.add(page_offset) };
-                unsafe { (ptr as *mut u64).write_unaligned(val) };
-                return Ok(());
-            }
-        }
-
-        // ---- Slow path: check cross-page ----
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 8 <= 0x1000 {
-            let paddr = self.translate_data_write(laddr)?;
-            self.mem_write_qword(paddr, val);
-        } else {
-            let bytes = val.to_le_bytes();
-            for i in 0..8u64 {
-                let la = (laddr.wrapping_add(i)) & 0xFFFF_FFFF;
-                self.write_virtual_byte_at_laddr(la, bytes[i as usize])?;
-            }
-        }
-        Ok(())
+        self.write_linear_qword(seg, laddr, val)
     }
 
     /// Read a 128-bit XMM word from virtual memory.
@@ -625,24 +419,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Internal helper: write a single byte at a given linear address.
-    /// Used by cross-page paths to avoid duplicating TLB fast-path code.
+    /// Delegates to write_linear_byte (no segment needed for cross-page helpers).
     #[inline]
     pub(super) fn write_virtual_byte_at_laddr(&mut self, laddr: u64, val: u8) -> Result<()> {
-        if self.cr0.pg() {
-            let lpf = laddr & super::tlb::LPF_MASK;
-            let needed_bit = 1u32 << (2 + self.user_pl as u32);
-            let tlb = self.dtlb.get_entry_of(laddr, 0);
-            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
-                let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-                self.i_cache.smc_write_check(paddr, 1); // Bochs: decWriteStamp
-                let host = tlb.host_page_addr as *mut u8;
-                unsafe { *host.add((laddr & 0xFFF) as usize) = val };
-                return Ok(());
-            }
-        }
-        let paddr = self.translate_data_write(laddr)?;
-        self.mem_write_byte(paddr, val);
-        Ok(())
+        self.write_linear_byte(BxSegregs::Ds, laddr, val)
     }
 
     // ===== Read-Modify-Write virtual functions (Bochs access2.cc) =====
@@ -653,169 +433,35 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     //   pages == 2 →  cross-page: paddress1/paddress2 + len1/len2
 
     /// Read phase of a read-modify-write byte access.
-    /// Bochs: read_RMW_virtual_byte_32 -> read_RMW_linear_byte (access2.cc:608)
+    /// Bochs: read_RMW_virtual_byte_32 (access.h:334-338) — thin wrapper
     #[inline]
     pub fn read_rmw_virtual_byte(&mut self, seg: BxSegregs, offset: u32) -> Result<u8> {
         let laddr = self.agen_write32(seg, offset, 1)? as u64;
-
-        // ---- Inline TLB fast path (Bochs access2.cc:613-631) ----
-        if self.cr0.pg() {
-            let lpf = laddr & 0xFFFF_F000;
-            let needed_bit = 1u32 << (2 + self.user_pl as u32);
-            let tlb = self.dtlb.get_entry_of(laddr, 0);
-            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
-                let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
-                let host_addr = tlb.host_page_addr | page_offset;
-                let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-                self.i_cache.smc_write_check(paddr, 1); // Bochs: decWriteStamp
-                let data = unsafe { *(host_addr as *const u8) };
-                // Cache host pointer for write-back (Bochs: pages > 2 = host addr)
-                self.address_xlation.pages = host_addr;
-                self.address_xlation.paddress1 = paddr;
-                return Ok(data);
-            }
-        }
-
-        // ---- Slow path ----
-        let paddr = self.translate_data_write(laddr)?;
-        let data = self.mem_read_byte(paddr);
-        self.address_xlation.pages = 1;
-        self.address_xlation.paddress1 = paddr;
-        Ok(data)
+        self.read_rmw_linear_byte(seg, laddr)
     }
 
     /// Read phase of a read-modify-write word access.
-    /// Bochs: read_RMW_virtual_word_32 -> read_RMW_linear_word (access2.cc:639)
+    /// Bochs: read_RMW_virtual_word_32 (access.h:340-345) — thin wrapper
     #[inline]
     pub fn read_rmw_virtual_word(&mut self, seg: BxSegregs, offset: u32) -> Result<u16> {
         let laddr = self.agen_write32(seg, offset, 2)? as u64;
-
-        // ---- Inline TLB fast path (Bochs: BX_DTLB_ENTRY_OF(laddr, 1)) ----
-        if self.cr0.pg() {
-            let lpf = laddr & 0xFFFF_F000;
-            let needed_bit = 1u32 << (2 + self.user_pl as u32);
-            let tlb = self.dtlb.get_entry_of(laddr, 1);
-            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
-                let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
-                let host_addr = tlb.host_page_addr | page_offset;
-                let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-                self.i_cache.smc_write_check(paddr, 2); // Bochs: decWriteStamp
-                let data = unsafe { (host_addr as *const u16).read_unaligned() };
-                self.address_xlation.pages = host_addr;
-                self.address_xlation.paddress1 = paddr;
-                return Ok(data);
-            }
-        }
-
-        // ---- Slow path: check cross-page ----
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 2 <= 0x1000 {
-            let paddr = self.translate_data_write(laddr)?;
-            let data = self.mem_read_word(paddr);
-            self.address_xlation.pages = 1;
-            self.address_xlation.paddress1 = paddr;
-            Ok(data)
-        } else {
-            // Cross-page RMW (Bochs: access_read_linear sets pages=2)
-            let p0 = self.translate_data_write(laddr)?;
-            let b0 = self.mem_read_byte(p0);
-            let laddr2 = (laddr & 0xFFFF_F000).wrapping_add(0x1000) & 0xFFFF_FFFF;
-            let p1 = self.translate_data_write(laddr2)?;
-            let b1 = self.mem_read_byte(p1);
-            self.address_xlation.pages = 2;
-            self.address_xlation.paddress1 = p0;
-            self.address_xlation.paddress2 = p1;
-            self.address_xlation.len1 = 1;
-            self.address_xlation.len2 = 1;
-            Ok(u16::from_le_bytes([b0, b1]))
-        }
+        self.read_rmw_linear_word(seg, laddr)
     }
 
     /// Read phase of a read-modify-write dword access.
-    /// Bochs: read_RMW_virtual_dword_32 -> read_RMW_linear_dword (access2.cc:674)
+    /// Bochs: read_RMW_virtual_dword_32 (access.h:347-352) — thin wrapper
     #[inline]
     pub fn read_rmw_virtual_dword(&mut self, seg: BxSegregs, offset: u32) -> Result<u32> {
         let laddr = self.agen_write32(seg, offset, 4)? as u64;
-
-        // ---- Inline TLB fast path (Bochs: BX_DTLB_ENTRY_OF(laddr, 3)) ----
-        if self.cr0.pg() {
-            let lpf = laddr & 0xFFFF_F000;
-            let needed_bit = 1u32 << (2 + self.user_pl as u32);
-            let tlb = self.dtlb.get_entry_of(laddr, 3);
-            if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
-                let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
-                let host_addr = tlb.host_page_addr | page_offset;
-                let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
-                self.i_cache.smc_write_check(paddr, 4); // Bochs: decWriteStamp
-                let data = unsafe { (host_addr as *const u32).read_unaligned() };
-                self.address_xlation.pages = host_addr;
-                self.address_xlation.paddress1 = paddr;
-                return Ok(data);
-            }
-        }
-
-        // ---- Slow path: check cross-page ----
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 4 <= 0x1000 {
-            let paddr = self.translate_data_write(laddr)?;
-            let data = self.mem_read_dword(paddr);
-            self.address_xlation.pages = 1;
-            self.address_xlation.paddress1 = paddr;
-            Ok(data)
-        } else {
-            // Cross-page RMW
-            let len1 = (0x1000 - page_offset) as u32;
-            let len2 = 4 - len1;
-            let p0 = self.translate_data_write(laddr)?;
-            let laddr2 = (laddr & 0xFFFF_F000).wrapping_add(0x1000) & 0xFFFF_FFFF;
-            let p1 = self.translate_data_write(laddr2)?;
-            let mut buf = [0u8; 4];
-            for i in 0..len1 as usize {
-                buf[i] = self.mem_read_byte(p0 + i as u64);
-            }
-            for i in 0..len2 as usize {
-                buf[len1 as usize + i] = self.mem_read_byte(p1 + i as u64);
-            }
-            self.address_xlation.pages = 2;
-            self.address_xlation.paddress1 = p0;
-            self.address_xlation.paddress2 = p1;
-            self.address_xlation.len1 = len1;
-            self.address_xlation.len2 = len2;
-            Ok(u32::from_le_bytes(buf))
-        }
+        self.read_rmw_linear_dword(seg, laddr)
     }
 
-    /// RMW read qword in 32-bit mode with cross-page handling.
-    /// Bochs: read_RMW_virtual_qword_32
+    /// RMW read qword in 32-bit mode.
+    /// Bochs: read_RMW_virtual_qword_32 (access.h:363-368) — thin wrapper
     pub fn read_rmw_virtual_qword(&mut self, seg: BxSegregs, offset: u32) -> Result<u64> {
         let laddr = self.agen_write32(seg, offset, 8)? as u64;
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 8 <= 0x1000 {
-            let paddr = self.translate_data_write(laddr)?;
-            let data = self.mem_read_qword(paddr);
-            self.address_xlation.pages = 1;
-            self.address_xlation.paddress1 = paddr;
-            Ok(data)
-        } else {
-            let len1 = (0x1000 - page_offset) as u32;
-            let len2 = 8 - len1;
-            let p0 = self.translate_data_write(laddr)?;
-            let laddr2 = (laddr & 0xFFFF_F000).wrapping_add(0x1000) & 0xFFFF_FFFF;
-            let p1 = self.translate_data_write(laddr2)?;
-            let mut buf = [0u8; 8];
-            for i in 0..len1 as usize {
-                buf[i] = self.mem_read_byte(p0 + i as u64);
-            }
-            for i in 0..len2 as usize {
-                buf[len1 as usize + i] = self.mem_read_byte(p1 + i as u64);
-            }
-            self.address_xlation.pages = 2;
-            self.address_xlation.paddress1 = p0;
-            self.address_xlation.paddress2 = p1;
-            self.address_xlation.len1 = len1;
-            self.address_xlation.len2 = len2;
-            Ok(u64::from_le_bytes(buf))
-        }
+        let (data, _) = self.read_rmw_linear_qword(seg, laddr)?;
+        Ok(data)
     }
 
     // ===== System read/write functions (Bochs access.cc) =====
@@ -1004,202 +650,97 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     //  - Paging is always active (CR0.PG must be set for long mode)
 
     /// Read a byte from virtual memory in 64-bit mode.
-    /// Bochs: read_virtual_byte_64
+    /// Bochs: read_virtual_byte (access.h) — thin wrapper: agen + canonical + read_linear_byte
     #[inline]
     pub(crate) fn read_virtual_byte_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u8> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Read)?;
-        let paddr = self.translate_data_read(laddr)?;
-        Ok(self.mem_read_byte(paddr))
+        self.read_linear_byte(seg, laddr)
     }
 
-    /// Read a word from virtual memory in 64-bit mode with cross-page handling.
-    /// Bochs: read_virtual_word_64
+    /// Read a word from virtual memory in 64-bit mode.
+    /// Bochs: read_virtual_word (access.h) — thin wrapper: agen + canonical + read_linear_word
     #[inline]
     pub(crate) fn read_virtual_word_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u16> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Read)?;
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 2 <= 0x1000 {
-            let paddr = self.translate_data_read(laddr)?;
-            Ok(self.mem_read_word(paddr))
-        } else {
-            self.check_canonical_data(seg, laddr.wrapping_add(1), MemoryAccessType::Read)?;
-            let p0 = self.translate_data_read(laddr)?;
-            let b0 = self.mem_read_byte(p0);
-            let p1 = self.translate_data_read(laddr.wrapping_add(1))?;
-            let b1 = self.mem_read_byte(p1);
-            Ok(u16::from_le_bytes([b0, b1]))
-        }
+        self.read_linear_word(seg, laddr)
     }
 
-    /// Read a dword from virtual memory in 64-bit mode with cross-page handling.
-    /// Bochs: read_virtual_dword_64
+    /// Read a dword from virtual memory in 64-bit mode.
+    /// Bochs: read_virtual_dword (access.h) — thin wrapper: agen + canonical + read_linear_dword
     #[inline]
     pub(crate) fn read_virtual_dword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u32> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Read)?;
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 4 <= 0x1000 {
-            let paddr = self.translate_data_read(laddr)?;
-            Ok(self.mem_read_dword(paddr))
-        } else {
-            self.check_canonical_data(seg, laddr.wrapping_add(3), MemoryAccessType::Read)?;
-            let mut buf = [0u8; 4];
-            for i in 0..4u64 {
-                let p = self.translate_data_read(laddr.wrapping_add(i))?;
-                buf[i as usize] = self.mem_read_byte(p);
-            }
-            Ok(u32::from_le_bytes(buf))
-        }
+        self.read_linear_dword(seg, laddr)
     }
 
-    /// Read a qword from virtual memory in 64-bit mode with cross-page handling.
-    /// Bochs: read_virtual_qword_64
+    /// Read a qword from virtual memory in 64-bit mode.
+    /// Bochs: read_virtual_qword (access.h) — thin wrapper: agen + canonical + read_linear_qword
     #[inline]
     pub(crate) fn read_virtual_qword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u64> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Read)?;
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 8 <= 0x1000 {
-            let paddr = self.translate_data_read(laddr)?;
-            Ok(self.mem_read_qword(paddr))
-        } else {
-            self.check_canonical_data(seg, laddr.wrapping_add(7), MemoryAccessType::Read)?;
-            let mut buf = [0u8; 8];
-            for i in 0..8u64 {
-                let p = self.translate_data_read(laddr.wrapping_add(i))?;
-                buf[i as usize] = self.mem_read_byte(p);
-            }
-            Ok(u64::from_le_bytes(buf))
-        }
+        self.read_linear_qword(seg, laddr)
     }
 
     // ===== 64-bit Virtual write functions =====
 
     /// Write a byte to virtual memory in 64-bit mode.
-    /// Bochs: write_virtual_byte_64
+    /// Bochs: write_virtual_byte (access.h) — thin wrapper: agen + canonical + write_linear_byte
     #[inline]
     pub(crate) fn write_virtual_byte_64(&mut self, seg: BxSegregs, offset: u64, val: u8) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
-        let paddr = self.translate_data_write(laddr)?;
-        self.i_cache.smc_write_check(paddr, 1);
-        self.mem_write_byte(paddr, val);
-        Ok(())
+        self.write_linear_byte(seg, laddr, val)
     }
 
-    /// Write a word to virtual memory in 64-bit mode with cross-page handling.
-    /// Bochs: write_virtual_word_64
+    /// Write a word to virtual memory in 64-bit mode.
+    /// Bochs: write_virtual_word (access.h) — thin wrapper: agen + canonical + write_linear_word
     #[inline]
     pub(crate) fn write_virtual_word_64(&mut self, seg: BxSegregs, offset: u64, val: u16) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 2 <= 0x1000 {
-            let paddr = self.translate_data_write(laddr)?;
-            self.i_cache.smc_write_check(paddr, 2);
-            self.mem_write_word(paddr, val);
-        } else {
-            self.check_canonical_data(seg, laddr.wrapping_add(1), MemoryAccessType::Write)?;
-            let bytes = val.to_le_bytes();
-            let p0 = self.translate_data_write(laddr)?;
-            self.i_cache.smc_write_check(p0, 1);
-            self.mem_write_byte(p0, bytes[0]);
-            let p1 = self.translate_data_write(laddr.wrapping_add(1))?;
-            self.i_cache.smc_write_check(p1, 1);
-            self.mem_write_byte(p1, bytes[1]);
-        }
-        Ok(())
+        self.write_linear_word(seg, laddr, val)
     }
 
-    /// Write a dword to virtual memory in 64-bit mode with cross-page handling.
-    /// Bochs: write_virtual_dword_64
+    /// Write a dword to virtual memory in 64-bit mode.
+    /// Bochs: write_virtual_dword (access.h) — thin wrapper: agen + canonical + write_linear_dword
     #[inline]
     pub(crate) fn write_virtual_dword_64(&mut self, seg: BxSegregs, offset: u64, val: u32) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 4 <= 0x1000 {
-            let paddr = self.translate_data_write(laddr)?;
-            self.i_cache.smc_write_check(paddr, 4);
-            self.mem_write_dword(paddr, val);
-        } else {
-            self.check_canonical_data(seg, laddr.wrapping_add(3), MemoryAccessType::Write)?;
-            let bytes = val.to_le_bytes();
-            for i in 0..4u64 {
-                let p = self.translate_data_write(laddr.wrapping_add(i))?;
-                self.i_cache.smc_write_check(p, 1);
-                self.mem_write_byte(p, bytes[i as usize]);
-            }
-        }
-        Ok(())
+        self.write_linear_dword(seg, laddr, val)
     }
 
-    /// Write a qword to virtual memory in 64-bit mode with cross-page handling.
-    /// Bochs: write_virtual_qword_64
+    /// Write a qword to virtual memory in 64-bit mode.
+    /// Bochs: write_virtual_qword (access.h) — thin wrapper: agen + canonical + write_linear_qword
     #[inline]
     pub(crate) fn write_virtual_qword_64(&mut self, seg: BxSegregs, offset: u64, val: u64) -> Result<()> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 8 <= 0x1000 {
-            let paddr = self.translate_data_write(laddr)?;
-            self.i_cache.smc_write_check(paddr, 8);
-            self.mem_write_qword(paddr, val);
-        } else {
-            self.check_canonical_data(seg, laddr.wrapping_add(7), MemoryAccessType::Write)?;
-            let bytes = val.to_le_bytes();
-            for i in 0..8u64 {
-                let p = self.translate_data_write(laddr.wrapping_add(i))?;
-                self.i_cache.smc_write_check(p, 1);
-                self.mem_write_byte(p, bytes[i as usize]);
-            }
-        }
-        Ok(())
+        self.write_linear_qword(seg, laddr, val)
     }
 
     // ===== 64-bit Read-Modify-Write functions =====
 
     /// Read phase of a RMW qword access in 64-bit mode.
-    /// Bochs: read_RMW_virtual_qword_64
+    /// Bochs: read_RMW_virtual_qword (access.h:391-396) — thin wrapper
     pub(crate) fn read_rmw_virtual_qword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u64> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 8 <= 0x1000 {
-            let paddr = self.translate_data_write(laddr)?;
-            let data = self.mem_read_qword(paddr);
-            self.address_xlation.pages = 1;
-            self.address_xlation.paddress1 = paddr;
-            Ok(data)
-        } else {
-            self.check_canonical_data(seg, laddr.wrapping_add(7), MemoryAccessType::Write)?;
-            let len1 = (0x1000 - page_offset) as u32;
-            let len2 = 8 - len1;
-            let p0 = self.translate_data_write(laddr)?;
-            let next_page = (laddr | 0xFFF).wrapping_add(1);
-            let p1 = self.translate_data_write(next_page)?;
-            let mut buf = [0u8; 8];
-            for i in 0..len1 as usize {
-                buf[i] = self.mem_read_byte(p0 + i as u64);
-            }
-            for i in 0..len2 as usize {
-                buf[len1 as usize + i] = self.mem_read_byte(p1 + i as u64);
-            }
-            self.address_xlation.pages = 2;
-            self.address_xlation.paddress1 = p0;
-            self.address_xlation.paddress2 = p1;
-            self.address_xlation.len1 = len1;
-            self.address_xlation.len2 = len2;
-            Ok(u64::from_le_bytes(buf))
-        }
+        let (data, _) = self.read_rmw_linear_qword(seg, laddr)?;
+        Ok(data)
     }
 
     /// Write phase of a RMW qword access (uses cached address_xlation).
     pub(crate) fn write_rmw_virtual_qword_back_64(&mut self, val: u64) {
         let pages = self.address_xlation.pages;
-        if pages == 1 {
+        if pages > 2 {
+            // Host pointer cached from TLB hit — direct write (fastest path)
+            unsafe { (pages as *mut u64).write_unaligned(val) };
+        } else if pages == 1 {
             let paddr = self.address_xlation.paddress1;
             self.mem_write_qword(paddr, val);
         } else {
@@ -1261,15 +802,137 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.write_virtual_qword_64(BxSegregs::Ss, offset, val)
     }
 
-    // ===== Linear address paging wrappers =====
+    // ===== Host pointer resolution for bulk operations (Bochs v2h_write_byte / v2h_read_byte) =====
     //
-    // These accept a PRE-COMPUTED linear address (from get_laddr64) and translate
-    // it through paging. Used by arith64/logical64/shift64/mult64/bit64 which
-    // compute laddr before calling the access function.
+    // Used by FastRep string ops and REP INSW for direct memcpy/memset to host memory.
+    // Returns a mutable host pointer if the linear address hits a TLB entry with a valid
+    // host page addr. Returns None on TLB miss or MMIO (host_page_addr == 0).
 
-    /// Read a qword given a pre-computed linear address (with paging translation).
+    /// Resolve a linear address to a host write pointer via TLB.
+    /// Returns (host_ptr, bytes_remaining_in_page) or None on miss.
+    /// Bochs: v2h_write_byte (access.h)
     #[inline]
+    pub(super) fn get_host_write_ptr(&mut self, laddr: u64) -> Option<(*mut u8, usize)> {
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let needed_bit = 1u32 << (2 + self.user_pl as u32);
+        let tlb = self.dtlb.get_entry_of(laddr, 0);
+        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            let page_offset = (laddr & 0xFFF) as usize;
+            let host = tlb.host_page_addr as *mut u8;
+            let ptr = unsafe { host.add(page_offset) };
+            let remaining = 0x1000 - page_offset;
+            // SMC check for the page
+            let paddr = tlb.ppf | page_offset as BxPhyAddress;
+            self.i_cache.smc_write_check(paddr, remaining as u32);
+            Some((ptr, remaining))
+        } else {
+            None
+        }
+    }
+
+    /// Resolve a linear address to a host read pointer via TLB.
+    /// Returns (host_ptr, bytes_remaining_in_page) or None on miss.
+    /// Bochs: v2h_read_byte (access.h)
+    #[inline]
+    pub(super) fn get_host_read_ptr(&mut self, laddr: u64) -> Option<(*const u8, usize)> {
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let needed_bit = 1u32 << (self.user_pl as u32);
+        let tlb = self.dtlb.get_entry_of(laddr, 0);
+        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            let page_offset = (laddr & 0xFFF) as usize;
+            let host = tlb.host_page_addr as *const u8;
+            let ptr = unsafe { host.add(page_offset) };
+            let remaining = 0x1000 - page_offset;
+            Some((ptr, remaining))
+        } else {
+            None
+        }
+    }
+
+    // ===== Linear address paging wrappers (Bochs access2.cc) =====
+    //
+    // These accept a PRE-COMPUTED linear address and translate it through paging
+    // with inline TLB fast paths. Used by both the 64-bit virtual_*_64 thin
+    // wrappers and by arith64/logical64/shift64/mult64/bit64 which compute
+    // laddr before calling the access function.
+    //
+    // Matches the Bochs read_linear_byte/word/dword/qword and
+    // write_linear_byte/word/dword/qword functions in access2.cc.
+
+    /// Read a byte given a pre-computed linear address.
+    /// Bochs: read_linear_byte (access2.cc:337-359)
+    pub(crate) fn read_linear_byte(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u8> {
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let needed_bit = 1u32 << (self.user_pl as u32);
+        let tlb = self.dtlb.get_entry_of(laddr, 0);
+        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            let host = tlb.host_page_addr as *const u8;
+            return Ok(unsafe { *host.add((laddr & 0xFFF) as usize) });
+        }
+        let paddr = self.translate_data_read(laddr)?;
+        Ok(self.mem_read_byte(paddr))
+    }
+
+    /// Read a word given a pre-computed linear address with cross-page handling.
+    /// Bochs: read_linear_word (access2.cc:361-396)
+    pub(crate) fn read_linear_word(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u16> {
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let needed_bit = 1u32 << (self.user_pl as u32);
+        let tlb = self.dtlb.get_entry_of(laddr, 1);
+        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            let host = tlb.host_page_addr as *const u8;
+            let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            return Ok(unsafe { (ptr as *const u16).read_unaligned() });
+        }
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 2 <= 0x1000 {
+            let paddr = self.translate_data_read(laddr)?;
+            Ok(self.mem_read_word(paddr))
+        } else {
+            let p0 = self.translate_data_read(laddr)?;
+            let b0 = self.mem_read_byte(p0);
+            let p1 = self.translate_data_read((laddr | 0xFFF).wrapping_add(1))?;
+            let b1 = self.mem_read_byte(p1);
+            Ok(u16::from_le_bytes([b0, b1]))
+        }
+    }
+
+    /// Read a dword given a pre-computed linear address with cross-page handling.
+    /// Bochs: read_linear_dword (access2.cc:398-432)
+    pub(crate) fn read_linear_dword(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u32> {
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let needed_bit = 1u32 << (self.user_pl as u32);
+        let tlb = self.dtlb.get_entry_of(laddr, 3);
+        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            let host = tlb.host_page_addr as *const u8;
+            let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            return Ok(unsafe { (ptr as *const u32).read_unaligned() });
+        }
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 4 <= 0x1000 {
+            let paddr = self.translate_data_read(laddr)?;
+            Ok(self.mem_read_dword(paddr))
+        } else {
+            let mut buf = [0u8; 4];
+            for i in 0..4u64 {
+                let p = self.translate_data_read(laddr.wrapping_add(i))?;
+                buf[i as usize] = self.mem_read_byte(p);
+            }
+            Ok(u32::from_le_bytes(buf))
+        }
+    }
+
+    /// Read a qword given a pre-computed linear address with cross-page handling.
+    /// Bochs: read_linear_qword (access2.cc:419-446)
     pub(crate) fn read_linear_qword(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u64> {
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let needed_bit = 1u32 << (self.user_pl as u32);
+        let tlb = self.dtlb.get_entry_of(laddr, 7);
+        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            let host = tlb.host_page_addr as *const u8;
+            let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            return Ok(unsafe { (ptr as *const u64).read_unaligned() });
+        }
         let page_offset = laddr & 0xFFF;
         if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_read(laddr)?;
@@ -1284,10 +947,136 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
+    /// Write a byte given a pre-computed linear address.
+    /// Bochs: write_linear_byte (access2.cc:30-50)
+    pub(crate) fn write_linear_byte(&mut self, _seg: BxSegregs, laddr: u64, val: u8) -> Result<()> {
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let needed_bit = 1u32 << (2 + self.user_pl as u32);
+        let tlb = self.dtlb.get_entry_of(laddr, 0);
+        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            self.i_cache.smc_write_check(paddr, 1);
+            let host = tlb.host_page_addr as *mut u8;
+            unsafe { *host.add((laddr & 0xFFF) as usize) = val };
+            return Ok(());
+        }
+        let paddr = self.translate_data_write(laddr)?;
+        self.i_cache.smc_write_check(paddr, 1);
+        self.mem_write_byte(paddr, val);
+        Ok(())
+    }
+
+    /// Write a word given a pre-computed linear address with cross-page handling.
+    /// Bochs: write_linear_word (access2.cc:53-77)
+    pub(crate) fn write_linear_word(&mut self, _seg: BxSegregs, laddr: u64, val: u16) -> Result<()> {
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let needed_bit = 1u32 << (2 + self.user_pl as u32);
+        let tlb = self.dtlb.get_entry_of(laddr, 1);
+        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            self.i_cache.smc_write_check(paddr, 2);
+            let host = tlb.host_page_addr as *mut u8;
+            let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            unsafe { (ptr as *mut u16).write_unaligned(val) };
+            return Ok(());
+        }
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 2 <= 0x1000 {
+            let paddr = self.translate_data_write(laddr)?;
+            self.i_cache.smc_write_check(paddr, 2);
+            self.mem_write_word(paddr, val);
+        } else {
+            let bytes = val.to_le_bytes();
+            let p0 = self.translate_data_write(laddr)?;
+            self.i_cache.smc_write_check(p0, 1);
+            self.mem_write_byte(p0, bytes[0]);
+            let p1 = self.translate_data_write((laddr | 0xFFF).wrapping_add(1))?;
+            self.i_cache.smc_write_check(p1, 1);
+            self.mem_write_byte(p1, bytes[1]);
+        }
+        Ok(())
+    }
+
+    /// Write a dword given a pre-computed linear address with cross-page handling.
+    /// Bochs: write_linear_dword (access2.cc:80-106)
+    pub(crate) fn write_linear_dword(&mut self, _seg: BxSegregs, laddr: u64, val: u32) -> Result<()> {
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let needed_bit = 1u32 << (2 + self.user_pl as u32);
+        let tlb = self.dtlb.get_entry_of(laddr, 3);
+        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            self.i_cache.smc_write_check(paddr, 4);
+            let host = tlb.host_page_addr as *mut u8;
+            let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            unsafe { (ptr as *mut u32).write_unaligned(val) };
+            return Ok(());
+        }
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 4 <= 0x1000 {
+            let paddr = self.translate_data_write(laddr)?;
+            self.i_cache.smc_write_check(paddr, 4);
+            self.mem_write_dword(paddr, val);
+        } else {
+            let bytes = val.to_le_bytes();
+            for i in 0..4u64 {
+                let p = self.translate_data_write(laddr.wrapping_add(i))?;
+                self.i_cache.smc_write_check(p, 1);
+                self.mem_write_byte(p, bytes[i as usize]);
+            }
+        }
+        Ok(())
+    }
+
+    /// Write a qword given a pre-computed linear address with cross-page handling.
+    /// Bochs: write_linear_qword (access2.cc:107-131)
+    pub(crate) fn write_linear_qword(&mut self, _seg: BxSegregs, laddr: u64, val: u64) -> Result<()> {
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let needed_bit = 1u32 << (2 + self.user_pl as u32);
+        let tlb = self.dtlb.get_entry_of(laddr, 7);
+        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            self.i_cache.smc_write_check(paddr, 8);
+            let host = tlb.host_page_addr as *mut u8;
+            let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            unsafe { (ptr as *mut u64).write_unaligned(val) };
+            return Ok(());
+        }
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 8 <= 0x1000 {
+            let paddr = self.translate_data_write(laddr)?;
+            self.i_cache.smc_write_check(paddr, 8);
+            self.mem_write_qword(paddr, val);
+        } else {
+            let bytes = val.to_le_bytes();
+            for i in 0..8u64 {
+                let p = self.translate_data_write(laddr.wrapping_add(i))?;
+                self.i_cache.smc_write_check(p, 1);
+                self.mem_write_byte(p, bytes[i as usize]);
+            }
+        }
+        Ok(())
+    }
+
     /// Read phase of a RMW qword given a pre-computed linear address.
+    /// Bochs: read_RMW_linear_qword (access2.cc:710-743)
     /// Returns (value, laddr). Caches translation in address_xlation.
-    #[inline]
     pub(crate) fn read_rmw_linear_qword(&mut self, _seg: BxSegregs, laddr: u64) -> Result<(u64, u64)> {
+        // ---- Inline TLB fast path (Bochs access2.cc:713-728) ----
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let needed_bit = 1u32 << (2 + self.user_pl as u32);
+        let tlb = self.dtlb.get_entry_of(laddr, 7);
+        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
+            let host_addr = tlb.host_page_addr | page_offset;
+            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            self.i_cache.smc_write_check(paddr, 8);
+            let data = unsafe { (host_addr as *const u64).read_unaligned() };
+            self.address_xlation.pages = host_addr;
+            self.address_xlation.paddress1 = paddr;
+            return Ok((data, laddr));
+        }
+
+        // ---- Slow path (Bochs: access_read_linear) ----
         let page_offset = laddr & 0xFFF;
         if page_offset + 8 <= 0x1000 {
             let paddr = self.translate_data_write(laddr)?;
@@ -1317,11 +1106,129 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
+    /// Read phase of a RMW byte given a pre-computed linear address.
+    /// Bochs: read_RMW_linear_byte (access2.cc:609-637)
+    pub(crate) fn read_rmw_linear_byte(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u8> {
+        // ---- Inline TLB fast path (Bochs access2.cc:612-630) ----
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let needed_bit = 1u32 << (2 + self.user_pl as u32);
+        let tlb = self.dtlb.get_entry_of(laddr, 0);
+        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
+            let host_addr = tlb.host_page_addr | page_offset;
+            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            self.i_cache.smc_write_check(paddr, 1);
+            let data = unsafe { *(host_addr as *const u8) };
+            self.address_xlation.pages = host_addr;
+            self.address_xlation.paddress1 = paddr;
+            return Ok(data);
+        }
+
+        // ---- Slow path (Bochs: access_read_linear) ----
+        let paddr = self.translate_data_write(laddr)?;
+        let data = self.mem_read_byte(paddr);
+        self.address_xlation.pages = 1;
+        self.address_xlation.paddress1 = paddr;
+        Ok(data)
+    }
+
+    /// Read phase of a RMW word given a pre-computed linear address.
+    /// Bochs: read_RMW_linear_word (access2.cc:639-672)
+    pub(crate) fn read_rmw_linear_word(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u16> {
+        // ---- Inline TLB fast path (Bochs access2.cc:643-665) ----
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let needed_bit = 1u32 << (2 + self.user_pl as u32);
+        let tlb = self.dtlb.get_entry_of(laddr, 1);
+        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
+            let host_addr = tlb.host_page_addr | page_offset;
+            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            self.i_cache.smc_write_check(paddr, 2);
+            let data = unsafe { (host_addr as *const u16).read_unaligned() };
+            self.address_xlation.pages = host_addr;
+            self.address_xlation.paddress1 = paddr;
+            return Ok(data);
+        }
+
+        // ---- Slow path ----
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 2 <= 0x1000 {
+            let paddr = self.translate_data_write(laddr)?;
+            let data = self.mem_read_word(paddr);
+            self.address_xlation.pages = 1;
+            self.address_xlation.paddress1 = paddr;
+            Ok(data)
+        } else {
+            let p0 = self.translate_data_write(laddr)?;
+            let b0 = self.mem_read_byte(p0);
+            let next_page = (laddr | 0xFFF).wrapping_add(1);
+            let p1 = self.translate_data_write(next_page)?;
+            let b1 = self.mem_read_byte(p1);
+            self.address_xlation.pages = 2;
+            self.address_xlation.paddress1 = p0;
+            self.address_xlation.paddress2 = p1;
+            self.address_xlation.len1 = 1;
+            self.address_xlation.len2 = 1;
+            Ok(u16::from_le_bytes([b0, b1]))
+        }
+    }
+
+    /// Read phase of a RMW dword given a pre-computed linear address.
+    /// Bochs: read_RMW_linear_dword (access2.cc:675-707)
+    pub(crate) fn read_rmw_linear_dword(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u32> {
+        // ---- Inline TLB fast path (Bochs access2.cc:678-700) ----
+        let lpf = laddr & super::tlb::LPF_MASK;
+        let needed_bit = 1u32 << (2 + self.user_pl as u32);
+        let tlb = self.dtlb.get_entry_of(laddr, 3);
+        if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
+            let page_offset = (laddr & 0xFFF) as BxPtrEquiv;
+            let host_addr = tlb.host_page_addr | page_offset;
+            let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
+            self.i_cache.smc_write_check(paddr, 4);
+            let data = unsafe { (host_addr as *const u32).read_unaligned() };
+            self.address_xlation.pages = host_addr;
+            self.address_xlation.paddress1 = paddr;
+            return Ok(data);
+        }
+
+        // ---- Slow path ----
+        let page_offset = laddr & 0xFFF;
+        if page_offset + 4 <= 0x1000 {
+            let paddr = self.translate_data_write(laddr)?;
+            let data = self.mem_read_dword(paddr);
+            self.address_xlation.pages = 1;
+            self.address_xlation.paddress1 = paddr;
+            Ok(data)
+        } else {
+            let len1 = (0x1000 - page_offset) as u32;
+            let len2 = 4 - len1;
+            let p0 = self.translate_data_write(laddr)?;
+            let next_page = (laddr | 0xFFF).wrapping_add(1);
+            let p1 = self.translate_data_write(next_page)?;
+            let mut buf = [0u8; 4];
+            for i in 0..len1 as usize {
+                buf[i] = self.mem_read_byte(p0 + i as u64);
+            }
+            for i in 0..len2 as usize {
+                buf[len1 as usize + i] = self.mem_read_byte(p1 + i as u64);
+            }
+            self.address_xlation.pages = 2;
+            self.address_xlation.paddress1 = p0;
+            self.address_xlation.paddress2 = p1;
+            self.address_xlation.len1 = len1;
+            self.address_xlation.len2 = len2;
+            Ok(u32::from_le_bytes(buf))
+        }
+    }
+
     /// Write phase of a RMW qword (uses cached address_xlation from read phase).
     #[inline]
     pub(crate) fn write_rmw_linear_qword(&mut self, _laddr: u64, val: u64) {
         let pages = self.address_xlation.pages;
-        if pages == 1 {
+        if pages > 2 {
+            // Host pointer cached from TLB hit — direct write (fastest path)
+            unsafe { (pages as *mut u64).write_unaligned(val) };
+        } else if pages == 1 {
             let paddr = self.address_xlation.paddress1;
             self.mem_write_qword(paddr, val);
         } else {
@@ -1349,18 +1256,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Write a qword to the stack given a pre-computed linear address.
     #[inline]
     pub(crate) fn stack_write_qword(&mut self, laddr: u64, val: u64) -> Result<()> {
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 8 <= 0x1000 {
-            let paddr = self.translate_data_write(laddr)?;
-            self.mem_write_qword(paddr, val);
-        } else {
-            let bytes = val.to_le_bytes();
-            for i in 0..8u64 {
-                let p = self.translate_data_write(laddr.wrapping_add(i))?;
-                self.mem_write_byte(p, bytes[i as usize]);
-            }
-        }
-        Ok(())
+        self.write_linear_qword(BxSegregs::Ss, laddr, val)
     }
 
     // =========================================================================
@@ -1674,80 +1570,29 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Mirrors read_rmw_virtual_qword_64 pattern but for smaller data sizes.
 
     /// RMW read byte in 64-bit mode.
-    /// Bochs: read_RMW_virtual_byte_64
+    /// Bochs: read_RMW_virtual_byte (access.h:370-375) — thin wrapper
     #[inline]
     pub(crate) fn read_rmw_virtual_byte_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u8> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
-        let paddr = self.translate_data_write(laddr)?;
-        let data = self.mem_read_byte(paddr);
-        self.address_xlation.pages = 1;
-        self.address_xlation.paddress1 = paddr;
-        Ok(data)
+        self.read_rmw_linear_byte(seg, laddr)
     }
 
-    /// RMW read word in 64-bit mode with cross-page handling.
-    /// Bochs: read_RMW_virtual_word_64
+    /// RMW read word in 64-bit mode.
+    /// Bochs: read_RMW_virtual_word (access.h:377-382) — thin wrapper
     #[inline]
     pub(crate) fn read_rmw_virtual_word_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u16> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 2 <= 0x1000 {
-            let paddr = self.translate_data_write(laddr)?;
-            let data = self.mem_read_word(paddr);
-            self.address_xlation.pages = 1;
-            self.address_xlation.paddress1 = paddr;
-            Ok(data)
-        } else {
-            self.check_canonical_data(seg, laddr.wrapping_add(1), MemoryAccessType::Write)?;
-            let p0 = self.translate_data_write(laddr)?;
-            let b0 = self.mem_read_byte(p0);
-            let next_page = (laddr | 0xFFF).wrapping_add(1);
-            let p1 = self.translate_data_write(next_page)?;
-            let b1 = self.mem_read_byte(p1);
-            self.address_xlation.pages = 2;
-            self.address_xlation.paddress1 = p0;
-            self.address_xlation.paddress2 = p1;
-            self.address_xlation.len1 = 1;
-            self.address_xlation.len2 = 1;
-            Ok(u16::from_le_bytes([b0, b1]))
-        }
+        self.read_rmw_linear_word(seg, laddr)
     }
 
-    /// RMW read dword in 64-bit mode with cross-page handling.
-    /// Bochs: read_RMW_virtual_dword_64
+    /// RMW read dword in 64-bit mode.
+    /// Bochs: read_RMW_virtual_dword (access.h:384-389) — thin wrapper
     #[inline]
     pub(crate) fn read_rmw_virtual_dword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u32> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
-        let page_offset = laddr & 0xFFF;
-        if page_offset + 4 <= 0x1000 {
-            let paddr = self.translate_data_write(laddr)?;
-            let data = self.mem_read_dword(paddr);
-            self.address_xlation.pages = 1;
-            self.address_xlation.paddress1 = paddr;
-            Ok(data)
-        } else {
-            self.check_canonical_data(seg, laddr.wrapping_add(3), MemoryAccessType::Write)?;
-            let len1 = (0x1000 - page_offset) as u32;
-            let len2 = 4 - len1;
-            let p0 = self.translate_data_write(laddr)?;
-            let next_page = (laddr | 0xFFF).wrapping_add(1);
-            let p1 = self.translate_data_write(next_page)?;
-            let mut buf = [0u8; 4];
-            for i in 0..len1 as usize {
-                buf[i] = self.mem_read_byte(p0 + i as u64);
-            }
-            for i in 0..len2 as usize {
-                buf[len1 as usize + i] = self.mem_read_byte(p1 + i as u64);
-            }
-            self.address_xlation.pages = 2;
-            self.address_xlation.paddress1 = p0;
-            self.address_xlation.paddress2 = p1;
-            self.address_xlation.len1 = len1;
-            self.address_xlation.len2 = len2;
-            Ok(u32::from_le_bytes(buf))
-        }
+        self.read_rmw_linear_dword(seg, laddr)
     }
 }

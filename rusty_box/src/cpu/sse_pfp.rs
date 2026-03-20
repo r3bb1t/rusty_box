@@ -1137,7 +1137,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
                 #[cfg(not(feature = "std"))]
                 {
-                    round_ties_even_f32(op) as i64 as u64
+                    round_ties_even_f64(op) as i64 as u64
                 }
             };
         self.set_gpr64(instr.dst() as usize, result);

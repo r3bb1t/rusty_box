@@ -286,15 +286,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// INSW - Input word from port DX to ES:EDI (32-bit address mode)
-    /// Bochs io.cc INSW32_YwDX: writes RDI = EDI ± 2
+    /// Bochs io.cc INSW32_YwDX (lines 325-373): RMW pattern triggers page faults
+    /// before I/O read. port_in does not touch address_xlation so RMW is safe.
     fn insw32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 2)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let edi = self.edi();
+        // Trigger segment/page faults before reading from IO port (Bochs io.cc:362)
+        let _old = self.read_rmw_virtual_word(BxSegregs::Es, edi)?;
         let value = self.port_in(port, 2) as u16;
-        self.v_write_word(BxSegregs::Es, edi, value)?;
+        self.write_rmw_linear_word(value);
         if self.get_df() {
             self.set_rdi(edi.wrapping_sub(2) as u64);
         } else {
@@ -304,15 +307,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// INSD - Input dword from port DX to ES:EDI (32-bit address mode)
-    /// Bochs io.cc INSD32_YdDX: writes RDI = EDI ± 4
+    /// Bochs io.cc INSD32_YdDX (lines 436-449): RMW pattern triggers page faults
+    /// before I/O read. port_in does not touch address_xlation so RMW is safe.
     fn insd32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 4)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let edi = self.edi();
+        // Trigger segment/page faults before reading from IO port (Bochs io.cc:439)
+        let _old = self.read_rmw_virtual_dword(BxSegregs::Es, edi)?;
         let value = self.port_in(port, 4);
-        self.v_write_dword(BxSegregs::Es, edi, value)?;
+        self.write_rmw_linear_dword(value);
         if self.get_df() {
             self.set_rdi(edi.wrapping_sub(4) as u64);
         } else {
@@ -680,14 +686,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// INSW - Input word from port DX to ES:RDI (64-bit address mode)
+    /// INSW - Input word from port DX to ES:RDI (64-bit address mode)
+    /// Bochs io.cc INSW64_YwDX (lines 378-391): RMW pattern with linear address.
     fn insw64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 2)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let rdi = self.rdi();
+        // Trigger page faults before reading from IO port (Bochs io.cc:381)
+        let _old = self.read_rmw_virtual_word_64(BxSegregs::Es, rdi)?;
         let value = self.port_in(port, 2) as u16;
-        self.write_virtual_word_64(BxSegregs::Es, rdi, value)?;
+        self.write_rmw_linear_word(value);
         if self.get_df() {
             self.set_rdi(rdi.wrapping_sub(2));
         } else {
@@ -697,14 +707,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// INSD - Input dword from port DX to ES:RDI (64-bit address mode)
+    /// Bochs io.cc INSD64_YdDX (lines 454-467): RMW pattern with linear address.
     fn insd64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 4)? {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let rdi = self.rdi();
+        // Trigger page faults before reading from IO port (Bochs io.cc:457)
+        let _old = self.read_rmw_virtual_dword_64(BxSegregs::Es, rdi)?;
         let value = self.port_in(port, 4);
-        self.write_virtual_dword_64(BxSegregs::Es, rdi, value)?;
+        self.write_rmw_linear_dword(value);
         if self.get_df() {
             self.set_rdi(rdi.wrapping_sub(4));
         } else {

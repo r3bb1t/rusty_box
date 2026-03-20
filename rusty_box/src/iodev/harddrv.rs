@@ -338,6 +338,15 @@ pub struct AtaController {
     /// Stores the previous value of each register before a new write,
     /// allowing 48-bit addressing by reading back the previous values.
     pub(crate) hob: AtaHob,
+    /// ATAPI DMA flag (Bochs controller_t::packet_dma).
+    /// Set from features register bit 0 when PACKET command (0xA0) is issued.
+    pub(crate) packet_dma: bool,
+    /// Multiword DMA mode bitmask (Bochs controller_t::mdma_mode).
+    /// Set by SET FEATURES (0xEF) sub-command 0x03 transfer mode type 0x04.
+    pub(crate) mdma_mode: u8,
+    /// Ultra DMA mode bitmask (Bochs controller_t::udma_mode).
+    /// Set by SET FEATURES (0xEF) sub-command 0x03 transfer mode type 0x08.
+    pub(crate) udma_mode: u8,
 }
 
 /// High Order Byte (HOB) registers for LBA48 addressing.
@@ -442,6 +451,9 @@ impl Default for AtaController {
             reset_in_progress: false,
             index_pulse_count: 0,
             hob: AtaHob::default(),
+            packet_dma: false,
+            mdma_mode: 0,
+            udma_mode: 0,
         }
     }
 }
@@ -3502,8 +3514,40 @@ impl BxHardDriveC {
                     }
                     0x03 => {
                         // Set transfer mode (PIO/DMA) based on sector_count
-                        let mode = drive.controller.sector_count;
-                        tracing::debug!("ATA: SET FEATURES: set transfer mode {:#04x}", mode);
+                        // Bochs harddrv.cc:2427-2463
+                        let xfer_type = drive.controller.sector_count >> 3;
+                        let xfer_mode = drive.controller.sector_count & 0x07;
+                        match xfer_type {
+                            0x00 | 0x01 => {
+                                // PIO default / PIO mode
+                                tracing::debug!("ATA: SET FEATURES: set transfer mode to PIO");
+                                drive.controller.mdma_mode = 0x00;
+                                drive.controller.udma_mode = 0x00;
+                            }
+                            0x04 => {
+                                // MDMA mode
+                                tracing::debug!("ATA: SET FEATURES: set transfer mode to MDMA{}", xfer_mode);
+                                drive.controller.mdma_mode = 1 << xfer_mode;
+                                drive.controller.udma_mode = 0x00;
+                            }
+                            0x08 => {
+                                // UDMA mode
+                                tracing::debug!("ATA: SET FEATURES: set transfer mode to UDMA{}", xfer_mode);
+                                drive.controller.mdma_mode = 0x00;
+                                drive.controller.udma_mode = 1 << xfer_mode;
+                            }
+                            _ => {
+                                tracing::debug!(
+                                    "ATA: SET FEATURES: unknown transfer mode type {:#04x}",
+                                    xfer_type
+                                );
+                                self.command_aborted(channel_num, command);
+                                return;
+                            }
+                        }
+                        // Bochs harddrv.cc:2463 — force IDENTIFY re-generation
+                        // on next IDENTIFY command to reflect new transfer mode
+                        drive.identify_set = false;
                     }
                     0x82 => {
                         // Disable write cache — no-op, just succeed
@@ -3617,6 +3661,14 @@ impl BxHardDriveC {
                 // Bochs harddrv.cc:2589-2611 — SEND PACKET (ATAPI)
                 tracing::debug!("ATA: PACKET command on ch{} (ATAPI)", channel_num);
                 if drive.device_type == DeviceType::Cdrom {
+                    // Bochs harddrv.cc:2592
+                    let features = drive.controller.features;
+                    drive.controller.packet_dma = (features & 1) != 0;
+                    if (features & (1 << 1)) != 0 {
+                        tracing::debug!("ATA: PACKET-overlapped not supported");
+                        self.command_aborted(channel_num, ATA_CMD_PACKET);
+                        return;
+                    }
                     drive.controller.sector_count = 1; // c_d=1 (command)
                     // Bochs sets individual fields: busy=0, write_fault=0, drq=1
                     // preserving other bits like drive_ready (DRDY) and seek_complete (DSC).

@@ -248,10 +248,10 @@ impl BxPcSystemC {
         self.ticks_total += self.curr_countdown_period as u64;
 
         // Step 2: Scan all timers for fires and find next event
-        // Bochs pc_system.cc:349 uses `<=` (timeToFire <= ticksTotal), not `==`.
-        // With `==`, if ticks_total overshoots time_to_fire (countdown period > timer
-        // period), the timer is permanently missed. This was the root cause of LAPIC
-        // timer interrupts never firing during HLT.
+        // Bochs pc_system.cc:348 uses `==` (ticksTotal == timeToFire).
+        // We use `>=` to catch overdue timers when countdown period overshoots
+        // the timer period. This was the root cause of LAPIC timer interrupts
+        // never firing during HLT (session 53 fix).
         for i in 0..self.num_timers {
             triggered[i] = false;
             if self.timers[i].flags.contains(TimerFlags::ACTIVE) {
@@ -663,6 +663,22 @@ impl BxPcSystemC {
     #[inline]
     pub fn get_num_cpu_ticks_left_next_event(&self) -> u32 {
         self.curr_countdown
+    }
+
+    /// Decrement countdown without firing events.
+    /// Used by FastRep (CPU instruction handlers) to track tick consumption
+    /// matching Bochs `BX_TICKN()` inside `faststring.cc`.
+    /// Returns true if countdown expired (caller should set async_event).
+    /// The actual `countdown_event()` fires later via the outer `tickn()` call.
+    #[inline]
+    pub fn sub_countdown(&mut self, n: u32) -> bool {
+        if self.curr_countdown > n {
+            self.curr_countdown -= n;
+            false
+        } else {
+            self.curr_countdown = 0;
+            true
+        }
     }
 
     /// Get the number of registered timers.

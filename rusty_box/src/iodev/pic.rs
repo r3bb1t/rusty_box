@@ -346,6 +346,10 @@ pub struct BxPicC {
     cpu_async_event_ptr: *mut u32,
     /// Raw pointer to CPU's `pending_event` for event-bit management.
     cpu_pending_event_ptr: *mut u32,
+    /// Raw pointer to I/O APIC for synchronous forwarding (Bochs pic.cc:499-500).
+    /// PIC raise/lower_irq forwards to IOAPIC immediately, matching Bochs.
+    #[cfg(feature = "bx_support_apic")]
+    ioapic_ptr: *mut super::ioapic::BxIoApic,
 }
 
 impl Default for BxPicC {
@@ -373,7 +377,18 @@ impl BxPicC {
             elcr: [0, 0],
             cpu_async_event_ptr: core::ptr::null_mut(),
             cpu_pending_event_ptr: core::ptr::null_mut(),
+            #[cfg(feature = "bx_support_apic")]
+            ioapic_ptr: core::ptr::null_mut(),
         }
+    }
+
+    /// Wire I/O APIC pointer for synchronous forwarding (Bochs pic.cc:499-500).
+    ///
+    /// # Safety
+    /// The pointer must remain valid for the lifetime of the PIC.
+    #[cfg(feature = "bx_support_apic")]
+    pub unsafe fn set_ioapic_ptr(&mut self, ptr: *mut super::ioapic::BxIoApic) {
+        self.ioapic_ptr = ptr;
     }
 
     /// Wire CPU signal pointers for BX_RAISE_INTR / BX_CLEAR_INTR.
@@ -811,6 +826,11 @@ impl BxPicC {
             if (self.master.irr & (1 << irq_no)) == 0 {
                 self.master.irr |= 1 << irq_no;
                 self.service_pic_dispatch(true);
+                // Bochs pic.cc:499-500: forward to IOAPIC on LOW→HIGH edge
+                #[cfg(feature = "bx_support_apic")]
+                if !self.ioapic_ptr.is_null() && irq_no != 2 {
+                    unsafe { (*self.ioapic_ptr).set_irq_level(irq_no, true) };
+                }
             }
         } else if irq_no < 16 {
             // Slave PIC — same logic
@@ -819,6 +839,11 @@ impl BxPicC {
             if (self.slave.irr & (1 << slave_irq)) == 0 {
                 self.slave.irr |= 1 << slave_irq;
                 self.service_pic_dispatch(false);
+                // Bochs pic.cc:499-500: forward to IOAPIC
+                #[cfg(feature = "bx_support_apic")]
+                if !self.ioapic_ptr.is_null() {
+                    unsafe { (*self.ioapic_ptr).set_irq_level(irq_no, true) };
+                }
             }
         }
     }
@@ -832,12 +857,22 @@ impl BxPicC {
             if self.master.irq_in[irq_no as usize] != 0 {
                 self.master.irq_in[irq_no as usize] = 0;
                 self.master.irr &= !(1 << irq_no);
+                // Bochs pic.cc:470-478: forward to IOAPIC
+                #[cfg(feature = "bx_support_apic")]
+                if !self.ioapic_ptr.is_null() && irq_no != 2 {
+                    unsafe { (*self.ioapic_ptr).set_irq_level(irq_no, false) };
+                }
             }
         } else if irq_no < 16 {
             let slave_irq = irq_no - 8;
             if self.slave.irq_in[slave_irq as usize] != 0 {
                 self.slave.irq_in[slave_irq as usize] = 0;
                 self.slave.irr &= !(1 << slave_irq);
+                // Bochs pic.cc:470-478: forward to IOAPIC
+                #[cfg(feature = "bx_support_apic")]
+                if !self.ioapic_ptr.is_null() {
+                    unsafe { (*self.ioapic_ptr).set_irq_level(irq_no, false) };
+                }
             }
         }
     }

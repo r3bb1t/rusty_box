@@ -404,6 +404,18 @@ impl BxIoApic {
         self.stuck_count = 0;
     }
 
+    /// Get redirect entry state for diagnostics.
+    pub fn redirect_entry_diag(&self, pin: usize) -> (u8, bool, u8, u8) {
+        let e = &self.ioredtbl[pin];
+        (e.vector(), e.is_masked(), e.trigger_mode(), e.delivery_mode())
+    }
+
+    /// Get the intin and irr state for a pin.
+    pub fn pin_state(&self, pin: u8) -> (bool, bool) {
+        let bit = 1u32 << pin;
+        (self.intin & bit != 0, self.irr & bit != 0)
+    }
+
     /// Read an aligned 32-bit register.
     ///
     /// Address is masked to 8-bit offset within the MMIO page.
@@ -726,8 +738,9 @@ impl BxIoApic {
             // Bochs: if (entry->delivery_mode() == 7) vector = DEV_pic_iac();
             // else vector = entry->vector(); (ioapic.cc:311-315)
             let vector = if entry.delivery_mode() == IoApicDeliveryMode::ExtInt as u8 {
-                // ExtINT: would read from PIC INTA cycle — for now use entry vector.
-                // This will be connected to PIC.iac() when integrated with DeviceManager.
+                // ExtINT: Bochs calls DEV_pic_iac() for vector. We use entry.vector() which
+                // is correct when BIOS configures redirect entries to match PIC vectors.
+                // Full Bochs parity would require a PIC callback here.
                 tracing::debug!(
                     "IOAPIC: ExtINT mode on pin {} — using entry vector {:#04x}",
                     pin,

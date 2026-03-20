@@ -955,6 +955,48 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REP MOVSB ECX times (32-bit)
     pub fn rep_movsb32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
+        let df = self.get_df();
+        let seg = BxSegregs::from(instr.seg());
+
+        // FastRep: try bulk memcpy when DF=0 (Bochs faststring.cc:91-92)
+        while ecx != 0 && !df && self.async_event == 0 {
+            let esi = self.esi();
+            let edi = self.edi();
+            let src_laddr = self.get_laddr32(seg as usize, esi) as u64;
+            let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+
+            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) =
+                (self.get_host_read_ptr(src_laddr), self.get_host_write_ptr(dst_laddr))
+            {
+                let count = (ecx as usize).min(src_rem).min(dst_rem)
+                    .min(self.ticks_left_next_event() as usize);
+                if count > 0 {
+                    // Bochs faststring.cc:99-103 — forward byte-by-byte loop.
+                    // Must NOT use memcpy: overlapping regions (LZ decompression)
+                    // rely on reading already-written bytes during forward copy.
+                    unsafe {
+                        for j in 0..count {
+                            *dst_ptr.add(j) = *src_ptr.add(j);
+                        }
+                    }
+                    self.set_rsi(esi.wrapping_add(count as u32) as u64);
+                    self.set_rdi(edi.wrapping_add(count as u32) as u64);
+                    self.icount += count as u64 - 1;
+                    self.tickn_fastrep(count);
+                    ecx -= count as u32;
+                    self.set_ecx(ecx);
+                    if ecx != 0 && self.async_event != 0 {
+                        self.set_rip(self.prev_rip);
+                        self.set_rcx(self.ecx() as u64);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+            break;
+        }
+
         while ecx != 0 {
             self.movsb32(instr)?;
             ecx = ecx.wrapping_sub(1);
@@ -975,6 +1017,48 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REP MOVSW ECX times (32-bit)
     pub fn rep_movsw32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
+        let df = self.get_df();
+        let seg = BxSegregs::from(instr.seg());
+
+        // FastRep: try bulk memcpy when DF=0 (Bochs FastRepMOVSB with granularity=2)
+        while ecx != 0 && !df && self.async_event == 0 {
+            let esi = self.esi();
+            let edi = self.edi();
+            let src_laddr = self.get_laddr32(seg as usize, esi) as u64;
+            let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+
+            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) =
+                (self.get_host_read_ptr(src_laddr), self.get_host_write_ptr(dst_laddr))
+            {
+                let max_bytes = (ecx as usize) * 2;
+                let count_bytes = max_bytes.min(src_rem).min(dst_rem)
+                    .min(self.ticks_left_next_event() as usize) & !1;
+                let count_words = count_bytes / 2;
+                if count_words > 0 {
+                    unsafe {
+                        // Forward byte-by-byte (Bochs faststring.cc:99-103)
+                        for j in 0..count_bytes {
+                            *dst_ptr.add(j) = *src_ptr.add(j);
+                        }
+                    }
+                    self.set_rsi(esi.wrapping_add(count_bytes as u32) as u64);
+                    self.set_rdi(edi.wrapping_add(count_bytes as u32) as u64);
+                    self.icount += count_words as u64 - 1;
+                    self.tickn_fastrep(count_words);
+                    ecx -= count_words as u32;
+                    self.set_ecx(ecx);
+                    if ecx != 0 && self.async_event != 0 {
+                        self.set_rip(self.prev_rip);
+                        self.set_rcx(self.ecx() as u64);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+            break;
+        }
+
         while ecx != 0 {
             self.movsw32(instr)?;
             ecx = ecx.wrapping_sub(1);
@@ -995,6 +1079,48 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REP MOVSD ECX times (32-bit)
     pub fn rep_movsd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
+        let df = self.get_df();
+        let seg = BxSegregs::from(instr.seg());
+
+        // FastRep: try bulk memcpy when DF=0 (Bochs faststring.cc:91-92 granularity=4)
+        while ecx != 0 && !df && self.async_event == 0 {
+            let esi = self.esi();
+            let edi = self.edi();
+            let src_laddr = self.get_laddr32(seg as usize, esi) as u64;
+            let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+
+            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) =
+                (self.get_host_read_ptr(src_laddr), self.get_host_write_ptr(dst_laddr))
+            {
+                let max_bytes = (ecx as usize) * 4;
+                let count_bytes = max_bytes.min(src_rem).min(dst_rem)
+                    .min(self.ticks_left_next_event() as usize) & !3;
+                let count_dwords = count_bytes / 4;
+                if count_dwords > 0 {
+                    unsafe {
+                        // Forward byte-by-byte (Bochs faststring.cc:99-103)
+                        for j in 0..count_bytes {
+                            *dst_ptr.add(j) = *src_ptr.add(j);
+                        }
+                    }
+                    self.set_rsi(esi.wrapping_add(count_bytes as u32) as u64);
+                    self.set_rdi(edi.wrapping_add(count_bytes as u32) as u64);
+                    self.icount += count_dwords as u64 - 1;
+                    self.tickn_fastrep(count_dwords);
+                    ecx -= count_dwords as u32;
+                    self.set_ecx(ecx);
+                    if ecx != 0 && self.async_event != 0 {
+                        self.set_rip(self.prev_rip);
+                        self.set_rcx(self.ecx() as u64);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+            break;
+        }
+
         while ecx != 0 {
             self.movsd32(instr)?;
             ecx = ecx.wrapping_sub(1);
@@ -1013,10 +1139,42 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP STOSB ECX times (32-bit)
-    pub fn rep_stosb32(&mut self, instr: &Instruction) -> super::Result<()> {
+    pub fn rep_stosb32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
+        let df = self.get_df();
+        let al = self.al();
+
+        // FastRep: try bulk memset when DF=0 (Bochs faststring.cc:146-147)
+        while ecx != 0 && !df && self.async_event == 0 {
+            let edi = self.edi();
+            let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+
+            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+                let count = (ecx as usize).min(dst_rem)
+                    .min(self.ticks_left_next_event() as usize);
+                if count > 0 {
+                    unsafe {
+                        core::ptr::write_bytes(dst_ptr, al, count);
+                    }
+                    self.set_rdi(edi.wrapping_add(count as u32) as u64);
+                    self.icount += count as u64 - 1;
+                    self.tickn_fastrep(count);
+                    ecx -= count as u32;
+                    self.set_ecx(ecx);
+                    if ecx != 0 && self.async_event != 0 {
+                        self.set_rip(self.prev_rip);
+                        self.set_rcx(self.ecx() as u64);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+            break;
+        }
+
         while ecx != 0 {
-            self.stosb32(instr)?;
+            self.stosb32(_instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
             if ecx != 0 {
@@ -1033,10 +1191,47 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP STOSW ECX times (32-bit)
-    pub fn rep_stosw32(&mut self, instr: &Instruction) -> super::Result<()> {
+    pub fn rep_stosw32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
+        let df = self.get_df();
+        let ax = self.ax();
+
+        // FastRep: try bulk word fill when DF=0 (Bochs faststring.cc:198-199)
+        while ecx != 0 && !df && self.async_event == 0 {
+            let edi = self.edi();
+            let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+
+            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+                let max_bytes = (ecx as usize) * 2;
+                let count_bytes = max_bytes.min(dst_rem) & !1;
+                let count_words = (count_bytes / 2)
+                    .min(self.ticks_left_next_event() as usize);
+                if count_words > 0 {
+                    let dst_slice = unsafe {
+                        core::slice::from_raw_parts_mut(dst_ptr as *mut u16, count_words)
+                    };
+                    for w in dst_slice.iter_mut() {
+                        *w = ax;
+                    }
+                    self.set_rdi(edi.wrapping_add((count_words * 2) as u32) as u64);
+                    self.icount += count_words as u64 - 1;
+                    self.tickn_fastrep(count_words);
+                    ecx -= count_words as u32;
+                    self.set_ecx(ecx);
+                    if ecx != 0 && self.async_event != 0 {
+                        self.set_rip(self.prev_rip);
+                        self.set_rcx(self.ecx() as u64);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+            break;
+        }
+
         while ecx != 0 {
-            self.stosw32(instr)?;
+            self.stosw32(_instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
             if ecx != 0 {
@@ -1053,10 +1248,47 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP STOSD ECX times (32-bit)
-    pub fn rep_stosd32(&mut self, instr: &Instruction) -> super::Result<()> {
+    pub fn rep_stosd32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
+        let df = self.get_df();
+        let eax = self.eax();
+
+        // FastRep: try bulk dword fill when DF=0 (Bochs faststring.cc:250-251)
+        while ecx != 0 && !df && self.async_event == 0 {
+            let edi = self.edi();
+            let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+
+            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+                let max_bytes = (ecx as usize) * 4;
+                let count_bytes = max_bytes.min(dst_rem) & !3;
+                let count_dwords = (count_bytes / 4)
+                    .min(self.ticks_left_next_event() as usize);
+                if count_dwords > 0 {
+                    let dst_slice = unsafe {
+                        core::slice::from_raw_parts_mut(dst_ptr as *mut u32, count_dwords)
+                    };
+                    for d in dst_slice.iter_mut() {
+                        *d = eax;
+                    }
+                    self.set_rdi(edi.wrapping_add((count_dwords * 4) as u32) as u64);
+                    self.icount += count_dwords as u64 - 1;
+                    self.tickn_fastrep(count_dwords);
+                    ecx -= count_dwords as u32;
+                    self.set_ecx(ecx);
+                    if ecx != 0 && self.async_event != 0 {
+                        self.set_rip(self.prev_rip);
+                        self.set_rcx(self.ecx() as u64);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+            break;
+        }
+
         while ecx != 0 {
-            self.stosd32(instr)?;
+            self.stosd32(_instr)?;
             ecx = ecx.wrapping_sub(1);
             self.set_ecx(ecx);
             if ecx != 0 {
@@ -1885,6 +2117,47 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub fn rep_movsb64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
+        let df = self.get_df();
+        let seg = BxSegregs::from(instr.seg());
+
+        // FastRep: try bulk memcpy when DF=0 (Bochs faststring.cc:91-92)
+        while rcx != 0 && !df && self.async_event == 0 {
+            let rsi = self.rsi();
+            let rdi = self.rdi();
+            let src_laddr = self.get_laddr64(seg as usize, rsi);
+            let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+
+            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) =
+                (self.get_host_read_ptr(src_laddr), self.get_host_write_ptr(dst_laddr))
+            {
+                let count = (rcx as usize).min(src_rem).min(dst_rem)
+                    .min(self.ticks_left_next_event() as usize);
+                if count > 0 {
+                    // Bochs faststring.cc:99-103 — forward byte-by-byte loop.
+                    // Must NOT use memcpy: overlapping regions (LZ decompression)
+                    // rely on reading already-written bytes during forward copy.
+                    unsafe {
+                        for j in 0..count {
+                            *dst_ptr.add(j) = *src_ptr.add(j);
+                        }
+                    }
+                    self.set_rsi(rsi.wrapping_add(count as u64));
+                    self.set_rdi(rdi.wrapping_add(count as u64));
+                    self.icount += count as u64 - 1;
+                    self.tickn_fastrep(count);
+                    rcx -= count as u64;
+                    self.set_rcx(rcx);
+                    if rcx != 0 && self.async_event != 0 {
+                        self.set_rip(self.prev_rip);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+            break; // TLB miss — fall through to per-byte loop
+        }
+
         while rcx != 0 {
             self.movsb64(instr)?;
             rcx = rcx.wrapping_sub(1);
@@ -1915,6 +2188,47 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub fn rep_movsw64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
+        let df = self.get_df();
+        let seg = BxSegregs::from(instr.seg());
+
+        // FastRep: try bulk memcpy when DF=0 (Bochs faststring.cc:91-92 granularity=2)
+        while rcx != 0 && !df && self.async_event == 0 {
+            let rsi = self.rsi();
+            let rdi = self.rdi();
+            let src_laddr = self.get_laddr64(seg as usize, rsi);
+            let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+
+            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) =
+                (self.get_host_read_ptr(src_laddr), self.get_host_write_ptr(dst_laddr))
+            {
+                let max_bytes = (rcx as usize) * 2;
+                let count_bytes = max_bytes.min(src_rem).min(dst_rem)
+                    .min(self.ticks_left_next_event() as usize) & !1;
+                let count_words = count_bytes / 2;
+                if count_words > 0 {
+                    unsafe {
+                        // Forward byte-by-byte (Bochs faststring.cc:99-103)
+                        for j in 0..count_bytes {
+                            *dst_ptr.add(j) = *src_ptr.add(j);
+                        }
+                    }
+                    self.set_rsi(rsi.wrapping_add(count_bytes as u64));
+                    self.set_rdi(rdi.wrapping_add(count_bytes as u64));
+                    self.icount += count_words as u64 - 1;
+                    self.tickn_fastrep(count_words);
+                    rcx -= count_words as u64;
+                    self.set_rcx(rcx);
+                    if rcx != 0 && self.async_event != 0 {
+                        self.set_rip(self.prev_rip);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+            break;
+        }
+
         while rcx != 0 {
             self.movsw64(instr)?;
             rcx = rcx.wrapping_sub(1);
@@ -1945,6 +2259,47 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub fn rep_movsd64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
+        let df = self.get_df();
+        let seg = BxSegregs::from(instr.seg());
+
+        // FastRep: try bulk memcpy when DF=0 (Bochs faststring.cc:91-92 granularity=4)
+        while rcx != 0 && !df && self.async_event == 0 {
+            let rsi = self.rsi();
+            let rdi = self.rdi();
+            let src_laddr = self.get_laddr64(seg as usize, rsi);
+            let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+
+            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) =
+                (self.get_host_read_ptr(src_laddr), self.get_host_write_ptr(dst_laddr))
+            {
+                let max_bytes = (rcx as usize) * 4;
+                let count_bytes = max_bytes.min(src_rem).min(dst_rem)
+                    .min(self.ticks_left_next_event() as usize) & !3; // align to 4
+                let count_dwords = count_bytes / 4;
+                if count_dwords > 0 {
+                    unsafe {
+                        // Forward byte-by-byte (Bochs faststring.cc:99-103)
+                        for j in 0..count_bytes {
+                            *dst_ptr.add(j) = *src_ptr.add(j);
+                        }
+                    }
+                    self.set_rsi(rsi.wrapping_add(count_bytes as u64));
+                    self.set_rdi(rdi.wrapping_add(count_bytes as u64));
+                    self.icount += count_dwords as u64 - 1;
+                    self.tickn_fastrep(count_dwords);
+                    rcx -= count_dwords as u64;
+                    self.set_rcx(rcx);
+                    if rcx != 0 && self.async_event != 0 {
+                        self.set_rip(self.prev_rip);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+            break;
+        }
+
         while rcx != 0 {
             self.movsd64(instr)?;
             rcx = rcx.wrapping_sub(1);
@@ -1973,10 +2328,41 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    pub fn rep_stosb64(&mut self, instr: &Instruction) -> super::Result<()> {
+    pub fn rep_stosb64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
+        let df = self.get_df();
+        let al = self.al();
+
+        // FastRep: try bulk memset when DF=0 (Bochs faststring.cc:146-147)
+        while rcx != 0 && !df && self.async_event == 0 {
+            let rdi = self.rdi();
+            let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+
+            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+                let count = (rcx as usize).min(dst_rem)
+                    .min(self.ticks_left_next_event() as usize);
+                if count > 0 {
+                    unsafe {
+                        core::ptr::write_bytes(dst_ptr, al, count);
+                    }
+                    self.set_rdi(rdi.wrapping_add(count as u64));
+                    self.icount += count as u64 - 1;
+                    self.tickn_fastrep(count);
+                    rcx -= count as u64;
+                    self.set_rcx(rcx);
+                    if rcx != 0 && self.async_event != 0 {
+                        self.set_rip(self.prev_rip);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+            break;
+        }
+
         while rcx != 0 {
-            self.stosb64(instr)?;
+            self.stosb64(_instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
             if rcx != 0 {
@@ -2001,10 +2387,46 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    pub fn rep_stosw64(&mut self, instr: &Instruction) -> super::Result<()> {
+    pub fn rep_stosw64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
+        let df = self.get_df();
+        let ax = self.ax();
+
+        // FastRep: try bulk word fill when DF=0 (Bochs faststring.cc:198-199)
+        while rcx != 0 && !df && self.async_event == 0 {
+            let rdi = self.rdi();
+            let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+
+            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+                let max_bytes = (rcx as usize) * 2;
+                let count_bytes = max_bytes.min(dst_rem) & !1;
+                let count_words = (count_bytes / 2)
+                    .min(self.ticks_left_next_event() as usize);
+                if count_words > 0 {
+                    let dst_slice = unsafe {
+                        core::slice::from_raw_parts_mut(dst_ptr as *mut u16, count_words)
+                    };
+                    for w in dst_slice.iter_mut() {
+                        *w = ax;
+                    }
+                    self.set_rdi(rdi.wrapping_add((count_words * 2) as u64));
+                    self.icount += count_words as u64 - 1;
+                    self.tickn_fastrep(count_words);
+                    rcx -= count_words as u64;
+                    self.set_rcx(rcx);
+                    if rcx != 0 && self.async_event != 0 {
+                        self.set_rip(self.prev_rip);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+            break;
+        }
+
         while rcx != 0 {
-            self.stosw64(instr)?;
+            self.stosw64(_instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
             if rcx != 0 {
@@ -2029,10 +2451,46 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    pub fn rep_stosd64(&mut self, instr: &Instruction) -> super::Result<()> {
+    pub fn rep_stosd64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
+        let df = self.get_df();
+        let eax = self.eax();
+
+        // FastRep: try bulk dword fill when DF=0 (Bochs faststring.cc:250-251)
+        while rcx != 0 && !df && self.async_event == 0 {
+            let rdi = self.rdi();
+            let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+
+            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+                let max_bytes = (rcx as usize) * 4;
+                let count_bytes = max_bytes.min(dst_rem) & !3;
+                let count_dwords = (count_bytes / 4)
+                    .min(self.ticks_left_next_event() as usize);
+                if count_dwords > 0 {
+                    let dst_slice = unsafe {
+                        core::slice::from_raw_parts_mut(dst_ptr as *mut u32, count_dwords)
+                    };
+                    for d in dst_slice.iter_mut() {
+                        *d = eax;
+                    }
+                    self.set_rdi(rdi.wrapping_add((count_dwords * 4) as u64));
+                    self.icount += count_dwords as u64 - 1;
+                    self.tickn_fastrep(count_dwords);
+                    rcx -= count_dwords as u64;
+                    self.set_rcx(rcx);
+                    if rcx != 0 && self.async_event != 0 {
+                        self.set_rip(self.prev_rip);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+            break;
+        }
+
         while rcx != 0 {
-            self.stosd64(instr)?;
+            self.stosd64(_instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
             if rcx != 0 {
@@ -2440,6 +2898,47 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// REP MOVSQ -- Move RCX qwords from [RSI] to [RDI]
     pub fn rep_movsq64(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
+        let df = self.get_df();
+        let seg = BxSegregs::from(instr.seg());
+
+        // FastRep: try bulk memcpy when DF=0 (Bochs faststring.cc:91-92 granularity=8)
+        while rcx != 0 && !df && self.async_event == 0 {
+            let rsi = self.rsi();
+            let rdi = self.rdi();
+            let src_laddr = self.get_laddr64(seg as usize, rsi);
+            let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+
+            if let (Some((src_ptr, src_rem)), Some((dst_ptr, dst_rem))) =
+                (self.get_host_read_ptr(src_laddr), self.get_host_write_ptr(dst_laddr))
+            {
+                let max_bytes = (rcx as usize) * 8;
+                let count_bytes = max_bytes.min(src_rem).min(dst_rem)
+                    .min(self.ticks_left_next_event() as usize) & !7;
+                let count_qwords = count_bytes / 8;
+                if count_qwords > 0 {
+                    unsafe {
+                        // Forward byte-by-byte (Bochs faststring.cc:99-103)
+                        for j in 0..count_bytes {
+                            *dst_ptr.add(j) = *src_ptr.add(j);
+                        }
+                    }
+                    self.set_rsi(rsi.wrapping_add(count_bytes as u64));
+                    self.set_rdi(rdi.wrapping_add(count_bytes as u64));
+                    self.icount += count_qwords as u64 - 1;
+                    self.tickn_fastrep(count_qwords);
+                    rcx -= count_qwords as u64;
+                    self.set_rcx(rcx);
+                    if rcx != 0 && self.async_event != 0 {
+                        self.set_rip(self.prev_rip);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+            break;
+        }
+
         while rcx != 0 {
             self.movsq64(instr)?;
             rcx = rcx.wrapping_sub(1);
@@ -2467,10 +2966,46 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// REP STOSQ -- Store RAX to RCX qwords at [RDI]
-    pub fn rep_stosq64(&mut self, instr: &Instruction) -> super::Result<()> {
+    pub fn rep_stosq64(&mut self, _instr: &Instruction) -> super::Result<()> {
         let mut rcx = self.rcx();
+        let df = self.get_df();
+        let rax = self.rax();
+
+        // FastRep: try bulk qword fill when DF=0 (Bochs faststring.cc:250-251 granularity=8)
+        while rcx != 0 && !df && self.async_event == 0 {
+            let rdi = self.rdi();
+            let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+
+            if let Some((dst_ptr, dst_rem)) = self.get_host_write_ptr(dst_laddr) {
+                let max_bytes = (rcx as usize) * 8;
+                let count_bytes = max_bytes.min(dst_rem) & !7;
+                let count_qwords = (count_bytes / 8)
+                    .min(self.ticks_left_next_event() as usize);
+                if count_qwords > 0 {
+                    let dst_slice = unsafe {
+                        core::slice::from_raw_parts_mut(dst_ptr as *mut u64, count_qwords)
+                    };
+                    for q in dst_slice.iter_mut() {
+                        *q = rax;
+                    }
+                    self.set_rdi(rdi.wrapping_add((count_qwords * 8) as u64));
+                    self.icount += count_qwords as u64 - 1;
+                    self.tickn_fastrep(count_qwords);
+                    rcx -= count_qwords as u64;
+                    self.set_rcx(rcx);
+                    if rcx != 0 && self.async_event != 0 {
+                        self.set_rip(self.prev_rip);
+                        self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                        return Ok(());
+                    }
+                    continue;
+                }
+            }
+            break;
+        }
+
         while rcx != 0 {
-            self.stosq64(instr)?;
+            self.stosq64(_instr)?;
             rcx = rcx.wrapping_sub(1);
             self.set_rcx(rcx);
             if rcx != 0 {

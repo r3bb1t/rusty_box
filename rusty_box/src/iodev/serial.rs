@@ -974,6 +974,9 @@ impl BxSerialC {
                     if new_dsr != s.modem_status.dsr {
                         s.modem_status.delta_dsr = true;
                     }
+                    if new_ri != s.modem_status.ri {
+                        s.ms_ipending = true;
+                    }
                     if !new_ri && s.modem_status.ri {
                         s.modem_status.ri_trailedge = true;
                     }

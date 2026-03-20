@@ -324,6 +324,23 @@ impl DeviceManager {
             "CMOS Data",
             0x1,
         );
+        // Bochs cmos.cc:225-228 — extended CMOS RAM ports (addresses 0x80-0xFF)
+        io.register_io_handler(
+            cmos_ptr,
+            super::cmos::cmos_read_handler,
+            super::cmos::cmos_write_handler,
+            0x0072,
+            "Ext CMOS RAM",
+            0x1,
+        );
+        io.register_io_handler(
+            cmos_ptr,
+            super::cmos::cmos_read_handler,
+            super::cmos::cmos_write_handler,
+            0x0073,
+            "Ext CMOS RAM",
+            0x1,
+        );
     }
 
     /// Register DMA I/O handlers
@@ -725,40 +742,25 @@ impl DeviceManager {
             // interrupt delivery).
             self.pic.lower_irq(0);
             self.pic.raise_irq(0);
-            // Route through I/O APIC as well (Bochs: DEV_ioapic_set_irq_level)
-            // IRQ0 is remapped to IOAPIC pin 2 inside set_irq_level()
-            #[cfg(feature = "bx_support_apic")]
-            {
-                self.ioapic.set_irq_level(0, false);
-                self.ioapic.set_irq_level(0, true);
-            }
             self.diag_irq0_latched += 1;
         }
 
         // CMOS: process IRQ8 lower BEFORE raise (from REG_STAT_C read)
         if self.cmos.check_irq8_lower() {
             self.pic.lower_irq(8);
-            #[cfg(feature = "bx_support_apic")]
-            self.ioapic.set_irq_level(8, false);
         }
         self.cmos.tick(usec);
         if self.cmos.check_irq8() {
             self.pic.raise_irq(8);
-            #[cfg(feature = "bx_support_apic")]
-            self.ioapic.set_irq_level(8, true);
         }
 
         // Keyboard: process IRQ lower requests BEFORE raises (matching Bochs
         // DEV_pic_lower_irq() calls in port 0x60 read handler, keyboard.cc:315/340)
         if self.keyboard.check_irq1_lower() {
             self.pic.lower_irq(1);
-            #[cfg(feature = "bx_support_apic")]
-            self.ioapic.set_irq_level(1, false);
         }
         if self.keyboard.check_irq12_lower() {
             self.pic.lower_irq(12);
-            #[cfg(feature = "bx_support_apic")]
-            self.ioapic.set_irq_level(12, false);
         }
 
         // Keyboard periodic: transfer internal buffers → output buffer,
@@ -766,23 +768,10 @@ impl DeviceManager {
         let kbd_irq = self.keyboard.periodic(usec as u32);
         if kbd_irq & 0x01 != 0 {
             self.pic.raise_irq(1);
-            #[cfg(feature = "bx_support_apic")]
-            self.ioapic.set_irq_level(1, true);
         }
         if kbd_irq & 0x02 != 0 {
             self.pic.raise_irq(12);
-            #[cfg(feature = "bx_support_apic")]
-            self.ioapic.set_irq_level(12, true);
         }
-
-        // Hard drive IRQ14/15 — level-based, matching Bochs direct PIC calls.
-        // On every tick, sync the PIC IRQ lines to the ATA interrupt_pending state.
-        // This avoids the one-shot race where status register polling would
-        // lower the IRQ before the CPU could acknowledge it.
-        #[cfg(feature = "bx_support_apic")]
-        self.harddrv.update_irq_lines_with_ioapic(&mut self.pic, &mut self.ioapic);
-        #[cfg(not(feature = "bx_support_apic"))]
-        self.harddrv.update_irq_lines(&mut self.pic);
 
         // ACPI PM timer: tick and sync IRQ 9 (SCI) to PIC
         #[cfg(feature = "bx_support_pci")]
@@ -790,26 +779,19 @@ impl DeviceManager {
             self.acpi.tick(usec);
             if self.acpi.irq9_level {
                 self.pic.raise_irq(9);
-                #[cfg(feature = "bx_support_apic")]
-                self.ioapic.set_irq_level(9, true);
             } else {
                 self.pic.lower_irq(9);
-                #[cfg(feature = "bx_support_apic")]
-                self.ioapic.set_irq_level(9, false);
             }
         }
 
-        // Serial port: forward pending IRQ raise/lower to PIC + IOAPIC
+        // Serial port: forward pending IRQ raise/lower to PIC
         // (Bochs: serial.cc raise_interrupt/lower_interrupt call DEV_pic_raise/lower_irq)
+        // PIC now forwards to IOAPIC synchronously (Bochs pic.cc:499-500).
         for (irq, raise) in self.serial.take_pending_irqs() {
             if raise {
                 self.pic.raise_irq(irq);
-                #[cfg(feature = "bx_support_apic")]
-                self.ioapic.set_irq_level(irq, true);
             } else {
                 self.pic.lower_irq(irq);
-                #[cfg(feature = "bx_support_apic")]
-                self.ioapic.set_irq_level(irq, false);
             }
         }
 

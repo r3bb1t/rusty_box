@@ -1,7 +1,8 @@
 //! VGA 8x16 font and default 16-color palette
 //!
 //! Font data from Bochs `gui/font/vga.bitmap.h` (bx_vgafont[256]).
-//! Each character is 16 bytes (rows), each byte = 8 pixels (MSB = leftmost).
+//! Each character is 16 bytes (rows), each byte = 8 pixels (LSB = leftmost).
+//! This matches Bochs DrawBitmap (rfb.cc) which extracts bit 0 first.
 //!
 //! Palette is the standard VGA 16-color text mode palette.
 

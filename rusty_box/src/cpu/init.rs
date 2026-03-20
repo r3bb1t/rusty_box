@@ -453,7 +453,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Flush all TLB entries (both DTLB and ITLB) and invalidate prefetch/stack caches.
     /// Matching Bochs paging.cc TLB_flush(): flushes DTLB, ITLB, prefetch queue,
     /// stack cache, and breaks icache trace links.
-    pub(super) fn tlb_flush(&mut self) {
+    pub(crate) fn tlb_flush(&mut self) {
         self.invalidate_prefetch_q();
         self.invalidate_stack_cache();
         self.dtlb.flush();
