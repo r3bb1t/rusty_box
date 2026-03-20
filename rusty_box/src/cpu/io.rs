@@ -498,82 +498,76 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let port = self.dx();
 
-        // Try bulk I/O for IDE data ports with direct host memory copy
-        // Bochs io.cc:335 — only enter fast path when no async_event pending
-        if (port == 0x1F0 || port == 0x170) && !self.get_df() && self.async_event == 0 {
+        // Fast path: direct host memory write, matching Bochs FastRepINSW
+        // (io.cc:39-117). DF=0 only, no pending async events.
+        if !self.get_df() && self.async_event == 0 {
             if self.allow_io(port, 2)? {
                 while ecx != 0 {
-                    let chunk_words = (ecx as usize).min(1024)
-                        .min(self.ticks_left_next_event() as usize);
-                    if chunk_words == 0 { break; }
-                    let chunk_bytes = chunk_words * 2;
-                    let mut tmp = [0u8; 2048];
-                    let got = self.bulk_port_in(port, &mut tmp[..chunk_bytes]);
-                    if got == 0 {
-                        break;
-                    }
-                    let bytes_got = got;
-                    let words_got = got / 2;
                     let edi = self.edi();
-                    let laddr = self.get_laddr32(BxSegregs::Es as usize, edi);
+                    // Pre-fault the destination word via RMW to populate TLB
+                    // and ensure the page is writable (Bochs io.cc:362).
+                    let _prefault = self.read_rmw_virtual_word(BxSegregs::Es, edi)?;
 
-                    // Try direct host memory copy (Bochs FastRepINSW pattern)
-                    if let Some((host_ptr, page_remaining)) = self.get_host_write_ptr(laddr as u64) {
-                        let copy_len = bytes_got.min(page_remaining);
-                        let copy_words = copy_len / 2;
-                        if copy_words > 0 {
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    tmp.as_ptr(),
-                                    host_ptr,
-                                    copy_words * 2,
-                                );
-                            }
-                            let new_edi = edi.wrapping_add((copy_words * 2) as u32);
-                            self.set_rdi(new_edi as u64);
-                            ecx -= copy_words as u32;
-                            self.set_ecx(ecx);
-                            self.tickn_fastrep(copy_words);
-                            // If we couldn't copy everything due to page boundary,
-                            // fall through to per-word for remainder of this chunk
-                            if copy_words * 2 < bytes_got {
-                                let remainder_start = copy_words * 2;
-                                let remainder_words = (bytes_got - remainder_start) / 2;
-                                let mut edi2 = self.edi() as u64;
-                                for i in 0..remainder_words {
-                                    let off = remainder_start + i * 2;
-                                    let val = u16::from_le_bytes([tmp[off], tmp[off + 1]]);
-                                    self.v_write_word(BxSegregs::Es, edi2 as u32, val)?;
-                                    edi2 = edi2.wrapping_add(2);
-                                }
-                                self.set_rdi(edi2);
-                                ecx -= remainder_words as u32;
-                                self.set_ecx(ecx);
-                                self.tickn_fastrep(remainder_words);
-                            }
-                            // Bochs io.cc:106-107 — break if async_event set
-                            if self.async_event != 0 { break; }
-                            continue;
+                    let laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+
+                    // Try to get a direct host pointer via TLB (Bochs v2h_write_byte)
+                    if let Some((host_ptr, page_remaining)) = self.get_host_write_ptr(laddr) {
+                        // How many words fit in the remaining page space
+                        let words_fit_page = page_remaining / 2;
+                        if words_fit_page == 0 {
+                            break;
                         }
+                        let chunk_words = (ecx as usize).min(words_fit_page);
+
+                        // Read from port per-word and write directly into host memory.
+                        // Matches Bochs FastRepINSW io.cc:88-105.
+                        for i in 0..chunk_words {
+                            let val = self.port_in(port, 2) as u16;
+                            unsafe {
+                                let dst = host_ptr.add(i * 2) as *mut u16;
+                                dst.write_unaligned(val.to_le());
+                            }
+                            // Check for async events after each word (Bochs io.cc:107)
+                            if self.async_event != 0 {
+                                let transferred = (i + 1) as u32;
+                                let new_edi = edi.wrapping_add(transferred * 2);
+                                self.set_rdi(new_edi as u64);
+                                ecx -= transferred;
+                                self.set_ecx(ecx);
+                                self.icount += transferred as u64;
+                                if transferred > 1 {
+                                    self.tickn_fastrep(transferred as usize - 1);
+                                }
+                                self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                                return Ok(());
+                            }
+                        }
+
+                        // All chunk_words transferred successfully
+                        let transferred = chunk_words as u32;
+                        let new_edi = edi.wrapping_add(transferred * 2);
+                        self.set_rdi(new_edi as u64);
+                        ecx -= transferred;
+                        self.set_ecx(ecx);
+                        self.icount += transferred as u64;
+                        // Bochs: BX_TICKN(wordCount-1)
+                        if transferred > 1 {
+                            self.tickn_fastrep(transferred as usize - 1);
+                        }
+
+                        if self.async_event != 0 {
+                            break;
+                        }
+                        continue;
                     }
 
-                    // Fallback: write word-by-word
-                    let mut edi_val = edi;
-                    for i in 0..words_got {
-                        let val = u16::from_le_bytes([tmp[i * 2], tmp[i * 2 + 1]]);
-                        self.v_write_word(BxSegregs::Es, edi_val, val)?;
-                        edi_val = edi_val.wrapping_add(2);
-                    }
-                    self.set_rdi(edi_val as u64);
-                    ecx -= words_got as u32;
-                    self.set_ecx(ecx);
-                    self.tickn_fastrep(words_got);
-                    if self.async_event != 0 { break; }
+                    // get_host_write_ptr returned None — fall to per-word path
+                    break;
                 }
             }
         }
 
-        // Per-word fallback (handles DF=1, non-IDE ports, or remainder)
+        // Per-word fallback (handles DF=1, non-TLB-resolvable pages, or remainder)
         while ecx != 0 {
             self.insw32(instr)?;
             ecx -= 1;
@@ -585,6 +579,87 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     fn rep_insd32(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut ecx = self.ecx();
+        if ecx == 0 {
+            return Ok(());
+        }
+        let port = self.dx();
+
+        // Fast path for IDE data ports: direct host memory write.
+        // Matches Bochs FastRepINSW pattern (io.cc:39-117) adapted for dwords.
+        // Only DF=0 (forward), no pending async events, I/O permission OK.
+        if !self.get_df() && self.async_event == 0 {
+            if self.allow_io(port, 4)? {
+                while ecx != 0 {
+                    let edi = self.edi();
+                    // Pre-fault the destination dword via RMW to populate TLB
+                    // and ensure the page is writable (Bochs io.cc:439).
+                    let _prefault = self.read_rmw_virtual_dword(BxSegregs::Es, edi)?;
+
+                    let laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
+
+                    // Try to get a direct host pointer via TLB (Bochs v2h_write_byte)
+                    if let Some((host_ptr, page_remaining)) = self.get_host_write_ptr(laddr) {
+                        // How many dwords fit in the remaining page space
+                        let dwords_fit_page = page_remaining / 4;
+                        if dwords_fit_page == 0 {
+                            // Less than 4 bytes left on page — do one dword via slow path
+                            break;
+                        }
+                        let chunk_dwords = (ecx as usize).min(dwords_fit_page);
+
+                        // Read from port per-dword and write directly into host memory.
+                        // This matches Bochs FastRepINSW where each word goes through
+                        // BX_INP individually, written via WriteHostWordToLittleEndian.
+                        for i in 0..chunk_dwords {
+                            let val = self.port_in(port, 4);
+                            unsafe {
+                                let dst = host_ptr.add(i * 4) as *mut u32;
+                                dst.write_unaligned(val.to_le());
+                            }
+                            // Check for async events after each dword (Bochs io.cc:107)
+                            if self.async_event != 0 {
+                                // Commit partial progress: i+1 dwords transferred
+                                let transferred = (i + 1) as u32;
+                                let new_edi = edi.wrapping_add(transferred * 4);
+                                self.set_rdi(new_edi as u64);
+                                ecx -= transferred;
+                                self.set_ecx(ecx);
+                                self.icount += transferred as u64;
+                                if transferred > 1 {
+                                    self.tickn_fastrep(transferred as usize - 1);
+                                }
+                                self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                                return Ok(());
+                            }
+                        }
+
+                        // All chunk_dwords transferred successfully
+                        let transferred = chunk_dwords as u32;
+                        let new_edi = edi.wrapping_add(transferred * 4);
+                        self.set_rdi(new_edi as u64);
+                        ecx -= transferred;
+                        self.set_ecx(ecx);
+                        self.icount += transferred as u64;
+                        // Bochs: BX_TICKN(wordCount-1) — main loop ticks 1
+                        if transferred > 1 {
+                            self.tickn_fastrep(transferred as usize - 1);
+                        }
+
+                        // If async_event was set by tickn_fastrep, break
+                        if self.async_event != 0 {
+                            break;
+                        }
+                        continue;
+                    }
+
+                    // get_host_write_ptr returned None (VGA/MMIO or TLB miss after
+                    // pre-fault). Fall through to per-dword slow path.
+                    break;
+                }
+            }
+        }
+
+        // Per-dword fallback (handles DF=1, non-TLB-resolvable pages, or remainder)
         while ecx != 0 {
             self.insd32(instr)?;
             ecx -= 1;
@@ -804,76 +879,66 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         let port = self.dx();
 
-        // Try bulk I/O for IDE data ports with direct host memory copy
-        // Bochs io.cc:335 — only enter fast path when no async_event pending
-        if (port == 0x1F0 || port == 0x170) && !self.get_df() && self.async_event == 0 {
+        // Fast path: direct host memory write, matching Bochs FastRepINSW
+        // (io.cc:39-117) adapted for 64-bit address mode. DF=0 only.
+        if !self.get_df() && self.async_event == 0 {
             if self.allow_io(port, 2)? {
                 while rcx != 0 {
-                    let chunk_words = (rcx as usize).min(1024)
-                        .min(self.ticks_left_next_event() as usize);
-                    if chunk_words == 0 { break; }
-                    let chunk_bytes = chunk_words * 2;
-                    let mut tmp = [0u8; 2048];
-                    let got = self.bulk_port_in(port, &mut tmp[..chunk_bytes]);
-                    if got == 0 {
-                        break;
-                    }
-                    let bytes_got = got;
-                    let words_got = got / 2;
                     let rdi = self.rdi();
+                    // Pre-fault the destination word via RMW to populate TLB
+                    // and ensure the page is writable (Bochs io.cc:381).
+                    let _prefault = self.read_rmw_virtual_word_64(BxSegregs::Es, rdi)?;
+
                     let laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
 
-                    // Try direct host memory copy (Bochs FastRepINSW pattern)
+                    // Try to get a direct host pointer via TLB (Bochs v2h_write_byte)
                     if let Some((host_ptr, page_remaining)) = self.get_host_write_ptr(laddr) {
-                        let copy_len = bytes_got.min(page_remaining);
-                        let copy_words = copy_len / 2;
-                        if copy_words > 0 {
-                            unsafe {
-                                core::ptr::copy_nonoverlapping(
-                                    tmp.as_ptr(),
-                                    host_ptr,
-                                    copy_words * 2,
-                                );
-                            }
-                            let new_rdi = rdi.wrapping_add((copy_words * 2) as u64);
-                            self.set_rdi(new_rdi);
-                            rcx -= copy_words as u64;
-                            self.set_rcx(rcx);
-                            self.tickn_fastrep(copy_words);
-                            // Handle remainder past page boundary
-                            if copy_words * 2 < bytes_got {
-                                let remainder_start = copy_words * 2;
-                                let remainder_words = (bytes_got - remainder_start) / 2;
-                                let mut rdi2 = self.rdi();
-                                for i in 0..remainder_words {
-                                    let off = remainder_start + i * 2;
-                                    let val = u16::from_le_bytes([tmp[off], tmp[off + 1]]);
-                                    self.write_virtual_word_64(BxSegregs::Es, rdi2, val)?;
-                                    rdi2 = rdi2.wrapping_add(2);
-                                }
-                                self.set_rdi(rdi2);
-                                rcx -= remainder_words as u64;
-                                self.set_rcx(rcx);
-                                self.tickn_fastrep(remainder_words);
-                            }
-                            // Bochs io.cc:106-107 — break if async_event set
-                            if self.async_event != 0 { break; }
-                            continue;
+                        let words_fit_page = page_remaining / 2;
+                        if words_fit_page == 0 {
+                            break;
                         }
+                        let chunk_words = (rcx as usize).min(words_fit_page);
+
+                        // Read from port per-word and write directly into host memory.
+                        for i in 0..chunk_words {
+                            let val = self.port_in(port, 2) as u16;
+                            unsafe {
+                                let dst = host_ptr.add(i * 2) as *mut u16;
+                                dst.write_unaligned(val.to_le());
+                            }
+                            if self.async_event != 0 {
+                                let transferred = (i + 1) as u64;
+                                let new_rdi = rdi.wrapping_add(transferred * 2);
+                                self.set_rdi(new_rdi);
+                                rcx -= transferred;
+                                self.set_rcx(rcx);
+                                self.icount += transferred;
+                                if transferred > 1 {
+                                    self.tickn_fastrep(transferred as usize - 1);
+                                }
+                                self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                                return Ok(());
+                            }
+                        }
+
+                        let transferred = chunk_words as u64;
+                        let new_rdi = rdi.wrapping_add(transferred * 2);
+                        self.set_rdi(new_rdi);
+                        rcx -= transferred;
+                        self.set_rcx(rcx);
+                        self.icount += transferred;
+                        if transferred > 1 {
+                            self.tickn_fastrep(transferred as usize - 1);
+                        }
+
+                        if self.async_event != 0 {
+                            break;
+                        }
+                        continue;
                     }
 
-                    // Fallback: write word-by-word
-                    let mut rdi_val = rdi;
-                    for i in 0..words_got {
-                        let val = u16::from_le_bytes([tmp[i * 2], tmp[i * 2 + 1]]);
-                        self.write_virtual_word_64(BxSegregs::Es, rdi_val, val)?;
-                        rdi_val = rdi_val.wrapping_add(2);
-                    }
-                    self.set_rdi(rdi_val);
-                    rcx -= words_got as u64;
-                    self.tickn_fastrep(words_got);
-                    if self.async_event != 0 { break; }
-                    self.set_rcx(rcx);
+                    // get_host_write_ptr returned None — fall to per-word path
+                    break;
                 }
             }
         }
@@ -889,11 +954,80 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     fn rep_insd64(&mut self, instr: &Instruction) -> super::Result<()> {
-        // TODO: Add bulk fast path once data integrity is verified.
-        // The BIOS boot path shows "v2 package integrity error" — need to
-        // investigate whether this is a pre-existing CPUID/SHA issue or
-        // a bug in the bulk path before re-enabling.
         let mut rcx = self.rcx();
+        if rcx == 0 {
+            return Ok(());
+        }
+        let port = self.dx();
+
+        // Fast path: direct host memory write, matching Bochs FastRepINSW
+        // pattern adapted for dwords in 64-bit address mode. DF=0 only.
+        if !self.get_df() && self.async_event == 0 {
+            if self.allow_io(port, 4)? {
+                while rcx != 0 {
+                    let rdi = self.rdi();
+                    // Pre-fault the destination dword via RMW to populate TLB
+                    // and ensure the page is writable (Bochs io.cc:457).
+                    let _prefault = self.read_rmw_virtual_dword_64(BxSegregs::Es, rdi)?;
+
+                    let laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
+
+                    // Try to get a direct host pointer via TLB (Bochs v2h_write_byte)
+                    if let Some((host_ptr, page_remaining)) = self.get_host_write_ptr(laddr) {
+                        // How many dwords fit in the remaining page space
+                        let dwords_fit_page = page_remaining / 4;
+                        if dwords_fit_page == 0 {
+                            break;
+                        }
+                        let chunk_dwords = (rcx as usize).min(dwords_fit_page);
+
+                        // Read from port per-dword and write directly into host memory.
+                        for i in 0..chunk_dwords {
+                            let val = self.port_in(port, 4);
+                            unsafe {
+                                let dst = host_ptr.add(i * 4) as *mut u32;
+                                dst.write_unaligned(val.to_le());
+                            }
+                            // Check for async events after each dword (Bochs io.cc:107)
+                            if self.async_event != 0 {
+                                let transferred = (i + 1) as u64;
+                                let new_rdi = rdi.wrapping_add(transferred * 4);
+                                self.set_rdi(new_rdi);
+                                rcx -= transferred;
+                                self.set_rcx(rcx);
+                                self.icount += transferred;
+                                if transferred > 1 {
+                                    self.tickn_fastrep(transferred as usize - 1);
+                                }
+                                self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                                return Ok(());
+                            }
+                        }
+
+                        // All chunk_dwords transferred successfully
+                        let transferred = chunk_dwords as u64;
+                        let new_rdi = rdi.wrapping_add(transferred * 4);
+                        self.set_rdi(new_rdi);
+                        rcx -= transferred;
+                        self.set_rcx(rcx);
+                        self.icount += transferred;
+                        if transferred > 1 {
+                            self.tickn_fastrep(transferred as usize - 1);
+                        }
+
+                        if self.async_event != 0 {
+                            break;
+                        }
+                        continue;
+                    }
+
+                    // get_host_write_ptr returned None — fall to per-dword path
+                    break;
+                }
+            }
+        }
+
+        // Per-dword fallback
         while rcx != 0 {
             self.insd64(instr)?;
             rcx -= 1;
