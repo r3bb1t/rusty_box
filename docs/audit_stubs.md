@@ -72,10 +72,7 @@ Each entry:
 
 ### ~~dma.rs — Address shift~~ — FALSE POSITIVE (get_address already shifts << 1 for channels >= 4)
 
-### serial.rs — Missing timer-based TX/RX scheduling
-- **Bochs does**: Registers tx_timer, rx_timer, fifo_timer with pc_system for paced TX/RX
-- **Our code does**: TX is immediate, no RX polling, no FIFO timeout timer
-- **Bochs ref**: serial.cc
+### ~~serial.rs — Timer fields~~ — PARTIALLY FIXED (session 56: timer handles + baudrate + databyte_usec fields added, not yet wired)
 
 ### ~~serial.rs — RI state change detection~~ — FIXED (session 56: ms_ipending on any RI change)
 
@@ -104,20 +101,11 @@ Each entry:
 
 ### ~~dma.rs — ctrl_disabled field~~ — FIXED (session 56: added + wired from command register write, plus drq/dack arrays)
 
-### memory/misc_mem.rs — Flash ROM state machine not implemented
-- **Bochs does**: Full flash_read/flash_write state machine (FLASH_READ_ARRAY, INT_ID, etc.)
-- **Our code does**: Constants defined, no implementation
-- **Bochs ref**: misc_mem.cc
+### ~~memory/misc_mem.rs — Flash ROM state machine~~ — FIXED (session 56: flash_read/flash_write stubs matching Bochs, not yet wired)
 
-### vga.rs — Graphics read modes 0/1 not implemented
-- **Bochs does**: Latch-based read with color compare/don't-care
-- **Our code does**: Returns text buffer directly
-- **Bochs ref**: vgacore.cc
+### ~~vga.rs — Graphics read modes 0/1~~ — FIXED (session 56: full planar read with latch, color compare)
 
-### vga.rs — Graphics write modes 1-3 not implemented
-- **Bochs does**: AND/OR/XOR logical operations with set/reset, bitmask
-- **Our code does**: Text mode write only
-- **Bochs ref**: vgacore.cc
+### ~~vga.rs — Graphics write modes 0-3~~ — FIXED (session 56: all 4 modes + chain-four + odd/even)
 
 ### ~~protect_ctrl.rs — VERR/VERW~~ — FALSE POSITIVE (implemented at protect_ctrl.rs:501,594)
 
@@ -142,10 +130,7 @@ Each entry:
 
 ### ~~vga.rs — Sequencer chain_four/odd_even~~ — FIXED (session 56: fields added + extracted on reg 4 write)
 
-### vga.rs — Retrace timing uses simple toggle, not timer calculation
-- **Bochs does**: Calculates from virtual timer and CRTC register values
-- **Our code does**: XOR toggle on each status read
-- **Bochs ref**: vgacore.cc
+### ~~vga.rs — Retrace timing~~ — FIXED (session 56: timer-based from CRTC registers + icount)
 
 ### ~~crregs.rs — MOV DRn~~ — FALSE POSITIVE (implemented at proc_ctrl.rs:726,760)
 
