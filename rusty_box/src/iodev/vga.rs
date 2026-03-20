@@ -349,6 +349,11 @@ pub(crate) struct BxVgaC {
     /// Bit 7: vert_sync_pol - vertical sync polarity
     misc_vert_sync_pol: bool,
 
+    /// Sequencer chain-four mode (seq reg 4 bit 3, Bochs vgacore.cc)
+    pub(crate) seq_chain_four: bool,
+    /// Sequencer odd/even disable (seq reg 4 bit 2, Bochs vgacore.cc)
+    pub(crate) seq_odd_even_dis: bool,
+
     /// Attribute controller: video_enabled (PAS = Palette Address Source)
     /// Bit 5 of the value written to port 0x3C0 when flip_flop=0
     /// Bochs: s.attribute_ctrl.video_enabled
@@ -423,6 +428,9 @@ impl BxVgaC {
             misc_select_high_bank: false, // Bit 5: Bochs default = 0
             misc_horiz_sync_pol: true,  // Bit 6: Bochs = 1
             misc_vert_sync_pol: true,   // Bit 7: Bochs = 1
+
+            seq_chain_four: false,
+            seq_odd_even_dis: false,
 
             video_enabled: false, // PAS bit, set by 0x3C0 address writes
 
@@ -1030,6 +1038,12 @@ impl BxVgaC {
             VGA_SEQ_DATA => {
                 if self.seq_index < 5 {
                     self.seq_regs[self.seq_index as usize] = value;
+                    // Track chain_four and odd_even_dis from memory mode register
+                    // (Bochs vgacore.cc seq register 4 write handler)
+                    if self.seq_index == 4 {
+                        self.seq_chain_four = (value & 0x08) != 0;
+                        self.seq_odd_even_dis = (value & 0x04) != 0;
+                    }
                 }
             }
             VGA_GRAPHICS_INDEX => {
