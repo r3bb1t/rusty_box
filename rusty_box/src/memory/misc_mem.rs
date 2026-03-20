@@ -41,7 +41,12 @@ impl BxMemC<'_> {
             memory_handlers,
 
             pci_enabled,
-            bios_write_enabled: true, // Enable BIOS ROM writes (for flash ROM and early stack)
+            // Bochs defaults bios_write_enabled to false (misc_mem.cc:67), then the
+            // PCI2ISA bridge sets it via DEV_mem_set_bios_write() when register 0x4E
+            // bit 2 is written (pci2isa.cc:362). Our PCI2ISA handler at 0x4E logs the
+            // change but does not propagate it to memory, so we keep true here to
+            // ensure BIOS ROM writes (shadow RAM, flash) work during early POST.
+            bios_write_enabled: true,
             bios_rom_addr: 0xffff0000,
             flash_type: 0,
             flash_status: 0x80,

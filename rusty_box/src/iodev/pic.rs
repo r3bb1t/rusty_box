@@ -490,19 +490,23 @@ impl BxPicC {
     ///
     /// Takes `&mut self` because poll mode read triggers an interrupt acknowledge
     /// which modifies PIC state (Bochs pic.cc:205-219).
-    pub fn read(&mut self, port: u16, _io_len: u8) -> u32 {
+    pub fn read(&mut self, port: u16, io_len: u8) -> u32 {
         // Poll mode: read triggers interrupt acknowledge (Bochs pic.cc:205-219)
         if (port == PIC_MASTER_CMD || port == PIC_MASTER_DATA) && self.master.polled {
             self.master.clear_highest_interrupt();
             self.master.polled = false;
             self.service_pic_dispatch(true);
-            return self.master.irq as u32;
+            // Bochs pic.cc:210: io_len==1 returns irq, io_len==2 returns (irq<<8)|irq
+            let irq = self.master.irq as u32;
+            return if io_len == 1 { irq } else { (irq << 8) | irq };
         }
         if (port == PIC_SLAVE_CMD || port == PIC_SLAVE_DATA) && self.slave.polled {
             self.slave.clear_highest_interrupt();
             self.slave.polled = false;
             self.service_pic_dispatch(false);
-            return self.slave.irq as u32;
+            // Bochs pic.cc:218: io_len==1 returns irq, io_len==2 returns (irq<<8)|irq
+            let irq = self.slave.irq as u32;
+            return if io_len == 1 { irq } else { (irq << 8) | irq };
         }
 
         match port {
