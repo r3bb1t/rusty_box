@@ -70,10 +70,7 @@ Each entry:
 
 ### ~~harddrv.rs — SET FEATURES (0xEF) transfer mode~~ — FIXED (session 56: mdma/udma/packet_dma wired up)
 
-### dma.rs — Address shift hardcoded for 16-bit channels
-- **Bochs does**: Uses `ma_sl` variable (0 for 8-bit, 1 for 16-bit) for address shift
-- **Our code does**: Hardcoded `<< 1`
-- **Bochs ref**: dma.cc
+### ~~dma.rs — Address shift~~ — FALSE POSITIVE (get_address already shifts << 1 for channels >= 4)
 
 ### serial.rs — Missing timer-based TX/RX scheduling
 - **Bochs does**: Registers tx_timer, rx_timer, fifo_timer with pc_system for paced TX/RX
@@ -84,10 +81,7 @@ Each entry:
 
 ### ~~cmos.rs — Extended CMOS addressing~~ — FIXED (session 56: ports 0x0072/0x0073, 256-byte RAM)
 
-### memory/misc_mem.rs — bios_write_enabled defaults true (Bochs: false)
-- **Bochs does**: BIOS ROM write-protected by default
-- **Our code does**: Write-enabled at startup
-- **Bochs ref**: misc_mem.cc
+### ~~memory/misc_mem.rs — bios_write_enabled~~ — DOCUMENTED (kept true; Bochs relies on PCI2ISA 0x4E propagation we don't wire)
 
 ---
 
@@ -139,10 +133,7 @@ Each entry:
 
 ### ~~pc_system.rs — isa_bus_delay()~~ — FIXED (session 56: stub method added, no-op for PCI systems)
 
-### pic.rs — Polled mode return format wrong for io_len==2
-- **Bochs does**: Duplicates IRQ byte in high 8 bits
-- **Our code does**: Only sets low 8 bits
-- **Bochs ref**: pic.cc
+### ~~pic.rs — Polled mode io_len==2~~ — FIXED (session 56: returns (irq<<8)|irq for word reads)
 
 ### serial.rs — RX input not implemented (only TX output works)
 - **Bochs does**: Polls file/socket/TTY/pipe for input
@@ -183,10 +174,7 @@ Match arms return Result directly (no `?` needed — the Result IS the return va
 
 ### ~~fpu_arith.rs — FPU NaN handling~~ — FIXED (session 56: 12 memory-form f32/f64 handlers with NaN check)
 
-### shared_display.rs — Missing actl_palette indirection in color lookup
-- **Bochs does**: Uses actl_palette[attr & 0x0f] for color indexing with PEL mask
-- **Our code does**: Uses attr & 0x0F directly as palette index
-- **Bochs ref**: gui.cc, vgacore.cc
+### ~~shared_display.rs — actl_palette indirection~~ — FIXED (session 56: parameter added, used for fg/bg lookup)
 
 ### snapshot.rs — Incomplete device coverage (missing APIC, VGA, harddrv, etc.)
 - **Bochs does**: Full machine state serialization
