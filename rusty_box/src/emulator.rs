@@ -730,6 +730,17 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             }
         }
 
+        // Wire VGA icount pointer for timing-based retrace computation.
+        // SAFETY: CPU struct outlives VGA — both live in the Emulator.
+        // The pointer is only read during VGA status register reads (port 0x3DA).
+        {
+            let icount_ptr = self.cpu.icount_ptr();
+            let ips = self.config.ips as u64;
+            unsafe {
+                self.device_manager.vga.set_icount_ptr(icount_ptr, ips);
+            }
+        }
+
         // Set up LAPIC pointers for live tick computation and direct event signaling.
         // SAFETY: CPU struct fields outlive LAPIC (it's a field of CPU). Pointers are
         // only dereferenced during LAPIC MMIO reads (icount) and service_local_apic()

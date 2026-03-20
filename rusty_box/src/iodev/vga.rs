@@ -1,14 +1,25 @@
 //! VGA Display Controller
 //!
-//! Implements VGA text mode (80x25) for console output.
-//! Based on Bochs vgacore.cc and vga.cc, simplified for text mode only.
+//! Implements VGA text mode (80x25) and graphics mode memory access.
+//! Based on Bochs vgacore.cc and vga.cc.
 //!
-//! ## Text Mode Memory Layout
+//! ## Memory Layout
 //!
-//! Text mode uses memory at 0xB8000-0xBFFFF:
-//! - Each character is 2 bytes: [character, attribute]
-//! - 80 columns × 25 rows × 2 bytes = 4000 bytes per page
-//! - Multiple pages can be stored in the 32KB region
+//! VGA planar memory: 256KB (`vga_memory`), organized as `memory[offset * 4 + plane]`
+//! matching Bochs vgacore.cc. The `text_memory` buffer (32KB) is maintained for
+//! text mode rendering (interleaved char+attr), updated from planar memory on writes.
+//!
+//! ## Write Modes (Graphics Controller register 5, bits 0-1)
+//!
+//! Write mode 0 (default): data rotate + set/reset + logical op + bitmask + map mask
+//! Write mode 1: latch copy (new_val = latch)
+//! Write mode 2: per-plane from data bits + logical op + bitmask + map mask
+//! Write mode 3: data rotate + bitmask AND value + set/reset + logical op
+//!
+//! ## Read Modes (Graphics Controller register 5, bit 3)
+//!
+//! Read mode 0: return plane selected by read_map_select (GFX reg 4)
+//! Read mode 1: color compare (returns match bitmap)
 
 #[cfg(not(feature = "std"))]
 use alloc::vec;
@@ -23,6 +34,37 @@ use super::BxDevicesC;
 const VGA_TEXT_MEM_BASE: BxPhyAddress = 0xB8000;
 const VGA_TEXT_MEM_SIZE: usize = 0x8000; // 32KB
 const VGA_TEXT_MEM_BASE_MONO: BxPhyAddress = 0xB0000;
+
+/// VGA planar memory size: 256KB (0x40000), matching Bochs vgacore.cc:107
+/// Layout: memory[offset * 4 + plane], where plane = 0..3
+const VGA_MEM_SIZE: usize = 0x40000;
+
+/// VGA clock frequencies in Hz (matching Bochs vgacore.cc:160-161)
+const VGA_VCLK: [u32; 4] = [25_175_000, 28_322_000, 25_175_000, 25_175_000];
+
+/// Color compare lookup table matching Bochs ccdat[16][4]
+/// For each 4-bit color value, provides the per-plane expansion (0x00 or 0xFF)
+const CCDAT: [[u8; 4]; 16] = [
+    [0x00, 0x00, 0x00, 0x00],
+    [0xff, 0x00, 0x00, 0x00],
+    [0x00, 0xff, 0x00, 0x00],
+    [0xff, 0xff, 0x00, 0x00],
+    [0x00, 0x00, 0xff, 0x00],
+    [0xff, 0x00, 0xff, 0x00],
+    [0x00, 0xff, 0xff, 0x00],
+    [0xff, 0xff, 0xff, 0x00],
+    [0x00, 0x00, 0x00, 0xff],
+    [0xff, 0x00, 0x00, 0xff],
+    [0x00, 0xff, 0x00, 0xff],
+    [0xff, 0xff, 0x00, 0xff],
+    [0x00, 0x00, 0xff, 0xff],
+    [0xff, 0x00, 0xff, 0xff],
+    [0x00, 0xff, 0xff, 0xff],
+    [0xff, 0xff, 0xff, 0xff],
+];
+
+/// Text snapshot sizes per memory mapping mode (Bochs vgacore.cc:45-47)
+const TEXT_SNAP_SIZE: [usize; 4] = [0x20000, 0x10000, 0x8000, 0x8000];
 
 /// VGA I/O ports
 const VGA_CRTC_INDEX: u16 = 0x3D4;
@@ -354,6 +396,42 @@ pub(crate) struct BxVgaC {
     /// Sequencer odd/even disable (seq reg 4 bit 2, Bochs vgacore.cc)
     pub(crate) seq_odd_even_dis: bool,
 
+    // =====================================================================
+    // VGA planar memory and graphics latch (Bochs vgacore.cc)
+    // =====================================================================
+    /// VGA planar memory (256KB). Layout: memory[offset * 4 + plane]
+    /// Matches Bochs `s.memory` with `s.memsize = 0x40000`.
+    vga_memory: Vec<u8>,
+
+    /// Graphics controller latch register (one byte per plane).
+    /// Loaded on every VGA memory read. Used by write modes 0-3.
+    /// Matches Bochs `s.graphics_ctrl.latch[4]`.
+    pub(crate) latch: [u8; 4],
+
+    // =====================================================================
+    // Retrace timing (Bochs vgacore.cc calculate_retrace_timing)
+    // =====================================================================
+    /// Horizontal total period in microseconds (Bochs s.htotal_usec)
+    htotal_usec: u32,
+    /// Horizontal blanking start in microseconds (Bochs s.hbstart_usec)
+    hbstart_usec: u32,
+    /// Horizontal blanking end in microseconds (Bochs s.hbend_usec)
+    hbend_usec: u32,
+    /// Vertical total period in microseconds (Bochs s.vtotal_usec)
+    vtotal_usec: u32,
+    /// Vertical blanking start in microseconds (Bochs s.vblank_usec)
+    vblank_usec: u32,
+    /// Vertical retrace start in microseconds (Bochs s.vrstart_usec)
+    vrstart_usec: u32,
+    /// Vertical retrace end in microseconds (Bochs s.vrend_usec)
+    vrend_usec: u32,
+
+    /// Pointer to CPU icount for timing-based retrace computation.
+    /// Set by `set_icount_ptr()`. If null, falls back to toggle behavior.
+    icount_ptr: *const u64,
+    /// Instructions per second, used to convert icount to microseconds.
+    ips: u64,
+
     /// Attribute controller: video_enabled (PAS = Palette Address Source)
     /// Bit 5 of the value written to port 0x3C0 when flip_flop=0
     /// Bochs: s.attribute_ctrl.video_enabled
@@ -431,6 +509,22 @@ impl BxVgaC {
 
             seq_chain_four: false,
             seq_odd_even_dis: false,
+
+            // VGA planar memory and latch
+            vga_memory: vec![0; VGA_MEM_SIZE],
+            latch: [0u8; 4],
+
+            // Retrace timing defaults (matching Bochs vgacore.cc:162-164)
+            htotal_usec: 31,
+            hbstart_usec: 25,
+            hbend_usec: 28,
+            vtotal_usec: 14268,
+            vblank_usec: 12688,
+            vrstart_usec: 13000,
+            vrend_usec: 13155,
+
+            icount_ptr: core::ptr::null(),
+            ips: 15_000_000, // Default 15 MIPS
 
             video_enabled: false, // PAS bit, set by 0x3C0 address writes
 
@@ -736,7 +830,105 @@ impl BxVgaC {
 
     /// Reset VGA controller
     pub(crate) fn reset(&mut self) {
+        // Save pointers that should persist across reset
+        let icount_ptr = self.icount_ptr;
+        let ips = self.ips;
         *self = Self::new();
+        self.icount_ptr = icount_ptr;
+        self.ips = ips;
+    }
+
+    /// Set the icount pointer and IPS for retrace timing computation.
+    /// Must be called after CPU initialization.
+    /// # Safety
+    /// The pointer must remain valid for the lifetime of the VGA controller.
+    pub(crate) unsafe fn set_icount_ptr(&mut self, ptr: *const u64, ips: u64) {
+        self.icount_ptr = ptr;
+        self.ips = if ips > 0 { ips } else { 15_000_000 };
+    }
+
+    /// Calculate retrace timing from CRTC registers.
+    /// Matches Bochs vgacore.cc:422-461 `calculate_retrace_timing()`.
+    fn calculate_retrace_timing(&mut self) {
+        // get_crtc_params (Bochs vgacore.cc:406-420)
+        let clock_select = self.misc_clock_select as usize;
+        let mut vclock = VGA_VCLK[clock_select.min(3)];
+        let x_dotclockdiv2 = (self.seq_regs[SEQ_REG_CLOCKING_MODE] & 0x08) != 0;
+        if x_dotclockdiv2 {
+            vclock >>= 1;
+        }
+        if vclock == 0 {
+            return; // Invalid clock
+        }
+
+        // Character width: 8 or 9 dots
+        let cwidth: u32 = if (self.seq_regs[SEQ_REG_CLOCKING_MODE] & 0x01) != 0 { 8 } else { 9 };
+
+        // htotal from CRTC reg 0 + 5 (Bochs get_crtc_params)
+        let htotal = self.crtc_regs[0x00] as u32 + 5;
+        // vtotal from CRTC regs 6 + overflow bits in reg 7
+        let vtotal = self.crtc_regs[0x06] as u32
+            + ((self.crtc_regs[0x07] as u32 & 0x01) << 8)
+            + ((self.crtc_regs[0x07] as u32 & 0x20) << 4)
+            + 2;
+        // vbstart from CRTC regs 0x15 + overflow bits
+        let vbstart = self.crtc_regs[0x15] as u32
+            + ((self.crtc_regs[0x07] as u32 & 0x08) << 5)
+            + ((self.crtc_regs[0x09] as u32 & 0x20) << 4);
+        // vrstart from CRTC regs 0x10 + overflow bits
+        let vrstart = self.crtc_regs[0x10] as u32
+            + ((self.crtc_regs[0x07] as u32 & 0x04) << 6)
+            + ((self.crtc_regs[0x07] as u32 & 0x80) << 2);
+
+        // vrend from CRTC reg 0x11 low 4 bits, relative to vrstart
+        let vrend_raw = ((self.crtc_regs[0x11] as u32 & 0x0F).wrapping_sub(vrstart)) & 0x0F;
+        let vrend = vrstart + vrend_raw;
+
+        // Horizontal frequency and period
+        let hfreq = vclock as f32 / (htotal * cwidth) as f32;
+        let f_htotal_usec = 1_000_000.0f32 / hfreq;
+        self.htotal_usec = f_htotal_usec as u32;
+
+        // Horizontal blanking
+        let hbstart = self.crtc_regs[0x02] as u32;
+        self.hbstart_usec = ((1_000_000.0 * hbstart as f64 * cwidth as f64) / vclock as f64) as u32;
+        let hbend_raw = (self.crtc_regs[0x03] as u32 & 0x1F)
+            + ((self.crtc_regs[0x05] as u32 & 0x80) >> 2);
+        let hbend = hbstart + ((hbend_raw.wrapping_sub(hbstart)) & 0x3F);
+        self.hbend_usec = ((1_000_000.0 * hbend as f64 * cwidth as f64) / vclock as f64) as u32;
+
+        // Vertical frequency and period
+        if vtotal > 0 {
+            let vfreq = hfreq / vtotal as f32;
+            if vfreq > 0.0 {
+                self.vtotal_usec = (1_000_000.0f32 / vfreq) as u32;
+            }
+        }
+        self.vblank_usec = (f_htotal_usec * vbstart as f32) as u32;
+        self.vrstart_usec = (f_htotal_usec * vrstart as f32) as u32;
+        self.vrend_usec = (f_htotal_usec * vrend as f32) as u32;
+
+        // Sanity clamps matching Bochs vgacore.cc:452-456
+        if self.vtotal_usec < 8000 {
+            self.vtotal_usec = 14268;
+        }
+        if self.vrend_usec < 7000 {
+            self.vrend_usec = self.vtotal_usec.saturating_sub(1113);
+        }
+    }
+
+    /// Get current time in microseconds from icount.
+    /// Returns a monotonically increasing value based on instructions executed.
+    fn current_usec(&self) -> u64 {
+        if self.icount_ptr.is_null() {
+            return 0;
+        }
+        let icount = unsafe { *self.icount_ptr };
+        if self.ips > 0 {
+            (icount as u128 * 1_000_000 / self.ips as u128) as u64
+        } else {
+            0
+        }
     }
 
     /// Initialize VGA to standard text mode 3 (80x25 color text).
@@ -870,13 +1062,37 @@ impl BxVgaC {
                 // Matching Bochs vgacore.cc:501-530
                 // bit 0: Display Enable (1 = in blanking period)
                 // bit 3: Vertical Retrace (1 = in vertical retrace)
-                // Toggle both bits to simulate display cycling through
-                // active → hblank → vblank → vretrace phases.
-                // VGA BIOS waits for bit 3 transitions (0→1 and 1→0).
-                self.status_reg ^= VGA_STATUS_TOGGLE_MASK; // toggle Display Enable and Vert Retrace
-                                                           // Reading this port resets the attribute flip-flop (Bochs line 529)
+                let retval = if !self.icount_ptr.is_null() && self.vtotal_usec > 0 {
+                    // Timing-based retrace matching Bochs vgacore.cc:511-526
+                    let time_usec = self.current_usec();
+                    let display_usec = time_usec % self.vtotal_usec as u64;
+                    let mut r = 0u8;
+                    // Vertical retrace (bit 3)
+                    if display_usec >= self.vrstart_usec as u64
+                        && display_usec <= self.vrend_usec as u64
+                    {
+                        r |= 0x08;
+                    }
+                    // Display enable / blanking (bit 0)
+                    if display_usec >= self.vblank_usec as u64 {
+                        r |= 0x01;
+                    } else if self.htotal_usec > 0 {
+                        let line_usec = display_usec % self.htotal_usec as u64;
+                        if line_usec >= self.hbstart_usec as u64
+                            && line_usec <= self.hbend_usec as u64
+                        {
+                            r |= 0x01;
+                        }
+                    }
+                    r
+                } else {
+                    // Fallback: toggle bits when no timing source available
+                    self.status_reg ^= VGA_STATUS_TOGGLE_MASK;
+                    self.status_reg
+                };
+                // Reading this port resets the attribute flip-flop (Bochs line 529)
                 self.attr_flip_flop = false;
-                self.status_reg as u32
+                retval as u32
             }
             VGA_ATTRIB_ADDR => {
                 // Bochs vgacore.cc:534-544: read returns (video_enabled<<5)|address
@@ -998,6 +1214,15 @@ impl BxVgaC {
                            || self.crtc_index as usize == CRTC_START_ADDR_LOW {
                         self.text_buffer_update = true;
                     }
+
+                    // Recalculate retrace timing on relevant CRTC register writes
+                    // Matches Bochs vgacore.cc:1129-1178
+                    match self.crtc_index as usize {
+                        0x03 | 0x05 | 0x06 | 0x07 | 0x10 | 0x11 | 0x12 => {
+                            self.calculate_retrace_timing();
+                        }
+                        _ => {}
+                    }
                 }
             }
             VGA_ATTRIB_ADDR => {
@@ -1038,11 +1263,19 @@ impl BxVgaC {
             VGA_SEQ_DATA => {
                 if self.seq_index < 5 {
                     self.seq_regs[self.seq_index as usize] = value;
-                    // Track chain_four and odd_even_dis from memory mode register
-                    // (Bochs vgacore.cc seq register 4 write handler)
-                    if self.seq_index == 4 {
-                        self.seq_chain_four = (value & 0x08) != 0;
-                        self.seq_odd_even_dis = (value & 0x04) != 0;
+                    match self.seq_index {
+                        1 => {
+                            // Clocking mode: recalculate retrace if dot clock or char width changed
+                            // Bochs vgacore.cc:937-941
+                            self.calculate_retrace_timing();
+                        }
+                        4 => {
+                            // Track chain_four and odd_even_dis from memory mode register
+                            // (Bochs vgacore.cc seq register 4 write handler)
+                            self.seq_chain_four = (value & 0x08) != 0;
+                            self.seq_odd_even_dis = (value & 0x04) != 0;
+                        }
+                        _ => {}
                     }
                 }
             }
@@ -1085,6 +1318,8 @@ impl BxVgaC {
                 self.misc_select_high_bank = (value & MISC_OUT_HIGH_BANK) != 0;
                 self.misc_horiz_sync_pol = (value & MISC_OUT_HORIZ_POL) != 0;
                 self.misc_vert_sync_pol = (value & MISC_OUT_VERT_POL) != 0;
+                // Bochs vgacore.cc:909
+                self.calculate_retrace_timing();
             }
 
             // Misc Output Write port - CRITICAL for BIOS color mode setup
@@ -1098,6 +1333,8 @@ impl BxVgaC {
                 self.misc_vert_sync_pol = (value & MISC_OUT_VERT_POL) != 0;
                 // Update combined misc_output for reads at 0x3CC
                 self.misc_output = value;
+                // Bochs vgacore.cc:909
+                self.calculate_retrace_timing();
                 tracing::info!(
                     "VGA Misc Output Write: {:#04x} (color_emulation={}, enable_ram={})",
                     value,
@@ -1499,8 +1736,9 @@ pub(super) fn vga_write_handler(this_ptr: *mut c_void, port: u16, value: u32, io
 }
 
 /// VGA memory read handler (called from memory system)
-/// Based on bx_vgacore_c::mem_read_handler in vgacore.cc
-/// Processes bytes one at a time, matching original implementation
+/// Based on bx_vgacore_c::mem_read / mem_read_handler in vgacore.cc:1696-1795
+/// Implements read mode 0 (return selected plane) and read mode 1 (color compare).
+/// Loads latch register on every read.
 pub(super) fn vga_mem_read_handler(
     addr: crate::config::BxPhyAddress,
     len: u32,
@@ -1511,24 +1749,14 @@ pub(super) fn vga_mem_read_handler(
         return false;
     }
 
-    let vga = unsafe { &*(param as *const BxVgaC) };
+    // Need mutable access for latch update (matching Bochs which mutates latch on read)
+    let vga = unsafe { &mut *(param as *mut BxVgaC) };
 
-    // Match Bochs window gating (vgacore.cc:1723..1738):
-    // only the selected window maps to VGA memory; others read as 0xff.
-    let memory_mapping = VgaMemoryMapping::from_u8(
-        (vga.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK,
-    );
     let mut current_addr = addr;
     let mut data_ptr = data as *mut u8;
 
     for _ in 0..len {
-        let val = if memory_mapping.contains_addr(current_addr) {
-            let offset = (current_addr - memory_mapping.window_base()) as usize;
-            vga.text_memory.get(offset).copied().unwrap_or(0xff)
-        } else {
-            0xff
-        };
-
+        let val = vga_mem_read_byte(vga, current_addr);
         unsafe {
             *data_ptr = val;
             data_ptr = data_ptr.add(1);
@@ -1539,9 +1767,99 @@ pub(super) fn vga_mem_read_handler(
     true
 }
 
+/// Read a single byte from VGA memory. Matches Bochs vgacore.cc:1717-1795 `mem_read`.
+fn vga_mem_read_byte(vga: &mut BxVgaC, addr: BxPhyAddress) -> u8 {
+    let mut read_map_select = vga.graphics_regs[GFX_REG_READ_MAP_SELECT] & 0x03;
+
+    // Window gating: compute offset from address (Bochs vgacore.cc:1722-1741)
+    let memory_mapping = (vga.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
+    let offset = if addr >= 0xA0000 {
+        match memory_mapping {
+            1 => { // 0xA0000..0xAFFFF
+                if addr > 0xAFFFF { return 0xFF; }
+                (addr & 0xFFFF) as u32
+            }
+            2 => { // 0xB0000..0xB7FFF
+                if addr < 0xB0000 || addr > 0xB7FFF { return 0xFF; }
+                (addr & 0x7FFF) as u32
+            }
+            3 => { // 0xB8000..0xBFFFF
+                if addr < 0xB8000 { return 0xFF; }
+                (addr & 0x7FFF) as u32
+            }
+            _ => { // 0xA0000..0xBFFFF
+                (addr & 0x1FFFF) as u32
+            }
+        }
+    } else {
+        addr as u32
+    };
+
+    // Chain-four mode (Mode 13h: 320x200x256)
+    if vga.seq_chain_four {
+        return vga.vga_memory.get(offset as usize).copied().unwrap_or(0xFF);
+    }
+
+    // Read mode (graphics_regs[5] bit 3)
+    let read_mode = (vga.graphics_regs[GFX_REG_GRAPHICS_MODE] >> 3) & 0x01;
+
+    match read_mode {
+        0 => {
+            // Read mode 0: load all 4 planes into latch, return selected plane
+            // Bochs vgacore.cc:1751-1764
+            if !vga.seq_odd_even_dis {
+                // Odd/even mode: adjacent byte addresses alternate between plane pairs
+                let base = ((offset & !1) << 2) as usize;
+                vga.latch[0] = vga.vga_memory.get(base).copied().unwrap_or(0);
+                vga.latch[1] = vga.vga_memory.get(base + 1).copied().unwrap_or(0);
+                vga.latch[2] = vga.vga_memory.get(base + 2).copied().unwrap_or(0);
+                vga.latch[3] = vga.vga_memory.get(base + 3).copied().unwrap_or(0);
+                read_map_select = (read_map_select & 2) | (offset as u8 & 1);
+            } else {
+                // Normal planar mode
+                let base = (offset << 2) as usize;
+                vga.latch[0] = vga.vga_memory.get(base).copied().unwrap_or(0);
+                vga.latch[1] = vga.vga_memory.get(base + 1).copied().unwrap_or(0);
+                vga.latch[2] = vga.vga_memory.get(base + 2).copied().unwrap_or(0);
+                vga.latch[3] = vga.vga_memory.get(base + 3).copied().unwrap_or(0);
+            }
+            vga.latch[read_map_select as usize & 3]
+        }
+        _ => {
+            // Read mode 1: color compare
+            // Bochs vgacore.cc:1766-1791
+            let color_compare = (vga.graphics_regs[GFX_REG_COLOR_COMPARE] & 0x0F) as usize;
+            let color_dont_care = (vga.graphics_regs[GFX_REG_COLOR_DONT_CARE] & 0x0F) as usize;
+
+            let base = (offset << 2) as usize;
+            let mut latch0 = vga.vga_memory.get(base).copied().unwrap_or(0);
+            let mut latch1 = vga.vga_memory.get(base + 1).copied().unwrap_or(0);
+            let mut latch2 = vga.vga_memory.get(base + 2).copied().unwrap_or(0);
+            let mut latch3 = vga.vga_memory.get(base + 3).copied().unwrap_or(0);
+
+            vga.latch[0] = latch0;
+            vga.latch[1] = latch1;
+            vga.latch[2] = latch2;
+            vga.latch[3] = latch3;
+
+            latch0 ^= CCDAT[color_compare][0];
+            latch1 ^= CCDAT[color_compare][1];
+            latch2 ^= CCDAT[color_compare][2];
+            latch3 ^= CCDAT[color_compare][3];
+
+            latch0 &= CCDAT[color_dont_care][0];
+            latch1 &= CCDAT[color_dont_care][1];
+            latch2 &= CCDAT[color_dont_care][2];
+            latch3 &= CCDAT[color_dont_care][3];
+
+            !(latch0 | latch1 | latch2 | latch3)
+        }
+    }
+}
+
 /// VGA memory write handler (called from memory system)
-/// Based on bx_vgacore_c::mem_write_handler in vgacore.cc
-/// Processes bytes one at a time, matching original implementation
+/// Based on bx_vgacore_c::mem_write / mem_write_handler in vgacore.cc:1797-2228
+/// Implements all 4 write modes with full planar memory support.
 pub(super) fn vga_mem_write_handler(
     addr: crate::config::BxPhyAddress,
     len: u32,
@@ -1555,61 +1873,328 @@ pub(super) fn vga_mem_write_handler(
     let vga = unsafe { &mut *(param as *mut BxVgaC) };
     vga.probe_handler_calls = vga.probe_handler_calls.wrapping_add(1);
 
-    // Match Bochs window gating (vgacore.cc:1826..1842):
-    // only the selected window maps to VGA memory; writes outside the window are ignored.
-    let memory_mapping = VgaMemoryMapping::from_u8(
-        (vga.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK,
-    );
-    // Sequencer map mask (reg 2): bits 0-3 select which planes to write.
-    // In text mode: plane 0 = characters, plane 1 = attributes, plane 2 = fonts.
-    // Only update text_memory when planes 0/1 are being written.
-    let map_mask = vga.seq_regs[SEQ_REG_MAP_MASK] & SEQ_MAP_MASK_PLANES;
-    let is_text_plane_write = (map_mask & SEQ_MAP_MASK_TEXT_PLANES) != 0;
-
     let mut current_addr = addr;
     let mut data_ptr = data as *const u8;
 
     for _ in 0..len {
-        let mapped = memory_mapping.contains_addr(current_addr);
-
-        if mapped && is_text_plane_write {
-            // Calculate offset relative to the window base.
-            let window_base = memory_mapping.window_base();
-            let offset = (current_addr - window_base) as usize;
-            if offset < vga.text_memory.len() {
-                unsafe {
-                    let new_val = *data_ptr;
-                    vga.probe_mapped_writes = vga.probe_mapped_writes.wrapping_add(1);
-                    if vga.probe_first_mapped.is_none() {
-                        vga.probe_first_mapped = Some((current_addr, new_val, memory_mapping));
-                    }
-                    let old_val = vga.text_memory[offset];
-                    vga.text_memory[offset] = new_val;
-                    if old_val != new_val {
-                        vga.text_dirty = true;
-                        vga.vga_mem_updated |= 1;
-                    }
-                    data_ptr = data_ptr.add(1);
-                }
-            } else {
-                unsafe { data_ptr = data_ptr.add(1) };
-            }
-        } else {
-            // Font plane write or unmapped — consume data byte but don't update text buffer
-            unsafe {
-                if !mapped {
-                    let new_val = *data_ptr;
-                    vga.probe_unmapped_writes = vga.probe_unmapped_writes.wrapping_add(1);
-                    if vga.probe_first_unmapped.is_none() {
-                        vga.probe_first_unmapped = Some((current_addr, new_val, memory_mapping));
-                    }
-                }
-                data_ptr = data_ptr.add(1);
-            };
-        }
-
+        let value = unsafe { *data_ptr };
+        vga_mem_write_byte(vga, current_addr, value);
         current_addr += 1;
+        unsafe { data_ptr = data_ptr.add(1); }
     }
 
     true
+}
+
+/// Write a single byte to VGA memory. Matches Bochs vgacore.cc:1818-2228 `mem_write`.
+fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
+    let sequ_map_mask = vga.seq_regs[SEQ_REG_MAP_MASK] & 0x0F;
+    let graphics_alpha = (vga.graphics_regs[GFX_REG_MISC] & GFX_MISC_GRAPHICS_ALPHA) != 0;
+
+    // Window gating: compute offset (Bochs vgacore.cc:1825-1845)
+    let memory_mapping = (vga.graphics_regs[GFX_REG_MISC] >> GFX_MISC_MEMORY_MAP_SHIFT) & GFX_MISC_MEMORY_MAP_MASK;
+    let offset = if addr >= 0xA0000 {
+        match memory_mapping {
+            1 => { // 0xA0000..0xAFFFF
+                if addr < 0xA0000 || addr > 0xAFFFF { return; }
+                (addr & 0xFFFF) as u32
+            }
+            2 => { // 0xB0000..0xB7FFF
+                if addr < 0xB0000 || addr > 0xB7FFF { return; }
+                (addr & 0x7FFF) as u32
+            }
+            3 => { // 0xB8000..0xBFFFF
+                if addr < 0xB8000 || addr > 0xBFFFF { return; }
+                (addr & 0x7FFF) as u32
+            }
+            _ => { // 0xA0000..0xBFFFF
+                if addr < 0xA0000 || addr > 0xBFFFF { return; }
+                (addr & 0x1FFFF) as u32
+            }
+        }
+    } else {
+        addr as u32
+    };
+
+    // Update probe counters
+    vga.probe_mapped_writes = vga.probe_mapped_writes.wrapping_add(1);
+    if vga.probe_first_mapped.is_none() {
+        let mm = VgaMemoryMapping::from_u8(memory_mapping);
+        vga.probe_first_mapped = Some((addr, value, mm));
+    }
+
+    // Chain-four mode (Mode 13h: 320x200x256) — Bochs vgacore.cc:1849-1882
+    if vga.seq_chain_four {
+        if let Some(slot) = vga.vga_memory.get_mut(offset as usize) {
+            *slot = value;
+        }
+        vga.vga_mem_updated |= 1 << (offset % 4) as u8;
+        return;
+    }
+
+    // Compute new_val[4] based on write mode — Bochs vgacore.cc:1886-2128
+    let mut new_val = [0u8; 4];
+    let write_mode = vga.graphics_regs[GFX_REG_GRAPHICS_MODE] & 0x03;
+    let mut value = value;
+
+    match write_mode {
+        0 => {
+            // Write mode 0 — Bochs vgacore.cc:1889-1997
+            let bitmask = vga.graphics_regs[GFX_REG_BIT_MASK];
+            let set_reset = vga.graphics_regs[GFX_REG_SET_RESET];
+            let enable_set_reset = vga.graphics_regs[GFX_REG_ENABLE_SET_RESET];
+            let data_rotate = vga.graphics_regs[GFX_REG_DATA_ROTATE] & 0x07;
+            let raster_op = (vga.graphics_regs[GFX_REG_DATA_ROTATE] >> 3) & 0x03;
+
+            // Rotate CPU data
+            if data_rotate > 0 {
+                value = (value >> data_rotate) | (value << (8 - data_rotate));
+            }
+
+            // Start from latch values masked by ~bitmask
+            new_val[0] = vga.latch[0] & !bitmask;
+            new_val[1] = vga.latch[1] & !bitmask;
+            new_val[2] = vga.latch[2] & !bitmask;
+            new_val[3] = vga.latch[3] & !bitmask;
+
+            match raster_op {
+                0 => { // Replace
+                    new_val[0] |= if (enable_set_reset & 1) != 0 {
+                        if (set_reset & 1) != 0 { bitmask } else { 0 }
+                    } else { value & bitmask };
+                    new_val[1] |= if (enable_set_reset & 2) != 0 {
+                        if (set_reset & 2) != 0 { bitmask } else { 0 }
+                    } else { value & bitmask };
+                    new_val[2] |= if (enable_set_reset & 4) != 0 {
+                        if (set_reset & 4) != 0 { bitmask } else { 0 }
+                    } else { value & bitmask };
+                    new_val[3] |= if (enable_set_reset & 8) != 0 {
+                        if (set_reset & 8) != 0 { bitmask } else { 0 }
+                    } else { value & bitmask };
+                }
+                1 => { // AND
+                    new_val[0] |= if (enable_set_reset & 1) != 0 {
+                        if (set_reset & 1) != 0 { vga.latch[0] & bitmask } else { 0 }
+                    } else { (value & vga.latch[0]) & bitmask };
+                    new_val[1] |= if (enable_set_reset & 2) != 0 {
+                        if (set_reset & 2) != 0 { vga.latch[1] & bitmask } else { 0 }
+                    } else { (value & vga.latch[1]) & bitmask };
+                    new_val[2] |= if (enable_set_reset & 4) != 0 {
+                        if (set_reset & 4) != 0 { vga.latch[2] & bitmask } else { 0 }
+                    } else { (value & vga.latch[2]) & bitmask };
+                    new_val[3] |= if (enable_set_reset & 8) != 0 {
+                        if (set_reset & 8) != 0 { vga.latch[3] & bitmask } else { 0 }
+                    } else { (value & vga.latch[3]) & bitmask };
+                }
+                2 => { // OR
+                    new_val[0] |= if (enable_set_reset & 1) != 0 {
+                        if (set_reset & 1) != 0 { bitmask } else { vga.latch[0] & bitmask }
+                    } else { (value | vga.latch[0]) & bitmask };
+                    new_val[1] |= if (enable_set_reset & 2) != 0 {
+                        if (set_reset & 2) != 0 { bitmask } else { vga.latch[1] & bitmask }
+                    } else { (value | vga.latch[1]) & bitmask };
+                    new_val[2] |= if (enable_set_reset & 4) != 0 {
+                        if (set_reset & 4) != 0 { bitmask } else { vga.latch[2] & bitmask }
+                    } else { (value | vga.latch[2]) & bitmask };
+                    new_val[3] |= if (enable_set_reset & 8) != 0 {
+                        if (set_reset & 8) != 0 { bitmask } else { vga.latch[3] & bitmask }
+                    } else { (value | vga.latch[3]) & bitmask };
+                }
+                3 | _ => { // XOR
+                    new_val[0] |= if (enable_set_reset & 1) != 0 {
+                        if (set_reset & 1) != 0 { !vga.latch[0] & bitmask } else { vga.latch[0] & bitmask }
+                    } else { (value ^ vga.latch[0]) & bitmask };
+                    new_val[1] |= if (enable_set_reset & 2) != 0 {
+                        if (set_reset & 2) != 0 { !vga.latch[1] & bitmask } else { vga.latch[1] & bitmask }
+                    } else { (value ^ vga.latch[1]) & bitmask };
+                    new_val[2] |= if (enable_set_reset & 4) != 0 {
+                        if (set_reset & 4) != 0 { !vga.latch[2] & bitmask } else { vga.latch[2] & bitmask }
+                    } else { (value ^ vga.latch[2]) & bitmask };
+                    new_val[3] |= if (enable_set_reset & 8) != 0 {
+                        if (set_reset & 8) != 0 { !vga.latch[3] & bitmask } else { vga.latch[3] & bitmask }
+                    } else { (value ^ vga.latch[3]) & bitmask };
+                }
+            }
+        }
+        1 => {
+            // Write mode 1: latch copy — Bochs vgacore.cc:1999-2003
+            new_val[0] = vga.latch[0];
+            new_val[1] = vga.latch[1];
+            new_val[2] = vga.latch[2];
+            new_val[3] = vga.latch[3];
+        }
+        2 => {
+            // Write mode 2 — Bochs vgacore.cc:2005-2064
+            let bitmask = vga.graphics_regs[GFX_REG_BIT_MASK];
+            let raster_op = (vga.graphics_regs[GFX_REG_DATA_ROTATE] >> 3) & 0x03;
+
+            new_val[0] = vga.latch[0] & !bitmask;
+            new_val[1] = vga.latch[1] & !bitmask;
+            new_val[2] = vga.latch[2] & !bitmask;
+            new_val[3] = vga.latch[3] & !bitmask;
+
+            match raster_op {
+                0 => { // Write
+                    new_val[0] |= if (value & 1) != 0 { bitmask } else { 0 };
+                    new_val[1] |= if (value & 2) != 0 { bitmask } else { 0 };
+                    new_val[2] |= if (value & 4) != 0 { bitmask } else { 0 };
+                    new_val[3] |= if (value & 8) != 0 { bitmask } else { 0 };
+                }
+                1 => { // AND
+                    new_val[0] |= if (value & 1) != 0 { vga.latch[0] & bitmask } else { 0 };
+                    new_val[1] |= if (value & 2) != 0 { vga.latch[1] & bitmask } else { 0 };
+                    new_val[2] |= if (value & 4) != 0 { vga.latch[2] & bitmask } else { 0 };
+                    new_val[3] |= if (value & 8) != 0 { vga.latch[3] & bitmask } else { 0 };
+                }
+                2 => { // OR
+                    new_val[0] |= if (value & 1) != 0 { bitmask } else { vga.latch[0] & bitmask };
+                    new_val[1] |= if (value & 2) != 0 { bitmask } else { vga.latch[1] & bitmask };
+                    new_val[2] |= if (value & 4) != 0 { bitmask } else { vga.latch[2] & bitmask };
+                    new_val[3] |= if (value & 8) != 0 { bitmask } else { vga.latch[3] & bitmask };
+                }
+                3 | _ => { // XOR
+                    new_val[0] |= if (value & 1) != 0 { !vga.latch[0] & bitmask } else { vga.latch[0] & bitmask };
+                    new_val[1] |= if (value & 2) != 0 { !vga.latch[1] & bitmask } else { vga.latch[1] & bitmask };
+                    new_val[2] |= if (value & 4) != 0 { !vga.latch[2] & bitmask } else { vga.latch[2] & bitmask };
+                    new_val[3] |= if (value & 8) != 0 { !vga.latch[3] & bitmask } else { vga.latch[3] & bitmask };
+                }
+            }
+        }
+        3 | _ => {
+            // Write mode 3 — Bochs vgacore.cc:2066-2123
+            let data_rotate = vga.graphics_regs[GFX_REG_DATA_ROTATE] & 0x07;
+            let raster_op = (vga.graphics_regs[GFX_REG_DATA_ROTATE] >> 3) & 0x03;
+            let set_reset = vga.graphics_regs[GFX_REG_SET_RESET];
+
+            // Rotate CPU data
+            if data_rotate > 0 {
+                value = (value >> data_rotate) | (value << (8 - data_rotate));
+            }
+
+            let bitmask = vga.graphics_regs[GFX_REG_BIT_MASK] & value;
+
+            new_val[0] = vga.latch[0] & !bitmask;
+            new_val[1] = vga.latch[1] & !bitmask;
+            new_val[2] = vga.latch[2] & !bitmask;
+            new_val[3] = vga.latch[3] & !bitmask;
+
+            // value &= bitmask (Bochs line 2082) — but value is only used in
+            // set_reset expansion below, not directly
+            let masked_value = value & bitmask;
+
+            match raster_op {
+                0 => { // Write
+                    new_val[0] |= if (set_reset & 1) != 0 { masked_value } else { 0 };
+                    new_val[1] |= if (set_reset & 2) != 0 { masked_value } else { 0 };
+                    new_val[2] |= if (set_reset & 4) != 0 { masked_value } else { 0 };
+                    new_val[3] |= if (set_reset & 8) != 0 { masked_value } else { 0 };
+                }
+                1 => { // AND
+                    new_val[0] |= (if (set_reset & 1) != 0 { masked_value } else { 0 }) & vga.latch[0];
+                    new_val[1] |= (if (set_reset & 2) != 0 { masked_value } else { 0 }) & vga.latch[1];
+                    new_val[2] |= (if (set_reset & 4) != 0 { masked_value } else { 0 }) & vga.latch[2];
+                    new_val[3] |= (if (set_reset & 8) != 0 { masked_value } else { 0 }) & vga.latch[3];
+                }
+                2 => { // OR
+                    new_val[0] |= (if (set_reset & 1) != 0 { masked_value } else { 0 }) | vga.latch[0];
+                    new_val[1] |= (if (set_reset & 2) != 0 { masked_value } else { 0 }) | vga.latch[1];
+                    new_val[2] |= (if (set_reset & 4) != 0 { masked_value } else { 0 }) | vga.latch[2];
+                    new_val[3] |= (if (set_reset & 8) != 0 { masked_value } else { 0 }) | vga.latch[3];
+                }
+                3 | _ => { // XOR
+                    new_val[0] |= (if (set_reset & 1) != 0 { masked_value } else { 0 }) ^ vga.latch[0];
+                    new_val[1] |= (if (set_reset & 2) != 0 { masked_value } else { 0 }) ^ vga.latch[1];
+                    new_val[2] |= (if (set_reset & 4) != 0 { masked_value } else { 0 }) ^ vga.latch[2];
+                    new_val[3] |= (if (set_reset & 8) != 0 { masked_value } else { 0 }) ^ vga.latch[3];
+                }
+            }
+        }
+    }
+
+    // Commit new_val to planar memory — Bochs vgacore.cc:2130-2228
+    if !vga.seq_odd_even_dis {
+        // Odd/even mode — Bochs vgacore.cc:2130-2177
+        let plane = (offset & 1) as u8;
+        let mask = sequ_map_mask & (0x05 << plane);
+        if mask > 0 {
+            if (mask & 0x03) != 0 {
+                let final_val = new_val[plane as usize];
+                let mem_idx = (((offset & !1) << 2) | plane as u32) as usize;
+                if let Some(slot) = vga.vga_memory.get_mut(mem_idx) {
+                    *slot = final_val;
+                }
+                vga.vga_mem_updated |= 1 << plane;
+            } else {
+                let final_val = new_val[(plane + 2) as usize];
+                let mem_idx = (((offset & !1) << 2) | (plane as u32 + 2)) as usize;
+                if let Some(slot) = vga.vga_memory.get_mut(mem_idx) {
+                    *slot = final_val;
+                }
+                vga.vga_mem_updated |= 4 << plane;
+            }
+            if !graphics_alpha {
+                // Text mode: update text_buffer (Bochs vgacore.cc:2170-2174)
+                let mem_mask = TEXT_SNAP_SIZE[memory_mapping as usize & 3] - 1;
+                let text_offset = (offset as usize) & mem_mask;
+                // In odd/even text mode, plane 0 = chars, plane 1 = attrs.
+                // The final value written was for the selected plane.
+                let write_val = if (mask & 0x03) != 0 {
+                    new_val[plane as usize]
+                } else {
+                    new_val[(plane + 2) as usize]
+                };
+                if let Some(slot) = vga.text_memory.get_mut(text_offset) {
+                    if *slot != write_val {
+                        *slot = write_val;
+                        vga.text_dirty = true;
+                    }
+                }
+            }
+        }
+    } else {
+        // Normal planar mode (odd_even_dis=true) — Bochs vgacore.cc:2179-2228
+        if (sequ_map_mask & 0x0F) != 0 {
+            vga.vga_mem_updated |= sequ_map_mask;
+            let base = (offset << 2) as usize;
+            if (sequ_map_mask & 0x01) != 0 {
+                if let Some(slot) = vga.vga_memory.get_mut(base) {
+                    *slot = new_val[0];
+                }
+            }
+            if (sequ_map_mask & 0x02) != 0 {
+                if let Some(slot) = vga.vga_memory.get_mut(base + 1) {
+                    *slot = new_val[1];
+                }
+            }
+            if (sequ_map_mask & 0x04) != 0 {
+                if let Some(slot) = vga.vga_memory.get_mut(base + 2) {
+                    *slot = new_val[2];
+                }
+            }
+            if (sequ_map_mask & 0x08) != 0 {
+                if let Some(slot) = vga.vga_memory.get_mut(base + 3) {
+                    *slot = new_val[3];
+                }
+            }
+
+            if !graphics_alpha {
+                // Text mode: update text_buffer (Bochs vgacore.cc:2218-2226)
+                // In planar text mode, write value to text_memory for rendering
+                let mem_mask = TEXT_SNAP_SIZE[memory_mapping as usize & 3] - 1;
+                let text_offset = (offset as usize) & mem_mask;
+                // Write plane 0 value as the character / attribute byte
+                // (plane selection already handled by map_mask)
+                if (sequ_map_mask & 0x03) != 0 {
+                    // Planes 0 or 1 are text-relevant
+                    let write_val = if (sequ_map_mask & 0x01) != 0 { new_val[0] } else { new_val[1] };
+                    if let Some(slot) = vga.text_memory.get_mut(text_offset) {
+                        if *slot != write_val {
+                            *slot = write_val;
+                            vga.text_dirty = true;
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
