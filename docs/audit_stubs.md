@@ -61,10 +61,7 @@ Each entry:
 
 ## HIGH Priority
 
-### pc_system.rs — Missing TLB flush on A20 change
-- **Bochs does**: Calls `MemoryMappingChanged()` → `TLB_flush()` on all CPUs when A20 changes
-- **Our code does**: Logs debug message, relies on caller to flush
-- **Bochs ref**: pc_system.cc
+### ~~pc_system.rs — A20 TLB flush~~ — FIXED (session 56: emulator.rs sync_a20_state + keyboard A20 handler)
 
 ### ioapic.rs — ExtINT delivery mode uses entry.vector() instead of PIC IAC
 - **Bochs does**: When delivery_mode==7 (ExtINT), calls `DEV_pic_iac()` for vector
@@ -100,15 +97,9 @@ Each entry:
 
 ### ~~pit.rs — Tick accumulation cap~~ — RAISED to 5M (session 56: with clock_multiple, bulk skip makes large counts safe)
 
-### serial.rs — Break control in loopback mode not implemented
-- **Bochs does**: Enqueues break character (0x00) into RX when entering loopback with break_cntl
-- **Our code does**: Missing logic
-- **Bochs ref**: serial.cc
+### ~~serial.rs — Break loopback~~ — FIXED (session 56: enqueue 0x00 + LSR flags on loopback+break_cntl)
 
-### serial.rs — MODSTAT interrupt pending→interrupt promotion incomplete
-- **Bochs does**: Promotes ms_ipending to ms_interrupt when modstat_enable becomes true
-- **Our code does**: Partial — calls raise_interrupt but doesn't match Bochs logic exactly
-- **Bochs ref**: serial.cc
+### ~~serial.rs — MODSTAT promotion~~ — FIXED (session 56: ms_ipending→ms_interrupt with clear, all 4 deltas)
 
 ### ~~cmos.rs — UIP bit ordering~~ — FALSE POSITIVE (already correct: line 295 clears UIP before line 298 update_clock)
 
@@ -138,19 +129,13 @@ Each entry:
 
 ### ~~protect_ctrl.rs — LAR/LSL~~ — FALSE POSITIVE (implemented at protect_ctrl.rs:314,410)
 
-### proc_ctrl.rs — MONITOR missing v2h_write_byte validation
-- **Bochs does**: Checks host pointer valid (not I/O mapped) before arming monitor
-- **Our code does**: Skips validation
-- **Bochs ref**: mwait.cc
+### ~~proc_ctrl.rs — MONITOR v2h validation~~ — FIXED (session 56: warns on MMIO, still arms monitor)
 
 ---
 
 ## LOW Priority
 
-### harddrv.rs — SET MULTIPLE MODE (0xC6) not dispatched
-- **Bochs does**: Validates count (power of 2, <= 16), sets multiple_sectors
-- **Our code does**: Command not in dispatch table
-- **Bochs ref**: harddrv.cc
+### ~~harddrv.rs — SET MULTIPLE MODE~~ — FALSE POSITIVE (implemented at line 3581, allows 1-128 power-of-2)
 
 ### pc_system.rs — Missing isa_bus_delay() method
 - **Bochs does**: Emulates 8 MHz ISA bus timing
@@ -202,10 +187,7 @@ Each entry:
 ### ~~dispatcher.rs — mod_c0 `?` propagation~~ — FALSE POSITIVE
 Match arms return Result directly (no `?` needed — the Result IS the return value)
 
-### fpu_arith.rs — Missing FPU_handle_NaN for memory-form arithmetic
-- **Bochs does**: Checks NaN before converting memory operand and performing arithmetic
-- **Our code does**: Skips NaN check, converts and operates directly
-- **Bochs ref**: fpu_arith.cc
+### ~~fpu_arith.rs — FPU NaN handling~~ — FIXED (session 56: 12 memory-form f32/f64 handlers with NaN check)
 
 ### shared_display.rs — Missing actl_palette indirection in color lookup
 - **Bochs does**: Uses actl_palette[attr & 0x0f] for color indexing with PEL mask
