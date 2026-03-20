@@ -399,11 +399,12 @@ impl BxSerialC {
                 }
             }
             IntSource::ModStat => {
-                if s.int_enable.modstat_enable {
+                // Bochs serial.cc:740-746: only promote to interrupt when
+                // ms_ipending is already set AND modstat_enable is on
+                if s.ms_ipending && s.int_enable.modstat_enable {
                     s.ms_interrupt = true;
+                    s.ms_ipending = false;
                     gen_int = true;
-                } else {
-                    s.ms_ipending = true;
                 }
             }
             IntSource::Fifo => {
@@ -934,9 +935,18 @@ impl BxSerialC {
                 s.line_cntl.break_cntl = (val & 0x40) != 0;
                 s.line_cntl.dlab = (val & 0x80) != 0;
 
+                // Bochs serial.cc:1220-1224: break in loopback mode
+                let need_break_enq = s.modem_cntl.local_loopback && s.line_cntl.break_cntl;
+                let check_dlab = prev_dlab && !s.line_cntl.dlab;
+                let divisor = ((s.divisor_msb as u16) << 8) | (s.divisor_lsb as u16);
+                if need_break_enq {
+                    s.line_status.break_int = true;
+                    s.line_status.framing_error = true;
+                    self.rx_fifo_enq(port_idx, 0x00);
+                }
+
                 // When DLAB transitions from 1→0, recalculate baud rate
-                if prev_dlab && !s.line_cntl.dlab {
-                    let divisor = ((s.divisor_msb as u16) << 8) | (s.divisor_lsb as u16);
+                if check_dlab {
                     if divisor > 0 {
                         let baudrate = (UART_CLOCK_XTL / (16.0 * divisor as f64)) as u32;
                         tracing::debug!(
@@ -959,43 +969,56 @@ impl BxSerialC {
                 s.modem_cntl.out2 = (val & 0x08) != 0;
                 s.modem_cntl.local_loopback = (val & 0x10) != 0;
 
-                if s.modem_cntl.local_loopback {
-                    // Loopback: MCR outputs reflected to MSR inputs
-                    // RTS → CTS, DTR → DSR, OUT1 → RI, OUT2 → DCD
-                    let new_cts = s.modem_cntl.rts;
-                    let new_dsr = s.modem_cntl.dtr;
-                    let new_ri = s.modem_cntl.out1;
-                    let new_dcd = s.modem_cntl.out2;
+                // Bochs serial.cc:1283-1304: detect loopback transition
+                let need_break_enq_mcr = !prev_loopback
+                    && s.modem_cntl.local_loopback
+                    && s.line_cntl.break_cntl;
+                let is_loopback = s.modem_cntl.local_loopback;
+                if need_break_enq_mcr {
+                    // Transition to loopback mode with break_cntl active
+                    // Bochs serial.cc:1295-1303
+                    s.line_status.break_int = true;
+                    s.line_status.framing_error = true;
+                    self.rx_fifo_enq(port_idx, 0x00);
+                }
 
-                    // Detect changes for delta bits
-                    if new_cts != s.modem_status.cts {
+                if is_loopback {
+                    let s = &mut self.ports[port_idx];
+                    // Bochs serial.cc:1318-1343: Loopback MCR→MSR reflection
+                    // Save previous MSR state before updating
+                    let prev_cts = s.modem_status.cts;
+                    let prev_dsr = s.modem_status.dsr;
+                    let prev_ri = s.modem_status.ri;
+                    let prev_dcd = s.modem_status.dcd;
+
+                    // RTS → CTS, DTR → DSR, OUT1 → RI, OUT2 → DCD
+                    s.modem_status.cts = s.modem_cntl.rts;
+                    s.modem_status.dsr = s.modem_cntl.dtr;
+                    s.modem_status.ri = s.modem_cntl.out1;
+                    s.modem_status.dcd = s.modem_cntl.out2;
+
+                    // Detect changes — set delta bits AND ms_ipending for each
+                    if s.modem_status.cts != prev_cts {
                         s.modem_status.delta_cts = true;
-                    }
-                    if new_dsr != s.modem_status.dsr {
-                        s.modem_status.delta_dsr = true;
-                    }
-                    if new_ri != s.modem_status.ri {
                         s.ms_ipending = true;
                     }
-                    if !new_ri && s.modem_status.ri {
+                    if s.modem_status.dsr != prev_dsr {
+                        s.modem_status.delta_dsr = true;
+                        s.ms_ipending = true;
+                    }
+                    if s.modem_status.ri != prev_ri {
+                        s.ms_ipending = true;
+                    }
+                    if !s.modem_status.ri && prev_ri {
                         s.modem_status.ri_trailedge = true;
                     }
-                    if new_dcd != s.modem_status.dcd {
+                    if s.modem_status.dcd != prev_dcd {
                         s.modem_status.delta_dcd = true;
+                        s.ms_ipending = true;
                     }
 
-                    s.modem_status.cts = new_cts;
-                    s.modem_status.dsr = new_dsr;
-                    s.modem_status.ri = new_ri;
-                    s.modem_status.dcd = new_dcd;
-
-                    if s.modem_status.delta_cts
-                        || s.modem_status.delta_dsr
-                        || s.modem_status.ri_trailedge
-                        || s.modem_status.delta_dcd
-                    {
-                        self.raise_interrupt(port_idx, IntSource::ModStat);
-                    }
+                    // Bochs always calls raise_interrupt here (it checks ms_ipending inside)
+                    self.raise_interrupt(port_idx, IntSource::ModStat);
                 } else if prev_loopback {
                     // Exiting loopback — restore CTS/DSR as "connected"
                     let s = &mut self.ports[port_idx];

@@ -313,6 +313,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         };
         let paddr = self.translate_data_read(laddr)?;
 
+        // Bochs mwait.cc: validate monitored address has valid host mapping.
+        // MMIO addresses (host_page_addr=0) cannot be monitored — MWAIT may
+        // never wake. MONITOR still succeeds (acceptable — just warn).
+        if self.get_host_write_ptr(laddr).is_none() {
+            tracing::warn!(
+                "MONITOR: laddr={:#x} paddr={:#x} has no host mapping (MMIO?), MWAIT may never trigger",
+                laddr, paddr
+            );
+        }
+
         // Bochs mwait.cc:121: invalidate page in monitoring system
         // (In Bochs this calls bx_pc_system.invlpg(paddr) to clear any
         // cached page state. We don't need this since we check is_monitor
