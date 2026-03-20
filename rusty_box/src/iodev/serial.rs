@@ -199,6 +199,22 @@ struct SerialPort {
     divisor_lsb: u8,
     divisor_msb: u8,
 
+    // Baud rate and character timing (Bochs serial.h:112-113)
+    baudrate: u32,
+    /// Microseconds per data byte, computed from baudrate and word length.
+    /// Formula (Bochs serial.cc:1253-1254):
+    ///   databyte_usec = (1000000 / baudrate) * (wordlen_sel + 7)
+    /// where wordlen_sel + 7 = total bits (start + data + stop).
+    /// Default: 87 usec at 115200 baud, 8-bit word (Bochs serial.cc:371).
+    databyte_usec: u32,
+
+    // Timer handles for Bochs-compatible timer integration (Bochs serial.h:115-117).
+    // Bochs registers tx/rx/fifo timers via bx_pc_system.register_timer().
+    // Our TX is immediate (no timer pacing). Timer integration deferred.
+    tx_timer_handle: Option<usize>,
+    rx_timer_handle: Option<usize>,
+    fifo_timer_handle: Option<usize>,
+
     // FIFO timeout: 16550 fires timeout interrupt after 4 character times
     // with no new data and RX FIFO below trigger level. We track ticks since
     // last RX byte; tick() checks and fires the timeout.
@@ -242,6 +258,16 @@ impl SerialPort {
             divisor_lsb: 1, // Default divisor=1 → 115200 baud
             divisor_msb: 0,
 
+            // Bochs serial.cc:370-371: default 115200 baud, 87 usec/byte
+            baudrate: 115200,
+            databyte_usec: 87,
+
+            // Bochs registers tx/rx/fifo timers here with bx_pc_system.register_timer().
+            // Our TX is immediate (no timer pacing). Timer integration deferred.
+            tx_timer_handle: None,
+            rx_timer_handle: None,
+            fifo_timer_handle: None,
+
             fifo_timeout_ticks: 0,
 
             tx_output: VecDeque::with_capacity(256),
@@ -280,6 +306,10 @@ impl SerialPort {
         self.scratch = 0;
         self.divisor_lsb = 1;
         self.divisor_msb = 0;
+        self.baudrate = 115200;
+        self.databyte_usec = 87;
+        // Timer handles are not reset — they persist across soft resets
+        // (Bochs serial.cc:294-312 only registers timers if handle == BX_NULL_TIMER_HANDLE)
         self.fifo_timeout_ticks = 0;
 
         // Simulate connected device
@@ -945,15 +975,37 @@ impl BxSerialC {
                     self.rx_fifo_enq(port_idx, 0x00);
                 }
 
-                // When DLAB transitions from 1→0, recalculate baud rate
+                // When DLAB transitions from 1→0, recalculate baud rate and
+                // databyte_usec (Bochs serial.cc:1226-1258)
                 if check_dlab {
                     if divisor > 0 {
-                        let baudrate = (UART_CLOCK_XTL / (16.0 * divisor as f64)) as u32;
+                        let new_baudrate = (UART_CLOCK_XTL / (16.0 * divisor as f64)) as u32;
+                        let s = &mut self.ports[port_idx];
+                        if new_baudrate != s.baudrate {
+                            s.baudrate = new_baudrate;
+                            tracing::debug!(
+                                "COM{}: baud rate set to {} (divisor={})",
+                                port_idx + 1,
+                                new_baudrate,
+                                divisor
+                            );
+                        }
+                        // Bochs serial.cc:1253-1254:
+                        //   databyte_usec = (1000000.0 / baudrate) * (wordlen_sel + 7)
+                        // wordlen_sel + 7 gives total bits per character frame
+                        // (start bit + data bits + stop bit)
+                        s.databyte_usec = (1_000_000.0 / s.baudrate as f64
+                            * (s.line_cntl.wordlen_sel as f64 + 7.0))
+                            as u32;
                         tracing::debug!(
-                            "COM{}: baud rate set to {} (divisor={})",
+                            "COM{}: databyte_usec={}",
                             port_idx + 1,
-                            baudrate,
-                            divisor
+                            s.databyte_usec
+                        );
+                    } else {
+                        tracing::debug!(
+                            "COM{}: ignoring invalid baud rate divisor",
+                            port_idx + 1
                         );
                     }
                 }

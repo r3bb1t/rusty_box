@@ -954,4 +954,121 @@ impl BxMemC<'_> {
 
         Ok(())
     }
+
+    // ========================================================================
+    // Flash ROM state machine (Bochs misc_mem.cc:923-1012)
+    // ========================================================================
+
+    /// Flash ROM read — returns value based on current flash state machine state.
+    ///
+    /// `addr` is a ROM array offset (already mapped via `bios_map_last128k` or
+    /// `& BIOS_MASK` by the caller), matching Bochs misc_mem.cc:923-948.
+    ///
+    /// Not yet wired into the read path — stub for future integration when
+    /// `flash_type > 0` is configured.
+    pub(crate) fn flash_read(&mut self, addr: u32) -> u8 {
+        match self.flash_wsm_state {
+            FLASH_READ_ARRAY => {
+                // Normal read — return ROM data (Bochs misc_mem.cc:936-938)
+                let rom = self.inherited_memory_stub.rom();
+                rom.get(addr as usize).copied().unwrap_or(0xFF)
+            }
+            FLASH_INT_ID => {
+                // Manufacturer/device ID (Bochs misc_mem.cc:928-934)
+                if (addr & 1) != 0 {
+                    if self.flash_type == 2 { 0x7c } else { 0x94 }
+                } else {
+                    0x89 // Intel manufacturer ID
+                }
+            }
+            _ => {
+                // FLASH_READ_STATUS and all other states return flash_status
+                // (Bochs misc_mem.cc:940-945)
+                if self.flash_wsm_state == FLASH_ERASE {
+                    self.flash_status |= 0x80;
+                }
+                self.flash_status
+            }
+        }
+    }
+
+    /// Flash ROM write — processes command bytes for the flash state machine.
+    ///
+    /// `addr` is a ROM array offset (already mapped by the caller), matching
+    /// Bochs misc_mem.cc:950-1012.
+    ///
+    /// Not yet wired into the write path — stub for future integration when
+    /// `flash_type > 0` is configured.
+    pub(crate) fn flash_write(&mut self, addr: u32, data: u8) {
+        let flash_addr = if self.flash_type == 2 {
+            addr & 0x3ffff
+        } else {
+            addr & 0x1ffff
+        };
+
+        if self.flash_wsm_state == FLASH_PROG_SETUP {
+            // Actual byte program — AND data into ROM (Bochs misc_mem.cc:961-964)
+            let rom = self.inherited_memory_stub.rom();
+            if let Some(byte) = rom.get_mut(addr as usize) {
+                *byte &= data;
+            }
+            self.flash_wsm_state = FLASH_READ_STATUS;
+            self.flash_modified = true;
+        } else {
+            // Command byte processing (Bochs misc_mem.cc:966-1010)
+            match data {
+                FLASH_INT_ID | FLASH_READ_ARRAY | FLASH_ERASE_SETUP
+                | FLASH_ERASE_SUSP | FLASH_PROG_SETUP => {
+                    self.flash_wsm_state = data;
+                }
+                FLASH_READ_STATUS => {
+                    if self.flash_wsm_state != FLASH_ERASE {
+                        self.flash_wsm_state = data;
+                    }
+                }
+                FLASH_CLR_STATUS => {
+                    // Clear status register error bits (Bochs misc_mem.cc:980-982)
+                    self.flash_status &= !0x38;
+                    self.flash_wsm_state = FLASH_READ_ARRAY;
+                }
+                FLASH_ERASE => {
+                    // Erase confirm / erase resume (Bochs misc_mem.cc:984-1006)
+                    if self.flash_wsm_state == FLASH_ERASE_SETUP {
+                        self.flash_status &= !0xc0;
+                        self.flash_wsm_state = FLASH_ERASE;
+                        // Block erase — fill block with 0xFF
+                        let rom = self.inherited_memory_stub.rom();
+                        if self.flash_type == 1
+                            && (flash_addr == 0x1c000 || flash_addr == 0x1d000)
+                        {
+                            for i in 0..0x1000u32 {
+                                if let Some(byte) = rom.get_mut((addr + i) as usize) {
+                                    *byte = 0xff;
+                                }
+                            }
+                            self.flash_modified = true;
+                        } else if self.flash_type == 2
+                            && (flash_addr == 0x38000 || flash_addr == 0x3a000)
+                        {
+                            for i in 0..0x2000u32 {
+                                if let Some(byte) = rom.get_mut((addr + i) as usize) {
+                                    *byte = 0xff;
+                                }
+                            }
+                            self.flash_modified = true;
+                        }
+                    } else if self.flash_wsm_state == FLASH_ERASE_SUSP {
+                        // Erase resume (Bochs misc_mem.cc:1001-1003)
+                        self.flash_status &= !0x40;
+                        self.flash_wsm_state = FLASH_ERASE;
+                    } else {
+                        tracing::debug!("flash_write(): unexpected ERASE CONFIRM / ERASE RESUME");
+                    }
+                }
+                _ => {
+                    tracing::debug!("flash_write(): unsupported code {:#04x}", data);
+                }
+            }
+        }
+    }
 }

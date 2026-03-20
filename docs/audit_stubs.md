@@ -149,11 +149,6 @@ Each entry:
 
 ### ~~crregs.rs — MOV DRn~~ — FALSE POSITIVE (implemented at proc_ctrl.rs:726,760)
 
-### memory_stub.rs — Debugger memory access functions unimplemented
-- **Bochs does**: dbg_set_mem, dbg_crc32 for debugger
-- **Our code does**: `unimplemented!()`
-- **Bochs ref**: memory.cc
-
 ### event.rs — Missing SMI/INIT event priority handling
 - **Bochs does**: Priority 3 events: enter_system_management_mode() on SMI, CPU reset on INIT
 - **Our code does**: Not implemented (jumps from Priority 2 to Priority 4)
@@ -184,4 +179,4 @@ Match arms return Result directly (no `?` needed — the Result IS the return va
 ### memory_stub.rs — Debugger memory access functions unimplemented
 - **Bochs does**: dbg_set_mem, dbg_crc32 for debugger
 - **Our code does**: `unimplemented!()`
-- **Bochs ref**: memory.cc
+- **Bochs ref**: memory.cc (duplicate entry removed)
