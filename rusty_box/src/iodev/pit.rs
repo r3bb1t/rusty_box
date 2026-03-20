@@ -770,7 +770,9 @@ impl BxPitC {
 
                 // Fast path: skip ticks in bulk when no state change is imminent
                 // (Bochs pit82c54.cc:259-335 clock_multiple). Then per-tick for remainder.
-                let mut remaining = pit_ticks.min(500_000) as u32;
+                // With clock_multiple bulk skip, we can process more ticks safely.
+                // 5M PIT ticks ≈ 4.2 seconds at 1.193182 MHz.
+                let mut remaining = pit_ticks.min(5_000_000) as u32;
                 while remaining > 0 {
                     // Try bulk skip on all 3 counters
                     let skip = remaining

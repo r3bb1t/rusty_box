@@ -96,15 +96,9 @@ Each entry:
 
 ## MEDIUM Priority
 
-### pit.rs — Missing clock_multiple() fast path optimization
-- **Bochs does**: Efficiently skips many cycles without per-tick clock() calls
-- **Our code does**: Loops once per PIT tick, caps at 500K
-- **Bochs ref**: pit82c54.cc
+### ~~pit.rs — clock_multiple() fast path~~ — PARTIALLY IMPLEMENTED (session 56: bulk skip when next_change_time > ticks)
 
-### pit.rs — Fractional tick accumulation capped at 500K
-- **Bochs does**: No cap — processes all ticks
-- **Our code does**: `.min(500_000)` limits maximum ticks per sync
-- **Bochs ref**: pit82c54.cc
+### ~~pit.rs — Tick accumulation cap~~ — RAISED to 5M (session 56: with clock_multiple, bulk skip makes large counts safe)
 
 ### serial.rs — Break control in loopback mode not implemented
 - **Bochs does**: Enqueues break character (0x00) into RX when entering loopback with break_cntl
@@ -123,10 +117,7 @@ Each entry:
 - **Our code does**: No registration method
 - **Bochs ref**: dma.cc
 
-### dma.rs — Missing ctrl_disabled field
-- **Bochs does**: DMA command register bit 2 disables entire controller
-- **Our code does**: Not tracked
-- **Bochs ref**: dma.h
+### ~~dma.rs — ctrl_disabled field~~ — FIXED (session 56: added + wired from command register write, plus drq/dack arrays)
 
 ### memory/misc_mem.rs — Flash ROM state machine not implemented
 - **Bochs does**: Full flash_read/flash_write state machine (FLASH_READ_ARRAY, INT_ID, etc.)

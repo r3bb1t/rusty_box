@@ -164,6 +164,12 @@ pub struct Dma8237 {
     pub(crate) flip_flop: bool,
     /// Controller number (0=DMA1, 1=DMA2)
     pub(crate) controller_num: u8,
+    /// Controller disabled (command register bit 2, Bochs dma.h:77)
+    pub(crate) ctrl_disabled: bool,
+    /// DMA Request lines (Bochs dma.h:70)
+    pub(crate) drq: [bool; 4],
+    /// DMA Acknowledge lines (Bochs dma.h:71)
+    pub(crate) dack: [bool; 4],
 }
 
 impl Dma8237 {
@@ -181,6 +187,9 @@ impl Dma8237 {
             status: 0,
             flip_flop: false,
             controller_num,
+            ctrl_disabled: false,
+            drq: [false; 4],
+            dack: [false; 4],
         }
     }
 
@@ -189,6 +198,9 @@ impl Dma8237 {
         self.command = 0;
         self.status = 0;
         self.flip_flop = false;
+        self.ctrl_disabled = false;
+        self.drq = [false; 4];
+        self.dack = [false; 4];
         for channel in &mut self.channels {
             channel.masked = true;
             channel.tc = false;
@@ -205,7 +217,8 @@ pub struct BxDmaC {
     /// DMA2 (16-bit channels 4-7)
     pub(crate) dma2: Dma8237,
     /// Extra page registers
-    pub(crate) extra_pages: [u8; 8],
+    /// Extra page registers (Bochs dma.h:97 has ext_page_reg[16])
+    pub(crate) extra_pages: [u8; 16],
 }
 
 impl Default for BxDmaC {
@@ -220,7 +233,7 @@ impl BxDmaC {
         Self {
             dma1: Dma8237::new(0),
             dma2: Dma8237::new(1),
-            extra_pages: [0; 8],
+            extra_pages: [0; 16],
         }
     }
 
@@ -239,7 +252,7 @@ impl BxDmaC {
     pub fn reset(&mut self) {
         self.dma1.reset();
         self.dma2.reset();
-        self.extra_pages = [0; 8];
+        self.extra_pages = [0; 16];
     }
 
     /// Read from DMA I/O port
@@ -316,7 +329,10 @@ impl BxDmaC {
         match port {
             // DMA1 registers
             0x0000..=0x0007 => self.write_addr_count(0, port as u8, value),
-            DMA1_COMMAND => self.dma1.command = value,
+            DMA1_COMMAND => {
+                self.dma1.command = value;
+                self.dma1.ctrl_disabled = (value & 0x04) != 0; // Bochs dma.cc
+            }
             DMA1_REQUEST => self.set_request(0, value),
             DMA1_MASK => self.set_mask(0, value),
             DMA1_MODE => self.set_mode(0, value),
@@ -327,7 +343,10 @@ impl BxDmaC {
 
             // DMA2 registers
             0x00C0..=0x00CF => self.write_addr_count(1, ((port - 0xC0) >> 1) as u8, value),
-            DMA2_COMMAND => self.dma2.command = value,
+            DMA2_COMMAND => {
+                self.dma2.command = value;
+                self.dma2.ctrl_disabled = (value & 0x04) != 0; // Bochs dma.cc
+            }
             DMA2_REQUEST => self.set_request(1, value),
             DMA2_MASK => self.set_mask(1, value),
             DMA2_MODE => self.set_mode(1, value),
