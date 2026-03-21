@@ -32,12 +32,23 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Priority 3: External Hardware Interventions (Bochs event.cc:250-296)
         //   FLUSH, STOPCLK, SMI, INIT
-        // SMI: enters System Management Mode (enter_system_management_mode).
-        //   Not implemented — single-CPU Alpine/DLX don't use SMM.
-        // INIT: resets CPU via reset(BX_RESET_SOFTWARE).
-        //   Used by multiprocessor startup (INIT-SIPI-SIPI sequence).
-        //   Not implemented — single-CPU emulation only.
-        // Bochs also checks SVM_GIF gating and VMX INIT vmexit here.
+
+        // SMI (Bochs event.cc:255-264): enter System Management Mode.
+        // Not implemented — single-CPU DLX/Alpine don't trigger SMI.
+        // Bochs: clear_event(BX_EVENT_SMI); enter_system_management_mode();
+        if self.is_unmasked_event_pending(Self::BX_EVENT_SMI) {
+            self.clear_event(Self::BX_EVENT_SMI);
+            tracing::debug!("SMI event cleared (SMM not implemented)");
+        }
+
+        // INIT (Bochs event.cc:266-296): reset CPU via reset(BX_RESET_SOFTWARE).
+        // Used by multiprocessor startup (INIT-SIPI-SIPI sequence).
+        // Not implemented — single-CPU emulation only.
+        // Bochs: clear_event(BX_EVENT_INIT); reset(BX_RESET_SOFTWARE);
+        if self.is_unmasked_event_pending(Self::BX_EVENT_INIT) {
+            self.clear_event(Self::BX_EVENT_INIT);
+            tracing::debug!("INIT event cleared (SMP not implemented)");
+        }
 
         // Priority 4: Debug trap exceptions (TF single-step, data/I/O breakpoints)
         // Bochs event.cc:312-324 — check inhibition FIRST, then debug_trap

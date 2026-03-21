@@ -791,10 +791,15 @@ impl BxPcSystemC {
     /// Emulate ISA bus timing delay (Bochs pc_system.cc:614-620).
     /// ISA bus runs at ~8 MHz. Each ISA cycle takes ~125ns.
     /// At typical IPS rates, this advances the tick counter to simulate bus delay.
+    /// Emulate ISA bus timing delay (Bochs pc_system.cc:614-620).
+    /// ISA bus runs at ~8 MHz. Each ISA cycle consumes CPU ticks
+    /// proportional to IPS. Bochs: `tickn((Bit32u)(m_ips * 2.0))`
     pub fn isa_bus_delay(&mut self) {
-        // Bochs: if (m_ips > 4.0) tickn((Bit32u)(m_ips * 2.0))
-        // At 15M IPS, this is 30M ticks per ISA delay (~2ms)
-        // This is intentionally a no-op for now — ISA timing not critical for PCI systems
+        let m_ips = self.m_ips;
+        if m_ips > 4.0 {
+            let ticks = (m_ips * 2.0) as u32;
+            self.tickn(ticks);
+        }
     }
 
     /// Null timer handler (does nothing, just maintains timing).

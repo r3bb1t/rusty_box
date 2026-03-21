@@ -258,6 +258,22 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         }
         self.cpu.pic_ptr = &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
 
+        // Wire CPU→DMA for raise_HLDA during HRQ handling (matches Bochs DEV_dma_raise_hlda)
+        self.cpu.dma_ptr = &mut self.device_manager.dma as *mut crate::iodev::dma::BxDmaC;
+
+        // Wire DMA→pc_system for set_HRQ and DMA→memory for physical DMA transfers
+        let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
+        self.device_manager.dma.set_system_ptrs(
+            &mut self.pc_system as *mut crate::pc_system::BxPcSystemC,
+            ram_base,
+            ram_len,
+        );
+
+        // Wire pc_system→CPU async_event for DMA HRQ signaling
+        // Matches Bochs pc_system.cc:83: BX_CPU(0)->async_event = 1
+        self.pc_system
+            .set_cpu_async_event_ptr(&mut self.cpu.async_event as *mut u32);
+
         // Wire HardDrive→PIC for immediate IRQ raise/lower (matches Bochs DEV_pic_raise_irq)
         self.device_manager.harddrv.pic_ptr =
             &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
@@ -267,6 +283,12 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         unsafe {
             let ioapic_ptr = &mut self.device_manager.ioapic as *mut crate::iodev::ioapic::BxIoApic;
             self.device_manager.pic.set_ioapic_ptr(ioapic_ptr);
+        }
+
+        // Wire IOAPIC→PIC for ExtINT delivery mode (Bochs ioapic.cc:312 DEV_pic_iac)
+        {
+            let pic_ptr = &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
+            self.device_manager.ioapic.set_pic_ptr(pic_ptr);
         }
 
         // Wire I/O APIC → LAPIC for interrupt delivery (matches Bochs apic_bus_deliver_interrupt)
@@ -422,6 +444,21 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         }
         self.cpu.pic_ptr = &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
 
+        // Wire CPU→DMA for raise_HLDA during HRQ handling (same as in initialize())
+        self.cpu.dma_ptr = &mut self.device_manager.dma as *mut crate::iodev::dma::BxDmaC;
+
+        // Wire DMA→pc_system for set_HRQ and DMA→memory for physical DMA transfers
+        let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
+        self.device_manager.dma.set_system_ptrs(
+            &mut self.pc_system as *mut crate::pc_system::BxPcSystemC,
+            ram_base,
+            ram_len,
+        );
+
+        // Wire pc_system→CPU async_event for DMA HRQ signaling (same as in initialize())
+        self.pc_system
+            .set_cpu_async_event_ptr(&mut self.cpu.async_event as *mut u32);
+
         // Wire HardDrive→PIC for immediate IRQ raise/lower (matches Bochs DEV_pic_raise_irq)
         self.device_manager.harddrv.pic_ptr =
             &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
@@ -431,6 +468,12 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         unsafe {
             let ioapic_ptr = &mut self.device_manager.ioapic as *mut crate::iodev::ioapic::BxIoApic;
             self.device_manager.pic.set_ioapic_ptr(ioapic_ptr);
+        }
+
+        // Wire IOAPIC→PIC for ExtINT delivery mode (Bochs ioapic.cc:312 DEV_pic_iac)
+        {
+            let pic_ptr = &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
+            self.device_manager.ioapic.set_pic_ptr(pic_ptr);
         }
 
         // Wire I/O APIC → LAPIC for interrupt delivery (matches Bochs apic_bus_deliver_interrupt)

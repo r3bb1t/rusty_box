@@ -343,44 +343,46 @@ impl DeviceManager {
         );
     }
 
-    /// Register DMA I/O handlers
+    /// Register DMA I/O handlers (Bochs dma.cc:138-154)
     fn register_dma_handlers(&mut self, io: &mut BxDevicesC) {
         let dma_ptr = &mut self.dma as *mut BxDmaC as *mut c_void;
 
-        // DMA1 ports (0x00-0x0F)
-        for port in 0x00..=0x0F_u16 {
+        // DMA1 ports 0x0000-0x000F (Bochs dma.cc:139-142)
+        for port in 0x0000..=0x000F_u16 {
             io.register_io_handler(
                 dma_ptr,
                 super::dma::dma_read_handler,
                 super::dma::dma_write_handler,
                 port,
-                "DMA1",
+                "DMA controller",
                 0x1,
             );
         }
 
-        // DMA2 ports (0xC0-0xDF)
-        for port in 0xC0..=0xDF_u16 {
+        // Page registers 0x0080-0x008F (Bochs dma.cc:145-148)
+        for port in 0x0080..=0x008F_u16 {
             io.register_io_handler(
                 dma_ptr,
                 super::dma::dma_read_handler,
                 super::dma::dma_write_handler,
                 port,
-                "DMA2",
+                "DMA controller",
                 0x1,
             );
         }
 
-        // DMA page registers
-        for port in [0x81_u16, 0x82, 0x83, 0x87, 0x89, 0x8A, 0x8B, 0x8F] {
+        // DMA2 ports 0x00C0-0x00DE, step 2 (Bochs dma.cc:151-154)
+        let mut port = 0x00C0_u16;
+        while port <= 0x00DE {
             io.register_io_handler(
                 dma_ptr,
                 super::dma::dma_read_handler,
                 super::dma::dma_write_handler,
                 port,
-                "DMA Page",
+                "DMA controller",
                 0x1,
             );
+            port += 2;
         }
     }
 

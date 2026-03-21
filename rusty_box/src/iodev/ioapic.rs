@@ -335,6 +335,12 @@ pub struct BxIoApic {
     /// routes directly to BX_CPU(0)->local_apic.
     #[cfg(feature = "bx_support_apic")]
     lapic_ptr: *mut crate::cpu::apic::BxLocalApic,
+
+    /// Raw pointer to the PIC for ExtINT delivery mode (delivery_mode == 7).
+    /// Bochs: `DEV_pic_iac()` in ioapic.cc:312 — reads the vector from the
+    /// 8259 PIC via an interrupt acknowledge cycle.
+    /// Set during emulator initialization via `set_pic_ptr()`.
+    pic_ptr: *mut super::pic::BxPicC,
 }
 
 impl Default for BxIoApic {
@@ -359,6 +365,7 @@ impl BxIoApic {
             stuck_count: 0,
             #[cfg(feature = "bx_support_apic")]
             lapic_ptr: core::ptr::null_mut(),
+            pic_ptr: core::ptr::null_mut(),
         }
     }
 
@@ -385,6 +392,16 @@ impl BxIoApic {
     pub fn set_lapic_ptr(&mut self, ptr: *mut crate::cpu::apic::BxLocalApic) {
         self.lapic_ptr = ptr;
         tracing::debug!("IOAPIC: LAPIC pointer set for interrupt delivery");
+    }
+
+    /// Set the PIC pointer for ExtINT delivery mode (delivery_mode == 7).
+    ///
+    /// Bochs calls `DEV_pic_iac()` in `service_ioapic()` when a redirect entry
+    /// has delivery_mode == 7. This performs an interrupt acknowledge cycle on the
+    /// 8259 PIC to read the vector. Must be called during emulator initialization.
+    pub fn set_pic_ptr(&mut self, ptr: *mut super::pic::BxPicC) {
+        self.pic_ptr = ptr;
+        tracing::debug!("IOAPIC: PIC pointer set for ExtINT delivery");
     }
 
     /// All redirection entries are masked, IRR and input state are cleared.
@@ -738,15 +755,26 @@ impl BxIoApic {
             // Bochs: if (entry->delivery_mode() == 7) vector = DEV_pic_iac();
             // else vector = entry->vector(); (ioapic.cc:311-315)
             let vector = if entry.delivery_mode() == IoApicDeliveryMode::ExtInt as u8 {
-                // ExtINT: Bochs calls DEV_pic_iac() for vector. We use entry.vector() which
-                // is correct when BIOS configures redirect entries to match PIC vectors.
-                // Full Bochs parity would require a PIC callback here.
-                tracing::debug!(
-                    "IOAPIC: ExtINT mode on pin {} — using entry vector {:#04x}",
-                    pin,
+                // ExtINT: Bochs calls DEV_pic_iac() for the vector (ioapic.cc:312).
+                // This performs an interrupt acknowledge cycle on the 8259 PIC.
+                if !self.pic_ptr.is_null() {
+                    let pic = unsafe { &mut *self.pic_ptr };
+                    let v = pic.iac();
+                    tracing::debug!(
+                        "IOAPIC: ExtINT mode on pin {} — PIC IAC vector {:#04x}",
+                        pin,
+                        v
+                    );
+                    v
+                } else {
+                    // Fallback: no PIC wired, use entry vector
+                    tracing::debug!(
+                        "IOAPIC: ExtINT mode on pin {} — no PIC, using entry vector {:#04x}",
+                        pin,
+                        entry.vector()
+                    );
                     entry.vector()
-                );
-                entry.vector()
+                }
             } else {
                 entry.vector()
             };

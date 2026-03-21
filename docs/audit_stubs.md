@@ -52,9 +52,7 @@ Each entry:
 
 ### ~~pc_system.rs — A20 TLB flush~~ — FIXED (session 56: emulator.rs sync_a20_state + keyboard A20 handler)
 
-### ioapic.rs — ExtINT delivery mode uses entry.vector() instead of PIC IAC
-- **Bochs does**: When delivery_mode==7 (ExtINT), calls `DEV_pic_iac()` for vector
-- **Our code does**: Uses entry.vector() as fallback
+### ~~ioapic.rs — ExtINT delivery mode~~ — FIXED (session 57: pic_ptr added, service_ioapic calls pic.iac() matching Bochs ioapic.cc:312)
 - **Bochs ref**: ioapic.cc
 
 ### ~~harddrv.rs — SET FEATURES (0xEF) transfer mode~~ — FIXED (session 56: mdma/udma/packet_dma wired up)
@@ -109,9 +107,7 @@ Each entry:
 
 ### ~~pic.rs — Polled mode io_len==2~~ — FIXED (session 56: returns (irq<<8)|irq for word reads)
 
-### serial.rs — RX input not implemented (only TX output works)
-- **Bochs does**: Polls file/socket/TTY/pipe for input
-- **Our code does**: Only receive_byte() stub exists
+### ~~serial.rs — RX input~~ — VERIFIED ALREADY IMPLEMENTED (receive_byte + rx_fifo_enq fully match Bochs serial.cc rx_fifo_enq: FIFO/non-FIFO paths, overrun, trigger levels, interrupts)
 - **Bochs ref**: serial.cc
 
 ### ~~vga.rs — Sequencer chain_four/odd_even~~ — FIXED (session 56: fields added + extracted on reg 4 write)
@@ -120,16 +116,12 @@ Each entry:
 
 ### ~~crregs.rs — MOV DRn~~ — FALSE POSITIVE (implemented at proc_ctrl.rs:726,760)
 
-### event.rs — Missing SMI/INIT event priority handling
-- **Bochs does**: Priority 3 events: enter_system_management_mode() on SMI, CPU reset on INIT
-- **Our code does**: Not implemented (jumps from Priority 2 to Priority 4)
+### ~~event.rs — SMI/INIT event priority handling~~ — FIXED (session 57: stub handlers clear events with debug log, matching Bochs event.cc:255-296 priority 3 placement)
 - **Bochs ref**: event.cc
 
 ### ~~event.rs — Code breakpoint matching~~ — FIXED (session 56: stub returning 0, no DR0-3 configured)
 
-### event.rs — Missing HRQ/DMA handling in async event loop
-- **Bochs does**: Checks BX_HRQ and calls DEV_dma_raise_hlda()
-- **Our code does**: No DMA integration in event handling
+### ~~event.rs — HRQ/DMA handling in async event loop~~ — VERIFIED ALREADY IMPLEMENTED (get_hrq() + dma.raise_hlda() at correct position matching Bochs event.cc:390-393)
 - **Bochs ref**: event.cc
 
 ### ~~dispatcher.rs — mod_c0 `?` propagation~~ — FALSE POSITIVE
@@ -141,7 +133,8 @@ Match arms return Result directly (no `?` needed — the Result IS the return va
 
 ### snapshot.rs — Incomplete device coverage (missing APIC, VGA, harddrv, etc.)
 - **Bochs does**: Full machine state serialization
-- **Our code does**: Only CPU, memory, PIC, PIT, CMOS, PC_SYSTEM
+- **Our code does**: Only CPU, memory, PIC, PIT, CMOS, PC_SYSTEM. Section IDs defined for DMA, VGA, keyboard, serial, harddrv, IOAPIC, LAPIC, PCI, ACPI but save/restore methods not implemented yet.
 - **Bochs ref**: siminterface.cc
+- **Status**: Partially done — IDs exist, save/restore deferred
 
 ### ~~memory_stub.rs — Debugger memory access~~ — FIXED (session 56: log warnings instead of panic, feature-gated)

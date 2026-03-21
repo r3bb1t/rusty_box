@@ -164,6 +164,7 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             io_bus: None,
             pc_system_ptr: None,
             pic_ptr: core::ptr::null_mut(),
+            dma_ptr: core::ptr::null_mut(),
             boot_debug_flags: 0,
             diag_hae_intr_delivered: 0,
             diag_hae_intr_if_blocked: 0,

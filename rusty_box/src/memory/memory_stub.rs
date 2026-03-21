@@ -304,26 +304,48 @@ impl BxMemoryStubC {
         Ok(ret)
     }
 
-    #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
     /// Write bytes to physical memory for debugger (Bochs memory.cc dbg_set_mem).
-    /// Requires bx_debugger or bx_gdb_stub feature. Writes directly via raw pointer.
-    pub fn dbg_set_mem<I: BxCpuIdTrait>(
-        _cpus: &[BxCpuC<I>],
-        _addr: BxPhyAddress,
-        _len: u32,
-        _buf: &mut [u8],
-    ) -> bool {
-        // Debugger memory access — requires integration with BxMemC.
-        // Stubbed until debugger features are implemented.
-        tracing::warn!("dbg_set_mem: debugger memory write not implemented");
-        false
+    /// Writes directly to the flat memory vector bypassing device handlers.
+    #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
+    pub fn dbg_set_mem(&mut self, addr: BxPhyAddress, len: u32, buf: &[u8]) -> bool {
+        let vo = self.vector_offset;
+        for i in 0..len as usize {
+            if i >= buf.len() {
+                break;
+            }
+            let phys = addr as usize + i;
+            let idx = vo + phys;
+            if idx < self.actual_vector.len() {
+                self.actual_vector[idx] = buf[i];
+            }
+        }
+        true
     }
 
     /// Compute CRC32 over physical memory range for debugger (Bochs memory.cc dbg_crc32).
     #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
-    pub fn dbg_crc32(_addr1: BxPhyAddress, _addr2: BxPhyAddress, _crc: &[u32]) -> bool {
-        tracing::warn!("dbg_crc32: debugger CRC not implemented");
-        false
+    pub fn dbg_crc32(&self, addr1: BxPhyAddress, addr2: BxPhyAddress, crc: &mut u32) -> bool {
+        let vo = self.vector_offset;
+        let mut c = 0xFFFF_FFFFu32;
+        let mut addr = addr1;
+        while addr <= addr2 {
+            let idx = vo + addr as usize;
+            let byte = if idx < self.actual_vector.len() {
+                self.actual_vector[idx]
+            } else {
+                0xFF
+            };
+            for bit in 0..8u32 {
+                let b = ((c ^ (byte as u32 >> bit)) & 1) != 0;
+                c >>= 1;
+                if b {
+                    c ^= 0xEDB88320; // CRC32 polynomial
+                }
+            }
+            addr += 1;
+        }
+        *crc = c;
+        true
     }
 
     ///
