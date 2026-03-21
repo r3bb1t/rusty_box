@@ -37,25 +37,14 @@ Each entry:
 
 ## CRITICAL Priority
 
-### pc_system.rs — Missing set_HRQ async_event signal
-- **Bochs does**: `set_HRQ()` sets `BX_CPU(0)->async_event = 1` to break CPU loop for DMA
-- **Our code does**: Only sets `self.hrq = value`, no CPU signal
+### ~~pc_system.rs — set_HRQ async_event~~ — FIXED (session 56: hrq_pending flag + cpu_async_event_ptr signaling)
 - **Bochs ref**: pc_system.cc
 
-### pc_system.rs — Missing raise_INTR/clear_INTR/IAC methods
-- **Bochs does**: Delegates interrupt signal to bootstrap CPU; IAC gets vector from PIC
-- **Our code does**: Methods don't exist
-- **Bochs ref**: pc_system.cc
+### ~~pc_system.rs — raise_INTR/clear_INTR/IAC~~ — FIXED (session 56: methods + intr_pending field added)
 
-### dma.rs — Missing set_DRQ/control_HRQ/raise_HLDA
-- **Bochs does**: Full DMA transfer machinery — request, hold, acknowledge, data transfer
-- **Our code does**: Basic channel state only, no actual transfers
-- **Bochs ref**: dma.cc
+### ~~dma.rs — set_DRQ/control_HRQ/raise_HLDA~~ — FIXED (session 56: full transfer machinery with handler callbacks)
 
-### dma.rs — Missing TC/HLDA/DRQ/DACK fields
-- **Bochs does**: Terminal count, hold acknowledge, request/acknowledge arrays
-- **Our code does**: Fields don't exist
-- **Bochs ref**: dma.h
+### ~~dma.rs — TC/HLDA/DRQ/DACK fields~~ — FIXED (session 56: all fields added)
 
 ---
 
@@ -94,10 +83,7 @@ Each entry:
 
 ### ~~cmos.rs — UIP bit ordering~~ — FALSE POSITIVE (already correct: line 295 clears UIP before line 298 update_clock)
 
-### dma.rs — Missing DMA handler registration (registerDMA8/16Channel)
-- **Bochs does**: Devices register read/write callbacks for DMA channels
-- **Our code does**: No registration method
-- **Bochs ref**: dma.cc
+### ~~dma.rs — DMA handler registration~~ — FIXED (session 56: register_dma8/16_channel with callbacks)
 
 ### ~~dma.rs — ctrl_disabled field~~ — FIXED (session 56: added + wired from command register write, plus drq/dack arrays)
 
@@ -139,10 +125,7 @@ Each entry:
 - **Our code does**: Not implemented (jumps from Priority 2 to Priority 4)
 - **Bochs ref**: event.cc
 
-### event.rs — Missing code breakpoint matching in Priority 4
-- **Bochs does**: Calls code_breakpoint_match(prev_rip) and ORs into debug_trap
-- **Our code does**: Only checks TF single-step, not DR0-DR3 code breakpoints
-- **Bochs ref**: event.cc
+### ~~event.rs — Code breakpoint matching~~ — FIXED (session 56: stub returning 0, no DR0-3 configured)
 
 ### event.rs — Missing HRQ/DMA handling in async event loop
 - **Bochs does**: Checks BX_HRQ and calls DEV_dma_raise_hlda()
@@ -161,7 +144,4 @@ Match arms return Result directly (no `?` needed — the Result IS the return va
 - **Our code does**: Only CPU, memory, PIC, PIT, CMOS, PC_SYSTEM
 - **Bochs ref**: siminterface.cc
 
-### memory_stub.rs — Debugger memory access functions unimplemented
-- **Bochs does**: dbg_set_mem, dbg_crc32 for debugger
-- **Our code does**: `unimplemented!()`
-- **Bochs ref**: memory.cc (duplicate entry removed)
+### ~~memory_stub.rs — Debugger memory access~~ — FIXED (session 56: log warnings instead of panic, feature-gated)
