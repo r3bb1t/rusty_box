@@ -269,10 +269,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             ram_len,
         );
 
-        // Wire pc_system→CPU async_event for DMA HRQ signaling
-        // Matches Bochs pc_system.cc:83: BX_CPU(0)->async_event = 1
-        self.pc_system
-            .set_cpu_async_event_ptr(&mut self.cpu.async_event as *mut u32);
+        // Wire pc_system→CPU event pointers for raise_intr/clear_intr/set_hrq.
+        // Matches Bochs pc_system.cc: raise_INTR() calls BX_CPU(0)->signal_event(),
+        // set_HRQ() sets BX_CPU(0)->async_event = 1.
+        unsafe {
+            self.pc_system.set_cpu_event_ptrs(
+                core::ptr::NonNull::from(&mut self.cpu.async_event),
+                core::ptr::NonNull::from(&mut self.cpu.pending_event),
+            );
+        }
 
         // Wire HardDrive→PIC for immediate IRQ raise/lower (matches Bochs DEV_pic_raise_irq)
         self.device_manager.harddrv.pic_ptr =
@@ -455,9 +460,13 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             ram_len,
         );
 
-        // Wire pc_system→CPU async_event for DMA HRQ signaling (same as in initialize())
-        self.pc_system
-            .set_cpu_async_event_ptr(&mut self.cpu.async_event as *mut u32);
+        // Wire pc_system→CPU event pointers (same as in initialize())
+        unsafe {
+            self.pc_system.set_cpu_event_ptrs(
+                core::ptr::NonNull::from(&mut self.cpu.async_event),
+                core::ptr::NonNull::from(&mut self.cpu.pending_event),
+            );
+        }
 
         // Wire HardDrive→PIC for immediate IRQ raise/lower (matches Bochs DEV_pic_raise_irq)
         self.device_manager.harddrv.pic_ptr =

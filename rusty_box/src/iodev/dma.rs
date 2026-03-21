@@ -160,14 +160,13 @@ pub struct BxDmaC {
     pub(crate) ext_page_reg: [u8; 16],
     /// Per-channel DMA handlers (Bochs dma.h:99-104, h[4])
     handlers: [DmaHandlers; 4],
-    /// Pointer to pc_system for set_hrq() calls (set during init)
-    /// This is a raw pointer because DMA needs to call pc_system.set_hrq()
-    /// during control_hrq(), matching Bochs bx_pc_system.set_HRQ() calls.
-    pc_system_ptr: *mut crate::pc_system::BxPcSystemC,
-    /// Raw pointer to emulator RAM for DMA physical read/write
-    /// Matches Bochs DEV_MEM_READ_PHYSICAL_DMA / DEV_MEM_WRITE_PHYSICAL_DMA
-    memory_base: *mut u8,
-    /// Length of the memory region pointed to by memory_base
+    /// Pointer to pc_system for set_hrq() calls (set during init).
+    /// Matches Bochs bx_pc_system.set_HRQ() calls from DMA control_hrq().
+    pc_system_ptr: Option<core::ptr::NonNull<crate::pc_system::BxPcSystemC>>,
+    /// Pointer to emulator RAM for DMA physical read/write.
+    /// Matches Bochs DEV_MEM_READ_PHYSICAL_DMA / DEV_MEM_WRITE_PHYSICAL_DMA.
+    memory_base: Option<core::ptr::NonNull<u8>>,
+    /// Length of the memory region pointed to by memory_base.
     memory_len: usize,
 }
 
@@ -191,8 +190,8 @@ impl BxDmaC {
                 DmaHandlers::default(),
                 DmaHandlers::default(),
             ],
-            pc_system_ptr: core::ptr::null_mut(),
-            memory_base: core::ptr::null_mut(),
+            pc_system_ptr: None,
+            memory_base: None,
             memory_len: 0,
         }
     }
@@ -242,8 +241,8 @@ impl BxDmaC {
         mem_base: *mut u8,
         mem_len: usize,
     ) {
-        self.pc_system_ptr = pc_system;
-        self.memory_base = mem_base;
+        self.pc_system_ptr = core::ptr::NonNull::new(pc_system);
+        self.memory_base = core::ptr::NonNull::new(mem_base);
         self.memory_len = mem_len;
     }
 
@@ -401,8 +400,8 @@ impl BxDmaC {
         if (self.s[ma_sl].status_reg & 0xF0) == 0 {
             if ma_sl != 0 {
                 // DMA2: deassert HRQ to CPU
-                if !self.pc_system_ptr.is_null() {
-                    let pc = unsafe { &mut *self.pc_system_ptr };
+                if let Some(pc_ptr) = self.pc_system_ptr {
+                    let pc = unsafe { &mut *pc_ptr.as_ptr() };
                     pc.set_hrq(false);
                 }
             } else {
@@ -417,8 +416,8 @@ impl BxDmaC {
             if (self.s[ma_sl].status_reg & (1 << (ch + 4))) != 0 && !self.s[ma_sl].mask[ch] {
                 if ma_sl != 0 {
                     // DMA2: assert HRQ to CPU
-                    if !self.pc_system_ptr.is_null() {
-                        let pc = unsafe { &mut *self.pc_system_ptr };
+                    if let Some(pc_ptr) = self.pc_system_ptr {
+                        let pc = unsafe { &mut *pc_ptr.as_ptr() };
                         pc.set_hrq(true);
                     }
                 } else {
@@ -616,8 +615,8 @@ impl BxDmaC {
             // Clear TC, HLDA, HRQ, DACK (Bochs dma.cc:782-789)
             self.tc = false;
             self.hlda = false;
-            if !self.pc_system_ptr.is_null() {
-                let pc = unsafe { &mut *self.pc_system_ptr };
+            if let Some(pc_ptr) = self.pc_system_ptr {
+                let pc = unsafe { &mut *pc_ptr.as_ptr() };
                 pc.set_hrq(false);
             }
             self.s[ma_sl].dack[channel] = false;
@@ -639,26 +638,28 @@ impl BxDmaC {
     /// is valid for the lifetime of the emulator and DMA only accesses
     /// conventional memory (< 16MB).
     fn mem_read_physical_dma(&self, addr: u32, len: u32, buffer: &mut [u8]) {
-        if self.memory_base.is_null() {
-            return;
-        }
+        let base = match self.memory_base {
+            Some(ptr) => ptr.as_ptr(),
+            None => return,
+        };
         for i in 0..(len as usize).min(buffer.len()) {
             let offset = addr as usize + i;
             if offset < self.memory_len {
-                buffer[i] = unsafe { *self.memory_base.add(offset) };
+                buffer[i] = unsafe { *base.add(offset) };
             }
         }
     }
 
     /// Write physical memory for DMA transfer.
     fn mem_write_physical_dma(&mut self, addr: u32, len: u32, buffer: &[u8]) {
-        if self.memory_base.is_null() {
-            return;
-        }
+        let base = match self.memory_base {
+            Some(ptr) => ptr.as_ptr(),
+            None => return,
+        };
         for i in 0..(len as usize).min(buffer.len()) {
             let offset = addr as usize + i;
             if offset < self.memory_len {
-                unsafe { *self.memory_base.add(offset) = buffer[i] };
+                unsafe { *base.add(offset) = buffer[i] };
             }
         }
     }
