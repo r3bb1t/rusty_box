@@ -16,9 +16,21 @@ Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emula
 
 2. **execute1/execute2 mismatch**: 18 opcodes in `opcodes_table.rs` had memory-form (`_M`) and register-form (`_R`) handlers swapped, causing memory operands to be read from registers and vice versa.
 
-**Current Status (2026-03-19):**
+**Current Status (2026-03-21):**
 - ✅ **DLX Linux boots to interactive bash shell!** Full boot: BIOS POST → LILO → kernel → init → `dlx login: root` → `dlx:~#` (250M instructions)
 - ✅ **Alpine Linux: OpenRC boots!** 28/28 packages install. OpenRC starts services, modloop mounting in progress. VGA screen shows OpenRC output.
+- ✅ **Session 59: BM-DMA engine + Alpine BIOS boot support + IDENTIFY DMA capability**:
+  - **Full BM-DMA timer engine** (`pci_ide.rs`): Timer-driven PRD table processing matching Bochs pci_ide.cc:251-336. Two per-channel timers registered with pc_system. Reads PRDs from guest RAM, transfers data via harddrv DMA callbacks, handles EOT/continuation with proper buffer compaction. Raw RAM pointer for physical memory DMA access.
+  - **Hard drive DMA callbacks** (`harddrv.rs`): `bmdma_read_sector()` handles ATA READ DMA (0xC8/0x25) and ATAPI PACKET with packet_dma — reads CD-ROM blocks directly into DMA buffer. `bmdma_write_sector()` for ATA WRITE DMA (0xCA/0x35). `bmdma_complete()` sets final status (BSY=0, DRDY=1, DRQ=0) and raises completion interrupt. All match Bochs harddrv.cc:3597-3694.
+  - **DMA interrupt path** (`harddrv.rs`): `raise_interrupt()` calls `bmdma_set_irq()` (Bochs harddrv.cc:3509). `ready_to_send_atapi()` branches on `packet_dma` flag — DMA path calls `pci_ide.bmdma_start_transfer()` instead of `raise_interrupt()` (Bochs harddrv.cc:3493-3498).
+  - **IDENTIFY PACKET DEVICE DMA** (`harddrv.rs`): Word 49 bit 8 (DMA capable), word 53=7 (validity), word 63 MDMA 0-2 + dynamic active bits from mdma_mode, word 80=0x7E (ATA/ATAPI-6), word 88 UDMA 0-5 + dynamic active bits from udma_mode.
+  - **PCI IDE BAR4** (`pci_ide.rs`): Pre-configured to 0xC000 in `reset()` with bus master enable (cmd reg=0x05). BM-DMA I/O ports registered during init for direct boot without BIOS.
+  - **Pointer wiring** (`emulator.rs`): harddrv→pci_ide for bmdma_set_irq/bmdma_start_transfer. pci_ide→{pc_system, harddrv, ram_ptr/ram_len} for timer activation, DMA callbacks, and physical memory access. Wired in both `initialize()` and `init_cpu_and_devices()`.
+  - **Alpine headless example** (`alpine_direct.rs`): Now supports both BIOS boot (default, `RUSTY_BOX_BOOT=bios`) and direct kernel boot (`RUSTY_BOX_BOOT=direct`). BIOS boot loads BIOS+VGA ROM, configures CD-ROM first boot, auto-injects Enter at ISOLINUX prompt. Direct boot extracts kernel/initramfs from ISO with `libata.atapi_dma=1`.
+  - **Egui Alpine** (`rusty_box_egui.rs`): Pre-queues Enter for ISOLINUX boot prompt, `libata.atapi_dma=1` in direct boot cmdline.
+  - **Keyboard buffer** (`keyboard.rs`): Enlarged from 16→256 elements for automated text injection.
+  - **DLX regression**: PASS. **Alpine BIOS boot**: kernel sees BAR4=0xC000, PCI config I/O confirmed working. DMA engine ready — awaiting kernel DMA activation.
+  - **Finding**: Kernel reads BAR4=0xC000 during PCI bus scan but `ata_piix` defaults to PIO for ATAPI. Needs `libata.atapi_dma=1` kernel parameter. Direct boot PCI config uses mechanism (likely ECAM) we don't support; BIOS boot PCI I/O works correctly.
 - ✅ **Session 55: Modloop stall diagnostics + HLT Bochs parity + ATA DRQ fix + BIOS boot in egui**:
   - **HLT loop IF check** (`emulator.rs`): Changed `!self.has_interrupt()` to `!(self.has_interrupt() && self.cpu.interrupts_enabled())` matching Bochs `handleWaitForEvent` (event.cc:40-116). When IF=0, loop continues advancing virtual time instead of exiting. Applied to both headless and egui HLT loops. Inner LAPIC break also checks IF.
   - **ATA DRQ completion fix** (`harddrv.rs`): Post-loop DRQ completion check in `bulk_read_data()`. When lazy-load breaks early (`remaining_blocks==0`), the in-loop DRQ check was skipped — final completion interrupt never fired. Matches Bochs harddrv.cc:986-1020.
@@ -354,8 +366,11 @@ cargo build --release --example alpine_direct --features std
 # DLX: Run headless — full boot to login prompt (default 200M instructions)
 RUSTY_BOX_HEADLESS=1 ./target/release/examples/dlxlinux.exe
 
-# Alpine: Run headless — serial output on stdout, diagnostics on stderr
-RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=2500000000 ./target/release/examples/alpine_direct.exe 2>/dev/null
+# Alpine: Run headless BIOS boot (default) — ISOLINUX → kernel → OpenRC
+RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=3500000000 ./target/release/examples/alpine_direct.exe 2>/dev/null
+
+# Alpine: Run headless direct kernel boot (bypasses BIOS/ISOLINUX)
+RUSTY_BOX_BOOT=direct RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=2500000000 ./target/release/examples/alpine_direct.exe 2>/dev/null
 
 # Alpine: Run with debug_init=1 for shell tracing
 CMDLINE="console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 nomodeset nokaslr kfence.sample_interval=0 modules=cdrom,sr_mod,isofs debug_init=1" RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=2500000000 ./target/release/examples/alpine_direct.exe

@@ -39,6 +39,11 @@ pub struct EmulatorConfig {
     pub pci_enabled: bool,
     /// CPU parameters
     pub cpu_params: BxParams,
+    /// Enable sync=slowdown clock synchronization.
+    /// When true, the emulator sleeps to match wall-clock time during active
+    /// (non-HLT) execution with a GUI attached. Matches Bochs `clock: sync=slowdown`.
+    /// Default: true (GUI), false (headless). Override with RUSTY_BOX_NOSYNC=1.
+    pub sync_slowdown: bool,
 }
 
 impl Default for EmulatorConfig {
@@ -50,6 +55,7 @@ impl Default for EmulatorConfig {
             ips: 4_000_000,
             pci_enabled: true,
             cpu_params: BxParams::default(),
+            sync_slowdown: false,
         }
     }
 }
@@ -283,6 +289,61 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.device_manager.harddrv.pic_ptr =
             &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
 
+        // Wire HardDrive→PCI IDE for BM-DMA set_irq (Bochs harddrv.cc:3509)
+        self.device_manager.harddrv.pci_ide_ptr =
+            &mut self.device_manager.pci_ide as *mut crate::iodev::pci_ide::BxPciIde;
+
+        // Wire PCI IDE → pc_system, harddrv, memory for DMA timer
+        self.device_manager.pci_ide.pc_system_ptr =
+            &mut self.pc_system as *mut crate::pc_system::BxPcSystemC;
+        self.device_manager.pci_ide.harddrv_ptr =
+            &mut self.device_manager.harddrv as *mut crate::iodev::harddrv::BxHardDriveC;
+        {
+            let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
+            self.device_manager.pci_ide.ram_ptr = ram_base;
+            self.device_manager.pci_ide.ram_len = ram_len;
+        }
+
+        // Register PCI IDE BM-DMA timers (Bochs pci_ide.cc:77-78)
+        {
+            let pci_ide_ptr =
+                &mut self.device_manager.pci_ide as *mut crate::iodev::pci_ide::BxPciIde;
+            // Channel 0 timer
+            match self.pc_system.register_timer(
+                crate::iodev::pci_ide::BxPciIde::timer_handler_ch0,
+                pci_ide_ptr as *mut core::ffi::c_void,
+                0,
+                false,
+                false,
+                "PIIX IDE ch0",
+            ) {
+                Ok(handle) => {
+                    self.device_manager.pci_ide.bmdma[0].timer_index = Some(handle);
+                    tracing::debug!("PCI IDE ch0 timer registered with handle {}", handle);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to register PCI IDE ch0 timer: {}", e);
+                }
+            }
+            // Channel 1 timer
+            match self.pc_system.register_timer(
+                crate::iodev::pci_ide::BxPciIde::timer_handler_ch1,
+                pci_ide_ptr as *mut core::ffi::c_void,
+                0,
+                false,
+                false,
+                "PIIX IDE ch1",
+            ) {
+                Ok(handle) => {
+                    self.device_manager.pci_ide.bmdma[1].timer_index = Some(handle);
+                    tracing::debug!("PCI IDE ch1 timer registered with handle {}", handle);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to register PCI IDE ch1 timer: {}", e);
+                }
+            }
+        }
+
         // Wire PIC→IOAPIC for synchronous forwarding (Bochs pic.cc:499-500)
         #[cfg(feature = "bx_support_apic")]
         unsafe {
@@ -471,6 +532,61 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Wire HardDrive→PIC for immediate IRQ raise/lower (matches Bochs DEV_pic_raise_irq)
         self.device_manager.harddrv.pic_ptr =
             &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
+
+        // Wire HardDrive→PCI IDE for BM-DMA set_irq (Bochs harddrv.cc:3509)
+        self.device_manager.harddrv.pci_ide_ptr =
+            &mut self.device_manager.pci_ide as *mut crate::iodev::pci_ide::BxPciIde;
+
+        // Wire PCI IDE → pc_system, harddrv, memory for DMA timer
+        self.device_manager.pci_ide.pc_system_ptr =
+            &mut self.pc_system as *mut crate::pc_system::BxPcSystemC;
+        self.device_manager.pci_ide.harddrv_ptr =
+            &mut self.device_manager.harddrv as *mut crate::iodev::harddrv::BxHardDriveC;
+        {
+            let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
+            self.device_manager.pci_ide.ram_ptr = ram_base;
+            self.device_manager.pci_ide.ram_len = ram_len;
+        }
+
+        // Register PCI IDE BM-DMA timers (Bochs pci_ide.cc:77-78)
+        {
+            let pci_ide_ptr =
+                &mut self.device_manager.pci_ide as *mut crate::iodev::pci_ide::BxPciIde;
+            // Channel 0 timer
+            match self.pc_system.register_timer(
+                crate::iodev::pci_ide::BxPciIde::timer_handler_ch0,
+                pci_ide_ptr as *mut core::ffi::c_void,
+                0,
+                false,
+                false,
+                "PIIX IDE ch0",
+            ) {
+                Ok(handle) => {
+                    self.device_manager.pci_ide.bmdma[0].timer_index = Some(handle);
+                    tracing::debug!("PCI IDE ch0 timer registered with handle {}", handle);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to register PCI IDE ch0 timer: {}", e);
+                }
+            }
+            // Channel 1 timer
+            match self.pc_system.register_timer(
+                crate::iodev::pci_ide::BxPciIde::timer_handler_ch1,
+                pci_ide_ptr as *mut core::ffi::c_void,
+                0,
+                false,
+                false,
+                "PIIX IDE ch1",
+            ) {
+                Ok(handle) => {
+                    self.device_manager.pci_ide.bmdma[1].timer_index = Some(handle);
+                    tracing::debug!("PCI IDE ch1 timer registered with handle {}", handle);
+                }
+                Err(e) => {
+                    tracing::error!("Failed to register PCI IDE ch1 timer: {}", e);
+                }
+            }
+        }
 
         // Wire PIC→IOAPIC for synchronous forwarding (Bochs pic.cc:499-500)
         #[cfg(feature = "bx_support_apic")]
@@ -1480,6 +1596,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.update_gui(); // Force initial update
 
         let mut instructions_executed = 0u64;
+        let mut slowdown_start = std::time::Instant::now();
+        let mut slowdown_icount_base = self.cpu.icount;
         let mut last_gui_update = std::time::Instant::now();
         let mut last_ips_update = std::time::Instant::now();
         let mut last_ips_instructions = self.cpu.icount; // Bochs-compatible: track icount for IPS
@@ -2881,7 +2999,30 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 );
             }
 
-            // 5. Check if we should exit (e.g., shutdown requested)
+            // 5. sync=slowdown: interval-based throttle matching Bochs slowdown.cc.
+            // Compares emulated vs wall-clock time over a sliding 1-second window.
+            // Resets the window periodically to prevent unbounded deficit accumulation
+            // (which would cause massive sleeps when transitioning from active to idle).
+            if self.config.sync_slowdown && self.config.ips > 0 {
+                let wall_elapsed = slowdown_start.elapsed().as_micros() as u64;
+                // Reset window every 1 second to prevent deficit accumulation
+                if wall_elapsed > 1_000_000 {
+                    slowdown_start = std::time::Instant::now();
+                    slowdown_icount_base = self.cpu.icount;
+                } else {
+                    let delta_icount = self.cpu.icount.saturating_sub(slowdown_icount_base);
+                    let emu_usec = delta_icount.saturating_mul(1_000_000)
+                        / (self.config.ips as u64);
+                    // Sleep if emulated time is >50ms ahead within this window.
+                    // 50ms threshold avoids Windows 15.6ms timer granularity issues.
+                    if emu_usec > wall_elapsed + 50_000 {
+                        let sleep_usec = (emu_usec - wall_elapsed).min(50_000);
+                        std::thread::sleep(std::time::Duration::from_micros(sleep_usec));
+                    }
+                }
+            }
+
+            // 6. Check if we should exit (e.g., shutdown requested)
             // TODO: Add shutdown flag check
         }
 

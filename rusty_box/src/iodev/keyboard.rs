@@ -160,7 +160,7 @@ pub const KBD_COMMAND_PORT: u16 = 0x0064;
 pub const SYSTEM_CONTROL_B: u16 = 0x0061;
 
 // Buffer sizes (matching Bochs)
-const BX_KBD_ELEMENTS: usize = 16;
+const BX_KBD_ELEMENTS: usize = 256;
 const BX_MOUSE_BUFF_SIZE: usize = 48;
 const BX_KBD_CONTROLLER_QSIZE: usize = 5;
 

@@ -195,12 +195,16 @@ fn run_emulator(
         }
     };
 
+    // sync=slowdown disabled by default — HLT idle sync already handles
+    // real-time matching. Enable with RUSTY_BOX_SYNC=1 if needed.
+    let sync = std::env::var("RUSTY_BOX_SYNC").map_or(false, |v| v == "1");
     let config = EmulatorConfig {
         guest_memory_size: ram_bytes,
         host_memory_size: ram_bytes,
         memory_block_size: 128 * 1024,
         ips: 15_000_000,
         pci_enabled: true,
+        sync_slowdown: sync,
         ..Default::default()
     };
 
@@ -257,7 +261,7 @@ fn run_emulator(
             let (kernel, initramfs) =
                 extract_kernel_from_iso(&iso_data).expect("Failed to extract kernel from ISO");
             let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_| {
-                "console=ttyS0,115200 console=tty0 earlycon=uart8250,io,0x3f8,115200n8 nomodeset nokaslr kfence.sample_interval=0 modules=cdrom,sr_mod,isofs".to_string()
+                "console=ttyS0,115200 console=tty0 earlycon=uart8250,io,0x3f8,115200n8 nomodeset nokaslr kfence.sample_interval=0 modules=cdrom,sr_mod,isofs libata.atapi_dma=1".to_string()
             });
             println!(
                 "Direct boot: kernel={} bytes, initramfs={} bytes",
@@ -307,6 +311,15 @@ fn run_emulator(
     emu.reset(ResetReason::Hardware)?;
     emu.init_gui_signal_handlers();
     emu.start();
+
+    // For Alpine BIOS boot: pre-queue kernel parameters for ISOLINUX prompt.
+    // The keyboard buffer holds these until ISOLINUX reads them at the boot: prompt.
+    // This enables ATAPI DMA + serial console output.
+    if matches!(profile, BootProfile::Alpine { .. }) {
+        emu.prepare_run();
+        println!("Pre-queuing ISOLINUX boot: virt libata.atapi_dma=1");
+        emu.send_string("    virt libata.atapi_dma=1\n");
+    }
 
     println!("Emulator started (max {} instructions)", max_instructions);
     let start_time = Instant::now();

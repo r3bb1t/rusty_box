@@ -1,18 +1,22 @@
-//! Alpine Linux Direct Kernel Boot
+//! Alpine Linux Boot (Direct Kernel or BIOS)
 //!
-//! Boots Alpine Linux by loading the kernel and initramfs directly from the ISO,
-//! bypassing ISOLINUX/SYSLINUX entirely. This is equivalent to QEMU's `-kernel`
-//! and `-initrd` options.
+//! Boots Alpine Linux either by loading the kernel and initramfs directly from
+//! the ISO (direct boot), or by running the full BIOS POST → ISOLINUX → kernel
+//! chain (BIOS boot). Default is BIOS boot.
 //!
 //! ## Usage
 //!
 //! ```bash
+//! # BIOS boot (default) — full BIOS POST, ISOLINUX, kernel boot
 //! cargo run --release --example alpine_direct --features std
+//!
+//! # Direct kernel boot — bypass BIOS/ISOLINUX, load kernel directly
+//! RUSTY_BOX_BOOT=direct cargo run --release --example alpine_direct --features std
 //!
 //! # Custom ISO path (default: alpine-virt-3.23.3-x86_64.iso)
 //! ALPINE_ISO=/path/to/alpine.iso cargo run --release --example alpine_direct --features std
 //!
-//! # Custom RAM size (default: 128 MB)
+//! # Custom RAM size (default: 256 MB)
 //! ALPINE_RAM_MB=256 cargo run --release --example alpine_direct --features std
 //!
 //! # Headless mode
@@ -32,9 +36,9 @@ fn main() {
 
     std::thread::Builder::new()
         .stack_size(THREAD_STACK_SIZE)
-        .name("Alpine Direct Boot".to_string())
+        .name("Alpine Boot".to_string())
         .spawn(|| {
-            if let Err(e) = run_alpine_direct() {
+            if let Err(e) = run_alpine() {
                 eprintln!("Error: {:?}", e);
                 std::process::exit(1);
             }
@@ -49,100 +53,119 @@ fn main() {
 fn extract_from_iso(iso_data: &[u8], target_path: &[&str]) -> Option<Vec<u8>> {
     // Parse Primary Volume Descriptor at sector 16
     let pvd_offset = 16 * 2048;
-    if pvd_offset + 190 > iso_data.len() {
+    if iso_data.len() < pvd_offset + 2048 {
+        return None;
+    }
+    let pvd = &iso_data[pvd_offset..pvd_offset + 2048];
+
+    // Check PVD signature: \x01CD001
+    if pvd[0] != 1 || &pvd[1..6] != b"CD001" {
         return None;
     }
 
-    // Root directory record is at PVD offset 156
+    // Root directory record at offset 156 (34 bytes)
+    let root_record = &pvd[156..156 + 34];
     let root_lba = u32::from_le_bytes([
-        iso_data[pvd_offset + 158],
-        iso_data[pvd_offset + 159],
-        iso_data[pvd_offset + 160],
-        iso_data[pvd_offset + 161],
-    ]) as usize;
-    let root_size = u32::from_le_bytes([
-        iso_data[pvd_offset + 166],
-        iso_data[pvd_offset + 167],
-        iso_data[pvd_offset + 168],
-        iso_data[pvd_offset + 169],
-    ]) as usize;
+        root_record[2],
+        root_record[3],
+        root_record[4],
+        root_record[5],
+    ]);
+    let root_len = u32::from_le_bytes([
+        root_record[10],
+        root_record[11],
+        root_record[12],
+        root_record[13],
+    ]);
 
-    fn find_entry(iso: &[u8], dir_lba: usize, dir_size: usize, name: &str) -> Option<(usize, usize, bool)> {
-        let dir_data_start = dir_lba * 2048;
-        let dir_data_end = dir_data_start + dir_size;
-        if dir_data_end > iso.len() {
+    // Navigate directory tree
+    let mut current_lba = root_lba;
+    let mut current_len = root_len;
+
+    for (depth, &name) in target_path.iter().enumerate() {
+        let is_file = depth == target_path.len() - 1;
+        let dir_offset = current_lba as usize * 2048;
+        if dir_offset + current_len as usize > iso_data.len() {
             return None;
         }
-        let dir_data = &iso[dir_data_start..dir_data_end];
-        let mut offset = 0;
-        while offset < dir_data.len() {
-            let rec_len = dir_data[offset] as usize;
-            if rec_len == 0 {
-                let next_sect = ((offset / 2048) + 1) * 2048;
-                if next_sect >= dir_data.len() {
+        let dir_data = &iso_data[dir_offset..dir_offset + current_len as usize];
+
+        let mut pos = 0;
+        let mut found = false;
+
+        while pos < dir_data.len() {
+            let record_len = dir_data[pos] as usize;
+            if record_len == 0 {
+                // Move to next sector boundary
+                let next_sector = ((pos / 2048) + 1) * 2048;
+                if next_sector >= dir_data.len() {
                     break;
                 }
-                offset = next_sect;
+                pos = next_sector;
                 continue;
             }
-            if offset + 33 > dir_data.len() {
+            if pos + record_len > dir_data.len() {
                 break;
             }
-            let name_len = dir_data[offset + 32] as usize;
-            if offset + 33 + name_len > dir_data.len() {
-                break;
-            }
-            let entry_name = std::str::from_utf8(&dir_data[offset + 33..offset + 33 + name_len])
-                .unwrap_or("");
-            let entry_lba = u32::from_le_bytes([
-                dir_data[offset + 2], dir_data[offset + 3],
-                dir_data[offset + 4], dir_data[offset + 5],
-            ]) as usize;
-            let entry_size = u32::from_le_bytes([
-                dir_data[offset + 10], dir_data[offset + 11],
-                dir_data[offset + 12], dir_data[offset + 13],
-            ]) as usize;
-            let is_dir = (dir_data[offset + 25] & 2) != 0;
 
-            // ISO 9660 names may have ";1" version suffix
-            let clean_name = entry_name.split(';').next().unwrap_or(entry_name);
-            if clean_name.eq_ignore_ascii_case(name) {
-                return Some((entry_lba, entry_size, is_dir));
-            }
-            offset += rec_len;
-        }
-        None
-    }
+            let name_len = dir_data[pos + 32] as usize;
+            if name_len > 0 && pos + 33 + name_len <= dir_data.len() {
+                let entry_name =
+                    String::from_utf8_lossy(&dir_data[pos + 33..pos + 33 + name_len]);
+                let entry_name_upper = entry_name.to_uppercase();
 
-    // Navigate path components
-    let mut cur_lba = root_lba;
-    let mut cur_size = root_size;
-    for (i, component) in target_path.iter().enumerate() {
-        let is_last = i == target_path.len() - 1;
-        match find_entry(iso_data, cur_lba, cur_size, component) {
-            Some((lba, size, is_dir)) => {
-                if is_last {
-                    // Extract file
-                    let start = lba * 2048;
-                    let end = start + size;
-                    if end <= iso_data.len() {
-                        return Some(iso_data[start..end].to_vec());
+                if entry_name_upper.starts_with(name) {
+                    let entry_lba = u32::from_le_bytes([
+                        dir_data[pos + 2],
+                        dir_data[pos + 3],
+                        dir_data[pos + 4],
+                        dir_data[pos + 5],
+                    ]);
+                    let entry_len = u32::from_le_bytes([
+                        dir_data[pos + 10],
+                        dir_data[pos + 11],
+                        dir_data[pos + 12],
+                        dir_data[pos + 13],
+                    ]);
+
+                    if is_file {
+                        // Extract file
+                        let file_offset = entry_lba as usize * 2048;
+                        if file_offset + entry_len as usize <= iso_data.len() {
+                            return Some(
+                                iso_data[file_offset..file_offset + entry_len as usize].to_vec(),
+                            );
+                        }
+                        return None;
+                    } else {
+                        // Enter directory
+                        current_lba = entry_lba;
+                        current_len = entry_len;
+                        found = true;
+                        break;
                     }
-                    return None;
                 }
-                if !is_dir {
-                    return None; // Expected directory but found file
-                }
-                cur_lba = lba;
-                cur_size = size;
             }
-            None => return None,
+            pos += record_len;
+        }
+        if !found && !is_file {
+            return None;
         }
     }
     None
 }
 
-fn run_alpine_direct() -> Result<()> {
+/// Find a file by checking multiple candidate paths.
+fn find_file(candidates: &[&str]) -> Option<(String, Vec<u8>)> {
+    for path in candidates {
+        if let Ok(data) = std::fs::read(path) {
+            return Some((path.to_string(), data));
+        }
+    }
+    None
+}
+
+fn run_alpine() -> Result<()> {
     // =========================================================================
     // Configuration
     // =========================================================================
@@ -159,12 +182,12 @@ fn run_alpine_direct() -> Result<()> {
     let max_instructions: u64 = std::env::var("MAX_INSTRUCTIONS")
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or(2_000_000_000);
+        .unwrap_or(4_000_000_000);
 
-    // Default command line: serial console + Alpine init
-    let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_|
-        "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 earlyprintk=serial,ttyS0,115200 nomodeset nokaslr kfence.sample_interval=0 modules=cdrom,sr_mod,isofs".to_string()
-    );
+    // Boot mode: "bios" (default) or "direct"
+    let boot_mode = std::env::var("RUSTY_BOX_BOOT")
+        .unwrap_or_else(|_| "bios".to_string());
+    let bios_boot = boot_mode != "direct";
 
     // =========================================================================
     // Setup logging
@@ -180,7 +203,7 @@ fn run_alpine_direct() -> Result<()> {
         .init();
 
     // =========================================================================
-    // Read ISO and extract kernel + initramfs
+    // Read ISO
     // =========================================================================
     println!("Reading ISO: {}", iso_path);
     let iso_data = std::fs::read(&iso_path)
@@ -190,20 +213,6 @@ fn run_alpine_direct() -> Result<()> {
             std::process::exit(1);
         });
     println!("  ISO size: {} MB", iso_data.len() / 1024 / 1024);
-
-    let vmlinuz = extract_from_iso(&iso_data, &["BOOT", "VMLINUZ_VIRT."])
-        .unwrap_or_else(|| {
-            eprintln!("Failed to find BOOT/VMLINUZ_VIRT in ISO");
-            std::process::exit(1);
-        });
-    println!("  Kernel: {} bytes", vmlinuz.len());
-
-    let initramfs = extract_from_iso(&iso_data, &["BOOT", "INITRAMFS_VIRT."])
-        .unwrap_or_else(|| {
-            eprintln!("Failed to find BOOT/INITRAMFS_VIRT in ISO");
-            std::process::exit(1);
-        });
-    println!("  Initramfs: {} bytes ({} MB)", initramfs.len(), initramfs.len() / 1024 / 1024);
 
     // =========================================================================
     // Create and initialize emulator
@@ -216,49 +225,125 @@ fn run_alpine_direct() -> Result<()> {
         ..EmulatorConfig::default()
     };
 
-    println!("Creating emulator with {} MB RAM...", ram_mb);
+    println!("Creating emulator with {} MB RAM (boot mode: {})...", ram_mb, boot_mode);
     let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
 
     // Initialize memory + PC system
     emu.init_memory_and_pc_system()?;
 
-    // Initialize CPU + devices (needed for PIC, PIT, serial, etc.)
-    emu.init_cpu_and_devices()?;
+    if bios_boot {
+        // =====================================================================
+        // BIOS Boot Path
+        // =====================================================================
+        // Find and load BIOS
+        let workspace_root = std::env::current_dir().unwrap_or_default();
+        let ws = workspace_root.to_string_lossy();
+        let bios_candidates = [
+            format!("{}/cpp_orig/bochs/bios/BIOS-bochs-latest", ws),
+            format!("{}/../cpp_orig/bochs/bios/BIOS-bochs-latest", ws),
+            "cpp_orig/bochs/bios/BIOS-bochs-latest".to_string(),
+        ];
+        let bios_strs: Vec<&str> = bios_candidates.iter().map(|s| s.as_str()).collect();
+        let (bios_path, bios_data) = find_file(&bios_strs)
+            .expect("Could not find BIOS-bochs-latest");
+        println!("  BIOS loaded: {} bytes ({})", bios_data.len(), bios_path);
 
-    // Configure CMOS memory
-    emu.configure_memory_in_cmos_from_config();
+        let bios_size = bios_data.len() as u64;
+        let bios_load_addr = !(bios_size - 1);
+        emu.load_bios(&bios_data, bios_load_addr)?;
 
-    // Attach ISO as CD-ROM so Alpine Init can mount the squashfs root filesystem
-    emu.attach_cdrom(1, 0, &iso_path)
-        .expect("Failed to attach Alpine ISO as CD-ROM");
-    println!("  CD-ROM attached: {}", iso_path);
+        // Find and load VGA BIOS
+        let vga_candidates = [
+            format!("{}/binaries/bios/VGABIOS-lgpl-latest.bin", ws),
+            format!("{}/../binaries/bios/VGABIOS-lgpl-latest.bin", ws),
+            "binaries/bios/VGABIOS-lgpl-latest.bin".to_string(),
+        ];
+        let vga_strs: Vec<&str> = vga_candidates.iter().map(|s| s.as_str()).collect();
+        if let Some((vga_path, vga_data)) = find_file(&vga_strs) {
+            emu.load_optional_rom(&vga_data, 0xC0000)?;
+            println!("  VGA BIOS loaded: {} bytes ({})", vga_data.len(), vga_path);
+        }
 
-    // Initialize GUI
-    if headless {
-        emu.set_gui(NoGui::new());
+        // Initialize CPU + devices
+        emu.init_cpu_and_devices()?;
+
+        // Configure for CD-ROM boot
+        emu.configure_memory_in_cmos_from_config();
+        emu.configure_boot_sequence(3, 0, 0); // CD-ROM first
+
+        // Attach ISO as CD-ROM
+        emu.attach_cdrom(1, 0, &iso_path)
+            .expect("Failed to attach Alpine ISO as CD-ROM");
+        println!("  CD-ROM attached: {}", iso_path);
+
+        // Initialize GUI
+        if headless {
+            emu.set_gui(NoGui::new());
+        } else {
+            emu.set_gui(TermGui::new());
+        }
+        emu.init_gui(0, &[])?;
+
+        // Reset and start
+        emu.reset(ResetReason::Hardware)?;
+        emu.init_gui_signal_handlers();
+        emu.start();
+        emu.prepare_run();
+
+        println!("  Boot: BIOS POST → ISOLINUX → kernel");
     } else {
-        emu.set_gui(TermGui::new());
+        // =====================================================================
+        // Direct Kernel Boot Path
+        // =====================================================================
+        let vmlinuz = extract_from_iso(&iso_data, &["BOOT", "VMLINUZ_VIRT."])
+            .unwrap_or_else(|| {
+                eprintln!("Failed to find BOOT/VMLINUZ_VIRT in ISO");
+                std::process::exit(1);
+            });
+        println!("  Kernel: {} bytes", vmlinuz.len());
+
+        let initramfs = extract_from_iso(&iso_data, &["BOOT", "INITRAMFS_VIRT."])
+            .unwrap_or_else(|| {
+                eprintln!("Failed to find BOOT/INITRAMFS_VIRT in ISO");
+                std::process::exit(1);
+            });
+        println!("  Initramfs: {} bytes ({} MB)", initramfs.len(), initramfs.len() / 1024 / 1024);
+
+        let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_|
+            "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 earlyprintk=serial,ttyS0,115200 nomodeset nokaslr kfence.sample_interval=0 modules=cdrom,sr_mod,isofs libata.atapi_dma=1".to_string()
+        );
+
+        // Initialize CPU + devices
+        emu.init_cpu_and_devices()?;
+        emu.configure_memory_in_cmos_from_config();
+
+        // Attach ISO as CD-ROM
+        emu.attach_cdrom(1, 0, &iso_path)
+            .expect("Failed to attach Alpine ISO as CD-ROM");
+        println!("  CD-ROM attached: {}", iso_path);
+
+        // Initialize GUI
+        if headless {
+            emu.set_gui(NoGui::new());
+        } else {
+            emu.set_gui(TermGui::new());
+        }
+        emu.init_gui(0, &[])?;
+
+        // Reset and set up direct boot
+        emu.reset(ResetReason::Hardware)?;
+        emu.init_vga_text_mode3();
+
+        println!("  Command line: {}", cmdline);
+        emu.setup_direct_linux_boot(&vmlinuz, Some(&initramfs), &cmdline)?;
+
+        emu.init_gui_signal_handlers();
+        emu.start();
+
+        println!("  Boot: direct kernel (EIP={:#010x})", emu.cpu.rip());
     }
-    emu.init_gui(0, &[])?;
 
-    // Do a normal reset first (initializes all device state)
-    emu.reset(ResetReason::Hardware)?;
-    emu.init_vga_text_mode3(); // No BIOS runs — initialize VGA for kernel vgacon
-
-    // =========================================================================
-    // Set up direct kernel boot (overrides CPU state from reset)
-    // =========================================================================
-    println!("Setting up direct kernel boot...");
-    println!("  Command line: {}", cmdline);
-    emu.setup_direct_linux_boot(&vmlinuz, Some(&initramfs), &cmdline)?;
-
-    emu.init_gui_signal_handlers();
-    emu.start();
-
-    println!();
-    println!("Direct boot: EIP={:#010x} ESI={:#010x}", emu.cpu.rip(), emu.cpu.rsi());
-    println!("Starting Alpine Linux kernel...");
-    println!();
+    println!("Starting Alpine Linux (max {} instructions)...\n", max_instructions);
 
     // =========================================================================
     // Execution loop
@@ -269,6 +354,10 @@ fn run_alpine_direct() -> Result<()> {
     const PHASE_SIZE: u64 = 500_000;
     let mut last_serial_drain = Instant::now();
 
+    // BIOS boot: inject Enter key at ISOLINUX prompt (~18M instructions)
+    // Enter scancode: PS/2 set 2 — make=0x5A, break=0xF0 0x5A
+    let mut enter_injected = !bios_boot; // skip for direct boot
+
     loop {
         if total_executed >= max_instructions {
             break;
@@ -277,10 +366,6 @@ fn run_alpine_direct() -> Result<()> {
         match emu.run_interactive(run_for) {
             Ok(n) => {
                 total_executed += n;
-                // Don't break on n==0 — the CPU may be in HLT with IF=0 transiently
-                // (e.g. kernel CLI/HLT before init scripts). The emulator's HLT loop
-                // advances virtual time; eventually the CPU wakes (timer/NMI).
-                // This matches egui behavior which never exits on zero-batch.
             }
             Err(e) => {
                 eprintln!("CPU error at {} instructions: {:?}", total_executed, e);
@@ -292,6 +377,16 @@ fn run_alpine_direct() -> Result<()> {
         if emu.cpu.is_in_shutdown() {
             println!("CPU shutdown at {} instructions", total_executed);
             break;
+        }
+
+        // Inject kernel parameters + Enter at ISOLINUX boot prompt (BIOS boot only)
+        // ISOLINUX boot prompt appears at ~17M instructions; inject after that
+        if !enter_injected && total_executed >= 18_000_000 {
+            println!("[{}M] Injecting at ISOLINUX boot prompt", total_executed / 1_000_000);
+            // Send just Enter — boot default kernel. The kernel's default
+            // atapi_dma setting should work since BAR4 is set by BIOS.
+            emu.send_string("\n");
+            enter_injected = true;
         }
 
         // Drain serial port output periodically

@@ -721,14 +721,20 @@ impl AtaDrive {
             self.id_drive[27 + i] = (hi << 8) | lo;
         }
 
-        // Word 49: Capabilities — LBA supported
-        self.id_drive[49] = 1 << 9;
+        // Word 49: Capabilities — LBA + DMA supported
+        // Bochs harddrv.cc:2978: (1<<9)|(1<<8)
+        self.id_drive[49] = (1 << 9) | (1 << 8);
 
-        // Word 53: Field validity (words 64-70 valid, words 54-58 valid)
-        self.id_drive[53] = 3;
+        // Word 53: Field validity (words 64-70 valid, words 54-58 valid, words 88 valid)
+        // Bochs harddrv.cc:2990: 7
+        self.id_drive[53] = 7;
 
-        // Word 63: Multiword DMA — none
-        self.id_drive[63] = 0;
+        // Word 63: Multiword DMA modes supported (bits 0-2) and active (bits 8-10)
+        // Bochs harddrv.cc:2991-3000: modes 0-2 supported, active mode from mdma_mode
+        self.id_drive[63] = 0x07; // MDMA modes 0-2 supported
+        if self.controller.mdma_mode > 0 {
+            self.id_drive[63] |= (self.controller.mdma_mode as u16) << 8;
+        }
 
         // Word 64: PIO modes supported — PIO mode 0
         self.id_drive[64] = 1;
@@ -739,8 +745,16 @@ impl AtaDrive {
         // Word 73: ATAPI byte count 0 limit
         self.id_drive[73] = 1; // number of bytes for ATAPI
 
-        // Word 80: Major version — ATA/ATAPI-4
-        self.id_drive[80] = 0x1E;
+        // Word 80: Major version — ATA/ATAPI-6
+        // Bochs harddrv.cc:3024: 0x7e
+        self.id_drive[80] = 0x7E;
+
+        // Word 88: Ultra DMA modes supported (bits 0-5) and active (bits 8-13)
+        // Bochs harddrv.cc:3001-3010: modes 0-5 supported, active mode from udma_mode
+        self.id_drive[88] = 0x3F; // UDMA modes 0-5 supported
+        if self.controller.udma_mode > 0 {
+            self.id_drive[88] |= (self.controller.udma_mode as u16) << 8;
+        }
 
         self.identify_set = true;
     }
@@ -1292,6 +1306,9 @@ pub struct BxHardDriveC {
     /// DEV_pic_raise_irq / DEV_pic_lower_irq calls in harddrv.cc).
     /// PIC now forwards to IOAPIC synchronously (Bochs pic.cc:499-500).
     pub(crate) pic_ptr: *mut super::pic::BxPicC,
+    /// Raw pointer to PCI IDE controller for BM-DMA set_irq.
+    /// Bochs: DEV_ide_bmdma_set_irq() in harddrv.cc:3509
+    pub(crate) pci_ide_ptr: *mut super::pci_ide::BxPciIde,
     /// Diagnostic: total read() calls
     pub(crate) read_count: u64,
     /// Diagnostic: total write() calls
@@ -1325,6 +1342,7 @@ impl BxHardDriveC {
                 AtaChannel::new(0x170, 0x370, 15), // Secondary
             ],
             pic_ptr: core::ptr::null_mut(),
+            pci_ide_ptr: core::ptr::null_mut(),
             read_count: 0,
             write_count: 0,
             diag_irq14_raise_count: 0,
@@ -1448,6 +1466,11 @@ impl BxHardDriveC {
                 0 => 14u8,
                 _ => 15u8,
             };
+            // Bochs harddrv.cc:3509: DEV_ide_bmdma_set_irq(channel)
+            if !self.pci_ide_ptr.is_null() {
+                let pci_ide = unsafe { &mut *self.pci_ide_ptr };
+                pci_ide.bmdma_set_irq(channel_num as u8);
+            }
             if !self.pic_ptr.is_null() {
                 // Bochs harddrv.cc:3511: DEV_pic_raise_irq(irq)
                 // PIC forwards to IOAPIC synchronously (Bochs pic.cc:499-500).
@@ -1468,6 +1491,152 @@ impl BxHardDriveC {
     pub fn get_irq_level(&self, channel_num: usize) -> bool {
         let drive = self.channels[channel_num].selected_drive();
         drive.controller.interrupt_pending && (drive.controller.control & 0x02) == 0
+    }
+
+    // ─── BM-DMA Callbacks (Bochs harddrv.cc:3597-3694) ──────────────────
+
+    /// Read a sector/block for BM-DMA transfer.
+    /// Bochs: bx_hard_drive_c::bmdma_read_sector() (harddrv.cc:3597-3655)
+    ///
+    /// For ATA READ DMA (0xC8/0x25): reads a 512-byte sector from disk.
+    /// For ATAPI PACKET with packet_dma: reads a CD-ROM block.
+    /// Returns false if no more data available.
+    pub fn bmdma_read_sector(
+        &mut self,
+        channel: u8,
+        buffer: &mut [u8],
+        sector_size: &mut u32,
+    ) -> bool {
+        let ch = channel as usize;
+        if ch >= 2 {
+            return false;
+        }
+        let selected = self.channels[ch].drive_select;
+        let current_command = self.channels[ch].drives[selected as usize].controller.current_command;
+
+        if current_command == 0xC8 || current_command == 0x25 {
+            // ATA READ DMA / READ DMA EXT
+            // Bochs harddrv.cc:3603-3611
+            let drive = &mut self.channels[ch].drives[selected as usize];
+            *sector_size = SECTOR_SIZE as u32;
+            if drive.controller.num_sectors == 0 {
+                return false;
+            }
+            if !drive.ide_read_sector() {
+                return false;
+            }
+            let bs = drive.controller.buffer_size.min(buffer.len());
+            buffer[..bs].copy_from_slice(&drive.controller.buffer[..bs]);
+            return true;
+        } else if current_command == ATA_CMD_PACKET {
+            // ATAPI PACKET with packet_dma
+            // Bochs harddrv.cc:3612-3649
+            let drive = &mut self.channels[ch].drives[selected as usize];
+            if !drive.controller.packet_dma {
+                tracing::warn!("ATAPI: PACKET-DMA not active");
+                self.command_aborted(ch, current_command);
+                return false;
+            }
+            let atapi_cmd = drive.atapi.command;
+            match atapi_cmd {
+                0x28 | 0xA8 | 0xBE => {
+                    // READ(10), READ(12), READ CD
+                    *sector_size = drive.controller.buffer_size as u32;
+                    if !drive.cdrom.ready {
+                        tracing::warn!("ATAPI: read with CD-ROM not ready");
+                        return false;
+                    }
+                    let next_lba = drive.cdrom.next_lba;
+                    let buf_size = drive.controller.buffer_size;
+                    if buf_size > buffer.len() {
+                        return false;
+                    }
+                    if !drive.read_cdrom_block(next_lba, buffer) {
+                        tracing::warn!("ATAPI: DMA read block {} failed", next_lba);
+                        return false;
+                    }
+                    drive.cdrom.next_lba += 1;
+                    drive.cdrom.remaining_blocks -= 1;
+                    if drive.cdrom.remaining_blocks <= 0 {
+                        drive.cdrom.curr_lba = drive.cdrom.next_lba;
+                    }
+                    return true;
+                }
+                _ => {
+                    // Other ATAPI commands: copy from controller buffer
+                    // Bochs harddrv.cc:3641-3648
+                    let remaining = drive.atapi.total_bytes_remaining as u32;
+                    let copy_size = if *sector_size > remaining {
+                        remaining as usize
+                    } else {
+                        *sector_size as usize
+                    };
+                    let copy_size = copy_size.min(buffer.len()).min(drive.controller.buffer_size);
+                    buffer[..copy_size]
+                        .copy_from_slice(&drive.controller.buffer[..copy_size]);
+                    return true;
+                }
+            }
+        }
+
+        tracing::warn!("BM-DMA read: command {:#04x} not a DMA command", current_command);
+        self.command_aborted(channel as usize, current_command);
+        false
+    }
+
+    /// Write a sector for BM-DMA transfer.
+    /// Bochs: bx_hard_drive_c::bmdma_write_sector() (harddrv.cc:3657-3673)
+    pub fn bmdma_write_sector(&mut self, channel: u8, buffer: &[u8]) -> bool {
+        let ch = channel as usize;
+        if ch >= 2 {
+            return false;
+        }
+        let selected = self.channels[ch].drive_select;
+        let current_command = self.channels[ch].drives[selected as usize].controller.current_command;
+
+        if current_command != 0xCA && current_command != 0x35 {
+            tracing::warn!("BM-DMA write: command {:#04x} not a DMA write", current_command);
+            self.command_aborted(ch, current_command);
+            return false;
+        }
+        let drive = &mut self.channels[ch].drives[selected as usize];
+        if drive.controller.num_sectors == 0 {
+            return false;
+        }
+        // Copy data into controller buffer and write sector
+        let copy_len = buffer.len().min(drive.controller.buffer.len());
+        drive.controller.buffer[..copy_len].copy_from_slice(&buffer[..copy_len]);
+        drive.controller.buffer_size = SECTOR_SIZE;
+        if !drive.ide_write_sector() {
+            return false;
+        }
+        true
+    }
+
+    /// Complete a BM-DMA transfer — set final status and raise interrupt.
+    /// Bochs: bx_hard_drive_c::bmdma_complete() (harddrv.cc:3675-3694)
+    pub fn bmdma_complete(&mut self, channel: u8) {
+        let ch = channel as usize;
+        if ch >= 2 {
+            return;
+        }
+        let selected = self.channels[ch].drive_select;
+        let is_cdrom = self.channels[ch].drives[selected as usize].device_type == DeviceType::Cdrom;
+        let drive = &mut self.channels[ch].drives[selected as usize];
+
+        // Bochs harddrv.cc:3680-3693
+        drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
+        drive.controller.status.insert(AtaStatus::DRDY);
+        if is_cdrom {
+            // Bochs harddrv.cc:3685-3688: set interrupt_reason I/O=1, C/D=1
+            drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x03;
+        } else {
+            // Bochs harddrv.cc:3689-3693: disk completion
+            drive.controller.status.remove(AtaStatus::DWF);
+            drive.controller.status.insert(AtaStatus::DSC);
+        }
+
+        self.raise_interrupt(ch);
     }
 
     /// Read from ATA I/O port (Bochs `bx_hard_drive_c::read`, harddrv.cc:770-1152).
@@ -1929,13 +2098,14 @@ impl BxHardDriveC {
                         let atapi_cmd = drive.atapi.command;
                         match atapi_cmd {
                             0x28 | 0xa8 | 0xbe => {
-                                if drive.cdrom.remaining_blocks > 0 {
-                                    // Next block will be loaded at top of loop
-                                }
+                                // Reset buffer position so lazy-load at top of loop
+                                // triggers on next iteration (buffer_index >= buffer_size).
                                 drive.controller.buffer_index = 0;
+                                drive.controller.buffer_size = 0;
                             }
                             _ => {
                                 drive.controller.buffer_index = 0;
+                                drive.controller.buffer_size = 0;
                             }
                         }
                     }
@@ -2439,13 +2609,26 @@ impl BxHardDriveC {
     ///
     /// Bochs sets individual fields: busy=0, drq=1, err=0
     /// preserving other bits like drive_ready (DRDY) and seek_complete (DSC).
+    ///
+    /// If packet_dma is set (features bit 0 was 1 on PACKET command),
+    /// signals DMA engine instead of raising interrupt for PIO.
+    /// Bochs harddrv.cc:3493-3498
     fn ready_to_send_atapi(&mut self, channel_num: usize) {
         let drive = self.channels[channel_num].selected_drive_mut();
         drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x02; // i_o=1, c_d=0
         drive.controller.status.remove(AtaStatus::BSY | AtaStatus::ERR);
         drive.controller.status.insert(AtaStatus::DRQ);
 
-        self.raise_interrupt(channel_num);
+        // Bochs harddrv.cc:3493-3498: DMA vs PIO branch
+        if drive.controller.packet_dma {
+            tracing::debug!("ATAPI: ready_to_send_atapi DMA path ch={}", channel_num);
+            if !self.pci_ide_ptr.is_null() {
+                let pci_ide = unsafe { &mut *self.pci_ide_ptr };
+                pci_ide.bmdma_start_transfer(channel_num as u8);
+            }
+        } else {
+            self.raise_interrupt(channel_num);
+        }
     }
 
     /// Handle an ATAPI command (Bochs harddrv.cc:1304-1830)
@@ -2646,7 +2829,7 @@ impl BxHardDriveC {
                     return;
                 }
 
-                tracing::warn!(
+                tracing::debug!(
                     "ATAPI: READ({}) LBA={} len={} sectors",
                     if atapi_command == 0x28 { 10 } else { 12 },
                     lba,
@@ -3526,13 +3709,13 @@ impl BxHardDriveC {
                             }
                             0x04 => {
                                 // MDMA mode
-                                tracing::debug!("ATA: SET FEATURES: set transfer mode to MDMA{}", xfer_mode);
+                                tracing::debug!("ATA: SET FEATURES: set transfer mode to MDMA{} ch={}", xfer_mode, channel_num);
                                 drive.controller.mdma_mode = 1 << xfer_mode;
                                 drive.controller.udma_mode = 0x00;
                             }
                             0x08 => {
                                 // UDMA mode
-                                tracing::debug!("ATA: SET FEATURES: set transfer mode to UDMA{}", xfer_mode);
+                                tracing::debug!("ATA: SET FEATURES: set transfer mode to UDMA{} ch={}", xfer_mode, channel_num);
                                 drive.controller.mdma_mode = 0x00;
                                 drive.controller.udma_mode = 1 << xfer_mode;
                             }
@@ -3659,11 +3842,13 @@ impl BxHardDriveC {
             }
             ATA_CMD_PACKET => {
                 // Bochs harddrv.cc:2589-2611 — SEND PACKET (ATAPI)
-                tracing::debug!("ATA: PACKET command on ch{} (ATAPI)", channel_num);
                 if drive.device_type == DeviceType::Cdrom {
                     // Bochs harddrv.cc:2592
                     let features = drive.controller.features;
                     drive.controller.packet_dma = (features & 1) != 0;
+                    if drive.controller.packet_dma {
+                        tracing::debug!("ATAPI: PACKET cmd with DMA flag (features={:#04x})", features);
+                    }
                     if (features & (1 << 1)) != 0 {
                         tracing::debug!("ATA: PACKET-overlapped not supported");
                         self.command_aborted(channel_num, ATA_CMD_PACKET);

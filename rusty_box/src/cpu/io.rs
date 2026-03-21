@@ -519,7 +519,32 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         }
                         let chunk_words = (ecx as usize).min(words_fit_page);
 
-                        // Read from port per-word and write directly into host memory.
+                        // Bulk path: try to read all chunk_words at once via inp_bulk.
+                        // This copies directly from the ATA buffer into guest RAM,
+                        // avoiding per-word port_in() dispatch overhead.
+                        let bulk_bytes = chunk_words * 2;
+                        let bulk_slice = unsafe {
+                            core::slice::from_raw_parts_mut(host_ptr, bulk_bytes)
+                        };
+                        let bytes_read = self.bulk_port_in(port, bulk_slice);
+                        if bytes_read >= 2 {
+                            let words_read = bytes_read / 2;
+                            let transferred = words_read as u32;
+                            let new_edi = edi.wrapping_add(transferred * 2);
+                            self.set_rdi(new_edi as u64);
+                            ecx -= transferred;
+                            self.set_ecx(ecx);
+                            self.icount += transferred as u64;
+                            if transferred > 1 {
+                                self.tickn_fastrep(transferred as usize - 1);
+                            }
+                            if self.async_event != 0 {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        // Bulk returned 0 — per-word fallback within this chunk.
                         // Matches Bochs FastRepINSW io.cc:88-105.
                         for i in 0..chunk_words {
                             let val = self.port_in(port, 2) as u16;
@@ -550,7 +575,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         ecx -= transferred;
                         self.set_ecx(ecx);
                         self.icount += transferred as u64;
-                        // Bochs: BX_TICKN(wordCount-1)
                         if transferred > 1 {
                             self.tickn_fastrep(transferred as usize - 1);
                         }
@@ -607,9 +631,32 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         }
                         let chunk_dwords = (ecx as usize).min(dwords_fit_page);
 
-                        // Read from port per-dword and write directly into host memory.
-                        // This matches Bochs FastRepINSW where each word goes through
-                        // BX_INP individually, written via WriteHostWordToLittleEndian.
+                        // Bulk path: try to read all chunk_dwords at once via inp_bulk.
+                        // This copies directly from the ATA buffer into guest RAM,
+                        // avoiding per-dword port_in() dispatch overhead (~20x speedup).
+                        let bulk_bytes = chunk_dwords * 4;
+                        let bulk_slice = unsafe {
+                            core::slice::from_raw_parts_mut(host_ptr, bulk_bytes)
+                        };
+                        let bytes_read = self.bulk_port_in(port, bulk_slice);
+                        if bytes_read >= 4 {
+                            let dwords_read = bytes_read / 4;
+                            let transferred = dwords_read as u32;
+                            let new_edi = edi.wrapping_add(transferred * 4);
+                            self.set_rdi(new_edi as u64);
+                            ecx -= transferred;
+                            self.set_ecx(ecx);
+                            self.icount += transferred as u64;
+                            if transferred > 1 {
+                                self.tickn_fastrep(transferred as usize - 1);
+                            }
+                            if self.async_event != 0 {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        // Bulk returned 0 — per-dword fallback within this chunk.
                         for i in 0..chunk_dwords {
                             let val = self.port_in(port, 4);
                             unsafe {
@@ -640,7 +687,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         ecx -= transferred;
                         self.set_ecx(ecx);
                         self.icount += transferred as u64;
-                        // Bochs: BX_TICKN(wordCount-1) — main loop ticks 1
                         if transferred > 1 {
                             self.tickn_fastrep(transferred as usize - 1);
                         }
@@ -899,7 +945,30 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         }
                         let chunk_words = (rcx as usize).min(words_fit_page);
 
-                        // Read from port per-word and write directly into host memory.
+                        // Bulk path: try to read all chunk_words at once via inp_bulk.
+                        let bulk_bytes = chunk_words * 2;
+                        let bulk_slice = unsafe {
+                            core::slice::from_raw_parts_mut(host_ptr, bulk_bytes)
+                        };
+                        let bytes_read = self.bulk_port_in(port, bulk_slice);
+                        if bytes_read >= 2 {
+                            let words_read = bytes_read / 2;
+                            let transferred = words_read as u64;
+                            let new_rdi = rdi.wrapping_add(transferred * 2);
+                            self.set_rdi(new_rdi);
+                            rcx -= transferred;
+                            self.set_rcx(rcx);
+                            self.icount += transferred;
+                            if transferred > 1 {
+                                self.tickn_fastrep(transferred as usize - 1);
+                            }
+                            if self.async_event != 0 {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        // Bulk returned 0 — per-word fallback within this chunk.
                         for i in 0..chunk_words {
                             let val = self.port_in(port, 2) as u16;
                             unsafe {
@@ -981,14 +1050,36 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         }
                         let chunk_dwords = (rcx as usize).min(dwords_fit_page);
 
-                        // Read from port per-dword and write directly into host memory.
+                        // Bulk path: try to read all chunk_dwords at once via inp_bulk.
+                        let bulk_bytes = chunk_dwords * 4;
+                        let bulk_slice = unsafe {
+                            core::slice::from_raw_parts_mut(host_ptr, bulk_bytes)
+                        };
+                        let bytes_read = self.bulk_port_in(port, bulk_slice);
+                        if bytes_read >= 4 {
+                            let dwords_read = bytes_read / 4;
+                            let transferred = dwords_read as u64;
+                            let new_rdi = rdi.wrapping_add(transferred * 4);
+                            self.set_rdi(new_rdi);
+                            rcx -= transferred;
+                            self.set_rcx(rcx);
+                            self.icount += transferred;
+                            if transferred > 1 {
+                                self.tickn_fastrep(transferred as usize - 1);
+                            }
+                            if self.async_event != 0 {
+                                break;
+                            }
+                            continue;
+                        }
+
+                        // Bulk returned 0 — per-dword fallback within this chunk.
                         for i in 0..chunk_dwords {
                             let val = self.port_in(port, 4);
                             unsafe {
                                 let dst = host_ptr.add(i * 4) as *mut u32;
                                 dst.write_unaligned(val.to_le());
                             }
-                            // Check for async events after each dword (Bochs io.cc:107)
                             if self.async_event != 0 {
                                 let transferred = (i + 1) as u64;
                                 let new_rdi = rdi.wrapping_add(transferred * 4);

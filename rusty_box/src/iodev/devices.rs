@@ -230,6 +230,11 @@ impl DeviceManager {
         self.register_acpi_handlers(io);
         #[cfg(feature = "bx_support_pci")]
         self.register_pci_handlers(io);
+        // Register BM-DMA ports if BAR4 is pre-configured (for direct boot without BIOS)
+        #[cfg(feature = "bx_support_pci")]
+        if self.pci_ide.bmdma_base > 0 {
+            self.register_pci_ide_bmdma_ports(io);
+        }
 
         tracing::info!("Device manager initialization complete");
         Ok(())
@@ -627,7 +632,7 @@ impl DeviceManager {
                     return 0xFFFF_FFFF; // only bus 0 implemented
                 }
 
-                let reg_addr = reg + offset;
+                let reg_addr = reg.wrapping_add(offset);
                 self.pci_device_read(devfunc, reg_addr, io_len)
             }
             // APM + ELCR ports → PIIX3
