@@ -305,18 +305,25 @@ impl BxMemoryStubC {
     }
 
     #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
+    /// Write bytes to physical memory for debugger (Bochs memory.cc dbg_set_mem).
+    /// Requires bx_debugger or bx_gdb_stub feature. Writes directly via raw pointer.
     pub fn dbg_set_mem<I: BxCpuIdTrait>(
         _cpus: &[BxCpuC<I>],
         _addr: BxPhyAddress,
         _len: u32,
         _buf: &mut [u8],
     ) -> bool {
-        unimplemented!()
+        // Debugger memory access — requires integration with BxMemC.
+        // Stubbed until debugger features are implemented.
+        tracing::warn!("dbg_set_mem: debugger memory write not implemented");
+        false
     }
 
+    /// Compute CRC32 over physical memory range for debugger (Bochs memory.cc dbg_crc32).
     #[cfg(any(feature = "bx_debugger", feature = "bx_gdb_stub"))]
     pub fn dbg_crc32(_addr1: BxPhyAddress, _addr2: BxPhyAddress, _crc: &[u32]) -> bool {
-        unimplemented!()
+        tracing::warn!("dbg_crc32: debugger CRC not implemented");
+        false
     }
 
     ///

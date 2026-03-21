@@ -137,6 +137,18 @@ pub struct BxPcSystemC {
     m_ips: f64,
     /// Hardware Request (DMA)
     hrq: bool,
+    /// HRQ pending flag — set by set_hrq(true), checked by emulator loop.
+    /// Bochs pc_system.cc:82-83: set_HRQ sets HRQ and signals async_event.
+    pub(crate) hrq_pending: bool,
+    /// Raw pointer to CPU's async_event for DMA HRQ signaling.
+    /// Bochs pc_system.cc:83: `BX_CPU(0)->async_event = 1`
+    /// Set during emulator initialization, valid for the emulator's lifetime.
+    cpu_async_event_ptr: *mut u32,
+    /// External interrupt pending flag — set by raise_intr(), cleared by clear_intr().
+    /// Bochs pc_system.cc:86-100: raise_INTR/clear_INTR forward to BX_CPU(0).
+    /// In our architecture the PIC signals the CPU directly via raw pointers,
+    /// so this flag exists for API completeness.
+    pub(crate) intr_pending: bool,
     /// Request to terminate emulation
     pub(crate) kill_bochs_request: bool,
 }
@@ -168,6 +180,9 @@ impl BxPcSystemC {
             enable_a20: false,
             m_ips: 1.0,
             hrq: false,
+            hrq_pending: false,
+            cpu_async_event_ptr: core::ptr::null_mut(),
+            intr_pending: false,
             kill_bochs_request: false,
         };
 
@@ -194,6 +209,8 @@ impl BxPcSystemC {
         self.usec_since_last = 0;
         self.triggered_timer = 0;
         self.hrq = false;
+        self.hrq_pending = false;
+        self.intr_pending = false;
         self.kill_bochs_request = false;
 
         // Convert IPS to millions for timing calculations
@@ -382,14 +399,52 @@ impl BxPcSystemC {
     // DMA and system control
     // ========================================================================
 
-    /// Set the Hardware Request (DMA) line
+    /// Set the Hardware Request (DMA) line.
+    /// Matches Bochs pc_system.cc:79-84: sets HRQ flag and signals async_event
+    /// directly on the CPU via raw pointer.
     pub fn set_hrq(&mut self, value: bool) {
         self.hrq = value;
+        if value {
+            self.hrq_pending = true;
+            // Bochs pc_system.cc:83: BX_CPU(0)->async_event = 1
+            if !self.cpu_async_event_ptr.is_null() {
+                unsafe {
+                    *self.cpu_async_event_ptr = 1;
+                }
+            }
+        }
+    }
+
+    /// Set CPU async_event pointer for DMA HRQ signaling.
+    /// Called during emulator initialization.
+    pub fn set_cpu_async_event_ptr(&mut self, ptr: *mut u32) {
+        self.cpu_async_event_ptr = ptr;
     }
 
     /// Get the Hardware Request (DMA) line state
     pub fn get_hrq(&self) -> bool {
         self.hrq
+    }
+
+    /// Signal external interrupt to bootstrap CPU (Bochs pc_system.cc:86-93).
+    /// In our single-CPU model, this sets a flag that the emulator loop checks.
+    /// The PIC also signals the CPU directly via raw pointers (BX_RAISE_INTR),
+    /// so this method exists for API completeness with Bochs.
+    pub fn raise_intr(&mut self) {
+        self.intr_pending = true;
+    }
+
+    /// Clear external interrupt signal (Bochs pc_system.cc:95-100).
+    pub fn clear_intr(&mut self) {
+        self.intr_pending = false;
+    }
+
+    /// Interrupt acknowledge cycle — get vector from PIC (Bochs pc_system.cc:207-210).
+    /// Returns 0 as placeholder — actual IAC goes through the emulator's PIC directly.
+    pub fn iac(&self) -> u8 {
+        // In Bochs this calls DEV_pic_iac(). Our emulator handles this directly
+        // through the PIC's iac() method in event.rs interrupt delivery.
+        0
     }
 
     /// Perform a system reset
@@ -402,6 +457,10 @@ impl BxPcSystemC {
         // A20 line is ENABLED at hardware reset on 386+ CPUs
         // (Only 286 systems start with A20 disabled)
         self.set_enable_a20(true);
+
+        // Clear interrupt and DMA pending flags
+        self.intr_pending = false;
+        self.hrq_pending = false;
 
         Ok(())
     }

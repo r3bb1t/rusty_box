@@ -715,6 +715,12 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     /// Set once during emulator initialization, valid for the emulator's lifetime.
     pub(crate) pic_ptr: *mut crate::iodev::pic::BxPicC,
 
+    /// Raw pointer to DMA controller for raise_HLDA inside handle_async_event().
+    ///
+    /// Matches Bochs' `DEV_dma_raise_hlda()` call in event.cc:83,390,505.
+    /// Set during emulator initialization, valid for the emulator's lifetime.
+    pub(crate) dma_ptr: *mut crate::iodev::dma::BxDmaC,
+
     /// Debug flags for one-time boot diagnostics (no globals).
     ///
     /// Bit 0: reported unsupported opcode
@@ -1207,6 +1213,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     #[inline]
     pub(crate) fn clear_pc_system(&mut self) {
         self.pc_system_ptr = None;
+    }
+
+    /// Check HRQ (DMA Hold Request) state from pc_system.
+    /// Matches Bochs `BX_HRQ` macro (pc_system.h:196) which reads
+    /// `bx_pc_system.HRQ`. Returns false if pc_system is not wired.
+    #[inline]
+    pub(super) fn get_hrq(&self) -> bool {
+        if let Some(ps) = self.pc_system_ptr {
+            unsafe { ps.as_ref().get_hrq() }
+        } else {
+            false
+        }
     }
 
     /// Bochs `bx_pc_system.getNumCpuTicksLeftNextEvent()` — caps FastRep transfer counts

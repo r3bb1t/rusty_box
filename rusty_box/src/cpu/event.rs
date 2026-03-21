@@ -42,9 +42,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Priority 4: Debug trap exceptions (TF single-step, data/I/O breakpoints)
         // Bochs event.cc:312-324 — check inhibition FIRST, then debug_trap
         if !self.interrupts_inhibited(Self::BX_INHIBIT_DEBUG) {
-            // Bochs event.cc:316 also checks code_breakpoint_match(prev_rip) here
-            // and ORs result into debug_trap. Not implemented — hardware debug
-            // breakpoints (DR0-DR3 + DR7) not fully supported yet.
+            // Bochs event.cc:316: OR code breakpoint matches into debug_trap
+            self.debug_trap |= self.code_breakpoint_match(self.prev_rip);
             if self.debug_trap & 0xF000 != 0 {
                 // BX_DEBUG_SINGLE_STEP_BIT or BX_DEBUG_DR_ACCESS_BIT set
                 // Bochs: exception() longjmps — propagate restart
@@ -177,6 +176,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             self.diag_hae_intr_if_blocked += 1;
         }
 
+        // DMA HRQ handling (Bochs event.cc:390-393)
+        // NOTE: similar code in handleWaitForEvent (event.cc:83-86)
+        // Assert Hold Acknowledge (HLDA) and perform DMA transfer
+        if self.get_hrq() {
+            if !self.dma_ptr.is_null() {
+                let dma = unsafe { &mut *self.dma_ptr };
+                dma.raise_hlda();
+            }
+        }
+
         // End of handleAsyncEvent: schedule TF->debug_trap for next boundary
         // Bochs event.cc:396-402
         if self.eflags.contains(EFlags::TF) {
@@ -186,12 +195,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Bochs event.cc:428-433: Conditionally clear async_event
         // Only clear when no events remain pending (debug_trap, pending events, HRQ)
-        // Bochs event.cc:428-433 also checks:
-        // - VMX monitor trap flag (BX_EVENT_VMX_MONITOR_TRAP_FLAG — not implemented)
-        // - DMA HRQ (BX_HRQ — not integrated into event handling)
-        // - SVM GIF flag (SVM_GIF — not implemented)
         let has_unmasked_events = (self.pending_event & !self.event_mask) != 0;
-        if !has_unmasked_events && self.debug_trap == 0 {
+        let hrq_active = self.get_hrq();
+        if !has_unmasked_events && self.debug_trap == 0 && !hrq_active {
             self.async_event = 0;
         }
 
@@ -206,6 +212,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         if matches!(self.activity_state, CpuActivityState::WaitForSipi) {
             tracing::debug!("CPU in WAIT_FOR_SIPI state, returning from cpu_loop");
             return true;
+        }
+
+        // Handle DMA also when CPU is halted (Bochs event.cc:83-86)
+        if self.get_hrq() {
+            if !self.dma_ptr.is_null() {
+                let dma = unsafe { &mut *self.dma_ptr };
+                dma.raise_hlda();
+            }
         }
 
         // For single processor, check if an external interrupt can wake us.
@@ -254,5 +268,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Bochs event.cc:68: clear inhibit_mask when waking from HLT
         self.inhibit_mask = 0;
         true
+    }
+
+    /// Check code breakpoints at the given linear address (Bochs event.cc:316).
+    /// Returns bitmap of matching breakpoints to OR into debug_trap.
+    /// In Bochs, this checks DR0-DR3 against laddr when DR7 L/G bits enable
+    /// execution breakpoints (R/W field = 0b00). Each match sets the
+    /// corresponding B0-B3 bit in the returned value.
+    /// Not implemented — hardware debug breakpoints (DR0-DR3 + DR7) not fully
+    /// supported yet. Returns 0 (no breakpoints configured).
+    fn code_breakpoint_match(&self, _laddr: u64) -> u32 {
+        0
     }
 }

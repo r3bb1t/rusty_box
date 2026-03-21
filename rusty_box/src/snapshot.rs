@@ -22,13 +22,31 @@ use crate::emulator::Emulator;
 const SNAPSHOT_MAGIC: &[u8; 8] = b"RBXSNAP1";
 const SNAPSHOT_VERSION: u32 = 1;
 
-// Section IDs
+// Section IDs — matching Bochs siminterface.cc section layout
 const SEC_CPU: u32 = 1;
 const SEC_MEMORY: u32 = 10;
 const SEC_PIC: u32 = 20;
 const SEC_PIT: u32 = 21;
 const SEC_CMOS: u32 = 22;
+#[allow(dead_code)]
+const SEC_DMA: u32 = 23;
+#[allow(dead_code)]
+const SEC_VGA: u32 = 24;
+#[allow(dead_code)]
+const SEC_KEYBOARD: u32 = 25;
+#[allow(dead_code)]
+const SEC_SERIAL: u32 = 26;
+#[allow(dead_code)]
+const SEC_HARDDRV: u32 = 27;
+#[allow(dead_code)]
+const SEC_IOAPIC: u32 = 28;
+#[allow(dead_code)]
+const SEC_LAPIC: u32 = 29;
 const SEC_PC_SYSTEM: u32 = 30;
+#[allow(dead_code)]
+const SEC_PCI: u32 = 31;
+#[allow(dead_code)]
+const SEC_ACPI: u32 = 32;
 
 #[cfg(feature = "std")]
 impl<I: BxCpuIdTrait> Emulator<'_, I> {
