@@ -598,6 +598,7 @@ impl BxPciIde {
 
     /// Write to PCI configuration space.
     /// Bochs: bx_pci_ide_c::pci_write_handler() (pci_ide.cc:433-457)
+    #[inline(never)]
     pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> bool {
         let mut bar4_changed = false;
 
@@ -621,19 +622,23 @@ impl BxPciIde {
                 0x04 => {
                     self.pci_conf[addr] = value8 & 0x05;
                 }
-                // BAR4 (BM-DMA base address)
+                // BAR4 (BM-DMA base address) — 16-port I/O BAR
+                // Bochs: pci_write_handler_common() (devices.cc:1721-1743)
+                // Low byte (0x20): bit 0 = 1 (I/O type), bits 1-3 = 0 (hardwired),
+                // only bits 4-7 writable (16-port size alignment mask).
+                // This makes BAR sizing return 0xFFFFFFF1 for a 16-port I/O BAR.
+                // Upper bytes (0x21-0x23): fully writable.
                 0x20..=0x23 => {
-                    bar4_changed |= value8 != oldval;
-                    self.pci_conf[addr] = value8;
-                    // Log BAR4 writes to track kernel reassignment
-                    if bar4_changed {
-                        let cur = u32::from_le_bytes([
-                            self.pci_conf[0x20], self.pci_conf[0x21],
-                            self.pci_conf[0x22], self.pci_conf[0x23],
-                        ]);
-                        tracing::debug!("PCI IDE: BAR4 write byte[{}]={:#04x} → raw={:#010x}",
-                            addr, value8, cur);
-                    }
+                    // BAR4: 16-port I/O BAR. Low byte hardwires bits 0-3.
+                    // Bochs devices.cc:1735-1737: value8 = (value8 & 0xfc) | 0x01
+                    // For 16-port: bits 0-3 fixed → mask = 0xF0 | 0x01
+                    let masked = if addr == 0x20 {
+                        (value8 & 0xF0) | 0x01
+                    } else {
+                        value8
+                    };
+                    bar4_changed |= masked != oldval;
+                    self.pci_conf[addr] = masked;
                 }
                 // Default: store (pci_ide.cc:450-453)
                 _ => {
@@ -642,8 +647,12 @@ impl BxPciIde {
             }
         }
 
-        // Update BAR4 if changed
+        // Update BAR4 if changed — also enforce I/O BAR type in low nibble
         if bar4_changed {
+            // Enforce BAR4 low nibble: bit 0 = 1 (I/O), bits 1-3 = 0 (size mask)
+            // This makes sizing probe return 0xFFFFFFF1 for 16-port BAR.
+            // Bochs: pci_write_handler_common (devices.cc:1735-1737)
+            self.pci_conf[0x20] = (self.pci_conf[0x20] & 0xF0) | 0x01;
             let new_base = u32::from_le_bytes([
                 self.pci_conf[0x20],
                 self.pci_conf[0x21],
