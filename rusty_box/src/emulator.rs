@@ -1867,6 +1867,21 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                         "ATAPI cmds since last STUCK: {}",
                                         self.device_manager.harddrv.diag_atapi_cmd_count,
                                     );
+                                    // Dump ATA ch1 (CD-ROM) controller state for debugging modloop hang
+                                    {
+                                        let ch1 = &self.device_manager.harddrv.channels[1];
+                                        let d = ch1.selected_drive();
+                                        eprintln!(
+                                            " ATA ch1: status={:?} cmd={:#04x} int_pending={} drq_idx={} tbr={} atapi_cmd={:#04x} rem_blocks={}",
+                                            d.controller.status,
+                                            d.controller.current_command,
+                                            d.controller.interrupt_pending,
+                                            d.controller.drq_index,
+                                            d.atapi.total_bytes_remaining,
+                                            d.atapi.command,
+                                            d.cdrom.remaining_blocks,
+                                        );
+                                    }
                                 }
                                 // For PM stuck points: dump 32-bit stack frame (saved EBP, return addr, args)
                                 let ebp = self.cpu.ebp() as usize;
@@ -2988,14 +3003,25 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 };
                 last_mips_log_instructions = instructions_executed;
                 last_mips_log_update = std::time::Instant::now();
+                // ATA ch1 controller state for modloop debugging
+                let ch1_status = {
+                    let ch1 = &self.device_manager.harddrv.channels[1];
+                    let d = ch1.selected_drive();
+                    format!("ata1[s={:?} cmd={:#04x} ip={} drqi={} tbr={} acmd={:#04x} rb={}]",
+                        d.controller.status, d.controller.current_command,
+                        d.controller.interrupt_pending, d.controller.drq_index,
+                        d.atapi.total_bytes_remaining, d.atapi.command,
+                        d.cdrom.remaining_blocks)
+                };
                 tracing::error!(
                     target: "mips",
-                    "[{:>6}M instr] {:>6.2} MIPS  RIP={:#010x}  CS={:#06x}  mode={}",
+                    "[{:>6}M instr] {:>6.2} MIPS  RIP={:#010x}  CS={:#06x}  mode={}  {}",
                     instructions_executed / 1_000_000,
                     mips,
                     self.cpu.rip(),
                     self.cpu.get_cs_selector(),
                     self.get_cpu_mode_str(),
+                    ch1_status,
                 );
             }
 
@@ -3456,6 +3482,17 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     /// Get ATA channel read counters for diagnostics.
     pub fn ata_diag_reads(&self) -> (u64, u64) {
         (self.device_manager.harddrv.diag_ch0_reads, self.device_manager.harddrv.diag_ch1_reads)
+    }
+
+    /// Get ATA channel 1 (CD-ROM) controller state for diagnostics.
+    pub fn ata_ch1_diag(&self) -> String {
+        let ch1 = &self.device_manager.harddrv.channels[1];
+        let d = ch1.selected_drive();
+        format!("s={:?} cmd={:#04x} ip={} tbr={} acmd={:#04x} rb={}",
+            d.controller.status, d.controller.current_command,
+            d.controller.interrupt_pending,
+            d.atapi.total_bytes_remaining, d.atapi.command,
+            d.cdrom.remaining_blocks)
     }
 
     /// Get total I/O port read/write counters for diagnostics.

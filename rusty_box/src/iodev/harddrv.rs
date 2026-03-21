@@ -2038,6 +2038,9 @@ impl BxHardDriveC {
                                 break;
                             }
                         } else {
+                            // No more blocks. Update curr_lba (Bochs harddrv.cc:953)
+                            // and let the DRQ check below handle completion.
+                            drive.cdrom.curr_lba = drive.cdrom.next_lba;
                             break;
                         }
                     }
@@ -2123,7 +2126,13 @@ impl BxHardDriveC {
                 drive.controller.status.remove(AtaStatus::DRQ);
                 drive.controller.drq_index = 0;
                 drive.atapi.total_bytes_remaining -= drive.atapi.drq_bytes;
-                if drive.atapi.total_bytes_remaining > 0 {
+                // Only start another DRQ phase if there's both remaining byte count
+                // AND remaining CD blocks to read. When remaining_blocks=0 but
+                // total_bytes_remaining > 0, the transfer is effectively complete
+                // (all actual data delivered). Force completion to avoid hanging.
+                if drive.atapi.total_bytes_remaining > 0
+                    && drive.cdrom.remaining_blocks > 0
+                {
                     drive.controller.sector_count =
                         (drive.controller.sector_count & 0xF8) | 0x02;
                     drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::DRQ);
@@ -2150,17 +2159,36 @@ impl BxHardDriveC {
         // has reached drq_bytes. Without this, the final DRQ completion status
         // transition and interrupt never fire, causing the kernel to poll forever.
         // Matches Bochs harddrv.cc:986-1020 which checks this on every word read.
+        //
+        // Also handles the "short DRQ" case: remaining_blocks == 0 and buffer
+        // exhausted, but drq_index < drq_bytes. The DRQ byte count was set larger
+        // than the actual remaining data. Force-complete the transfer by treating
+        // the delivered bytes as the full DRQ cycle.
         if !need_raise_irq && need_abort_cmd.is_none()
             && current_command == ATA_CMD_PACKET
         {
             let drive = &mut self.channels[channel_num].drives[selected as usize];
-            if drive.controller.drq_index >= drive.atapi.drq_bytes as u32
-                && drive.atapi.drq_bytes > 0
-            {
+            let drq_complete = drive.controller.drq_index >= drive.atapi.drq_bytes as u32
+                && drive.atapi.drq_bytes > 0;
+            // Short DRQ: all CD blocks consumed but drq_index hasn't reached drq_bytes.
+            // The transfer is over — complete it with whatever was delivered.
+            let short_drq = !drq_complete
+                && drive.cdrom.remaining_blocks <= 0
+                && drive.controller.buffer_index >= drive.controller.buffer_size
+                && drive.controller.drq_index > 0
+                && drive.atapi.total_bytes_remaining > 0;
+            if drq_complete || short_drq {
                 drive.controller.status.remove(AtaStatus::DRQ);
+                // For short DRQ: force remaining to 0 since all CD data was consumed
+                if short_drq {
+                    drive.atapi.total_bytes_remaining = 0;
+                } else {
+                    drive.atapi.total_bytes_remaining -= drive.atapi.drq_bytes;
+                }
                 drive.controller.drq_index = 0;
-                drive.atapi.total_bytes_remaining -= drive.atapi.drq_bytes;
-                if drive.atapi.total_bytes_remaining > 0 {
+                if drive.atapi.total_bytes_remaining > 0
+                    && drive.cdrom.remaining_blocks > 0
+                {
                     // More DRQ phases remain (Bochs harddrv.cc:992-1006)
                     drive.controller.sector_count =
                         (drive.controller.sector_count & 0xF8) | 0x02;
@@ -2172,7 +2200,8 @@ impl BxHardDriveC {
                     }
                     drive.atapi.drq_bytes = drive.controller.cylinder_no as i32;
                 } else {
-                    // All bytes read (Bochs harddrv.cc:1007-1018)
+                    // All bytes read or no more blocks (Bochs harddrv.cc:1007-1018)
+                    drive.atapi.total_bytes_remaining = 0;
                     drive.controller.sector_count =
                         (drive.controller.sector_count & 0xF8) | 0x03;
                     drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
