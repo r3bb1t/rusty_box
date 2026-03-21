@@ -411,8 +411,16 @@ impl BxCpuIdTrait for Corei7SkylakeX {
     fn get_cpuid_leaf(&self, eax: u32, ecx: u32) -> (u32, u32, u32, u32) {
         match eax {
             // ── Basic CPUID Information ─────────────────────────────────
+            // Max leaf = 0x14 (stop before leaf 0x15/0x16).
+            // Bochs's Alpine config uses a generic CPU model without
+            // leaf 0x15 (TSC crystal ratio) or 0x16 (processor frequency).
+            // Without these leaves, the kernel falls back to PIT-based TSC
+            // calibration, which correctly measures our emulated tick rate
+            // (= IPS setting). With leaves 0x15/0x16 reporting 3.5 GHz,
+            // the kernel trusts that value and never calibrates — causing
+            // all timer operations to run ~233x too slow at IPS=15M.
             0x00000000 => (
-                0x00000016, // Max basic leaf = 22
+                0x00000014, // Max basic leaf = 20 (no leaf 0x15/0x16)
                 0x756e6547, // "Genu"
                 0x6c65746e, // "ntel"
                 0x49656e69, // "ineI" → "GenuineIntel"
