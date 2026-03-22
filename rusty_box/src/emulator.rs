@@ -3489,12 +3489,12 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         let ch1 = &self.device_manager.harddrv.channels[1];
         let d = ch1.selected_drive();
         let hd = &self.device_manager.harddrv;
-        format!("s={:?} cmd={:#04x} ip={} tbr={} acmd={:#04x} rb={} drqS={} drqC={}",
+        format!("s={:?} cmd={:#04x} ip={} tbr={} acmd={:#04x} rb={} drqS={} drqL={}",
             d.controller.status, d.controller.current_command,
             d.controller.interrupt_pending,
             d.atapi.total_bytes_remaining, d.atapi.command,
             d.cdrom.remaining_blocks,
-            hd.diag_drq_set_count, hd.diag_drq_clear_count)
+            hd.diag_drq_set_count, hd.diag_drq_clear_loc)
     }
 
     /// Get total I/O port read/write counters for diagnostics.

@@ -249,9 +249,11 @@ impl BxPciIde {
             return;
         }
 
-        // If READ DMA and data not ready, reschedule and return
+        // If data not ready (device hasn't signaled via bmdma_start_transfer),
+        // reschedule and return. For PIO commands, data_ready is never set,
+        // so the timer keeps rescheduling harmlessly until the kernel stops DMA.
         // Bochs pci_ide.cc:268-271
-        if self.bmdma[channel].cmd_rwcon && !self.bmdma[channel].data_ready {
+        if !self.bmdma[channel].data_ready {
             self.activate_channel_timer(channel, 1);
             return;
         }
