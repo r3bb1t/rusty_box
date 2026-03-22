@@ -1707,20 +1707,7 @@ impl BxHardDriveC {
 
         match offset {
             ATA_DATA => {
-                // Bochs harddrv.cc:806-894 — data port read
-                // Track data port reads for diagnostics
-                static DATA_READS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-                let dr_count = DATA_READS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if dr_count % 50000 == 0 {
-                    eprintln!("[DATA-READ] #{} drq={} tbr={} drqi={} drqb={} cyl={} rb={}",
-                        dr_count,
-                        drive.controller.status.contains(AtaStatus::DRQ),
-                        drive.atapi.total_bytes_remaining,
-                        drive.controller.drq_index,
-                        drive.atapi.drq_bytes,
-                        drive.controller.cylinder_no,
-                        drive.cdrom.remaining_blocks);
-                }
+                // Bochs harddrv.cc:806-1023 — data port read
                 // Bochs harddrv.cc:806-811: DRQ check
                 if !drive.controller.status.contains(AtaStatus::DRQ) {
                     tracing::debug!(
@@ -1981,12 +1968,6 @@ impl BxHardDriveC {
     /// Handles ATAPI lazy-load, sector transitions, and DRQ completion.
     #[inline(never)]
     pub fn bulk_read_data(&mut self, port: u16, buf: &mut [u8]) -> usize {
-        // Static counter — survives across calls, not optimizable
-        static BULK_CALLS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-        let call_num = BULK_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        if call_num % 1000 == 0 {
-            eprintln!("[BULK] call #{} port={:#06x} buflen={}", call_num, port, buf.len());
-        }
         let channel_num = match self.port_to_channel(port) {
             Some(c) => c,
             None => return 0,
@@ -1994,6 +1975,15 @@ impl BxHardDriveC {
 
         let selected = self.channels[channel_num].drive_select;
         let drive = &mut self.channels[channel_num].drives[selected as usize];
+
+        // Bochs BX_SUPPORT_REPEAT_SPEEDUPS (harddrv.cc:828-843) bulk path is
+        // ONLY for ATA READ SECTORS, NEVER for ATAPI. For ATAPI commands (0xA0),
+        // return 0 to force the per-word read() handler path, which has the
+        // correct single-block lazy-load and DRQ completion logic matching
+        // Bochs harddrv.cc:929-1023 exactly.
+        if drive.controller.current_command == ATA_CMD_PACKET {
+            return 0;
+        }
 
         if drive.device_type == DeviceType::None {
             return 0;
@@ -2577,17 +2567,11 @@ impl BxHardDriveC {
         drive.controller.cylinder_no = byte_count as u16;
         drive.atapi.command = command;
         drive.atapi.drq_bytes = byte_count;
-        let tbr_val = if req_length < alloc_length { req_length } else { alloc_length };
-        drive.atapi.total_bytes_remaining = tbr_val;
-        // Diagnostic: log after all fields are set
-        if (command == 0x28 || command == 0xA8) {
-            static INIT_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-            let n = INIT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            eprintln!("[INIT-ATAPI] #{} cmd={:#04x} drqb={} tbr={} cyl={} req={} alloc={}",
-                n, command, drive.atapi.drq_bytes,
-                drive.atapi.total_bytes_remaining, drive.controller.cylinder_no,
-                req_length, alloc_length);
-        }
+        drive.atapi.total_bytes_remaining = if req_length < alloc_length {
+            req_length
+        } else {
+            alloc_length
+        };
     }
 
     /// Set ATAPI command error (Bochs atapi_cmd_error, harddrv.cc:3424-3447)

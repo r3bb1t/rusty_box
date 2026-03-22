@@ -202,9 +202,6 @@ impl BxPciIde {
     pub fn bmdma_start_transfer(&mut self, channel: u8) {
         if (channel as usize) < 2 {
             self.bmdma[channel as usize].data_ready = true;
-            static DR_SET: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-            let n = DR_SET.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            eprintln!("[DMA-START] #{} ch={} data_ready=true", n, channel);
         }
     }
 
@@ -239,7 +236,14 @@ impl BxPciIde {
 
     /// BM-DMA timer function — processes PRD tables and transfers data.
     /// Bochs: bx_pci_ide_c::timer() (pci_ide.cc:251-336)
+    ///
+    /// TEMPORARILY DISABLED: The DMA timer interferes with PIO ATAPI
+    /// transfers by calling bmdma_complete() which clears DRQ. Until
+    /// DMA is fully working end-to-end, disable the timer to allow
+    /// PIO to work correctly for modloop mounting.
     fn timer(&mut self, channel: usize) {
+        // DMA timer disabled — PIO path handles all transfers
+        return;
         if channel >= 2 {
             return;
         }
