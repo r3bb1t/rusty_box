@@ -202,6 +202,9 @@ impl BxPciIde {
     pub fn bmdma_start_transfer(&mut self, channel: u8) {
         if (channel as usize) < 2 {
             self.bmdma[channel as usize].data_ready = true;
+            static DR_SET: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+            let n = DR_SET.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            eprintln!("[DMA-START] #{} ch={} data_ready=true", n, channel);
         }
     }
 
@@ -249,11 +252,10 @@ impl BxPciIde {
             return;
         }
 
-        // If data not ready (device hasn't signaled via bmdma_start_transfer),
-        // reschedule and return. For PIO commands, data_ready is never set,
-        // so the timer keeps rescheduling harmlessly until the kernel stops DMA.
-        // Bochs pci_ide.cc:268-271
-        if !self.bmdma[channel].data_ready {
+        // Bochs pci_ide.cc:268-271: for READ DMA, wait until device signals
+        // data_ready via bmdma_start_transfer(). WRITE DMA proceeds immediately
+        // (it reads from guest RAM, doesn't need device data).
+        if self.bmdma[channel].cmd_rwcon && !self.bmdma[channel].data_ready {
             self.activate_channel_timer(channel, 1);
             return;
         }
