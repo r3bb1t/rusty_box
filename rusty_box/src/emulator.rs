@@ -3488,11 +3488,13 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     pub fn ata_ch1_diag(&self) -> String {
         let ch1 = &self.device_manager.harddrv.channels[1];
         let d = ch1.selected_drive();
-        format!("s={:?} cmd={:#04x} ip={} tbr={} acmd={:#04x} rb={}",
+        let hd = &self.device_manager.harddrv;
+        format!("s={:?} cmd={:#04x} ip={} tbr={} acmd={:#04x} rb={} drqS={} drqC={}",
             d.controller.status, d.controller.current_command,
             d.controller.interrupt_pending,
             d.atapi.total_bytes_remaining, d.atapi.command,
-            d.cdrom.remaining_blocks)
+            d.cdrom.remaining_blocks,
+            hd.diag_drq_set_count, hd.diag_drq_clear_count)
     }
 
     /// Get total I/O port read/write counters for diagnostics.
