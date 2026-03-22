@@ -2170,12 +2170,12 @@ impl BxHardDriveC {
             let drive = &mut self.channels[channel_num].drives[selected as usize];
             let drq_complete = drive.controller.drq_index >= drive.atapi.drq_bytes as u32
                 && drive.atapi.drq_bytes > 0;
-            // Short DRQ: all CD blocks consumed but drq_index hasn't reached drq_bytes.
-            // The transfer is over — complete it with whatever was delivered.
+            // Short DRQ: all CD blocks consumed but DRQ cycle not complete.
+            // This happens when a DRQ phase was started but remaining_blocks=0
+            // and the buffer is empty — no data can ever be loaded to advance
+            // drq_index to drq_bytes. Force-complete the transfer.
             let short_drq = !drq_complete
                 && drive.cdrom.remaining_blocks <= 0
-                && drive.controller.buffer_index >= drive.controller.buffer_size
-                && drive.controller.drq_index > 0
                 && drive.atapi.total_bytes_remaining > 0;
             if drq_complete || short_drq {
                 drive.controller.status.remove(AtaStatus::DRQ);
