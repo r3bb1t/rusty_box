@@ -2555,6 +2555,7 @@ impl BxHardDriveC {
     }
 
     /// Initialize an ATAPI command response (Bochs init_send_atapi_command, harddrv.cc:3372-3421)
+    #[inline(never)]
     fn init_send_atapi_command(
         &mut self,
         channel_num: usize,
@@ -2564,9 +2565,21 @@ impl BxHardDriveC {
         lazy: bool,
     ) {
         let drive = self.channels[channel_num].selected_drive_mut();
-        let mut byte_count = drive.controller.cylinder_no as i32;
+        // Use black_box to prevent the optimizer from proving byte_count
+        // is never 0 and eliminating the byte_count==0 guard below.
+        let mut byte_count = core::hint::black_box(drive.controller.cylinder_no as i32);
         if byte_count == 0xffff_i32 {
             byte_count = 0xfffe;
+        }
+        // byte_count = 0 means "no limit" — use full transfer size.
+        // Without this, drq_bytes=0 causes immediate DRQ completion
+        // with 0 bytes subtracted from total_bytes_remaining, hanging
+        // the transfer forever.
+        if byte_count == 0 {
+            byte_count = if alloc_length > 0 { alloc_length } else { req_length };
+            if byte_count > 0xfffe {
+                byte_count = 0xfffe;
+            }
         }
         if (byte_count & 1) != 0 && !(alloc_length <= byte_count) {
             byte_count -= 1;
@@ -2635,6 +2648,7 @@ impl BxHardDriveC {
     }
 
     /// Signal data ready to send (Bochs ready_to_send_atapi, harddrv.cc:3482-3500)
+    #[inline(never)]
     ///
     /// Bochs sets individual fields: busy=0, drq=1, err=0
     /// preserving other bits like drive_ready (DRDY) and seek_complete (DSC).
@@ -2661,6 +2675,7 @@ impl BxHardDriveC {
     }
 
     /// Handle an ATAPI command (Bochs harddrv.cc:1304-1830)
+    #[inline(never)]
     fn handle_atapi_command(&mut self, channel_num: usize) {
         self.diag_atapi_cmd_count += 1;
         let drive = self.channels[channel_num].selected_drive_mut();
