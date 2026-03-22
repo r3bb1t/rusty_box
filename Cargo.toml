@@ -16,6 +16,3 @@ spin = { version = "0.10", default-features = false, features = ["once"] }
 bitflags = "2"
 paste = "1.0"
 tracing-subscriber = { version = "0.3" }
-
-[profile.release]
-opt-level = 2

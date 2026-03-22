@@ -1712,54 +1712,40 @@ impl BxHardDriveC {
                 let current_command = drive.controller.current_command;
                 let bytes = io_len as usize;
 
-                // Bochs harddrv.cc:929-1023 — ATAPI lazy-load: when buffer_index >= buffer_size
-                // (set by init_send_atapi_command with lazy=true), load the first/next CD block
-                // BEFORE trying to read data. Must happen before the guard check below.
+                // Bochs harddrv.cc:935-965 — ATAPI lazy-load: when buffer_index >= buffer_size,
+                // load the next CD block BEFORE reading data. Loads ONE block at a time,
+                // matching Bochs exactly. This ensures remaining_blocks decrements in lockstep
+                // with data delivery, so total_bytes_remaining always reaches 0 cleanly.
                 if current_command == ATA_CMD_PACKET
                     && drive.controller.buffer_index >= drive.controller.buffer_size
                 {
                     let atapi_cmd = drive.atapi.command;
                     match atapi_cmd {
                         0x28 | 0xa8 | 0xbe => {
-                            if drive.cdrom.remaining_blocks > 0 {
-                                let next_lba = drive.cdrom.next_lba;
-                                // Multi-sector pre-read: read up to 32 sectors in one
-                                // file I/O call to reduce syscalls (~32x fewer seeks).
-                                let max_blocks = 32usize.min(drive.cdrom.remaining_blocks as usize);
-                                // Heap-allocate temp buffer to avoid borrow checker issue
-                                // (read_cdrom_blocks needs &mut self + we need &mut buffer)
-                                let mut temp = vec![0u8; max_blocks * CDROM_SECTOR_SIZE];
-                                let sectors_read = drive.read_cdrom_blocks(
-                                    next_lba, max_blocks, &mut temp,
-                                );
-                                if sectors_read > 0 {
-                                    let total_bytes = sectors_read * CDROM_SECTOR_SIZE;
-                                    drive.controller.buffer[..total_bytes]
-                                        .copy_from_slice(&temp[..total_bytes]);
-                                    drive.controller.buffer_size = total_bytes;
-                                    drive.cdrom.next_lba += sectors_read as u32;
-                                    drive.cdrom.remaining_blocks -= sectors_read as i32;
-                                    drive.controller.buffer_index = 0;
-                                } else {
-                                    // Abort ATAPI transfer on read failure
-                                    // (matches atapi_cmd_error inline — can't call method due to borrow)
-                                    tracing::warn!("ATAPI lazy-load LBA {} FAILED — aborting transfer", next_lba);
-                                    drive.atapi.drq_bytes = 0;
-                                    drive.atapi.total_bytes_remaining = 0;
-                                    drive.cdrom.remaining_blocks = 0;
-                                    drive.controller.buffer_index = 0;
-                                    drive.controller.error = AtaError::from_bits_retain((SenseKey::MediumError as u8) << 4);
-                                    drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x03;
-                                    drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DWF | AtaStatus::DRQ);
-                                    drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::ERR);
-                                    drive.sense.sense_key = SenseKey::MediumError as u8;
-                                    drive.sense.asc = Asc::UnrecoveredReadError as u8;
-                                    drive.sense.ascq = 0;
-                                    return 0;
-                                }
+                            // Bochs harddrv.cc:942-964: read ONE block
+                            if !drive.cdrom.ready {
+                                tracing::warn!("ATAPI: read with CD-ROM not ready");
+                                return 0;
                             }
+                            let next_lba = drive.cdrom.next_lba;
+                            // Use temp buffer to avoid borrow conflict
+                            // (read_cdrom_block needs &mut self for file I/O)
+                            let mut temp = [0u8; CDROM_SECTOR_SIZE];
+                            if !drive.read_cdrom_block(next_lba, &mut temp) {
+                                tracing::warn!("ATAPI: read block {} failed", next_lba);
+                                return 0;
+                            }
+                            drive.controller.buffer[..CDROM_SECTOR_SIZE]
+                                .copy_from_slice(&temp);
+                            drive.cdrom.next_lba += 1;
+                            drive.cdrom.remaining_blocks -= 1;
+                            if drive.cdrom.remaining_blocks <= 0 {
+                                drive.cdrom.curr_lba = drive.cdrom.next_lba;
+                            }
+                            // Bochs harddrv.cc:964: index = 0
+                            drive.controller.buffer_index = 0;
                         }
-                        _ => {}
+                        _ => {} // no need to load a new block
                     }
                 }
 
@@ -1823,34 +1809,11 @@ impl BxHardDriveC {
                             drive.controller.error = AtaError::empty();
                         }
                         ATA_CMD_PACKET => {
-                            // ATAPI: CD block buffer drained (Bochs harddrv.cc:935-965)
-                            // Reload next CD block — per-block reload only.
-                            // DRQ cycle completion checked separately via drq_index below.
-                            let atapi_cmd = drive.atapi.command;
-                            match atapi_cmd {
-                                0x28 | 0xa8 | 0xbe => {
-                                    if drive.cdrom.remaining_blocks > 0 {
-                                        let next_lba = drive.cdrom.next_lba;
-                                        let max_blocks = 32usize.min(drive.cdrom.remaining_blocks as usize);
-                                        let mut temp = vec![0u8; max_blocks * CDROM_SECTOR_SIZE];
-                                        let sectors_read = drive.read_cdrom_blocks(
-                                            next_lba, max_blocks, &mut temp,
-                                        );
-                                        if sectors_read > 0 {
-                                            let total_bytes = sectors_read * CDROM_SECTOR_SIZE;
-                                            drive.controller.buffer[..total_bytes]
-                                                .copy_from_slice(&temp[..total_bytes]);
-                                            drive.controller.buffer_size = total_bytes;
-                                            drive.cdrom.next_lba += sectors_read as u32;
-                                            drive.cdrom.remaining_blocks -= sectors_read as i32;
-                                        }
-                                    }
-                                    drive.controller.buffer_index = 0;
-                                }
-                                _ => {
-                                    drive.controller.buffer_index = 0;
-                                }
-                            }
+                            // In Bochs, ATAPI block reload happens at the TOP of the
+                            // read handler (harddrv.cc:935-965), not here. The buffer_index
+                            // reset is the only thing needed — the next read will trigger
+                            // the lazy-load above.
+                            drive.controller.buffer_index = drive.controller.buffer_size;
                         }
                         _ => {
                             drive.controller.status.remove(AtaStatus::DRQ);
@@ -1869,6 +1832,7 @@ impl BxHardDriveC {
 
                     drive.atapi.total_bytes_remaining -= drive.atapi.drq_bytes;
 
+                    // Bochs harddrv.cc:992-1006
                     if drive.atapi.total_bytes_remaining > 0 {
                         drive.controller.sector_count =
                             (drive.controller.sector_count & 0xF8) | 0x02;
@@ -1882,9 +1846,10 @@ impl BxHardDriveC {
                         }
                         drive.atapi.drq_bytes = drive.controller.cylinder_no as i32;
                     } else {
+                        // Transfer complete (or no more blocks to deliver)
+                        drive.atapi.total_bytes_remaining = 0;
                         drive.controller.sector_count =
                             (drive.controller.sector_count & 0xF8) | 0x03;
-                        // Preserve DSC — same pattern as atapi_cmd_nop
                         drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
                         drive.controller.status.insert(AtaStatus::DRDY);
                     }
@@ -2012,7 +1977,10 @@ impl BxHardDriveC {
         let mut need_abort_cmd: Option<u8> = None;
 
         while total_copied < buf.len() {
-            // ATAPI lazy-load: pre-fill buffer if exhausted
+            // Bochs harddrv.cc:935-965 — ATAPI lazy-load: load ONE block when
+            // buffer is exhausted. Single-block loading keeps remaining_blocks
+            // in lockstep with data delivery, preventing the hang where
+            // remaining_blocks=0 but total_bytes_remaining > 0.
             if current_command == ATA_CMD_PACKET
                 && drive.controller.buffer_index >= drive.controller.buffer_size
             {
@@ -2021,26 +1989,20 @@ impl BxHardDriveC {
                     0x28 | 0xa8 | 0xbe => {
                         if drive.cdrom.remaining_blocks > 0 {
                             let next_lba = drive.cdrom.next_lba;
-                            let max_blocks = 32usize.min(drive.cdrom.remaining_blocks as usize);
-                            let mut temp = vec![0u8; max_blocks * CDROM_SECTOR_SIZE];
-                            let sectors_read = drive.read_cdrom_blocks(
-                                next_lba, max_blocks, &mut temp,
-                            );
-                            if sectors_read > 0 {
-                                let total_bytes = sectors_read * CDROM_SECTOR_SIZE;
-                                drive.controller.buffer[..total_bytes]
-                                    .copy_from_slice(&temp[..total_bytes]);
-                                drive.controller.buffer_size = total_bytes;
-                                drive.cdrom.next_lba += sectors_read as u32;
-                                drive.cdrom.remaining_blocks -= sectors_read as i32;
-                                drive.controller.buffer_index = 0;
-                            } else {
+                            let mut temp = [0u8; CDROM_SECTOR_SIZE];
+                            if !drive.read_cdrom_block(next_lba, &mut temp) {
                                 break;
                             }
+                            drive.controller.buffer[..CDROM_SECTOR_SIZE]
+                                .copy_from_slice(&temp);
+                            drive.controller.buffer_size = CDROM_SECTOR_SIZE;
+                            drive.cdrom.next_lba += 1;
+                            drive.cdrom.remaining_blocks -= 1;
+                            if drive.cdrom.remaining_blocks <= 0 {
+                                drive.cdrom.curr_lba = drive.cdrom.next_lba;
+                            }
+                            drive.controller.buffer_index = 0;
                         } else {
-                            // No more blocks. Update curr_lba (Bochs harddrv.cc:953)
-                            // and let the DRQ check below handle completion.
-                            drive.cdrom.curr_lba = drive.cdrom.next_lba;
                             break;
                         }
                     }
@@ -2098,19 +2060,9 @@ impl BxHardDriveC {
                         break;
                     }
                     ATA_CMD_PACKET => {
-                        let atapi_cmd = drive.atapi.command;
-                        match atapi_cmd {
-                            0x28 | 0xa8 | 0xbe => {
-                                // Reset buffer position so lazy-load at top of loop
-                                // triggers on next iteration (buffer_index >= buffer_size).
-                                drive.controller.buffer_index = 0;
-                                drive.controller.buffer_size = 0;
-                            }
-                            _ => {
-                                drive.controller.buffer_index = 0;
-                                drive.controller.buffer_size = 0;
-                            }
-                        }
+                        // Bochs: block reload happens at the lazy-load check at top
+                        // of loop. Mark buffer as exhausted so next iteration triggers it.
+                        drive.controller.buffer_index = drive.controller.buffer_size;
                     }
                     _ => {
                         drive.controller.status.remove(AtaStatus::DRQ);
@@ -2126,13 +2078,8 @@ impl BxHardDriveC {
                 drive.controller.status.remove(AtaStatus::DRQ);
                 drive.controller.drq_index = 0;
                 drive.atapi.total_bytes_remaining -= drive.atapi.drq_bytes;
-                // Only start another DRQ phase if there's both remaining byte count
-                // AND remaining CD blocks to read. When remaining_blocks=0 but
-                // total_bytes_remaining > 0, the transfer is effectively complete
-                // (all actual data delivered). Force completion to avoid hanging.
-                if drive.atapi.total_bytes_remaining > 0
-                    && drive.cdrom.remaining_blocks > 0
-                {
+                // Bochs harddrv.cc:992-1006
+                if drive.atapi.total_bytes_remaining > 0 {
                     drive.controller.sector_count =
                         (drive.controller.sector_count & 0xF8) | 0x02;
                     drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::DRQ);
@@ -2155,41 +2102,20 @@ impl BxHardDriveC {
         }
 
         // Post-loop DRQ completion check: handles the case where the while loop
-        // breaks early (e.g. remaining_blocks == 0 during lazy-load) but drq_index
-        // has reached drq_bytes. Without this, the final DRQ completion status
-        // transition and interrupt never fire, causing the kernel to poll forever.
-        // Matches Bochs harddrv.cc:986-1020 which checks this on every word read.
-        //
-        // Also handles the "short DRQ" case: remaining_blocks == 0 and buffer
-        // exhausted, but drq_index < drq_bytes. The DRQ byte count was set larger
-        // than the actual remaining data. Force-complete the transfer by treating
-        // the delivered bytes as the full DRQ cycle.
+        // breaks early but drq_index has reached drq_bytes.
+        // Matches Bochs harddrv.cc:986-1020.
         if !need_raise_irq && need_abort_cmd.is_none()
             && current_command == ATA_CMD_PACKET
         {
             let drive = &mut self.channels[channel_num].drives[selected as usize];
-            let drq_complete = drive.controller.drq_index >= drive.atapi.drq_bytes as u32
-                && drive.atapi.drq_bytes > 0;
-            // Short DRQ: all CD blocks consumed but DRQ cycle not complete.
-            // This happens when a DRQ phase was started but remaining_blocks=0
-            // and the buffer is empty — no data can ever be loaded to advance
-            // drq_index to drq_bytes. Force-complete the transfer.
-            let short_drq = !drq_complete
-                && drive.cdrom.remaining_blocks <= 0
-                && drive.atapi.total_bytes_remaining > 0;
-            if drq_complete || short_drq {
+            if drive.controller.drq_index >= drive.atapi.drq_bytes as u32
+                && drive.atapi.drq_bytes > 0
+            {
                 drive.controller.status.remove(AtaStatus::DRQ);
-                // For short DRQ: force remaining to 0 since all CD data was consumed
-                if short_drq {
-                    drive.atapi.total_bytes_remaining = 0;
-                } else {
-                    drive.atapi.total_bytes_remaining -= drive.atapi.drq_bytes;
-                }
                 drive.controller.drq_index = 0;
-                if drive.atapi.total_bytes_remaining > 0
-                    && drive.cdrom.remaining_blocks > 0
-                {
-                    // More DRQ phases remain (Bochs harddrv.cc:992-1006)
+                drive.atapi.total_bytes_remaining -= drive.atapi.drq_bytes;
+                if drive.atapi.total_bytes_remaining > 0 {
+                    // Bochs harddrv.cc:992-1006
                     drive.controller.sector_count =
                         (drive.controller.sector_count & 0xF8) | 0x02;
                     drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::DRQ);
@@ -2200,8 +2126,7 @@ impl BxHardDriveC {
                     }
                     drive.atapi.drq_bytes = drive.controller.cylinder_no as i32;
                 } else {
-                    // All bytes read or no more blocks (Bochs harddrv.cc:1007-1018)
-                    drive.atapi.total_bytes_remaining = 0;
+                    // Bochs harddrv.cc:1007-1018
                     drive.controller.sector_count =
                         (drive.controller.sector_count & 0xF8) | 0x03;
                     drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
@@ -2555,7 +2480,6 @@ impl BxHardDriveC {
     }
 
     /// Initialize an ATAPI command response (Bochs init_send_atapi_command, harddrv.cc:3372-3421)
-    #[inline(never)]
     fn init_send_atapi_command(
         &mut self,
         channel_num: usize,
@@ -2565,21 +2489,20 @@ impl BxHardDriveC {
         lazy: bool,
     ) {
         let drive = self.channels[channel_num].selected_drive_mut();
-        // Use black_box to prevent the optimizer from proving byte_count
-        // is never 0 and eliminating the byte_count==0 guard below.
-        let mut byte_count = core::hint::black_box(drive.controller.cylinder_no as i32);
+        // Volatile read prevents the optimizer from proving byte_count != 0
+        // and eliminating the guard below. Without volatile, opt-level=3
+        // eliminates the guard via cross-function analysis.
+        let mut byte_count = unsafe {
+            core::ptr::read_volatile(&drive.controller.cylinder_no)
+        } as i32;
         if byte_count == 0xffff_i32 {
             byte_count = 0xfffe;
         }
         // byte_count = 0 means "no limit" — use full transfer size.
-        // Without this, drq_bytes=0 causes immediate DRQ completion
-        // with 0 bytes subtracted from total_bytes_remaining, hanging
-        // the transfer forever.
+        // Without this, drq_bytes=0 causes immediate DRQ completion with
+        // 0 bytes subtracted from total_bytes_remaining → infinite loop.
         if byte_count == 0 {
-            byte_count = if alloc_length > 0 { alloc_length } else { req_length };
-            if byte_count > 0xfffe {
-                byte_count = 0xfffe;
-            }
+            byte_count = req_length.min(0xfffe);
         }
         if (byte_count & 1) != 0 && !(alloc_length <= byte_count) {
             byte_count -= 1;
@@ -2648,7 +2571,6 @@ impl BxHardDriveC {
     }
 
     /// Signal data ready to send (Bochs ready_to_send_atapi, harddrv.cc:3482-3500)
-    #[inline(never)]
     ///
     /// Bochs sets individual fields: busy=0, drq=1, err=0
     /// preserving other bits like drive_ready (DRDY) and seek_complete (DSC).
@@ -2675,7 +2597,6 @@ impl BxHardDriveC {
     }
 
     /// Handle an ATAPI command (Bochs harddrv.cc:1304-1830)
-    #[inline(never)]
     fn handle_atapi_command(&mut self, channel_num: usize) {
         self.diag_atapi_cmd_count += 1;
         let drive = self.channels[channel_num].selected_drive_mut();
