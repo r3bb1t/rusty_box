@@ -1309,26 +1309,8 @@ pub struct BxHardDriveC {
     /// Raw pointer to PCI IDE controller for BM-DMA set_irq.
     /// Bochs: DEV_ide_bmdma_set_irq() in harddrv.cc:3509
     pub(crate) pci_ide_ptr: *mut super::pci_ide::BxPciIde,
-    /// Diagnostic: total read() calls
-    pub(crate) read_count: u64,
-    /// Diagnostic: total write() calls
-    pub(crate) write_count: u64,
-    /// Diagnostic: total times irq14 was raised (immediate or deferred)
-    pub(crate) diag_irq14_raise_count: u64,
-    /// Diagnostic: count of DRQ set operations
-    pub(crate) diag_drq_set_count: u64,
-    /// Diagnostic: last DRQ clear location ID
-    pub(crate) diag_drq_clear_loc: u32,
-    /// Diagnostic: total times irq14 was lowered (immediate or deferred)
-    pub(crate) diag_irq14_lower_count: u64,
-    /// Diagnostic: command history (last 32 commands)
-    pub(crate) cmd_history: Vec<(u8, u8, u32)>, // (channel, command, lba)
-    /// Diagnostic: ATA reads on channel 0 (empty) — tracks empty channel polling
-    pub(crate) diag_ch0_reads: u64,
-    /// Diagnostic: ATA reads on channel 1 (CD-ROM)
-    pub(crate) diag_ch1_reads: u64,
-    /// Diagnostic: total ATAPI commands dispatched
-    pub(crate) diag_atapi_cmd_count: u64,
+    /// Command history ring buffer (last 32 commands) for diagnostics
+    pub(crate) cmd_history: Vec<(u8, u8, u32)>,
 }
 
 impl Default for BxHardDriveC {
@@ -1347,15 +1329,6 @@ impl BxHardDriveC {
             ],
             pic_ptr: core::ptr::null_mut(),
             pci_ide_ptr: core::ptr::null_mut(),
-            read_count: 0,
-            write_count: 0,
-            diag_irq14_raise_count: 0,
-            diag_drq_set_count: 0,
-            diag_drq_clear_loc: 0,
-            diag_irq14_lower_count: 0,
-            diag_ch0_reads: 0,
-            diag_ch1_reads: 0,
-            diag_atapi_cmd_count: 0,
             cmd_history: Vec::new(),
         }
     }
@@ -1482,9 +1455,6 @@ impl BxHardDriveC {
                 // PIC forwards to IOAPIC synchronously (Bochs pic.cc:499-500).
                 let pic = unsafe { &mut *self.pic_ptr };
                 pic.raise_irq(irq);
-            }
-            if irq == 14 {
-                self.diag_irq14_raise_count += 1;
             }
         }
     }
@@ -1632,7 +1602,6 @@ impl BxHardDriveC {
 
         // Bochs harddrv.cc:3680-3693
         drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
-        self.diag_drq_clear_loc = 1; // bmdma_complete
         drive.controller.status.insert(AtaStatus::DRDY);
         if is_cdrom {
             // Bochs harddrv.cc:3685-3688: set interrupt_reason I/O=1, C/D=1
@@ -1671,18 +1640,11 @@ impl BxHardDriveC {
     ///
     /// For READ MULTIPLE (0xC4), multiple sectors are buffered at once.
     /// The buffer_size is set to `min(multiple_sectors, num_sectors) * sect_size`.
-    #[inline(never)]
     pub fn read(&mut self, port: u16, io_len: u8) -> u32 {
-        self.read_count += 1;
         let channel_num = match self.port_to_channel(port) {
             Some(c) => c,
             None => return 0xFF,
         };
-        match channel_num {
-            0 => self.diag_ch0_reads += 1,
-            _ => self.diag_ch1_reads += 1,
-        }
-
         let channel = &mut self.channels[channel_num];
         let base = channel.ioaddr1;
         let drive_select = channel.drive_select;
@@ -1825,7 +1787,6 @@ impl BxHardDriveC {
                         }
                         _ => {
                             drive.controller.status.remove(AtaStatus::DRQ);
-                            self.diag_drq_clear_loc = 2; // per-word buffer drain default
                         }
                     }
                 }
@@ -1837,7 +1798,6 @@ impl BxHardDriveC {
                     && drive.controller.drq_index >= drive.atapi.drq_bytes as u32
                 {
                     drive.controller.status.remove(AtaStatus::DRQ);
-                    self.diag_drq_clear_loc = 3; // per-word DRQ completion (initial clear)
                     drive.controller.drq_index = 0;
 
                     drive.atapi.total_bytes_remaining -= drive.atapi.drq_bytes;
@@ -1847,7 +1807,6 @@ impl BxHardDriveC {
                         drive.controller.sector_count =
                             (drive.controller.sector_count & 0xF8) | 0x02;
                         drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::DRQ);
-                        self.diag_drq_set_count += 1; // DRQ re-set for next phase
                         drive.controller.status.remove(AtaStatus::BSY | AtaStatus::ERR);
                         if drive.atapi.total_bytes_remaining
                             < drive.controller.cylinder_no as i32
@@ -1861,7 +1820,6 @@ impl BxHardDriveC {
                         drive.controller.sector_count =
                             (drive.controller.sector_count & 0xF8) | 0x03;
                         drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
-                        self.diag_drq_clear_loc = 4; // per-word DRQ completion (transfer done)
                         drive.controller.status.insert(AtaStatus::DRDY);
                     }
                     need_raise_irq = true;
@@ -1943,13 +1901,9 @@ impl BxHardDriveC {
                         let pic = unsafe { &mut *self.pic_ptr };
                         pic.lower_irq(irq);
                     }
-                    if irq == 14 {
-                        self.diag_irq14_lower_count += 1;
-                    }
                 }
                 tracing::debug!(
-                    "ATA: Status read #{} = {:#04x} (port={:#06x}) cmd={:#04x} drq={}",
-                    self.read_count,
+                    "ATA: Status read {:#04x} (port={:#06x}) cmd={:#04x} drq={}",
                     status.bits(),
                     port,
                     drive.controller.current_command,
@@ -1966,7 +1920,6 @@ impl BxHardDriveC {
     /// Equivalent to calling `read(port, 2)` in a loop but avoids per-word
     /// handler dispatch overhead. Returns the number of bytes actually copied.
     /// Handles ATAPI lazy-load, sector transitions, and DRQ completion.
-    #[inline(never)]
     pub fn bulk_read_data(&mut self, port: u16, buf: &mut [u8]) -> usize {
         let channel_num = match self.port_to_channel(port) {
             Some(c) => c,
@@ -2087,7 +2040,6 @@ impl BxHardDriveC {
                     }
                     _ => {
                         drive.controller.status.remove(AtaStatus::DRQ);
-                        self.diag_drq_clear_loc = 8; // bulk buffer drain default
                         break;
                     }
                 }
@@ -2098,7 +2050,6 @@ impl BxHardDriveC {
                 && drive.controller.drq_index >= drive.atapi.drq_bytes as u32
             {
                 drive.controller.status.remove(AtaStatus::DRQ);
-                self.diag_drq_clear_loc = 9; // bulk in-loop DRQ completion
                 drive.controller.drq_index = 0;
                 drive.atapi.total_bytes_remaining -= drive.atapi.drq_bytes;
                 // Bochs harddrv.cc:992-1006
@@ -2106,7 +2057,6 @@ impl BxHardDriveC {
                     drive.controller.sector_count =
                         (drive.controller.sector_count & 0xF8) | 0x02;
                     drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::DRQ);
-                    self.diag_drq_set_count += 1;
                     drive.controller.status.remove(AtaStatus::BSY | AtaStatus::ERR);
                     if drive.atapi.total_bytes_remaining < drive.controller.cylinder_no as i32 {
                         drive.controller.cylinder_no =
@@ -2117,7 +2067,6 @@ impl BxHardDriveC {
                     drive.controller.sector_count =
                         (drive.controller.sector_count & 0xF8) | 0x03;
                     drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
-                    self.diag_drq_clear_loc = 10; // bulk in-loop transfer done
                     drive.controller.status.insert(AtaStatus::DRDY);
                 }
                 need_raise_irq = true;
@@ -2137,7 +2086,6 @@ impl BxHardDriveC {
                 && drive.atapi.drq_bytes > 0
             {
                 drive.controller.status.remove(AtaStatus::DRQ);
-                self.diag_drq_clear_loc = 11; // bulk post-loop DRQ completion
                 drive.controller.drq_index = 0;
                 drive.atapi.total_bytes_remaining -= drive.atapi.drq_bytes;
                 if drive.atapi.total_bytes_remaining > 0 {
@@ -2145,7 +2093,6 @@ impl BxHardDriveC {
                     drive.controller.sector_count =
                         (drive.controller.sector_count & 0xF8) | 0x02;
                     drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::DRQ);
-                    self.diag_drq_set_count += 1;
                     drive.controller.status.remove(AtaStatus::BSY | AtaStatus::ERR);
                     if drive.atapi.total_bytes_remaining < drive.controller.cylinder_no as i32 {
                         drive.controller.cylinder_no =
@@ -2154,7 +2101,6 @@ impl BxHardDriveC {
                     drive.atapi.drq_bytes = drive.controller.cylinder_no as i32;
                 } else {
                     // Bochs harddrv.cc:1007-1018
-                    self.diag_drq_clear_loc = 12; // bulk post-loop transfer done
                     drive.controller.sector_count =
                         (drive.controller.sector_count & 0xF8) | 0x03;
                     drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
@@ -2214,9 +2160,7 @@ impl BxHardDriveC {
     /// - Decrements `num_sectors` via `increment_address()`
     /// - If `num_sectors > 0`: keeps DRQ=1, raises IRQ for next sector
     /// - If `num_sectors == 0`: clears DRQ, raises final completion IRQ
-    #[inline(never)]
     pub fn write(&mut self, port: u16, value: u32, io_len: u8) {
-        self.write_count += 1;
         let channel_num = match self.port_to_channel(port) {
             Some(c) => c,
             None => return,
@@ -2509,7 +2453,6 @@ impl BxHardDriveC {
     }
 
     /// Initialize an ATAPI command response (Bochs init_send_atapi_command, harddrv.cc:3372-3421)
-    #[inline(never)]
     fn init_send_atapi_command(
         &mut self,
         channel_num: usize,
@@ -2519,20 +2462,10 @@ impl BxHardDriveC {
         lazy: bool,
     ) {
         let drive = self.channels[channel_num].selected_drive_mut();
-        // Volatile read prevents the optimizer from proving byte_count != 0
-        // and eliminating the guard below. Without volatile, opt-level=3
-        // eliminates the guard via cross-function analysis.
-        let mut byte_count = unsafe {
-            core::ptr::read_volatile(&drive.controller.cylinder_no)
-        } as i32;
+        // Bochs harddrv.cc:3379-3393
+        let mut byte_count = drive.controller.cylinder_no as i32;
         if byte_count == 0xffff_i32 {
             byte_count = 0xfffe;
-        }
-        // byte_count = 0 means "no limit" — use full transfer size.
-        // Without this, drq_bytes=0 causes immediate DRQ completion with
-        // 0 bytes subtracted from total_bytes_remaining → infinite loop.
-        if byte_count == 0 {
-            byte_count = req_length.min(0xfffe);
         }
         if (byte_count & 1) != 0 && !(alloc_length <= byte_count) {
             byte_count -= 1;
@@ -2547,7 +2480,6 @@ impl BxHardDriveC {
         // Bochs sets individual fields: busy=1, drive_ready=1, drq=0, err=0
         // preserving other bits like seek_complete (DSC).
         drive.controller.status.remove(AtaStatus::DRQ | AtaStatus::ERR);
-        self.diag_drq_clear_loc = 5; // init_send_atapi_command
         drive.controller.status.insert(AtaStatus::BSY | AtaStatus::DRDY);
 
         if lazy {
@@ -2583,7 +2515,6 @@ impl BxHardDriveC {
         drive.controller.error = AtaError::from_bits_retain((sense_key as u8) << 4);
         drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x03; // i_o=1, c_d=1
         drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DWF | AtaStatus::DRQ);
-        self.diag_drq_clear_loc = 6; // atapi_cmd_error
         drive.controller.status.insert(AtaStatus::DRDY | AtaStatus::ERR);
 
         drive.sense.sense_key = sense_key as u8;
@@ -2599,12 +2530,10 @@ impl BxHardDriveC {
         let drive = self.channels[channel_num].selected_drive_mut();
         drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x03; // i_o=1, c_d=1
         drive.controller.status.remove(AtaStatus::BSY | AtaStatus::DRQ | AtaStatus::ERR);
-        self.diag_drq_clear_loc = 7; // atapi_cmd_nop
         drive.controller.status.insert(AtaStatus::DRDY);
     }
 
     /// Signal data ready to send (Bochs ready_to_send_atapi, harddrv.cc:3482-3500)
-    #[inline(never)]
     ///
     /// Bochs sets individual fields: busy=0, drq=1, err=0
     /// preserving other bits like drive_ready (DRDY) and seek_complete (DSC).
@@ -2617,7 +2546,6 @@ impl BxHardDriveC {
         drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x02; // i_o=1, c_d=0
         drive.controller.status.remove(AtaStatus::BSY | AtaStatus::ERR);
         drive.controller.status.insert(AtaStatus::DRQ);
-        self.diag_drq_set_count += 1;
 
         // Bochs harddrv.cc:3493-3498: DMA vs PIO branch
         if drive.controller.packet_dma {
@@ -2632,9 +2560,7 @@ impl BxHardDriveC {
     }
 
     /// Handle an ATAPI command (Bochs harddrv.cc:1304-1830)
-    #[inline(never)]
     fn handle_atapi_command(&mut self, channel_num: usize) {
-        self.diag_atapi_cmd_count += 1;
         let drive = self.channels[channel_num].selected_drive_mut();
         let atapi_command = drive.controller.buffer[0];
         drive.controller.buffer_size = CDROM_SECTOR_SIZE;
@@ -3908,9 +3834,8 @@ impl BxHardDriveC {
             }
         }
         s.push_str(&format!(
-            "  irq14_level={} irq15_level={}\n  irq14_raise_count={} irq14_lower_count={}\n",
+            "  irq14_level={} irq15_level={}\n",
             self.get_irq_level(0), self.get_irq_level(1),
-            self.diag_irq14_raise_count, self.diag_irq14_lower_count,
         ));
         s.push_str(&format!("  cmd_history ({} cmds):", self.cmd_history.len()));
         for (i, &(ch, cmd, lba)) in self.cmd_history.iter().enumerate() {

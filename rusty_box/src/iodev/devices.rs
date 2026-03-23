@@ -825,7 +825,7 @@ impl DeviceManager {
 
     /// Get ATA I/O counts for diagnostics
     pub fn ata_io_counts(&self) -> (u64, u64) {
-        (self.harddrv.read_count, self.harddrv.write_count)
+        (0, 0)
     }
 
     /// Get PIC diagnostic string
