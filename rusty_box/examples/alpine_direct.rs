@@ -222,6 +222,7 @@ fn run_alpine() -> Result<()> {
         guest_memory_size: ram_bytes,
         host_memory_size: ram_bytes,
         ips: 15_000_000,
+        pci_enabled: true,
         ..EmulatorConfig::default()
     };
 
@@ -310,7 +311,7 @@ fn run_alpine() -> Result<()> {
         println!("  Initramfs: {} bytes ({} MB)", initramfs.len(), initramfs.len() / 1024 / 1024);
 
         let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_|
-            "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 earlyprintk=serial,ttyS0,115200 nomodeset nokaslr kfence.sample_interval=0 modules=cdrom,sr_mod,isofs libata.atapi_dma=1".to_string()
+            "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 earlyprintk=serial,ttyS0,115200 nomodeset nokaslr kfence.sample_interval=0 modules=loop,squashfs,cdrom,sr_mod,isofs".to_string()
         );
 
         // Initialize CPU + devices

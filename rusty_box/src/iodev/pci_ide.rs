@@ -154,8 +154,12 @@ impl BxPciIde {
         self.pci_conf[0x03] = 0x70;
         // Revision: 0x00
         self.pci_conf[0x08] = 0x00;
-        // Class code: IDE controller (0x010180) — native-mode capable, both channels
-        self.pci_conf[0x09] = 0x80;
+        // Class code: IDE controller — ISA-compatible, no bus master DMA.
+        // Bochs uses 0x80 (bus master capable) because its DMA engine works.
+        // Our BM-DMA timer is disabled, so advertising bus master causes the
+        // kernel to attempt DMA transfers that never complete (30-second timeouts).
+        // Set 0x00 to force PIO mode until the DMA engine is implemented.
+        self.pci_conf[0x09] = 0x00;
         self.pci_conf[0x0A] = 0x01;
         self.pci_conf[0x0B] = 0x01;
         // Header type: single function (but shared with ISA bridge)
@@ -625,23 +629,16 @@ impl BxPciIde {
                 0x04 => {
                     self.pci_conf[addr] = value8 & 0x05;
                 }
-                // BAR4 (BM-DMA base address) — 16-port I/O BAR
-                // Bochs: pci_write_handler_common() (devices.cc:1721-1743)
-                // Low byte (0x20): bit 0 = 1 (I/O type), bits 1-3 = 0 (hardwired),
-                // only bits 4-7 writable (16-port size alignment mask).
-                // This makes BAR sizing return 0xFFFFFFF1 for a 16-port I/O BAR.
-                // Upper bytes (0x21-0x23): fully writable.
+                // BAR4 (BM-DMA base address) — hardwired to 0 (no BM-DMA).
+                // Our BM-DMA timer is disabled, so we must not advertise BAR4.
+                // If BAR4 responds to sizing probes, the BIOS assigns an address
+                // and the kernel (ata_piix) attempts DMA transfers that never
+                // complete — causing 30-second timeouts on every CD-ROM read.
+                // When the DMA engine is implemented, restore the 16-port I/O BAR:
+                //   addr 0x20: (value8 & 0xF0) | 0x01
+                //   addr 0x21-0x23: value8
                 0x20..=0x23 => {
-                    // BAR4: 16-port I/O BAR. Low byte hardwires bits 0-3.
-                    // Bochs devices.cc:1735-1737: value8 = (value8 & 0xfc) | 0x01
-                    // For 16-port: bits 0-3 fixed → mask = 0xF0 | 0x01
-                    let masked = if addr == 0x20 {
-                        (value8 & 0xF0) | 0x01
-                    } else {
-                        value8
-                    };
-                    bar4_changed |= masked != oldval;
-                    self.pci_conf[addr] = masked;
+                    // BAR4 writes ignored — hardwired to 0
                 }
                 // Default: store (pci_ide.cc:450-453)
                 _ => {

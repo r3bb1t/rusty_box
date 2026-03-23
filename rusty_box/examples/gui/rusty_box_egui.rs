@@ -261,7 +261,7 @@ fn run_emulator(
             let (kernel, initramfs) =
                 extract_kernel_from_iso(&iso_data).expect("Failed to extract kernel from ISO");
             let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_| {
-                "console=ttyS0,115200 console=tty0 earlycon=uart8250,io,0x3f8,115200n8 nomodeset nokaslr kfence.sample_interval=0 modules=cdrom,sr_mod,isofs libata.atapi_dma=1".to_string()
+                "console=ttyS0,115200 console=tty0 earlycon=uart8250,io,0x3f8,115200n8 nomodeset nokaslr kfence.sample_interval=0 modules=loop,squashfs,cdrom,sr_mod,isofs".to_string()
             });
             println!(
                 "Direct boot: kernel={} bytes, initramfs={} bytes",
@@ -312,13 +312,14 @@ fn run_emulator(
     emu.init_gui_signal_handlers();
     emu.start();
 
-    // For Alpine BIOS boot: pre-queue kernel parameters for ISOLINUX prompt.
-    // The keyboard buffer holds these until ISOLINUX reads them at the boot: prompt.
-    // This enables ATAPI DMA + serial console output.
+    // For Alpine BIOS boot: pre-queue Enter at the ISOLINUX boot prompt.
+    // The SYSLINUX config already specifies the right kernel, initrd, and modules.
+    // We just add console=ttyS0 for serial output visibility.
+    // No PCI means no ata_piix/DMA — kernel uses legacy ISA IDE, matching Bochs.
     if matches!(profile, BootProfile::Alpine { .. }) {
         emu.prepare_run();
-        println!("Pre-queuing ISOLINUX boot: virt libata.atapi_dma=1");
-        emu.send_string("    virt libata.atapi_dma=1\n");
+        println!("Pre-queuing ISOLINUX boot: virt console=ttyS0,115200");
+        emu.send_string("    virt console=ttyS0,115200\n");
     }
 
     println!("Emulator started (max {} instructions)", max_instructions);

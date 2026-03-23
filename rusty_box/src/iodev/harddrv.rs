@@ -1437,10 +1437,16 @@ impl BxHardDriveC {
     /// are still updated by the caller — the host can poll Alternate Status instead.
     fn raise_interrupt(&mut self, channel_num: usize) {
         let drive = self.channels[channel_num].selected_drive_mut();
-        // Only raise if nIEN bit (bit 1 of control register) is clear
+        // Always record that the drive wants an interrupt (the drive asserts
+        // its interrupt line regardless of nIEN). Bochs doesn't have this field
+        // but we need it because our commands complete synchronously — before the
+        // kernel clears nIEN. When nIEN transitions 1→0 (in the control register
+        // write handler), we check interrupt_pending and raise the PIC IRQ then.
+        drive.controller.interrupt_pending = true;
+
+        // Only raise PIC IRQ if nIEN bit (bit 1 of control register) is clear.
         // Matches Bochs: raise_interrupt() calls DEV_pic_raise_irq() directly.
         if (drive.controller.control & 0x02) == 0 {
-            drive.controller.interrupt_pending = true;
             let irq = match channel_num {
                 0 => 14u8,
                 _ => 15u8,
@@ -2381,6 +2387,27 @@ impl BxHardDriveC {
                     channel.drives[d].controller.control = value;
                 }
 
+                // nIEN transition 1→0: if the selected drive has a pending interrupt
+                // that was deferred (because nIEN was set when the drive completed),
+                // raise the PIC IRQ now. This handles the timing mismatch where our
+                // commands complete synchronously during CDB writes, before the kernel
+                // clears nIEN. In real hardware, the interrupt line stays asserted and
+                // becomes visible to the PIC when nIEN is cleared.
+                if prev_nien && !new_nien {
+                    let selected = channel.drive_select as usize;
+                    if channel.drives[selected].controller.interrupt_pending {
+                        let irq = if channel_num == 0 { 14u8 } else { 15u8 };
+                        if !self.pci_ide_ptr.is_null() {
+                            let pci_ide = unsafe { &mut *self.pci_ide_ptr };
+                            pci_ide.bmdma_set_irq(channel_num as u8);
+                        }
+                        if !self.pic_ptr.is_null() {
+                            let pic = unsafe { &mut *self.pic_ptr };
+                            pic.raise_irq(irq);
+                        }
+                    }
+                }
+
                 // Software reset — affects both drives
                 if (value & 0x04) != 0 && prev_reset == 0 {
                     // Transition 0→1: Assert SRST (Bochs harddrv.cc:2823-2849)
@@ -2564,6 +2591,22 @@ impl BxHardDriveC {
         let drive = self.channels[channel_num].selected_drive_mut();
         let atapi_command = drive.controller.buffer[0];
         drive.controller.buffer_size = CDROM_SECTOR_SIZE;
+
+        // Modloop investigation: print every ATAPI command with LBA for READ(10)
+        {
+            static ATAPI_COUNT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let n = ATAPI_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+            if atapi_command == 0x28 {
+                let lba = ((drive.controller.buffer[2] as u32) << 24)
+                    | ((drive.controller.buffer[3] as u32) << 16)
+                    | ((drive.controller.buffer[4] as u32) << 8)
+                    | drive.controller.buffer[5] as u32;
+                let tlen = ((drive.controller.buffer[7] as u16) << 8) | drive.controller.buffer[8] as u16;
+                eprintln!("[ATAPI#{}] READ(10) LBA={} len={} ch={}", n, lba, tlen, channel_num);
+            } else {
+                eprintln!("[ATAPI#{}] cmd={:#04x} ch={}", n, atapi_command, channel_num);
+            }
+        }
 
         tracing::debug!("ATAPI: cmd={:#04x} ch={} sc={}", atapi_command, channel_num, drive.status_changed);
 
