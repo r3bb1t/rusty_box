@@ -1854,10 +1854,11 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     let (vec15, masked15, trig15, dmode15) = self.device_manager.ioapic.redirect_entry_diag(15);
                                     let (intin15, irr15) = self.device_manager.ioapic.pin_state(15);
                                     let lapic = unsafe { &*self.cpu.lapic_ptr_mut() };
+                                    let (tmr_active, tmr_init, tmr_period, tmr_vec, tmr_act_pend, tmr_deact_pend) = lapic.hlt_timer_diag();
                                     tracing::warn!(
-                                        "IOAPIC pin14: vec={:#04x} masked={} trig={} dmode={} intin={} irr={} | LAPIC intr={} activity={:?}",
+                                        "IOAPIC pin14: vec={:#04x} masked={} trig={} dmode={} intin={} irr={} | LAPIC intr={} activity={:?} timer_active={} timer_vec={:#04x} timer_period={}",
                                         vec14, masked14, trig14, dmode14, intin14, irr14,
-                                        lapic.intr, self.cpu.activity_state,
+                                        lapic.intr, self.cpu.activity_state, tmr_active, tmr_vec, tmr_period,
                                     );
                                     tracing::warn!(
                                         "IOAPIC pin15: vec={:#04x} masked={} trig={} dmode={} intin={} irr={}",
