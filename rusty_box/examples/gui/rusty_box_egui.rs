@@ -261,7 +261,7 @@ fn run_emulator(
             let (kernel, initramfs) =
                 extract_kernel_from_iso(&iso_data).expect("Failed to extract kernel from ISO");
             let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_| {
-                "console=ttyS0,115200 console=tty0 earlycon=uart8250,io,0x3f8,115200n8 nomodeset nokaslr kfence.sample_interval=0 modules=loop,squashfs,cdrom,sr_mod,isofs".to_string()
+                "console=tty0 console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 nomodeset nokaslr kfence.sample_interval=0 modules=loop,squashfs,cdrom,sr_mod,isofs".to_string()
             });
             println!(
                 "Direct boot: kernel={} bytes, initramfs={} bytes",

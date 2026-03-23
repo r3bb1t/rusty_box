@@ -2387,15 +2387,18 @@ impl BxHardDriveC {
                     channel.drives[d].controller.control = value;
                 }
 
-                // nIEN transition 1→0: if the selected drive has a pending interrupt
-                // that was deferred (because nIEN was set when the drive completed),
-                // raise the PIC IRQ now. This handles the timing mismatch where our
-                // commands complete synchronously during CDB writes, before the kernel
-                // clears nIEN. In real hardware, the interrupt line stays asserted and
-                // becomes visible to the PIC when nIEN is cleared.
+                // nIEN transition 1→0: raise deferred interrupt ONLY if the drive
+                // still has an active transfer (DRQ set = data waiting to be read).
+                // Without the DRQ check, stale interrupt_pending from PREVIOUS commands
+                // (acknowledged via alternate status polling, which doesn't clear
+                // interrupt_pending) causes spurious interrupts that confuse ata_piix's
+                // HSM and trigger "lost interrupt" errors.
                 if prev_nien && !new_nien {
                     let selected = channel.drive_select as usize;
-                    if channel.drives[selected].controller.interrupt_pending {
+                    let drv = &channel.drives[selected];
+                    if drv.controller.interrupt_pending
+                        && drv.controller.status.contains(AtaStatus::DRQ)
+                    {
                         let irq = if channel_num == 0 { 14u8 } else { 15u8 };
                         if !self.pci_ide_ptr.is_null() {
                             let pci_ide = unsafe { &mut *self.pci_ide_ptr };
