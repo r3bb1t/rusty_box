@@ -373,7 +373,7 @@ fn detect_boot_profile(workspace_root: &std::path::Path) -> BootProfile {
     let boot_env = std::env::var("RUSTY_BOX_BOOT")
         .unwrap_or_else(|_| {
             if iso_found.is_some() {
-                "alpine".to_string()
+                "alpine-direct".to_string()
             } else {
                 "dlx".to_string()
             }
