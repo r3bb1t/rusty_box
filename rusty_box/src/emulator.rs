@@ -1863,11 +1863,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                         "IOAPIC pin15: vec={:#04x} masked={} trig={} dmode={} intin={} irr={}",
                                         vec15, masked15, trig15, dmode15, intin15, irr15,
                                     );
-                                    tracing::warn!(
-                                        "ATAPI cmds since last STUCK: {}",
-                                        self.device_manager.harddrv.diag_atapi_cmd_count,
-                                    );
-                                    // Dump ATA ch1 (CD-ROM) controller state for debugging modloop hang
+                                    // Dump ATA ch1 (CD-ROM) controller state
                                     {
                                         let ch1 = &self.device_manager.harddrv.channels[1];
                                         let d = ch1.selected_drive();
@@ -3479,22 +3475,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         }
     }
 
-    /// Get ATA channel read counters for diagnostics.
-    pub fn ata_diag_reads(&self) -> (u64, u64) {
-        (self.device_manager.harddrv.diag_ch0_reads, self.device_manager.harddrv.diag_ch1_reads)
-    }
-
     /// Get ATA channel 1 (CD-ROM) controller state for diagnostics.
     pub fn ata_ch1_diag(&self) -> String {
         let ch1 = &self.device_manager.harddrv.channels[1];
         let d = ch1.selected_drive();
-        let hd = &self.device_manager.harddrv;
-        format!("s={:?} cmd={:#04x} ip={} tbr={} acmd={:#04x} rb={} drqS={} drqL={}",
+        format!("s={:?} cmd={:#04x} ip={} tbr={} acmd={:#04x} rb={}",
             d.controller.status, d.controller.current_command,
             d.controller.interrupt_pending,
             d.atapi.total_bytes_remaining, d.atapi.command,
-            d.cdrom.remaining_blocks,
-            hd.diag_drq_set_count, hd.diag_drq_clear_loc)
+            d.cdrom.remaining_blocks)
     }
 
     /// Get total I/O port read/write counters for diagnostics.
@@ -3673,11 +3662,6 @@ impl<I: BxCpuIdTrait> Emulator<'_, I> {
         lapic_ref.dump_state();
         // ATA channel diagnostics
         eprintln!("--- ATA Diag ---");
-        eprintln!("  ch0_reads={} ch1_reads={} total_reads={} total_writes={}",
-            self.device_manager.harddrv.diag_ch0_reads,
-            self.device_manager.harddrv.diag_ch1_reads,
-            self.device_manager.harddrv.read_count,
-            self.device_manager.harddrv.write_count);
         eprintln!("  cmd_history (last 10):");
         let hist = &self.device_manager.harddrv.cmd_history;
         let start = if hist.len() > 10 { hist.len() - 10 } else { 0 };

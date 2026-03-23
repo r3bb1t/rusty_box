@@ -823,9 +823,9 @@ impl DeviceManager {
         self.keyboard.get_a20_enabled()
     }
 
-    /// Get ATA I/O counts for diagnostics
+    /// Get ATA I/O counts for diagnostics (removed — returns zeros)
     pub fn ata_io_counts(&self) -> (u64, u64) {
-        (self.harddrv.read_count, self.harddrv.write_count)
+        (0, 0)
     }
 
     /// Get PIC diagnostic string

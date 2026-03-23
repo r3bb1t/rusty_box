@@ -405,19 +405,16 @@ fn run_alpine() -> Result<()> {
         if total_executed % 50_000_000 < PHASE_SIZE {
             let elapsed = start_time.elapsed().as_secs_f64();
             let mips = total_executed as f64 / elapsed / 1_000_000.0;
-            let (ata_ch0, ata_ch1) = emu.ata_diag_reads();
             let (io_r, io_w) = emu.io_diag_counts();
             let ata1_info = emu.ata_ch1_diag();
             eprintln!(
-                "[{:>4}M instr, {:.1}s, {:.1} MIPS] RIP={:#010x} mode={} IO[r={} w={}] ATA[ch0={} ch1={}] {}",
+                "[{:>4}M instr, {:.1}s, {:.1} MIPS] RIP={:#010x} mode={} IO[r={} w={}] {}",
                 total_executed / 1_000_000,
                 elapsed,
                 mips,
                 emu.cpu.rip(),
                 emu.get_cpu_mode_str(),
                 io_r, io_w,
-                ata_ch0,
-                ata_ch1,
                 ata1_info,
             );
         }
