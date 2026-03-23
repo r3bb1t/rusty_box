@@ -165,7 +165,7 @@ impl BxPciIde {
     /// Reset the PCI IDE controller.
     /// Bochs: bx_pci_ide_c::reset() (pci_ide.cc:124-148)
     pub fn reset(&mut self) {
-        self.pci_conf[0x04] = 0x05; // I/O space + bus master enabled
+        self.pci_conf[0x04] = 0x01; // I/O space enabled (no bus master until DMA works)
         self.pci_conf[0x06] = 0x80;
         self.pci_conf[0x07] = 0x02;
         // IDE timing registers (pci_ide.cc:130-136)
@@ -175,15 +175,10 @@ impl BxPciIde {
         self.pci_conf[0x43] = 0x80; // Channel 1 enabled
         self.pci_conf[0x44] = 0x00;
 
-        // BAR4: Bus Master DMA base address.
-        // The BIOS normally writes this during POST (0xC001 = I/O at 0xC000).
-        // Pre-configure so direct-boot kernels see BM-DMA without BIOS.
-        // Bochs bochsrc: ata: ... ioaddr1=0xc000
-        self.pci_conf[0x20] = 0x01; // I/O space indicator + low nibble
-        self.pci_conf[0x21] = 0xC0; // Base = 0xC000
-        self.pci_conf[0x22] = 0x00;
-        self.pci_conf[0x23] = 0x00;
-        self.bmdma_base = 0xC000;
+        // BAR4: NOT pre-configured. The DMA timer is currently disabled,
+        // so advertising BAR4 causes 30-second kernel DMA timeouts before
+        // PIO fallback. With BAR4=0, the kernel uses PIO directly (no timeout).
+        // When DMA is re-enabled, restore BAR4 pre-configuration here.
 
         // Reset BM-DMA state
         for ch in self.bmdma.iter_mut() {
