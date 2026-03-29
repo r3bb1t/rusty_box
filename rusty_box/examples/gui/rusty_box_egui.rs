@@ -195,9 +195,9 @@ fn run_emulator(
         }
     };
 
-    // sync=slowdown disabled by default — HLT idle sync already handles
-    // real-time matching. Enable with RUSTY_BOX_SYNC=1 if needed.
-    let sync = std::env::var("RUSTY_BOX_SYNC").map_or(false, |v| v == "1");
+    // sync=slowdown enabled by default — throttles active execution to match
+    // wall-clock time. HLT idle sync handles idle separately. Override RUSTY_BOX_NOSYNC=1.
+    let sync = std::env::var("RUSTY_BOX_NOSYNC").map_or(true, |v| v != "1");
     let config = EmulatorConfig {
         guest_memory_size: ram_bytes,
         host_memory_size: ram_bytes,

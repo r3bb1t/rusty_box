@@ -1613,7 +1613,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
         let mut instructions_executed = 0u64;
         let mut slowdown_start = std::time::Instant::now();
-        let mut slowdown_icount_base = self.cpu.icount;
+        let mut slowdown_ticks_base = self.pc_system.time_ticks();
         let mut last_gui_update = std::time::Instant::now();
         let mut last_ips_update = std::time::Instant::now();
         let mut last_ips_instructions = self.cpu.icount; // Bochs-compatible: track icount for IPS
@@ -1625,7 +1625,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Bochs VGA timer fires every ~40ms (25 fps). Use same interval for display parity.
         const GUI_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(40);
         const IPS_SHOW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
-        const MIPS_LOG_INTERVAL: u64 = 5_000_000;
+        const MIPS_LOG_INTERVAL: u64 = 50_000_000;
         let mut last_port92_value: u8 = self.system_control.value;
 
         const INSTRUCTION_BATCH_SIZE: u64 = 100_000;
@@ -1838,23 +1838,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                         bytes.join(" ")
                                     );
                                 }
-                                // Dump 256 bytes BEFORE stuck point to see the comparison code
-                                let pre_start = rip_usize.saturating_sub(256);
-                                if pre_start < mem.len() && rip_usize < mem.len() {
-                                    // Dump in 32-byte lines
-                                    for offset in (pre_start..rip_usize).step_by(32) {
-                                        let end = (offset + 32).min(rip_usize);
-                                        let bytes: Vec<String> = mem[offset..end]
-                                            .iter()
-                                            .map(|b| format!("{:02x}", b))
-                                            .collect();
-                                        tracing::debug!(
-                                            "Code@{:#06x}: {}",
-                                            offset,
-                                            bytes.join(" ")
-                                        );
-                                    }
-                                }
                                 // Also dump all general registers + CR0
                                 tracing::warn!(
                                     "Regs: EAX={:#010x} EBX={:#010x} ECX={:#010x} EDX={:#010x} ESI={:#010x} EDI={:#010x} ESP={:#010x} EBP={:#010x} CR0={:#010x}",
@@ -1880,21 +1863,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                         "IOAPIC pin15: vec={:#04x} masked={} trig={} dmode={} intin={} irr={}",
                                         vec15, masked15, trig15, dmode15, intin15, irr15,
                                     );
-                                    // Dump ATA ch1 (CD-ROM) controller state for debugging modloop hang
-                                    {
-                                        let ch1 = &self.device_manager.harddrv.channels[1];
-                                        let d = ch1.selected_drive();
-                                        eprintln!(
-                                            " ATA ch1: status={:?} cmd={:#04x} int_pending={} drq_idx={} tbr={} atapi_cmd={:#04x} rem_blocks={}",
-                                            d.controller.status,
-                                            d.controller.current_command,
-                                            d.controller.interrupt_pending,
-                                            d.controller.drq_index,
-                                            d.atapi.total_bytes_remaining,
-                                            d.atapi.command,
-                                            d.cdrom.remaining_blocks,
-                                        );
-                                    }
                                 }
                                 // For PM stuck points: dump 32-bit stack frame (saved EBP, return addr, args)
                                 let ebp = self.cpu.ebp() as usize;
@@ -2378,8 +2346,14 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             // Safety cap: Bochs uses while(1) on a separate CPU thread.
                             // We cap at 100M ticks to yield for max_instructions/GUI checks.
                             // No icount inflation — TSC reads pc_system.time_ticks() directly.
+                            // MwaitIf: wake on interrupt even when IF=0 (ECX[0]=1).
+                            let mwait_if = matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::MwaitIf);
                             let mut hlt_budget = 0u64;
-                            while !(self.has_interrupt() && self.cpu.interrupts_enabled()) && hlt_budget < 100_000_000 {
+                            let hlt_wall_start = std::time::Instant::now();
+                            while hlt_budget < 100_000_000 {
+                                if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if) {
+                                    break;
+                                }
                                 if self.stop_flag.load(core::sync::atomic::Ordering::Relaxed) {
                                     break;
                                 }
@@ -2410,7 +2384,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
                                         self.device_manager.ioapic.receive_eoi(eoi_vec);
                                     }
-                                    if lapic.intr && self.cpu.interrupts_enabled() {
+                                    if lapic.intr && (self.cpu.interrupts_enabled() || mwait_if) {
                                         self.cpu.signal_event(1 << 2);
                                         break;
                                     }
@@ -2423,6 +2397,13 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 hlt_budget += step as u64;
                                 let dev_usec = (step as u64 * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
                                 self.tick_devices(dev_usec);
+                                // Wall-clock throttle: sleep if virtual time races ahead
+                                let virtual_usec = hlt_budget * 1_000_000 / (self.config.ips as u64).max(1);
+                                let wall_usec = hlt_wall_start.elapsed().as_micros() as u64;
+                                if virtual_usec > wall_usec + 1_000 {
+                                    let sleep_usec = (virtual_usec - wall_usec).min(15_000);
+                                    std::thread::sleep(std::time::Duration::from_micros(sleep_usec));
+                                }
                             }
 
                             // If LAPIC has a pending interrupt, signal CPU
@@ -2437,7 +2418,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             // between MWAIT wakes. Budget: 15ms wall-clock.
                             let mwait_wall_start = std::time::Instant::now();
                             let mwait_wall_budget = std::time::Duration::from_millis(15);
-                            let mut _tight_iters = 0u32;
                             while mwait_wall_start.elapsed() < mwait_wall_budget
                                 && !self.stop_flag.load(core::sync::atomic::Ordering::Relaxed)
                             {
@@ -2460,7 +2440,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 // Don't check activity_state here — LAPIC uses signal_event
                                 // which sets async_event but doesn't change activity_state
                                 // until handle_async_event runs inside the CPU loop.
-                                _tight_iters += 1;
                                 let batch2 = (max_instructions.saturating_sub(instructions_executed)).min(INSTRUCTION_BATCH_SIZE);
                                 if batch2 == 0 { break; }
                                 let r2 = unsafe {
@@ -2507,8 +2486,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     break; // CPU is active — return to outer loop
                                 }
                                 // HLT loop: advance time to next interrupt
+                                let mwait_if2 = matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::MwaitIf);
                                 let mut hlt2 = 0u64;
-                                while !(self.has_interrupt() && self.cpu.interrupts_enabled()) && hlt2 < 100_000_000 {
+                                while hlt2 < 100_000_000 {
+                                    if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if2) { break; }
                                     #[cfg(feature = "bx_support_apic")]
                                     {
                                         let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
@@ -2522,7 +2503,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                             lapic.set_ticks_initial(self.pc_system.time_ticks());
                                         }
                                         if let Some(eoi_vec) = lapic.pending_eoi_vector.take() { self.device_manager.ioapic.receive_eoi(eoi_vec); }
-                                        if lapic.intr && self.cpu.interrupts_enabled() { self.cpu.signal_event(1 << 2); break; }
+                                        if lapic.intr && (self.cpu.interrupts_enabled() || mwait_if2) { self.cpu.signal_event(1 << 2); break; }
                                     }
                                     let s = self.pc_system.get_num_ticks_left_next_event().max(1).min(100_000);
                                     self.pc_system.tickn(s);
@@ -2532,12 +2513,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 }
                                 #[cfg(feature = "bx_support_apic")]
                                 if self.cpu.lapic_has_intr() { self.cpu.signal_event(1 << 2); }
-                            }
-                            // Log tight loop iterations periodically
-                            if _tight_iters > 0 && instructions_executed % 5_000_000 < INSTRUCTION_BATCH_SIZE {
-                                eprintln!("[TIGHT] iters={} elapsed={:.1}ms instr={}M",
-                                    _tight_iters, mwait_wall_start.elapsed().as_secs_f64() * 1000.0,
-                                    instructions_executed / 1_000_000);
                             }
                         } else {
                             let usec_from_instr =
@@ -3103,7 +3078,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     gui.show_ips(ips);
                 }
             }
-            // Print MIPS terminal line every 5M instructions.
+            // Print MIPS terminal line every 50M instructions (~5s at 9 MIPS).
             if instructions_executed / MIPS_LOG_INTERVAL
                 > last_mips_log_instructions / MIPS_LOG_INTERVAL
             {
@@ -3116,25 +3091,14 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 };
                 last_mips_log_instructions = instructions_executed;
                 last_mips_log_update = std::time::Instant::now();
-                // ATA ch1 controller state for modloop debugging
-                let ch1_status = {
-                    let ch1 = &self.device_manager.harddrv.channels[1];
-                    let d = ch1.selected_drive();
-                    format!("ata1[s={:?} cmd={:#04x} ip={} drqi={} tbr={} acmd={:#04x} rb={}]",
-                        d.controller.status, d.controller.current_command,
-                        d.controller.interrupt_pending, d.controller.drq_index,
-                        d.atapi.total_bytes_remaining, d.atapi.command,
-                        d.cdrom.remaining_blocks)
-                };
-                tracing::error!(
+                tracing::info!(
                     target: "mips",
-                    "[{:>6}M instr] {:>6.2} MIPS  RIP={:#010x}  CS={:#06x}  mode={}  {}",
+                    "[{:>6}M instr] {:>6.2} MIPS  RIP={:#010x}  CS={:#06x}  mode={}",
                     instructions_executed / 1_000_000,
                     mips,
                     self.cpu.rip(),
                     self.cpu.get_cs_selector(),
                     self.get_cpu_mode_str(),
-                    ch1_status,
                 );
             }
 
@@ -3147,10 +3111,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 // Reset window every 1 second to prevent deficit accumulation
                 if wall_elapsed > 1_000_000 {
                     slowdown_start = std::time::Instant::now();
-                    slowdown_icount_base = self.cpu.icount;
+                    slowdown_ticks_base = self.pc_system.time_ticks();
                 } else {
-                    let delta_icount = self.cpu.icount.saturating_sub(slowdown_icount_base);
-                    let emu_usec = delta_icount.saturating_mul(1_000_000)
+                    let delta_ticks = self.pc_system.time_ticks().saturating_sub(slowdown_ticks_base);
+                    let emu_usec = delta_ticks.saturating_mul(1_000_000)
                         / (self.config.ips as u64);
                     // Sleep if emulated time is >50ms ahead within this window.
                     // 50ms threshold avoids Windows 15.6ms timer granularity issues.
@@ -3289,8 +3253,11 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 | crate::cpu::cpu::CpuActivityState::Mwait
                 | crate::cpu::cpu::CpuActivityState::MwaitIf
             ) {
+                let mwait_if = matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::MwaitIf);
                 let mut hlt_budget = 0u64;
-                while !(self.has_interrupt() && self.cpu.interrupts_enabled()) && hlt_budget < 100_000_000 {
+                let hlt_wall_start = std::time::Instant::now();
+                while hlt_budget < 100_000_000 {
+                    if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if) { break; }
                     #[cfg(feature = "bx_support_apic")]
                     {
                         let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
@@ -3313,7 +3280,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
                             self.device_manager.ioapic.receive_eoi(eoi_vec);
                         }
-                        if lapic.intr && self.cpu.interrupts_enabled() {
+                        if lapic.intr && (self.cpu.interrupts_enabled() || mwait_if) {
                             self.cpu.signal_event(1 << 2);
                             break;
                         }
@@ -3325,6 +3292,13 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     hlt_budget += step as u64;
                     let dev_usec = (step as u64 * 1_000_000 / ips.max(1)).max(1);
                     self.tick_devices(dev_usec);
+                    // Wall-clock throttle: sleep if virtual time races ahead
+                    let virtual_usec = hlt_budget * 1_000_000 / ips.max(1);
+                    let wall_usec = hlt_wall_start.elapsed().as_micros() as u64;
+                    if virtual_usec > wall_usec + 1_000 {
+                        let sleep_usec = (virtual_usec - wall_usec).min(15_000);
+                        std::thread::sleep(std::time::Duration::from_micros(sleep_usec));
+                    }
                 }
                 #[cfg(feature = "bx_support_apic")]
                 if self.cpu.lapic_has_intr() {

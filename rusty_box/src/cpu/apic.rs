@@ -1361,7 +1361,7 @@ impl BxLocalApic {
     /// timer_fired is set by the pc_system timer handler.
     pub(crate) fn periodic(&mut self, current_ticks: u64) {
         if !self.timer_active {
-            error!("periodic() called, timer_active==0");
+            debug!("periodic() called, timer_active==0");
             return;
         }
 
