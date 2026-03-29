@@ -1,6 +1,11 @@
 pub mod error;
 pub use error::{CpuError, Result};
 
+#[cfg(feature = "bx_instrumentation")]
+pub mod instrumentation;
+#[cfg(feature = "bx_instrumentation")]
+pub use instrumentation::{CpuSnapshot, Instrumentation};
+
 pub(super) mod access;
 pub(super) mod aes;
 pub(super) mod apic;

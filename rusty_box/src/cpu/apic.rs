@@ -1516,6 +1516,14 @@ impl BxLocalApic {
 
     /// Diagnostic: return timer state for HLT debugging.
     /// Returns (timer_active, timer_initial, period_ticks, timer_vector, activate_pending, deactivate_pending)
+    /// Check if a specific vector has IRR or ISR bits set.
+    pub(crate) fn vector_state(&self, vector: u8) -> (bool, bool) {
+        let v = vector as u32;
+        let irr = (self.irr[(v / 32) as usize] >> (v % 32)) & 1 != 0;
+        let isr = (self.isr[(v / 32) as usize] >> (v % 32)) & 1 != 0;
+        (irr, isr)
+    }
+
     pub(crate) fn hlt_timer_diag(&self) -> (bool, u32, u64, u8, bool, bool) {
         let vec = self.lvt[LocalVectorTableEntry::Timer as usize].vector();
         let period = self.timer_initial as u64 * self.timer_divide_factor as u64;

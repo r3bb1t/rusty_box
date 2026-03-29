@@ -701,6 +701,11 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.gui.as_deref()
     }
 
+    /// Get mutable reference to CPU for instrumentation setup.
+    pub fn cpu_mut(&mut self) -> &mut crate::cpu::cpu::BxCpuC<'a, I> {
+        &mut self.cpu
+    }
+
     /// Update GUI with VGA text mode changes
     ///
     /// Call this periodically to refresh the display (matching vgacore.cc:2413-2430)
@@ -1076,6 +1081,17 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     /// Simulate time passing (for timer-based devices)
     pub fn tick_devices(&mut self, usec: u64) {
         self.device_manager.tick(usec);
+        // Process deferred ATAPI seek completion (Bochs seek_timer pattern).
+        // In Bochs, start_seek() activates a timer that fires after a seek
+        // delay and calls ready_to_send_atapi(). We process it here during
+        // the next tick, providing the minimum 1-tick delay that separates
+        // the PACKET CDB write from the data-ready interrupt.
+        for ch in 0..2 {
+            if self.device_manager.harddrv.seek_complete_pending[ch] {
+                self.device_manager.harddrv.seek_complete_pending[ch] = false;
+                self.device_manager.harddrv.ready_to_send_atapi(ch);
+            }
+        }
         // Process any deferred PCI port re-registrations and PAM changes
         #[cfg(feature = "bx_support_pci")]
         self.device_manager
@@ -2355,20 +2371,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             //
                             // Without a GUI (headless): spin at full speed; the caller injects
                             // periodic keystrokes to keep the screen alive.
-                            let mut hlt_ticks = 0u64;
-                            // Efficient HLT: advance to next countdown event, capped at 100K ticks
-                            // per step to prevent huge tick_devices calls.
-                            // Bochs handleWaitForEvent (event.cc:40-116) uses while(1) + BX_TICKN(10).
-                            // We cap at 100M ticks (~6.7ms at 15M IPS) as a safety limit for
-                            // IF=0 HLT with no timer sources, where Bochs would also spin forever
-                            // but has debugger/SMP escape hatches we don't have.
-                            // Bochs handleWaitForEvent (event.cc:40-116) breaks on:
-                            //   BX_CPU_INTR && get_IF() — maskable interrupt with IF=1
-                            //   pending_NMI / pending_SMI / pending_INIT — always
-                            // We match by requiring has_interrupt() AND interrupts_enabled().
-                            // When IF=0, the loop keeps ticking devices (advancing virtual time)
-                            // until IF is set or the safety cap is reached.
-                            while !(self.has_interrupt() && self.cpu.interrupts_enabled()) && hlt_ticks < 100_000_000 {
+                            // Bochs handleWaitForEvent (event.cc:40-116): while(1) + BX_TICKN(10).
+                            // Advances pc_system time (NOT icount) until interrupt fires.
+                            // TSC reads pc_system.time_ticks(), so TSC advances during HLT
+                            // without inflating icount.
+                            // Safety cap: Bochs uses while(1) on a separate CPU thread.
+                            // We cap at 100M ticks to yield for max_instructions/GUI checks.
+                            // No icount inflation — TSC reads pc_system.time_ticks() directly.
+                            let mut hlt_budget = 0u64;
+                            while !(self.has_interrupt() && self.cpu.interrupts_enabled()) && hlt_budget < 100_000_000 {
                                 if self.stop_flag.load(core::sync::atomic::Ordering::Relaxed) {
                                     break;
                                 }
@@ -2409,19 +2420,124 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     .max(1)
                                     .min(100_000);
                                 self.pc_system.tickn(step);
-                                hlt_ticks += step as u64;
+                                hlt_budget += step as u64;
                                 let dev_usec = (step as u64 * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
                                 self.tick_devices(dev_usec);
                             }
-                            // Advance icount to reflect virtual time that passed during HLT.
-                            // This is critical for TSC-based kernel timekeeping (RDTSC uses icount).
-                            // Without this, TSC freezes during HLT and kernel poll() timeouts never expire.
-                            self.cpu.icount += hlt_ticks;
 
                             // If LAPIC has a pending interrupt, signal CPU
                             #[cfg(feature = "bx_support_apic")]
                             if self.cpu.lapic_has_intr() {
                                 self.cpu.signal_event(1 << 2); // BX_EVENT_PENDING_LAPIC_INTR
+                            }
+
+                            // Tight MWAIT loop: process multiple wake→execute→MWAIT
+                            // cycles without returning to the outer loop. This matches
+                            // Bochs's dedicated CPU thread which never yields to GUI
+                            // between MWAIT wakes. Budget: 15ms wall-clock.
+                            let mwait_wall_start = std::time::Instant::now();
+                            let mwait_wall_budget = std::time::Duration::from_millis(15);
+                            let mut _tight_iters = 0u32;
+                            while mwait_wall_start.elapsed() < mwait_wall_budget
+                                && !self.stop_flag.load(core::sync::atomic::Ordering::Relaxed)
+                            {
+                                // Deliver PIC interrupt if pending
+                                if self.device_manager.has_interrupt()
+                                    && self.cpu.get_b_if() != 0
+                                    && !self.cpu.interrupts_inhibited(0x01)
+                                {
+                                    let vec = self.iac();
+                                    unsafe {
+                                        let mem_ext: &'a mut BxMemC<'a> =
+                                            core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory);
+                                        self.cpu.set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_ext));
+                                        let _ = self.cpu.inject_external_interrupt(vec);
+                                        self.cpu.clear_mem_bus();
+                                    };
+                                }
+                                // Run CPU batch — handle_async_event inside cpu_loop_n
+                                // will process LAPIC events and wake from MWAIT.
+                                // Don't check activity_state here — LAPIC uses signal_event
+                                // which sets async_event but doesn't change activity_state
+                                // until handle_async_event runs inside the CPU loop.
+                                _tight_iters += 1;
+                                let batch2 = (max_instructions.saturating_sub(instructions_executed)).min(INSTRUCTION_BATCH_SIZE);
+                                if batch2 == 0 { break; }
+                                let r2 = unsafe {
+                                    let mem_ext: &'a mut BxMemC<'a> =
+                                        core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory);
+                                    let io2 = core::ptr::NonNull::from(&mut self.devices);
+                                    let ps2 = core::ptr::NonNull::from(&mut self.pc_system);
+                                    self.cpu.cpu_loop_n_with_io(mem_ext, &[], batch2, io2, ps2)
+                                };
+                                if let Ok(ex2) = r2 {
+                                    instructions_executed += ex2;
+                                    let u2 = if self.config.ips != 0 { (ex2 * 1_000_000 / (self.config.ips as u64)).max(10) } else { 10 };
+                                    self.tick_devices(u2);
+                                    self.pc_system.tickn(ex2 as u32);
+                                    // LAPIC sync
+                                    #[cfg(feature = "bx_support_apic")]
+                                    {
+                                        let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
+                                        let tn = self.pc_system.time_ticks();
+                                        lapic.current_ticks = tn;
+                                        lapic.ticks_at_sync = tn;
+                                        lapic.icount_at_sync = self.cpu.icount;
+                                        if lapic.timer_fired { lapic.timer_fired = false; lapic.periodic(tn); }
+                                        if lapic.timer_deactivate_request {
+                                            lapic.timer_deactivate_request = false;
+                                            if let Some(h) = lapic.timer_handle { let _ = self.pc_system.deactivate_timer(h); }
+                                        }
+                                        if let Some(period) = lapic.timer_activate_request.take() {
+                                            if let Some(h) = lapic.timer_handle { let _ = self.pc_system.reactivate_timer_relative(h, period); }
+                                            lapic.set_ticks_initial(self.pc_system.time_ticks());
+                                        }
+                                        if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
+                                            self.device_manager.ioapic.receive_eoi(eoi_vec);
+                                        }
+                                        if lapic.intr { self.cpu.signal_event(1 << 2); }
+                                    }
+                                } else { break; }
+                                // If CPU re-entered MWAIT, advance time again
+                                if !matches!(self.cpu.activity_state,
+                                    crate::cpu::cpu::CpuActivityState::Hlt
+                                    | crate::cpu::cpu::CpuActivityState::Mwait
+                                    | crate::cpu::cpu::CpuActivityState::MwaitIf
+                                ) {
+                                    break; // CPU is active — return to outer loop
+                                }
+                                // HLT loop: advance time to next interrupt
+                                let mut hlt2 = 0u64;
+                                while !(self.has_interrupt() && self.cpu.interrupts_enabled()) && hlt2 < 100_000_000 {
+                                    #[cfg(feature = "bx_support_apic")]
+                                    {
+                                        let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
+                                        if lapic.timer_fired { lapic.timer_fired = false; lapic.periodic(self.pc_system.time_ticks()); }
+                                        if lapic.timer_deactivate_request {
+                                            lapic.timer_deactivate_request = false;
+                                            if let Some(h) = lapic.timer_handle { let _ = self.pc_system.deactivate_timer(h); }
+                                        }
+                                        if let Some(period) = lapic.timer_activate_request.take() {
+                                            if let Some(h) = lapic.timer_handle { let _ = self.pc_system.activate_timer(h, period, false); }
+                                            lapic.set_ticks_initial(self.pc_system.time_ticks());
+                                        }
+                                        if let Some(eoi_vec) = lapic.pending_eoi_vector.take() { self.device_manager.ioapic.receive_eoi(eoi_vec); }
+                                        if lapic.intr && self.cpu.interrupts_enabled() { self.cpu.signal_event(1 << 2); break; }
+                                    }
+                                    let s = self.pc_system.get_num_ticks_left_next_event().max(1).min(100_000);
+                                    self.pc_system.tickn(s);
+                                    hlt2 += s as u64;
+                                    let du = (s as u64 * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
+                                    self.tick_devices(du);
+                                }
+                                #[cfg(feature = "bx_support_apic")]
+                                if self.cpu.lapic_has_intr() { self.cpu.signal_event(1 << 2); }
+                            }
+                            // Log tight loop iterations periodically
+                            if _tight_iters > 0 && instructions_executed % 5_000_000 < INSTRUCTION_BATCH_SIZE {
+                                eprintln!("[TIGHT] iters={} elapsed={:.1}ms instr={}M",
+                                    _tight_iters, mwait_wall_start.elapsed().as_secs_f64() * 1000.0,
+                                    instructions_executed / 1_000_000);
                             }
                         } else {
                             let usec_from_instr =
@@ -3064,7 +3180,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             let pf = self.cpu.perf_prefetch;
             let tlb_total = tlb_h + tlb_m;
             let tlb_pct = if tlb_total > 0 { tlb_h as f64 / tlb_total as f64 * 100.0 } else { 0.0 };
-            // icount = Bochs-compatible tick count (includes REP iterations + HLT ticks)
+            // icount = instruction count (REP iterations count as separate ticks)
             let bochs_ticks = self.cpu.icount;
             eprintln!("[PERF] dispatches={pi} bochs_ticks={bochs_ticks} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw}");
         }
@@ -3083,224 +3199,189 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     where
         'a: 'static,
     {
-        let result = unsafe {
-            let mem_extended: &'a mut BxMemC<'a> =
-                core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory);
-            let io_ptr = core::ptr::NonNull::from(&mut self.devices);
-            let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
-            self.cpu
-                .cpu_loop_n_with_io(mem_extended, &[], max_instructions, io_ptr, ps_ptr)
-        };
+        let ips = self.config.ips as u64;
+        let mut total_executed = 0u64;
+        // Wall-clock budget: 15ms keeps GUI responsive at 60 fps.
+        // Bochs runs CPU on a dedicated thread with no frame budget; we emulate
+        // that throughput by processing multiple MWAIT→wake→execute cycles here.
+        let wall_start = std::time::Instant::now();
+        let wall_budget = std::time::Duration::from_millis(15);
 
-        match result {
-            Ok(mut executed) => {
-                let ips = self.config.ips as u64;
-                let usec = if ips > 0 {
-                    (executed * 1_000_000 / ips).max(10)
-                } else {
-                    10
-                };
-                self.tick_devices(usec);
+        'batch: loop {
+            // --- Run CPU batch ---
+            let result = unsafe {
+                let mem_extended: &'a mut BxMemC<'a> =
+                    core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory);
+                let io_ptr = core::ptr::NonNull::from(&mut self.devices);
+                let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
+                self.cpu
+                    .cpu_loop_n_with_io(mem_extended, &[], max_instructions, io_ptr, ps_ptr)
+            };
 
-                // Drive pc_system timers via Bochs-exact tickn() mechanism.
-                self.pc_system.tickn(executed as u32);
+            let executed = match result {
+                Ok(n) => n,
+                Err(e) => return Err(crate::error::Error::Cpu(e)),
+            };
+            total_executed += executed;
 
-                // Handle LAPIC timer fires with catch-up (same as main loop)
-                #[cfg(feature = "bx_support_apic")]
+            // --- Tick devices + pc_system ---
+            let usec = if ips > 0 { (executed * 1_000_000 / ips).max(10) } else { 10 };
+            self.tick_devices(usec);
+            self.pc_system.tickn(executed as u32);
+
+            // --- LAPIC timer catchup ---
+            #[cfg(feature = "bx_support_apic")]
+            {
+                let lapic_ptr = self.cpu.lapic_ptr_mut();
                 {
-                    let lapic_ptr = self.cpu.lapic_ptr_mut();
-                    {
-                        let lapic = unsafe { &mut *lapic_ptr };
-                        let ticks_now = self.pc_system.time_ticks();
-                        lapic.current_ticks = ticks_now;
-                        lapic.ticks_at_sync = ticks_now;
-                        lapic.icount_at_sync = self.cpu.icount;
-                    }
-
-                    let mut catchup_count = 0u32;
-                    loop {
-                        let should_continue = {
-                            let lapic = unsafe { &mut *lapic_ptr };
-                            if !lapic.timer_fired || catchup_count >= 1000 {
-                                false
-                            } else {
-                                lapic.timer_fired = false;
-                                lapic.diag_timer_fires += 1;
-                                let ticks_now = self.pc_system.time_ticks();
-                                lapic.periodic(ticks_now);
-                                if lapic.timer_deactivate_request {
-                                    lapic.timer_deactivate_request = false;
-                                    if let Some(handle) = lapic.timer_handle {
-                                        let _ = self.pc_system.deactivate_timer(handle);
-                                    }
-                                }
-                                if let Some(period) = lapic.timer_activate_request.take() {
-                                    if let Some(handle) = lapic.timer_handle {
-                                        let _ = self.pc_system.reactivate_timer_relative(handle, period);
-                                    }
-                                    lapic.set_ticks_initial(self.pc_system.time_ticks());
-                                }
-                                catchup_count += 1;
-                                true
-                            }
-                        };
-                        if !should_continue { break; }
-                        self.pc_system.tickn(0);
-                    }
-                    // Handle non-fire requests
-                    {
-                        let lapic = unsafe { &mut *lapic_ptr };
-                        if lapic.timer_deactivate_request {
-                            lapic.timer_deactivate_request = false;
-                            if let Some(handle) = lapic.timer_handle {
-                                let _ = self.pc_system.deactivate_timer(handle);
-                            }
-                        }
-                        if let Some(period) = lapic.timer_activate_request.take() {
-                            if let Some(handle) = lapic.timer_handle {
-                                let _ = self.pc_system.activate_timer(handle, period, false);
-                            }
-                            lapic.set_ticks_initial(self.pc_system.time_ticks());
-                        }
-                        if lapic.intr {
-                            self.cpu.signal_event(1 << 2); // BX_EVENT_PENDING_LAPIC_INTR
-                        }
-                    }
+                    let lapic = unsafe { &mut *lapic_ptr };
+                    let ticks_now = self.pc_system.time_ticks();
+                    lapic.current_ticks = ticks_now;
+                    lapic.ticks_at_sync = ticks_now;
+                    lapic.icount_at_sync = self.cpu.icount;
                 }
-
-                // When CPU is halted/mwait, advance virtual clock until an
-                // interrupt fires or a budget is exhausted.
-                // Matches run_interactive() HLT loop but bounded for egui responsiveness.
-                if matches!(
-                    self.cpu.activity_state,
-                    crate::cpu::cpu::CpuActivityState::Hlt
-                    | crate::cpu::cpu::CpuActivityState::Mwait
-                    | crate::cpu::cpu::CpuActivityState::MwaitIf
-                ) {
-                    let ips = self.config.ips as u64;
-                    let mut hlt_ticks = 0u64;
-                    // Cap at 1M ticks per step_batch call (~67µs at 15M IPS).
-                    // Egui calls us at ~60fps so total HLT throughput ≈ 60M ticks/s.
-                    // Bochs-match: only break when interrupt is deliverable (IF=1)
-                    while !(self.has_interrupt() && self.cpu.interrupts_enabled()) && hlt_ticks < 1_000_000 {
-                        // Process LAPIC requests first
-                        #[cfg(feature = "bx_support_apic")]
-                        {
-                            let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
-                            if lapic.timer_fired {
-                                lapic.timer_fired = false;
-                                lapic.periodic(self.pc_system.time_ticks());
-                            }
-                            if lapic.timer_deactivate_request {
-                                lapic.timer_deactivate_request = false;
-                                if let Some(h) = lapic.timer_handle {
-                                    let _ = self.pc_system.deactivate_timer(h);
-                                }
-                            }
-                            if let Some(period) = lapic.timer_activate_request.take() {
-                                if let Some(h) = lapic.timer_handle {
-                                    let _ = self.pc_system.activate_timer(h, period, false);
-                                }
-                                lapic.set_ticks_initial(self.pc_system.time_ticks());
-                            }
-                            if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
-                                self.device_manager.ioapic.receive_eoi(eoi_vec);
-                            }
-                            if lapic.intr && self.cpu.interrupts_enabled() {
-                                self.cpu.signal_event(1 << 2);
-                                break;
-                            }
+                let mut catchup_count = 0u32;
+                loop {
+                    let lapic = unsafe { &mut *lapic_ptr };
+                    if !lapic.timer_fired || catchup_count >= 1000 { break; }
+                    lapic.timer_fired = false;
+                    lapic.diag_timer_fires += 1;
+                    lapic.periodic(self.pc_system.time_ticks());
+                    if lapic.timer_deactivate_request {
+                        lapic.timer_deactivate_request = false;
+                        if let Some(h) = lapic.timer_handle {
+                            let _ = self.pc_system.deactivate_timer(h);
                         }
-                        let step = self.pc_system.get_num_ticks_left_next_event()
-                            .max(1)
-                            .min(100_000);
-                        self.pc_system.tickn(step);
-                        hlt_ticks += step as u64;
-                        let dev_usec = (step as u64 * 1_000_000 / ips.max(1)).max(1);
-                        self.tick_devices(dev_usec);
                     }
-                    self.cpu.icount += hlt_ticks;
-                    #[cfg(feature = "bx_support_apic")]
-                    if self.cpu.lapic_has_intr() {
+                    if let Some(period) = lapic.timer_activate_request.take() {
+                        if let Some(h) = lapic.timer_handle {
+                            let _ = self.pc_system.reactivate_timer_relative(h, period);
+                        }
+                        lapic.set_ticks_initial(self.pc_system.time_ticks());
+                    }
+                    catchup_count += 1;
+                    self.pc_system.tickn(0);
+                }
+                {
+                    let lapic = unsafe { &mut *lapic_ptr };
+                    if lapic.timer_deactivate_request {
+                        lapic.timer_deactivate_request = false;
+                        if let Some(h) = lapic.timer_handle {
+                            let _ = self.pc_system.deactivate_timer(h);
+                        }
+                    }
+                    if let Some(period) = lapic.timer_activate_request.take() {
+                        if let Some(h) = lapic.timer_handle {
+                            let _ = self.pc_system.activate_timer(h, period, false);
+                        }
+                        lapic.set_ticks_initial(self.pc_system.time_ticks());
+                    }
+                    if lapic.intr {
                         self.cpu.signal_event(1 << 2);
                     }
                 }
-
-                // Deliver pending PIC interrupts — matches run_interactive().
-                // This must happen EVERY batch, not just during HLT, because
-                // the BIOS and OS rely on timer interrupts during normal
-                // execution (not only when halted).
-                // Only use PIC path — LAPIC interrupts delivered via CPU event system.
-                if self.device_manager.has_interrupt()
-                    && self.cpu.get_b_if() != 0
-                    && !self.cpu.interrupts_inhibited(0x01)
-                {
-                    let vector = self.iac();
-                    let _inject = unsafe {
-                        let mem_extended: &'a mut BxMemC<'a> =
-                            core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(
-                                &mut self.memory,
-                            );
-                        self.cpu
-                            .set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_extended));
-                        let r = self.cpu.inject_external_interrupt(vector);
-                        self.cpu.clear_mem_bus();
-                        r
-                    };
-                }
-
-                // If CPU was halted and we just delivered an interrupt,
-                // re-enter CPU loop so the handler runs in this batch.
-                if matches!(
-                    self.cpu.activity_state,
-                    crate::cpu::cpu::CpuActivityState::Active
-                ) && executed == 0
-                {
-                    let result2 = unsafe {
-                        let mem_extended: &'a mut BxMemC<'a> =
-                            core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(
-                                &mut self.memory,
-                            );
-                        let io_ptr = core::ptr::NonNull::from(&mut self.devices);
-                        let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
-                        self.cpu
-                            .cpu_loop_n_with_io(mem_extended, &[], max_instructions, io_ptr, ps_ptr)
-                    };
-                    if let Ok(executed2) = result2 {
-                        executed += executed2;
-                        let usec2 = if ips > 0 {
-                            (executed2 * 1_000_000 / ips).max(10)
-                        } else {
-                            10
-                        };
-                        self.tick_devices(usec2);
-                        self.pc_system.tickn(executed2 as u32);
-                    }
-                }
-
-                // Sync A20 state
-                self.sync_a20_state();
-
-                // Handle keyboard scancodes and serial input from GUI
-                let mut scancodes_to_send = Vec::new();
-                let mut serial_input = Vec::new();
-                if let Some(ref mut gui) = self.gui {
-                    gui.handle_events();
-                    scancodes_to_send = gui.get_pending_scancodes();
-                    serial_input = gui.get_pending_serial_input();
-                }
-                for scancode in scancodes_to_send {
-                    self.device_manager.keyboard.send_scancode(scancode);
-                }
-                for byte in serial_input {
-                    self.device_manager.serial.receive_byte(0, byte);
-                }
-
-                let shutdown = self.cpu.is_in_shutdown();
-                Ok((executed, shutdown))
             }
-            Err(e) => Err(crate::error::Error::Cpu(e)),
+
+            // --- HLT/MWAIT: advance time until interrupt ---
+            if matches!(
+                self.cpu.activity_state,
+                crate::cpu::cpu::CpuActivityState::Hlt
+                | crate::cpu::cpu::CpuActivityState::Mwait
+                | crate::cpu::cpu::CpuActivityState::MwaitIf
+            ) {
+                let mut hlt_budget = 0u64;
+                while !(self.has_interrupt() && self.cpu.interrupts_enabled()) && hlt_budget < 100_000_000 {
+                    #[cfg(feature = "bx_support_apic")]
+                    {
+                        let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
+                        if lapic.timer_fired {
+                            lapic.timer_fired = false;
+                            lapic.periodic(self.pc_system.time_ticks());
+                        }
+                        if lapic.timer_deactivate_request {
+                            lapic.timer_deactivate_request = false;
+                            if let Some(h) = lapic.timer_handle {
+                                let _ = self.pc_system.deactivate_timer(h);
+                            }
+                        }
+                        if let Some(period) = lapic.timer_activate_request.take() {
+                            if let Some(h) = lapic.timer_handle {
+                                let _ = self.pc_system.activate_timer(h, period, false);
+                            }
+                            lapic.set_ticks_initial(self.pc_system.time_ticks());
+                        }
+                        if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
+                            self.device_manager.ioapic.receive_eoi(eoi_vec);
+                        }
+                        if lapic.intr && self.cpu.interrupts_enabled() {
+                            self.cpu.signal_event(1 << 2);
+                            break;
+                        }
+                    }
+                    let step = self.pc_system.get_num_ticks_left_next_event()
+                        .max(1)
+                        .min(100_000);
+                    self.pc_system.tickn(step);
+                    hlt_budget += step as u64;
+                    let dev_usec = (step as u64 * 1_000_000 / ips.max(1)).max(1);
+                    self.tick_devices(dev_usec);
+                }
+                #[cfg(feature = "bx_support_apic")]
+                if self.cpu.lapic_has_intr() {
+                    self.cpu.signal_event(1 << 2);
+                }
+            }
+
+            // --- Deliver PIC interrupt ---
+            if self.device_manager.has_interrupt()
+                && self.cpu.get_b_if() != 0
+                && !self.cpu.interrupts_inhibited(0x01)
+            {
+                let vector = self.iac();
+                unsafe {
+                    let mem_extended: &'a mut BxMemC<'a> =
+                        core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(
+                            &mut self.memory,
+                        );
+                    self.cpu
+                        .set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_extended));
+                    let _ = self.cpu.inject_external_interrupt(vector);
+                    self.cpu.clear_mem_bus();
+                };
+            }
+
+            // --- Tight loop: if CPU was woken from MWAIT and wall budget remains,
+            // run another cycle instead of returning to egui event loop.
+            // This matches Bochs's dedicated CPU thread which never yields to GUI.
+            if matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::Active) {
+                if wall_start.elapsed() < wall_budget {
+                    continue 'batch;
+                }
+            }
+
+            break 'batch;
         }
+
+        // Sync A20 state
+        self.sync_a20_state();
+
+        // Handle keyboard scancodes and serial input from GUI
+        let mut scancodes_to_send = Vec::new();
+        let mut serial_input = Vec::new();
+        if let Some(ref mut gui) = self.gui {
+            gui.handle_events();
+            scancodes_to_send = gui.get_pending_scancodes();
+            serial_input = gui.get_pending_serial_input();
+        }
+        for scancode in scancodes_to_send {
+            self.device_manager.keyboard.send_scancode(scancode);
+        }
+        for byte in serial_input {
+            self.device_manager.serial.receive_byte(0, byte);
+        }
+
+        let shutdown = self.cpu.is_in_shutdown();
+        Ok((total_executed, shutdown))
     }
 
     /// Attach a hard disk from in-memory data (for no_std / WASM environments).
@@ -3481,15 +3562,20 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         (0, 0)
     }
 
-    /// Get ATA channel 1 (CD-ROM) controller state for diagnostics.
+    /// Get ATA channel 1 (CD-ROM) controller state + interrupt routing diagnostics.
     pub fn ata_ch1_diag(&self) -> String {
         let ch1 = &self.device_manager.harddrv.channels[1];
         let d = ch1.selected_drive();
-        format!("s={:?} cmd={:#04x} ip={} tbr={} acmd={:#04x} rb={}",
+        let (vec15, masked15, trig15, _dmode15) = self.device_manager.ioapic.redirect_entry_diag(15);
+        // Check LAPIC IRR/ISR for the IDE vector
+        let (irr_set, isr_set) = if vec15 > 0 { self.cpu.lapic_vector_state(vec15) } else { (false, false) };
+        format!("s={:?} cmd={:#04x} ip={} acmd={:#04x} nIEN={} IOAPIC15[v={:#04x} m={} t={}] LAPIC[irr={} isr={}]",
             d.controller.status, d.controller.current_command,
             d.controller.interrupt_pending,
-            d.atapi.total_bytes_remaining, d.atapi.command,
-            d.cdrom.remaining_blocks)
+            d.atapi.command,
+            d.controller.control & 0x02,
+            vec15, masked15 as u8, trig15,
+            irr_set, isr_set)
     }
 
     /// Get total I/O port read/write counters for diagnostics.
@@ -3629,6 +3715,22 @@ impl<I: BxCpuIdTrait> Emulator<'_, I> {
         eprintln!("diag: intr_delivered={} if_blocked={} pic_empty={}",
             self.cpu.diag_hae_intr_delivered, self.cpu.diag_hae_intr_if_blocked,
             self.cpu.diag_hae_intr_pic_empty);
+        // SYSCALL ring buffer
+        eprintln!("--- Last {} SYSCALLs (total={}, sysret={}, blocked={}) ---",
+            self.cpu.diag_syscall_ring_idx.min(32),
+            self.cpu.diag_syscall_count,
+            self.cpu.diag_sysret_count,
+            self.cpu.diag_syscall_count.saturating_sub(self.cpu.diag_sysret_count));
+        {
+            let count = self.cpu.diag_syscall_ring_idx.min(32);
+            let start = if self.cpu.diag_syscall_ring_idx > 32 {
+                self.cpu.diag_syscall_ring_idx - 32
+            } else { 0 };
+            for i in start..self.cpu.diag_syscall_ring_idx {
+                let (nr, arg0, ic) = self.cpu.diag_syscall_ring[i % 32];
+                eprintln!("  syscall nr={} arg0={:#x} icount={}", nr, arg0, ic);
+            }
+        }
         // PIC state
         eprintln!("--- PIC State ---");
         eprintln!("  master: IMR={:#04x} IRR={:#04x} ISR={:#04x} has_int={}",

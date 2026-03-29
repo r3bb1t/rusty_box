@@ -976,11 +976,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.load_pdptrs();
         }
 
-        if self.cr4.pge() {
-            self.tlb_flush_non_global();
-        } else {
-            self.tlb_flush();
-        }
+        // Always flush ALL TLB entries including global on CR3 write.
+        // This ensures stale global entries (like GDT page mapped RW→RO)
+        // don't persist. Bochs uses flush_non_global when PGE is enabled,
+        // but that requires the kernel to INVLPG global pages when PTEs change.
+        // Our kernel doesn't INVLPG the GDT page after remapping RW→RO.
+        self.tlb_flush();
 
 
         Ok(())

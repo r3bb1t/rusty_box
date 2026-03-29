@@ -125,7 +125,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn fnsave(&mut self, instr: &Instruction) -> super::super::Result<()> {
         let offset = self.fpu_save_environment(instr)?;
         let seg = BxSegregs::from(instr.seg());
-        let asize_mask: u64 = if self.long64_mode() {
+        let asize_mask: u64 = if instr.as64_l() != 0 {
             0xFFFF_FFFF_FFFF_FFFF
         } else if instr.as32_l() != 0 {
             0xFFFF_FFFF
@@ -157,7 +157,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let offset = self.fpu_load_environment(instr)?;
         let seg = BxSegregs::from(instr.seg());
-        let asize_mask: u64 = if self.long64_mode() {
+        let asize_mask: u64 = if instr.as64_l() != 0 {
             0xFFFF_FFFF_FFFF_FFFF
         } else if instr.as32_l() != 0 {
             0xFFFF_FFFF
@@ -207,7 +207,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let asize_mask: u64 = if self.long64_mode() {
+        let asize_mask: u64 = if instr.as64_l() != 0 {
             0xFFFF_FFFF_FFFF_FFFF
         } else if instr.as32_l() != 0 {
             0xFFFF_FFFF
@@ -328,7 +328,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn fpu_load_environment(&mut self, instr: &Instruction) -> super::super::Result<u64> {
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let asize_mask: u64 = if self.long64_mode() {
+        let asize_mask: u64 = if instr.as64_l() != 0 {
             0xFFFF_FFFF_FFFF_FFFF
         } else if instr.as32_l() != 0 {
             0xFFFF_FFFF

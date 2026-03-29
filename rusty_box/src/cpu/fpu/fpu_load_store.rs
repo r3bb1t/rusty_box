@@ -571,6 +571,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 &mut status,
             );
 
+            // Theory 2 diagnostic: check if 1.0 converts to 0
+            {
+                let st0 = self.read_fpu_reg(0);
+                // extf80 for 1.0: sign=0, exp=0x3FFF, sig=0x8000000000000000
+                if st0.sign_exp == 0x3FFF && st0.signif == 0x8000000000000000 && save_reg == 0 {
+                    eprintln!("[FISTP-BUG] x87 FISTP: 1.0 -> 0! RIP={:#x} ic={}", self.rip(), self.icount);
+                }
+            }
             if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, true) != 0 {
                 return Ok(());
             }

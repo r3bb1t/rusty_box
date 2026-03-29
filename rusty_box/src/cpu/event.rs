@@ -239,9 +239,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // MWAIT_IF (ECX[0]=1 at MWAIT): wake on interrupt even when IF=0
         // (Bochs event.cc:73-80)
         let mwait_if = matches!(self.activity_state, CpuActivityState::MwaitIf);
+        let in_mwait = matches!(self.activity_state, CpuActivityState::Mwait | CpuActivityState::MwaitIf);
 
         // NMI can always wake from HLT (Bochs event.cc:54-60)
         if self.pending_event & Self::BX_EVENT_NMI != 0 {
+            // Bochs event.cc:63-66: reset monitor when waking from MWAIT
+            #[cfg(feature = "bx_support_monitor_mwait")]
+            if in_mwait {
+                self.monitor.reset_monitor();
+            }
             self.activity_state = CpuActivityState::Active;
             self.inhibit_mask = 0;
             return false; // Continue to NMI delivery
@@ -250,6 +256,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // PIC interrupt can wake from HLT/MWAIT if IF=1
         if self.pending_event & Self::BX_EVENT_PENDING_INTR != 0 {
             if self.eflags.contains(EFlags::IF_) || mwait_if {
+                // Bochs event.cc:63-66: reset monitor when waking from MWAIT
+                #[cfg(feature = "bx_support_monitor_mwait")]
+                if in_mwait {
+                    self.monitor.reset_monitor();
+                }
                 self.activity_state = CpuActivityState::Active;
                 self.inhibit_mask = 0;
                 return false; // Continue to interrupt delivery
@@ -259,6 +270,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // LAPIC interrupt can also wake from HLT/MWAIT if IF=1
         if self.pending_event & Self::BX_EVENT_PENDING_LAPIC_INTR != 0 || self.lapic.intr {
             if self.eflags.contains(EFlags::IF_) || mwait_if {
+                // Bochs event.cc:63-66: reset monitor when waking from MWAIT
+                #[cfg(feature = "bx_support_monitor_mwait")]
+                if in_mwait {
+                    self.monitor.reset_monitor();
+                }
                 self.activity_state = CpuActivityState::Active;
                 self.inhibit_mask = 0;
                 return false; // Continue to LAPIC interrupt delivery

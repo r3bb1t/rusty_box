@@ -1586,7 +1586,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Bochs mmx.cc:2372: bx_address rdi = RDI & i->asize_mask();
-        let asize_mask: u64 = if self.long64_mode() {
+        let asize_mask: u64 = if instr.as64_l() != 0 {
             0xFFFF_FFFF_FFFF_FFFF
         } else if instr.as32_l() == 0 {
             0xFFFF

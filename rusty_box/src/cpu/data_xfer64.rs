@@ -116,10 +116,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// LEA r64, m - Load effective address into 64-bit register
     /// Matching C++ data_xfer64.cc:98-105 LEA_GqM
     pub fn lea_gq_m(&mut self, instr: &Instruction) {
-        let eaddr = self.resolve_addr64(instr);
-        let dst_reg = instr.dst() as usize;
-
-        self.set_gpr64(dst_reg, eaddr);
+        // Bochs: BX_CPU_RESOLVE_ADDR_64(i) = as64L() ? BxResolve64 : BxResolve32
+        let eaddr = if instr.as64_l() != 0 {
+            self.resolve_addr64(instr)
+        } else {
+            u64::from(self.resolve_addr32(instr))
+        };
+        self.set_gpr64(instr.dst() as usize, eaddr);
     }
 
     /// MOV AL, moffs64

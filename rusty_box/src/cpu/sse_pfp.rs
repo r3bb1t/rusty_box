@@ -1024,6 +1024,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             } else {
                 (op as i32) as u32
             };
+        // Catch any conversion near 1.0 producing 0
+        if result == 0 && op > 0.5 && op < 1.5 && self.icount > 2_000_000_000 {
+            eprintln!("[CVTT-BUG] CVTTSD2SI: {:.6} -> {} RIP={:#x} ic={}", op, result, self.rip(), self.icount);
+        }
         self.set_gpr32(instr.dst().into(), result);
         Ok(())
     }
@@ -1098,6 +1102,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             } else {
                 (op as i64) as u64
             };
+        if op == 1.0 && result == 0 {
+            eprintln!("[CVTT-BUG] CVTTSD2SI_64: 1.0 -> 0! RIP={:#x} icount={}", self.rip(), self.icount);
+        }
         self.set_gpr64(instr.dst() as usize, result);
         Ok(())
     }

@@ -1309,6 +1309,10 @@ pub struct BxHardDriveC {
     /// Raw pointer to PCI IDE controller for BM-DMA set_irq.
     /// Bochs: DEV_ide_bmdma_set_irq() in harddrv.cc:3509
     pub(crate) pci_ide_ptr: *mut super::pci_ide::BxPciIde,
+    /// Deferred seek completion flag per channel (Bochs seek_timer pattern).
+    /// When set, the emulator's tick loop calls ready_to_send_atapi().
+    /// Matches Bochs start_seek() + seek_timer_handler() flow.
+    pub(crate) seek_complete_pending: [bool; 2],
     /// Command history ring buffer (last 32 commands) for diagnostics
     pub(crate) cmd_history: Vec<(u8, u8, u32)>,
 }
@@ -1330,6 +1334,7 @@ impl BxHardDriveC {
             pic_ptr: core::ptr::null_mut(),
             pci_ide_ptr: core::ptr::null_mut(),
             cmd_history: Vec::new(),
+            seek_complete_pending: [false; 2],
         }
     }
 
@@ -1678,6 +1683,14 @@ impl BxHardDriveC {
                 // Bochs harddrv.cc:806-1023 — data port read
                 // Bochs harddrv.cc:806-811: DRQ check
                 if !drive.controller.status.contains(AtaStatus::DRQ) {
+                    // Trace: count data reads with DRQ=0 (kernel reading when no data)
+                    if channel_num == 1 {
+                        static NODRQ_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                        let n = NODRQ_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 5 || n % 1000 == 0 {
+                            eprintln!("[ATA-NODRQ] #{} data read with DRQ=0, cmd={:#04x}", n, drive.controller.current_command);
+                        }
+                    }
                     tracing::debug!(
                         "ATA: IO read(0x{:04x}) with drq == 0: last cmd was {:02x}",
                         port,
@@ -1897,6 +1910,21 @@ impl BxHardDriveC {
                 // AND lowers the IRQ line (but not for alternate status port).
                 // Bochs harddrv.cc:1117-1118: DEV_pic_lower_irq() on port 0x07.
                 if offset == ATA_STATUS {
+                    // Trace: log the last status read for channel 1 (CD-ROM)
+                    if channel_num == 1 {
+                        static SR_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+                        let n = SR_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        // Log first few, then every 100th, and ALWAYS log the status bits
+                        if n < 10 || n % 200 == 0 {
+                            let s = status.bits();
+                            let cmd = drive.controller.current_command;
+                            let ip = drive.controller.interrupt_pending;
+                            eprintln!("[ATA-SR] #{} status={:#04x} cmd={:#04x} ip={} DRQ={} ERR={}",
+                                n, s, cmd, ip,
+                                status.contains(AtaStatus::DRQ),
+                                status.contains(AtaStatus::ERR));
+                        }
+                    }
                     drive.controller.interrupt_pending = false;
                     let irq = match channel_num {
                         0 => 14u8,
@@ -2571,7 +2599,7 @@ impl BxHardDriveC {
     /// If packet_dma is set (features bit 0 was 1 on PACKET command),
     /// signals DMA engine instead of raising interrupt for PIO.
     /// Bochs harddrv.cc:3493-3498
-    fn ready_to_send_atapi(&mut self, channel_num: usize) {
+    pub(crate) fn ready_to_send_atapi(&mut self, channel_num: usize) {
         let drive = self.channels[channel_num].selected_drive_mut();
         drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x02; // i_o=1, c_d=0
         drive.controller.status.remove(AtaStatus::BSY | AtaStatus::ERR);
@@ -2820,7 +2848,10 @@ impl BxHardDriveC {
                 let drive = self.channels[channel_num].selected_drive_mut();
                 drive.cdrom.remaining_blocks = transfer_length;
                 drive.cdrom.next_lba = lba;
-                self.ready_to_send_atapi(channel_num);
+                // Bochs: start_seek(channel) activates a timer; the timer
+                // callback calls ready_to_send_atapi(). We defer it via a flag
+                // processed by the emulator's tick loop.
+                self.seek_complete_pending[channel_num] = true;
             }
             0x43 => {
                 // READ TOC
@@ -3365,7 +3396,8 @@ impl BxHardDriveC {
                 drive.controller.buffer_size = sector_size as usize;
                 drive.cdrom.remaining_blocks = transfer_length;
                 drive.cdrom.next_lba = lba;
-                self.ready_to_send_atapi(channel_num);
+                // Bochs: start_seek(channel) defers via timer
+                self.seek_complete_pending[channel_num] = true;
             }
             0x2b => {
                 // SEEK (Bochs harddrv.cc:1817-1821)
@@ -3816,6 +3848,12 @@ impl BxHardDriveC {
             ATA_CMD_PACKET => {
                 // Bochs harddrv.cc:2589-2611 — SEND PACKET (ATAPI)
                 if drive.device_type == DeviceType::Cdrom {
+                    static PKT_COUNT: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = PKT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 5 || n % 100 == 0 || (n > 500 && n % 10 == 0) {
+                        eprintln!("[ATAPI-CMD] #{} PACKET on ch{}", n, channel_num);
+                    }
                     // Bochs harddrv.cc:2592
                     let features = drive.controller.features;
                     drive.controller.packet_dma = (features & 1) != 0;

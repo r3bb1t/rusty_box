@@ -848,6 +848,14 @@ impl BxPicC {
                 if !self.ioapic_ptr.is_null() {
                     unsafe { (*self.ioapic_ptr).set_irq_level(irq_no, true) };
                 }
+            } else if irq_no == 15 {
+                // IRQ 15 raise while slave IRR bit 7 already set — IOAPIC skipped!
+                static SKIP_COUNT: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                let n = SKIP_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 10 || n == 50 || n == 100 || n == 500 {
+                    eprintln!("[PIC-IRR-SKIP] #{} raise_irq(15) with IRR already set — IOAPIC NOT forwarded!", n);
+                }
             }
         }
     }

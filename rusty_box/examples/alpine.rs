@@ -1706,7 +1706,7 @@ fn run_alpine() -> Result<()> {
                 let dw0 = rd_ft(base);
                 let dw1 = rd_ft(base + 4);
                 let dw2 = rd_ft(base + 8);
-                let b0 = rb_ft(base);
+                let _b0 = rb_ft(base);
                 // Only show non-zero entries or a few zero ones for context
                 if dw0 != 0 || dw1 != 0 || i < 4 || i == 0x1C {
                     print!("  [{}] @{:#08x}: {:08x} {:08x} {:08x}", i, base, dw0, dw1, dw2);

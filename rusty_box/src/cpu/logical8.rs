@@ -162,7 +162,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Returns 64-bit effective address in long mode, zero-extended 32-bit otherwise.
     #[inline]
     pub fn resolve_addr(&self, instr: &Instruction) -> u64 {
-        if self.long64_mode() {
+        // Bochs BX_CPU_RESOLVE_ADDR: (i)->as64L() ? BxResolve64 : BxResolve32
+        // Must use per-instruction address-size attribute, NOT CPU mode.
+        // In 64-bit mode with 67h prefix, as64_l()==0 → use 32-bit resolution.
+        if instr.as64_l() != 0 {
             self.resolve_addr64(instr)
         } else {
             u64::from(self.resolve_addr32(instr))
@@ -270,6 +273,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
         let op1 = self.v_read_byte(seg, eaddr)?;
         let op2 = instr.ib();
+        // diagnostics disabled for performance
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_8(op1, op2, result);
         Ok(())
@@ -295,6 +299,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.get_gpr8(0); // AL
         let op2 = instr.ib();
         let result = op1 & op2;
+        // Trace: count ALL test $0xDF,%AL with AL=0x20
+        #[cfg(feature = "bx_instrumentation")]
+        if op2 == 0xDF && self.rip() > 0x400000 && self.icount > 3_000_000_000 {
+            static TEST_DF_TOTAL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            static TEST_DF_SPACE: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let total = TEST_DF_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if op1 == 0x20 { TEST_DF_SPACE.fetch_add(1, core::sync::atomic::Ordering::Relaxed); }
+            // Log first 20 hits showing what chars awk processes, then summary every 1000
+            if total < 20 || (total % 1000 == 0 && total < 10000) {
+                let ch = if op1 >= 0x20 && op1 < 0x7f { op1 as char } else { '.' };
+                let space_n = TEST_DF_SPACE.load(core::sync::atomic::Ordering::Relaxed);
+                eprintln!("[TEST-DF] #{} AL={:#04x} '{}' ZF={} spaces={} RIP={:#x} i={}",
+                    total, op1, ch, result == 0, space_n, self.rip(), self.icount);
+            }
+        }
         self.set_flags_oszapc_logic_8(result);
     }
 
@@ -622,6 +641,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn cmp_eb_ib_r(&mut self, instr: &Instruction) {
         let op1 = self.read_8bit_regx(instr.dst() as usize, instr.extend8bit_l());
         let op2 = instr.ib();
+        // Diagnostic: catch awk FS comparison (cmp $0x20, %bpl → dst=5, imm=0x20, REX)
+        #[cfg(feature = "bx_instrumentation")]
+        if op2 == 0x20 && instr.dst() == 5 && instr.extend8bit_l() != 0 && self.icount > 1_500_000_000 {
+            // Read first 80 bytes of awk input string from [RBX]
+            let rbx = self.rbx();
+            let mut input_buf = [0u8; 80];
+            for i in 0..80 {
+                if let Ok(b) = self.v_read_byte(super::decoder::BxSegregs::Ds, rbx + i as u64) {
+                    if b == 0 { break; }
+                    input_buf[i] = b;
+                } else { break; }
+            }
+            let input_len = input_buf.iter().position(|&b| b == 0).unwrap_or(80);
+            let input_str = core::str::from_utf8(&input_buf[..input_len]).unwrap_or("<non-utf8>");
+            eprintln!("[AWK-FS] cmp $0x20,%bpl: BPL={:#04x} ({}) RIP={:#x} icount={} RBX={:#x} input={:?}",
+                op1, if op1 == 0x20 { "SPACE" } else { "NOT-SPACE" }, self.rip(), self.icount, rbx, input_str);
+        }
         let result = op1.wrapping_sub(op2);
         self.set_flags_oszapc_sub_8(op1, op2, result);
     }

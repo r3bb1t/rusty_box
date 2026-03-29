@@ -32,7 +32,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Matching Bochs data_xfer32.cc LEA_GdM
     pub fn lea_gd_m(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
-        let eaddr = if self.long64_mode() {
+        // Bochs: (Bit32u) BX_CPU_RESOLVE_ADDR(i) — uses as64L(), not long64_mode()
+        let eaddr = if instr.as64_l() != 0 {
             self.resolve_addr64(instr)
         } else {
             u64::from(self.resolve_addr32(instr))

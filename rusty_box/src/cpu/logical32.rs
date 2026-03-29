@@ -900,6 +900,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         };
         let bit = (instr.ib() & 0x1F) as u32;
         let cf = (op1 >> bit) & 1;
+        // Diagnostic: trace BT bit 10 (VF_SPECIAL) — awk handle_special check
+        #[cfg(feature = "bx_instrumentation")]
+        if bit == 10 && self.rip() > 0x400000 && self.icount > 3_000_000_000 {
+            static BT_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let n = BT_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 20 {
+                eprintln!("[BT-b10] val={:#010x} bit10={} CF={} RIP={:#x} RDI={:#x} mod_c0={} icount={}",
+                    op1, (op1 >> 10) & 1, cf, self.rip(), self.rdi(), instr.mod_c0(), self.icount);
+            }
+        }
         self.eflags.set(EFlags::CF, cf != 0);
         Ok(())
     }

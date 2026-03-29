@@ -580,6 +580,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Write a dword to a system (linear) address with cross-page handling.
     /// Bochs: system_write_dword (access.cc)
     pub(super) fn system_write_dword(&mut self, laddr: BxAddress, data: u32) -> Result<()> {
+        self.check_gdt_watchpoint(laddr, data as u64, 4);
         let page_offset = laddr & 0xFFF;
         let laddr_mask = if self.long_mode() { 0xFFFF_FFFF_FFFF_FFFF } else { 0xFFFF_FFFF };
         if page_offset + 4 <= 0x1000 {
@@ -599,6 +600,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Write a qword to a system (linear) address with cross-page handling.
     /// Bochs: system_write_qword (access.cc)
     pub(super) fn system_write_qword(&mut self, laddr: BxAddress, data: u64) -> Result<()> {
+        self.check_gdt_watchpoint(laddr, data, 8);
         let page_offset = laddr & 0xFFF;
         let laddr_mask = if self.long_mode() { 0xFFFF_FFFF_FFFF_FFFF } else { 0xFFFF_FFFF };
         if page_offset + 8 <= 0x1000 {
@@ -999,7 +1001,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Write a dword given a pre-computed linear address with cross-page handling.
     /// Bochs: write_linear_dword (access2.cc:80-106)
+    fn check_gdt_watchpoint(&mut self, _laddr: u64, _val: u64, _size: u32) {
+        // Disabled — the GDT 'corruption' was caused by our own diagnostic code
+        // (v_read_byte in SYSCALL handler triggering page walks that set A/D bits)
+    }
+
     pub(crate) fn write_linear_dword(&mut self, _seg: BxSegregs, laddr: u64, val: u32) -> Result<()> {
+        self.check_gdt_watchpoint(laddr, val as u64, 4);
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 3);
@@ -1030,9 +1038,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Write a qword given a pre-computed linear address with cross-page handling.
     /// Bochs: write_linear_qword (access2.cc:107-131)
     pub(crate) fn write_linear_qword(&mut self, _seg: BxSegregs, laddr: u64, val: u64) -> Result<()> {
+        self.check_gdt_watchpoint(laddr, val, 8);
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 7);
+        // DIAGNOSTIC: bypass TLB for writes to test stale-TLB theory
         if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 8);

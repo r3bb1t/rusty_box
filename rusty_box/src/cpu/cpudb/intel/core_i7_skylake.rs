@@ -5,6 +5,20 @@ use crate::cpu::decoder::{features::X86Feature, BX_ISA_EXTENSIONS_ARRAY_SIZE};
 
 use bitflags::bitflags;
 
+/// When RUSTY_BOX_NO_AVX is set, strip AVX/AVX2/FMA/BMI1/BMI2/AVX-512 from
+/// CPUID and ISA extensions. Forces kernel to SSE2-only code paths for
+/// diagnosing instruction emulation bugs.
+fn no_avx_mode() -> bool {
+    static NO_AVX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *NO_AVX.get_or_init(|| {
+        let active = std::env::var("RUSTY_BOX_NO_AVX").is_ok();
+        if active {
+            eprintln!("[CPUID] RUSTY_BOX_NO_AVX: stripping AVX/AVX2/FMA/BMI1/BMI2/AVX-512");
+        }
+        active
+    })
+}
+
 // ─── CPUID Leaf 1 ECX feature flags (Bochs cpuid.h:313-344) ────────────────
 
 bitflags! {
@@ -396,6 +410,19 @@ impl BxCpuIdTrait for Corei7SkylakeX {
         // enable_extension(&mut b, X86Feature::IsaAvx512Bw);  // disabled: BW handlers not implemented
         enable_extension(&mut b, X86Feature::IsaClflushopt);
         enable_extension(&mut b, X86Feature::IsaClwb);
+        if no_avx_mode() {
+            let disable = |b: &mut [u32; BX_ISA_EXTENSIONS_ARRAY_SIZE], f: X86Feature| {
+                let idx = f as usize;
+                b[idx / 32] &= !(1 << (idx % 32));
+            };
+            disable(&mut b, X86Feature::IsaAvx);
+            disable(&mut b, X86Feature::IsaAvx2);
+            disable(&mut b, X86Feature::IsaAvxFma);
+            disable(&mut b, X86Feature::IsaAvxF16c);
+            disable(&mut b, X86Feature::IsaBmi1);
+            disable(&mut b, X86Feature::IsaBmi2);
+            disable(&mut b, X86Feature::IsaAvx512);
+        }
         b
     }
 
@@ -428,12 +455,21 @@ impl BxCpuIdTrait for Corei7SkylakeX {
 
             // ── Leaf 1: Version / Feature Flags ─────────────────────────
             // Bochs corei7_skylake-x.cc:260-365
-            0x00000001 => (
-                0x00050654, // EAX: Family 6, ExtModel 5, Model 5 → Skylake-X (stepping U0)
-                0x00010800, // EBX: Brand=0, CLFLUSH=8(64B), 1 logical proc, APIC ID 0
-                LEAF1_ECX_BASE.bits(),
-                LEAF1_EDX_BASE.bits(),
-            ),
+            0x00000001 => {
+                let mut ecx = LEAF1_ECX_BASE;
+                if no_avx_mode() {
+                    ecx = ecx
+                        .difference(CpuIdStd1Ecx::AVX)
+                        .difference(CpuIdStd1Ecx::FMA)
+                        .difference(CpuIdStd1Ecx::AVX_F16C);
+                }
+                (
+                    0x00050654,
+                    0x00010800,
+                    ecx.bits(),
+                    LEAF1_EDX_BASE.bits(),
+                )
+            },
 
             // ── Leaf 2: Cache/TLB descriptors ───────────────────────────
             // Bochs corei7_skylake-x.cc:368-375
@@ -470,12 +506,23 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             // Bochs corei7_skylake-x.cc:445-493
             0x00000007 => {
                 match ecx {
-                    0 => (
-                        0x00000000,             // EAX: max sub-leaf = 0
-                        LEAF7_EBX_BASE.bits(),  // EBX: feature flags
-                        0x00000000,             // ECX: no features
-                        0x00000000,             // EDX: no features
-                    ),
+                    0 => {
+                        let mut ebx = LEAF7_EBX_BASE;
+                        if no_avx_mode() {
+                            ebx = ebx
+                                .difference(CpuIdStd7Ebx::AVX2)
+                                .difference(CpuIdStd7Ebx::BMI1)
+                                .difference(CpuIdStd7Ebx::BMI2)
+                                .difference(CpuIdStd7Ebx::AVX512F)
+                                .difference(CpuIdStd7Ebx::AVX512VL);
+                        }
+                        (
+                            0x00000000,  // EAX: max sub-leaf = 0
+                            ebx.bits(),  // EBX: feature flags
+                            0x00000000,  // ECX: no features
+                            0x00000000,  // EDX: no features
+                        )
+                    }
                     _ => (0, 0, 0, 0),
                 }
             }

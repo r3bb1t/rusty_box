@@ -240,6 +240,7 @@ impl BxPciIde {
     /// transfers by calling bmdma_complete() which clears DRQ. Until
     /// DMA is fully working end-to-end, disable the timer to allow
     /// PIO to work correctly for modloop mounting.
+    #[allow(unreachable_code)]
     fn timer(&mut self, channel: usize) {
         // DMA timer disabled — PIO path handles all transfers
         return;
@@ -607,7 +608,7 @@ impl BxPciIde {
     /// Bochs: bx_pci_ide_c::pci_write_handler() (pci_ide.cc:433-457)
     #[inline(never)]
     pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> bool {
-        let mut bar4_changed = false;
+        let bar4_changed = false;
 
         // BAR0-BAR3 and some reserved ranges are read-only (pci_ide.cc:435-437)
         if (address >= 0x10 && address < 0x20) || (address > 0x23 && address < 0x40) {

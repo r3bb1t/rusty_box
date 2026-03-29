@@ -312,10 +312,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             // Triple fault: 3rd exception with no resolution after #DF.
             if self.last_exception_type == ExceptionType::DoubleFault as u32 {
+                let rip = self.rip();
+                let cs = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
                 tracing::error!("TRIPLE FAULT at RIP={:#x} CS={:#x} vector={:?} error_code={:#x} icount={} CR0={:#x} CR3={:#x} CR2={:#x} IDTR.base={:#x} IDTR.limit={:#x}",
-                    self.rip(), self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value,
-                    vector, error_code, self.icount,
+                    rip, cs, vector, error_code, self.icount,
                     self.cr0.get32(), self.cr3, self.cr2, self.idtr.base, self.idtr.limit);
+                eprintln!("\n!!! TRIPLE FAULT !!! RIP={:#x} CS={:#06x} vector={:?} error_code={:#x} icount={} CR2={:#x}",
+                    rip, cs, vector, error_code, self.icount, self.cr2);
                 self.debug_puts(b"[TRIPLE_FAULT]\n");
                 self.activity_state = super::cpu::CpuActivityState::Shutdown;
                 self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -349,6 +352,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     self.r8(), self.r9(), self.r10(), self.r11());
                 tracing::error!("  R12={:#018x} R13={:#018x} R14={:#018x} R15={:#018x}",
                     self.r12(), self.r13(), self.r14(), self.r15());
+                eprintln!("\n!!! DOUBLE FAULT !!! 1st={} 2nd={:?} RIP={:#x} CR2={:#x} icount={}",
+                    last, vector, self.rip(), self.cr2, self.icount);
                 return self.exception(Exception::Df, 0);
             }
         }

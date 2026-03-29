@@ -311,7 +311,7 @@ fn run_alpine() -> Result<()> {
         println!("  Initramfs: {} bytes ({} MB)", initramfs.len(), initramfs.len() / 1024 / 1024);
 
         let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_|
-            "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 earlyprintk=serial,ttyS0,115200 nomodeset nokaslr kfence.sample_interval=0 modules=loop,squashfs,cdrom,sr_mod,isofs".to_string()
+            "console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 earlyprintk=serial,ttyS0,115200 nomodeset nokaslr kfence.sample_interval=0 modules=loop,squashfs,cdrom,sr_mod,isofs modloop=/boot/modloop-virt".to_string()
         );
 
         // Initialize CPU + devices
@@ -347,6 +347,49 @@ fn run_alpine() -> Result<()> {
     println!("Starting Alpine Linux (max {} instructions)...\n", max_instructions);
 
     // =========================================================================
+    // =========================================================================
+    // Instrumentation: awk field-splitting debug hook
+    // =========================================================================
+    #[cfg(feature = "bx_instrumentation")]
+    {
+        use rusty_box::cpu::{CpuSnapshot, Instrumentation};
+
+        /// Traces awk_split FS dispatch to find why field splitting fails.
+        /// Watches for CmpEbIb (FS==space check) and TestAlib (Phase 2 whitespace)
+        /// by matching decoded opcode + register values.
+        struct AwkFieldSplitTracer {
+            hits: u32,
+        }
+        impl Instrumentation for AwkFieldSplitTracer {
+            fn before_execution(&mut self, rip: u64, opcode: u16, _ilen: u8, snap: &CpuSnapshot) {
+                if snap.icount < 3_000_000_000 || rip < 0x400000 { return; }
+                if self.hits >= 100 { return; }
+
+                let al = (snap.rax & 0xFF) as u8;
+                let bpl = (snap.rbp & 0xFF) as u8;
+
+                // Print actual opcode values on first call for verification
+                if self.hits == 0 {
+                    let test_alib_val = rusty_box_decoder::opcode::Opcode::TestAlib as u16;
+                    let cmp_ebib_val = rusty_box_decoder::opcode::Opcode::CmpEbIb as u16;
+                    let cmp_alib_val = rusty_box_decoder::opcode::Opcode::CmpAlib as u16;
+                    eprintln!("[INSTR-VALS] TestAlib={} CmpEbIb={} CmpAlib={} cur={}",
+                        test_alib_val, cmp_ebib_val, cmp_alib_val, opcode);
+                    self.hits = 1;
+                }
+                // Match opcodes
+                if (opcode == 42 || opcode == 70 || opcode == 38) && self.hits < 30 {
+                    let ch = if al >= 0x20 && al < 0x7f { al as char } else { '.' };
+                    eprintln!("[INSTR] op={} RIP={:#x} AL={:#04x} '{}' BPL={:#04x} i={}",
+                        opcode, rip, al, ch, bpl, snap.icount);
+                    self.hits += 1;
+                }
+            }
+        }
+        emu.cpu_mut().set_instrumentation(Box::new(AwkFieldSplitTracer { hits: 0 }));
+        println!("Instrumentation: AwkFieldSplitTracer installed");
+    }
+
     // Execution loop
     // =========================================================================
     let start_time = Instant::now();
@@ -358,6 +401,7 @@ fn run_alpine() -> Result<()> {
     // BIOS boot: inject Enter key at ISOLINUX prompt (~18M instructions)
     // Enter scancode: PS/2 set 2 — make=0x5A, break=0xF0 0x5A
     let mut enter_injected = !bios_boot; // skip for direct boot
+
 
     loop {
         if total_executed >= max_instructions {
@@ -380,15 +424,19 @@ fn run_alpine() -> Result<()> {
             break;
         }
 
-        // Inject kernel parameters + Enter at ISOLINUX boot prompt (BIOS boot only)
-        // ISOLINUX boot prompt appears at ~17M instructions; inject after that
+        // BIOS boot: type the full kernel cmdline at ISOLINUX prompt.
+        // Typing at the prompt REPLACES the syslinux.cfg APPEND line,
+        // so we must include everything from the original APPEND plus
+        // console= for serial output. The original APPEND is:
+        //   modules=loop,squashfs,sd-mod,usb-storage quiet
+        // We add console=ttyS0,115200 and drop quiet for visibility.
         if !enter_injected && total_executed >= 18_000_000 {
-            println!("[{}M] Injecting at ISOLINUX boot prompt", total_executed / 1_000_000);
-            // Send just Enter — boot default kernel. The kernel's default
-            // atapi_dma setting should work since BAR4 is set by BIOS.
-            emu.send_string("\n");
+            println!("[{}M] Typing cmdline at ISOLINUX boot prompt", total_executed / 1_000_000);
+            emu.send_string("virt modules=loop,squashfs,sd-mod,usb-storage console=ttyS0,115200\n");
             enter_injected = true;
         }
+
+
 
         // Drain serial port output periodically
         if last_serial_drain.elapsed().as_millis() >= 100 {

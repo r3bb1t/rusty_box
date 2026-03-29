@@ -166,7 +166,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Get the Time Stamp Counter value.
     ///
     /// Bochs: TSC = bx_pc_system.time_ticks() + tsc_adjust (no scaling).
-    /// time_ticks() increments by 1 per instruction. TSC_SCALE = 1 matches Bochs.
+    /// time_ticks() advances via pc_system tickn(), NOT via icount.
+    /// This matches Bochs where BX_TICKN(10) in HLT advances time_ticks()
+    /// but NOT icount, so TSC advances during HLT without inflating icount.
     const TSC_SCALE: u64 = 1;
 
     pub fn get_tsc(&self, system_ticks: u64) -> u64 {
@@ -176,6 +178,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Set the Time Stamp Counter to a specific value
     pub fn set_tsc(&mut self, newval: u64, system_ticks: u64) {
         self.tsc_adjust = newval.wrapping_sub(system_ticks.wrapping_mul(Self::TSC_SCALE)) as i64
+    }
+
+    /// Get current system ticks from pc_system (Bochs: bx_pc_system.time_ticks()).
+    /// Falls back to icount when pc_system is not wired (unit tests).
+    #[inline]
+    fn system_ticks(&self) -> u64 {
+        if let Some(ps) = self.pc_system_ptr {
+            unsafe { ps.as_ref().time_ticks() }
+        } else {
+            self.icount
+        }
     }
 
     // =========================================================================
@@ -463,7 +476,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        let ticks = self.get_tsc(self.icount);
+        let ticks = self.get_tsc(self.system_ticks());
         self.set_rax((ticks & 0xFFFF_FFFF) as u64);
         self.set_rdx((ticks >> 32) as u64);
         // ECX = IA32_TSC_AUX MSR (processor ID) — Bochs proc_ctrl.cc:834
@@ -489,9 +502,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        // Use icount as time source. During HLT, the emulator's HLT handler
-        // advances icount to reflect elapsed virtual time (see emulator.rs HLT loop).
-        let ticks = self.get_tsc(self.icount);
+        // Use system_ticks (pc_system.time_ticks) as time source.
+        // time_ticks advances during HLT via tickn(), matching Bochs behavior.
+        let ticks = self.get_tsc(self.system_ticks());
 
         self.set_rax((ticks & 0xFFFF_FFFF) as u64);
         self.set_rdx((ticks >> 32) as u64);
@@ -519,7 +532,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let msr = self.ecx();
         let val: u64 = match msr {
-            BX_MSR_TSC => self.get_tsc(self.icount),
+            BX_MSR_TSC => self.get_tsc(self.system_ticks()),
             #[cfg(feature = "bx_support_apic")]
             BX_MSR_APICBASE => self.msr.apicbase as u64,
             #[cfg(not(feature = "bx_support_apic"))]
@@ -618,7 +631,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val = ((self.edx() as u64) << 32) | (self.eax() as u64);
 
         match msr {
-            BX_MSR_TSC => self.set_tsc(val, self.icount),
+            BX_MSR_TSC => self.set_tsc(val, self.system_ticks()),
             #[cfg(feature = "bx_support_apic")]
             BX_MSR_APICBASE => self.msr.apicbase = val as _,
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr = val as u32,
@@ -1393,6 +1406,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
+        // Record syscall in diagnostic ring buffer
+        {
+            let nr = self.rax();
+            let arg0 = self.rdi();
+            let arg1 = self.rsi();
+            let ic = self.icount;
+            let idx = self.diag_syscall_ring_idx % 32;
+            self.diag_syscall_ring[idx] = (nr, arg0, ic);
+            self.diag_syscall_ring_idx += 1;
+            self.diag_syscall_count += 1;
+        }
         self.invalidate_prefetch_q();
 
         let seg_valid =
@@ -1531,6 +1555,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             SEG_ACCESS_ROK, SEG_ACCESS_ROK4_G, SEG_ACCESS_WOK, SEG_ACCESS_WOK4_G, SEG_VALID_CACHE,
         };
         use super::eflags::EFlags;
+
+        // Track SYSRET for diagnostics
+        self.diag_sysret_count += 1;
 
         if !self.efer.sce() {
             return self.exception(super::cpu::Exception::Ud, 0);

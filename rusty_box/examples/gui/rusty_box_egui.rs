@@ -261,7 +261,7 @@ fn run_emulator(
             let (kernel, initramfs) =
                 extract_kernel_from_iso(&iso_data).expect("Failed to extract kernel from ISO");
             let cmdline = std::env::var("CMDLINE").unwrap_or_else(|_| {
-                "console=tty0 console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 nomodeset nokaslr kfence.sample_interval=0 modules=loop,squashfs,cdrom,sr_mod,isofs".to_string()
+                "console=tty0 console=ttyS0,115200 earlycon=uart8250,io,0x3f8,115200n8 nomodeset nokaslr kfence.sample_interval=0 modules=loop,squashfs,cdrom,sr_mod,isofs modloop=/boot/modloop-virt".to_string()
             });
             println!(
                 "Direct boot: kernel={} bytes, initramfs={} bytes",
@@ -374,7 +374,7 @@ fn detect_boot_profile(workspace_root: &std::path::Path) -> BootProfile {
     let boot_env = std::env::var("RUSTY_BOX_BOOT")
         .unwrap_or_else(|_| {
             if iso_found.is_some() {
-                "alpine-direct".to_string()
+                "alpine".to_string()
             } else {
                 "dlx".to_string()
             }

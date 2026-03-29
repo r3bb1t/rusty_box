@@ -591,7 +591,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     /// Stack snapshot at first PM HLT (16 dwords from ESP)
     pub(crate) diag_first_pm_hlt_stack: [u32; 16],
     /// RIP ring buffer for tracing last N instructions before HLT
-    pub(super) diag_rip_ring: [u64; 256],
+    pub(super) diag_rip_ring: [u64; 8192],
     /// Opcode ring buffer (parallel to diag_rip_ring)
     pub(super) diag_opcode_ring: [u16; 256],
     pub(super) diag_rip_ring_idx: usize,
@@ -607,6 +607,15 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(super) diag_retf16_count: u64,
     /// Address hit counters: [addr, count] pairs for tracking specific RIP values
     pub(crate) diag_addr_hits: [(u32, u64); 8],
+
+    /// SYSCALL ring buffer: last 32 syscalls [syscall_nr, arg0 (RDI), icount]
+    pub(crate) diag_syscall_ring: [(u64, u64, u64); 32],
+    pub(crate) diag_syscall_ring_idx: usize,
+    pub(crate) diag_syscall_count: u64,
+    /// SYSRET count — compare with diag_syscall_count to find blocked syscalls
+    pub(crate) diag_sysret_count: u64,
+    /// When true, log every userspace instruction to stderr (awk trace mode)
+    pub(crate) diag_awk_trace_active: bool,
 
     // Boundaries of current code page, based on EIP
     pub(super) eip_page_bias: BxAddress,
@@ -658,6 +667,11 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
 
     #[cfg(feature = "bx_instrumentation")]
     pub(super) far_branch: FarBranch,
+
+    /// Bochs-style instrumentation (instrument/instrumentation.txt).
+    /// Install via `set_instrumentation()`. Feature-gated by `bx_instrumentation`.
+    #[cfg(feature = "bx_instrumentation")]
+    pub(crate) instrumentation: Option<alloc::boxed::Box<dyn super::Instrumentation>>,
 
     pub(crate) dtlb: Tlb<BX_DTLB_SIZE>,
     pub(super) itlb: Tlb<BX_ITLB_SIZE>,
@@ -765,6 +779,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Used by emulator.rs to wire I/O APIC → LAPIC interrupt delivery.
     pub(crate) fn lapic_ptr_mut(&mut self) -> *mut crate::cpu::apic::BxLocalApic {
         &mut self.lapic as *mut _
+    }
+
+    /// Check LAPIC IRR/ISR for a specific vector (immutable access for diagnostics).
+    #[cfg(feature = "bx_support_apic")]
+    pub(crate) fn lapic_vector_state(&self, vector: u8) -> (bool, bool) {
+        self.lapic.vector_state(vector)
     }
 
     /// Check if the LAPIC has a pending interrupt (immutable access).
@@ -1205,6 +1225,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.io_bus = None;
     }
 
+    /// Install instrumentation hooks (Bochs instrument/instrumentation.txt).
+    /// Implement the `Instrumentation` trait and pass a boxed instance.
+    #[cfg(feature = "bx_instrumentation")]
+    pub fn set_instrumentation(&mut self, instr: alloc::boxed::Box<dyn super::Instrumentation>) {
+        self.instrumentation = Some(instr);
+    }
+
     #[inline]
     pub(crate) fn set_pc_system_ptr(&mut self, ps: NonNull<crate::pc_system::BxPcSystemC>) {
         self.pc_system_ptr = Some(ps);
@@ -1592,6 +1619,24 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 let opcode = unsafe { (*i_ptr).get_ia_opcode() };
                 self.diag_current_opcode = opcode as u16;
 
+                // Bochs BX_INSTR_BEFORE_EXECUTION(cpu_id, i)
+                #[cfg(feature = "bx_instrumentation")]
+                if self.instrumentation.is_some() {
+                    if self.icount == 50_000_001 {
+                        eprintln!("[INSTR-ALIVE] instrumentation callback active at icount={}", self.icount);
+                    }
+                    let snap = super::CpuSnapshot {
+                        rax: self.rax(), rbx: self.rbx(), rcx: self.rcx(), rdx: self.rdx(),
+                        rsi: self.rsi(), rdi: self.rdi(), rbp: self.rbp(), rsp: self.rsp(),
+                        r8: self.r8(), r9: self.r9(), r10: self.r10(), r11: self.r11(),
+                        r12: self.r12(), r13: self.r13(), r14: self.r14(), r15: self.r15(),
+                        eflags: self.eflags.bits(), icount: self.icount,
+                    };
+                    let rip_before = self.prev_rip;
+                    self.instrumentation.as_mut().unwrap()
+                        .before_execution(rip_before, opcode as u16, ilen_val, &snap);
+                }
+
                 match self.execute_instruction(unsafe { &*i_ptr }) {
                     Ok(()) => {}
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
@@ -1827,6 +1872,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Check if entry matches and has valid instruction (matching C++ line 299)
         let cache_hit = matches!(entry.p_addr, crate::cpu::icache::IcacheAddress::Address(addr) if addr == p_addr)
             && entry.i.ilen() != 0;
+
 
         if cache_hit {
             // SMC detection: compare first 8 bytes against current memory
@@ -2167,7 +2213,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     fn before_execution(&mut self, _cpu_id: u32) {
-        // Bochs instrumentation hook (BX_INSTR_BEFORE_EXECUTION) — no-op without instrumentation.
+        // Populate RIP ring buffer for post-mortem analysis.
+        // Cheap: one array write per instruction, no I/O.
+        let idx = self.diag_rip_ring_idx % 256;
+        self.diag_rip_ring[idx] = self.rip();
+        self.diag_rip_ring_idx += 1;
     }
 
     // boundaries of consideration:

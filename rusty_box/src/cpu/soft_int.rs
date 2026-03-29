@@ -176,7 +176,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr(instr);
 
         // Bochs: (eaddr+2) & i->asize_mask() — mask for 16-bit address wrap
-        let asize_mask: u64 = if self.long64_mode() {
+        let asize_mask: u64 = if instr.as64_l() != 0 {
             0xFFFF_FFFF_FFFF_FFFF
         } else if instr.as32_l() == 0 {
             0xFFFF
@@ -217,7 +217,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr(instr);
 
         // Bochs: (eaddr+4) & i->asize_mask() — mask for 16-bit address wrap
-        let asize_mask: u64 = if self.long64_mode() {
+        let asize_mask: u64 = if instr.as64_l() != 0 {
             0xFFFF_FFFF_FFFF_FFFF
         } else if instr.as32_l() == 0 {
             0xFFFF
