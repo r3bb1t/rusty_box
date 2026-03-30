@@ -54,7 +54,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // eSP+4:  OLD CS      (already read by caller, passed as raw_cs_selector)
         // eSP+0:  OLD EIP     (already read by caller, passed as new_eip)
 
-        let temp_esp = if unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b } {
+        let temp_esp = if self.sregs[BxSegregs::Ss as usize].cache.u.segment_d_b() {
             self.esp()
         } else {
             self.sp() as u32
@@ -206,8 +206,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// false if it should go through the IDT (protected_mode_int).
     pub(super) fn v86_redirect_interrupt(&mut self, vector: u8) -> super::Result<bool> {
         if self.cr4.vme() {
-            let tr_base = unsafe { self.tr.cache.u.segment.base };
-            let tr_limit = unsafe { self.tr.cache.u.segment.limit_scaled };
+            let tr_base = self.tr.cache.u.segment_base();
+            let tr_limit = self.tr.cache.u.segment_limit_scaled();
 
             // TSS must have room for I/O base address field (offset 102-103)
             // (vm8086.cc:208-211)
@@ -301,14 +301,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[sreg].cache.segment = true;
             self.sregs[sreg].cache.r#type = 3; // BX_DATA_READ_WRITE_ACCESSED
 
-            unsafe {
-                self.sregs[sreg].cache.u.segment.base =
-                    (self.sregs[sreg].selector.value as u64) << 4;
-                self.sregs[sreg].cache.u.segment.limit_scaled = 0xFFFF;
-                self.sregs[sreg].cache.u.segment.g = false;
-                self.sregs[sreg].cache.u.segment.d_b = false;
-                self.sregs[sreg].cache.u.segment.avl = false;
-            }
+                self.sregs[sreg].cache.u.set_segment_base(
+                    (self.sregs[sreg].selector.value as u64) << 4);
+                self.sregs[sreg].cache.u.set_segment_limit_scaled(0xFFFF);
+                self.sregs[sreg].cache.u.set_segment_g(false);
+                self.sregs[sreg].cache.u.set_segment_d_b(false);
+                self.sregs[sreg].cache.u.set_segment_avl(false);
             self.sregs[sreg].selector.rpl = 3;
         }
 

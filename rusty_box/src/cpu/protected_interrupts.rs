@@ -27,7 +27,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     ) -> Result<()> {
         // Only log for exceptions (vectors 0-31), not hardware IRQs (32+)
         if vector < 32 {
-            tracing::debug!("PM_INT: vec={:#04x} IDTR.base={:#010x} IDTR.limit={:#06x} CPL={} RIP={:#010x} icount={}",
+            tracing::trace!("PM_INT: vec={:#04x} IDTR.base={:#010x} IDTR.limit={:#06x} CPL={} RIP={:#010x} icount={}",
                 vector, self.idtr.base, self.idtr.limit,
                 self.sregs[BxSegregs::Cs as usize].selector.rpl,
                 self.rip(), self.icount);
@@ -140,7 +140,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             SystemAndGateDescriptorEnum::BxTaskGate => {
                 // Task switch via Task Gate (matches original lines 341-381)
                 // Bochs returns immediately after task_switch — no flag clearing
-                let raw_tss_selector = unsafe { gate_descriptor.u.task_gate.tss_selector };
+                // SAFETY: descriptor type verified as task gate before union access
+                let raw_tss_selector = gate_descriptor.u.task_gate_tss_selector();
                 let mut tss_selector = BxSelector::default();
                 parse_selector(raw_tss_selector, &mut tss_selector);
 
@@ -178,7 +179,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             | SystemAndGateDescriptorEnum::Bx286TrapGate
             | SystemAndGateDescriptorEnum::Bx386InterruptGate
             | SystemAndGateDescriptorEnum::Bx386TrapGate => {
-                let gate_dest_offset = unsafe { gate_descriptor.u.gate.dest_offset };
+                // SAFETY: descriptor type verified as gate before union access
+                let gate_dest_offset = gate_descriptor.u.gate_dest_offset();
                 self.handle_interrupt_trap_gate(&gate_descriptor, push_error, error_code)?;
                 // Set EIP after handling the gate (matches original line 714)
                 self.set_eip(gate_dest_offset);
@@ -213,8 +215,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         push_error: bool,
         error_code: u16,
     ) -> Result<()> {
-        let gate_dest_selector = unsafe { gate_descriptor.u.gate.dest_selector };
-        let gate_dest_offset = unsafe { gate_descriptor.u.gate.dest_offset };
+        // SAFETY: descriptor type verified as gate before union access
+        let gate_dest_selector = gate_descriptor.u.gate_dest_selector();
+        let gate_dest_offset = gate_descriptor.u.gate_dest_offset();
 
         if (gate_dest_selector & 0xfffc) == 0 {
             tracing::error!("handle_interrupt_trap_gate(): selector null");
@@ -252,7 +255,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             || super::descriptor::is_data_segment(cs_descriptor.r#type)
             || cs_descriptor.dpl > cpl
         {
-            tracing::warn!(
+            tracing::debug!(
                 "handle_interrupt_trap_gate(): not accessible or not code segment cs={:#04x} \
                  valid={} segment={} type={:#x} dpl={} cpl={} icount={}",
                 cs_selector.value,
@@ -305,7 +308,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
 
             // EIP must be in CS limit else #GP(0) (matches original line 678)
-            if gate_dest_offset > unsafe { cs_descriptor.u.segment.limit_scaled } {
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            if gate_dest_offset > cs_descriptor.u.segment_limit_scaled() {
                 let gdt_entry_laddr = self.gdtr.base + (cs_selector.index as u64 * 8);
                 let gdt_phys = gdt_entry_laddr.wrapping_sub(0xC0000000);
                 let raw_lo = self.mem_read_dword(gdt_phys);
@@ -316,7 +320,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                      GDT[{}] raw={:#010x}_{:#010x} at phys={:#010x} \
                      GDTR.base={:#010x} GDTR.limit={:#06x} RIP={:#010x} icount={}",
                     gate_dest_offset,
-                    unsafe { cs_descriptor.u.segment.limit_scaled },
+                    cs_descriptor.u.segment_limit_scaled(),
                     cs_selector.value,
                     cs_selector.index,
                     raw_hi,
@@ -359,7 +363,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             new_cs_selector.value = (new_cs_selector.value & !0x03) | cpl as u16;
 
             if tracing::enabled!(tracing::Level::DEBUG) {
-                let base = unsafe { cs_descriptor.u.segment.base };
+                // SAFETY: segment cache populated during segment load; union read matches descriptor type
+                let base = cs_descriptor.u.segment_base();
                 let linear = base + gate_dest_offset as u64;
                 let bytes: Vec<u8> = (0..48u64)
                     .map(|i| {
@@ -370,12 +375,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         }
                     })
                     .collect();
-                tracing::debug!("PM_INT: loading CS sel={:#06x} base={:#010x} limit={:#010x} d_b={} -> EIP={:#010x} (linear={:#010x})",
+                tracing::trace!("PM_INT: loading CS sel={:#06x} base={:#010x} limit={:#010x} d_b={} -> EIP={:#010x} (linear={:#010x})",
                     new_cs_selector.value, base,
-                    unsafe { cs_descriptor.u.segment.limit_scaled },
-                    unsafe { cs_descriptor.u.segment.d_b },
+                    cs_descriptor.u.segment_limit_scaled(),
+                    cs_descriptor.u.segment_d_b(),
                     gate_dest_offset, linear);
-                tracing::debug!("PM_INT: handler bytes @ {:#010x}: {:02x?}", linear, bytes);
+                tracing::trace!("PM_INT: handler bytes @ {:#010x}: {:02x?}", linear, bytes);
             }
 
             // Use load_cs() to properly update user_pl, touch accessed bit, and
@@ -520,8 +525,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Bochs exception.cc:497-500: IP must be within CS segment boundaries, else #GP(0)
-        let gate_dest_offset = unsafe { gate_descriptor.u.gate.dest_offset };
-        if gate_dest_offset > unsafe { cs_descriptor.u.segment.limit_scaled } {
+        // SAFETY: descriptor type verified as gate before union access
+        let gate_dest_offset = gate_descriptor.u.gate_dest_offset();
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
+        if gate_dest_offset > cs_descriptor.u.segment_limit_scaled() {
             tracing::error!("handle_interrupt_to_inner_privilege(): gate EIP > CS.limit");
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
@@ -541,7 +548,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let is_386_gate = gate_descriptor.r#type >= 14;
 
         // Build stack frame on new stack (matches lines 511-630)
-        if unsafe { new_stack.cache.u.segment.d_b } {
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
+        if new_stack.cache.u.segment_d_b() {
             // 32-bit stack
             let mut temp_esp = esp_for_cpl_x;
 
@@ -920,7 +928,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let gate_descriptor = self.parse_descriptor(dword1, dword2)?;
 
         if gate_descriptor.valid == 0 || gate_descriptor.segment {
-            tracing::warn!(
+            tracing::debug!(
                 "long_mode_int(): gate descriptor is not valid sys seg: vector={} type={:#x} dword1={:#010x} dword2={:#010x} dword3={:#010x} idt_addr={:#x} icount={}",
                 vector as u8, gate_descriptor.r#type, dword1, dword2, dword3, idt_entry_addr, self.icount
             );
@@ -962,13 +970,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             });
         }
 
-        let gate_dest_selector = unsafe { gate_descriptor.u.gate.dest_selector };
+        // SAFETY: descriptor type verified as gate before union access
+        let gate_dest_selector = gate_descriptor.u.gate_dest_selector();
         // 64-bit offset: low 16 bits from gate dword1, high 16 from gate dword2, upper 32 from dword3
         let gate_dest_offset = ((dword3 as u64) << 32)
-            | (unsafe { gate_descriptor.u.gate.dest_offset } as u64);
+            // SAFETY: descriptor type verified as gate before union access
+            | (gate_descriptor.u.gate_dest_offset() as u64);
 
         // IST (Interrupt Stack Table) index from gate param_count bits 0-2
-        let ist = (unsafe { gate_descriptor.u.gate.param_count } & 0x7) as u8;
+        // SAFETY: descriptor type verified as gate before union access
+        let ist = (gate_descriptor.u.gate_param_count() & 0x7) as u8;
 
         // CS selector must be non-null
         if (gate_dest_selector & 0xfffc) == 0 {
@@ -1013,7 +1024,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Must be a 64-bit segment (L=1, D_B=0)
-        if unsafe { !cs_descriptor.u.segment.l } || unsafe { cs_descriptor.u.segment.d_b } {
+        if !cs_descriptor.u.segment_l() || cs_descriptor.u.segment_d_b() {
             tracing::error!("long_mode_int(): must be 64 bit segment");
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
@@ -1145,7 +1156,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         _error_code: u16,
     ) -> Result<()> {
         // Examine selector to TSS, given in task gate descriptor (matches line 343)
-        let raw_tss_selector = unsafe { gate_descriptor.u.task_gate.tss_selector };
+        // SAFETY: descriptor type verified as task gate before union access
+        let raw_tss_selector = gate_descriptor.u.task_gate_tss_selector();
         let mut tss_selector = BxSelector::default();
         parse_selector(raw_tss_selector, &mut tss_selector);
 

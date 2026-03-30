@@ -17,7 +17,6 @@
 //! - **HardDrive (ATA/IDE)**: Hard disk controller
 
 use alloc::{collections::VecDeque, string::String, vec::Vec};
-use core::ffi::c_void;
 
 pub mod acpi;
 pub mod cmos;
@@ -52,35 +51,48 @@ pub use serial::BxSerialC;
 /// Number of I/O ports (0x0000 - 0xFFFF)
 pub const IO_PORTS: usize = 0x10000;
 
-/// I/O read handler function type
+/// Identifies which hardware device owns an I/O port registration.
 ///
-/// # Arguments
-/// * `this_ptr` - Pointer to device instance
-/// * `address` - I/O port address
-/// * `io_len` - Length of I/O operation (1, 2, or 4 bytes)
-///
-/// # Returns
-/// The value read from the port
-pub type IoReadHandlerT = fn(this_ptr: *mut c_void, address: u16, io_len: u8) -> u32;
+/// Used for safe enum-based dispatch instead of C-style `fn ptr + *mut c_void`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceId {
+    /// No device registered (unhandled port)
+    None,
+    /// 8259 PIC (Programmable Interrupt Controller)
+    Pic,
+    /// 8254 PIT (Programmable Interval Timer)
+    Pit,
+    /// CMOS/RTC
+    Cmos,
+    /// 8237 DMA Controller
+    Dma,
+    /// 8042 Keyboard/Mouse Controller
+    Keyboard,
+    /// ATA/IDE Hard Drive Controller
+    HardDrive,
+    /// 16550 UART Serial Port
+    Serial,
+    /// VGA Display Controller
+    Vga,
+    /// Port 92h System Control (A20/reset)
+    Port92,
+    /// PCI bus (config addr/data, PIIX3 ELCR, BM-DMA)
+    Pci,
+    /// PCI IDE Controller (BM-DMA ports)
+    PciIde,
+    /// PIIX4 ACPI Power Management
+    Acpi,
+    /// I/O APIC (MMIO-only, no port I/O)
+    Ioapic,
+}
 
-/// I/O write handler function type
+/// I/O handler registration entry for a single port.
 ///
-/// # Arguments
-/// * `this_ptr` - Pointer to device instance
-/// * `address` - I/O port address
-/// * `value` - Value to write
-/// * `io_len` - Length of I/O operation (1, 2, or 4 bytes)
-pub type IoWriteHandlerT = fn(this_ptr: *mut c_void, address: u16, value: u32, io_len: u8);
-
-/// I/O handler registration structure
+/// Each port maps to a `DeviceId` for safe dispatch through `DeviceManager`.
 #[derive(Clone)]
 pub struct IoHandlerEntry {
-    /// Handler function
-    pub(crate) handler: Option<IoReadHandlerT>,
-    /// Write handler function
-    pub(crate) write_handler: Option<IoWriteHandlerT>,
-    /// Device instance pointer
-    pub(crate) this_ptr: *mut c_void,
+    /// Which device owns this port
+    pub(crate) device_id: DeviceId,
     /// Handler name for debugging
     pub(crate) name: String,
     /// I/O length mask (bit 0 = 1 byte, bit 1 = 2 bytes, bit 2 = 4 bytes)
@@ -90,18 +102,12 @@ pub struct IoHandlerEntry {
 impl Default for IoHandlerEntry {
     fn default() -> Self {
         Self {
-            handler: None,
-            write_handler: None,
-            this_ptr: core::ptr::null_mut(),
+            device_id: DeviceId::None,
             name: String::new(),
             mask: 0x7, // All lengths supported by default
         }
     }
 }
-
-// SAFETY: IoHandlerEntry's raw pointer is only dereferenced within single-threaded emulator context
-unsafe impl Send for IoHandlerEntry {}
-unsafe impl Sync for IoHandlerEntry {}
 
 /// Device controller - manages all I/O devices and port handlers
 ///
@@ -141,6 +147,9 @@ pub struct BxDevicesC {
     pub(crate) diag_io_reads: u64,
     /// Total I/O port writes
     pub(crate) diag_io_writes: u64,
+    /// Pointer to DeviceManager for enum-based I/O dispatch.
+    /// Set by the emulator before CPU execution; single-threaded.
+    device_manager: Option<core::ptr::NonNull<devices::DeviceManager>>,
 }
 
 impl Default for BxDevicesC {
@@ -173,28 +182,20 @@ impl BxDevicesC {
             last_io_read_value: 0,
             diag_io_reads: 0,
             diag_io_writes: 0,
+            device_manager: None,
         }
     }
 
     /// Register a read handler for a specific I/O port
-    ///
-    /// # Arguments
-    /// * `this_ptr` - Pointer to device instance
-    /// * `handler` - Handler function
-    /// * `port` - I/O port address
-    /// * `name` - Handler name for debugging
-    /// * `mask` - I/O length mask
     pub fn register_io_read_handler(
         &mut self,
-        this_ptr: *mut c_void,
-        handler: IoReadHandlerT,
+        device_id: DeviceId,
         port: u16,
         name: &str,
         mask: u8,
     ) {
         let entry = &mut self.read_handlers[port as usize];
-        entry.handler = Some(handler);
-        entry.this_ptr = this_ptr;
+        entry.device_id = device_id;
         entry.name = String::from(name);
         entry.mask = mask;
         tracing::debug!(
@@ -207,15 +208,13 @@ impl BxDevicesC {
     /// Register a write handler for a specific I/O port
     pub fn register_io_write_handler(
         &mut self,
-        this_ptr: *mut c_void,
-        handler: IoWriteHandlerT,
+        device_id: DeviceId,
         port: u16,
         name: &str,
         mask: u8,
     ) {
         let entry = &mut self.write_handlers[port as usize];
-        entry.write_handler = Some(handler);
-        entry.this_ptr = this_ptr;
+        entry.device_id = device_id;
         entry.name = String::from(name);
         entry.mask = mask;
         tracing::debug!(
@@ -228,15 +227,13 @@ impl BxDevicesC {
     /// Register both read and write handlers for a port
     pub fn register_io_handler(
         &mut self,
-        this_ptr: *mut c_void,
-        read_handler: IoReadHandlerT,
-        write_handler: IoWriteHandlerT,
+        device_id: DeviceId,
         port: u16,
         name: &str,
         mask: u8,
     ) {
-        self.register_io_read_handler(this_ptr, read_handler, port, name, mask);
-        self.register_io_write_handler(this_ptr, write_handler, port, name, mask);
+        self.register_io_read_handler(device_id, port, name, mask);
+        self.register_io_write_handler(device_id, port, name, mask);
     }
 
     /// Read from an I/O port
@@ -250,20 +247,17 @@ impl BxDevicesC {
     pub fn inp(&mut self, port: u16, io_len: u8) -> u32 {
         self.diag_io_reads += 1;
         let entry = &self.read_handlers[port as usize];
+        let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
 
-        let value = if let Some(handler) = entry.handler {
-            // Check if the requested I/O length is supported
-            let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
-            if (entry.mask & len_mask) != 0 {
-                handler(entry.this_ptr, port, io_len)
+        let value = if entry.device_id != DeviceId::None && (entry.mask & len_mask) != 0 {
+            if let Some(mut dm) = self.device_manager {
+                // SAFETY: device_manager set by emulator for execution duration; single-threaded
+                let dm = unsafe { dm.as_mut() };
+                Self::dispatch_read(dm, entry.device_id, port, io_len)
             } else {
-                // Handler exists but mask doesn't match - log this
-                tracing::debug!("I/O read port={:#06x}: handler '{}' exists but mask={:#x} doesn't support len={}",
-                    port, entry.name, entry.mask, io_len);
                 self.default_read_handler(port, io_len)
             }
         } else {
-            // Default: return all 1s for unhandled reads
             self.default_read_handler(port, io_len)
         };
 
@@ -273,25 +267,20 @@ impl BxDevicesC {
     }
 
     /// Write to an I/O port
-    ///
-    /// # Arguments
-    /// * `port` - I/O port address
-    /// * `value` - Value to write
-    /// * `io_len` - Length of I/O operation (1, 2, or 4 bytes)
     pub fn outp(&mut self, port: u16, value: u32, io_len: u8) {
         self.diag_io_writes += 1;
         let entry = &self.write_handlers[port as usize];
+        let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
 
-        if let Some(handler) = entry.write_handler {
-            // Check if the requested I/O length is supported
-            let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
-            if (entry.mask & len_mask) != 0 {
-                handler(entry.this_ptr, port, value, io_len);
+        if entry.device_id != DeviceId::None && (entry.mask & len_mask) != 0 {
+            if let Some(mut dm) = self.device_manager {
+                // SAFETY: device_manager set by emulator for execution duration; single-threaded
+                let dm = unsafe { dm.as_mut() };
+                Self::dispatch_write(dm, entry.device_id, port, value, io_len);
                 return;
             }
         }
 
-        // Default: ignore unhandled writes
         self.default_write_handler(port, value, io_len);
     }
 
@@ -307,18 +296,16 @@ impl BxDevicesC {
             return 0;
         }
         let entry = &self.read_handlers[port as usize];
-        if entry.handler.is_none() {
+        if entry.device_id != DeviceId::HardDrive {
             return 0;
         }
-        // Get the HardDriveC pointer from the handler entry
-        let hd_ptr = entry.this_ptr;
-        if hd_ptr.is_null() {
-            return 0;
+        if let Some(mut dm) = self.device_manager {
+            // SAFETY: device_manager set by emulator for execution duration; single-threaded
+            let dm = unsafe { dm.as_mut() };
+            dm.harddrv.bulk_read_data(port, buf)
+        } else {
+            0
         }
-        // SAFETY: this_ptr was set to &mut BxHardDriveC during handler registration
-        // and is only accessed in single-threaded emulator context.
-        let hd = unsafe { &mut *(hd_ptr as *mut harddrv::BxHardDriveC) };
-        hd.bulk_read_data(port, buf)
     }
 
     /// Default read handler - returns 0xFFFFFFFF for unhandled ports
@@ -393,6 +380,68 @@ impl BxDevicesC {
     pub fn take_port80_output(&mut self) -> Vec<u8> {
         self.port80_output.drain(..).collect()
     }
+
+    /// Set device_manager pointer for enum-based I/O dispatch.
+    /// Called by emulator before CPU execution.
+    pub fn set_device_manager(&mut self, dm: core::ptr::NonNull<devices::DeviceManager>) {
+        self.device_manager = Some(dm);
+    }
+
+    /// Clear device_manager pointer after CPU execution.
+    pub fn clear_device_manager(&mut self) {
+        self.device_manager = None;
+    }
+
+    /// Dispatch a port read to the device identified by `id`.
+    fn dispatch_read(dm: &mut devices::DeviceManager, id: DeviceId, port: u16, io_len: u8) -> u32 {
+        match id {
+            DeviceId::Pic => dm.pic.read(port, io_len),
+            DeviceId::Pit => dm.pit.read(port, io_len),
+            DeviceId::Cmos => dm.cmos.read(port, io_len),
+            DeviceId::Dma => dm.dma.read(port, io_len),
+            DeviceId::Keyboard => dm.keyboard.read(port, io_len),
+            DeviceId::HardDrive => dm.harddrv.read(port, io_len),
+            DeviceId::Serial => dm.serial.read(port, io_len),
+            DeviceId::Vga => dm.vga.read_port(port, io_len),
+            DeviceId::Port92 => dm.port92_read(port, io_len),
+            #[cfg(feature = "bx_support_pci")]
+            DeviceId::Pci => dm.pci_read(port, io_len),
+            #[cfg(feature = "bx_support_pci")]
+            DeviceId::Acpi => dm.acpi_read(port, io_len),
+            #[cfg(feature = "bx_support_pci")]
+            DeviceId::PciIde => dm.pci_ide_read(port, io_len),
+            // Without PCI feature, these variants are unreachable but must compile
+            #[cfg(not(feature = "bx_support_pci"))]
+            DeviceId::Pci | DeviceId::Acpi | DeviceId::PciIde => 0xFFFF_FFFF,
+            DeviceId::Ioapic => 0xFF, // IOAPIC uses MMIO, not port I/O
+            DeviceId::None => 0xFFFF_FFFF,
+        }
+    }
+
+    /// Dispatch a port write to the device identified by `id`.
+    fn dispatch_write(dm: &mut devices::DeviceManager, id: DeviceId, port: u16, value: u32, io_len: u8) {
+        match id {
+            DeviceId::Pic => dm.pic.write(port, value, io_len),
+            DeviceId::Pit => dm.pit.write(port, value, io_len),
+            DeviceId::Cmos => dm.cmos.write(port, value, io_len),
+            DeviceId::Dma => dm.dma.write(port, value, io_len),
+            DeviceId::Keyboard => dm.keyboard.write(port, value, io_len),
+            DeviceId::HardDrive => dm.harddrv.write(port, value, io_len),
+            DeviceId::Serial => dm.serial.write(port, value, io_len),
+            DeviceId::Vga => dm.vga.write_port(port, value, io_len),
+            DeviceId::Port92 => dm.port92_write(port, value, io_len),
+            #[cfg(feature = "bx_support_pci")]
+            DeviceId::Pci => dm.pci_write(port, value, io_len),
+            #[cfg(feature = "bx_support_pci")]
+            DeviceId::Acpi => dm.acpi_write(port, value, io_len),
+            #[cfg(feature = "bx_support_pci")]
+            DeviceId::PciIde => dm.pci_ide_write(port, value, io_len),
+            #[cfg(not(feature = "bx_support_pci"))]
+            DeviceId::Pci | DeviceId::Acpi | DeviceId::PciIde => {},
+            DeviceId::Ioapic | DeviceId::None => {},
+        }
+    }
+
 }
 
 #[cfg(test)]
@@ -412,19 +461,14 @@ mod tests {
     #[test]
     fn test_multiple_instances() {
         let mut dev1 = BxDevicesC::new();
-        let dev2 = BxDevicesC::new();
-
-        // Custom handler that returns port number
-        fn custom_read(_: *mut c_void, port: u16, _: u8) -> u32 {
-            port as u32 * 2
-        }
+        let mut dev2 = BxDevicesC::new();
 
         // Register handler only on dev1
-        dev1.register_io_read_handler(core::ptr::null_mut(), custom_read, 0x100, "test", 0x1);
+        dev1.register_io_read_handler(DeviceId::Pic, 0x100, "test", 0x1);
 
-        // dev1 should return custom value, dev2 should return default
-        assert_eq!(dev1.inp(0x100, 1), 0x200);
-        let mut dev2 = dev2;
+        // dev1 has a device registered, dev2 does not.
+        // Without a device_manager, both return default.
+        assert_eq!(dev1.inp(0x100, 1), 0xFF);
         assert_eq!(dev2.inp(0x100, 1), 0xFF);
     }
 }

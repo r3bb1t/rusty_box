@@ -118,8 +118,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return false;
         }
 
-        let limit_scaled = unsafe { cache.u.segment.limit_scaled };
-        let base = unsafe { cache.u.segment.base };
+        let limit_scaled = cache.u.segment_limit_scaled();
+        let base = cache.u.segment_base();
 
         if (seg_type & 0x04) == 0 {
             // Normal data segment (expand-up, types 2,3)
@@ -137,7 +137,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         } else {
             // Expand-down data segment (types 6,7)
-            let d_b = unsafe { cache.u.segment.d_b };
+            let d_b = cache.u.segment_d_b();
             let upper_limit: u32 = if d_b { 0xFFFFFFFF } else { 0x0000FFFF };
             if offset <= limit_scaled || offset > upper_limit || (upper_limit - offset) < length {
                 return false;
@@ -172,12 +172,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return false;
         }
 
-        let limit_scaled = unsafe { cache.u.segment.limit_scaled };
-        let base = unsafe { cache.u.segment.base };
+        let limit_scaled = cache.u.segment_limit_scaled();
+        let base = cache.u.segment_base();
 
         // Expand-down segments (types 4,5,6,7)
         if (seg_type & 0x08) == 0 && (seg_type & 0x04) != 0 {
-            let d_b = unsafe { cache.u.segment.d_b };
+            let d_b = cache.u.segment_d_b();
             let upper_limit: u32 = if d_b { 0xFFFFFFFF } else { 0x0000FFFF };
             if offset <= limit_scaled || offset > upper_limit || (upper_limit - offset) < length {
                 return false;
@@ -222,7 +222,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Medium path: within cached limit
         if (self.sregs[seg_idx].cache.valid & SEG_ACCESS_ROK) != 0 {
-            let limit = unsafe { self.sregs[seg_idx].cache.u.segment.limit_scaled };
+            let limit = self.sregs[seg_idx].cache.u.segment_limit_scaled();
             if offset <= limit.wrapping_sub(len.wrapping_sub(1)) {
                 return Ok(self.get_laddr32(seg_idx, offset));
             }
@@ -253,7 +253,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Medium path: within cached limit
         if (self.sregs[seg_idx].cache.valid & SEG_ACCESS_WOK) != 0 {
-            let limit = unsafe { self.sregs[seg_idx].cache.u.segment.limit_scaled };
+            let limit = self.sregs[seg_idx].cache.u.segment_limit_scaled();
             if offset <= limit.wrapping_sub(len.wrapping_sub(1)) {
                 return Ok(self.get_laddr32(seg_idx, offset));
             }
@@ -370,7 +370,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     ) -> Result<super::xmm::BxPackedXmmRegister> {
         let lo = self.read_virtual_qword(seg, offset)?;
         let hi = self.read_virtual_qword(seg, offset.wrapping_add(8))?;
-        Ok(super::xmm::BxPackedXmmRegister { xmm64u: [lo, hi] })
+        let mut r = super::xmm::BxPackedXmmRegister::default();
+        r.set_xmm64u(0, lo);
+        r.set_xmm64u(1, hi);
+        Ok(r)
     }
 
     /// Read a 128-bit XMM word with 16-byte alignment check.
@@ -396,10 +399,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         offset: u32,
         val: &super::xmm::BxPackedXmmRegister,
     ) -> Result<()> {
-        unsafe {
-            self.write_virtual_qword(seg, offset, val.xmm64u[0])?;
-            self.write_virtual_qword(seg, offset.wrapping_add(8), val.xmm64u[1])?;
-        }
+        self.write_virtual_qword(seg, offset, val.xmm64u(0))?;
+        self.write_virtual_qword(seg, offset.wrapping_add(8), val.xmm64u(1))?;
         Ok(())
     }
 
@@ -741,6 +742,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let pages = self.address_xlation.pages;
         if pages > 2 {
             // Host pointer cached from TLB hit — direct write (fastest path)
+            // SAFETY: address_xlation.pages set during address translation; pointer valid for write
             unsafe { (pages as *mut u64).write_unaligned(val) };
         } else if pages == 1 {
             let paddr = self.address_xlation.paddress1;
@@ -821,6 +823,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
             let page_offset = (laddr & 0xFFF) as usize;
             let host = tlb.host_page_addr as *mut u8;
+            // SAFETY: host pointer validated during TLB fill; offset within page bounds
             let ptr = unsafe { host.add(page_offset) };
             let remaining = 0x1000 - page_offset;
             // SMC check for the page
@@ -843,6 +846,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
             let page_offset = (laddr & 0xFFF) as usize;
             let host = tlb.host_page_addr as *const u8;
+            // SAFETY: host pointer validated during TLB fill; offset within page bounds
             let ptr = unsafe { host.add(page_offset) };
             let remaining = 0x1000 - page_offset;
             Some((ptr, remaining))
@@ -869,6 +873,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let tlb = self.dtlb.get_entry_of(laddr, 0);
         if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
             let host = tlb.host_page_addr as *const u8;
+            // SAFETY: host pointer validated during TLB fill; offset within page bounds
             return Ok(unsafe { *host.add((laddr & 0xFFF) as usize) });
         }
         let paddr = self.translate_data_read(laddr)?;
@@ -883,7 +888,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let tlb = self.dtlb.get_entry_of(laddr, 1);
         if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
             let host = tlb.host_page_addr as *const u8;
+            // SAFETY: host pointer validated during TLB fill; offset within page bounds
             let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             return Ok(unsafe { (ptr as *const u16).read_unaligned() });
         }
         let page_offset = laddr & 0xFFF;
@@ -907,7 +914,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let tlb = self.dtlb.get_entry_of(laddr, 3);
         if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
             let host = tlb.host_page_addr as *const u8;
+            // SAFETY: host pointer validated during TLB fill; offset within page bounds
             let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             return Ok(unsafe { (ptr as *const u32).read_unaligned() });
         }
         let page_offset = laddr & 0xFFF;
@@ -932,7 +941,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let tlb = self.dtlb.get_entry_of(laddr, 7);
         if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
             let host = tlb.host_page_addr as *const u8;
+            // SAFETY: host pointer validated during TLB fill; offset within page bounds
             let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             return Ok(unsafe { (ptr as *const u64).read_unaligned() });
         }
         let page_offset = laddr & 0xFFF;
@@ -959,6 +970,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 1);
             let host = tlb.host_page_addr as *mut u8;
+            // SAFETY: host pointer validated during TLB fill; offset within page bounds
             unsafe { *host.add((laddr & 0xFFF) as usize) = val };
             return Ok(());
         }
@@ -978,7 +990,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 2);
             let host = tlb.host_page_addr as *mut u8;
+            // SAFETY: host pointer validated during TLB fill; offset within page bounds
             let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             unsafe { (ptr as *mut u16).write_unaligned(val) };
             return Ok(());
         }
@@ -1015,7 +1029,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 4);
             let host = tlb.host_page_addr as *mut u8;
+            // SAFETY: host pointer validated during TLB fill; offset within page bounds
             let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             unsafe { (ptr as *mut u32).write_unaligned(val) };
             return Ok(());
         }
@@ -1047,7 +1063,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 8);
             let host = tlb.host_page_addr as *mut u8;
+            // SAFETY: host pointer validated during TLB fill; offset within page bounds
             let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             unsafe { (ptr as *mut u64).write_unaligned(val) };
             return Ok(());
         }
@@ -1080,6 +1098,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let host_addr = tlb.host_page_addr | page_offset;
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 8);
+            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let data = unsafe { (host_addr as *const u64).read_unaligned() };
             self.address_xlation.pages = host_addr;
             self.address_xlation.paddress1 = paddr;
@@ -1128,6 +1147,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let host_addr = tlb.host_page_addr | page_offset;
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 1);
+            // SAFETY: host pointer validated during TLB fill; offset within page bounds
             let data = unsafe { *(host_addr as *const u8) };
             self.address_xlation.pages = host_addr;
             self.address_xlation.paddress1 = paddr;
@@ -1154,6 +1174,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let host_addr = tlb.host_page_addr | page_offset;
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 2);
+            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let data = unsafe { (host_addr as *const u16).read_unaligned() };
             self.address_xlation.pages = host_addr;
             self.address_xlation.paddress1 = paddr;
@@ -1195,6 +1216,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let host_addr = tlb.host_page_addr | page_offset;
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 4);
+            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
             let data = unsafe { (host_addr as *const u32).read_unaligned() };
             self.address_xlation.pages = host_addr;
             self.address_xlation.paddress1 = paddr;
@@ -1237,6 +1259,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let pages = self.address_xlation.pages;
         if pages > 2 {
             // Host pointer cached from TLB hit — direct write (fastest path)
+            // SAFETY: address_xlation.pages set during address translation; pointer valid for write
             unsafe { (pages as *mut u64).write_unaligned(val) };
         } else if pages == 1 {
             let paddr = self.address_xlation.paddress1;
@@ -1474,7 +1497,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     ) -> Result<super::xmm::BxPackedXmmRegister> {
         let lo = self.read_virtual_qword_64(seg, offset)?;
         let hi = self.read_virtual_qword_64(seg, offset.wrapping_add(8))?;
-        Ok(super::xmm::BxPackedXmmRegister { xmm64u: [lo, hi] })
+        let mut r = super::xmm::BxPackedXmmRegister::default();
+        r.set_xmm64u(0, lo);
+        r.set_xmm64u(1, hi);
+        Ok(r)
     }
 
     /// Read a 128-bit XMM word with 16-byte alignment check in 64-bit mode.
@@ -1498,10 +1524,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         offset: u64,
         val: &super::xmm::BxPackedXmmRegister,
     ) -> Result<()> {
-        unsafe {
-            self.write_virtual_qword_64(seg, offset, val.xmm64u[0])?;
-            self.write_virtual_qword_64(seg, offset.wrapping_add(8), val.xmm64u[1])?;
-        }
+        self.write_virtual_qword_64(seg, offset, val.xmm64u(0))?;
+        self.write_virtual_qword_64(seg, offset.wrapping_add(8), val.xmm64u(1))?;
         Ok(())
     }
 
@@ -1531,9 +1555,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let q1 = self.read_virtual_qword_64(seg, offset.wrapping_add(8))?;
         let q2 = self.read_virtual_qword_64(seg, offset.wrapping_add(16))?;
         let q3 = self.read_virtual_qword_64(seg, offset.wrapping_add(24))?;
-        Ok(super::xmm::BxPackedYmmRegister {
-            ymm64u: [q0, q1, q2, q3],
-        })
+        let mut r = super::xmm::BxPackedYmmRegister::default();
+        r.set_ymm64u(0, q0);
+        r.set_ymm64u(1, q1);
+        r.set_ymm64u(2, q2);
+        r.set_ymm64u(3, q3);
+        Ok(r)
     }
 
     /// Write a 256-bit YMM word to virtual memory in 64-bit mode.
@@ -1543,12 +1570,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         offset: u64,
         val: &super::xmm::BxPackedYmmRegister,
     ) -> Result<()> {
-        unsafe {
-            self.write_virtual_qword_64(seg, offset, val.ymm64u[0])?;
-            self.write_virtual_qword_64(seg, offset.wrapping_add(8), val.ymm64u[1])?;
-            self.write_virtual_qword_64(seg, offset.wrapping_add(16), val.ymm64u[2])?;
-            self.write_virtual_qword_64(seg, offset.wrapping_add(24), val.ymm64u[3])?;
-        }
+        self.write_virtual_qword_64(seg, offset, val.ymm64u(0))?;
+        self.write_virtual_qword_64(seg, offset.wrapping_add(8), val.ymm64u(1))?;
+        self.write_virtual_qword_64(seg, offset.wrapping_add(16), val.ymm64u(2))?;
+        self.write_virtual_qword_64(seg, offset.wrapping_add(24), val.ymm64u(3))?;
         Ok(())
     }
 

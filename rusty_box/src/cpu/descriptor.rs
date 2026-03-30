@@ -111,6 +111,111 @@ impl Default for Descriptor {
     }
 }
 
+impl Descriptor {
+    // -- Segment accessors --
+    // SAFETY for all: caller must ensure the descriptor is a segment type
+    //   (BxDescriptor.segment == true) before calling segment_* methods.
+    //   This matches the existing invariant maintained throughout the codebase.
+
+    #[inline(always)]
+    pub(crate) fn segment_base(&self) -> BxAddress {
+        // SAFETY: union read; caller verified descriptor is segment type
+        unsafe { self.segment.base }
+    }
+    #[inline(always)]
+    pub(crate) fn set_segment_base(&mut self, val: BxAddress) {
+        self.segment.base = val;
+    }
+
+    #[inline(always)]
+    pub(crate) fn segment_limit_scaled(&self) -> u32 {
+        // SAFETY: union read; caller verified descriptor is segment type
+        unsafe { self.segment.limit_scaled }
+    }
+    #[inline(always)]
+    pub(crate) fn set_segment_limit_scaled(&mut self, val: u32) {
+        self.segment.limit_scaled = val;
+    }
+
+    #[inline(always)]
+    pub(crate) fn segment_g(&self) -> bool {
+        // SAFETY: union read; caller verified descriptor is segment type
+        unsafe { self.segment.g }
+    }
+    #[inline(always)]
+    pub(crate) fn set_segment_g(&mut self, val: bool) {
+        self.segment.g = val;
+    }
+
+    #[inline(always)]
+    pub(crate) fn segment_d_b(&self) -> bool {
+        // SAFETY: union read; caller verified descriptor is segment type
+        unsafe { self.segment.d_b }
+    }
+    #[inline(always)]
+    pub(crate) fn set_segment_d_b(&mut self, val: bool) {
+        self.segment.d_b = val;
+    }
+
+    #[inline(always)]
+    pub(crate) fn segment_l(&self) -> bool {
+        // SAFETY: union read; caller verified descriptor is segment type
+        unsafe { self.segment.l }
+    }
+    #[inline(always)]
+    pub(crate) fn set_segment_l(&mut self, val: bool) {
+        self.segment.l = val;
+    }
+
+    #[inline(always)]
+    pub(crate) fn segment_avl(&self) -> bool {
+        // SAFETY: union read; caller verified descriptor is segment type
+        unsafe { self.segment.avl }
+    }
+    #[inline(always)]
+    pub(crate) fn set_segment_avl(&mut self, val: bool) {
+        self.segment.avl = val;
+    }
+
+    // -- Gate accessors --
+    // SAFETY: caller must ensure the descriptor is a gate type.
+
+    #[inline(always)]
+    pub(crate) fn gate_dest_offset(&self) -> u32 {
+        // SAFETY: union read; caller verified descriptor is gate type
+        unsafe { self.gate.dest_offset }
+    }
+    #[inline(always)]
+    pub(crate) fn set_gate_dest_offset(&mut self, val: u32) {
+        self.gate.dest_offset = val;
+    }
+
+    #[inline(always)]
+    pub(crate) fn gate_dest_selector(&self) -> u16 {
+        // SAFETY: union read; caller verified descriptor is gate type
+        unsafe { self.gate.dest_selector }
+    }
+    #[inline(always)]
+    pub(crate) fn set_gate_dest_selector(&mut self, val: u16) {
+        self.gate.dest_selector = val;
+    }
+
+    #[inline(always)]
+    pub(crate) fn gate_param_count(&self) -> u8 {
+        // SAFETY: union read; caller verified descriptor is gate type
+        unsafe { self.gate.param_count }
+    }
+
+    // -- TaskGate accessors --
+    // SAFETY: caller must ensure the descriptor is a task gate type.
+
+    #[inline(always)]
+    pub(crate) fn task_gate_tss_selector(&self) -> u16 {
+        // SAFETY: union read; caller verified descriptor is task gate type
+        unsafe { self.task_gate.tss_selector }
+    }
+}
+
 bitflags::bitflags! {
     /// Segment cache validity and access-permission flags.
     ///
@@ -209,7 +314,7 @@ impl BxDescriptor {
     }
 
     pub fn is_long64_segment(&self) -> bool {
-        unsafe { self.u.segment.l }
+        self.u.segment_l()
     }
 
     /// Get Access Rights byte from descriptor

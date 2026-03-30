@@ -985,9 +985,7 @@ pub(super) fn get_opcode_entry<I: BxCpuIdTrait>(
         // Don't allow loading CS
         if seg != BxSegregs::Cs as usize {
             parse_selector(val, &mut cpu.sregs[seg].selector);
-            unsafe {
-                cpu.sregs[seg].cache.u.segment.base = (val as u64) << 4;
-            }
+            cpu.sregs[seg].cache.u.set_segment_base((val as u64) << 4);
         }
         Ok(())
     }

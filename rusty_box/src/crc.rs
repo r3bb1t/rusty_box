@@ -54,8 +54,8 @@ fn init_crc32_table() -> [u32; 256] {
     let mut crc32_table = [0u32; 256]; // Create a vector with 256 elements initialized to 0
 
     (0..256usize).for_each(|i| {
-        // FIXME: don't unwrap
-        let mut c: u32 = (i << 24).try_into().unwrap(); // Shift the byte value to the left by 24 bits
+        // i is in 0..256 so i<<24 fits in u32 (max 255<<24 = 0xFF000000)
+        let mut c: u32 = (i << 24) as u32;
         for _ in 0..8 {
             c = if c & 0x80000000 != 0 {
                 (c << 1) ^ CRC32_POLY // If the MSB is set, shift left and XOR with the polynomial

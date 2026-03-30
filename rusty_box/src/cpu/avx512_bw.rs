@@ -59,14 +59,15 @@ fn read_opmask_for_write<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, instr: &Instructi
     if k == 0 {
         u64::MAX // k0 = all elements active
     } else {
-        unsafe { cpu.opmask[k as usize].rrx }
+        // SAFETY: opmask register union always valid for rrx (full 64-bit) access
+        unsafe { cpu.opmask[k as usize].rrx() }
     }
 }
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
 fn read_zmm<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, reg: u8) -> BxPackedZmmRegister {
-    unsafe { cpu.vmm[reg as usize] }
+    cpu.vmm[reg as usize]
 }
 
 /// Write ZMM register with per-byte masking, zeroing upper bytes beyond VL
@@ -79,20 +80,18 @@ fn write_zmm_masked_b<I: BxCpuIdTrait>(
     vl: u8,
 ) {
     let nbytes = byte_elements(vl);
-    unsafe {
-        let dst = &mut cpu.vmm[reg as usize];
-        for i in 0..nbytes {
-            if (mask >> i) & 1 != 0 {
-                dst.zmmubyte[i] = result.zmmubyte[i];
-            } else if zero_masking {
-                dst.zmmubyte[i] = 0;
-            }
-            // else: merge masking — keep original value
+    let dst = &mut cpu.vmm[reg as usize];
+    for i in 0..nbytes {
+        if (mask >> i) & 1 != 0 {
+            dst.set_zmmubyte(i, result.zmmubyte(i));
+        } else if zero_masking {
+            dst.set_zmmubyte(i, 0);
         }
-        // Zero upper bytes beyond VL (EVEX always clears upper)
-        for i in nbytes..64 {
-            dst.zmmubyte[i] = 0;
-        }
+        // else: merge masking — keep original value
+    }
+    // Zero upper bytes beyond VL (EVEX always clears upper)
+    for i in nbytes..64 {
+        dst.set_zmmubyte(i, 0);
     }
 }
 
@@ -106,19 +105,17 @@ fn write_zmm_masked_w<I: BxCpuIdTrait>(
     vl: u8,
 ) {
     let nwords = word_elements(vl);
-    unsafe {
-        let dst = &mut cpu.vmm[reg as usize];
-        for i in 0..nwords {
-            if (mask >> i) & 1 != 0 {
-                dst.zmm16u[i] = result.zmm16u[i];
-            } else if zero_masking {
-                dst.zmm16u[i] = 0;
-            }
+    let dst = &mut cpu.vmm[reg as usize];
+    for i in 0..nwords {
+        if (mask >> i) & 1 != 0 {
+            dst.set_zmm16u(i, result.zmm16u(i));
+        } else if zero_masking {
+            dst.set_zmm16u(i, 0);
         }
-        // Zero upper words beyond VL
-        for i in nwords..32 {
-            dst.zmm16u[i] = 0;
-        }
+    }
+    // Zero upper words beyond VL
+    for i in nwords..32 {
+        dst.set_zmm16u(i, 0);
     }
 }
 
@@ -134,10 +131,10 @@ fn read_src2_bytes<I: BxCpuIdTrait>(
         let nbytes = vl_bytes(vl);
         let laddr = cpu.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let mut tmp = BxPackedZmmRegister { zmm64u: [0; 8] };
+        let mut tmp = BxPackedZmmRegister::default();
         for i in 0..nbytes {
             let val = cpu.v_read_byte(seg, laddr + i as u64)?;
-            unsafe { tmp.zmmubyte[i] = val; }
+            tmp.set_zmmubyte(i, val);
         }
         Ok(tmp)
     }
@@ -155,10 +152,10 @@ fn read_src2_words<I: BxCpuIdTrait>(
         let nwords = word_elements(vl);
         let laddr = cpu.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let mut tmp = BxPackedZmmRegister { zmm64u: [0; 8] };
+        let mut tmp = BxPackedZmmRegister::default();
         for i in 0..nwords {
             let val = cpu.v_read_word(seg, laddr + (i * 2) as u64)?;
-            unsafe { tmp.zmm16u[i] = val; }
+            tmp.set_zmm16u(i, val);
         }
         Ok(tmp)
     }
@@ -176,10 +173,10 @@ fn read_src2_dwords<I: BxCpuIdTrait>(
         let ndwords = dword_elements(vl);
         let laddr = cpu.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
-        let mut tmp = BxPackedZmmRegister { zmm64u: [0; 8] };
+        let mut tmp = BxPackedZmmRegister::default();
         for i in 0..ndwords {
             let val = cpu.v_read_dword(seg, laddr + (i * 4) as u64)?;
-            unsafe { tmp.zmm32u[i] = val; }
+            tmp.set_zmm32u(i, val);
         }
         Ok(tmp)
     }
@@ -196,11 +193,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = byte_elements(vl);
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_bytes(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmmubyte[i] = src1.zmmubyte[i].wrapping_add(src2.zmmubyte[i]);
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmmubyte(i, src1.zmmubyte(i).wrapping_add(src2.zmmubyte(i)));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -214,11 +209,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = word_elements(vl);
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_words(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmm16u[i] = src1.zmm16u[i].wrapping_add(src2.zmm16u[i]);
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm16u(i, src1.zmm16u(i).wrapping_add(src2.zmm16u(i)));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -236,11 +229,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = byte_elements(vl);
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_bytes(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmmubyte[i] = src1.zmmubyte[i].wrapping_sub(src2.zmmubyte[i]);
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmmubyte(i, src1.zmmubyte(i).wrapping_sub(src2.zmmubyte(i)));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -254,11 +245,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = word_elements(vl);
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_words(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmm16u[i] = src1.zmm16u[i].wrapping_sub(src2.zmm16u[i]);
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm16u(i, src1.zmm16u(i).wrapping_sub(src2.zmm16u(i)));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -276,12 +265,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = word_elements(vl);
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_words(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let product = (src1.zmm16u[i] as u32).wrapping_mul(src2.zmm16u[i] as u32);
-                result.zmm16u[i] = product as u16;
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let product = (src1.zmm16u(i) as u32).wrapping_mul(src2.zmm16u(i) as u32);
+            result.set_zmm16u(i, product as u16);
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -299,12 +286,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = byte_elements(vl);
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_bytes(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmmubyte[i] =
-                    ((src1.zmmubyte[i] as u16 + src2.zmmubyte[i] as u16 + 1) >> 1) as u8;
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmmubyte(i, ((src1.zmmubyte(i) as u16 + src2.zmmubyte(i) as u16 + 1) >> 1) as u8);
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -318,12 +302,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = word_elements(vl);
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_words(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmm16u[i] =
-                    ((src1.zmm16u[i] as u32 + src2.zmm16u[i] as u32 + 1) >> 1) as u16;
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm16u(i, ((src1.zmm16u(i) as u32 + src2.zmm16u(i) as u32 + 1) >> 1) as u16);
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -341,15 +322,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = byte_elements(vl);
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_bytes(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmmubyte[i] = if src1.zmmubyte[i] > src2.zmmubyte[i] {
-                    src1.zmmubyte[i]
-                } else {
-                    src2.zmmubyte[i]
-                };
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmmubyte(i, if src1.zmmubyte(i) > src2.zmmubyte(i) {
+                src1.zmmubyte(i)
+            } else {
+                src2.zmmubyte(i)
+            });
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -363,15 +342,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = byte_elements(vl);
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_bytes(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmmubyte[i] = if src1.zmmubyte[i] < src2.zmmubyte[i] {
-                    src1.zmmubyte[i]
-                } else {
-                    src2.zmmubyte[i]
-                };
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmmubyte(i, if src1.zmmubyte(i) < src2.zmmubyte(i) {
+                src1.zmmubyte(i)
+            } else {
+                src2.zmmubyte(i)
+            });
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -389,15 +366,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = word_elements(vl);
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_words(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmm16s[i] = if src1.zmm16s[i] > src2.zmm16s[i] {
-                    src1.zmm16s[i]
-                } else {
-                    src2.zmm16s[i]
-                };
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm16s(i, if src1.zmm16s(i) > src2.zmm16s(i) {
+                src1.zmm16s(i)
+            } else {
+                src2.zmm16s(i)
+            });
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -411,15 +386,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = word_elements(vl);
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_words(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmm16s[i] = if src1.zmm16s[i] < src2.zmm16s[i] {
-                    src1.zmm16s[i]
-                } else {
-                    src2.zmm16s[i]
-                };
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm16s(i, if src1.zmm16s(i) < src2.zmm16s(i) {
+                src1.zmm16s(i)
+            } else {
+                src2.zmm16s(i)
+            });
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -436,24 +409,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let vl = instr.get_vl();
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_dwords(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
+        let mut result = BxPackedZmmRegister::default();
         let nlanes = match vl {
             0 => 1,
             1 => 2,
             _ => 4,
         };
-        unsafe {
-            for lane in 0..nlanes {
-                let dword_base = lane * 4; // 4 dwords per 128-bit lane
-                let word_base = lane * 8;  // 8 words per 128-bit lane output
-                // Pack 4 dwords from src1 into low 4 words of lane
-                for j in 0..4 {
-                    result.zmm16s[word_base + j] = saturate_i32_to_i16(src1.zmm32s[dword_base + j]);
-                }
-                // Pack 4 dwords from src2 into high 4 words of lane
-                for j in 0..4 {
-                    result.zmm16s[word_base + 4 + j] = saturate_i32_to_i16(src2.zmm32s[dword_base + j]);
-                }
+        for lane in 0..nlanes {
+            let dword_base = lane * 4; // 4 dwords per 128-bit lane
+            let word_base = lane * 8;  // 8 words per 128-bit lane output
+            // Pack 4 dwords from src1 into low 4 words of lane
+            for j in 0..4 {
+                result.set_zmm16s(word_base + j, saturate_i32_to_i16(src1.zmm32s(dword_base + j)));
+            }
+            // Pack 4 dwords from src2 into high 4 words of lane
+            for j in 0..4 {
+                result.set_zmm16s(word_base + 4 + j, saturate_i32_to_i16(src2.zmm32s(dword_base + j)));
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -471,24 +442,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let vl = instr.get_vl();
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_dwords(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
+        let mut result = BxPackedZmmRegister::default();
         let nlanes = match vl {
             0 => 1,
             1 => 2,
             _ => 4,
         };
-        unsafe {
-            for lane in 0..nlanes {
-                let dword_base = lane * 4;
-                let word_base = lane * 8;
-                // Pack 4 dwords from src1 into low 4 words of lane
-                for j in 0..4 {
-                    result.zmm16u[word_base + j] = saturate_i32_to_u16(src1.zmm32s[dword_base + j]);
-                }
-                // Pack 4 dwords from src2 into high 4 words of lane
-                for j in 0..4 {
-                    result.zmm16u[word_base + 4 + j] = saturate_i32_to_u16(src2.zmm32s[dword_base + j]);
-                }
+        for lane in 0..nlanes {
+            let dword_base = lane * 4;
+            let word_base = lane * 8;
+            // Pack 4 dwords from src1 into low 4 words of lane
+            for j in 0..4 {
+                result.set_zmm16u(word_base + j, saturate_i32_to_u16(src1.zmm32s(dword_base + j)));
+            }
+            // Pack 4 dwords from src2 into high 4 words of lane
+            for j in 0..4 {
+                result.set_zmm16u(word_base + 4 + j, saturate_i32_to_u16(src2.zmm32s(dword_base + j)));
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -506,20 +475,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let vl = instr.get_vl();
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_bytes(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
+        let mut result = BxPackedZmmRegister::default();
         let nlanes = match vl {
             0 => 1,
             1 => 2,
             _ => 4,
         };
-        unsafe {
-            for lane in 0..nlanes {
-                let byte_base = lane * 16; // 16 bytes per 128-bit lane
-                // Interleave low 8 bytes from src1 and src2
-                for j in 0..8 {
-                    result.zmmubyte[byte_base + j * 2] = src1.zmmubyte[byte_base + j];
-                    result.zmmubyte[byte_base + j * 2 + 1] = src2.zmmubyte[byte_base + j];
-                }
+        for lane in 0..nlanes {
+            let byte_base = lane * 16; // 16 bytes per 128-bit lane
+            // Interleave low 8 bytes from src1 and src2
+            for j in 0..8 {
+                result.set_zmmubyte(byte_base + j * 2, src1.zmmubyte(byte_base + j));
+                result.set_zmmubyte(byte_base + j * 2 + 1, src2.zmmubyte(byte_base + j));
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -533,20 +500,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let vl = instr.get_vl();
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_bytes(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
+        let mut result = BxPackedZmmRegister::default();
         let nlanes = match vl {
             0 => 1,
             1 => 2,
             _ => 4,
         };
-        unsafe {
-            for lane in 0..nlanes {
-                let byte_base = lane * 16;
-                // Interleave high 8 bytes from src1 and src2
-                for j in 0..8 {
-                    result.zmmubyte[byte_base + j * 2] = src1.zmmubyte[byte_base + 8 + j];
-                    result.zmmubyte[byte_base + j * 2 + 1] = src2.zmmubyte[byte_base + 8 + j];
-                }
+        for lane in 0..nlanes {
+            let byte_base = lane * 16;
+            // Interleave high 8 bytes from src1 and src2
+            for j in 0..8 {
+                result.set_zmmubyte(byte_base + j * 2, src1.zmmubyte(byte_base + 8 + j));
+                result.set_zmmubyte(byte_base + j * 2 + 1, src2.zmmubyte(byte_base + 8 + j));
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -564,20 +529,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let vl = instr.get_vl();
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_words(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
+        let mut result = BxPackedZmmRegister::default();
         let nlanes = match vl {
             0 => 1,
             1 => 2,
             _ => 4,
         };
-        unsafe {
-            for lane in 0..nlanes {
-                let word_base = lane * 8; // 8 words per 128-bit lane
-                // Interleave low 4 words from src1 and src2
-                for j in 0..4 {
-                    result.zmm16u[word_base + j * 2] = src1.zmm16u[word_base + j];
-                    result.zmm16u[word_base + j * 2 + 1] = src2.zmm16u[word_base + j];
-                }
+        for lane in 0..nlanes {
+            let word_base = lane * 8; // 8 words per 128-bit lane
+            // Interleave low 4 words from src1 and src2
+            for j in 0..4 {
+                result.set_zmm16u(word_base + j * 2, src1.zmm16u(word_base + j));
+                result.set_zmm16u(word_base + j * 2 + 1, src2.zmm16u(word_base + j));
             }
         }
         let mask = read_opmask_for_write(self, instr);
@@ -591,20 +554,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let vl = instr.get_vl();
         let src1 = read_zmm(self, instr.src1());
         let src2 = read_src2_words(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
+        let mut result = BxPackedZmmRegister::default();
         let nlanes = match vl {
             0 => 1,
             1 => 2,
             _ => 4,
         };
-        unsafe {
-            for lane in 0..nlanes {
-                let word_base = lane * 8;
-                // Interleave high 4 words from src1 and src2
-                for j in 0..4 {
-                    result.zmm16u[word_base + j * 2] = src1.zmm16u[word_base + 4 + j];
-                    result.zmm16u[word_base + j * 2 + 1] = src2.zmm16u[word_base + 4 + j];
-                }
+        for lane in 0..nlanes {
+            let word_base = lane * 8;
+            // Interleave high 4 words from src1 and src2
+            for j in 0..4 {
+                result.set_zmm16u(word_base + j * 2, src1.zmm16u(word_base + 4 + j));
+                result.set_zmm16u(word_base + j * 2 + 1, src2.zmm16u(word_base + 4 + j));
             }
         }
         let mask = read_opmask_for_write(self, instr);

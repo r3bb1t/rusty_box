@@ -37,14 +37,15 @@ fn read_opmask_for_write<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, instr: &Instructi
     if k == 0 {
         u64::MAX
     } else {
-        unsafe { cpu.opmask[k as usize].rrx }
+        // SAFETY: opmask register union always valid for rrx (full 64-bit) access
+        unsafe { cpu.opmask[k as usize].rrx() }
     }
 }
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
 fn read_zmm<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, reg: u8) -> BxPackedZmmRegister {
-    unsafe { cpu.vmm[reg as usize] }
+    cpu.vmm[reg as usize]
 }
 
 /// Write ZMM register with dword-granularity masking, zeroing upper beyond VL
@@ -57,18 +58,16 @@ fn write_zmm_masked<I: BxCpuIdTrait>(
     vl: u8,
 ) {
     let nelements = dword_elements(vl);
-    unsafe {
-        let dst = &mut cpu.vmm[reg as usize];
-        for i in 0..nelements {
-            if (mask >> i) & 1 != 0 {
-                dst.zmm32u[i] = result.zmm32u[i];
-            } else if zero_masking {
-                dst.zmm32u[i] = 0;
-            }
+    let dst = &mut cpu.vmm[reg as usize];
+    for i in 0..nelements {
+        if (mask >> i) & 1 != 0 {
+            dst.set_zmm32u(i, result.zmm32u(i));
+        } else if zero_masking {
+            dst.set_zmm32u(i, 0);
         }
-        for i in nelements..16 {
-            dst.zmm32u[i] = 0;
-        }
+    }
+    for i in nelements..16 {
+        dst.set_zmm32u(i, 0);
     }
 }
 
@@ -82,18 +81,16 @@ fn write_zmm_masked_q<I: BxCpuIdTrait>(
     vl: u8,
 ) {
     let nelements = qword_elements(vl);
-    unsafe {
-        let dst = &mut cpu.vmm[reg as usize];
-        for i in 0..nelements {
-            if (mask >> i) & 1 != 0 {
-                dst.zmm64u[i] = result.zmm64u[i];
-            } else if zero_masking {
-                dst.zmm64u[i] = 0;
-            }
+    let dst = &mut cpu.vmm[reg as usize];
+    for i in 0..nelements {
+        if (mask >> i) & 1 != 0 {
+            dst.set_zmm64u(i, result.zmm64u(i));
+        } else if zero_masking {
+            dst.set_zmm64u(i, 0);
         }
-        for i in nelements..8 {
-            dst.zmm64u[i] = 0;
-        }
+    }
+    for i in nelements..8 {
+        dst.set_zmm64u(i, 0);
     }
 }
 
@@ -278,11 +275,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src()))
         } else {
-            let mut tmp = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let mut tmp = BxPackedZmmRegister::default();
             let laddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
             for i in 0..nelements {
-                unsafe { tmp.zmm32u[i] = self.v_read_dword(seg, laddr + (i * 4) as u64)?; }
+                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
             }
             Ok(tmp)
         }
@@ -294,13 +291,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src()))
         } else {
-            let mut tmp = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let mut tmp = BxPackedZmmRegister::default();
             let laddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
             for i in 0..nelements {
                 let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
                 let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-                unsafe { tmp.zmm64u[i] = lo | (hi << 32); }
+                tmp.set_zmm64u(i, lo | (hi << 32));
             }
             Ok(tmp)
         }
@@ -312,11 +309,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src2()))
         } else {
-            let mut tmp = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let mut tmp = BxPackedZmmRegister::default();
             let laddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
             for i in 0..nelements {
-                unsafe { tmp.zmm32u[i] = self.v_read_dword(seg, laddr + (i * 4) as u64)?; }
+                tmp.set_zmm32u(i, self.v_read_dword(seg, laddr + (i * 4) as u64)?);
             }
             Ok(tmp)
         }
@@ -328,13 +325,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if instr.mod_c0() {
             Ok(read_zmm(self, instr.src2()))
         } else {
-            let mut tmp = BxPackedZmmRegister { zmm64u: [0; 8] };
+            let mut tmp = BxPackedZmmRegister::default();
             let laddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
             for i in 0..nelements {
                 let lo = self.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
                 let hi = self.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-                unsafe { tmp.zmm64u[i] = lo | (hi << 32); }
+                tmp.set_zmm64u(i, lo | (hi << 32));
             }
             Ok(tmp)
         }
@@ -345,7 +342,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn read_scalar_ss(&mut self, instr: &Instruction) -> super::Result<f32> {
         if instr.mod_c0() {
             let src = read_zmm(self, instr.src());
-            Ok(unsafe { src.zmm32f[0] })
+            Ok(src.zmm32f(0))
         } else {
             let laddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
@@ -359,7 +356,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn read_scalar_sd(&mut self, instr: &Instruction) -> super::Result<f64> {
         if instr.mod_c0() {
             let src = read_zmm(self, instr.src());
-            Ok(unsafe { src.zmm64f[0] })
+            Ok(src.zmm64f(0))
         } else {
             let laddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
@@ -383,11 +380,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // imm8[3] = suppress inexact, imm8[7:4] = scale (fraction bits)
         let rc = if (imm8 & 0x04) != 0 { 0 } else { imm8 & 0x03 }; // TODO: read MXCSR.RC when bit2=1
         let scale = (imm8 >> 4) & 0x0F;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmm32f[i] = round_f32(src.zmm32f[i], rc, scale);
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm32f(i, round_f32(src.zmm32f(i), rc, scale));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -407,11 +402,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let imm8 = instr.ib();
         let rc = if (imm8 & 0x04) != 0 { 0 } else { imm8 & 0x03 };
         let scale = (imm8 >> 4) & 0x0F;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmm64f[i] = round_f64(src.zmm64f[i], rc, scale);
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm64f(i, round_f64(src.zmm64f(i), rc, scale));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -434,29 +427,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Start with src1 (vvvv) to preserve upper elements
         let mut result = read_zmm(self, instr.src1());
-        unsafe {
-            result.zmm32f[0] = rounded;
-        }
+        result.set_zmm32f(0, rounded);
 
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         // Scalar: only element 0 is masked; elements 1..3 always from src1
         if (mask & 1) == 0 {
             if zmask {
-                unsafe { result.zmm32u[0] = 0; }
+                result.set_zmm32u(0, 0);
             } else {
                 // Merge: keep original dst element 0
                 let orig = read_zmm(self, instr.dst());
-                unsafe { result.zmm32u[0] = orig.zmm32u[0]; }
+                result.set_zmm32u(0, orig.zmm32u(0));
             }
         }
         // Zero upper 256 bits (EVEX scalar zeroes upper)
-        unsafe {
-            for i in 4..16 {
-                result.zmm32u[i] = 0;
-            }
+        for i in 4..16 {
+            result.set_zmm32u(i, 0);
         }
-        unsafe { self.vmm[instr.dst() as usize] = result; }
+        self.vmm[instr.dst() as usize] = result;
         Ok(())
     }
 
@@ -473,26 +462,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let rounded = round_f64(src_val, rc, scale);
 
         let mut result = read_zmm(self, instr.src1());
-        unsafe {
-            result.zmm64f[0] = rounded;
-        }
+        result.set_zmm64f(0, rounded);
 
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
         if (mask & 1) == 0 {
             if zmask {
-                unsafe { result.zmm64u[0] = 0; }
+                result.set_zmm64u(0, 0);
             } else {
                 let orig = read_zmm(self, instr.dst());
-                unsafe { result.zmm64u[0] = orig.zmm64u[0]; }
+                result.set_zmm64u(0, orig.zmm64u(0));
             }
         }
-        unsafe {
-            for i in 2..8 {
-                result.zmm64u[i] = 0;
-            }
+        for i in 2..8 {
+            result.set_zmm64u(i, 0);
         }
-        unsafe { self.vmm[instr.dst() as usize] = result; }
+        self.vmm[instr.dst() as usize] = result;
         Ok(())
     }
 
@@ -507,11 +492,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = dword_elements(vl);
         let src1 = read_zmm(self, instr.src1());
         let src2 = self.read_src2_ps(instr, nelements)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmm32f[i] = scalef_f32(src1.zmm32f[i], src2.zmm32f[i]);
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm32f(i, scalef_f32(src1.zmm32f(i), src2.zmm32f(i)));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -529,11 +512,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = qword_elements(vl);
         let src1 = read_zmm(self, instr.src1());
         let src2 = self.read_src2_pd(instr, nelements)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmm64f[i] = scalef_f64(src1.zmm64f[i], src2.zmm64f[i]);
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm64f(i, scalef_f64(src1.zmm64f(i), src2.zmm64f(i)));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -551,11 +532,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
         let src = self.read_src_ps(instr, nelements)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmm32f[i] = getexp_f32(src.zmm32f[i]);
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm32f(i, getexp_f32(src.zmm32f(i)));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -572,11 +551,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
         let src = self.read_src_pd(instr, nelements)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmm64f[i] = getexp_f64(src.zmm64f[i]);
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm64f(i, getexp_f64(src.zmm64f(i)));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -599,11 +576,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = dword_elements(vl);
         let src = self.read_src_ps(instr, nelements)?;
         let imm8 = instr.ib();
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmm32f[i] = getmant_f32(src.zmm32f[i], imm8);
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm32f(i, getmant_f32(src.zmm32f(i), imm8));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -621,11 +596,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let nelements = qword_elements(vl);
         let src = self.read_src_pd(instr, nelements)?;
         let imm8 = instr.ib();
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                result.zmm64f[i] = getmant_f64(src.zmm64f[i], imm8);
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            result.set_zmm64f(i, getmant_f64(src.zmm64f(i), imm8));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;

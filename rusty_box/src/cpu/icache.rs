@@ -1,4 +1,4 @@
-use alloc::{format, vec, vec::Vec};
+use alloc::{vec, vec::Vec};
 
 use crate::{
     config::BxPhyAddress,
@@ -671,6 +671,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
         }
 
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
         let is_32_bit_mode = unsafe {
             self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
                 .cache
@@ -861,6 +862,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                             "DECODE-FAIL: remaining={} RIP={:#x} CS.base={:#x} EIP={:#x} icount={}",
                             current_remaining,
                             self.rip(),
+                            // SAFETY: segment cache populated during segment load; union read matches descriptor type
                             unsafe {
                                 self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
                                     .cache
@@ -1034,6 +1036,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                  or boundary_fetch was called with an incorrect remaining_in_page value.",
                 remaining_in_page,
                 self.rip(),
+                // SAFETY: segment cache populated during segment load; union read matches descriptor type
                 unsafe {
                     self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
                         .cache
@@ -1076,6 +1079,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
 
         // Get is_32_bit_mode from CS segment descriptor d_b flag
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
         let is_32_bit_mode = unsafe {
             self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
                 .cache
@@ -1092,33 +1096,17 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             decode32::fetch_decode32(&fetch_buffer[..total_bytes], is_32_bit_mode)
         };
 
-        let instr = decode_result.unwrap_or_else(|e| {
-            tracing::error!(
-                "boundary_fetch FATAL: total_bytes={} remaining_in_page={} fetch_buffer_limit={} eip_page_window_size={} RIP={:#x} err={:?} bytes={:02x?}",
-                total_bytes, remaining_in_page, fetch_buffer_limit, self.eip_page_window_size,
-                self.rip(), e, &fetch_buffer[..total_bytes.min(16)]
-            );
-            // Panic on decode failure with instruction bytes for debugging
-            let bytes_str = fetch_buffer[..total_bytes.min(16)]
-                .iter()
-                .map(|b| format!("{:02x}", b))
-                .collect::<Vec<_>>()
-                .join(" ");
-            panic!(
-                "\n\
-                ╔════════════════════════════════════════════════════════════╗\n\
-                ║      DECODE FAILURE - INSTRUCTION COULD NOT BE DECODED     ║\n\
-                ╠════════════════════════════════════════════════════════════╣\n\
-                ║  RIP:         {:#018x}                          ║\n\
-                ║  Bytes:       {}                                      ║\n\
-                ║                                                             ║\n\
-                ║  The decoder failed to decode this instruction.             ║\n\
-                ║  Please check the decoder implementation.                   ║\n\
-                ╚════════════════════════════════════════════════════════════╝\n",
-                self.rip(),
-                bytes_str
-            );
-        });
+        let instr = match decode_result {
+            Ok(i) => i,
+            Err(e) => {
+                tracing::error!(
+                    "boundary_fetch FATAL: total_bytes={} remaining_in_page={} fetch_buffer_limit={} eip_page_window_size={} RIP={:#x} err={:?} bytes={:02x?}",
+                    total_bytes, remaining_in_page, fetch_buffer_limit, self.eip_page_window_size,
+                    self.rip(), e, &fetch_buffer[..total_bytes.min(16)]
+                );
+                return Err(e.into());
+            }
+        };
 
         // assignHandler is a no-op in Rust (matching C++ line 303)
         // In C++, assignHandler can return non-zero, but we don't check it here

@@ -1,7 +1,8 @@
 //! XMM/YMM/ZMM register types and MXCSR for SSE/AVX/AVX-512
 //!
-//! Based on Bochs cpu/simd_int.h and cpu/xmm.h
-//! Uses unions for free reinterpretation matching Bochs semantics.
+//! Based on Bochs cpu/simd_int.h and cpu/xmm.h.
+//! Safe structs backed by byte arrays with inline accessor methods.
+//! On x86 targets LLVM optimises from_le_bytes/to_le_bytes to identical code as union access.
 
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
@@ -12,32 +13,94 @@ pub(super) const MXCSR_MASK: u32 = 0x0000_FFBF; // Valid bits mask (no bit 6 DAZ
 // XMM register (128-bit) — matches Bochs bx_xmm_reg_t
 // ============================================================================
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union BxPackedXmmRegister {
-    pub xmm_sbyte: [i8; 16],
-    pub xmm16s: [i16; 8],
-    pub xmm32s: [i32; 4],
-    pub xmm64s: [i64; 2],
-    pub xmmubyte: [u8; 16],
-    pub xmm16u: [u16; 8],
-    pub xmm32u: [u32; 4],
-    pub xmm64u: [u64; 2],
-    pub xmm32f: [f32; 4],
-    pub xmm64f: [f64; 2],
-    // Raw bytes for bulk copy
-    pub raw: [u8; 16],
+// Helper: read N bytes from a byte array at offset, interpret as little-endian value.
+// These are generic building blocks used by the register accessor macros below.
+
+/// Generate typed accessor methods for a packed-register struct backed by `self.bytes`.
+/// Each invocation generates a getter `$name(i) -> $ty` and setter `set_$name(i, v: $ty)`
+/// for a specific element width.
+macro_rules! packed_reg_accessors {
+    // Unsigned integer accessor
+    (uint $name:ident, $setter:ident, $ty:ty, $width:expr) => {
+        #[inline(always)]
+        pub fn $name(&self, i: usize) -> $ty {
+            let s = i * $width;
+            <$ty>::from_le_bytes(self.bytes[s..s + $width].try_into().unwrap())
+        }
+        #[inline(always)]
+        pub fn $setter(&mut self, i: usize, v: $ty) {
+            let s = i * $width;
+            self.bytes[s..s + $width].copy_from_slice(&v.to_le_bytes());
+        }
+    };
+    // Signed integer accessor (reinterprets same bytes)
+    (sint $name:ident, $setter:ident, $uname:ident, $usetter:ident, $sty:ty, $uty:ty) => {
+        #[inline(always)]
+        pub fn $name(&self, i: usize) -> $sty { self.$uname(i) as $sty }
+        #[inline(always)]
+        pub fn $setter(&mut self, i: usize, v: $sty) { self.$usetter(i, v as $uty) }
+    };
+    // Float accessor
+    (float $name:ident, $setter:ident, $fty:ty, $width:expr) => {
+        #[inline(always)]
+        pub fn $name(&self, i: usize) -> $fty {
+            let s = i * $width;
+            <$fty>::from_le_bytes(self.bytes[s..s + $width].try_into().unwrap())
+        }
+        #[inline(always)]
+        pub fn $setter(&mut self, i: usize, v: $fty) {
+            let s = i * $width;
+            self.bytes[s..s + $width].copy_from_slice(&v.to_le_bytes());
+        }
+    };
+    // Single-byte accessor (no endianness concern)
+    (byte $name:ident, $setter:ident, $sname:ident, $ssetter:ident) => {
+        #[inline(always)]
+        pub fn $name(&self, i: usize) -> u8 { self.bytes[i] }
+        #[inline(always)]
+        pub fn $setter(&mut self, i: usize, v: u8) { self.bytes[i] = v; }
+        #[inline(always)]
+        pub fn $sname(&self, i: usize) -> i8 { self.bytes[i] as i8 }
+        #[inline(always)]
+        pub fn $ssetter(&mut self, i: usize, v: i8) { self.bytes[i] = v as u8; }
+    };
+}
+
+// ============================================================================
+// XMM register (128-bit) — matches Bochs bx_xmm_reg_t
+// ============================================================================
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct BxPackedXmmRegister {
+    pub(crate) bytes: [u8; 16],
 }
 
 impl Default for BxPackedXmmRegister {
-    fn default() -> Self {
-        Self { xmm64u: [0, 0] }
-    }
+    fn default() -> Self { Self { bytes: [0; 16] } }
+}
+
+impl BxPackedXmmRegister {
+    packed_reg_accessors!(uint xmm64u, set_xmm64u, u64, 8);
+    packed_reg_accessors!(uint xmm32u, set_xmm32u, u32, 4);
+    packed_reg_accessors!(uint xmm16u, set_xmm16u, u16, 2);
+    packed_reg_accessors!(byte xmmubyte, set_xmmubyte, xmm_sbyte, set_xmm_sbyte);
+    packed_reg_accessors!(sint xmm64s, set_xmm64s, xmm64u, set_xmm64u, i64, u64);
+    packed_reg_accessors!(sint xmm32s, set_xmm32s, xmm32u, set_xmm32u, i32, u32);
+    packed_reg_accessors!(sint xmm16s, set_xmm16s, xmm16u, set_xmm16u, i16, u16);
+    packed_reg_accessors!(float xmm32f, set_xmm32f, f32, 4);
+    packed_reg_accessors!(float xmm64f, set_xmm64f, f64, 8);
+
+    /// Raw byte slice (for bulk copy / memcmp).
+    #[inline(always)]
+    pub fn raw(&self) -> &[u8; 16] { &self.bytes }
+    #[inline(always)]
+    pub fn raw_mut(&mut self) -> &mut [u8; 16] { &mut self.bytes }
 }
 
 impl core::fmt::Debug for BxPackedXmmRegister {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        let (hi, lo) = unsafe { (self.xmm64u[1], self.xmm64u[0]) };
+        let (hi, lo) = (self.xmm64u(1), self.xmm64u(0));
         write!(f, "XMM({:016x}:{:016x})", hi, lo)
     }
 }
@@ -48,29 +111,45 @@ pub type BxXmmReg = BxPackedXmmRegister;
 // YMM register (256-bit) — matches Bochs bx_ymm_reg_t
 // ============================================================================
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union BxPackedYmmRegister {
-    pub ymm_sbyte: [i8; 32],
-    pub ymm16s: [i16; 16],
-    pub ymm32s: [i32; 8],
-    pub ymm64s: [i64; 4],
-    pub ymmubyte: [u8; 32],
-    pub ymm16u: [u16; 16],
-    pub ymm32u: [u32; 8],
-    pub ymm64u: [u64; 4],
-    pub ymm32f: [f32; 8],
-    pub ymm64f: [f64; 4],
-    pub ymm128: [BxPackedXmmRegister; 2],
-    pub raw: [u8; 32],
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct BxPackedYmmRegister {
+    pub(crate) bytes: [u8; 32],
 }
 
 impl Default for BxPackedYmmRegister {
-    fn default() -> Self {
-        Self {
-            ymm64u: [0, 0, 0, 0],
-        }
+    fn default() -> Self { Self { bytes: [0; 32] } }
+}
+
+impl BxPackedYmmRegister {
+    packed_reg_accessors!(uint ymm64u, set_ymm64u, u64, 8);
+    packed_reg_accessors!(uint ymm32u, set_ymm32u, u32, 4);
+    packed_reg_accessors!(uint ymm16u, set_ymm16u, u16, 2);
+    packed_reg_accessors!(byte ymmubyte, set_ymmubyte, ymm_sbyte, set_ymm_sbyte);
+    packed_reg_accessors!(sint ymm64s, set_ymm64s, ymm64u, set_ymm64u, i64, u64);
+    packed_reg_accessors!(sint ymm32s, set_ymm32s, ymm32u, set_ymm32u, i32, u32);
+    packed_reg_accessors!(sint ymm16s, set_ymm16s, ymm16u, set_ymm16u, i16, u16);
+    packed_reg_accessors!(float ymm32f, set_ymm32f, f32, 4);
+    packed_reg_accessors!(float ymm64f, set_ymm64f, f64, 8);
+
+    /// View as XMM halves.
+    #[inline(always)]
+    pub fn ymm128(&self, i: usize) -> BxPackedXmmRegister {
+        let s = i * 16;
+        let mut r = BxPackedXmmRegister::default();
+        r.bytes.copy_from_slice(&self.bytes[s..s + 16]);
+        r
     }
+    #[inline(always)]
+    pub fn set_ymm128(&mut self, i: usize, v: BxPackedXmmRegister) {
+        let s = i * 16;
+        self.bytes[s..s + 16].copy_from_slice(&v.bytes);
+    }
+
+    #[inline(always)]
+    pub fn raw(&self) -> &[u8; 32] { &self.bytes }
+    #[inline(always)]
+    pub fn raw_mut(&mut self) -> &mut [u8; 32] { &mut self.bytes }
 }
 
 impl core::fmt::Debug for BxPackedYmmRegister {
@@ -85,36 +164,63 @@ pub type BxYmmReg = BxPackedYmmRegister;
 // ZMM register (512-bit) — matches Bochs bx_zmm_reg_t
 // ============================================================================
 
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub union BxPackedZmmRegister {
-    pub zmm_sbyte: [i8; 64],
-    pub zmm16s: [i16; 32],
-    pub zmm32s: [i32; 16],
-    pub zmm64s: [i64; 8],
-    pub zmmubyte: [u8; 64],
-    pub zmm16u: [u16; 32],
-    pub zmm32u: [u32; 16],
-    pub zmm64u: [u64; 8],
-    pub zmm32f: [f32; 16],
-    pub zmm64f: [f64; 8],
-    pub zmm128: [BxPackedXmmRegister; 4],
-    pub zmm256: [BxPackedYmmRegister; 2],
-    pub raw: [u8; 64],
-}
-
-impl BxPackedZmmRegister {
-    pub(super) fn clear(&mut self) {
-        *self = Default::default();
-    }
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct BxPackedZmmRegister {
+    pub(crate) bytes: [u8; 64],
 }
 
 impl Default for BxPackedZmmRegister {
-    fn default() -> Self {
-        Self {
-            zmm64u: [0, 0, 0, 0, 0, 0, 0, 0],
-        }
+    fn default() -> Self { Self { bytes: [0; 64] } }
+}
+
+impl BxPackedZmmRegister {
+    packed_reg_accessors!(uint zmm64u, set_zmm64u, u64, 8);
+    packed_reg_accessors!(uint zmm32u, set_zmm32u, u32, 4);
+    packed_reg_accessors!(uint zmm16u, set_zmm16u, u16, 2);
+    packed_reg_accessors!(byte zmmubyte, set_zmmubyte, zmm_sbyte, set_zmm_sbyte);
+    packed_reg_accessors!(sint zmm64s, set_zmm64s, zmm64u, set_zmm64u, i64, u64);
+    packed_reg_accessors!(sint zmm32s, set_zmm32s, zmm32u, set_zmm32u, i32, u32);
+    packed_reg_accessors!(sint zmm16s, set_zmm16s, zmm16u, set_zmm16u, i16, u16);
+    packed_reg_accessors!(float zmm32f, set_zmm32f, f32, 4);
+    packed_reg_accessors!(float zmm64f, set_zmm64f, f64, 8);
+
+    /// View as XMM quarters.
+    #[inline(always)]
+    pub fn zmm128(&self, i: usize) -> BxPackedXmmRegister {
+        let s = i * 16;
+        let mut r = BxPackedXmmRegister::default();
+        r.bytes.copy_from_slice(&self.bytes[s..s + 16]);
+        r
     }
+    #[inline(always)]
+    pub fn set_zmm128(&mut self, i: usize, v: BxPackedXmmRegister) {
+        let s = i * 16;
+        self.bytes[s..s + 16].copy_from_slice(&v.bytes);
+    }
+
+    /// View as YMM halves.
+    #[inline(always)]
+    pub fn zmm256(&self, i: usize) -> BxPackedYmmRegister {
+        let s = i * 32;
+        let mut r = BxPackedYmmRegister::default();
+        r.bytes.copy_from_slice(&self.bytes[s..s + 32]);
+        r
+    }
+    #[inline(always)]
+    pub fn set_zmm256(&mut self, i: usize, v: BxPackedYmmRegister) {
+        let s = i * 32;
+        self.bytes[s..s + 32].copy_from_slice(&v.bytes);
+    }
+
+    pub(super) fn clear(&mut self) {
+        *self = Default::default();
+    }
+
+    #[inline(always)]
+    pub fn raw(&self) -> &[u8; 64] { &self.bytes }
+    #[inline(always)]
+    pub fn raw_mut(&mut self) -> &mut [u8; 64] { &mut self.bytes }
 }
 
 impl core::fmt::Debug for BxPackedZmmRegister {
@@ -266,7 +372,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Read XMM register (lower 128 bits of vmm[index])
     #[inline]
     pub(super) fn read_xmm_reg(&self, index: u8) -> BxPackedXmmRegister {
-        unsafe { self.vmm[index as usize].zmm128[0] }
+        self.vmm[index as usize].zmm128(0)
     }
 
     /// Write XMM register (writes lower 128 bits, clears upper bits for VEX-encoded SSE)
@@ -274,65 +380,55 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn write_xmm_reg(&mut self, index: u8, val: BxPackedXmmRegister) {
         let i = index as usize;
         self.vmm[i].clear();
-        unsafe {
-            self.vmm[i].zmm128[0] = val;
-        }
+        self.vmm[i].set_zmm128(0, val);
     }
 
     /// Write XMM register preserving upper bits (for legacy SSE without VEX)
     #[inline]
     pub(super) fn write_xmm_reg_lo128(&mut self, index: u8, val: BxPackedXmmRegister) {
-        unsafe {
-            self.vmm[index as usize].zmm128[0] = val;
-        }
+        self.vmm[index as usize].set_zmm128(0, val);
     }
 
     /// Read low qword of XMM register
     #[inline]
     pub(super) fn xmm_lo_qword(&self, index: u8) -> u64 {
-        unsafe { self.vmm[index as usize].zmm64u[0] }
+        self.vmm[index as usize].zmm64u(0)
     }
 
     /// Read high qword of XMM register
     #[inline]
     pub(super) fn xmm_hi_qword(&self, index: u8) -> u64 {
-        unsafe { self.vmm[index as usize].zmm64u[1] }
+        self.vmm[index as usize].zmm64u(1)
     }
 
     /// Write low qword of XMM register (preserves high qword)
     #[inline]
     pub(super) fn write_xmm_lo_qword(&mut self, index: u8, val: u64) {
-        unsafe {
-            self.vmm[index as usize].zmm64u[0] = val;
-        }
+        self.vmm[index as usize].set_zmm64u(0, val);
     }
 
     /// Write high qword of XMM register (preserves low qword)
     #[inline]
     pub(super) fn write_xmm_hi_qword(&mut self, index: u8, val: u64) {
-        unsafe {
-            self.vmm[index as usize].zmm64u[1] = val;
-        }
+        self.vmm[index as usize].set_zmm64u(1, val);
     }
 
     /// Read low dword of XMM register
     #[inline]
     pub(super) fn xmm_lo_dword(&self, index: u8) -> u32 {
-        unsafe { self.vmm[index as usize].zmm32u[0] }
+        self.vmm[index as usize].zmm32u(0)
     }
 
     /// Write low dword of XMM register (preserves rest)
     #[inline]
     pub(super) fn write_xmm_lo_dword(&mut self, index: u8, val: u32) {
-        unsafe {
-            self.vmm[index as usize].zmm32u[0] = val;
-        }
+        self.vmm[index as usize].set_zmm32u(0, val);
     }
 
     /// Read YMM register (lower 256 bits of vmm[index])
     #[inline]
     pub(super) fn read_ymm_reg(&self, index: u8) -> BxPackedYmmRegister {
-        unsafe { self.vmm[index as usize].zmm256[0] }
+        self.vmm[index as usize].zmm256(0)
     }
 
     /// Write YMM register (writes lower 256 bits, clears upper 256 bits)
@@ -340,9 +436,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn write_ymm_reg(&mut self, index: u8, val: BxPackedYmmRegister) {
         let i = index as usize;
         self.vmm[i].clear();
-        unsafe {
-            self.vmm[i].zmm256[0] = val;
-        }
+        self.vmm[i].set_zmm256(0, val);
     }
 
     /// Prepare for SSE instruction — check CR0.EM, CR4.OSFXSR, CR0.TS

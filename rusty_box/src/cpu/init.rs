@@ -104,10 +104,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         for i in 0..BX_GENERAL_REGISTERS {
-            self.gen_reg[i].rrx = 0
+            self.gen_reg[i].set_rrx(0)
         }
 
-        self.gen_reg[BX_NIL_REGISTER].rrx = 0;
+        self.gen_reg[BX_NIL_REGISTER].set_rrx(0);
 
         // Bochs init.cc:867-868: all general registers reset to 0
         // (includes ESP — BIOS sets SS:SP before any stack operations)
@@ -149,13 +149,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.sregs[cs_index].cache.segment = true; /* data/code segment */
         self.sregs[cs_index].cache.r#type = BxDataAndCodeDescriptorEnum::DataReadWriteAccessed as _;
 
-        self.sregs[cs_index].cache.u.segment.base = 0xFFFF0000;
-        self.sregs[cs_index].cache.u.segment.limit_scaled = 0xFFFF;
+        self.sregs[cs_index].cache.u.set_segment_base(0xFFFF0000);
+        self.sregs[cs_index].cache.u.set_segment_limit_scaled(0xFFFF);
 
-        self.sregs[cs_index].cache.u.segment.g = false; /* byte granular */
-        self.sregs[cs_index].cache.u.segment.d_b = false; /* 16bit default size */
-        self.sregs[cs_index].cache.u.segment.l = false; /* 16bit default size */
-        self.sregs[cs_index].cache.u.segment.avl = false; /* 16bit default size */
+        self.sregs[cs_index].cache.u.set_segment_g(false); /* byte granular */
+        self.sregs[cs_index].cache.u.set_segment_d_b(false); /* 16bit default size */
+        self.sregs[cs_index].cache.u.set_segment_l(false); /* 16bit default size */
+        self.sregs[cs_index].cache.u.set_segment_avl(false); /* 16bit default size */
 
         // flushICaches();
 
@@ -168,13 +168,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.sregs[ds_index].cache.segment = true; /* data/code segment */
         self.sregs[ds_index].cache.r#type = BxDataAndCodeDescriptorEnum::DataReadWriteAccessed as _;
 
-        self.sregs[ds_index].cache.u.segment.base = 0x00000000;
-        self.sregs[ds_index].cache.u.segment.limit_scaled = 0xFFFF;
+        self.sregs[ds_index].cache.u.set_segment_base(0x00000000);
+        self.sregs[ds_index].cache.u.set_segment_limit_scaled(0xFFFF);
 
-        self.sregs[ds_index].cache.u.segment.avl = false; /* 16bit default size */
-        self.sregs[ds_index].cache.u.segment.g = false; /* byte granular */
-        self.sregs[ds_index].cache.u.segment.d_b = false; /* 16bit default size */
-        self.sregs[ds_index].cache.u.segment.l = false; /* 16bit default size */
+        self.sregs[ds_index].cache.u.set_segment_avl(false); /* 16bit default size */
+        self.sregs[ds_index].cache.u.set_segment_g(false); /* byte granular */
+        self.sregs[ds_index].cache.u.set_segment_d_b(false); /* 16bit default size */
+        self.sregs[ds_index].cache.u.set_segment_l(false); /* 16bit default size */
 
         // use DS segment as template for the others
         self.sregs[BxSegregs::Ss as usize] = self.sregs[ds_index].clone();
@@ -202,10 +202,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.ldtr.cache.segment = false; /* system segment */
         /* system segment */
         self.ldtr.cache.r#type = SystemAndGateDescriptorEnum::BxSysSegmentLdt as _;
-        self.ldtr.cache.u.segment.base = 0x00000000;
-        self.ldtr.cache.u.segment.limit_scaled = 0xFFFF;
-        self.ldtr.cache.u.segment.avl = false;
-        self.ldtr.cache.u.segment.g = false; /* byte granular */
+        self.ldtr.cache.u.set_segment_base(0x00000000);
+        self.ldtr.cache.u.set_segment_limit_scaled(0xFFFF);
+        self.ldtr.cache.u.set_segment_avl(false);
+        self.ldtr.cache.u.set_segment_g(false); /* byte granular */
 
         /* TR (Task Register) */
         self.tr.selector.value = 0x0000;
@@ -219,10 +219,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.tr.cache.segment = false; /* system segment */
         /* system segment */
         self.tr.cache.r#type = SystemAndGateDescriptorEnum::BxSysSegmentBusy386Tss as _;
-        self.tr.cache.u.segment.base = 0x00000000;
-        self.tr.cache.u.segment.limit_scaled = 0xFFFF;
-        self.tr.cache.u.segment.avl = false;
-        self.tr.cache.u.segment.g = false; /* byte granular */
+        self.tr.cache.u.set_segment_base(0x00000000);
+        self.tr.cache.u.set_segment_limit_scaled(0xFFFF);
+        self.tr.cache.u.set_segment_avl(false);
+        self.tr.cache.u.set_segment_g(false); /* byte granular */
 
         self.cpu_mode = CpuMode::Ia32Real;
 
@@ -325,15 +325,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.msr.mtrrphys = [0; 16];
 
             // Bochs init.cc: MTRR fix ranges initialized to 0 (not PAT default)
-            self.msr.mtrrfix64k = BxPackedRegister { U64: 0 };
-            self.msr.mtrrfix16k[0] = BxPackedRegister { U64: 0 };
-            self.msr.mtrrfix16k[1] = BxPackedRegister { U64: 0 };
+            self.msr.mtrrfix64k = BxPackedRegister { bytes: [0; 8] };
+            self.msr.mtrrfix16k[0] = BxPackedRegister { bytes: [0; 8] };
+            self.msr.mtrrfix16k[1] = BxPackedRegister { bytes: [0; 8] };
 
-            self.msr.mtrrfix4k = [BxPackedRegister { U64: 0 }; 8];
+            self.msr.mtrrfix4k = [BxPackedRegister { bytes: [0; 8] }; 8];
 
-            self.msr.pat = BxPackedRegister {
-                U64: 0x0007040600070406,
-            };
+            self.msr.pat = BxPackedRegister { bytes: 0x0007040600070406u64.to_le_bytes() };
             self.msr.mtrr_deftype = 0;
         }
 
@@ -445,7 +443,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     fn write_32bit_regz(&mut self, index: usize, val: u64) {
-        self.gen_reg[index].rrx = val
+        self.gen_reg[index].set_rrx(val)
     }
 
     // Minimal platform housekeeping helpers used during reset/context changes.
@@ -554,12 +552,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.sregs[cs].cache.segment = true;
         self.sregs[cs].cache.r#type =
             BxDataAndCodeDescriptorEnum::CodeExecReadAccessed as u8;
-        self.sregs[cs].cache.u.segment.base = 0;
-        self.sregs[cs].cache.u.segment.limit_scaled = 0xFFFFFFFF;
-        self.sregs[cs].cache.u.segment.g = true;  // page granular
-        self.sregs[cs].cache.u.segment.d_b = true; // 32-bit
-        self.sregs[cs].cache.u.segment.l = false;  // not 64-bit
-        self.sregs[cs].cache.u.segment.avl = false;
+        self.sregs[cs].cache.u.set_segment_base(0);
+        self.sregs[cs].cache.u.set_segment_limit_scaled(0xFFFFFFFF);
+        self.sregs[cs].cache.u.set_segment_g(true);  // page granular
+        self.sregs[cs].cache.u.set_segment_d_b(true); // 32-bit
+        self.sregs[cs].cache.u.set_segment_l(false);  // not 64-bit
+        self.sregs[cs].cache.u.set_segment_avl(false);
 
         // DS/ES/FS/GS/SS: selector 0x18 = GDT entry 3 (flat 32-bit data)
         let data_segs = [
@@ -577,12 +575,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[seg_idx].cache.segment = true;
             self.sregs[seg_idx].cache.r#type =
                 BxDataAndCodeDescriptorEnum::DataReadWriteAccessed as u8;
-            self.sregs[seg_idx].cache.u.segment.base = 0;
-            self.sregs[seg_idx].cache.u.segment.limit_scaled = 0xFFFFFFFF;
-            self.sregs[seg_idx].cache.u.segment.g = true;
-            self.sregs[seg_idx].cache.u.segment.d_b = true;
-            self.sregs[seg_idx].cache.u.segment.l = false;
-            self.sregs[seg_idx].cache.u.segment.avl = false;
+            self.sregs[seg_idx].cache.u.set_segment_base(0);
+            self.sregs[seg_idx].cache.u.set_segment_limit_scaled(0xFFFFFFFF);
+            self.sregs[seg_idx].cache.u.set_segment_g(true);
+            self.sregs[seg_idx].cache.u.set_segment_d_b(true);
+            self.sregs[seg_idx].cache.u.set_segment_l(false);
+            self.sregs[seg_idx].cache.u.set_segment_avl(false);
         }
 
         // CPU mode = protected (kernel transitions to long mode itself)

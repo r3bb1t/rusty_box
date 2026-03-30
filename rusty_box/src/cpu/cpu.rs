@@ -47,92 +47,69 @@ use super::avx::AMX;
 
 use super::tlb::BxMemType;
 
-// region:  x64 big endian
-
-#[cfg(feature = "bx_big_endian")]
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub union BxGenRegWord {
-    pub(crate) dword_filler: u16,
-    pub(crate) word_filler: u16,
-    pub(crate) rx: u16,
-    pub(crate) byte: BxWordByte,
+// Safe register type replacing C-style union. Stores canonical u64 value;
+// sub-register views are computed via inline methods. On x86 targets LLVM
+// optimises from_le_bytes/to_le_bytes to the same instructions as union access.
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+#[repr(transparent)]
+pub struct BxGenReg {
+    value: u64,
 }
 
-#[cfg(feature = "bx_big_endian")]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct BxGenRegDword {
-    pub(crate) hrx: u32,
-    pub(crate) erx: u32,
-}
+impl BxGenReg {
+    /// Full 64-bit value (RAX, RCX, ...).
+    #[inline(always)]
+    pub fn rrx(&self) -> u64 { self.value }
+    #[inline(always)]
+    pub fn set_rrx(&mut self, v: u64) { self.value = v; }
 
-#[cfg(feature = "bx_big_endian")]
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub union BxGenRegWordInner {
-    pub(crate) rx: u16,
-    pub(crate) byte: BxWordByte,
-}
+    /// Lower 32-bit dword (EAX, ECX, ...). Does NOT zero-extend on read.
+    #[inline(always)]
+    pub fn erx(&self) -> u32 { self.value as u32 }
+    /// Write lower 32 bits, PRESERVING upper 32 bits.
+    /// Callers that need x86-64 zero-extension must also call set_hrx(0).
+    #[inline(always)]
+    pub fn set_erx(&mut self, v: u32) {
+        self.value = (self.value & 0xFFFF_FFFF_0000_0000) | v as u64;
+    }
 
-#[cfg(feature = "bx_big_endian")]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct BxWordByte {
-    pub(crate) rh: u8,
-    pub(crate) rl: u8,
-}
+    /// Upper 32 bits (used for zero-extension checks).
+    #[inline(always)]
+    pub fn hrx(&self) -> u32 { (self.value >> 32) as u32 }
+    #[inline(always)]
+    pub fn set_hrx(&mut self, v: u32) {
+        self.value = (self.value & 0x0000_0000_FFFF_FFFF) | ((v as u64) << 32);
+    }
 
-// endregion:  x64 big endian
+    /// Lower 16-bit word (AX, CX, ...).
+    #[inline(always)]
+    pub fn rx(&self) -> u16 { self.value as u16 }
+    /// Write lower 16 bits, preserving all other bits.
+    #[inline(always)]
+    pub fn set_rx(&mut self, v: u16) {
+        self.value = (self.value & !0xFFFF) | v as u64;
+    }
 
-// region:  x64 little endian
+    /// Low byte (AL, CL, ...).
+    #[inline(always)]
+    pub fn rl(&self) -> u8 { self.value as u8 }
+    #[inline(always)]
+    pub fn set_rl(&mut self, v: u8) {
+        self.value = (self.value & !0xFF) | v as u64;
+    }
 
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub union BxGenReg {
-    pub(crate) word: BxGenRegWord,
-    pub(crate) rrx: u64,
-    pub(crate) dword: BxGenRegDword,
-}
-
-impl Default for BxGenReg {
-    fn default() -> Self {
-        Self { rrx: 0 }
+    /// High byte of low word (AH, CH, ...).
+    #[inline(always)]
+    pub fn rh(&self) -> u8 { (self.value >> 8) as u8 }
+    #[inline(always)]
+    pub fn set_rh(&mut self, v: u8) {
+        self.value = (self.value & !0xFF00) | ((v as u64) << 8);
     }
 }
 
-#[cfg(not(feature = "bx_big_endian"))]
-#[repr(C)]
-#[derive(Copy, Clone)]
-pub union BxGenRegWord {
-    pub(crate) rx: u16,
-    pub(crate) byte: BxWordByte,
-    pub(crate) word_filler: u16,
-    pub(crate) dword_filler: u16,
-}
-
-#[cfg(not(feature = "bx_big_endian"))]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct BxGenRegDword {
-    pub(crate) erx: u32,
-    pub(crate) hrx: u32,
-}
-
-#[cfg(not(feature = "bx_big_endian"))]
-#[repr(C)]
-#[derive(Debug, Copy, Clone)]
-pub struct BxWordByte {
-    pub(crate) rl: u8,
-    pub(crate) rh: u8,
-}
-
-// endregion:  x64 little endian
-
 impl core::fmt::Debug for BxGenReg {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        write!(f, "{:#x}", unsafe { self.rrx })?;
-        Ok(())
+        write!(f, "{:#x}", self.value)
     }
 }
 
@@ -603,8 +580,6 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(crate) diag_pm_to_rm_count: u64,
     /// RM→PM transition count (CR0 PE: 0→1)
     pub(crate) diag_rm_to_pm_count: u64,
-    /// Real-mode RETF16 diagnostic counter
-    pub(super) diag_retf16_count: u64,
     /// Address hit counters: [addr, count] pairs for tracking specific RIP values
     pub(crate) diag_addr_hits: [(u32, u64); 8],
 
@@ -827,7 +802,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     pub(super) fn bx_write_opmask(&mut self, index: usize, val_64: u64) {
-        self.opmask[index].rrx = val_64;
+        self.opmask[index].set_rrx(val_64);
     }
 
     // ── Debug trap bits (DR6 bits set by CPU) ──
@@ -903,38 +878,6 @@ pub(super) struct FarBranch {
     pub(crate) rev_rip: BxAddress,
 }
 
-#[derive(Debug)]
-enum BxCpuActivityState {
-    ActivityStateActive = 0,
-    ActivityStateHlt,
-    ActivityStateShutdown,
-    ActivityStateWaitForSipi,
-    VmxLastActivityState,
-    ActivityStateMwait,
-    ActivityStateMwaitIf,
-}
-
-// Hack since duplicated 3
-impl From<BxCpuActivityState> for u8 {
-    fn from(value: BxCpuActivityState) -> Self {
-        match value {
-            BxCpuActivityState::ActivityStateActive => 0,
-            BxCpuActivityState::ActivityStateHlt => 1,
-            BxCpuActivityState::ActivityStateShutdown => 2,
-            BxCpuActivityState::ActivityStateWaitForSipi
-            | BxCpuActivityState::VmxLastActivityState => 3,
-            BxCpuActivityState::ActivityStateMwait => 4,
-            BxCpuActivityState::ActivityStateMwaitIf => 5,
-        }
-    }
-}
-
-impl Default for BxCpuActivityState {
-    fn default() -> Self {
-        Self::VmxLastActivityState
-    }
-}
-
 #[derive(Debug, Default)]
 pub struct BxRegsMsr {
     pub(crate) apicbase: BxPhyAddress,
@@ -994,21 +937,19 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     //}
 
     fn bx_write_32bit_regz(&mut self, index: usize, val: u32) {
-        self.gen_reg[index].rrx = val as _;
+        self.gen_reg[index].set_rrx(val as _);
     }
 
     fn bx_write_64bit_reg(&mut self, index: usize, val: u64) {
-        self.gen_reg[index].rrx = val;
+        self.gen_reg[index].set_rrx(val);
     }
     pub(super) fn bx_clear_64bit_high(&mut self, index: usize) {
-        unsafe {
-            self.gen_reg[index].dword.hrx = 0;
-        }
+        self.gen_reg[index].set_hrx(0);
     }
 
     #[inline]
     pub(super) fn get_laddr32(&self, seg: usize, offset: u32) -> u32 {
-        (unsafe { self.sregs[seg].cache.u.segment.base } + u64::from(offset)) as u32
+        (self.sregs[seg].cache.u.segment_base() + u64::from(offset)) as u32
     }
 
     /// Get linear address in 64-bit mode (matching Bochs get_laddr64 — cpu.h:5534-5540)
@@ -1022,7 +963,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             offset
         } else {
             // FS, GS — use actual segment base from MSR
-            unsafe { self.sregs[seg].cache.u.segment.base.wrapping_add(offset) }
+            self.sregs[seg].cache.u.segment_base().wrapping_add(offset)
         }
     }
 
@@ -1248,6 +1189,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     #[inline]
     pub(super) fn get_hrq(&self) -> bool {
         if let Some(ps) = self.pc_system_ptr {
+            // SAFETY: PcSystem pointer valid for emulator lifetime; single-threaded access
             unsafe { ps.as_ref().get_hrq() }
         } else {
             false
@@ -1259,6 +1201,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     #[inline]
     pub(super) fn ticks_left_next_event(&self) -> u32 {
         if let Some(ps) = self.pc_system_ptr {
+            // SAFETY: PcSystem pointer valid for emulator lifetime; single-threaded access
             unsafe { ps.as_ref().get_num_cpu_ticks_left_next_event() }
         } else {
             u32::MAX // no cap when not wired (tests)
@@ -1275,6 +1218,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     #[inline]
     pub(super) fn tickn_fastrep(&mut self, n: usize) {
         if let Some(mut ps) = self.pc_system_ptr {
+            // SAFETY: PcSystem pointer valid for emulator lifetime; single-threaded access
             let expired = unsafe { ps.as_mut().sub_countdown(n as u32) };
             if expired {
                 self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
@@ -1484,6 +1428,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         #[cfg(feature = "profiling")]
         let mut prof_icache_ns = 0u64;
 
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
         tracing::info!(
             "CPU loop starting at CS:IP = {:04X}:{:08X}",
             unsafe { self.sregs[BxSegregs::Cs as usize].selector.value },
@@ -1496,7 +1441,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             outer_loop_count += 1;
             // Detect spinning: log every 100K outer-loop iterations
             if outer_loop_count % 100_000 == 0 {
-                tracing::warn!(
+                tracing::debug!(
                     "[cpu_loop-spin] outer={} iter={}/{} RIP={:#010x} async={} activity={:?}",
                     outer_loop_count,
                     iteration,
@@ -1515,7 +1460,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // Use >= so each batch runs exactly max_instructions, not max_instructions+1.
             if iteration >= max_instructions {
                 #[cfg(feature = "profiling")]
-                tracing::warn!(
+                tracing::debug!(
                     "CPU-LOOP-STATS: {} instr, icache={}ms assign={}ms exec={}ms",
                     iteration,
                     prof_icache_ns / 1_000_000,
@@ -1565,6 +1510,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // The borrow is released at the end of the expression.
             #[cfg(feature = "profiling")]
             let _t0 = std::time::Instant::now();
+            // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
             let (mut instr_idx, mut trace_end) = unsafe {
                 let mem_extended: &'c mut BxMemC<'c> = &mut *mem_ptr;
                 match self.get_icache_entry(mem_extended, cpus) {
@@ -1605,13 +1551,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 let ilen_val = unsafe { (*i_ptr).ilen() };
                 // ilen=0 is valid ONLY for InsertedOpcode (trace boundary marker)
                 if ilen_val == 0 || ilen_val > 15 {
+                    // SAFETY: i_ptr is valid for the lifetime of this loop iteration
                     let oc = unsafe { (*i_ptr).get_ia_opcode() };
                     assert!(ilen_val == 0 && oc == super::decoder::Opcode::InsertedOpcode,
-                        "Invalid ilen={} opcode={:?} at RIP={:#x}", ilen_val, oc, unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx });
+                        "Invalid ilen={} opcode={:?} at RIP={:#x}", ilen_val, oc, self.gen_reg[BX_64BIT_REG_RIP].rrx());
                 }
-                unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx += ilen_val as u64 };
+                self.gen_reg[BX_64BIT_REG_RIP].set_rrx(self.gen_reg[BX_64BIT_REG_RIP].rrx() + ilen_val as u64);
                 if is_real {
-                    unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx &= 0xFFFF };
+                    self.gen_reg[BX_64BIT_REG_RIP].set_rrx(self.gen_reg[BX_64BIT_REG_RIP].rrx() & 0xFFFF);
                 }
 
                 // Execute instruction (matching C++ BX_CPU_CALL_METHOD)
@@ -1623,7 +1570,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 #[cfg(feature = "bx_instrumentation")]
                 if self.instrumentation.is_some() {
                     if self.icount == 50_000_001 {
-                        eprintln!("[INSTR-ALIVE] instrumentation callback active at icount={}", self.icount);
+                        tracing::trace!("[INSTR-ALIVE] instrumentation callback active at icount={}", self.icount);
                     }
                     let snap = super::CpuSnapshot {
                         rax: self.rax(), rbx: self.rbx(), rcx: self.rcx(), rdx: self.rdx(),
@@ -1633,10 +1580,15 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         eflags: self.eflags.bits(), icount: self.icount,
                     };
                     let rip_before = self.prev_rip;
-                    self.instrumentation.as_mut().unwrap()
+                    // SAFETY: `.is_some()` guard above ensures this won't panic.
+                    // We can't use `if let Some(cb) = self.instrumentation.as_mut()` because
+                    // building `snap` above borrows `self` immutably through the getters.
+                    self.instrumentation.as_mut()
+                        .expect("guarded by is_some")
                         .before_execution(rip_before, opcode as u16, ilen_val, &snap);
                 }
 
+                // SAFETY: i_ptr is valid for the lifetime of this loop iteration
                 match self.execute_instruction(unsafe { &*i_ptr }) {
                     Ok(()) => {}
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
@@ -1657,13 +1609,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     }
                     Err(e) => {
                         // Cold path: handle fatal/unimplemented errors
+                        // SAFETY: i_ptr is valid for the lifetime of this loop iteration
                         self.handle_execution_error(e, unsafe { &*i_ptr })?;
                         break 'cpu_loop Err(crate::cpu::CpuError::CpuNotInitialized);
                     }
                 }
 
                 // Bochs cpu.cc:204 — prev_rip = RIP AFTER execution ("commit new RIP")
-                self.prev_rip = unsafe { self.gen_reg[BX_64BIT_REG_RIP].rrx };
+                self.prev_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
                 // Bochs cpu.cc:206 — icount++
                 self.icount += 1;
                 self.perf_instructions += 1;
@@ -1694,6 +1647,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     }
                     // Chain to new trace without breaking to outer loop
                     // (matching C++ line 218-220: entry=getICacheEntry; i=entry->i; last=...)
+                    // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
                     let (start, tlen) = unsafe {
                         let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
                         match self.get_icache_entry(mem_reborrowed, cpus) {
@@ -1747,8 +1701,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             CpuError::UnimplementedOpcode { ref opcode } => {
                 let rip = self.prev_rip; // prev_rip was the RIP before advancement
-                let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+                let cs_base = self.sregs[BxSegregs::Cs as usize].cache.u.segment_base();
                 let laddr = cs_base + rip;
+                // SAFETY: segment cache populated during segment load; union read matches descriptor type
                 let cs_value = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
                 let instr_bytes = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
                     let page_base = cs_base + (self.eip_page_bias as u64);
@@ -1762,13 +1717,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 } else {
                     vec![]
                 };
-                panic!(
+                tracing::error!(
                     "UNIMPLEMENTED OPCODE: {} at RIP={:#x} CS:IP={:#x}:{:#x} laddr={:#x} bytes={:02x?}",
                     opcode, rip, cs_value, rip, laddr, instr_bytes
                 );
             }
             _ => {
                 let rip = self.prev_rip;
+                // SAFETY: segment cache populated during segment load; union read matches descriptor type
                 let cs_value = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
                 let opcode = instr.get_ia_opcode();
                 tracing::error!(
@@ -1795,6 +1751,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         cpus: &[&Self],
     ) -> Result<Instruction> {
         let mem_ptr: *mut BxMemC<'c> = mem;
+        // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
         let (mpool_start_idx, _tlen) = unsafe {
             let mem_reborrowed: &'c mut BxMemC<'c> = &mut *mem_ptr;
             self.get_icache_entry(mem_reborrowed, cpus)?
@@ -1818,6 +1775,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         };
 
         // Get raw pointer to mem before calling prefetch() to work around borrow checker
+        // SAFETY: addr_of_mut avoids creating intermediate reference; pointer valid for fn scope
         let mem_ptr: *mut BxMemC<'c> = unsafe { core::ptr::addr_of_mut!(*mem) };
 
         let mut eip_biased = (self.rip() as i64).wrapping_add(self.eip_page_bias as i64) as u32;
@@ -1826,6 +1784,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             self.perf_prefetch += 1;
             let mut retry_count = 0;
             loop {
+                // SAFETY: mem_ptr valid for duration of cpu_loop; reborrow is non-overlapping
                 let mem_reborrowed: &'c mut BxMemC<'c> = unsafe { &mut *mem_ptr };
                 self.prefetch(mem_reborrowed, cpus)?;
 
@@ -1927,15 +1886,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     pub(super) fn get_gpr32(&self, idx: usize) -> u32 {
         // Must handle indices 0-15 (R8D-R15D via REX in 64-bit mode)
         // Matches set_gpr32() which uses direct array access
-        unsafe { self.gen_reg[idx].dword.erx }
+        self.gen_reg[idx].erx()
     }
 
     /// Write 32-bit GPR with zero-extension to 64 bits (Bochs BX_WRITE_32BIT_REGZ)
     /// Handles all 16 GPRs (0-7 = EAX-EDI, 8-15 = R8D-R15D)
     pub(super) fn set_gpr32(&mut self, idx: usize, val: u32) {
+        // SAFETY: gen_reg union always valid for erx/hrx (32-bit) write access
         unsafe {
-            self.gen_reg[idx].dword.erx = val;
-            self.gen_reg[idx].dword.hrx = 0;
+            self.gen_reg[idx].set_erx(val);
+            self.gen_reg[idx].set_hrx(0);
         }
     }
 
@@ -2164,37 +2124,23 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     /// Get segment base address safely
-    /// This is a safe wrapper around the unsafe union access
     pub(super) fn get_segment_base(&self, seg: super::decoder::BxSegregs) -> BxAddress {
-        // Safe: We know seg is a valid BxSegregs enum value (0-5, 7)
-        // and sregs array has 6 elements, so seg as usize is always in bounds
-        unsafe { self.sregs[seg as usize].cache.u.segment.base }
+        self.sregs[seg as usize].cache.u.segment_base()
     }
 
     /// Get segment limit safely
-    /// This is a safe wrapper around the unsafe union access
     pub(super) fn get_segment_limit(&self, seg: super::decoder::BxSegregs) -> u32 {
-        // Safe: We know seg is a valid BxSegregs enum value (0-5, 7)
-        // and sregs array has 6 elements, so seg as usize is always in bounds
-        unsafe { self.sregs[seg as usize].cache.u.segment.limit_scaled }
+        self.sregs[seg as usize].cache.u.segment_limit_scaled()
     }
 
     /// Get segment d_b flag safely
-    /// This is a safe wrapper around the unsafe union access
     pub(super) fn get_segment_d_b(&self, seg: super::decoder::BxSegregs) -> bool {
-        // Safe: We know seg is a valid BxSegregs enum value (0-5, 7)
-        // and sregs array has 6 elements, so seg as usize is always in bounds
-        unsafe { self.sregs[seg as usize].cache.u.segment.d_b }
+        self.sregs[seg as usize].cache.u.segment_d_b()
     }
 
     /// Set segment base address safely
-    /// This is a safe wrapper around the unsafe union access
     pub(super) fn set_segment_base(&mut self, seg: super::decoder::BxSegregs, base: BxAddress) {
-        // Safe: We know seg is a valid BxSegregs enum value (0-5, 7)
-        // and sregs array has 6 elements, so seg as usize is always in bounds
-        unsafe {
-            self.sregs[seg as usize].cache.u.segment.base = base;
-        }
+        self.sregs[seg as usize].cache.u.set_segment_base(base);
     }
 
     pub(super) fn update_flags_logic32(&mut self, result: u32) {
@@ -2274,7 +2220,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
 
             laddr = BxAddress::from(self.get_laddr32(BxSegregs::Cs as _, eip));
-            let cs_base = unsafe { self.sregs[BxSegregs::Cs as usize].cache.u.segment.base };
+            let cs_base = self.sregs[BxSegregs::Cs as usize].cache.u.segment_base();
             tracing::debug!(
                 "prefetch: CS.base={:#x}, EIP={:#x}, laddr={:#x}",
                 cs_base,
@@ -2286,6 +2232,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // Calculate RIP at the beginning of the page.
             let eip_page_bias_calc = BxAddress::from(page_offset.wrapping_sub(eip));
 
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
             let limit: u32 = unsafe {
                 self.sregs[BxSegregs::Cs as usize]
                     .cache
@@ -2303,6 +2250,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // After exception handler runs, check if the new EIP is valid
                 // If not, we're in a loop (exception handler also has invalid EIP)
                 let new_eip = self.eip();
+                // SAFETY: segment cache populated during segment load; union read matches descriptor type
                 let new_limit: u32 = unsafe {
                     self.sregs[BxSegregs::Cs as usize]
                         .cache
@@ -2366,6 +2314,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             {
                 let dtlb_lpf = self.dtlb.get_entry_of(laddr, 0).lpf;
                 if dtlb_lpf != lpf {
+                    // Speculative TLB population — miss is expected and harmless
                     let _ = self.translate_data_read(laddr);
                 }
             }
@@ -2380,7 +2329,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // Get a20_mask before borrowing mem mutably
             let a20_mask = mem.a20_mask();
             // Create a dummy TLB entry (not actually used for page walk)
-            let dummy_tlb_entry = unsafe { core::mem::zeroed::<TLBEntry>() };
+            let dummy_tlb_entry = TLBEntry::default();
             match self.translate_linear(
                 &dummy_tlb_entry,
                 laddr,
@@ -2406,6 +2355,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     // decompressed kernel's page table symbols — the TLB must
                     // shield data accesses from the corrupted boot page tables
                     // until CR3 is switched.
+                    // Speculative TLB population — miss is expected and harmless
                     let _ = self.translate_data_read(laddr);
                     None
                 }
@@ -2424,6 +2374,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         if let Some(fetch_ptr) = fetch_ptr_option {
             // let fetch_ptr_as_ptr = fetch_ptr as *mut u8;
             let fetch_ptr_as_ptr =
+                // SAFETY: pointer and length validated by caller; memory region is valid
                 unsafe { core::slice::from_raw_parts(fetch_ptr as *mut u8, 4096) };
             self.eip_fetch_ptr = Some(fetch_ptr_as_ptr);
         } else {

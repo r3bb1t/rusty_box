@@ -12,7 +12,6 @@
 
 use alloc::format;
 use alloc::string::String;
-use core::ffi::c_void;
 
 use crate::{cpu::ResetReason, memory::BxMemC, pc_system::BxPcSystemC, Result};
 
@@ -36,6 +35,7 @@ use super::pit::{BxPitC, PIT_CONTROL, PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2};
 use super::serial::BxSerialC;
 use super::vga::BxVgaC;
 use super::BxDevicesC;
+use super::DeviceId;
 
 /// Port 0x92 - System Control Port
 /// Bit 0: Fast A20 gate control (1 = A20 enabled)
@@ -272,8 +272,6 @@ impl DeviceManager {
 
     /// Register PIC I/O handlers
     fn register_pic_handlers(&mut self, io: &mut BxDevicesC) {
-        let pic_ptr = &mut self.pic as *mut BxPicC as *mut c_void;
-
         for port in [
             PIC_MASTER_CMD,
             PIC_MASTER_DATA,
@@ -282,204 +280,73 @@ impl DeviceManager {
             PIC_ELCR1,
             PIC_ELCR2,
         ] {
-            io.register_io_handler(
-                pic_ptr,
-                super::pic::pic_read_handler,
-                super::pic::pic_write_handler,
-                port,
-                "8259 PIC",
-                0x1,
-            );
+            io.register_io_handler(DeviceId::Pic, port, "8259 PIC", 0x1);
         }
     }
 
     /// Register PIT I/O handlers
     fn register_pit_handlers(&mut self, io: &mut BxDevicesC) {
-        let pit_ptr = &mut self.pit as *mut BxPitC as *mut c_void;
-
         for port in [PIT_COUNTER0, PIT_COUNTER1, PIT_COUNTER2, PIT_CONTROL] {
-            io.register_io_handler(
-                pit_ptr,
-                super::pit::pit_read_handler,
-                super::pit::pit_write_handler,
-                port,
-                "8254 PIT",
-                0x1,
-            );
+            io.register_io_handler(DeviceId::Pit, port, "8254 PIT", 0x1);
         }
     }
 
     /// Register CMOS I/O handlers
     fn register_cmos_handlers(&mut self, io: &mut BxDevicesC) {
-        let cmos_ptr = &mut self.cmos as *mut BxCmosC as *mut c_void;
-
-        io.register_io_handler(
-            cmos_ptr,
-            super::cmos::cmos_read_handler,
-            super::cmos::cmos_write_handler,
-            CMOS_ADDR,
-            "CMOS Address",
-            0x1,
-        );
-        io.register_io_handler(
-            cmos_ptr,
-            super::cmos::cmos_read_handler,
-            super::cmos::cmos_write_handler,
-            CMOS_DATA,
-            "CMOS Data",
-            0x1,
-        );
+        io.register_io_handler(DeviceId::Cmos, CMOS_ADDR, "CMOS Address", 0x1);
+        io.register_io_handler(DeviceId::Cmos, CMOS_DATA, "CMOS Data", 0x1);
         // Bochs cmos.cc:225-228 — extended CMOS RAM ports (addresses 0x80-0xFF)
-        io.register_io_handler(
-            cmos_ptr,
-            super::cmos::cmos_read_handler,
-            super::cmos::cmos_write_handler,
-            0x0072,
-            "Ext CMOS RAM",
-            0x1,
-        );
-        io.register_io_handler(
-            cmos_ptr,
-            super::cmos::cmos_read_handler,
-            super::cmos::cmos_write_handler,
-            0x0073,
-            "Ext CMOS RAM",
-            0x1,
-        );
+        io.register_io_handler(DeviceId::Cmos, 0x0072, "Ext CMOS RAM", 0x1);
+        io.register_io_handler(DeviceId::Cmos, 0x0073, "Ext CMOS RAM", 0x1);
     }
 
     /// Register DMA I/O handlers (Bochs dma.cc:138-154)
     fn register_dma_handlers(&mut self, io: &mut BxDevicesC) {
-        let dma_ptr = &mut self.dma as *mut BxDmaC as *mut c_void;
-
         // DMA1 ports 0x0000-0x000F (Bochs dma.cc:139-142)
         for port in 0x0000..=0x000F_u16 {
-            io.register_io_handler(
-                dma_ptr,
-                super::dma::dma_read_handler,
-                super::dma::dma_write_handler,
-                port,
-                "DMA controller",
-                0x1,
-            );
+            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x1);
         }
 
         // Page registers 0x0080-0x008F (Bochs dma.cc:145-148)
         for port in 0x0080..=0x008F_u16 {
-            io.register_io_handler(
-                dma_ptr,
-                super::dma::dma_read_handler,
-                super::dma::dma_write_handler,
-                port,
-                "DMA controller",
-                0x1,
-            );
+            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x1);
         }
 
         // DMA2 ports 0x00C0-0x00DE, step 2 (Bochs dma.cc:151-154)
         let mut port = 0x00C0_u16;
         while port <= 0x00DE {
-            io.register_io_handler(
-                dma_ptr,
-                super::dma::dma_read_handler,
-                super::dma::dma_write_handler,
-                port,
-                "DMA controller",
-                0x1,
-            );
+            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x1);
             port += 2;
         }
     }
 
     /// Register Keyboard I/O handlers
     fn register_keyboard_handlers(&mut self, io: &mut BxDevicesC) {
-        let kbd_ptr = &mut self.keyboard as *mut BxKeyboardC as *mut c_void;
-
-        io.register_io_handler(
-            kbd_ptr,
-            super::keyboard::keyboard_read_handler,
-            super::keyboard::keyboard_write_handler,
-            KBD_DATA_PORT,
-            "Keyboard Data",
-            0x1,
-        );
-        io.register_io_handler(
-            kbd_ptr,
-            super::keyboard::keyboard_read_handler,
-            super::keyboard::keyboard_write_handler,
-            KBD_STATUS_PORT,
-            "Keyboard Status/Command",
-            0x1,
-        );
-        io.register_io_handler(
-            kbd_ptr,
-            super::keyboard::keyboard_read_handler,
-            super::keyboard::keyboard_write_handler,
-            SYSTEM_CONTROL_B,
-            "System Control B",
-            0x1,
-        );
+        io.register_io_handler(DeviceId::Keyboard, KBD_DATA_PORT, "Keyboard Data", 0x1);
+        io.register_io_handler(DeviceId::Keyboard, KBD_STATUS_PORT, "Keyboard Status/Command", 0x1);
+        io.register_io_handler(DeviceId::Keyboard, SYSTEM_CONTROL_B, "System Control B", 0x1);
     }
 
     /// Register Hard Drive I/O handlers
     fn register_harddrv_handlers(&mut self, io: &mut BxDevicesC) {
-        let hd_ptr = &mut self.harddrv as *mut BxHardDriveC as *mut c_void;
-
         // Primary ATA (0x1F0-0x1F7, 0x3F6)
         for port in 0x1F0..=0x1F7_u16 {
-            io.register_io_handler(
-                hd_ptr,
-                super::harddrv::harddrv_read_handler,
-                super::harddrv::harddrv_write_handler,
-                port,
-                "ATA Primary",
-                0x7, // 1, 2, 4 byte access
-            );
+            io.register_io_handler(DeviceId::HardDrive, port, "ATA Primary", 0x7);
         }
-        io.register_io_handler(
-            hd_ptr,
-            super::harddrv::harddrv_read_handler,
-            super::harddrv::harddrv_write_handler,
-            0x3F6,
-            "ATA Primary Control",
-            0x1,
-        );
+        io.register_io_handler(DeviceId::HardDrive, 0x3F6, "ATA Primary Control", 0x1);
 
         // Secondary ATA (0x170-0x177, 0x376)
         for port in 0x170..=0x177_u16 {
-            io.register_io_handler(
-                hd_ptr,
-                super::harddrv::harddrv_read_handler,
-                super::harddrv::harddrv_write_handler,
-                port,
-                "ATA Secondary",
-                0x7,
-            );
+            io.register_io_handler(DeviceId::HardDrive, port, "ATA Secondary", 0x7);
         }
-        io.register_io_handler(
-            hd_ptr,
-            super::harddrv::harddrv_read_handler,
-            super::harddrv::harddrv_write_handler,
-            0x376,
-            "ATA Secondary Control",
-            0x1,
-        );
+        io.register_io_handler(DeviceId::HardDrive, 0x376, "ATA Secondary Control", 0x1);
     }
 
     /// Register Serial Port I/O handlers
     fn register_serial_handlers(&mut self, io: &mut BxDevicesC) {
-        let serial_ptr = &mut self.serial as *mut BxSerialC as *mut c_void;
-
         // COM1: 0x3F8-0x3FF (8 registers)
         for port in 0x3F8..=0x3FF_u16 {
-            io.register_io_handler(
-                serial_ptr,
-                super::serial::serial_read_handler,
-                super::serial::serial_write_handler,
-                port,
-                "16550 COM1",
-                0x1, // byte access only
-            );
+            io.register_io_handler(DeviceId::Serial, port, "16550 COM1", 0x1);
         }
     }
 
@@ -488,32 +355,16 @@ impl DeviceManager {
     /// Dynamic ports (PM/SM base) are re-registered when PCI config changes.
     #[cfg(feature = "bx_support_pci")]
     fn register_acpi_handlers(&mut self, io: &mut BxDevicesC) {
-        let acpi_ptr = &mut self.acpi as *mut BxAcpiCtrl as *mut c_void;
-
         // SMI command port (0xB2) — Bochs acpi.cc:137-138
-        io.register_io_write_handler(
-            acpi_ptr,
-            acpi_write_handler,
-            0x00B2,
-            "ACPI SMI Command",
-            0x1,
-        );
+        io.register_io_write_handler(DeviceId::Acpi, 0x00B2, "ACPI SMI Command", 0x1);
 
         // ACPI debug port (0xB044) — Bochs acpi.cc:145-148
-        io.register_io_handler(
-            acpi_ptr,
-            acpi_read_handler,
-            acpi_write_handler,
-            0xB044,
-            "ACPI Debug",
-            0x7, // 1, 2, 4 byte
-        );
+        io.register_io_handler(DeviceId::Acpi, 0xB044, "ACPI Debug", 0x7);
     }
 
     /// Register ACPI PM I/O port range (called when PM base changes via PCI config).
     #[cfg(feature = "bx_support_pci")]
     pub fn register_acpi_pm_ports(&mut self, io: &mut BxDevicesC) {
-        let acpi_ptr = &mut self.acpi as *mut BxAcpiCtrl as *mut c_void;
         let base = self.acpi.pm_base as u16;
         if base == 0 {
             return;
@@ -522,14 +373,7 @@ impl DeviceManager {
         for offset in 0..64u16 {
             let mask = self.acpi.pm_io_mask(offset as u8);
             if mask != 0 {
-                io.register_io_handler(
-                    acpi_ptr,
-                    acpi_read_handler,
-                    acpi_write_handler,
-                    base + offset,
-                    "ACPI PM",
-                    mask,
-                );
+                io.register_io_handler(DeviceId::Acpi, base + offset, "ACPI PM", mask);
             }
         }
         self.acpi.pm_ports_registered = true;
@@ -538,7 +382,6 @@ impl DeviceManager {
     /// Register ACPI SMBus I/O port range (called when SM base changes via PCI config).
     #[cfg(feature = "bx_support_pci")]
     pub fn register_acpi_sm_ports(&mut self, io: &mut BxDevicesC) {
-        let acpi_ptr = &mut self.acpi as *mut BxAcpiCtrl as *mut c_void;
         let base = self.acpi.sm_base as u16;
         if base == 0 {
             return;
@@ -547,14 +390,7 @@ impl DeviceManager {
         for offset in 0..16u16 {
             let mask = self.acpi.sm_io_mask(offset as u8);
             if mask != 0 {
-                io.register_io_handler(
-                    acpi_ptr,
-                    acpi_read_handler,
-                    acpi_write_handler,
-                    base + offset,
-                    "ACPI SMBus",
-                    mask,
-                );
+                io.register_io_handler(DeviceId::Acpi, base + offset, "ACPI SMBus", mask);
             }
         }
         self.acpi.sm_ports_registered = true;
@@ -566,47 +402,22 @@ impl DeviceManager {
     /// Bochs: devices.cc:264-270 (PCI bridge init order)
     #[cfg(feature = "bx_support_pci")]
     fn register_pci_handlers(&mut self, io: &mut BxDevicesC) {
-        let dm_ptr = self as *mut DeviceManager as *mut c_void;
-
         // PCI config address register (0xCF8) — 4-byte write only
-        // Bochs: devices.cc register_io_* for 0xCF8
-        io.register_io_handler(
-            dm_ptr,
-            pci_read_handler,
-            pci_write_handler,
-            super::pci::PCI_CONFIG_ADDR,
-            "PCI Config Addr",
-            0x4, // 4-byte only
-        );
+        io.register_io_handler(DeviceId::Pci, super::pci::PCI_CONFIG_ADDR, "PCI Config Addr", 0x4);
 
         // PCI config data register (0xCFC-0xCFF) — 1/2/4-byte
         for port in 0x0CFC..=0x0CFF_u16 {
-            io.register_io_handler(
-                dm_ptr,
-                pci_read_handler,
-                pci_write_handler,
-                port,
-                "PCI Config Data",
-                0x7, // 1, 2, 4 byte
-            );
+            io.register_io_handler(DeviceId::Pci, port, "PCI Config Data", 0x7);
         }
 
         // PIIX3 I/O ports: APM (0xB2-0xB3), ELCR (0x4D0-0x4D1)
-        // Bochs: pci2isa.cc:80-92 registers these during init()
         for port in [
             super::pci2isa::APM_CMD_PORT,
             super::pci2isa::APM_STS_PORT,
             super::pci2isa::ELCR1_PORT,
             super::pci2isa::ELCR2_PORT,
         ] {
-            io.register_io_handler(
-                dm_ptr,
-                pci_read_handler,
-                pci_write_handler,
-                port,
-                "PIIX3",
-                0x1,
-            );
+            io.register_io_handler(DeviceId::Pci, port, "PIIX3", 0x1);
         }
     }
 
@@ -672,7 +483,6 @@ impl DeviceManager {
     /// Register PCI IDE BM-DMA I/O ports when BAR4 changes.
     #[cfg(feature = "bx_support_pci")]
     fn register_pci_ide_bmdma_ports(&mut self, io: &mut BxDevicesC) {
-        let dm_ptr = self as *mut DeviceManager as *mut c_void;
         let base = self.pci_ide.bmdma_base as u16;
         if base == 0 {
             return;
@@ -680,14 +490,7 @@ impl DeviceManager {
         for offset in 0..16u16 {
             let mask = self.pci_ide.bmdma_io_mask(offset as u8);
             if mask != 0 {
-                io.register_io_handler(
-                    dm_ptr,
-                    pci_read_handler,
-                    pci_write_handler,
-                    base + offset,
-                    "PCI IDE BM-DMA",
-                    mask,
-                );
+                io.register_io_handler(DeviceId::Pci, base + offset, "PCI IDE BM-DMA", mask);
             }
         }
         tracing::info!("PCI IDE BM-DMA ports registered at base {:#06x}", base);
@@ -899,6 +702,125 @@ impl DeviceManager {
             self.diag_vector_hist[0x08], self.diag_vector_hist[0x2E],
         )
     }
+
+    // ─── Dispatch methods called from BxDevicesC via DeviceId ───
+
+    /// Port 92h read dispatch (System Control Port)
+    pub(crate) fn port92_read(&self, _port: u16, _io_len: u8) -> u32 {
+        // Reads current A20 gate state (bit 1)
+        // TODO: When DeviceManager owns SystemControlPort, read from it directly.
+        // For now, return default A20-enabled.
+        0x02
+    }
+
+    /// Port 92h write dispatch (System Control Port)
+    pub(crate) fn port92_write(&mut self, _port: u16, value: u32, _io_len: u8) {
+        let _value = value as u8;
+        // Port92 state is owned by Emulator (SystemControlPort), not DeviceManager.
+        // The emulator polls system_control after each batch for A20/reset changes.
+        // Writes here are a no-op until we move SystemControlPort into DeviceManager.
+        tracing::debug!("Port 92h write: value={:#04x} (dispatch stub)", _value);
+    }
+
+    /// PCI I/O read dispatch
+    #[cfg(feature = "bx_support_pci")]
+    pub(crate) fn pci_read(&self, address: u16, io_len: u8) -> u32 {
+        self.pci_io_read(address, io_len)
+    }
+
+    /// PCI I/O write dispatch
+    #[cfg(feature = "bx_support_pci")]
+    pub(crate) fn pci_write(&mut self, address: u16, value: u32, io_len: u8) {
+        match address {
+            0x0CF8 => {
+                self.pci_conf_addr = value;
+            }
+            0x0CFC..=0x0CFF => {
+                let conf_addr = self.pci_conf_addr;
+                if conf_addr & 0x8000_0000 == 0 {
+                    return;
+                }
+                let bus = ((conf_addr >> 16) & 0xFF) as u8;
+                let devfunc = ((conf_addr >> 8) & 0xFF) as u8;
+                let reg = (conf_addr & 0xFC) as u8;
+                let offset = (address - 0x0CFC) as u8;
+                if bus != 0 {
+                    return;
+                }
+                let reg_addr = reg + offset;
+                match devfunc {
+                    0x00 => {
+                        let pam_changed = self.pci_bridge.pci_write(reg_addr, value, io_len);
+                        if pam_changed {
+                            self.pam_needs_update = true;
+                        }
+                    }
+                    0x08 => self.pci2isa.pci_write(reg_addr, value, io_len),
+                    0x09 => {
+                        let bar4_changed = self.pci_ide.pci_write(reg_addr, value, io_len);
+                        if bar4_changed {
+                            self.pci_ide_bar4_needs_reregister = true;
+                        }
+                    }
+                    0x0B => {
+                        let (pm_changed, sm_changed) = self.acpi.pci_write(reg_addr, value, io_len);
+                        if pm_changed {
+                            self.acpi_pm_needs_reregister = true;
+                        }
+                        if sm_changed {
+                            self.acpi_sm_needs_reregister = true;
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            0x00B2 | 0x00B3 | 0x04D0 | 0x04D1 => {
+                self.pci2isa.write(address, value, io_len);
+                if address == 0x00B2 {
+                    self.acpi.generate_smi(value as u8);
+                    self.pci2isa.apms = 0;
+                    tracing::debug!(
+                        "APM command {:#04x}: forwarded to ACPI, apms cleared (no SMM)",
+                        value
+                    );
+                }
+            }
+            _ => {
+                let base = self.pci_ide.bmdma_base as u16;
+                if base > 0 && address >= base && address < base + 16 {
+                    self.pci_ide.bmdma_write(address, value, io_len);
+                }
+            }
+        }
+    }
+
+    /// ACPI I/O read dispatch
+    #[cfg(feature = "bx_support_pci")]
+    pub(crate) fn acpi_read(&mut self, address: u16, io_len: u8) -> u32 {
+        self.acpi.read(address, io_len)
+    }
+
+    /// ACPI I/O write dispatch
+    #[cfg(feature = "bx_support_pci")]
+    pub(crate) fn acpi_write(&mut self, address: u16, value: u32, io_len: u8) {
+        if address == 0x00B2 {
+            self.acpi.generate_smi(value as u8);
+        } else {
+            self.acpi.write(address, value, io_len);
+        }
+    }
+
+    /// PCI IDE I/O read dispatch (BM-DMA ports)
+    #[cfg(feature = "bx_support_pci")]
+    pub(crate) fn pci_ide_read(&self, address: u16, io_len: u8) -> u32 {
+        self.pci_ide.bmdma_read(address, io_len)
+    }
+
+    /// PCI IDE I/O write dispatch (BM-DMA ports)
+    #[cfg(feature = "bx_support_pci")]
+    pub(crate) fn pci_ide_write(&mut self, address: u16, value: u32, io_len: u8) {
+        self.pci_ide.bmdma_write(address, value, io_len);
+    }
 }
 
 impl BxDevicesC {
@@ -913,31 +835,12 @@ impl BxDevicesC {
     pub fn init(
         &mut self,
         _mem: &mut BxMemC,
-        port92_state: Option<*mut SystemControlPort>,
+        _port92_state: Option<*mut SystemControlPort>,
     ) -> Result<()> {
         tracing::info!("Initializing device subsystem");
 
         // Register Port 92h - System Control Port (A20 gate, fast reset)
-        // Pass pointer to SystemControlPort if provided
-        let port92_ptr = port92_state
-            .map(|p| p as *mut c_void)
-            .unwrap_or(core::ptr::null_mut());
-        self.register_io_handler(
-            port92_ptr,
-            port92_read_handler,
-            port92_write_handler,
-            PORT_92H,
-            "Port 92h System Control",
-            0x1, // 1-byte I/O only
-        );
-
-        // TODO: Initialize other core devices as they are implemented:
-        // - CMOS RTC (ports 0x70-0x71)
-        // - DMA controller (ports 0x00-0x0F, 0x80-0x8F, 0xC0-0xDF)
-        // - PIC - Interrupt controller (ports 0x20-0x3F, 0xA0-0xBF)
-        // - PIT - Timer (ports 0x40-0x5F)
-        // - Keyboard controller (ports 0x60, 0x64)
-        // - Floppy controller (ports 0x3F0-0x3F7)
+        self.register_io_handler(DeviceId::Port92, PORT_92H, "Port 92h System Control", 0x1);
 
         tracing::info!("Device initialization complete");
         Ok(())
@@ -989,39 +892,6 @@ impl BxDevicesC {
     }
 }
 
-/// Port 92h read handler
-///
-/// Returns the current state of the System Control Port
-fn port92_read_handler(this_ptr: *mut c_void, _port: u16, _io_len: u8) -> u32 {
-    if this_ptr.is_null() {
-        // No state available, return default
-        return 0x01; // A20 enabled
-    }
-
-    let port92 = unsafe { &*(this_ptr as *const SystemControlPort) };
-    port92.read() as u32
-}
-
-/// Port 92h write handler
-///
-/// Handles A20 gate control and fast reset
-fn port92_write_handler(this_ptr: *mut c_void, _port: u16, value: u32, _io_len: u8) {
-    let value = value as u8;
-
-    if this_ptr.is_null() {
-        tracing::debug!("Port 92h write: value={:#04x} (no state handler)", value);
-        return;
-    }
-
-    let port92 = unsafe { &mut *(this_ptr as *mut SystemControlPort) };
-    port92.write(value);
-    tracing::debug!(
-        "Port 92h write: value={:#04x}, a20={}, reset={}",
-        value,
-        port92.a20_gate,
-        port92.reset_request
-    );
-}
 
 /// Helper structure for managing Port 92h state
 /// This is used by the Emulator to track and respond to Port 92h changes
@@ -1067,127 +937,6 @@ impl SystemControlPort {
         } else {
             0x00
         }
-    }
-}
-
-/// PCI I/O read handler — dispatches to DeviceManager::pci_io_read()
-/// Handles: 0xCF8 (config addr), 0xCFC-0xCFF (config data), ELCR, BM-DMA
-#[cfg(feature = "bx_support_pci")]
-fn pci_read_handler(this_ptr: *mut c_void, address: u16, io_len: u8) -> u32 {
-    if this_ptr.is_null() {
-        return 0xFFFF_FFFF;
-    }
-    let dm = unsafe { &*(this_ptr as *const DeviceManager) };
-    dm.pci_io_read(address, io_len)
-}
-
-/// PCI I/O write handler — dispatches to DeviceManager::pci_io_write()
-/// Note: For write, we need BxDevicesC access for ACPI port re-registration.
-/// The handler casts back to DeviceManager and handles config addr write
-/// locally. Config data writes that trigger port re-registration will be
-/// handled when the emulator loop next calls tick().
-#[cfg(feature = "bx_support_pci")]
-fn pci_write_handler(this_ptr: *mut c_void, address: u16, value: u32, io_len: u8) {
-    if this_ptr.is_null() {
-        return;
-    }
-    let dm = unsafe { &mut *(this_ptr as *mut DeviceManager) };
-    // Handle writes that don't need BxDevicesC
-    match address {
-        0x0CF8 => {
-            dm.pci_conf_addr = value;
-        }
-        0x0CFC..=0x0CFF => {
-            let conf_addr = dm.pci_conf_addr;
-            if conf_addr & 0x8000_0000 == 0 {
-                return;
-            }
-            let bus = ((conf_addr >> 16) & 0xFF) as u8;
-            let devfunc = ((conf_addr >> 8) & 0xFF) as u8;
-            let reg = (conf_addr & 0xFC) as u8;
-            let offset = (address - 0x0CFC) as u8;
-            if bus != 0 {
-                return;
-            }
-            let reg_addr = reg + offset;
-            // Dispatch to device — note: ACPI port re-registration deferred
-            match devfunc {
-                0x00 => {
-                    let pam_changed = dm.pci_bridge.pci_write(reg_addr, value, io_len);
-                    if pam_changed {
-                        dm.pam_needs_update = true;
-                    }
-                }
-                0x08 => dm.pci2isa.pci_write(reg_addr, value, io_len),
-                0x09 => {
-                    let bar4_changed = dm.pci_ide.pci_write(reg_addr, value, io_len);
-                    if bar4_changed {
-                        // BM-DMA port registration needs BxDevicesC — deferred flag
-                        dm.pci_ide_bar4_needs_reregister = true;
-                    }
-                }
-                0x0B => {
-                    let (pm_changed, sm_changed) = dm.acpi.pci_write(reg_addr, value, io_len);
-                    if pm_changed {
-                        dm.acpi_pm_needs_reregister = true;
-                    }
-                    if sm_changed {
-                        dm.acpi_sm_needs_reregister = true;
-                    }
-                }
-                _ => {
-                }
-            }
-        }
-        0x00B2 | 0x00B3 | 0x04D0 | 0x04D1 => {
-            dm.pci2isa.write(address, value, io_len);
-            // Port 0xB2 (SMI command): forward to ACPI for ACPI_ENABLE/DISABLE
-            // processing, then clear apms since we can't deliver real SMI
-            // (no SMM support). Bochs: pci2isa.cc calls DEV_acpi_generate_smi().
-            if address == 0x00B2 {
-                dm.acpi.generate_smi(value as u8);
-                // SMM not implemented: clear apms so BIOS smm_init() polling
-                // loop (rombios32.c:975) exits immediately.
-                dm.pci2isa.apms = 0;
-                tracing::debug!(
-                    "APM command {:#04x}: forwarded to ACPI, apms cleared (no SMM)",
-                    value
-                );
-            }
-        }
-        _ => {
-            let base = dm.pci_ide.bmdma_base as u16;
-            if base > 0 && address >= base && address < base + 16 {
-                dm.pci_ide.bmdma_write(address, value, io_len);
-            }
-        }
-    }
-}
-
-/// ACPI I/O read handler — dispatches to BxAcpiCtrl::read()
-/// Bochs: bx_acpi_ctrl_c::read_handler() (acpi.cc:302-310)
-#[cfg(feature = "bx_support_pci")]
-fn acpi_read_handler(this_ptr: *mut c_void, address: u16, io_len: u8) -> u32 {
-    if this_ptr.is_null() {
-        return 0xFFFF_FFFF;
-    }
-    let acpi = unsafe { &mut *(this_ptr as *mut BxAcpiCtrl) };
-    acpi.read(address, io_len)
-}
-
-/// ACPI I/O write handler — dispatches to BxAcpiCtrl::write() or generate_smi()
-/// Bochs: bx_acpi_ctrl_c::write_handler() (acpi.cc:386-395)
-#[cfg(feature = "bx_support_pci")]
-fn acpi_write_handler(this_ptr: *mut c_void, address: u16, value: u32, io_len: u8) {
-    if this_ptr.is_null() {
-        return;
-    }
-    let acpi = unsafe { &mut *(this_ptr as *mut BxAcpiCtrl) };
-    // SMI command port (0xB2) — Bochs acpi.cc:393
-    if address == 0x00B2 {
-        acpi.generate_smi(value as u8);
-    } else {
-        acpi.write(address, value, io_len);
     }
 }
 

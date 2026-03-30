@@ -21,7 +21,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Based on Bochs BX_CPU_THIS_PTR sregs[BX_SEG_REG_SS].cache.u.segment.d_b
     #[inline]
     pub(super) fn is_stack_32bit(&self) -> bool {
-        unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b }
+        self.sregs[BxSegregs::Ss as usize].cache.u.segment_d_b()
     }
 
     // =========================================================================

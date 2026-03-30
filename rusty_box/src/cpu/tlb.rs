@@ -17,6 +17,7 @@ const TLB_GLOBAL_PAGE: u32 = 0x80000000;
 
 const BX_INVALID_TLB_ENTRY: u64 = 0xffffffffffffffffu64;
 
+#[derive(Default)]
 pub(crate) struct TLBEntry {
     /// linear page frame
     pub(crate) lpf: BxAddress,
@@ -114,7 +115,7 @@ impl<const SIZE: usize> Tlb<SIZE> {
             for _ in 0..SIZE {
                 tmp.push(TLBEntry::new());
             }
-            tmp.try_into().unwrap_or_else(|_| panic!("SIZE mismatch"))
+            tmp.try_into().unwrap_or_else(|_| unreachable!("Vec length equals SIZE by construction"))
         };
 
         // If we had a split_large field, initialize it here:

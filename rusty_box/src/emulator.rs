@@ -111,6 +111,19 @@ pub struct Emulator<'a, I: BxCpuIdTrait> {
 }
 
 impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
+    /// Extend the borrow of memory owned by this Emulator to match lifetime 'a.
+    ///
+    /// # Safety
+    /// Sound because:
+    /// 1. Memory is owned by Emulator which outlives every cpu_loop call
+    /// 2. We hold &mut self, preventing concurrent access
+    /// 3. CPU does not retain the reference beyond the call
+    /// 4. No other code path accesses self.memory during CPU execution
+    #[inline]
+    unsafe fn borrow_memory_for_cpu(&mut self) -> &'a mut BxMemC<'a> {
+        core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory)
+    }
+
     /// Create a new emulator instance with the given configuration
     ///
     /// This creates all components but does not initialize them.
@@ -241,6 +254,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             // Give PCI bridge a raw pointer to memory_type so PAM writes
             // take effect immediately (matches Bochs DEV_mem_set_memory_type).
             let memory_type_ptr = self.memory.memory_type_ptr();
+            // SAFETY: memory_type_ptr valid for emulator lifetime; single-threaded access
             unsafe {
                 self.device_manager
                     .pci_bridge
@@ -255,6 +269,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // can break the CPU inner loop when master int_pin asserts/deasserts.
         // Also give the CPU a raw pointer to the PIC for DEV_pic_iac() in
         // handle_async_event()'s external interrupt delivery.
+        // SAFETY: CPU event field pointers valid for emulator lifetime; single-threaded access
         unsafe {
             let async_ptr = &mut self.cpu.async_event as *mut u32;
             let pending_ptr = &mut self.cpu.pending_event as *mut u32;
@@ -278,6 +293,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Wire pc_system→CPU event pointers for raise_intr/clear_intr/set_hrq.
         // Matches Bochs pc_system.cc: raise_INTR() calls BX_CPU(0)->signal_event(),
         // set_HRQ() sets BX_CPU(0)->async_event = 1.
+        // SAFETY: CPU event field pointers valid for emulator lifetime; single-threaded access
         unsafe {
             self.pc_system.set_cpu_event_ptrs(
                 core::ptr::NonNull::from(&mut self.cpu.async_event),
@@ -346,6 +362,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
         // Wire PIC→IOAPIC for synchronous forwarding (Bochs pic.cc:499-500)
         #[cfg(feature = "bx_support_apic")]
+        // SAFETY: ioapic_ptr valid for emulator lifetime; single-threaded access
         unsafe {
             let ioapic_ptr = &mut self.device_manager.ioapic as *mut crate::iodev::ioapic::BxIoApic;
             self.device_manager.pic.set_ioapic_ptr(ioapic_ptr);
@@ -379,6 +396,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             );
             match timer_handle {
                 Ok(handle) => {
+                    // SAFETY: lapic_ptr set during CPU init; single-threaded access
                     let lapic = unsafe { &mut *lapic_ptr };
                     lapic.timer_handle = Some(handle);
                     tracing::debug!("LAPIC timer registered with handle {}", handle);
@@ -491,6 +509,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             let ramsize_mb = (self.config.guest_memory_size / (1024 * 1024)) as u32;
             self.device_manager.pci_bridge.init_dram(ramsize_mb);
             let memory_type_ptr = self.memory.memory_type_ptr();
+            // SAFETY: memory_type_ptr valid for emulator lifetime; single-threaded access
             unsafe {
                 self.device_manager
                     .pci_bridge
@@ -501,6 +520,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         tracing::info!("Device initialization complete");
 
         // Wire PIC→CPU interrupt signaling (same as in initialize())
+        // SAFETY: CPU event field pointers valid for emulator lifetime; single-threaded access
         unsafe {
             let async_ptr = &mut self.cpu.async_event as *mut u32;
             let pending_ptr = &mut self.cpu.pending_event as *mut u32;
@@ -522,6 +542,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         );
 
         // Wire pc_system→CPU event pointers (same as in initialize())
+        // SAFETY: CPU event field pointers valid for emulator lifetime; single-threaded access
         unsafe {
             self.pc_system.set_cpu_event_ptrs(
                 core::ptr::NonNull::from(&mut self.cpu.async_event),
@@ -590,6 +611,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
         // Wire PIC→IOAPIC for synchronous forwarding (Bochs pic.cc:499-500)
         #[cfg(feature = "bx_support_apic")]
+        // SAFETY: ioapic_ptr valid for emulator lifetime; single-threaded access
         unsafe {
             let ioapic_ptr = &mut self.device_manager.ioapic as *mut crate::iodev::ioapic::BxIoApic;
             self.device_manager.pic.set_ioapic_ptr(ioapic_ptr);
@@ -623,6 +645,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             );
             match timer_handle {
                 Ok(handle) => {
+                    // SAFETY: lapic_ptr set during CPU init; single-threaded access
                     let lapic = unsafe { &mut *lapic_ptr };
                     lapic.timer_handle = Some(handle);
                     tracing::debug!("LAPIC timer registered with handle {}", handle);
@@ -909,6 +932,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         {
             let icount_ptr = self.cpu.icount_ptr();
             let ips = self.config.ips as u64;
+            // SAFETY: CPU outlives VGA; pointer only read during VGA status register reads
             unsafe {
                 self.device_manager.vga.set_icount_ptr(icount_ptr, ips);
             }
@@ -923,6 +947,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             let pending_event_ptr = &mut self.cpu.pending_event as *mut u32;
             let async_event_ptr = &mut self.cpu.async_event as *mut u32;
             let lapic_ptr = self.cpu.lapic_ptr_mut();
+            // SAFETY: CPU fields outlive LAPIC; pointers only used during LAPIC MMIO access
             unsafe {
                 (*lapic_ptr).set_icount_ptr(icount_ptr);
                 (*lapic_ptr).set_event_ptrs(pending_event_ptr, async_event_ptr);
@@ -1585,7 +1610,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     #[cfg(feature = "std")]
     pub fn run_interactive(&mut self, max_instructions: u64) -> Result<u64>
     where
-        'a: 'static, // Required for unsafe transmute
+        'a: 'static, // Required for borrow_memory_for_cpu safety
     {
         self.prepare_run();
 
@@ -1664,15 +1689,18 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
             // 2. Execute CPU instructions in batches
             let batch_size = (max_instructions - instructions_executed).min(INSTRUCTION_BATCH_SIZE);
-            // Use unsafe to work around lifetime issues - the memory borrow is safe because
-            // we control the lifetime and the CPU doesn't outlive the memory
+            // SAFETY: see borrow_memory_for_cpu
             let result = unsafe {
-                let mem_extended: &'a mut BxMemC<'a> =
-                    core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory);
+                let mem_extended = self.borrow_memory_for_cpu();
                 let io_ptr = core::ptr::NonNull::from(&mut self.devices);
                 let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
-                self.cpu
-                    .cpu_loop_n_with_io(mem_extended, &[], batch_size, io_ptr, ps_ptr)
+                // Wire DeviceManager into BxDevicesC for enum-based I/O dispatch
+                let dm_ptr = core::ptr::NonNull::from(&mut self.device_manager);
+                io_ptr.as_ptr().as_mut().unwrap_unchecked().set_device_manager(dm_ptr);
+                let r = self.cpu
+                    .cpu_loop_n_with_io(mem_extended, &[], batch_size, io_ptr, ps_ptr);
+                self.devices.clear_device_manager();
+                r
             };
 
             let should_update_gui = match result {
@@ -1714,25 +1742,13 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             // kernel recovers (timer/NMI wakes CPU). Breaking here would
                             // prevent headless Alpine from reaching modloop phase.
                             if hlt_if0_count == 1000 {
-                                tracing::warn!(
+                                tracing::debug!(
                                     "[ZERO-BATCH] HLT/MWAIT with IF=0 for 1000 consecutive batches at RIP={:#x} CS={:#06x} activity={:?} — continuing (egui-match)",
                                     self.cpu.rip(), self.cpu.get_cs_selector(), self.cpu.activity_state,
                                 );
                             }
                         } else {
                             hlt_if0_count = 0;
-                        }
-                        static ZERO_COUNT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
-                        let zc = ZERO_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                        if zc < 5 || zc % 10000 == 0 {
-                            tracing::debug!(
-                                "[ZERO-BATCH #{}] RIP={:#010x} CS={:#06x} activity={:?} async_event={}",
-                                zc,
-                                self.cpu.rip(),
-                                self.cpu.get_cs_selector(),
-                                self.cpu.activity_state,
-                                self.cpu.async_event,
-                            );
                         }
                     }
 
@@ -1813,7 +1829,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             } else {
                                 0
                             };
-                            tracing::warn!(
+                            tracing::debug!(
                                 "STUCK at RIP={:#x} after {}k instructions, last I/O read: port={:#06x} value={:#x}, CS={:#06x} mode={}, BP={:#06x} AX={:#06x} [BP+2]={:#06x} [BP+4]={:#06x} [BP+6]={:#06x}",
                                 current_rip,
                                 instructions_executed / 1000,
@@ -1832,14 +1848,14 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                         .iter()
                                         .map(|b| format!("{:02x}", b))
                                         .collect();
-                                    tracing::warn!(
+                                    tracing::debug!(
                                         "Code at RIP={:#x}: {}",
                                         current_rip,
                                         bytes.join(" ")
                                     );
                                 }
                                 // Also dump all general registers + CR0
-                                tracing::warn!(
+                                tracing::debug!(
                                     "Regs: EAX={:#010x} EBX={:#010x} ECX={:#010x} EDX={:#010x} ESI={:#010x} EDI={:#010x} ESP={:#010x} EBP={:#010x} CR0={:#010x}",
                                     self.cpu.eax(), self.cpu.ebx(), self.cpu.ecx(), self.cpu.edx(),
                                     self.cpu.esi(), self.cpu.edi(), self.cpu.esp(), self.cpu.ebp(),
@@ -1852,14 +1868,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     let (intin14, irr14) = self.device_manager.ioapic.pin_state(14);
                                     let (vec15, masked15, trig15, dmode15) = self.device_manager.ioapic.redirect_entry_diag(15);
                                     let (intin15, irr15) = self.device_manager.ioapic.pin_state(15);
+                                    // SAFETY: lapic_ptr set during CPU init; single-threaded access
                                     let lapic = unsafe { &*self.cpu.lapic_ptr_mut() };
                                     let (tmr_active, tmr_init, tmr_period, tmr_vec, tmr_act_pend, tmr_deact_pend) = lapic.hlt_timer_diag();
-                                    tracing::warn!(
+                                    tracing::debug!(
                                         "IOAPIC pin14: vec={:#04x} masked={} trig={} dmode={} intin={} irr={} | LAPIC intr={} activity={:?} timer_active={} timer_vec={:#04x} timer_period={}",
                                         vec14, masked14, trig14, dmode14, intin14, irr14,
                                         lapic.intr, self.cpu.activity_state, tmr_active, tmr_vec, tmr_period,
                                     );
-                                    tracing::warn!(
+                                    tracing::debug!(
                                         "IOAPIC pin15: vec={:#04x} masked={} trig={} dmode={} intin={} irr={}",
                                         vec15, masked15, trig15, dmode15, intin15, irr15,
                                     );
@@ -2360,6 +2377,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 // 1. Process pending LAPIC requests FIRST so timers are active
                                 #[cfg(feature = "bx_support_apic")]
                                 {
+                                    // SAFETY: lapic_ptr set during CPU init; single-threaded access
                                     let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
                                     if lapic.timer_fired {
                                         lapic.timer_fired = false;
@@ -2427,9 +2445,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     && !self.cpu.interrupts_inhibited(0x01)
                                 {
                                     let vec = self.iac();
+                                    // SAFETY: see borrow_memory_for_cpu
                                     unsafe {
-                                        let mem_ext: &'a mut BxMemC<'a> =
-                                            core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory);
+                                        let mem_ext = self.borrow_memory_for_cpu();
                                         self.cpu.set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_ext));
                                         let _ = self.cpu.inject_external_interrupt(vec);
                                         self.cpu.clear_mem_bus();
@@ -2442,12 +2460,16 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 // until handle_async_event runs inside the CPU loop.
                                 let batch2 = (max_instructions.saturating_sub(instructions_executed)).min(INSTRUCTION_BATCH_SIZE);
                                 if batch2 == 0 { break; }
+                                // SAFETY: see borrow_memory_for_cpu
                                 let r2 = unsafe {
-                                    let mem_ext: &'a mut BxMemC<'a> =
-                                        core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory);
+                                    let mem_ext = self.borrow_memory_for_cpu();
                                     let io2 = core::ptr::NonNull::from(&mut self.devices);
                                     let ps2 = core::ptr::NonNull::from(&mut self.pc_system);
-                                    self.cpu.cpu_loop_n_with_io(mem_ext, &[], batch2, io2, ps2)
+                                    let dm2 = core::ptr::NonNull::from(&mut self.device_manager);
+                                    io2.as_ptr().as_mut().unwrap_unchecked().set_device_manager(dm2);
+                                    let r = self.cpu.cpu_loop_n_with_io(mem_ext, &[], batch2, io2, ps2);
+                                    self.devices.clear_device_manager();
+                                    r
                                 };
                                 if let Ok(ex2) = r2 {
                                     instructions_executed += ex2;
@@ -2457,6 +2479,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     // LAPIC sync
                                     #[cfg(feature = "bx_support_apic")]
                                     {
+                                        // SAFETY: lapic_ptr set during CPU init; single-threaded access
                                         let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
                                         let tn = self.pc_system.time_ticks();
                                         lapic.current_ticks = tn;
@@ -2492,6 +2515,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if2) { break; }
                                     #[cfg(feature = "bx_support_apic")]
                                     {
+                                        // SAFETY: lapic_ptr set during CPU init; single-threaded access
                                         let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
                                         if lapic.timer_fired { lapic.timer_fired = false; lapic.periodic(self.pc_system.time_ticks()); }
                                         if lapic.timer_deactivate_request {
@@ -2540,6 +2564,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
                         // Sync LAPIC tick tracking for live timer reads
                         {
+                            // SAFETY: lapic_ptr set during CPU init; single-threaded access
                             let lapic = unsafe { &mut *lapic_ptr };
                             let ticks_now = self.pc_system.time_ticks();
                             lapic.current_ticks = ticks_now;
@@ -2555,6 +2580,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         loop {
                             // Borrow lapic, check timer_fired, process fire, drop borrow
                             let should_continue = {
+                                // SAFETY: lapic_ptr set during CPU init; single-threaded access
                                 let lapic = unsafe { &mut *lapic_ptr };
                                 if !lapic.timer_fired || catchup_count >= max_catchup {
                                     false
@@ -2598,6 +2624,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         // Handle non-fire deactivate/activate requests (from
                         // set_initial_timer_count during instruction execution)
                         {
+                            // SAFETY: lapic_ptr set during CPU init; single-threaded access
                             let lapic = unsafe { &mut *lapic_ptr };
                             if lapic.timer_deactivate_request {
                                 lapic.timer_deactivate_request = false;
@@ -2646,6 +2673,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         let bda_ticks = {
                             let (ptr, len) = self.memory.get_raw_memory_ptr();
                             if 0x046C + 4 <= len {
+                        // SAFETY: pointer and length validated by caller; memory region is valid
                                 unsafe {
                                     let p = ptr.add(0x046C) as *const u32;
                                     *p
@@ -2988,11 +3016,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
                         // Temporarily wire the memory bus so the interrupt path can
                         // read IVT/IDT and push stack frames correctly.
+                        // SAFETY: see borrow_memory_for_cpu
                         let inject_result = unsafe {
-                            let mem_extended: &'a mut BxMemC<'a> =
-                                core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(
-                                    &mut self.memory,
-                                );
+                            let mem_extended = self.borrow_memory_for_cpu();
                             self.cpu
                                 .set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_extended));
                             let r = self.cpu.inject_external_interrupt(vector);
@@ -3146,7 +3172,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             let tlb_pct = if tlb_total > 0 { tlb_h as f64 / tlb_total as f64 * 100.0 } else { 0.0 };
             // icount = instruction count (REP iterations count as separate ticks)
             let bochs_ticks = self.cpu.icount;
-            eprintln!("[PERF] dispatches={pi} bochs_ticks={bochs_ticks} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw}");
+            tracing::info!("[PERF] dispatches={pi} bochs_ticks={bochs_ticks} tlb_hit={tlb_h} tlb_miss={tlb_m} tlb_hit%={tlb_pct:.2}% page_walks={pw}");
         }
 
         Ok(instructions_executed)
@@ -3173,13 +3199,17 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
         'batch: loop {
             // --- Run CPU batch ---
+            // SAFETY: see borrow_memory_for_cpu
             let result = unsafe {
-                let mem_extended: &'a mut BxMemC<'a> =
-                    core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory);
+                let mem_extended = self.borrow_memory_for_cpu();
                 let io_ptr = core::ptr::NonNull::from(&mut self.devices);
                 let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
-                self.cpu
-                    .cpu_loop_n_with_io(mem_extended, &[], max_instructions, io_ptr, ps_ptr)
+                let dm_ptr = core::ptr::NonNull::from(&mut self.device_manager);
+                io_ptr.as_ptr().as_mut().unwrap_unchecked().set_device_manager(dm_ptr);
+                let r = self.cpu
+                    .cpu_loop_n_with_io(mem_extended, &[], max_instructions, io_ptr, ps_ptr);
+                self.devices.clear_device_manager();
+                r
             };
 
             let executed = match result {
@@ -3198,6 +3228,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             {
                 let lapic_ptr = self.cpu.lapic_ptr_mut();
                 {
+                    // SAFETY: lapic_ptr set during CPU init; single-threaded access
                     let lapic = unsafe { &mut *lapic_ptr };
                     let ticks_now = self.pc_system.time_ticks();
                     lapic.current_ticks = ticks_now;
@@ -3206,6 +3237,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 }
                 let mut catchup_count = 0u32;
                 loop {
+                    // SAFETY: lapic_ptr set during CPU init; single-threaded access
                     let lapic = unsafe { &mut *lapic_ptr };
                     if !lapic.timer_fired || catchup_count >= 1000 { break; }
                     lapic.timer_fired = false;
@@ -3227,6 +3259,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     self.pc_system.tickn(0);
                 }
                 {
+                    // SAFETY: lapic_ptr set during CPU init; single-threaded access
                     let lapic = unsafe { &mut *lapic_ptr };
                     if lapic.timer_deactivate_request {
                         lapic.timer_deactivate_request = false;
@@ -3260,6 +3293,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if) { break; }
                     #[cfg(feature = "bx_support_apic")]
                     {
+                        // SAFETY: lapic_ptr set during CPU init; single-threaded access
                         let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
                         if lapic.timer_fired {
                             lapic.timer_fired = false;
@@ -3312,11 +3346,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 && !self.cpu.interrupts_inhibited(0x01)
             {
                 let vector = self.iac();
+                // SAFETY: see borrow_memory_for_cpu
                 unsafe {
-                    let mem_extended: &'a mut BxMemC<'a> =
-                        core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(
-                            &mut self.memory,
-                        );
+                    let mem_extended = self.borrow_memory_for_cpu();
                     self.cpu
                         .set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_extended));
                     let _ = self.cpu.inject_external_interrupt(vector);
@@ -3387,9 +3419,11 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     pub fn update_display(&mut self, display: &mut crate::gui::shared_display::SharedDisplay) {
         // Debug: log VGA state periodically
         static mut DBG_CTR: u32 = 0;
+        // SAFETY: debug counter; single-threaded access
         unsafe {
             DBG_CTR += 1;
         }
+        // SAFETY: debug counter; single-threaded access
         let dbg = unsafe { DBG_CTR };
 
         if let Some(update_result) = self.device_manager.vga.update() {
@@ -3402,7 +3436,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     .count();
                 let first_16: Vec<u8> =
                     update_result.text_buffer.iter().take(32).copied().collect();
-                tracing::warn!(
+                tracing::debug!(
                     "VGA update: dim_changed={}, needs_update={}, buf_non_zero={}, first_32={:02x?}, start_addr={}",
                     update_result.dimension_changed,
                     update_result.needs_update,
@@ -3462,7 +3496,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             let gr6 = self.device_manager.vga.graphics_regs[6];
             let ga = (gr6 & 0x01) != 0;
             let mm = (gr6 >> 2) & 0x03;
-            tracing::warn!(
+            tracing::debug!(
                 "VGA update returned None: graphics_alpha={}, memory_mapping={}, gr6=0x{:02x}",
                 ga,
                 mm,
@@ -3597,8 +3631,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         if seg_idx < 6 {
             let selector = self.cpu.sregs[seg_idx].selector.value;
             let valid = self.cpu.sregs[seg_idx].cache.valid;
-            // Access union fields through unsafe
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
             let base = unsafe { self.cpu.sregs[seg_idx].cache.u.segment.base };
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
             let limit = unsafe { self.cpu.sregs[seg_idx].cache.u.segment.limit_scaled };
             (selector, base, limit, valid)
         } else {
@@ -3661,6 +3696,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         let addr = paddr as usize;
         let host_base = self.cpu.mem_host_base;
         if !host_base.is_null() && addr + 4 <= self.cpu.mem_host_len {
+            // SAFETY: host pointer validated during TLB fill; offset within page bounds
             Some(unsafe { (host_base.add(addr) as *const u32).read_unaligned() })
         } else {
             None
@@ -3672,25 +3708,25 @@ impl<I: BxCpuIdTrait> Emulator<'_, I> {
     /// Dump comprehensive diagnostic state (for Alpine debugging).
     #[cfg(feature = "std")]
     pub fn dump_alpine_diag(&mut self) {
-        eprintln!("\n=== DIAGNOSTIC DUMP ===");
-        eprintln!("RIP={:#018x} RSP={:#018x} RBP={:#018x}",
+        tracing::debug!("\n=== DIAGNOSTIC DUMP ===");
+        tracing::debug!("RIP={:#018x} RSP={:#018x} RBP={:#018x}",
             self.cpu.rip(), self.cpu.rsp(), self.cpu.rbp());
-        eprintln!("RAX={:#018x} RBX={:#018x} RCX={:#018x} RDX={:#018x}",
+        tracing::debug!("RAX={:#018x} RBX={:#018x} RCX={:#018x} RDX={:#018x}",
             self.cpu.rax(), self.cpu.rbx(), self.cpu.rcx(), self.cpu.rdx());
-        eprintln!("RSI={:#018x} RDI={:#018x} R8={:#018x}  R9={:#018x}",
+        tracing::debug!("RSI={:#018x} RDI={:#018x} R8={:#018x}  R9={:#018x}",
             self.cpu.rsi(), self.cpu.rdi(), self.cpu.r8(), self.cpu.r9());
-        eprintln!("CS={:#06x} mode={} IF={}",
+        tracing::debug!("CS={:#06x} mode={} IF={}",
             self.cpu.get_cs_selector(), self.get_cpu_mode_str(),
             if self.cpu.get_b_if() != 0 { 1 } else { 0 });
-        eprintln!("CR0={:#010x} CR3={:#018x}",
+        tracing::debug!("CR0={:#010x} CR3={:#018x}",
             self.cpu.cr0.bits(), self.cpu.cr3);
-        eprintln!("pending_event={:#010x} event_mask={:#010x} async_event={}",
+        tracing::debug!("pending_event={:#010x} event_mask={:#010x} async_event={}",
             self.cpu.pending_event, self.cpu.event_mask, self.cpu.async_event);
-        eprintln!("diag: intr_delivered={} if_blocked={} pic_empty={}",
+        tracing::debug!("diag: intr_delivered={} if_blocked={} pic_empty={}",
             self.cpu.diag_hae_intr_delivered, self.cpu.diag_hae_intr_if_blocked,
             self.cpu.diag_hae_intr_pic_empty);
         // SYSCALL ring buffer
-        eprintln!("--- Last {} SYSCALLs (total={}, sysret={}, blocked={}) ---",
+        tracing::debug!("--- Last {} SYSCALLs (total={}, sysret={}, blocked={}) ---",
             self.cpu.diag_syscall_ring_idx.min(32),
             self.cpu.diag_syscall_count,
             self.cpu.diag_sysret_count,
@@ -3702,53 +3738,54 @@ impl<I: BxCpuIdTrait> Emulator<'_, I> {
             } else { 0 };
             for i in start..self.cpu.diag_syscall_ring_idx {
                 let (nr, arg0, ic) = self.cpu.diag_syscall_ring[i % 32];
-                eprintln!("  syscall nr={} arg0={:#x} icount={}", nr, arg0, ic);
+                tracing::debug!("  syscall nr={} arg0={:#x} icount={}", nr, arg0, ic);
             }
         }
         // PIC state
-        eprintln!("--- PIC State ---");
-        eprintln!("  master: IMR={:#04x} IRR={:#04x} ISR={:#04x} has_int={}",
+        tracing::debug!("--- PIC State ---");
+        tracing::debug!("  master: IMR={:#04x} IRR={:#04x} ISR={:#04x} has_int={}",
             self.device_manager.pic.master.imr,
             self.device_manager.pic.master.irr,
             self.device_manager.pic.master.isr,
             self.device_manager.pic.has_interrupt());
-        eprintln!("  slave:  IMR={:#04x} IRR={:#04x} ISR={:#04x}",
+        tracing::debug!("  slave:  IMR={:#04x} IRR={:#04x} ISR={:#04x}",
             self.device_manager.pic.slave.imr,
             self.device_manager.pic.slave.irr,
             self.device_manager.pic.slave.isr);
         // PIT state
         let pit_c0 = &self.device_manager.pit.counters[0];
-        eprintln!("--- PIT State ---");
-        eprintln!("  C0: mode={:?} count={} gate={} output={}",
+        tracing::debug!("--- PIT State ---");
+        tracing::debug!("  C0: mode={:?} count={} gate={} output={}",
             pit_c0.mode, pit_c0.count, pit_c0.gate, pit_c0.output);
         // Device tick diagnostics
-        eprintln!("--- Device Tick Diag ---");
-        eprintln!("  tick_count={} total_usec={} pit_fires={} irq0_latched={} iac_count={}",
+        tracing::debug!("--- Device Tick Diag ---");
+        tracing::debug!("  tick_count={} total_usec={} pit_fires={} irq0_latched={} iac_count={}",
             self.device_manager.diag_tick_count,
             self.device_manager.diag_total_usec,
             self.device_manager.diag_pit_fires,
             self.device_manager.diag_irq0_latched,
             self.device_manager.diag_iac_count);
         let lapic = self.cpu.lapic_ptr_mut();
+        // SAFETY: lapic_ptr set during CPU init; single-threaded access
         let lapic_ref = unsafe { &*lapic };
-        eprintln!("  lapic_timer_fires={} set_initial_count={} timer_masked={}",
+        tracing::debug!("  lapic_timer_fires={} set_initial_count={} timer_masked={}",
             lapic_ref.diag_timer_fires, lapic_ref.diag_set_initial_count,
             lapic_ref.diag_timer_masked);
         // Show pc_system timer state for LAPIC timer
         if let Some(handle) = lapic_ref.timer_handle {
             let t = &self.pc_system.timers[handle];
-            eprintln!("  pc_system_timer[{}]: flags={:?} time_to_fire={} period={} ticks_total={}",
+            tracing::debug!("  pc_system_timer[{}]: flags={:?} time_to_fire={} period={} ticks_total={}",
                 handle, t.flags, t.time_to_fire, t.period,
                 self.pc_system.time_ticks());
         }
         lapic_ref.dump_state();
         // ATA channel diagnostics
-        eprintln!("--- ATA Diag ---");
-        eprintln!("  cmd_history (last 10):");
+        tracing::debug!("--- ATA Diag ---");
+        tracing::debug!("  cmd_history (last 10):");
         let hist = &self.device_manager.harddrv.cmd_history;
         let start = if hist.len() > 10 { hist.len() - 10 } else { 0 };
         for (ch, cmd, lba) in &hist[start..] {
-            eprintln!("    ch={} cmd={:#04x} lba={}", ch, cmd, lba);
+            tracing::debug!("    ch={} cmd={:#04x} lba={}", ch, cmd, lba);
         }
         // Dump key code addresses from memory
         {
@@ -3764,10 +3801,10 @@ impl<I: BxCpuIdTrait> Emulator<'_, I> {
                 let p = *paddr as usize;
                 if p + 48 <= ram.len() {
                     let code = &ram[p..p+48];
-                    eprintln!("--- {} (phys={:#010x}) ---", label, paddr);
+                    tracing::debug!("--- {} (phys={:#010x}) ---", label, paddr);
                     for row in 0..3 {
                         let off = row * 16;
-                        eprintln!("  +{:02x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                        tracing::debug!("  +{:02x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
                             off,
                             code[off], code[off+1], code[off+2], code[off+3],
                             code[off+4], code[off+5], code[off+6], code[off+7],
@@ -3806,12 +3843,12 @@ impl<I: BxCpuIdTrait> Emulator<'_, I> {
                 if pte & 1 == 0 { return 0; }
                 safe_read((pte & 0xFFFFF_FFFFF000) | page_off)
             };
-            eprintln!("--- Stack at RSP={:#018x} ---", rsp);
+            tracing::debug!("--- Stack at RSP={:#018x} ---", rsp);
             for i in 0..16 {
                 let addr = rsp.wrapping_add(i * 8);
                 let val = read_u64(addr);
                 let marker = if val > 0xffffffff81000000 && val < 0xffffffff82000000 { " <-- kernel text?" } else { "" };
-                eprintln!("  [{:+4}] {:#018x}{}", i * 8, val, marker);
+                tracing::debug!("  [{:+4}] {:#018x}{}", i * 8, val, marker);
             }
         }
         // Dump 64 bytes of code at current RIP via manual page walk
@@ -3850,10 +3887,10 @@ impl<I: BxCpuIdTrait> Emulator<'_, I> {
                     };
                     if paddr != 0 && (paddr as usize) + 64 <= ram.len() {
                         let code = &ram[paddr as usize..(paddr as usize) + 64];
-                        eprintln!("--- Code at RIP={:#018x} (phys={:#010x}) ---", rip, paddr);
+                        tracing::debug!("--- Code at RIP={:#018x} (phys={:#010x}) ---", rip, paddr);
                         for row in 0..4 {
                             let off = row * 16;
-                            eprintln!("  {:016x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
+                            tracing::debug!("  {:016x}: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}  {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
                                 rip + off as u64,
                                 code[off], code[off+1], code[off+2], code[off+3],
                                 code[off+4], code[off+5], code[off+6], code[off+7],
@@ -3864,7 +3901,7 @@ impl<I: BxCpuIdTrait> Emulator<'_, I> {
                 }
             }
         }
-        eprintln!("=== END DIAGNOSTIC ===");
+        tracing::debug!("=== END DIAGNOSTIC ===");
     }
 }
 

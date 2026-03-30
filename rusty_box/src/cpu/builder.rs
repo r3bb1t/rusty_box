@@ -208,7 +208,6 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             diag_gpr64_corrupt_count: 0,
             diag_pm_to_rm_count: 0,
             diag_rm_to_pm_count: 0,
-            diag_retf16_count: 0,
         };
 
         let config = Default::default();

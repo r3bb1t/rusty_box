@@ -295,11 +295,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if self.ldtr.cache.valid == 0 {
                 return None;
             }
-            let ldt_limit = unsafe { self.ldtr.cache.u.segment.limit_scaled as u64 };
+            let ldt_limit = self.ldtr.cache.u.segment_limit_scaled() as u64;
             if index * 8 + 7 > ldt_limit {
                 return None;
             }
-            let ldt_base = unsafe { self.ldtr.cache.u.segment.base };
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            let ldt_base = self.ldtr.cache.u.segment_base();
             let offset = ldt_base + index * 8;
             let qword = self.system_read_qword(offset).ok()?;
             Some((

@@ -53,8 +53,8 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             0x67 // 386 TSS
         };
 
-        let nbase32 = unsafe { tss_descriptor.u.segment.base } as u32;
-        let new_tss_limit = unsafe { tss_descriptor.u.segment.limit_scaled };
+        let nbase32 = tss_descriptor.u.segment_base() as u32;
+        let new_tss_limit = tss_descriptor.u.segment_limit_scaled();
 
         if new_tss_limit < new_tss_max {
             tracing::error!(
@@ -75,8 +75,8 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             0x5F
         };
 
-        let obase32 = unsafe { self.tr.cache.u.segment.base } as u32;
-        let old_tss_limit = unsafe { self.tr.cache.u.segment.limit_scaled };
+        let obase32 = self.tr.cache.u.segment_base() as u32;
+        let old_tss_limit = self.tr.cache.u.segment_limit_scaled();
 
         if old_tss_limit < old_tss_max {
             tracing::error!(
@@ -547,6 +547,7 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         // Instruction pointer must be in CS limit, else #GP(0) (Bochs tasking.cc:831-834)
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
         let cs_limit = unsafe {
             self.sregs[BxSegregs::Cs as usize]
                 .cache

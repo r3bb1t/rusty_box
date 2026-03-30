@@ -150,6 +150,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
             // Then check PIC (legacy 8259 path) — only if LAPIC didn't deliver
             if !delivered && !self.pic_ptr.is_null() {
+                // SAFETY: pic_ptr set during emulator init; single-threaded access
                 let pic = unsafe { &mut *self.pic_ptr };
                 if pic.has_interrupt() {
                     let vector = pic.iac();
@@ -192,6 +193,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Assert Hold Acknowledge (HLDA) and perform DMA transfer
         if self.get_hrq() {
             if !self.dma_ptr.is_null() {
+                // SAFETY: dma_ptr set during emulator init; single-threaded access
                 let dma = unsafe { &mut *self.dma_ptr };
                 dma.raise_hlda();
             }
@@ -228,6 +230,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Handle DMA also when CPU is halted (Bochs event.cc:83-86)
         if self.get_hrq() {
             if !self.dma_ptr.is_null() {
+                // SAFETY: dma_ptr set during emulator init; single-threaded access
                 let dma = unsafe { &mut *self.dma_ptr };
                 dma.raise_hlda();
             }

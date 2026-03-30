@@ -99,9 +99,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn jmp_ed_r(&mut self, instr: &Instruction) -> Result<()> {
         let dst = instr.dst() as usize;
         let new_eip = self.get_gpr32(dst);
-        if new_eip > 0x1000_0000 {
-            tracing::debug!("JMP r32: EIP={:#010x} from RIP={:#010x} reg={}", new_eip, self.prev_rip, dst);
-        }
         self.branch_near32(new_eip)?;
         Ok(())
     }
@@ -112,9 +109,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
         let new_eip = self.v_read_dword(seg, eaddr)?;
-        if new_eip > 0x1000_0000 {
-            tracing::debug!("JMP m32: [{:?}:{:#010x}] -> EIP={:#010x} from RIP={:#010x}", seg, eaddr, new_eip, self.prev_rip);
-        }
         self.branch_near32(new_eip)?;
         Ok(())
     }
@@ -493,9 +487,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Bochs: RPL = 0 in real mode, 3 in v8086
         self.sregs[seg_idx].selector.rpl = if self.real_mode() { 0 } else { 3 };
         self.sregs[seg_idx].cache.valid = super::descriptor::SEG_VALID_CACHE;
-        unsafe {
-            self.sregs[seg_idx].cache.u.segment.base = (selector as u64) << 4;
-        }
+        self.sregs[seg_idx].cache.u.set_segment_base((selector as u64) << 4);
         self.sregs[seg_idx].cache.segment = true;
         self.sregs[seg_idx].cache.p = true;
 
@@ -506,13 +498,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // v8086 mode — Bochs segment_ctrl_pro.cc:194-209
             self.sregs[seg_idx].cache.r#type = 3; // DATA_READ_WRITE_ACCESSED
             self.sregs[seg_idx].cache.dpl = 3;
-            unsafe {
-                self.sregs[seg_idx].cache.u.segment.limit_scaled = 0xFFFF;
-                self.sregs[seg_idx].cache.u.segment.g = false;
-                self.sregs[seg_idx].cache.u.segment.d_b = false;
-                self.sregs[seg_idx].cache.u.segment.avl = false;
-                self.sregs[seg_idx].cache.u.segment.l = false; // Bochs line 194
-            }
+            self.sregs[seg_idx].cache.u.set_segment_limit_scaled(0xFFFF);
+            self.sregs[seg_idx].cache.u.set_segment_g(false);
+            self.sregs[seg_idx].cache.u.set_segment_d_b(false);
+            self.sregs[seg_idx].cache.u.set_segment_avl(false);
+            self.sregs[seg_idx].cache.u.set_segment_l(false); // Bochs line 194
         }
 
         if seg as usize == BxSegregs::Cs as usize {

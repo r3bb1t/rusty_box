@@ -24,7 +24,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(in crate::cpu) fn init_fetch_decode_tables(&mut self) -> crate::cpu::Result<()> {
         // Bochs panics if bitmask is empty (fetchdecode32.cc:2151-2152)
         if self.ia_extensions_bitmask[0] == 0 {
-            panic!("init_fetch_decode_tables: CPU features bitmask is empty!");
+            return Err(crate::cpu::CpuError::UnimplementedInstruction);
         }
 
         // Log key ISA feature status for debugging

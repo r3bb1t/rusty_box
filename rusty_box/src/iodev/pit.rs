@@ -8,7 +8,6 @@
 //!
 //! Base frequency: 1.193182 MHz
 
-use core::ffi::c_void;
 
 /// PIT I/O port addresses
 pub const PIT_COUNTER0: u16 = 0x0040;
@@ -973,18 +972,6 @@ impl BxPitC {
         self.irq0_pending = false;
         pending
     }
-}
-
-/// PIT read handler for I/O port infrastructure
-pub fn pit_read_handler(this_ptr: *mut c_void, port: u16, io_len: u8) -> u32 {
-    let pit = unsafe { &mut *(this_ptr as *mut BxPitC) };
-    pit.read(port, io_len)
-}
-
-/// PIT write handler for I/O port infrastructure
-pub fn pit_write_handler(this_ptr: *mut c_void, port: u16, value: u32, io_len: u8) {
-    let pit = unsafe { &mut *(this_ptr as *mut BxPitC) };
-    pit.write(port, value, io_len);
 }
 
 #[cfg(test)]

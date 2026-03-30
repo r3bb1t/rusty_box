@@ -193,37 +193,63 @@ impl I387 {
 
 pub type BxPackedRegT = BxPackedRegister;
 
-#[derive(Clone, Copy)]
-pub union BxPackedRegister {
-    pub Sbyte: [i8; 8],
-    pub S16: [i16; 4],
-    pub S32: [i32; 2],
-    pub S64: i64,
-    pub Ubyte: [u8; 8],
-    pub U16: [u16; 4],
-    pub U32: [u32; 2],
-    pub U64: u64,
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(transparent)]
+#[allow(non_snake_case)]
+pub struct BxPackedRegister {
+    pub(crate) bytes: [u8; 8],
+}
+
+#[allow(non_snake_case)]
+impl BxPackedRegister {
+    #[inline(always)] pub fn U64(&self) -> u64 { u64::from_le_bytes(self.bytes) }
+    #[inline(always)] pub fn set_U64(&mut self, v: u64) { self.bytes = v.to_le_bytes(); }
+
+    #[inline(always)] pub fn U32(&self, i: usize) -> u32 {
+        let s = i * 4;
+        u32::from_le_bytes(self.bytes[s..s+4].try_into().unwrap())
+    }
+    #[inline(always)] pub fn set_U32(&mut self, i: usize, v: u32) {
+        let s = i * 4;
+        self.bytes[s..s+4].copy_from_slice(&v.to_le_bytes());
+    }
+
+    #[inline(always)] pub fn U16(&self, i: usize) -> u16 {
+        let s = i * 2;
+        u16::from_le_bytes(self.bytes[s..s+2].try_into().unwrap())
+    }
+    #[inline(always)] pub fn set_U16(&mut self, i: usize, v: u16) {
+        let s = i * 2;
+        self.bytes[s..s+2].copy_from_slice(&v.to_le_bytes());
+    }
+
+    #[inline(always)] pub fn Ubyte(&self, i: usize) -> u8 { self.bytes[i] }
+    #[inline(always)] pub fn set_Ubyte(&mut self, i: usize, v: u8) { self.bytes[i] = v; }
+
+    #[inline(always)] pub fn S64(&self) -> i64 { self.U64() as i64 }
+    #[inline(always)] pub fn set_S64(&mut self, v: i64) { self.set_U64(v as u64); }
+
+    #[inline(always)] pub fn S32(&self, i: usize) -> i32 { self.U32(i) as i32 }
+    #[inline(always)] pub fn set_S32(&mut self, i: usize, v: i32) { self.set_U32(i, v as u32); }
+
+    #[inline(always)] pub fn S16(&self, i: usize) -> i16 { self.U16(i) as i16 }
+    #[inline(always)] pub fn set_S16(&mut self, i: usize, v: i16) { self.set_U16(i, v as u16); }
+
+    #[inline(always)] pub fn Sbyte(&self, i: usize) -> i8 { self.bytes[i] as i8 }
+    #[inline(always)] pub fn set_Sbyte(&mut self, i: usize, v: i8) { self.bytes[i] = v as u8; }
 }
 
 impl Debug for BxPackedRegister {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("BxPackedRegister")
-            .field("Sbyte", unsafe { &self.Sbyte })
-            .field("S16", unsafe { &self.S16 })
-            .field("S32", unsafe { &self.S32 })
-            .field("S64", unsafe { &self.S64 })
-            .field("Ubyte", unsafe { &self.Ubyte })
-            .field("U16", unsafe { &self.U16 })
-            .field("U32", unsafe { &self.U32 })
-            .field("U64", unsafe { &self.U64 })
-            .finish()
+        write!(f, "MMX({:#018x})", self.U64())
     }
 }
 
 impl Default for BxPackedRegister {
     fn default() -> Self {
-        BxPackedRegister {
-            U64: 0x0007040600070406,
-        }
+        // Bochs FPU default pattern
+        let mut r = BxPackedRegister { bytes: [0; 8] };
+        r.set_U64(0x0007040600070406);
+        r
     }
 }

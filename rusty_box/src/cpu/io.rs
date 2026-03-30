@@ -38,12 +38,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return Ok(false);
             }
 
-            let tr_limit = unsafe { self.tr.cache.u.segment.limit_scaled };
+            let tr_limit = self.tr.cache.u.segment_limit_scaled();
             if tr_limit < 103 {
                 return Ok(false);
             }
 
-            let tr_base = unsafe { self.tr.cache.u.segment.base };
+            let tr_base = self.tr.cache.u.segment_base();
             let io_base = self.system_read_word(tr_base + 102)? as u32;
 
             if (io_base + (port as u32) / 8) >= tr_limit {
@@ -523,6 +523,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         // This copies directly from the ATA buffer into guest RAM,
                         // avoiding per-word port_in() dispatch overhead.
                         let bulk_bytes = chunk_words * 2;
+                        // SAFETY: pointer and length validated by caller; memory region is valid
                         let bulk_slice = unsafe {
                             core::slice::from_raw_parts_mut(host_ptr, bulk_bytes)
                         };
@@ -548,6 +549,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         // Matches Bochs FastRepINSW io.cc:88-105.
                         for i in 0..chunk_words {
                             let val = self.port_in(port, 2) as u16;
+                            // SAFETY: host pointer validated during TLB fill; offset within page bounds
                             unsafe {
                                 let dst = host_ptr.add(i * 2) as *mut u16;
                                 dst.write_unaligned(val.to_le());
@@ -635,6 +637,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         // This copies directly from the ATA buffer into guest RAM,
                         // avoiding per-dword port_in() dispatch overhead (~20x speedup).
                         let bulk_bytes = chunk_dwords * 4;
+                        // SAFETY: pointer and length validated by caller; memory region is valid
                         let bulk_slice = unsafe {
                             core::slice::from_raw_parts_mut(host_ptr, bulk_bytes)
                         };
@@ -659,6 +662,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         // Bulk returned 0 — per-dword fallback within this chunk.
                         for i in 0..chunk_dwords {
                             let val = self.port_in(port, 4);
+                            // SAFETY: host pointer validated during TLB fill; offset within page bounds
                             unsafe {
                                 let dst = host_ptr.add(i * 4) as *mut u32;
                                 dst.write_unaligned(val.to_le());
@@ -947,6 +951,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
                         // Bulk path: try to read all chunk_words at once via inp_bulk.
                         let bulk_bytes = chunk_words * 2;
+                        // SAFETY: pointer and length validated by caller; memory region is valid
                         let bulk_slice = unsafe {
                             core::slice::from_raw_parts_mut(host_ptr, bulk_bytes)
                         };
@@ -971,6 +976,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         // Bulk returned 0 — per-word fallback within this chunk.
                         for i in 0..chunk_words {
                             let val = self.port_in(port, 2) as u16;
+                            // SAFETY: host pointer validated during TLB fill; offset within page bounds
                             unsafe {
                                 let dst = host_ptr.add(i * 2) as *mut u16;
                                 dst.write_unaligned(val.to_le());
@@ -1052,6 +1058,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
                         // Bulk path: try to read all chunk_dwords at once via inp_bulk.
                         let bulk_bytes = chunk_dwords * 4;
+                        // SAFETY: pointer and length validated by caller; memory region is valid
                         let bulk_slice = unsafe {
                             core::slice::from_raw_parts_mut(host_ptr, bulk_bytes)
                         };
@@ -1076,6 +1083,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         // Bulk returned 0 — per-dword fallback within this chunk.
                         for i in 0..chunk_dwords {
                             let val = self.port_in(port, 4);
+                            // SAFETY: host pointer validated during TLB fill; offset within page bounds
                             unsafe {
                                 let dst = host_ptr.add(i * 4) as *mut u32;
                                 dst.write_unaligned(val.to_le());
@@ -1267,6 +1275,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// bulk reads (or no IO bus is wired), returns 0.
     fn bulk_port_in(&mut self, port: u16, buf: &mut [u8]) -> usize {
         if let Some(mut io_bus) = self.io_bus {
+            // SAFETY: io_bus valid for duration of execution; single-threaded access
             let devices = unsafe { io_bus.as_mut() };
             return devices.inp_bulk(port, buf);
         }
@@ -1282,6 +1291,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if let Some(mut io_bus) = self.io_bus {
             // SAFETY: `io_bus` is set by the emulator for the duration of execution
             // and cleared afterwards. Single-CPU execution avoids concurrent access.
+            // SAFETY: io_bus valid for duration of execution; single-threaded access
             let value = unsafe { io_bus.as_mut().inp(port, len) };
             return value;
         }
@@ -1316,6 +1326,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if let Some(mut io_bus) = self.io_bus {
             // SAFETY: `io_bus` is set by the emulator for the duration of execution
             // and cleared afterwards. Single-CPU execution avoids concurrent access.
+            // SAFETY: io_bus valid for duration of execution; single-threaded access
             unsafe { io_bus.as_mut().outp(port, value, len) };
         }
     }

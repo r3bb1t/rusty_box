@@ -59,14 +59,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Zero the destination register
         let result = BxPackedZmmRegister::default();
-        unsafe {
-            let dst = &mut self.vmm[dst_reg as usize];
-            for i in 0..nelements {
-                dst.zmm32u[i] = result.zmm32u[i];
-            }
-            for i in nelements..16 {
-                dst.zmm32u[i] = 0;
-            }
+        let dst = &mut self.vmm[dst_reg as usize];
+        for i in 0..nelements {
+            dst.set_zmm32u(i, result.zmm32u(i));
+        }
+        for i in nelements..16 {
+            dst.set_zmm32u(i, 0);
         }
 
         // Clear opmask register (Intel spec: mask is zeroed after gather)
@@ -97,14 +95,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst();
 
         // Zero the destination register
-        unsafe {
-            let dst = &mut self.vmm[dst_reg as usize];
-            for i in 0..nelements {
-                dst.zmm64u[i] = 0;
-            }
-            for i in nelements..8 {
-                dst.zmm64u[i] = 0;
-            }
+        let dst = &mut self.vmm[dst_reg as usize];
+        for i in 0..nelements {
+            dst.set_zmm64u(i, 0);
+        }
+        for i in nelements..8 {
+            dst.set_zmm64u(i, 0);
         }
 
         // Clear opmask register
@@ -139,11 +135,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst();
 
         // Zero the entire destination register
-        unsafe {
-            let dst = &mut self.vmm[dst_reg as usize];
-            for i in 0..16 {
-                dst.zmm32u[i] = 0;
-            }
+        let dst = &mut self.vmm[dst_reg as usize];
+        for i in 0..16 {
+            dst.set_zmm32u(i, 0);
         }
 
         // Clear opmask register
@@ -178,14 +172,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let dst_reg = instr.dst();
 
         // Zero the destination register
-        unsafe {
-            let dst = &mut self.vmm[dst_reg as usize];
-            for i in 0..nelements {
-                dst.zmm64u[i] = 0;
-            }
-            for i in nelements..8 {
-                dst.zmm64u[i] = 0;
-            }
+        let dst = &mut self.vmm[dst_reg as usize];
+        for i in 0..nelements {
+            dst.set_zmm64u(i, 0);
+        }
+        for i in nelements..8 {
+            dst.set_zmm64u(i, 0);
         }
 
         // Clear opmask register

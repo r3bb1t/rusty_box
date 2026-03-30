@@ -10,11 +10,7 @@
 //!   COM4: 0x2E8-0x2EF, IRQ 3
 
 use alloc::collections::VecDeque;
-use core::ffi::c_void;
 
-/// Global flag set when mdev regex error is detected in serial output.
-/// Used by CPU tracing to dump instruction history at the right moment.
-pub static MDEV_REGEX_TRIGGERED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
 
 /// UART crystal oscillator frequency (Hz) — Bochs BX_PC_CLOCK_XTL
 const UART_CLOCK_XTL: f64 = 1_843_200.0;
@@ -758,29 +754,6 @@ impl BxSerialC {
                     s.divisor_lsb = val;
                 } else {
                     // DLAB=0: write THR
-                    // DIAG: detect "bad r" pattern to trigger CPU dump when mdev prints regex error
-                    {
-                        static MATCH_STATE: core::sync::atomic::AtomicU8 = core::sync::atomic::AtomicU8::new(0);
-                        static TRIGGER_COUNT: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
-                        let state = MATCH_STATE.load(core::sync::atomic::Ordering::Relaxed);
-                        let next = match (state, val) {
-                            (0, b'b') => 1,
-                            (1, b'a') => 2,
-                            (2, b'd') => 3,
-                            (3, b' ') => 4,
-                            (4, b'r') => 5, // "bad r" detected
-                            _ => 0,
-                        };
-                        MATCH_STATE.store(next, core::sync::atomic::Ordering::Relaxed);
-                        if next == 5 {
-                            let tc = TRIGGER_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                            if tc == 0 {
-                                // Store trigger flag for CPU to pick up
-                                MDEV_REGEX_TRIGGERED.store(true, core::sync::atomic::Ordering::Relaxed);
-                                tracing::debug!("[MDEV-REGEX-ERROR] 'bad r' detected at serial write — trigger instruction dump");
-                            }
-                        }
-                    }
                     let bitmask: u8 = 0xFF >> (3u8.saturating_sub(s.line_cntl.wordlen_sel));
                     let data = val & bitmask;
 
@@ -1100,20 +1073,6 @@ impl BxSerialC {
 
 // ============================================================================
 // I/O port handler functions for the device infrastructure
-// ============================================================================
-
-/// Serial port read handler for I/O port infrastructure
-pub fn serial_read_handler(this_ptr: *mut c_void, port: u16, io_len: u8) -> u32 {
-    let serial = unsafe { &mut *(this_ptr as *mut BxSerialC) };
-    serial.read(port, io_len)
-}
-
-/// Serial port write handler for I/O port infrastructure
-pub fn serial_write_handler(this_ptr: *mut c_void, port: u16, value: u32, io_len: u8) {
-    let serial = unsafe { &mut *(this_ptr as *mut BxSerialC) };
-    serial.write(port, value, io_len);
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

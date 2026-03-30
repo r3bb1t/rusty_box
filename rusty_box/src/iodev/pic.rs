@@ -112,7 +112,6 @@
 //! to create a new edge. Level-triggered IRQs remain asserted in IRR until
 //! the device deasserts the line. IRQ0-2 and IRQ8,13 are always edge-triggered.
 
-use core::ffi::c_void;
 
 /// PIC I/O port addresses
 pub const PIC_MASTER_CMD: u16 = 0x0020;
@@ -850,12 +849,6 @@ impl BxPicC {
                 }
             } else if irq_no == 15 {
                 // IRQ 15 raise while slave IRR bit 7 already set — IOAPIC skipped!
-                static SKIP_COUNT: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                let n = SKIP_COUNT.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if n < 10 || n == 50 || n == 100 || n == 500 {
-                    eprintln!("[PIC-IRR-SKIP] #{} raise_irq(15) with IRR already set — IOAPIC NOT forwarded!", n);
-                }
             }
         }
     }
@@ -993,18 +986,6 @@ impl BxPicC {
 
         vector
     }
-}
-
-/// PIC read handler for I/O port infrastructure
-pub fn pic_read_handler(this_ptr: *mut c_void, port: u16, io_len: u8) -> u32 {
-    let pic = unsafe { &mut *(this_ptr as *mut BxPicC) };
-    pic.read(port, io_len)
-}
-
-/// PIC write handler for I/O port infrastructure
-pub fn pic_write_handler(this_ptr: *mut c_void, port: u16, value: u32, io_len: u8) {
-    let pic = unsafe { &mut *(this_ptr as *mut BxPicC) };
-    pic.write(port, value, io_len);
 }
 
 #[cfg(test)]

@@ -86,7 +86,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     error_code: new_error_code,
                 }) => {
                     // Delivery failed — raise the indicated exception.
-                    tracing::warn!(
+                    tracing::debug!(
                         "interrupt({:#04x}) PM delivery failed, raising {:?} error_code={:#x}; icount={}",
                         vector,
                         new_vector,
@@ -118,7 +118,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Based on Bochs INT_Ib in soft_int.cc:127-161
     pub fn int_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let vector = instr.ib();
-        tracing::debug!("INT {:#04x}", vector);
+        tracing::trace!("INT {:#04x}", vector);
         // BX_SOFTWARE_INTERRUPT → soft_int=true, no error code
         self.interrupt(vector, true, false, 0)
     }
@@ -145,7 +145,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// INT1 (ICEBP) - In-circuit emulator breakpoint (vector 1)
     /// Based on Bochs INT1 in soft_int.cc:68-96
     pub fn int1(&mut self, _instr: &Instruction) -> super::Result<()> {
-        tracing::warn!(
+        tracing::debug!(
             "INT1 (ICEBP) at RIP={:#x} CS={:#x}",
             self.rip(),
             self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
@@ -286,7 +286,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let cs_val = self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value;
             if cs_val == 0xF000 {
                 let cf = new_flags & 1;
-                tracing::warn!(
+                tracing::debug!(
                     "IRET from BIOS: CS:IP={:04x}:{:04x} → {:04x}:{:04x} FLAGS={:04x} CF={} AH={:#04x} icount={}",
                     cs_val, self.rip() as u16, new_cs, new_ip, new_flags, cf, self.ah(), self.icount
                 );
@@ -399,7 +399,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::debug!("IRET: nested task return (NT=1)");
 
             // Read back-link selector from current TSS offset 0
-            let tss_base = unsafe { self.tr.cache.u.segment.base };
+            let tss_base = self.tr.cache.u.segment_base();
             let raw_link_selector = self.system_read_word(tss_base)?;
 
             let mut link_selector = BxSelector::default();
@@ -660,7 +660,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Nested Task (NT) — same as 32-bit path
         if self.eflags.contains(EFlags::NT) {
             tracing::debug!("IRET16(PM): nested task return (NT=1)");
-            let tss_base = unsafe { self.tr.cache.u.segment.base };
+            let tss_base = self.tr.cache.u.segment_base();
             let raw_link_selector = self.system_read_word(tss_base)?;
             let mut link_selector = BxSelector::default();
             parse_selector(raw_link_selector, &mut link_selector);
@@ -876,9 +876,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Bochs exception.cc:750-751: load CS:IP from IVT
         let cs_index = BxSegregs::Cs as usize;
         parse_selector(new_cs, &mut self.sregs[cs_index].selector);
-        unsafe {
-            self.sregs[cs_index].cache.u.segment.base = (new_cs as u64) << 4;
-        }
+            self.sregs[cs_index].cache.u.set_segment_base((new_cs as u64) << 4);
         self.set_ip(new_ip);
 
         // Bochs exception.cc:754-759: clear IF, TF, AC, RF
@@ -925,7 +923,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Check if interrupts are disabled (IF=0) - matches Bochs proc_ctrl.cc:206
         if !self.eflags.contains(EFlags::IF_) {
-            tracing::warn!("HLT: CPU halted with IF=0 (interrupts disabled) - CPU will be stuck!");
+            tracing::debug!("HLT: CPU halted with IF=0 (interrupts disabled) - CPU will be stuck!");
         }
 
         if !self.diag_first_pm_hlt_captured && self.protected_mode() {

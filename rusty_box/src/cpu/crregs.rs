@@ -776,6 +776,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     );
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
+                // SAFETY: segment cache populated during segment load; union read matches descriptor type
                 let cs_l = unsafe {
                     self.sregs[super::decoder::BxSegregs::Cs as usize]
                         .cache
@@ -826,82 +827,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let new_pe = BxCr0::from_bits_retain(val_32).contains(BxCr0::PE);
         if old_pe && !new_pe {
             self.diag_pm_to_rm_count += 1;
-            // Log first 10 and then every 1000th to avoid flooding
-            let n = self.diag_pm_to_rm_count;
-            if n <= 10 || n % 1000 == 0 {
-                tracing::warn!(
-                    "PM→RM #{}: EBX={:#010x} prev_RIP={:#x} icount={}",
-                    n, self.ebx(), self.prev_rip, self.icount
-                );
-            }
-            // Dump ALL PM→RM bounces (farcall AND intcall) to see complete picture
-            if (self.ebx() == 0x84A7 || self.ebx() == 0x8662) && (self.ebx() == 0x84A7 || n <= 30 || (n <= 200 && n % 10 == 0) || n % 5000 == 0) {
-                // RM stack pointer is at [0x38B8] (4 bytes: SP, SS)
-                let rm_sp = self.system_read_word(0x38B8).unwrap_or(0) as u64;
-                let rm_ss = self.system_read_word(0x38BA).unwrap_or(0) as u64;
-                let rm_stack_phys = (rm_ss << 4) + rm_sp;
-                // Stack layout (pushed by PM setup code):
-                // [SP+0]:  GS (2)
-                // [SP+2]:  FS (2)
-                // [SP+4]:  ES (2)
-                // [SP+6]:  DS (2)
-                // [SP+8]:  PUSHAD: EDI(4),ESI(4),EBP(4),ESP(4),EBX(4),EDX(4),ECX(4),EAX(4)
-                // [SP+40]: EFLAGS (4)
-                // [SP+44]: RETF IP (2)
-                // [SP+46]: RETF CS (2)
-                let retf_ip = self.system_read_word(rm_stack_phys + 44).unwrap_or(0xFFFF);
-                let retf_cs = self.system_read_word(rm_stack_phys + 46).unwrap_or(0xFFFF);
-                // PUSHAD order (from SP+8): EDI(+8),ESI(+12),EBP(+16),ESP(+20),EBX(+24),EDX(+28),ECX(+32),EAX(+36)
-                let edi = self.system_read_dword(rm_stack_phys + 8).unwrap_or(0);
-                let esi = self.system_read_dword(rm_stack_phys + 12).unwrap_or(0);
-                let eax = self.system_read_dword(rm_stack_phys + 36).unwrap_or(0);
-                let ecx = self.system_read_dword(rm_stack_phys + 32).unwrap_or(0);
-                let edx = self.system_read_dword(rm_stack_phys + 28).unwrap_or(0);
-                let ebx = self.system_read_dword(rm_stack_phys + 24).unwrap_or(0);
-                // For __intcall (EBX=0x84A7): ESI = INT vector, retaddr should be 0x8523
-                // For __farcall (EBX=0x8662): RETF CS:IP = BIOS handler address
-                if self.ebx() == 0x84A7 {
-                    // __intcall: dump raw stack bytes to determine layout
-                    let mut hex = alloc::string::String::with_capacity(256);
-                    use core::fmt::Write;
-                    for i in 0u64..64 {
-                        let b = self.system_read_byte(rm_stack_phys + i).unwrap_or(0);
-                        let _ = write!(hex, "{:02x} ", b);
-                    }
-                    tracing::warn!(
-                        "__intcall #{}: SS:SP={:04x}:{:04x} (phys={:#x}) icount={}",
-                        n, rm_ss, rm_sp, rm_stack_phys, self.icount
-                    );
-                    tracing::warn!(
-                        "__intcall #{} raw stack[0..63]: {}",
-                        n, hex
-                    );
-                } else {
-                    tracing::warn!(
-                        "__farcall #{}: RETF→{:04x}:{:04x} AH={:02x} AL={:02x} EDI={:08x} ESI={:08x} icount={}",
-                        n, retf_cs, retf_ip, (eax >> 8) & 0xFF, eax & 0xFF, edi, esi, self.icount
-                    );
-                }
-            }
-            // One-shot: dump BIOS INT 13h routing info
-            if n == 2 {
-                // Read INT 13h IVT entry
-                let int13_off = self.system_read_word(0x4C).unwrap_or(0);
-                let int13_seg = self.system_read_word(0x4E).unwrap_or(0);
-                let int13_phys = ((int13_seg as u64) << 4) + int13_off as u64;
-                tracing::warn!(
-                    "INT 13h IVT: {:04x}:{:04x} (phys {:#x})",
-                    int13_seg, int13_off, int13_phys
-                );
-                // Dump first 32 bytes at INT 13h handler to see routing
-                let mut hex = alloc::string::String::with_capacity(128);
-                for i in 0u64..32 {
-                    let b = self.system_read_byte(int13_phys + i).unwrap_or(0);
-                    use core::fmt::Write;
-                    let _ = write!(hex, "{:02x} ", b);
-                }
-                tracing::warn!("INT13h handler first 32B: {}", hex);
-            }
         } else if !old_pe && new_pe {
             self.diag_rm_to_pm_count += 1;
         }

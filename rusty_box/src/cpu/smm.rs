@@ -323,14 +323,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.sregs[cs_idx].cache.dpl = 0;
         self.sregs[cs_idx].cache.segment = true;
         self.sregs[cs_idx].cache.r#type = 0x3; // DATA_READ_WRITE_ACCESSED
-        unsafe {
-            self.sregs[cs_idx].cache.u.segment.base = self.smbase as u64;
-            self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
-            self.sregs[cs_idx].cache.u.segment.g = true;
-            self.sregs[cs_idx].cache.u.segment.d_b = false; // 16-bit default
-            self.sregs[cs_idx].cache.u.segment.avl = false;
-            self.sregs[cs_idx].cache.u.segment.l = false;
-        }
+        self.sregs[cs_idx].cache.u.set_segment_base(self.smbase as u64);
+        self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+        self.sregs[cs_idx].cache.u.set_segment_g(true);
+        self.sregs[cs_idx].cache.u.set_segment_d_b(false); // 16-bit default
+        self.sregs[cs_idx].cache.u.set_segment_avl(false);
+        self.sregs[cs_idx].cache.u.set_segment_l(false);
 
         // DS/ES/SS/FS/GS: all set to flat data segments with base=0
         for seg in [
@@ -351,14 +349,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[idx].cache.dpl = 0;
             self.sregs[idx].cache.segment = true;
             self.sregs[idx].cache.r#type = 0x3; // DATA_READ_WRITE_ACCESSED
-            unsafe {
-                self.sregs[idx].cache.u.segment.base = 0;
-                self.sregs[idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
-                self.sregs[idx].cache.u.segment.g = true;
-                self.sregs[idx].cache.u.segment.d_b = false; // 16-bit
-                self.sregs[idx].cache.u.segment.avl = false;
-                self.sregs[idx].cache.u.segment.l = false;
-            }
+            self.sregs[idx].cache.u.set_segment_base(0);
+            self.sregs[idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+            self.sregs[idx].cache.u.set_segment_g(true);
+            self.sregs[idx].cache.u.set_segment_d_b(false); // 16-bit
+            self.sregs[idx].cache.u.set_segment_avl(false);
+            self.sregs[idx].cache.u.set_segment_l(false);
         }
 
         // Update CPU mode (we cleared PE → real mode)
@@ -425,12 +421,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // TR (Task Register)
         let tr_ar = self.pack_seg_ar(&self.tr.cache);
-        smram_set!(SMRAM_FIELD_TR_BASE, unsafe {
-            self.tr.cache.u.segment.base as u32
-        });
-        smram_set!(SMRAM_FIELD_TR_LIMIT, unsafe {
-            self.tr.cache.u.segment.limit_scaled
-        });
+        smram_set!(SMRAM_FIELD_TR_BASE, self.tr.cache.u.segment_base() as u32);
+        smram_set!(SMRAM_FIELD_TR_LIMIT, self.tr.cache.u.segment_limit_scaled());
         smram_set!(
             SMRAM_FIELD_TR_SELECTOR_AR,
             self.tr.selector.value as u32 | ((tr_ar as u32) << 16)
@@ -438,12 +430,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // LDTR
         let ldtr_ar = self.pack_seg_ar(&self.ldtr.cache);
-        smram_set!(SMRAM_FIELD_LDTR_BASE, unsafe {
-            self.ldtr.cache.u.segment.base as u32
-        });
-        smram_set!(SMRAM_FIELD_LDTR_LIMIT, unsafe {
-            self.ldtr.cache.u.segment.limit_scaled
-        });
+        smram_set!(SMRAM_FIELD_LDTR_BASE, self.ldtr.cache.u.segment_base() as u32);
+        smram_set!(SMRAM_FIELD_LDTR_LIMIT, self.ldtr.cache.u.segment_limit_scaled());
         smram_set!(
             SMRAM_FIELD_LDTR_SELECTOR_AR,
             self.ldtr.selector.value as u32 | ((ldtr_ar as u32) << 16)
@@ -493,12 +481,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let idx = seg as usize;
             let ar = self.pack_seg_ar(&self.sregs[idx].cache);
             let sel = self.sregs[idx].selector.value;
-            smram_set!(base_field, unsafe {
-                self.sregs[idx].cache.u.segment.base as u32
-            });
-            smram_set!(limit_field, unsafe {
-                self.sregs[idx].cache.u.segment.limit_scaled
-            });
+            smram_set!(base_field, self.sregs[idx].cache.u.segment_base() as u32);
+            smram_set!(limit_field, self.sregs[idx].cache.u.segment_limit_scaled());
             smram_set!(selar_field, sel as u32 | ((ar as u32) << 16));
         }
     }
@@ -565,10 +549,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let tr_ar = ((tr_selar >> 16) & 0xFFFF) as u16;
         super::segment_ctrl_pro::parse_selector(tr_sel, &mut self.tr.selector);
         unpack_seg_ar(&mut self.tr.cache, tr_ar);
-        unsafe {
-            self.tr.cache.u.segment.base = smram_get!(SMRAM_FIELD_TR_BASE) as u64;
-            self.tr.cache.u.segment.limit_scaled = smram_get!(SMRAM_FIELD_TR_LIMIT);
-        }
+        self.tr.cache.u.set_segment_base(smram_get!(SMRAM_FIELD_TR_BASE) as u64);
+        self.tr.cache.u.set_segment_limit_scaled(smram_get!(SMRAM_FIELD_TR_LIMIT));
 
         // Restore LDTR
         let ldtr_selar = smram_get!(SMRAM_FIELD_LDTR_SELECTOR_AR);
@@ -576,10 +558,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let ldtr_ar = ((ldtr_selar >> 16) & 0xFFFF) as u16;
         super::segment_ctrl_pro::parse_selector(ldtr_sel, &mut self.ldtr.selector);
         unpack_seg_ar(&mut self.ldtr.cache, ldtr_ar);
-        unsafe {
-            self.ldtr.cache.u.segment.base = smram_get!(SMRAM_FIELD_LDTR_BASE) as u64;
-            self.ldtr.cache.u.segment.limit_scaled = smram_get!(SMRAM_FIELD_LDTR_LIMIT);
-        }
+        self.ldtr.cache.u.set_segment_base(smram_get!(SMRAM_FIELD_LDTR_BASE) as u64);
+        self.ldtr.cache.u.set_segment_limit_scaled(smram_get!(SMRAM_FIELD_LDTR_LIMIT));
 
         // Restore segment registers
         let seg_fields = [
@@ -628,10 +608,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let ar = ((selar >> 16) & 0xFFFF) as u16;
             super::segment_ctrl_pro::parse_selector(sel, &mut self.sregs[idx].selector);
             unpack_seg_ar(&mut self.sregs[idx].cache, ar);
-            unsafe {
-                self.sregs[idx].cache.u.segment.base = smram_get!(base_field) as u64;
-                self.sregs[idx].cache.u.segment.limit_scaled = smram_get!(limit_field);
-            }
+            self.sregs[idx].cache.u.set_segment_base(smram_get!(base_field) as u64);
+            self.sregs[idx].cache.u.set_segment_limit_scaled(smram_get!(limit_field));
         }
 
         // Restore SMBASE (if revision ID supports relocation)
@@ -671,19 +649,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // High nibble (bits 12-15): G(15) + D/B(14) + L(13) + AVL(12)
-        unsafe {
-            if cache.u.segment.avl {
-                ar |= 0x1000;
-            }
-            if cache.u.segment.l {
-                ar |= 0x2000;
-            }
-            if cache.u.segment.d_b {
-                ar |= 0x4000;
-            }
-            if cache.u.segment.g {
-                ar |= 0x8000;
-            }
+        if cache.u.segment_avl() {
+            ar |= 0x1000;
+        }
+        if cache.u.segment_l() {
+            ar |= 0x2000;
+        }
+        if cache.u.segment_d_b() {
+            ar |= 0x4000;
+        }
+        if cache.u.segment_g() {
+            ar |= 0x8000;
         }
 
         ar
@@ -696,8 +672,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     fn smram_read_physical_dword(&mut self, paddr: u64) -> u32 {
         if let Some(mem_bus) = self.mem_bus {
+            // SAFETY: mem_bus valid for duration of cpu_loop; single-threaded access
             let mem = unsafe { &mut *mem_bus.as_ptr() };
             let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+            // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
             let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
             let mut data = [0u8; 4];
             if mem
@@ -712,8 +690,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     fn smram_write_physical_dword(&mut self, paddr: u64, value: u32) {
         if let Some(mem_bus) = self.mem_bus {
+            // SAFETY: mem_bus valid for duration of cpu_loop; single-threaded access
             let mem = unsafe { &mut *mem_bus.as_ptr() };
             let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+            // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
             let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
             let mut data = value.to_le_bytes();
             // Use a dummy stamp table for SMRAM writes (no SMC detection needed)
@@ -756,10 +736,8 @@ fn unpack_seg_ar(cache: &mut super::descriptor::BxDescriptor, ar: u16) {
     }
 
     // High nibble
-    unsafe {
-        cache.u.segment.avl = (ar & 0x1000) != 0;
-        cache.u.segment.l = (ar & 0x2000) != 0;
-        cache.u.segment.d_b = (ar & 0x4000) != 0;
-        cache.u.segment.g = (ar & 0x8000) != 0;
-    }
+    cache.u.set_segment_avl((ar & 0x1000) != 0);
+    cache.u.set_segment_l((ar & 0x2000) != 0);
+    cache.u.set_segment_d_b((ar & 0x4000) != 0);
+    cache.u.set_segment_g((ar & 0x8000) != 0);
 }

@@ -36,6 +36,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 tracing::error!("handle_cpu_mode_change: EFER.LMA is set when CR0.PE=0!");
             }
             // Bochs proc_ctrl.cc:366 — check CS.L bit for 64-bit vs compat mode
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
             let cs_l = unsafe {
                 self.sregs[super::decoder::BxSegregs::Cs as usize]
                     .cache
@@ -70,6 +71,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             } else {
                 self.cpu_mode = CpuMode::Ia32Real;
                 // Bochs proc_ctrl.cc:393-398 — CS segment in real mode allows full access
+                // SAFETY: descriptor cache fields set atomically; union write matches descriptor type
                 unsafe {
                     let seg = &mut self.sregs[super::decoder::BxSegregs::Cs as usize];
                     seg.cache.p = true; // present (Bochs line 394)
@@ -143,6 +145,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         use super::opcodes_table::FetchModeMask;
 
         // Bochs: fetchModeMask = cpu_state_use_ok | (long64<<1) | d_b
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
         let d_b = unsafe {
             self.sregs[super::decoder::BxSegregs::Cs as usize]
                 .cache
@@ -185,6 +188,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[inline]
     fn system_ticks(&self) -> u64 {
         if let Some(ps) = self.pc_system_ptr {
+            // SAFETY: PcSystem pointer valid for emulator lifetime; single-threaded access
             unsafe { ps.as_ref().time_ticks() }
         } else {
             self.icount
@@ -544,20 +548,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             BX_MSR_SYSENTER_CS => self.msr.sysenter_cs_msr as u64,
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr,
             BX_MSR_SYSENTER_EIP => self.msr.sysenter_eip_msr,
-            BX_MSR_PAT => unsafe { self.msr.pat.U64 },
+            BX_MSR_PAT => self.msr.pat.U64(),
             BX_MSR_MTRR_DEFTYPE => self.msr.mtrr_deftype as u64,
             n @ BX_MSR_MTRRPHYSBASE0..=BX_MSR_MTRRPHYSMASK7 => {
                 self.msr.mtrrphys[(n - BX_MSR_MTRRPHYSBASE0) as usize]
             }
             // Fixed MTRR registers (Bochs msr.cc)
-            BX_MSR_MTRRFIX64K_00000 => unsafe { self.msr.mtrrfix64k.U64 },
+            BX_MSR_MTRRFIX64K_00000 => self.msr.mtrrfix64k.U64(),
             BX_MSR_MTRRFIX16K_80000..=BX_MSR_MTRRFIX16K_A0000 => {
                 let idx = (msr - BX_MSR_MTRRFIX16K_80000) as usize;
-                unsafe { self.msr.mtrrfix16k[idx].U64 }
+                self.msr.mtrrfix16k[idx].U64()
             }
             BX_MSR_MTRRFIX4K_C0000..=BX_MSR_MTRRFIX4K_F8000 => {
                 let idx = (msr - BX_MSR_MTRRFIX4K_C0000) as usize;
-                unsafe { self.msr.mtrrfix4k[idx].U64 }
+                self.msr.mtrrfix4k[idx].U64()
             }
             // Long-mode MSRs (Bochs msr.cc:521-620)
             BX_MSR_EFER => self.efer.get32() as u64,
@@ -638,26 +642,29 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             BX_MSR_SYSENTER_ESP => self.msr.sysenter_esp_msr = val,
             BX_MSR_SYSENTER_EIP => self.msr.sysenter_eip_msr = val,
             BX_MSR_PAT => {
-                self.msr.pat.U64 = val;
+                self.msr.pat.set_U64(val);
             }
             BX_MSR_MTRR_DEFTYPE => self.msr.mtrr_deftype = val as u32,
             n @ BX_MSR_MTRRPHYSBASE0..=BX_MSR_MTRRPHYSMASK7 => {
                 self.msr.mtrrphys[(n - BX_MSR_MTRRPHYSBASE0) as usize] = val;
             }
             // Fixed MTRR registers (Bochs msr.cc)
+            // SAFETY: descriptor cache fields set atomically; union write matches descriptor type
             BX_MSR_MTRRFIX64K_00000 => unsafe {
-                self.msr.mtrrfix64k.U64 = val;
+                self.msr.mtrrfix64k.set_U64(val);
             },
             BX_MSR_MTRRFIX16K_80000..=BX_MSR_MTRRFIX16K_A0000 => {
                 let idx = (msr - BX_MSR_MTRRFIX16K_80000) as usize;
+                // SAFETY: descriptor cache fields set atomically; union write matches descriptor type
                 unsafe {
-                    self.msr.mtrrfix16k[idx].U64 = val;
+                    self.msr.mtrrfix16k[idx].set_U64(val);
                 }
             }
             BX_MSR_MTRRFIX4K_C0000..=BX_MSR_MTRRFIX4K_F8000 => {
                 let idx = (msr - BX_MSR_MTRRFIX4K_C0000) as usize;
+                // SAFETY: descriptor cache fields set atomically; union write matches descriptor type
                 unsafe {
-                    self.msr.mtrrfix4k[idx].U64 = val;
+                    self.msr.mtrrfix4k[idx].set_U64(val);
                 }
             }
             BX_MSR_MTRRCAP => {
@@ -892,8 +899,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Bytes 160-415: XMM registers XMM0-XMM7 (16 bytes each, 32-bit mode)
         for i in 0..8u64 {
             let offset = eaddr.wrapping_add(160 + i * 16);
-            let lo = unsafe { self.vmm[i as usize].zmm64u[0] };
-            let hi = unsafe { self.vmm[i as usize].zmm64u[1] };
+            let lo = self.vmm[i as usize].zmm64u(0);
+            let hi = self.vmm[i as usize].zmm64u(1);
             self.v_write_qword(seg, offset, lo)?;
             self.v_write_qword(seg, offset.wrapping_add(8), hi)?;
         }
@@ -963,16 +970,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let offset = eaddr.wrapping_add(160 + i * 16);
                 let lo = self.v_read_qword(seg, offset)?;
                 let hi = self.v_read_qword(seg, offset.wrapping_add(8))?;
+                // SAFETY: zmm union access; index within register file bounds
                 unsafe {
-                    self.vmm[i as usize].zmm64u[0] = lo;
-                    self.vmm[i as usize].zmm64u[1] = hi;
+                    self.vmm[i as usize].set_zmm64u(0, lo);
+                    self.vmm[i as usize].set_zmm64u(1, hi);
                     // Clear upper bits
-                    self.vmm[i as usize].zmm64u[2] = 0;
-                    self.vmm[i as usize].zmm64u[3] = 0;
-                    self.vmm[i as usize].zmm64u[4] = 0;
-                    self.vmm[i as usize].zmm64u[5] = 0;
-                    self.vmm[i as usize].zmm64u[6] = 0;
-                    self.vmm[i as usize].zmm64u[7] = 0;
+                    self.vmm[i as usize].set_zmm64u(2, 0);
+                    self.vmm[i as usize].set_zmm64u(3, 0);
+                    self.vmm[i as usize].set_zmm64u(4, 0);
+                    self.vmm[i as usize].set_zmm64u(5, 0);
+                    self.vmm[i as usize].set_zmm64u(6, 0);
+                    self.vmm[i as usize].set_zmm64u(7, 0);
                 }
             }
         }
@@ -1094,14 +1102,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.sregs[cs_idx].cache.dpl = 0;
         self.sregs[cs_idx].cache.segment = true;
         self.sregs[cs_idx].cache.r#type = 0xb; // CODE_EXEC_READ_ACCESSED
-        unsafe {
-            self.sregs[cs_idx].cache.u.segment.base = 0;
-            self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
-            self.sregs[cs_idx].cache.u.segment.g = true;
-            self.sregs[cs_idx].cache.u.segment.avl = false;
-            self.sregs[cs_idx].cache.u.segment.d_b = !self.long_mode();
-            self.sregs[cs_idx].cache.u.segment.l = self.long_mode();
-        }
+        self.sregs[cs_idx].cache.u.set_segment_base(0);
+        self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+        self.sregs[cs_idx].cache.u.set_segment_g(true);
+        self.sregs[cs_idx].cache.u.set_segment_avl(false);
+        self.sregs[cs_idx].cache.u.set_segment_d_b(!self.long_mode());
+        self.sregs[cs_idx].cache.u.set_segment_l(self.long_mode());
 
         self.handle_cpu_mode_change();
         self.alignment_check_mask = 0;
@@ -1119,14 +1125,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.sregs[ss_idx].cache.dpl = 0;
         self.sregs[ss_idx].cache.segment = true;
         self.sregs[ss_idx].cache.r#type = 0x3; // DATA_READ_WRITE_ACCESSED
-        unsafe {
-            self.sregs[ss_idx].cache.u.segment.base = 0;
-            self.sregs[ss_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
-            self.sregs[ss_idx].cache.u.segment.g = true;
-            self.sregs[ss_idx].cache.u.segment.d_b = true;
-            self.sregs[ss_idx].cache.u.segment.avl = false;
-            self.sregs[ss_idx].cache.u.segment.l = false;
-        }
+        self.sregs[ss_idx].cache.u.set_segment_base(0);
+        self.sregs[ss_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+        self.sregs[ss_idx].cache.u.set_segment_g(true);
+        self.sregs[ss_idx].cache.u.set_segment_d_b(true);
+        self.sregs[ss_idx].cache.u.set_segment_avl(false);
+        self.sregs[ss_idx].cache.u.set_segment_l(false);
 
         // Load RSP/RIP from MSRs (Bochs proc_ctrl.cc:946-955)
         if self.long_mode() {
@@ -1188,14 +1192,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[cs_idx].cache.dpl = 3;
             self.sregs[cs_idx].cache.segment = true;
             self.sregs[cs_idx].cache.r#type = 0xb;
-            unsafe {
-                self.sregs[cs_idx].cache.u.segment.base = 0;
-                self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
-                self.sregs[cs_idx].cache.u.segment.g = true;
-                self.sregs[cs_idx].cache.u.segment.avl = false;
-                self.sregs[cs_idx].cache.u.segment.d_b = false;
-                self.sregs[cs_idx].cache.u.segment.l = true; // 64-bit
-            }
+                self.sregs[cs_idx].cache.u.set_segment_base(0);
+                self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+                self.sregs[cs_idx].cache.u.set_segment_g(true);
+                self.sregs[cs_idx].cache.u.set_segment_avl(false);
+                self.sregs[cs_idx].cache.u.set_segment_d_b(false);
+                self.sregs[cs_idx].cache.u.set_segment_l(true); // 64-bit
 
             self.set_rsp(self.rcx());
             self.set_rip(self.rdx());
@@ -1210,14 +1212,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[cs_idx].cache.dpl = 3;
             self.sregs[cs_idx].cache.segment = true;
             self.sregs[cs_idx].cache.r#type = 0xb;
-            unsafe {
-                self.sregs[cs_idx].cache.u.segment.base = 0;
-                self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
-                self.sregs[cs_idx].cache.u.segment.g = true;
-                self.sregs[cs_idx].cache.u.segment.avl = false;
-                self.sregs[cs_idx].cache.u.segment.d_b = true;
-                self.sregs[cs_idx].cache.u.segment.l = false;
-            }
+                self.sregs[cs_idx].cache.u.set_segment_base(0);
+                self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+                self.sregs[cs_idx].cache.u.set_segment_g(true);
+                self.sregs[cs_idx].cache.u.set_segment_avl(false);
+                self.sregs[cs_idx].cache.u.set_segment_d_b(true);
+                self.sregs[cs_idx].cache.u.set_segment_l(false);
 
             self.set_esp(self.ecx());
             self.set_eip(self.edx());
@@ -1239,14 +1239,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.sregs[ss_idx].cache.dpl = 3;
         self.sregs[ss_idx].cache.segment = true;
         self.sregs[ss_idx].cache.r#type = 0x3;
-        unsafe {
-            self.sregs[ss_idx].cache.u.segment.base = 0;
-            self.sregs[ss_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
-            self.sregs[ss_idx].cache.u.segment.g = true;
-            self.sregs[ss_idx].cache.u.segment.d_b = true;
-            self.sregs[ss_idx].cache.u.segment.avl = false;
-            self.sregs[ss_idx].cache.u.segment.l = false;
-        }
+        self.sregs[ss_idx].cache.u.set_segment_base(0);
+        self.sregs[ss_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+        self.sregs[ss_idx].cache.u.set_segment_g(true);
+        self.sregs[ss_idx].cache.u.set_segment_d_b(true);
+        self.sregs[ss_idx].cache.u.set_segment_avl(false);
+        self.sregs[ss_idx].cache.u.set_segment_l(false);
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
         self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
@@ -1447,14 +1445,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[cs_idx].cache.dpl = 0;
             self.sregs[cs_idx].cache.segment = true;
             self.sregs[cs_idx].cache.r#type = 0xb;
-            unsafe {
-                self.sregs[cs_idx].cache.u.segment.base = 0;
-                self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
-                self.sregs[cs_idx].cache.u.segment.g = true;
-                self.sregs[cs_idx].cache.u.segment.d_b = false;
-                self.sregs[cs_idx].cache.u.segment.l = true; // 64-bit code
-                self.sregs[cs_idx].cache.u.segment.avl = false;
-            }
+            self.sregs[cs_idx].cache.u.set_segment_base(0);
+            self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+            self.sregs[cs_idx].cache.u.set_segment_g(true);
+            self.sregs[cs_idx].cache.u.set_segment_d_b(false);
+            self.sregs[cs_idx].cache.u.set_segment_l(true); // 64-bit code
+            self.sregs[cs_idx].cache.u.set_segment_avl(false);
 
             self.handle_cpu_mode_change();
             self.alignment_check_mask = 0;
@@ -1471,14 +1467,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[ss_idx].cache.dpl = 0;
             self.sregs[ss_idx].cache.segment = true;
             self.sregs[ss_idx].cache.r#type = 0x3;
-            unsafe {
-                self.sregs[ss_idx].cache.u.segment.base = 0;
-                self.sregs[ss_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
-                self.sregs[ss_idx].cache.u.segment.g = true;
-                self.sregs[ss_idx].cache.u.segment.d_b = true;
-                self.sregs[ss_idx].cache.u.segment.l = false;
-                self.sregs[ss_idx].cache.u.segment.avl = false;
-            }
+            self.sregs[ss_idx].cache.u.set_segment_base(0);
+            self.sregs[ss_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+            self.sregs[ss_idx].cache.u.set_segment_g(true);
+            self.sregs[ss_idx].cache.u.set_segment_d_b(true);
+            self.sregs[ss_idx].cache.u.set_segment_l(false);
+            self.sregs[ss_idx].cache.u.set_segment_avl(false);
 
             // Mask RFLAGS with FMASK, clear RF (Bochs proc_ctrl.cc:1146)
             let new_flags = saved_rflags & !(self.msr.fmask as u32) & !EFlags::RF.bits();
@@ -1500,14 +1494,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[cs_idx].cache.dpl = 0;
             self.sregs[cs_idx].cache.segment = true;
             self.sregs[cs_idx].cache.r#type = 0xb;
-            unsafe {
-                self.sregs[cs_idx].cache.u.segment.base = 0;
-                self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
-                self.sregs[cs_idx].cache.u.segment.g = true;
-                self.sregs[cs_idx].cache.u.segment.d_b = true;
-                self.sregs[cs_idx].cache.u.segment.l = false;
-                self.sregs[cs_idx].cache.u.segment.avl = false;
-            }
+            self.sregs[cs_idx].cache.u.set_segment_base(0);
+            self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+            self.sregs[cs_idx].cache.u.set_segment_g(true);
+            self.sregs[cs_idx].cache.u.set_segment_d_b(true);
+            self.sregs[cs_idx].cache.u.set_segment_l(false);
+            self.sregs[cs_idx].cache.u.set_segment_avl(false);
 
             self.handle_cpu_mode_change();
             self.alignment_check_mask = 0;
@@ -1524,14 +1516,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[ss_idx].cache.dpl = 0;
             self.sregs[ss_idx].cache.segment = true;
             self.sregs[ss_idx].cache.r#type = 0x3;
-            unsafe {
-                self.sregs[ss_idx].cache.u.segment.base = 0;
-                self.sregs[ss_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
-                self.sregs[ss_idx].cache.u.segment.g = true;
-                self.sregs[ss_idx].cache.u.segment.d_b = true;
-                self.sregs[ss_idx].cache.u.segment.l = false;
-                self.sregs[ss_idx].cache.u.segment.avl = false;
-            }
+            self.sregs[ss_idx].cache.u.set_segment_base(0);
+            self.sregs[ss_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+            self.sregs[ss_idx].cache.u.set_segment_g(true);
+            self.sregs[ss_idx].cache.u.set_segment_d_b(true);
+            self.sregs[ss_idx].cache.u.set_segment_l(false);
+            self.sregs[ss_idx].cache.u.set_segment_avl(false);
 
             self.clear_vm();
             self.clear_if();
@@ -1597,14 +1587,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.sregs[cs_idx].cache.dpl = 3;
                 self.sregs[cs_idx].cache.segment = true;
                 self.sregs[cs_idx].cache.r#type = 0xb;
-                unsafe {
-                    self.sregs[cs_idx].cache.u.segment.base = 0;
-                    self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
-                    self.sregs[cs_idx].cache.u.segment.g = true;
-                    self.sregs[cs_idx].cache.u.segment.d_b = false;
-                    self.sregs[cs_idx].cache.u.segment.l = true; // 64-bit
-                    self.sregs[cs_idx].cache.u.segment.avl = false;
-                }
+                    self.sregs[cs_idx].cache.u.set_segment_base(0);
+                    self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+                    self.sregs[cs_idx].cache.u.set_segment_g(true);
+                    self.sregs[cs_idx].cache.u.set_segment_d_b(false);
+                    self.sregs[cs_idx].cache.u.set_segment_l(true); // 64-bit
+                    self.sregs[cs_idx].cache.u.set_segment_avl(false);
 
                 // Bochs proc_ctrl.cc:1269 — save RCX for later RIP assignment
                 temp_rip = self.rcx();
@@ -1619,14 +1607,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.sregs[cs_idx].cache.dpl = 3;
                 self.sregs[cs_idx].cache.segment = true;
                 self.sregs[cs_idx].cache.r#type = 0xb;
-                unsafe {
-                    self.sregs[cs_idx].cache.u.segment.base = 0;
-                    self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
-                    self.sregs[cs_idx].cache.u.segment.g = true;
-                    self.sregs[cs_idx].cache.u.segment.d_b = true;
-                    self.sregs[cs_idx].cache.u.segment.l = false;
-                    self.sregs[cs_idx].cache.u.segment.avl = false;
-                }
+                    self.sregs[cs_idx].cache.u.set_segment_base(0);
+                    self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+                    self.sregs[cs_idx].cache.u.set_segment_g(true);
+                    self.sregs[cs_idx].cache.u.set_segment_d_b(true);
+                    self.sregs[cs_idx].cache.u.set_segment_l(false);
+                    self.sregs[cs_idx].cache.u.set_segment_avl(false);
 
                 // Bochs proc_ctrl.cc:1288 — save ECX for later RIP assignment
                 temp_rip = self.ecx() as u64;
@@ -1661,14 +1647,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[cs_idx].cache.dpl = 3;
             self.sregs[cs_idx].cache.segment = true;
             self.sregs[cs_idx].cache.r#type = 0xb;
-            unsafe {
-                self.sregs[cs_idx].cache.u.segment.base = 0;
-                self.sregs[cs_idx].cache.u.segment.limit_scaled = 0xFFFF_FFFF;
-                self.sregs[cs_idx].cache.u.segment.g = true;
-                self.sregs[cs_idx].cache.u.segment.d_b = true;
-                self.sregs[cs_idx].cache.u.segment.l = false;
-                self.sregs[cs_idx].cache.u.segment.avl = false;
-            }
+            self.sregs[cs_idx].cache.u.set_segment_base(0);
+            self.sregs[cs_idx].cache.u.set_segment_limit_scaled(0xFFFF_FFFF);
+            self.sregs[cs_idx].cache.u.set_segment_g(true);
+            self.sregs[cs_idx].cache.u.set_segment_d_b(true);
+            self.sregs[cs_idx].cache.u.set_segment_l(false);
+            self.sregs[cs_idx].cache.u.set_segment_avl(false);
 
             // Bochs proc_ctrl.cc:1328 — updateFetchModeMask after CS reload
             // (NOT handleCpuModeChange — that's only called at line 1346 outside)
@@ -1953,8 +1937,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let num = if self.long64_mode() { 16u64 } else { 8u64 };
         for i in 0..num {
             let offset = base.wrapping_add(i * 16);
-            let lo = unsafe { self.vmm[i as usize].zmm64u[0] };
-            let hi = unsafe { self.vmm[i as usize].zmm64u[1] };
+            let lo = self.vmm[i as usize].zmm64u(0);
+            let hi = self.vmm[i as usize].zmm64u(1);
             self.v_write_qword(seg, offset, lo)?;
             self.v_write_qword(seg, offset.wrapping_add(8), hi)?;
         }
@@ -2046,9 +2030,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let offset = base.wrapping_add(i * 16);
             let lo = self.v_read_qword(seg, offset)?;
             let hi = self.v_read_qword(seg, offset.wrapping_add(8))?;
+            // SAFETY: zmm union access; index within register file bounds
             unsafe {
-                self.vmm[i as usize].zmm64u[0] = lo;
-                self.vmm[i as usize].zmm64u[1] = hi;
+                self.vmm[i as usize].set_zmm64u(0, lo);
+                self.vmm[i as usize].set_zmm64u(1, hi);
             }
         }
         Ok(())
@@ -2082,9 +2067,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let desc = self.v_read_xmmword(seg, eaddr)?;
 
         // Descriptor bits [63:12] must be zero (reserved)
-        // SAFETY: xmm64u union field is always valid for u64 access
-        let desc_lo = unsafe { desc.xmm64u[0] };
-        let desc_hi = unsafe { desc.xmm64u[1] };
+        let desc_lo = desc.xmm64u(0);
+        let desc_hi = desc.xmm64u(1);
         if desc_lo > 0xFFF {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
@@ -2132,9 +2116,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn xrstor_init_sse_state(&mut self) {
         let num = if self.long64_mode() { 16 } else { 8 };
         for i in 0..num {
+            // SAFETY: zmm union access; index within register file bounds
             unsafe {
-                self.vmm[i].zmm64u[0] = 0;
-                self.vmm[i].zmm64u[1] = 0;
+                self.vmm[i].set_zmm64u(0, 0);
+                self.vmm[i].set_zmm64u(1, 0);
             }
         }
     }
@@ -2149,9 +2134,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let num = if self.long64_mode() { 16u64 } else { 8u64 };
         for i in 0..num {
             let offset = base.wrapping_add(i * 16);
+            // SAFETY: zmm union access; index within register file bounds
             unsafe {
-                self.v_write_qword(seg, offset, self.vmm[i as usize].zmm64u[2])?;
-                self.v_write_qword(seg, offset.wrapping_add(8), self.vmm[i as usize].zmm64u[3])?;
+                self.v_write_qword(seg, offset, self.vmm[i as usize].zmm64u(2))?;
+                self.v_write_qword(seg, offset.wrapping_add(8), self.vmm[i as usize].zmm64u(3))?;
             }
         }
         Ok(())
@@ -2161,9 +2147,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let num = if self.long64_mode() { 16u64 } else { 8u64 };
         for i in 0..num {
             let offset = base.wrapping_add(i * 16);
+            // SAFETY: zmm union access; index within register file bounds
             unsafe {
-                self.vmm[i as usize].zmm64u[2] = self.v_read_qword(seg, offset)?;
-                self.vmm[i as usize].zmm64u[3] = self.v_read_qword(seg, offset.wrapping_add(8))?;
+                let __tmp = self.v_read_qword(seg, offset)?;
+
+                self.vmm[i as usize].set_zmm64u(2, __tmp);
+                let __tmp = self.v_read_qword(seg, offset.wrapping_add(8))?;
+
+                self.vmm[i as usize].set_zmm64u(3, __tmp);
             }
         }
         Ok(())
@@ -2172,9 +2163,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn xrstor_init_ymm_state(&mut self) {
         let num = if self.long64_mode() { 16 } else { 8 };
         for i in 0..num {
+            // SAFETY: zmm union access; index within register file bounds
             unsafe {
-                self.vmm[i].zmm64u[2] = 0;
-                self.vmm[i].zmm64u[3] = 0;
+                self.vmm[i].set_zmm64u(2, 0);
+                self.vmm[i].set_zmm64u(3, 0);
             }
         }
     }
@@ -2182,7 +2174,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// OPMASK state: k0-k7 (64 bytes)
     fn xsave_opmask_state(&mut self, seg: super::decoder::BxSegregs, base: u64) -> super::Result<()> {
         for i in 0..8u64 {
-            let val = unsafe { self.opmask[i as usize].rrx };
+            let val = self.opmask[i as usize].rrx();
             self.v_write_qword(seg, base.wrapping_add(i * 8), val)?;
         }
         Ok(())
@@ -2207,11 +2199,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let num = if self.long64_mode() { 16u64 } else { 8u64 };
         for i in 0..num {
             let offset = base.wrapping_add(i * 32);
+            // SAFETY: zmm union access; index within register file bounds
             unsafe {
-                self.v_write_qword(seg, offset, self.vmm[i as usize].zmm64u[4])?;
-                self.v_write_qword(seg, offset.wrapping_add(8), self.vmm[i as usize].zmm64u[5])?;
-                self.v_write_qword(seg, offset.wrapping_add(16), self.vmm[i as usize].zmm64u[6])?;
-                self.v_write_qword(seg, offset.wrapping_add(24), self.vmm[i as usize].zmm64u[7])?;
+                self.v_write_qword(seg, offset, self.vmm[i as usize].zmm64u(4))?;
+                self.v_write_qword(seg, offset.wrapping_add(8), self.vmm[i as usize].zmm64u(5))?;
+                self.v_write_qword(seg, offset.wrapping_add(16), self.vmm[i as usize].zmm64u(6))?;
+                self.v_write_qword(seg, offset.wrapping_add(24), self.vmm[i as usize].zmm64u(7))?;
             }
         }
         Ok(())
@@ -2221,11 +2214,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let num = if self.long64_mode() { 16u64 } else { 8u64 };
         for i in 0..num {
             let offset = base.wrapping_add(i * 32);
+            // SAFETY: zmm union access; index within register file bounds
             unsafe {
-                self.vmm[i as usize].zmm64u[4] = self.v_read_qword(seg, offset)?;
-                self.vmm[i as usize].zmm64u[5] = self.v_read_qword(seg, offset.wrapping_add(8))?;
-                self.vmm[i as usize].zmm64u[6] = self.v_read_qword(seg, offset.wrapping_add(16))?;
-                self.vmm[i as usize].zmm64u[7] = self.v_read_qword(seg, offset.wrapping_add(24))?;
+                let __tmp = self.v_read_qword(seg, offset)?;
+
+                self.vmm[i as usize].set_zmm64u(4, __tmp);
+                let __tmp = self.v_read_qword(seg, offset.wrapping_add(8))?;
+
+                self.vmm[i as usize].set_zmm64u(5, __tmp);
+                let __tmp = self.v_read_qword(seg, offset.wrapping_add(16))?;
+
+                self.vmm[i as usize].set_zmm64u(6, __tmp);
+                let __tmp = self.v_read_qword(seg, offset.wrapping_add(24))?;
+
+                self.vmm[i as usize].set_zmm64u(7, __tmp);
             }
         }
         Ok(())
@@ -2234,11 +2236,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn xrstor_init_zmm_hi256_state(&mut self) {
         let num = if self.long64_mode() { 16 } else { 8 };
         for i in 0..num {
+            // SAFETY: zmm union access; index within register file bounds
             unsafe {
-                self.vmm[i].zmm64u[4] = 0;
-                self.vmm[i].zmm64u[5] = 0;
-                self.vmm[i].zmm64u[6] = 0;
-                self.vmm[i].zmm64u[7] = 0;
+                self.vmm[i].set_zmm64u(4, 0);
+                self.vmm[i].set_zmm64u(5, 0);
+                self.vmm[i].set_zmm64u(6, 0);
+                self.vmm[i].set_zmm64u(7, 0);
             }
         }
     }
@@ -2248,10 +2251,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if self.long64_mode() {
             for idx in 16..32u64 {
                 let offset = base.wrapping_add((idx - 16) * 64);
+                // SAFETY: zmm union access; index within register file bounds
                 unsafe {
                     for j in 0..8u64 {
                         self.v_write_qword(seg, offset.wrapping_add(j * 8),
-                            self.vmm[idx as usize].zmm64u[j as usize])?;
+                            self.vmm[idx as usize].zmm64u(j as usize))?;
                     }
                 }
             }
@@ -2263,10 +2267,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if self.long64_mode() {
             for idx in 16..32u64 {
                 let offset = base.wrapping_add((idx - 16) * 64);
+                // SAFETY: zmm union access; index within register file bounds
                 unsafe {
                     for j in 0..8u64 {
-                        self.vmm[idx as usize].zmm64u[j as usize] =
-                            self.v_read_qword(seg, offset.wrapping_add(j * 8))?;
+                        let __tmp = self.v_read_qword(seg, offset.wrapping_add(j * 8))?;
+
+                        self.vmm[idx as usize].set_zmm64u(j as usize, __tmp);
                     }
                 }
             }
@@ -2277,9 +2283,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn xrstor_init_hi_zmm_state(&mut self) {
         if self.long64_mode() {
             for idx in 16..32 {
+                // SAFETY: zmm union access; index within register file bounds
                 unsafe {
                     for j in 0..8 {
-                        self.vmm[idx].zmm64u[j] = 0;
+                        self.vmm[idx].set_zmm64u(j, 0);
                     }
                 }
             }
@@ -2380,8 +2387,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             } else {
                 let num = if self.long64_mode() { 16 } else { 8 };
                 for i in 0..num {
+                    // SAFETY: zmm union access; index within register file bounds
                     unsafe {
-                        if self.vmm[i].zmm64u[0] != 0 || self.vmm[i].zmm64u[1] != 0 {
+                        if self.vmm[i].zmm64u(0) != 0 || self.vmm[i].zmm64u(1) != 0 {
                             xinuse |= 2;
                             break;
                         }
@@ -2394,8 +2402,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if (rfbm & 4) != 0 {
             let num = if self.long64_mode() { 16 } else { 8 };
             for i in 0..num {
+                // SAFETY: zmm union access; index within register file bounds
                 unsafe {
-                    if self.vmm[i].zmm64u[2] != 0 || self.vmm[i].zmm64u[3] != 0 {
+                    if self.vmm[i].zmm64u(2) != 0 || self.vmm[i].zmm64u(3) != 0 {
                         xinuse |= 4;
                         break;
                     }
@@ -2406,7 +2415,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // OPMASK (bit 5)
         if (rfbm & (1 << 5)) != 0 {
             for i in 0..8 {
-                if unsafe { self.opmask[i].rrx } != 0 {
+                if self.opmask[i].rrx() != 0 {
                     xinuse |= 1 << 5;
                     break;
                 }
@@ -2417,9 +2426,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if (rfbm & (1 << 6)) != 0 {
             let num = if self.long64_mode() { 16 } else { 8 };
             for i in 0..num {
+                // SAFETY: zmm union access; index within register file bounds
                 unsafe {
-                    if self.vmm[i].zmm64u[4] != 0 || self.vmm[i].zmm64u[5] != 0
-                        || self.vmm[i].zmm64u[6] != 0 || self.vmm[i].zmm64u[7] != 0
+                    if self.vmm[i].zmm64u(4) != 0 || self.vmm[i].zmm64u(5) != 0
+                        || self.vmm[i].zmm64u(6) != 0 || self.vmm[i].zmm64u(7) != 0
                     {
                         xinuse |= 1 << 6;
                         break;
@@ -2431,11 +2441,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // HI_ZMM (bit 7) — ZMM16-31 (64-bit mode only)
         if (rfbm & (1 << 7)) != 0 && self.long64_mode() {
             for i in 16..32 {
+                // SAFETY: zmm union access; index within register file bounds
                 unsafe {
-                    if self.vmm[i].zmm64u[0] != 0 || self.vmm[i].zmm64u[1] != 0
-                        || self.vmm[i].zmm64u[2] != 0 || self.vmm[i].zmm64u[3] != 0
-                        || self.vmm[i].zmm64u[4] != 0 || self.vmm[i].zmm64u[5] != 0
-                        || self.vmm[i].zmm64u[6] != 0 || self.vmm[i].zmm64u[7] != 0
+                    if self.vmm[i].zmm64u(0) != 0 || self.vmm[i].zmm64u(1) != 0
+                        || self.vmm[i].zmm64u(2) != 0 || self.vmm[i].zmm64u(3) != 0
+                        || self.vmm[i].zmm64u(4) != 0 || self.vmm[i].zmm64u(5) != 0
+                        || self.vmm[i].zmm64u(6) != 0 || self.vmm[i].zmm64u(7) != 0
                     {
                         xinuse |= 1 << 7;
                         break;

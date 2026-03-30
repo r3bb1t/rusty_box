@@ -281,7 +281,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Reduce verbosity for common exceptions (#GP(0) is very common during boot)
         if vector != Exception::Gp || error_code != 0 {
-            tracing::debug!("exception({:?}): error_code={:#x}", vector, error_code);
+            tracing::trace!("exception({:?}): error_code={:#x}", vector, error_code);
         }
 
         // (Alpine exception trace removed — IMUL 0x69 decoder convention bug fixed)
@@ -317,7 +317,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 tracing::error!("TRIPLE FAULT at RIP={:#x} CS={:#x} vector={:?} error_code={:#x} icount={} CR0={:#x} CR3={:#x} CR2={:#x} IDTR.base={:#x} IDTR.limit={:#x}",
                     rip, cs, vector, error_code, self.icount,
                     self.cr0.get32(), self.cr3, self.cr2, self.idtr.base, self.idtr.limit);
-                eprintln!("\n!!! TRIPLE FAULT !!! RIP={:#x} CS={:#06x} vector={:?} error_code={:#x} icount={} CR2={:#x}",
+                tracing::error!("TRIPLE FAULT: RIP={:#x} CS={:#06x} vector={:?} error_code={:#x} icount={} CR2={:#x}",
                     rip, cs, vector, error_code, self.icount, self.cr2);
                 self.debug_puts(b"[TRIPLE_FAULT]\n");
                 self.activity_state = super::cpu::CpuActivityState::Shutdown;
@@ -352,7 +352,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     self.r8(), self.r9(), self.r10(), self.r11());
                 tracing::error!("  R12={:#018x} R13={:#018x} R14={:#018x} R15={:#018x}",
                     self.r12(), self.r13(), self.r14(), self.r15());
-                eprintln!("\n!!! DOUBLE FAULT !!! 1st={} 2nd={:?} RIP={:#x} CR2={:#x} icount={}",
+                tracing::error!("DOUBLE FAULT: 1st={} 2nd={:?} RIP={:#x} CR2={:#x} icount={}",
                     last, vector, self.rip(), self.cr2, self.icount);
                 return self.exception(Exception::Df, 0);
             }
@@ -419,7 +419,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }) => {
                     // Delivery failed — raise the indicated exception.
                     // Double-fault / triple-fault detection is in the recursive call.
-                    tracing::warn!(
+                    tracing::debug!(
                         "protected_mode_int({:?}) failed, raising {:?} error_code={:#x}; icount={}",
                         vector,
                         new_vector,

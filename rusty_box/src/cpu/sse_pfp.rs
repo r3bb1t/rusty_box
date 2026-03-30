@@ -121,7 +121,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn sse_pfp_read_op2_ss(&mut self, instr: &Instruction) -> super::Result<f32> {
         if instr.mod_c0() {
             let src = self.read_xmm_reg(instr.src1());
-            Ok(unsafe { src.xmm32f[0] })
+            Ok(src.xmm32f(0))
         } else {
             let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
@@ -137,7 +137,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     fn sse_pfp_read_op2_sd(&mut self, instr: &Instruction) -> super::Result<f64> {
         if instr.mod_c0() {
             let src = self.read_xmm_reg(instr.src1());
-            Ok(unsafe { src.xmm64f[0] })
+            Ok(src.xmm64f(0))
         } else {
             let eaddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
@@ -179,11 +179,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            for i in 0..4 {
-                result.xmm32f[i] = op1.xmm32f[i] + op2.xmm32f[i];
+        for i in 0..4 {
+                result.set_xmm32f(i, op1.xmm32f(i) + op2.xmm32f(i));
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -194,11 +192,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            for i in 0..2 {
-                result.xmm64f[i] = op1.xmm64f[i] + op2.xmm64f[i];
+        for i in 0..2 {
+                result.set_xmm64f(i, op1.xmm64f(i) + op2.xmm64f(i));
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -208,9 +204,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        unsafe {
-            result.xmm32f[0] += op2;
-        }
+            result.set_xmm32f(0, result.xmm32f(0) + op2);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -220,9 +214,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        unsafe {
-            result.xmm64f[0] += op2;
-        }
+            result.set_xmm64f(0, result.xmm64f(0) + op2);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -238,11 +230,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            for i in 0..4 {
-                result.xmm32f[i] = op1.xmm32f[i] - op2.xmm32f[i];
+        for i in 0..4 {
+                result.set_xmm32f(i, op1.xmm32f(i) - op2.xmm32f(i));
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -253,11 +243,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            for i in 0..2 {
-                result.xmm64f[i] = op1.xmm64f[i] - op2.xmm64f[i];
+        for i in 0..2 {
+                result.set_xmm64f(i, op1.xmm64f(i) - op2.xmm64f(i));
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -267,9 +255,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        unsafe {
-            result.xmm32f[0] -= op2;
-        }
+            result.set_xmm32f(0, result.xmm32f(0) - op2);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -279,9 +265,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        unsafe {
-            result.xmm64f[0] -= op2;
-        }
+            result.set_xmm64f(0, result.xmm64f(0) - op2);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -297,11 +281,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            for i in 0..4 {
-                result.xmm32f[i] = op1.xmm32f[i] * op2.xmm32f[i];
+        for i in 0..4 {
+                result.set_xmm32f(i, op1.xmm32f(i) * op2.xmm32f(i));
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -312,11 +294,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            for i in 0..2 {
-                result.xmm64f[i] = op1.xmm64f[i] * op2.xmm64f[i];
+        for i in 0..2 {
+                result.set_xmm64f(i, op1.xmm64f(i) * op2.xmm64f(i));
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -326,9 +306,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        unsafe {
-            result.xmm32f[0] *= op2;
-        }
+            result.set_xmm32f(0, result.xmm32f(0) * op2);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -338,9 +316,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        unsafe {
-            result.xmm64f[0] *= op2;
-        }
+            result.set_xmm64f(0, result.xmm64f(0) * op2);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -356,11 +332,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            for i in 0..4 {
-                result.xmm32f[i] = op1.xmm32f[i] / op2.xmm32f[i];
+        for i in 0..4 {
+                result.set_xmm32f(i, op1.xmm32f(i) / op2.xmm32f(i));
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -371,11 +345,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            for i in 0..2 {
-                result.xmm64f[i] = op1.xmm64f[i] / op2.xmm64f[i];
+        for i in 0..2 {
+                result.set_xmm64f(i, op1.xmm64f(i) / op2.xmm64f(i));
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -385,9 +357,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        unsafe {
-            result.xmm32f[0] /= op2;
-        }
+            result.set_xmm32f(0, result.xmm32f(0) / op2);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -397,9 +367,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        unsafe {
-            result.xmm64f[0] /= op2;
-        }
+            result.set_xmm64f(0, result.xmm64f(0) / op2);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -414,11 +382,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            for i in 0..4 {
-                result.xmm32f[i] = op.xmm32f[i].sqrt();
+        for i in 0..4 {
+                result.set_xmm32f(i, op.xmm32f(i).sqrt());
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -428,11 +394,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            for i in 0..2 {
-                result.xmm64f[i] = op.xmm64f[i].sqrt();
+        for i in 0..2 {
+                result.set_xmm64f(i, op.xmm64f(i).sqrt());
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -442,9 +406,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        unsafe {
-            result.xmm32f[0] = op2.sqrt();
-        }
+            result.set_xmm32f(0, op2.sqrt());
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -454,9 +416,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        unsafe {
-            result.xmm64f[0] = op2.sqrt();
-        }
+            result.set_xmm64f(0, op2.sqrt());
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -475,15 +435,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
         // SSE MIN: if either is NaN, return op2 (source); else return smaller
-        unsafe {
             for i in 0..4 {
-                result.xmm32f[i] = if op1.xmm32f[i].is_nan() || op2.xmm32f[i].is_nan() || op2.xmm32f[i] < op1.xmm32f[i] {
-                    op2.xmm32f[i]
+                result.set_xmm32f(i, if op1.xmm32f(i).is_nan() || op2.xmm32f(i).is_nan() || op2.xmm32f(i) < op1.xmm32f(i) {
+                    op2.xmm32f(i)
                 } else {
-                    op1.xmm32f[i]
-                };
+                    op1.xmm32f(i)
+                });
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -495,15 +453,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
         // SSE MIN: if either is NaN, return op2 (source); else return smaller
-        unsafe {
             for i in 0..2 {
-                result.xmm64f[i] = if op1.xmm64f[i].is_nan() || op2.xmm64f[i].is_nan() || op2.xmm64f[i] < op1.xmm64f[i] {
-                    op2.xmm64f[i]
+                result.set_xmm64f(i, if op1.xmm64f(i).is_nan() || op2.xmm64f(i).is_nan() || op2.xmm64f(i) < op1.xmm64f(i) {
+                    op2.xmm64f(i)
                 } else {
-                    op1.xmm64f[i]
-                };
+                    op1.xmm64f(i)
+                });
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -514,13 +470,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
         // SSE MIN: if either is NaN, return op2 (source); else return smaller
-        unsafe {
-            result.xmm32f[0] = if result.xmm32f[0].is_nan() || op2.is_nan() || op2 < result.xmm32f[0] {
+            result.set_xmm32f(0, if result.xmm32f(0).is_nan() || op2.is_nan() || op2 < result.xmm32f(0) {
                 op2
             } else {
-                result.xmm32f[0]
-            };
-        }
+                result.xmm32f(0)
+            });
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -531,13 +485,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
         // SSE MIN: if either is NaN, return op2 (source); else return smaller
-        unsafe {
-            result.xmm64f[0] = if result.xmm64f[0].is_nan() || op2.is_nan() || op2 < result.xmm64f[0] {
+            result.set_xmm64f(0, if result.xmm64f(0).is_nan() || op2.is_nan() || op2 < result.xmm64f(0) {
                 op2
             } else {
-                result.xmm64f[0]
-            };
-        }
+                result.xmm64f(0)
+            });
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -556,15 +508,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
         // SSE MAX: if either is NaN, return op2 (source); else return larger
-        unsafe {
             for i in 0..4 {
-                result.xmm32f[i] = if op1.xmm32f[i].is_nan() || op2.xmm32f[i].is_nan() || op2.xmm32f[i] > op1.xmm32f[i] {
-                    op2.xmm32f[i]
+                result.set_xmm32f(i, if op1.xmm32f(i).is_nan() || op2.xmm32f(i).is_nan() || op2.xmm32f(i) > op1.xmm32f(i) {
+                    op2.xmm32f(i)
                 } else {
-                    op1.xmm32f[i]
-                };
+                    op1.xmm32f(i)
+                });
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -576,15 +526,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
         // SSE MAX: if either is NaN, return op2 (source); else return larger
-        unsafe {
             for i in 0..2 {
-                result.xmm64f[i] = if op1.xmm64f[i].is_nan() || op2.xmm64f[i].is_nan() || op2.xmm64f[i] > op1.xmm64f[i] {
-                    op2.xmm64f[i]
+                result.set_xmm64f(i, if op1.xmm64f(i).is_nan() || op2.xmm64f(i).is_nan() || op2.xmm64f(i) > op1.xmm64f(i) {
+                    op2.xmm64f(i)
                 } else {
-                    op1.xmm64f[i]
-                };
+                    op1.xmm64f(i)
+                });
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -595,13 +543,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
         // SSE MAX: if either is NaN, return op2 (source); else return larger
-        unsafe {
-            result.xmm32f[0] = if result.xmm32f[0].is_nan() || op2.is_nan() || op2 > result.xmm32f[0] {
+            result.set_xmm32f(0, if result.xmm32f(0).is_nan() || op2.is_nan() || op2 > result.xmm32f(0) {
                 op2
             } else {
-                result.xmm32f[0]
-            };
-        }
+                result.xmm32f(0)
+            });
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -612,13 +558,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
         // SSE MAX: if either is NaN, return op2 (source); else return larger
-        unsafe {
-            result.xmm64f[0] = if result.xmm64f[0].is_nan() || op2.is_nan() || op2 > result.xmm64f[0] {
+            result.set_xmm64f(0, if result.xmm64f(0).is_nan() || op2.is_nan() || op2 > result.xmm64f(0) {
                 op2
             } else {
-                result.xmm64f[0]
-            };
-        }
+                result.xmm64f(0)
+            });
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -634,10 +578,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm64u[0] = op1.xmm64u[0] & op2.xmm64u[0];
-            result.xmm64u[1] = op1.xmm64u[1] & op2.xmm64u[1];
-        }
+            result.set_xmm64u(0, op1.xmm64u(0) & op2.xmm64u(0));
+            result.set_xmm64u(1, op1.xmm64u(1) & op2.xmm64u(1));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -648,10 +590,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm64u[0] = op1.xmm64u[0] & op2.xmm64u[0];
-            result.xmm64u[1] = op1.xmm64u[1] & op2.xmm64u[1];
-        }
+            result.set_xmm64u(0, op1.xmm64u(0) & op2.xmm64u(0));
+            result.set_xmm64u(1, op1.xmm64u(1) & op2.xmm64u(1));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -668,10 +608,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm64u[0] = (!op1.xmm64u[0]) & op2.xmm64u[0];
-            result.xmm64u[1] = (!op1.xmm64u[1]) & op2.xmm64u[1];
-        }
+            result.set_xmm64u(0, (!op1.xmm64u(0)) & op2.xmm64u(0));
+            result.set_xmm64u(1, (!op1.xmm64u(1)) & op2.xmm64u(1));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -683,10 +621,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm64u[0] = (!op1.xmm64u[0]) & op2.xmm64u[0];
-            result.xmm64u[1] = (!op1.xmm64u[1]) & op2.xmm64u[1];
-        }
+            result.set_xmm64u(0, (!op1.xmm64u(0)) & op2.xmm64u(0));
+            result.set_xmm64u(1, (!op1.xmm64u(1)) & op2.xmm64u(1));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -702,10 +638,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm64u[0] = op1.xmm64u[0] | op2.xmm64u[0];
-            result.xmm64u[1] = op1.xmm64u[1] | op2.xmm64u[1];
-        }
+            result.set_xmm64u(0, op1.xmm64u(0) | op2.xmm64u(0));
+            result.set_xmm64u(1, op1.xmm64u(1) | op2.xmm64u(1));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -716,10 +650,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm64u[0] = op1.xmm64u[0] | op2.xmm64u[0];
-            result.xmm64u[1] = op1.xmm64u[1] | op2.xmm64u[1];
-        }
+            result.set_xmm64u(0, op1.xmm64u(0) | op2.xmm64u(0));
+            result.set_xmm64u(1, op1.xmm64u(1) | op2.xmm64u(1));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -735,10 +667,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm64u[0] = op1.xmm64u[0] ^ op2.xmm64u[0];
-            result.xmm64u[1] = op1.xmm64u[1] ^ op2.xmm64u[1];
-        }
+            result.set_xmm64u(0, op1.xmm64u(0) ^ op2.xmm64u(0));
+            result.set_xmm64u(1, op1.xmm64u(1) ^ op2.xmm64u(1));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -749,10 +679,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm64u[0] = op1.xmm64u[0] ^ op2.xmm64u[0];
-            result.xmm64u[1] = op1.xmm64u[1] ^ op2.xmm64u[1];
-        }
+            result.set_xmm64u(0, op1.xmm64u(0) ^ op2.xmm64u(0));
+            result.set_xmm64u(1, op1.xmm64u(1) ^ op2.xmm64u(1));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -770,15 +698,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let predicate = instr.ib();
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
             for i in 0..4 {
-                result.xmm32u[i] = if sse_compare_f32(op1.xmm32f[i], op2.xmm32f[i], predicate) {
+                result.set_xmm32u(i, if sse_compare_f32(op1.xmm32f(i), op2.xmm32f(i), predicate) {
                     0xFFFF_FFFF
                 } else {
                     0
-                };
+                });
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -790,15 +716,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let predicate = instr.ib();
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
             for i in 0..2 {
-                result.xmm64u[i] = if sse_compare_f64(op1.xmm64f[i], op2.xmm64f[i], predicate) {
+                result.set_xmm64u(i, if sse_compare_f64(op1.xmm64f(i), op2.xmm64f(i), predicate) {
                     0xFFFF_FFFF_FFFF_FFFF
                 } else {
                     0
-                };
+                });
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -808,15 +732,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        let op1 = unsafe { result.xmm32f[0] };
+        let op1 = result.xmm32f(0);
         let predicate = instr.ib();
-        unsafe {
-            result.xmm32u[0] = if sse_compare_f32(op1, op2, predicate) {
+            result.set_xmm32u(0, if sse_compare_f32(op1, op2, predicate) {
                 0xFFFF_FFFF
             } else {
                 0
-            };
-        }
+            });
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -826,15 +748,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        let op1 = unsafe { result.xmm64f[0] };
+        let op1 = result.xmm64f(0);
         let predicate = instr.ib();
-        unsafe {
-            result.xmm64u[0] = if sse_compare_f64(op1, op2, predicate) {
+            result.set_xmm64u(0, if sse_compare_f64(op1, op2, predicate) {
                 0xFFFF_FFFF_FFFF_FFFF
             } else {
                 0
-            };
-        }
+            });
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -849,7 +769,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// COMISS — Ordered Compare Scalar Single-Precision to EFLAGS
     pub(super) fn comiss_vss_wss(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op1 = unsafe { self.read_xmm_reg(instr.dst()).xmm32f[0] };
+        let op1 = self.read_xmm_reg(instr.dst()).xmm32f(0);
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
 
         let unordered = op1.is_nan() || op2.is_nan();
@@ -862,7 +782,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// COMISD — Ordered Compare Scalar Double-Precision to EFLAGS
     pub(super) fn comisd_vsd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op1 = unsafe { self.read_xmm_reg(instr.dst()).xmm64f[0] };
+        let op1 = self.read_xmm_reg(instr.dst()).xmm64f(0);
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
 
         let unordered = op1.is_nan() || op2.is_nan();
@@ -883,7 +803,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// UCOMISS — Unordered Compare Scalar Single-Precision to EFLAGS
     pub(super) fn ucomiss_vss_wss(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op1 = unsafe { self.read_xmm_reg(instr.dst()).xmm32f[0] };
+        let op1 = self.read_xmm_reg(instr.dst()).xmm32f(0);
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
 
         let unordered = op1.is_nan() || op2.is_nan();
@@ -896,7 +816,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// UCOMISD — Unordered Compare Scalar Double-Precision to EFLAGS
     pub(super) fn ucomisd_vsd_wsd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
-        let op1 = unsafe { self.read_xmm_reg(instr.dst()).xmm64f[0] };
+        let op1 = self.read_xmm_reg(instr.dst()).xmm64f(0);
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
 
         let unordered = op1.is_nan() || op2.is_nan();
@@ -922,9 +842,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.v_read_dword(seg, eaddr)? as i32
         };
         let mut result = self.read_xmm_reg(instr.dst());
-        unsafe {
-            result.xmm32f[0] = op2 as f32;
-        }
+            result.set_xmm32f(0, op2 as f32);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -940,9 +858,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.v_read_dword(seg, eaddr)? as i32
         };
         let mut result = self.read_xmm_reg(instr.dst());
-        unsafe {
-            result.xmm64f[0] = op2 as f64;
-        }
+            result.set_xmm64f(0, op2 as f64);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1024,10 +940,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             } else {
                 (op as i32) as u32
             };
-        // Catch any conversion near 1.0 producing 0
-        if result == 0 && op > 0.5 && op < 1.5 && self.icount > 2_000_000_000 {
-            eprintln!("[CVTT-BUG] CVTTSD2SI: {:.6} -> {} RIP={:#x} ic={}", op, result, self.rip(), self.icount);
-        }
         self.set_gpr32(instr.dst().into(), result);
         Ok(())
     }
@@ -1048,9 +960,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.read_virtual_qword_64(seg, eaddr)? as i64
         };
         let mut result = self.read_xmm_reg(instr.dst());
-        unsafe {
-            result.xmm32f[0] = op2 as f32;
-        }
+            result.set_xmm32f(0, op2 as f32);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1066,9 +976,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.read_virtual_qword_64(seg, eaddr)? as i64
         };
         let mut result = self.read_xmm_reg(instr.dst());
-        unsafe {
-            result.xmm64f[0] = op2 as f64;
-        }
+            result.set_xmm64f(0, op2 as f64);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1102,9 +1010,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             } else {
                 (op as i64) as u64
             };
-        if op == 1.0 && result == 0 {
-            eprintln!("[CVTT-BUG] CVTTSD2SI_64: 1.0 -> 0! RIP={:#x} icount={}", self.rip(), self.icount);
-        }
         self.set_gpr64(instr.dst() as usize, result);
         Ok(())
     }
@@ -1169,16 +1074,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let seg = BxSegregs::from(instr.seg());
             let lo = self.v_read_qword(seg, eaddr)?;
             let mut tmp = BxPackedXmmRegister::default();
-            unsafe {
-                tmp.xmm64u[0] = lo;
-            }
+                tmp.set_xmm64u(0, lo);
             tmp
         };
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm64f[0] = op2.xmm32f[0] as f64;
-            result.xmm64f[1] = op2.xmm32f[1] as f64;
-        }
+            result.set_xmm64f(0, op2.xmm32f(0) as f64);
+            result.set_xmm64f(1, op2.xmm32f(1) as f64);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1189,11 +1090,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm32f[0] = op2.xmm64f[0] as f32;
-            result.xmm32f[1] = op2.xmm64f[1] as f32;
+            result.set_xmm32f(0, op2.xmm64f(0) as f32);
+            result.set_xmm32f(1, op2.xmm64f(1) as f32);
             // High 64 bits zeroed (from default())
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1203,9 +1102,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_ss(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        unsafe {
-            result.xmm64f[0] = op2 as f64;
-        }
+            result.set_xmm64f(0, op2 as f64);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1215,9 +1112,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_sd(instr)?;
         let mut result = self.read_xmm_reg(instr.dst());
-        unsafe {
-            result.xmm32f[0] = op2 as f32;
-        }
+            result.set_xmm32f(0, op2 as f32);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1232,11 +1127,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            for i in 0..4 {
-                result.xmm32f[i] = op2.xmm32s[i] as f32;
+        for i in 0..4 {
+                result.set_xmm32f(i, op2.xmm32s(i) as f32);
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1246,10 +1139,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
             for i in 0..4 {
-                let val = op2.xmm32f[i];
-                result.xmm32s[i] = if val.is_nan()
+                let val = op2.xmm32f(i);
+                result.set_xmm32s(i, if val.is_nan()
                     || val.is_infinite()
                     || val > i32::MAX as f32
                     || val < i32::MIN as f32
@@ -1264,9 +1156,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     {
                         round_ties_even_f32(val) as i32
                     }
-                };
+                });
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1276,10 +1167,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
             for i in 0..4 {
-                let val = op2.xmm32f[i];
-                result.xmm32s[i] = if val.is_nan()
+                let val = op2.xmm32f(i);
+                result.set_xmm32s(i, if val.is_nan()
                     || val.is_infinite()
                     || val > i32::MAX as f32
                     || val < i32::MIN as f32
@@ -1287,9 +1177,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     0x8000_0000u32 as i32
                 } else {
                     val as i32
-                };
+                });
             }
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1306,16 +1195,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let seg = BxSegregs::from(instr.seg());
             let lo = self.v_read_qword(seg, eaddr)?;
             let mut tmp = BxPackedXmmRegister::default();
-            unsafe {
-                tmp.xmm64u[0] = lo;
-            }
+                tmp.set_xmm64u(0, lo);
             tmp
         };
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm64f[0] = op2.xmm32s[0] as f64;
-            result.xmm64f[1] = op2.xmm32s[1] as f64;
-        }
+            result.set_xmm64f(0, op2.xmm32s(0) as f64);
+            result.set_xmm64f(1, op2.xmm32s(1) as f64);
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1326,10 +1211,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
             for i in 0..2 {
-                let val = op2.xmm64f[i];
-                result.xmm32s[i] = if val.is_nan()
+                let val = op2.xmm64f(i);
+                result.set_xmm32s(i, if val.is_nan()
                     || val.is_infinite()
                     || val > i32::MAX as f64
                     || val < i32::MIN as f64
@@ -1344,10 +1228,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     {
                         round_ties_even_f64(val) as i32
                     }
-                };
+                });
             }
             // High 64 bits zeroed (from default())
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1358,10 +1241,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.prepare_sse()?;
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
             for i in 0..2 {
-                let val = op2.xmm64f[i];
-                result.xmm32s[i] = if val.is_nan()
+                let val = op2.xmm64f(i);
+                result.set_xmm32s(i, if val.is_nan()
                     || val.is_infinite()
                     || val > i32::MAX as f64
                     || val < i32::MIN as f64
@@ -1369,10 +1251,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     0x8000_0000u32 as i32
                 } else {
                     val as i32
-                };
+                });
             }
             // High 64 bits zeroed (from default())
-        }
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1391,12 +1272,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let order = instr.ib();
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm32u[0] = op1.xmm32u[(order & 3) as usize];
-            result.xmm32u[1] = op1.xmm32u[((order >> 2) & 3) as usize];
-            result.xmm32u[2] = op2.xmm32u[((order >> 4) & 3) as usize];
-            result.xmm32u[3] = op2.xmm32u[((order >> 6) & 3) as usize];
-        }
+            result.set_xmm32u(0, op1.xmm32u((order & 3) as usize));
+            result.set_xmm32u(1, op1.xmm32u(((order >> 2) & 3) as usize));
+            result.set_xmm32u(2, op2.xmm32u(((order >> 4) & 3) as usize));
+            result.set_xmm32u(3, op2.xmm32u(((order >> 6) & 3) as usize));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1409,10 +1288,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let order = instr.ib();
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm64u[0] = op1.xmm64u[(order & 1) as usize];
-            result.xmm64u[1] = op2.xmm64u[((order >> 1) & 1) as usize];
-        }
+            result.set_xmm64u(0, op1.xmm64u((order & 1) as usize));
+            result.set_xmm64u(1, op2.xmm64u(((order >> 1) & 1) as usize));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1429,12 +1306,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm32u[0] = op1.xmm32u[0];
-            result.xmm32u[1] = op2.xmm32u[0];
-            result.xmm32u[2] = op1.xmm32u[1];
-            result.xmm32u[3] = op2.xmm32u[1];
-        }
+            result.set_xmm32u(0, op1.xmm32u(0));
+            result.set_xmm32u(1, op2.xmm32u(0));
+            result.set_xmm32u(2, op1.xmm32u(1));
+            result.set_xmm32u(3, op2.xmm32u(1));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1446,12 +1321,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm32u[0] = op1.xmm32u[2];
-            result.xmm32u[1] = op2.xmm32u[2];
-            result.xmm32u[2] = op1.xmm32u[3];
-            result.xmm32u[3] = op2.xmm32u[3];
-        }
+            result.set_xmm32u(0, op1.xmm32u(2));
+            result.set_xmm32u(1, op2.xmm32u(2));
+            result.set_xmm32u(2, op1.xmm32u(3));
+            result.set_xmm32u(3, op2.xmm32u(3));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1463,10 +1336,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm64u[0] = op1.xmm64u[0];
-            result.xmm64u[1] = op2.xmm64u[0];
-        }
+            result.set_xmm64u(0, op1.xmm64u(0));
+            result.set_xmm64u(1, op2.xmm64u(0));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }
@@ -1478,10 +1349,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_pfp_read_op2_xmm(instr)?;
         let mut result = BxPackedXmmRegister::default();
-        unsafe {
-            result.xmm64u[0] = op1.xmm64u[1];
-            result.xmm64u[1] = op2.xmm64u[1];
-        }
+            result.set_xmm64u(0, op1.xmm64u(1));
+            result.set_xmm64u(1, op2.xmm64u(1));
         self.write_xmm_reg_lo128(instr.dst(), result);
         Ok(())
     }

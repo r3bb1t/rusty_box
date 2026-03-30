@@ -47,8 +47,8 @@ fn compare_strings(
             // unsigned bytes compare
             for i in 0..16 {
                 for j in 0..16 {
-                    let a = unsafe { op1.xmmubyte[i] };
-                    let b = unsafe { op2.xmmubyte[j] };
+                    let a = op1.xmmubyte(i);
+                    let b = op2.xmmubyte(j);
                     bool_res[j][i] = match aggregation_operation {
                         0 | 2 | 3 => {
                             // 'equal' comparison
@@ -71,8 +71,8 @@ fn compare_strings(
             // unsigned words compare
             for i in 0..8 {
                 for j in 0..8 {
-                    let a = unsafe { op1.xmm16u[i] };
-                    let b = unsafe { op2.xmm16u[j] };
+                    let a = op1.xmm16u(i);
+                    let b = op2.xmm16u(j);
                     bool_res[j][i] = match aggregation_operation {
                         0 | 2 | 3 => {
                             if a == b { 1 } else { 0 }
@@ -93,8 +93,8 @@ fn compare_strings(
             // signed bytes compare
             for i in 0..16 {
                 for j in 0..16 {
-                    let a = unsafe { op1.xmm_sbyte[i] };
-                    let b = unsafe { op2.xmm_sbyte[j] };
+                    let a = op1.xmm_sbyte(i);
+                    let b = op2.xmm_sbyte(j);
                     bool_res[j][i] = match aggregation_operation {
                         0 | 2 | 3 => {
                             if a == b { 1 } else { 0 }
@@ -115,8 +115,8 @@ fn compare_strings(
             // signed words compare
             for i in 0..8 {
                 for j in 0..8 {
-                    let a = unsafe { op1.xmm16s[i] };
-                    let b = unsafe { op2.xmm16s[j] };
+                    let a = op1.xmm16s(i);
+                    let b = op2.xmm16s(j);
                     bool_res[j][i] = match aggregation_operation {
                         0 | 2 | 3 => {
                             if a == b { 1 } else { 0 }
@@ -145,7 +145,7 @@ fn find_eos(op: &BxPackedXmmRegister, imm: u8) -> usize {
     if imm & 0x1 != 0 {
         // 8 elements (words)
         for i in 0..8 {
-            if unsafe { op.xmm16u[i] } == 0 {
+            if op.xmm16u(i) == 0 {
                 return i;
             }
         }
@@ -153,7 +153,7 @@ fn find_eos(op: &BxPackedXmmRegister, imm: u8) -> usize {
     } else {
         // 16 elements (bytes)
         for i in 0..16 {
-            if unsafe { op.xmmubyte[i] } == 0 {
+            if op.xmmubyte(i) == 0 {
                 return i;
             }
         }
@@ -425,25 +425,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if imm8 & 0x40 != 0 {
             if num_elements == 8 {
                 for index in 0..8 {
-                    unsafe {
-                        result.xmm16u[index] =
-                            if result2 & (1 << index) != 0 { 0xFFFF } else { 0 };
-                    }
+                        result.set_xmm16u(index, if result2 & (1 << index) != 0 { 0xFFFF } else { 0 });
                 }
             } else {
                 // num_elements = 16
                 for index in 0..16 {
-                    unsafe {
-                        result.xmmubyte[index] =
-                            if result2 & (1 << index) != 0 { 0xFF } else { 0 };
-                    }
+                        result.set_xmmubyte(index, if result2 & (1 << index) != 0 { 0xFF } else { 0 });
                 }
             }
         } else {
-            unsafe {
-                result.xmm64u[1] = 0;
-                result.xmm64u[0] = result2 as u64;
-            }
+                result.set_xmm64u(1, 0);
+                result.set_xmm64u(0, result2 as u64);
         }
 
         // Set flags: CF, ZF, SF, OF; clear AF, PF
@@ -581,25 +573,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if imm8 & 0x40 != 0 {
             if num_elements == 8 {
                 for index in 0..8 {
-                    unsafe {
-                        result.xmm16u[index] =
-                            if result2 & (1 << index) != 0 { 0xFFFF } else { 0 };
-                    }
+                        result.set_xmm16u(index, if result2 & (1 << index) != 0 { 0xFFFF } else { 0 });
                 }
             } else {
                 // num_elements = 16
                 for index in 0..16 {
-                    unsafe {
-                        result.xmmubyte[index] =
-                            if result2 & (1 << index) != 0 { 0xFF } else { 0 };
-                    }
+                        result.set_xmmubyte(index, if result2 & (1 << index) != 0 { 0xFF } else { 0 });
                 }
             }
         } else {
-            unsafe {
-                result.xmm64u[1] = 0;
-                result.xmm64u[0] = result2 as u64;
-            }
+                result.set_xmm64u(1, 0);
+                result.set_xmm64u(0, result2 as u64);
         }
 
         // Set flags: CF, ZF, SF, OF; clear AF, PF

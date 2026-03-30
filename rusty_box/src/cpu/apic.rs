@@ -482,6 +482,7 @@ impl BxLocalApic {
     #[inline]
     fn live_ticks(&self) -> u64 {
         if let Some(ptr) = self.icount_ptr {
+            // SAFETY: pointer to CPU icount field; valid for CPU lifetime, single-threaded
             let cpu_icount = unsafe { *ptr };
             self.ticks_at_sync + (cpu_icount - self.icount_at_sync)
         } else {
@@ -1062,6 +1063,7 @@ impl BxLocalApic {
     fn clear_pending_lapic_event(&mut self) {
         const BX_EVENT_PENDING_LAPIC_INTR: u32 = 1 << 2;
         if let Some(ptr) = self.pending_event_ptr {
+            // SAFETY: pointer to CPU event field; valid for CPU lifetime, single-threaded
             unsafe { *ptr &= !BX_EVENT_PENDING_LAPIC_INTR; }
         }
     }
@@ -1110,9 +1112,11 @@ impl BxLocalApic {
         // causing interrupts triggered by EOI within a batch to be delayed.
         const BX_EVENT_PENDING_LAPIC_INTR: u32 = 1 << 2;
         if let Some(ptr) = self.pending_event_ptr {
+            // SAFETY: pointer to CPU event field; valid for CPU lifetime, single-threaded
             unsafe { *ptr |= BX_EVENT_PENDING_LAPIC_INTR; }
         }
         if let Some(ptr) = self.async_event_ptr {
+            // SAFETY: pointer to CPU event field; valid for CPU lifetime, single-threaded
             unsafe { *ptr |= 1; }
         }
     }
@@ -1741,7 +1745,7 @@ impl From<u8> for ApicError {
 }
 
 impl BxLocalApic {
-    /// Dump LAPIC state for debugging. Uses eprintln! so it's always visible.
+    /// Dump LAPIC state for debugging.
     #[cfg(feature = "std")]
     pub(crate) fn dump_state(&self) {
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
@@ -1753,21 +1757,21 @@ impl BxLocalApic {
         };
         let timer_masked = timervec.contains(LvtBits::MASKED);
         let timer_vector = timervec.vector();
-        eprintln!("--- LAPIC State ---");
-        eprintln!("  mode={:?} sw_enabled={} base={:#x} id={}",
+        tracing::debug!("--- LAPIC State ---");
+        tracing::debug!("  mode={:?} sw_enabled={} base={:#x} id={}",
             self.mode, self.software_enabled, self.base_addr, self.apic_id);
-        eprintln!("  TPR={:#x} PPR={:#x} spurious_vec={:#x}",
+        tracing::debug!("  TPR={:#x} PPR={:#x} spurious_vec={:#x}",
             self.task_priority, self.get_ppr(), self.spurious_vector);
-        eprintln!("  LVT[Timer]={:#010x} (vec={:#x} mode={} masked={})",
+        tracing::debug!("  LVT[Timer]={:#010x} (vec={:#x} mode={} masked={})",
             timervec.bits(), timer_vector, timer_mode, timer_masked);
-        eprintln!("  LVT[LINT0]={:#010x} LVT[LINT1]={:#010x}",
+        tracing::debug!("  LVT[LINT0]={:#010x} LVT[LINT1]={:#010x}",
             self.lvt[3].bits(), self.lvt[4].bits());
-        eprintln!("  timer: initial={} current={} active={} div_factor={} period={}",
+        tracing::debug!("  timer: initial={} current={} active={} div_factor={} period={}",
             self.timer_initial, self.timer_current, self.timer_active,
             self.timer_divide_factor,
             self.timer_initial as u64 * self.timer_divide_factor as u64);
-        eprintln!("  ticks_initial={} current_ticks={}", self.ticks_initial, self.current_ticks);
-        eprintln!("  intr={} timer_fired={} timer_activate_req={} timer_deact_req={}",
+        tracing::debug!("  ticks_initial={} current_ticks={}", self.ticks_initial, self.current_ticks);
+        tracing::debug!("  intr={} timer_fired={} timer_activate_req={} timer_deact_req={}",
             self.intr, self.timer_fired,
             self.timer_activate_request.is_some(), self.timer_deactivate_request);
         // Show IRR/ISR summary - which vectors are pending/in-service
@@ -1777,8 +1781,8 @@ impl BxLocalApic {
             if Self::get_vector(&self.irr, i) { irr_vecs.push(i); }
             if Self::get_vector(&self.isr, i) { isr_vecs.push(i); }
         }
-        eprintln!("  IRR vectors: {:?}", irr_vecs);
-        eprintln!("  ISR vectors: {:?}", isr_vecs);
+        tracing::debug!("  IRR vectors: {:?}", irr_vecs);
+        tracing::debug!("  ISR vectors: {:?}", isr_vecs);
     }
 }
 

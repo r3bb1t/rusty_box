@@ -602,220 +602,43 @@ impl BxVgaC {
         tracing::info!("Initializing VGA text mode");
 
         // Register I/O port handlers
-        let vga_ptr = self as *mut BxVgaC as *mut c_void;
+        use super::DeviceId;
 
         // All VGA write handlers use mask 0x3 (byte+word) matching Bochs vgacore.cc:208-235.
         // Word writes are split into two byte writes in write_port().
 
-        // CRTC registers (mono) (0x3B4-0x3B5)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_CRTC_INDEX_MONO,
-            "VGA CRTC Index (mono)",
-            0x3,
-        );
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_CRTC_DATA_MONO,
-            "VGA CRTC Data (mono)",
-            0x3,
-        );
-
-        // CRTC registers (0x3D4-0x3D5)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_CRTC_INDEX,
-            "VGA CRTC Index",
-            0x3,
-        );
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_CRTC_DATA,
-            "VGA CRTC Data",
-            0x3,
-        );
-
-        // Status register (0x3DA)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_STATUS,
-            "VGA Status",
-            0x3,
-        );
-
-        // Status register (mono) (0x3BA)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_STATUS_MONO,
-            "VGA Status (mono)",
-            0x3,
-        );
-
-        // Attribute controller (0x3C0-0x3C1)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_ATTRIB_ADDR,
-            "VGA Attribute Address",
-            0x3,
-        );
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_ATTRIB_DATA,
-            "VGA Attribute Data",
-            0x3,
-        );
-
-        // Sequencer (0x3C4-0x3C5)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_SEQ_INDEX,
-            "VGA Sequencer Index",
-            0x3,
-        );
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_SEQ_DATA,
-            "VGA Sequencer Data",
-            0x3,
-        );
-
-        // Graphics controller (0x3CE-0x3CF)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_GRAPHICS_INDEX,
-            "VGA Graphics Index",
-            0x3,
-        );
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_GRAPHICS_DATA,
-            "VGA Graphics Data",
-            0x3,
-        );
-
-        // Misc output READ (0x3CC) - reads the misc output register
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_MISC_OUTPUT,
-            "VGA Misc Output Read",
-            0x3,
-        );
-
-        // Misc output WRITE - CRITICAL for BIOS to set color mode
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_MISC_OUTPUT_WRITE,
-            "VGA Misc Output Write",
-            0x3,
-        );
-
-        // VGA Enable
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_ENABLE,
-            "VGA Enable",
-            0x3,
-        );
-
-        // PEL Mask
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_PEL_MASK,
-            "VGA PEL Mask",
-            0x3,
-        );
-
-        // DAC State Read / PEL Address Read Mode Write
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_DAC_STATE,
-            "VGA DAC State",
-            0x3,
-        );
-
-        // PEL Address Write Mode
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_PEL_ADDR_WRITE,
-            "VGA PEL Address Write",
-            0x3,
-        );
-
-        // PEL Data Register
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            VGA_PEL_DATA,
-            "VGA PEL Data",
-            0x3,
-        );
-
-        // EGA compatibility ports (0x3CA, 0x3CB, 0x3CD)
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            0x3CA,
-            "VGA EGA Compat",
-            0x3,
-        );
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            0x3CB,
-            "VGA EGA Compat",
-            0x3,
-        );
-        io.register_io_handler(
-            vga_ptr,
-            vga_read_handler,
-            vga_write_handler,
-            0x3CD,
-            "VGA EGA Compat",
-            0x3,
-        );
+        // Register all VGA ports with DeviceId::Vga
+        let vga_ports: &[(u16, &str)] = &[
+            (VGA_CRTC_INDEX_MONO, "VGA CRTC Index (mono)"),
+            (VGA_CRTC_DATA_MONO, "VGA CRTC Data (mono)"),
+            (VGA_CRTC_INDEX, "VGA CRTC Index"),
+            (VGA_CRTC_DATA, "VGA CRTC Data"),
+            (VGA_STATUS, "VGA Status"),
+            (VGA_STATUS_MONO, "VGA Status (mono)"),
+            (VGA_ATTRIB_ADDR, "VGA Attribute Address"),
+            (VGA_ATTRIB_DATA, "VGA Attribute Data"),
+            (VGA_SEQ_INDEX, "VGA Sequencer Index"),
+            (VGA_SEQ_DATA, "VGA Sequencer Data"),
+            (VGA_GRAPHICS_INDEX, "VGA Graphics Index"),
+            (VGA_GRAPHICS_DATA, "VGA Graphics Data"),
+            (VGA_MISC_OUTPUT, "VGA Misc Output Read"),
+            (VGA_MISC_OUTPUT_WRITE, "VGA Misc Output Write"),
+            (VGA_ENABLE, "VGA Enable"),
+            (VGA_PEL_MASK, "VGA PEL Mask"),
+            (VGA_DAC_STATE, "VGA DAC State"),
+            (VGA_PEL_ADDR_WRITE, "VGA PEL Address Write"),
+            (VGA_PEL_DATA, "VGA PEL Data"),
+            (0x3CA, "VGA EGA Compat"),
+            (0x3CB, "VGA EGA Compat"),
+            (0x3CD, "VGA EGA Compat"),
+        ];
+        for &(port, name) in vga_ports {
+            io.register_io_handler(DeviceId::Vga, port, name, 0x3);
+        }
 
         // Register memory handlers for VGA memory range (0xA0000-0xBFFFF)
         // This matches DEV_register_memory_handlers in vgacore.cc line 177
-        let vga_ptr_const = vga_ptr as *const c_void;
+        let vga_ptr_const = self as *const BxVgaC as *const c_void;
         mem.register_memory_handlers(
             vga_ptr_const,
             vga_mem_read_handler,
@@ -1723,17 +1546,6 @@ impl BxVgaC {
     }
 }
 
-/// VGA read handler (called from I/O port system)
-pub(super) fn vga_read_handler(this_ptr: *mut c_void, port: u16, io_len: u8) -> u32 {
-    let vga = unsafe { &mut *(this_ptr as *mut BxVgaC) };
-    vga.read_port(port, io_len)
-}
-
-/// VGA write handler (called from I/O port system)
-pub(super) fn vga_write_handler(this_ptr: *mut c_void, port: u16, value: u32, io_len: u8) {
-    let vga = unsafe { &mut *(this_ptr as *mut BxVgaC) };
-    vga.write_port(port, value, io_len);
-}
 
 /// VGA memory read handler (called from memory system)
 /// Based on bx_vgacore_c::mem_read / mem_read_handler in vgacore.cc:1696-1795

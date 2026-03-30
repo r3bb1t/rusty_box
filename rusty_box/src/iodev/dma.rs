@@ -22,7 +22,6 @@
 //! Currently no devices register DMA handlers (IDE uses PIO, floppy not implemented),
 //! so the machinery exists structurally but no actual data transfers occur.
 
-use core::ffi::c_void;
 
 /// DMA buffer size for transfers (Bochs dma.h BX_DMA_BUFFER_SIZE = 512)
 const BX_DMA_BUFFER_SIZE: usize = 512;
@@ -938,17 +937,6 @@ impl BxDmaC {
     }
 }
 
-/// DMA read handler for I/O port infrastructure
-pub fn dma_read_handler(this_ptr: *mut c_void, port: u16, io_len: u8) -> u32 {
-    let dma = unsafe { &mut *(this_ptr as *mut BxDmaC) };
-    dma.read(port, io_len)
-}
-
-/// DMA write handler for I/O port infrastructure
-pub fn dma_write_handler(this_ptr: *mut c_void, port: u16, value: u32, io_len: u8) {
-    let dma = unsafe { &mut *(this_ptr as *mut BxDmaC) };
-    dma.write(port, value, io_len);
-}
 
 #[cfg(test)]
 mod tests {

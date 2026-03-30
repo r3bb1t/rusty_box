@@ -15,7 +15,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // General registers (20 × 8 = 160 bytes)
         for i in 0..20 {
-            buf.extend_from_slice(&unsafe { self.gen_reg[i].rrx }.to_le_bytes());
+            buf.extend_from_slice(&self.gen_reg[i].rrx().to_le_bytes());
         }
 
         // EFLAGS + instruction state
@@ -81,12 +81,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Vector registers (32 × 64 = 2048 bytes)
         for i in 0..32 {
-            buf.extend_from_slice(unsafe { &self.vmm[i].raw });
+            buf.extend_from_slice(self.vmm[i].raw());
         }
         buf.extend_from_slice(&self.mxcsr.mxcsr.to_le_bytes());
         buf.extend_from_slice(&self.mxcsr_mask.to_le_bytes());
         for i in 0..8 {
-            buf.extend_from_slice(&unsafe { self.opmask[i].rrx }.to_le_bytes());
+            buf.extend_from_slice(&self.opmask[i].rrx().to_le_bytes());
         }
 
         // MSR block
@@ -100,16 +100,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         buf.extend_from_slice(&self.msr.sysenter_cs_msr.to_le_bytes());
         buf.extend_from_slice(&self.msr.sysenter_esp_msr.to_le_bytes());
         buf.extend_from_slice(&self.msr.sysenter_eip_msr.to_le_bytes());
-        buf.extend_from_slice(&unsafe { self.msr.pat.U64 }.to_le_bytes());
+        buf.extend_from_slice(&self.msr.pat.U64().to_le_bytes());
         for v in &self.msr.mtrrphys {
             buf.extend_from_slice(&v.to_le_bytes());
         }
-        buf.extend_from_slice(&unsafe { self.msr.mtrrfix64k.U64 }.to_le_bytes());
+        buf.extend_from_slice(&self.msr.mtrrfix64k.U64().to_le_bytes());
         for r in &self.msr.mtrrfix16k {
-            buf.extend_from_slice(&unsafe { r.U64 }.to_le_bytes());
+            buf.extend_from_slice(&r.U64().to_le_bytes());
         }
         for r in &self.msr.mtrrfix4k {
-            buf.extend_from_slice(&unsafe { r.U64 }.to_le_bytes());
+            buf.extend_from_slice(&r.U64().to_le_bytes());
         }
         buf.extend_from_slice(&self.msr.mtrr_deftype.to_le_bytes());
 
@@ -137,7 +137,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // General registers
         for i in 0..20 {
-            self.gen_reg[i].rrx = u64_at(d, &mut off);
+            self.gen_reg[i].set_rrx(u64_at(d, &mut off));
         }
         self.eflags = EFlags::from_bits_retain(u32_at(d, &mut off));
         self.icount = u64_at(d, &mut off);
@@ -195,13 +195,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Vector registers
         for i in 0..32 {
-            unsafe { self.vmm[i].raw.copy_from_slice(&d[off..off + 64]) };
+            self.vmm[i].raw_mut().copy_from_slice(&d[off..off + 64]);
             off += 64;
         }
         self.mxcsr.mxcsr = u32_at(d, &mut off);
         self.mxcsr_mask = u32_at(d, &mut off);
         for i in 0..8 {
-            self.opmask[i].rrx = u64_at(d, &mut off);
+            self.opmask[i].set_rrx(u64_at(d, &mut off));
         }
 
         // MSRs
@@ -215,16 +215,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.msr.sysenter_cs_msr = u32_at(d, &mut off);
         self.msr.sysenter_esp_msr = u64_at(d, &mut off);
         self.msr.sysenter_eip_msr = u64_at(d, &mut off);
-        self.msr.pat.U64 = u64_at(d, &mut off);
+        self.msr.pat.set_U64(u64_at(d, &mut off));
         for v in self.msr.mtrrphys.iter_mut() {
             *v = u64_at(d, &mut off);
         }
-        self.msr.mtrrfix64k.U64 = u64_at(d, &mut off);
+        self.msr.mtrrfix64k.set_U64(u64_at(d, &mut off));
         for r in self.msr.mtrrfix16k.iter_mut() {
-            r.U64 = u64_at(d, &mut off);
+            r.set_U64(u64_at(d, &mut off));
         }
         for r in self.msr.mtrrfix4k.iter_mut() {
-            r.U64 = u64_at(d, &mut off);
+            r.set_U64(u64_at(d, &mut off));
         }
         self.msr.mtrr_deftype = u32_at(d, &mut off);
 
@@ -286,14 +286,12 @@ fn write_seg_reg(buf: &mut alloc::vec::Vec<u8>, seg: &BxSegmentReg) {
     buf.push(seg.cache.dpl);
     buf.push(seg.cache.segment as u8);
     buf.push(seg.cache.r#type);
-    // Descriptor: segment union variant (base, limit_scaled, g, d_b, l, avl)
-    let s = unsafe { &seg.cache.u.segment };
-    buf.extend_from_slice(&s.base.to_le_bytes());
-    buf.extend_from_slice(&s.limit_scaled.to_le_bytes());
-    buf.push(s.g as u8);
-    buf.push(s.d_b as u8);
-    buf.push(s.l as u8);
-    buf.push(s.avl as u8);
+    buf.extend_from_slice(&seg.cache.u.segment_base().to_le_bytes());
+    buf.extend_from_slice(&seg.cache.u.segment_limit_scaled().to_le_bytes());
+    buf.push(seg.cache.u.segment_g() as u8);
+    buf.push(seg.cache.u.segment_d_b() as u8);
+    buf.push(seg.cache.u.segment_l() as u8);
+    buf.push(seg.cache.u.segment_avl() as u8);
 }
 
 fn write_global_seg(buf: &mut alloc::vec::Vec<u8>, seg: &BxGlobalSegmentReg) {
@@ -311,14 +309,12 @@ fn read_seg_reg(d: &[u8], off: &mut usize, seg: &mut BxSegmentReg) {
     seg.cache.dpl = d[*off]; *off += 1;
     seg.cache.segment = d[*off] != 0; *off += 1;
     seg.cache.r#type = d[*off]; *off += 1;
-    unsafe {
-        seg.cache.u.segment.base = u64_at(d, off);
-        seg.cache.u.segment.limit_scaled = u32_at(d, off);
-        seg.cache.u.segment.g = d[*off] != 0; *off += 1;
-        seg.cache.u.segment.d_b = d[*off] != 0; *off += 1;
-        seg.cache.u.segment.l = d[*off] != 0; *off += 1;
-        seg.cache.u.segment.avl = d[*off] != 0; *off += 1;
-    }
+    seg.cache.u.set_segment_base(u64_at(d, off));
+    seg.cache.u.set_segment_limit_scaled(u32_at(d, off));
+    seg.cache.u.set_segment_g(d[*off] != 0); *off += 1;
+    seg.cache.u.set_segment_d_b(d[*off] != 0); *off += 1;
+    seg.cache.u.set_segment_l(d[*off] != 0); *off += 1;
+    seg.cache.u.set_segment_avl(d[*off] != 0); *off += 1;
 }
 
 fn read_global_seg(d: &[u8], off: &mut usize, seg: &mut BxGlobalSegmentReg) {
@@ -337,19 +333,19 @@ fn u16_at(d: &[u8], off: &mut usize) -> u16 {
 }
 
 fn u32_at(d: &[u8], off: &mut usize) -> u32 {
-    let v = u32::from_le_bytes(d[*off..*off + 4].try_into().unwrap());
+    let v = u32::from_le_bytes(d[*off..*off + 4].try_into().unwrap_or_else(|_| unreachable!("slice is exactly 4 bytes")));
     *off += 4;
     v
 }
 
 fn u64_at(d: &[u8], off: &mut usize) -> u64 {
-    let v = u64::from_le_bytes(d[*off..*off + 8].try_into().unwrap());
+    let v = u64::from_le_bytes(d[*off..*off + 8].try_into().unwrap_or_else(|_| unreachable!("slice is exactly 8 bytes")));
     *off += 8;
     v
 }
 
 fn i64_at(d: &[u8], off: &mut usize) -> i64 {
-    let v = i64::from_le_bytes(d[*off..*off + 8].try_into().unwrap());
+    let v = i64::from_le_bytes(d[*off..*off + 8].try_into().unwrap_or_else(|_| unreachable!("slice is exactly 8 bytes")));
     *off += 8;
     v
 }

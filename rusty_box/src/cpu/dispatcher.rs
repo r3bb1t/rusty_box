@@ -304,7 +304,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // FAR JMP
             // =========================================================================
             Opcode::JmpfAp => {
-                tracing::debug!("DISPATCH JmpfAp: RIP={:#x} CS={:#x}", self.prev_rip, unsafe { self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value });
+                // SAFETY: segment cache populated during segment load; union read matches descriptor type
+                tracing::trace!("DISPATCH JmpfAp: RIP={:#x} CS={:#x}", self.prev_rip, unsafe { self.sregs[super::decoder::BxSegregs::Cs as usize].selector.value });
                 self.jmpf_ap(instr)
             }
 

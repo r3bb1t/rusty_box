@@ -122,9 +122,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op1 = self.read_xmm_reg(instr.dst());
         let mut op2 = self.sse_read_op2_xmm(instr)?;
 
-        unsafe {
-            op2.xmm32u[3] = op2.xmm32u[3].wrapping_add(rol32(op1.xmm32u[3], 30));
-        }
+            op2.set_xmm32u(3, op2.xmm32u(3).wrapping_add(rol32(op1.xmm32u(3), 30)));
 
         self.write_xmm_reg_lo128(instr.dst(), op2);
         Ok(())
@@ -137,12 +135,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
-        unsafe {
-            op1.xmm32u[3] ^= op1.xmm32u[1];
-            op1.xmm32u[2] ^= op1.xmm32u[0];
-            op1.xmm32u[1] ^= op2.xmm32u[3];
-            op1.xmm32u[0] ^= op2.xmm32u[2];
-        }
+            op1.set_xmm32u(3, op1.xmm32u(3) ^ op1.xmm32u(1));
+            op1.set_xmm32u(2, op1.xmm32u(2) ^ op1.xmm32u(0));
+            op1.set_xmm32u(1, op1.xmm32u(1) ^ op2.xmm32u(3));
+            op1.set_xmm32u(0, op1.xmm32u(0) ^ op2.xmm32u(2));
 
         self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
@@ -155,13 +151,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
-        unsafe {
-            op1.xmm32u[3] = rol32(op1.xmm32u[3] ^ op2.xmm32u[2], 1);
-            op1.xmm32u[2] = rol32(op1.xmm32u[2] ^ op2.xmm32u[1], 1);
-            op1.xmm32u[1] = rol32(op1.xmm32u[1] ^ op2.xmm32u[0], 1);
-            // Note: uses already-updated op1.xmm32u[3] (Bochs matches this)
-            op1.xmm32u[0] = rol32(op1.xmm32u[0] ^ op1.xmm32u[3], 1);
-        }
+            op1.set_xmm32u(3, rol32(op1.xmm32u(3) ^ op2.xmm32u(2), 1));
+            op1.set_xmm32u(2, rol32(op1.xmm32u(2) ^ op2.xmm32u(1), 1));
+            op1.set_xmm32u(1, rol32(op1.xmm32u(1) ^ op2.xmm32u(0), 1));
+            // Note: uses already-updated op1.xmm32u(3) (Bochs matches this)
+            op1.set_xmm32u(0, rol32(op1.xmm32u(0) ^ op1.xmm32u(3), 1));
 
         self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
@@ -180,7 +174,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.sse_read_op2_xmm(instr)?;
         let wk = self.read_xmm_reg(0); // implicit XMM0
 
-        unsafe {
             let mut a = [0u32; 3];
             let mut b = [0u32; 3];
             let mut c = [0u32; 3];
@@ -190,20 +183,20 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let mut g = [0u32; 3];
             let mut h = [0u32; 3];
 
-            a[0] = op2.xmm32u[3];
-            b[0] = op2.xmm32u[2];
-            e[0] = op2.xmm32u[1];
-            f[0] = op2.xmm32u[0];
+            a[0] = op2.xmm32u(3);
+            b[0] = op2.xmm32u(2);
+            e[0] = op2.xmm32u(1);
+            f[0] = op2.xmm32u(0);
 
-            c[0] = op1.xmm32u[3];
-            d[0] = op1.xmm32u[2];
-            g[0] = op1.xmm32u[1];
-            h[0] = op1.xmm32u[0];
+            c[0] = op1.xmm32u(3);
+            d[0] = op1.xmm32u(2);
+            g[0] = op1.xmm32u(1);
+            h[0] = op1.xmm32u(0);
 
             for n in 0..2usize {
                 let tmp = sha_ch(e[n], f[n], g[n])
                     .wrapping_add(sha256_transformation_rrr(e[n], 6, 11, 25))
-                    .wrapping_add(wk.xmm32u[n])
+                    .wrapping_add(wk.xmm32u(n))
                     .wrapping_add(h[n]);
                 a[n + 1] = tmp
                     .wrapping_add(sha_maj(a[n], b[n], c[n]))
@@ -218,13 +211,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
 
             let mut result = BxPackedXmmRegister::default();
-            result.xmm32u[0] = f[2];
-            result.xmm32u[1] = e[2];
-            result.xmm32u[2] = b[2];
-            result.xmm32u[3] = a[2];
+            result.set_xmm32u(0, f[2]);
+            result.set_xmm32u(1, e[2]);
+            result.set_xmm32u(2, b[2]);
+            result.set_xmm32u(3, a[2]);
 
             self.write_xmm_reg_lo128(instr.dst(), result);
-        }
         Ok(())
     }
 
@@ -234,18 +226,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Uses sigma0 transformation: ror(x,7) ^ ror(x,18) ^ (x >> 3)
     pub fn sha256msg1_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         let mut op1 = self.read_xmm_reg(instr.dst());
-        let op2_dword0 = unsafe { self.sse_read_op2_xmm(instr)?.xmm32u[0] };
+        let op2_dword0 = self.sse_read_op2_xmm(instr)?.xmm32u(0);
 
-        unsafe {
-            op1.xmm32u[0] = op1.xmm32u[0]
-                .wrapping_add(sha256_transformation_rrs(op1.xmm32u[1], 7, 18, 3));
-            op1.xmm32u[1] = op1.xmm32u[1]
-                .wrapping_add(sha256_transformation_rrs(op1.xmm32u[2], 7, 18, 3));
-            op1.xmm32u[2] = op1.xmm32u[2]
-                .wrapping_add(sha256_transformation_rrs(op1.xmm32u[3], 7, 18, 3));
-            op1.xmm32u[3] =
-                op1.xmm32u[3].wrapping_add(sha256_transformation_rrs(op2_dword0, 7, 18, 3));
-        }
+            op1.set_xmm32u(0, op1.xmm32u(0)
+                .wrapping_add(sha256_transformation_rrs(op1.xmm32u(1), 7, 18, 3)));
+            op1.set_xmm32u(1, op1.xmm32u(1)
+                .wrapping_add(sha256_transformation_rrs(op1.xmm32u(2), 7, 18, 3)));
+            op1.set_xmm32u(2, op1.xmm32u(2)
+                .wrapping_add(sha256_transformation_rrs(op1.xmm32u(3), 7, 18, 3)));
+            op1.set_xmm32u(3, op1.xmm32u(3).wrapping_add(sha256_transformation_rrs(op2_dword0, 7, 18, 3)));
 
         self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
@@ -259,17 +248,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut op1 = self.read_xmm_reg(instr.dst());
         let op2 = self.sse_read_op2_xmm(instr)?;
 
-        unsafe {
-            op1.xmm32u[0] = op1.xmm32u[0]
-                .wrapping_add(sha256_transformation_rrs(op2.xmm32u[2], 17, 19, 10));
-            op1.xmm32u[1] = op1.xmm32u[1]
-                .wrapping_add(sha256_transformation_rrs(op2.xmm32u[3], 17, 19, 10));
-            // Note: uses already-updated op1.xmm32u[0] and [1] (Bochs matches this)
-            op1.xmm32u[2] = op1.xmm32u[2]
-                .wrapping_add(sha256_transformation_rrs(op1.xmm32u[0], 17, 19, 10));
-            op1.xmm32u[3] = op1.xmm32u[3]
-                .wrapping_add(sha256_transformation_rrs(op1.xmm32u[1], 17, 19, 10));
-        }
+            op1.set_xmm32u(0, op1.xmm32u(0)
+                .wrapping_add(sha256_transformation_rrs(op2.xmm32u(2), 17, 19, 10)));
+            op1.set_xmm32u(1, op1.xmm32u(1)
+                .wrapping_add(sha256_transformation_rrs(op2.xmm32u(3), 17, 19, 10)));
+            // Note: uses already-updated op1.xmm32u(0) and [1] (Bochs matches this)
+            op1.set_xmm32u(2, op1.xmm32u(2)
+                .wrapping_add(sha256_transformation_rrs(op1.xmm32u(0), 17, 19, 10)));
+            op1.set_xmm32u(3, op1.xmm32u(3)
+                .wrapping_add(sha256_transformation_rrs(op1.xmm32u(1), 17, 19, 10)));
 
         self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())
@@ -292,14 +279,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let imm = (instr.ib() & 0x3) as u32;
         let k = SHA_KI[imm as usize];
 
-        unsafe {
-            let mut a = op1.xmm32u[3];
-            let mut b = op1.xmm32u[2];
-            let mut c = op1.xmm32u[1];
-            let mut d = op1.xmm32u[0];
+            let mut a = op1.xmm32u(3);
+            let mut b = op1.xmm32u(2);
+            let mut c = op1.xmm32u(1);
+            let mut d = op1.xmm32u(0);
             let mut e: u32 = 0;
 
-            let w = [op2.xmm32u[3], op2.xmm32u[2], op2.xmm32u[1], op2.xmm32u[0]];
+            let w = [op2.xmm32u(3), op2.xmm32u(2), op2.xmm32u(1), op2.xmm32u(0)];
 
             for n in 0..4 {
                 let a_next = sha_f(b, c, d, imm)
@@ -315,11 +301,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 a = a_next;
             }
 
-            op1.xmm32u[3] = a;
-            op1.xmm32u[2] = b;
-            op1.xmm32u[1] = c;
-            op1.xmm32u[0] = d;
-        }
+            op1.set_xmm32u(3, a);
+            op1.set_xmm32u(2, b);
+            op1.set_xmm32u(1, c);
+            op1.set_xmm32u(0, d);
 
         self.write_xmm_reg_lo128(instr.dst(), op1);
         Ok(())

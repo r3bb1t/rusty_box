@@ -52,7 +52,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     error_code: (selector.value & 0xfffc) as u16,
                 });
             }
-            let ldt_limit = unsafe { self.ldtr.cache.u.segment.limit_scaled };
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            let ldt_limit = self.ldtr.cache.u.segment_limit_scaled();
             let index_offset = (index as u32) * 8 + 7;
             if index_offset > ldt_limit {
                 tracing::debug!(
@@ -66,7 +67,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     error_code: (selector.value & 0xfffc) as u16,
                 });
             }
-            offset = unsafe { self.ldtr.cache.u.segment.base } + (index as u64 * 8);
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            offset = self.ldtr.cache.u.segment_base() + (index as u64 * 8);
         }
 
         // Read descriptor as qword (64 bits = 2 dwords)
@@ -216,7 +218,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         if tss_type == 0x9 || tss_type == 0xB {
             // 32-bit TSS
             let tss_stackaddr = (8 * pl as u32) + 4;
-            let limit_scaled = unsafe { self.tr.cache.u.segment.limit_scaled };
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            let limit_scaled = self.tr.cache.u.segment_limit_scaled();
             if (tss_stackaddr + 7) > limit_scaled {
                 tracing::error!("get_ss_esp_from_tss(386): TSSstackaddr > TSS.LIMIT");
                 return Err(super::error::CpuError::BadVector {
@@ -224,14 +227,16 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     error_code: 0,
                 });
             }
-            let tss_base = unsafe { self.tr.cache.u.segment.base };
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            let tss_base = self.tr.cache.u.segment_base();
             let ss = self.system_read_word(tss_base + tss_stackaddr as u64 + 4)?;
             let esp = self.system_read_dword(tss_base + tss_stackaddr as u64)?;
             Ok((ss, esp))
         } else if tss_type == 0x1 || tss_type == 0x3 {
             // 16-bit TSS
             let tss_stackaddr = (4 * pl as u32) + 2;
-            let limit_scaled = unsafe { self.tr.cache.u.segment.limit_scaled };
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            let limit_scaled = self.tr.cache.u.segment_limit_scaled();
             if (tss_stackaddr + 3) > limit_scaled {
                 tracing::error!("get_ss_esp_from_tss(286): TSSstackaddr > TSS.LIMIT");
                 return Err(super::error::CpuError::BadVector {
@@ -239,7 +244,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     error_code: 0,
                 });
             }
-            let tss_base = unsafe { self.tr.cache.u.segment.base };
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            let tss_base = self.tr.cache.u.segment_base();
             let ss = self.system_read_word(tss_base + tss_stackaddr as u64 + 2)?;
             let esp = self.system_read_word(tss_base + tss_stackaddr as u64)? as u32;
             Ok((ss, esp))
@@ -265,7 +271,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
         // 64-bit TSS: RSP fields at offsets 4, 12, 20 for PL 0, 1, 2
         let tss_stackaddr = (8 * pl as u32) + 4;
-        let limit_scaled = unsafe { self.tr.cache.u.segment.limit_scaled };
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
+        let limit_scaled = self.tr.cache.u.segment_limit_scaled();
         if (tss_stackaddr + 7) > limit_scaled {
             tracing::debug!("get_rsp_from_tss: TSSstackaddr > TSS.LIMIT");
             let err_code = self.tr.selector.value & 0xfffc;
@@ -273,7 +280,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             unreachable!();
         }
 
-        let tss_base = unsafe { self.tr.cache.u.segment.base };
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
+        let tss_base = self.tr.cache.u.segment_base();
         let rsp = self.system_read_qword(tss_base + tss_stackaddr as u64)?;
 
         if !self.is_canonical(rsp) {
@@ -318,7 +326,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     error_code: selector.value & 0xfffc,
                 });
             }
-            let ldt_limit = unsafe { self.ldtr.cache.u.segment.limit_scaled };
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            let ldt_limit = self.ldtr.cache.u.segment_limit_scaled();
             let index_offset = index * 8 + 15;
             if index_offset > ldt_limit {
                 tracing::error!(
@@ -332,7 +341,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     error_code: selector.value & 0xfffc,
                 });
             }
-            offset = unsafe { self.ldtr.cache.u.segment.base } + (index as u64 * 8);
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            offset = self.ldtr.cache.u.segment_base() + (index as u64 * 8);
         }
 
         // Read two qwords (16 bytes total = 128-bit descriptor)
@@ -368,7 +378,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         _dpl: u8,
         value: u16,
     ) -> Result<()> {
-        let seg_base = unsafe { seg.cache.u.segment.base };
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
+        let seg_base = seg.cache.u.segment_base();
         let laddr = (seg_base + addr as u64) & 0xFFFFFFFF;
         self.system_write_word(laddr, value)
     }
@@ -384,7 +395,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         _dpl: u8,
         value: u32,
     ) -> Result<()> {
-        let seg_base = unsafe { seg.cache.u.segment.base };
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
+        let seg_base = seg.cache.u.segment_base();
         let laddr = (seg_base + addr as u64) & 0xFFFFFFFF;
         self.system_write_dword(laddr, value)
     }
@@ -454,7 +466,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 self.gdtr.base + (selector.index as u64 * 8) + 5
             } else {
                 // LDT
-                let ldt_base = unsafe { self.ldtr.cache.u.segment.base };
+                // SAFETY: segment cache populated during segment load; union read matches descriptor type
+                let ldt_base = self.ldtr.cache.u.segment_base();
                 ldt_base + (selector.index as u64 * 8) + 5
             };
 
@@ -486,7 +499,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
         // Bochs ctrl_xfer_pro.cc:39-44 — L+D_B both set is invalid in long mode
         if self.long_mode() {
-            if unsafe { descriptor.u.segment.l && descriptor.u.segment.d_b } {
+            if descriptor.u.segment_l() && descriptor.u.segment_d_b() {
                 tracing::error!(
                     "check_cs({:#06x}): Both CS.L and CS.D_B bits enabled!",
                     cs_raw
@@ -597,7 +610,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     ) -> Result<()> {
         // Bochs ctrl_xfer_pro.cc:122-147
         // In long mode with a 64-bit code segment, do canonical check instead of limit check
-        if self.long_mode() && unsafe { descriptor.u.segment.l } {
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
+        if self.long_mode() && descriptor.u.segment_l() {
             if !self.is_canonical(rip) {
                 tracing::error!("branch_far: canonical RIP violation {:#018x}", rip);
                 return self.exception(Exception::Gp, 0);
@@ -605,7 +619,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         } else {
             // Legacy mode: mask RIP to 32 bits and check segment limit
             let rip_masked = rip & 0xFFFFFFFF;
-            let limit = unsafe { descriptor.u.segment.limit_scaled };
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            let limit = descriptor.u.segment_limit_scaled();
             if rip_masked as u32 > limit {
                 tracing::error!(
                     "branch_far: RIP {:#010x} > limit {:#010x}",
@@ -621,7 +636,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
         // Update RIP
         // In long mode with L=1, RIP is full 64-bit; otherwise mask to 32 bits
-        if self.long_mode() && unsafe { descriptor.u.segment.l } {
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
+        if self.long_mode() && descriptor.u.segment_l() {
             self.set_rip(rip);
         } else {
             self.set_rip(rip & 0xFFFFFFFF);
@@ -666,7 +682,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
         tracing::info!("jump_protected: descriptor segment={}, type={:#x}, dpl={}, p={}, base={:#010x}, limit={:#010x}",
                       descriptor.segment, descriptor.r#type, descriptor.dpl, descriptor.p,
-                      unsafe { descriptor.u.segment.base }, unsafe { descriptor.u.segment.limit_scaled });
+                      descriptor.u.segment_base(), descriptor.u.segment_limit_scaled());
 
         if descriptor.segment {
             // Code segment descriptor
@@ -852,7 +868,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 tracing::debug!(
                     "load_seg_reg(SS): loaded selector {:#06x}, d_b={}",
                     new_value,
-                    unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b }
+                    self.sregs[BxSegregs::Ss as usize].cache.u.segment_d_b()
                 );
 
                 return Ok(());
@@ -980,14 +996,12 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         self.sregs[seg_idx].cache.r#type = 0;
 
         // Zero segment descriptor fields — Bochs segment_ctrl_pro.cc:227-234
-        unsafe {
-            self.sregs[seg_idx].cache.u.segment.base = 0;
-            self.sregs[seg_idx].cache.u.segment.limit_scaled = 0;
-            self.sregs[seg_idx].cache.u.segment.g = false;
-            self.sregs[seg_idx].cache.u.segment.d_b = false;
-            self.sregs[seg_idx].cache.u.segment.l = false;
-            self.sregs[seg_idx].cache.u.segment.avl = false;
-        }
+        self.sregs[seg_idx].cache.u.set_segment_base(0);
+        self.sregs[seg_idx].cache.u.set_segment_limit_scaled(0);
+        self.sregs[seg_idx].cache.u.set_segment_g(false);
+        self.sregs[seg_idx].cache.u.set_segment_d_b(false);
+        self.sregs[seg_idx].cache.u.set_segment_l(false);
+        self.sregs[seg_idx].cache.u.set_segment_avl(false);
 
         // Bochs segment_ctrl_pro.cc:236 — invalidate stack cache after null SS load
         if seg == BxSegregs::Ss {
@@ -1083,10 +1097,9 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         // In long mode, extend base to 64 bits and check canonical
         // Bochs protect_ctrl.cc:460-468
         if self.long64_mode() {
-            unsafe {
-                descriptor.u.segment.base |= (dword3 as u64) << 32;
-            }
-            if !self.is_canonical(unsafe { descriptor.u.segment.base }) {
+            descriptor.u.set_segment_base(descriptor.u.segment_base() | (dword3 as u64) << 32);
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            if !self.is_canonical(descriptor.u.segment_base()) {
                 tracing::error!("LLDT: non-canonical LDT descriptor base!");
                 self.exception(Exception::Gp, raw_selector & 0xfffc)?;
                 return Ok(());
@@ -1197,10 +1210,9 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         // In long mode, extend base to 64 bits and check canonical
         // Bochs protect_ctrl.cc:569-577
         if self.long64_mode() {
-            unsafe {
-                descriptor.u.segment.base |= (dword3 as u64) << 32;
-            }
-            if !self.is_canonical(unsafe { descriptor.u.segment.base }) {
+            descriptor.u.set_segment_base(descriptor.u.segment_base() | (dword3 as u64) << 32);
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            if !self.is_canonical(descriptor.u.segment_base()) {
                 tracing::error!("LTR: non-canonical TSS descriptor base!");
                 self.exception(Exception::Gp, raw_selector & 0xfffc)?;
                 return Ok(());
@@ -1411,8 +1423,10 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         // Get CS:EIP from gate
-        let gate_cs_raw = unsafe { gate_descriptor.u.gate.dest_selector };
-        let new_eip = unsafe { gate_descriptor.u.gate.dest_offset };
+        // SAFETY: descriptor type verified as gate before union access
+        let gate_cs_raw = gate_descriptor.u.gate_dest_selector();
+        // SAFETY: descriptor type verified as gate before union access
+        let new_eip = gate_descriptor.u.gate_dest_offset();
 
         if (gate_cs_raw & 0xfffc) == 0 {
             tracing::error!("call_gate: CS selector null");
@@ -1483,7 +1497,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 return self.exception(Exception::Ss, ss_for_cpl_x & 0xfffc);
             }
 
-            let param_count = unsafe { gate_descriptor.u.gate.param_count } & 0x1f;
+            // SAFETY: descriptor type verified as gate before union access
+            let param_count = gate_descriptor.u.gate_param_count() & 0x1f;
 
             // Save return SS:ESP and CS:EIP
             let return_ss = self.sregs[BxSegregs::Ss as usize].selector.value;
@@ -1505,7 +1520,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
             let is_386_gate = gate_descriptor.r#type == 0xC;
 
-            if unsafe { ss_descriptor.u.segment.d_b } {
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            if ss_descriptor.u.segment_d_b() {
                 let mut temp_esp = esp_for_cpl_x;
 
                 if is_386_gate {
@@ -1712,7 +1728,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             return self.exception(Exception::Np, selector.value & 0xfffc);
         }
 
-        let raw_tss_selector = unsafe { gate_descriptor.u.task_gate.tss_selector };
+        // SAFETY: descriptor type verified as task gate before union access
+        let raw_tss_selector = gate_descriptor.u.task_gate_tss_selector();
         let mut tss_selector = BxSelector::default();
         parse_selector(raw_tss_selector, &mut tss_selector);
 
@@ -1908,7 +1925,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             // Load new SS
             self.load_ss(&mut ss_selector, &mut ss_descriptor, new_cpl)?;
 
-            if unsafe { ss_descriptor.u.segment.d_b } {
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            if ss_descriptor.u.segment_d_b() {
                 self.set_esp(return_rsp.wrapping_add(pop_bytes as u32));
             } else {
                 self.set_sp((return_rsp as u16).wrapping_add(pop_bytes));
@@ -1936,7 +1954,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             return self.exception(Exception::Np, _selector.value & 0xfffc);
         }
 
-        let gate_cs_raw = unsafe { gate_descriptor.u.gate.dest_selector };
+        // SAFETY: descriptor type verified as gate before union access
+        let gate_cs_raw = gate_descriptor.u.gate_dest_selector();
         if (gate_cs_raw & 0xfffc) == 0 {
             tracing::error!("jmp_call_gate: CS selector null");
             return self.exception(Exception::Gp, 0);
@@ -1954,7 +1973,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         self.check_cs(&cs_descriptor, gate_cs_raw, 0, cpl)?;
 
-        let temp_eip = unsafe { gate_descriptor.u.gate.dest_offset };
+        // SAFETY: descriptor type verified as gate before union access
+        let temp_eip = gate_descriptor.u.gate_dest_offset();
         self.branch_far(
             &mut gate_cs_selector,
             &mut cs_descriptor,
@@ -1977,7 +1997,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         let (dword1, dword2, dword3) = self.fetch_raw_descriptor_64(gate_selector)?;
         let gate_descriptor = self.parse_descriptor(dword1, dword2)?;
 
-        let dest_selector = unsafe { gate_descriptor.u.gate.dest_selector };
+        // SAFETY: descriptor type verified as gate before union access
+        let dest_selector = gate_descriptor.u.gate_dest_selector();
         // selector must not be null else #GP(0)
         if (dest_selector & 0xfffc) == 0 {
             tracing::error!("jmp_call_gate64: selector in gate null");
@@ -1994,7 +2015,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         let mut cs_descriptor = self.parse_descriptor(dw1, dw2)?;
 
         // Find the RIP from the gate_descriptor: high 32 bits from dword3, low 32 from gate offset
-        let gate_offset_lo = unsafe { gate_descriptor.u.gate.dest_offset };
+        // SAFETY: descriptor type verified as gate before union access
+        let gate_offset_lo = gate_descriptor.u.gate_dest_offset();
         let new_rip = ((dword3 as u64) << 32) | (gate_offset_lo as u64);
 
         // AR byte of selected descriptor must indicate code segment, else #GP(code segment selector)
@@ -2008,7 +2030,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
         // In long mode, only 64-bit call gates are allowed, and they must point
         // to 64-bit code segments (L=1, D=0), else #GP(selector)
-        if !cs_descriptor.is_long64_segment() || unsafe { cs_descriptor.u.segment.d_b } {
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
+        if !cs_descriptor.is_long64_segment() || cs_descriptor.u.segment_d_b() {
             tracing::error!("jmp_call_gate64: not 64-bit code segment in 64-bit call gate");
             return self.exception(Exception::Gp, dest_selector & 0xfffc);
         }
@@ -2037,7 +2060,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             return self.exception(Exception::Np, selector.value & 0xfffc);
         }
 
-        let raw_tss_selector = unsafe { gate_descriptor.u.task_gate.tss_selector };
+        // SAFETY: descriptor type verified as task gate before union access
+        let raw_tss_selector = gate_descriptor.u.task_gate_tss_selector();
         let mut tss_selector = BxSelector::default();
         parse_selector(raw_tss_selector, &mut tss_selector);
 
@@ -2120,7 +2144,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             // Normal code segment
             self.check_cs(&cs_descriptor, cs_raw, cs_selector.rpl, cpl)?;
 
-            if self.long_mode() && unsafe { cs_descriptor.u.segment.l } {
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            if self.long_mode() && cs_descriptor.u.segment_l() {
                 // Moving to 64-bit long mode code segment — use 64-bit RSP directly
                 let temp_rsp = self.rsp();
 
@@ -2166,7 +2191,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 }
             } else {
                 // Legacy mode within long mode (compatibility sub-mode)
-                let temp_rsp = if unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b }
+                // SAFETY: segment cache populated during segment load; union read matches descriptor type
+                let temp_rsp = if self.sregs[BxSegregs::Ss as usize].cache.u.segment_d_b()
                 {
                     self.esp() as u64
                 } else {
@@ -2189,7 +2215,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                         self.eip(),
                     )?;
                     self.branch_far(&mut cs_selector, &mut cs_descriptor, disp, cpl)?;
-                    if unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b } {
+                    // SAFETY: segment cache populated during segment load; union read matches descriptor type
+                    if self.sregs[BxSegregs::Ss as usize].cache.u.segment_d_b() {
                         self.set_esp(temp_rsp.wrapping_sub(8) as u32);
                     } else {
                         self.set_sp(temp_rsp.wrapping_sub(8) as u16);
@@ -2208,7 +2235,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                         self.get_ip(),
                     )?;
                     self.branch_far(&mut cs_selector, &mut cs_descriptor, disp, cpl)?;
-                    if unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b } {
+                    // SAFETY: segment cache populated during segment load; union read matches descriptor type
+                    if self.sregs[BxSegregs::Ss as usize].cache.u.segment_d_b() {
                         self.set_esp(temp_rsp.wrapping_sub(4) as u32);
                     } else {
                         self.set_sp(temp_rsp.wrapping_sub(4) as u16);
@@ -2259,7 +2287,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         let (dword1, dword2, dword3) = self.fetch_raw_descriptor_64(gate_selector)?;
         let gate_descriptor = self.parse_descriptor(dword1, dword2)?;
 
-        let dest_selector = unsafe { gate_descriptor.u.gate.dest_selector };
+        // SAFETY: descriptor type verified as gate before union access
+        let dest_selector = gate_descriptor.u.gate_dest_selector();
         if (dest_selector & 0xfffc) == 0 {
             tracing::error!("call_gate64: selector in gate null");
             return self.exception(Exception::Gp, 0);
@@ -2275,7 +2304,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         let mut cs_descriptor = self.parse_descriptor(dw1, dw2)?;
 
         // Compute the full 64-bit RIP from the gate descriptor
-        let gate_offset_lo = unsafe { gate_descriptor.u.gate.dest_offset };
+        // SAFETY: descriptor type verified as gate before union access
+        let gate_offset_lo = gate_descriptor.u.gate_dest_offset();
         let new_rip = ((dword3 as u64) << 32) | (gate_offset_lo as u64);
 
         // AR byte must indicate code segment, DPL <= CPL
@@ -2290,7 +2320,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         // Must be a 64-bit code segment (L=1, D=0)
-        if !cs_descriptor.is_long64_segment() || unsafe { cs_descriptor.u.segment.d_b } {
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
+        if !cs_descriptor.is_long64_segment() || cs_descriptor.u.segment_d_b() {
             tracing::error!("call_gate64: not 64-bit code segment in call gate 64");
             return self.exception(Exception::Gp, dest_selector & 0xfffc);
         }
@@ -2375,7 +2406,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     ) -> Result<()> {
         let temp_rsp: u64 = if self.long64_mode() {
             self.rsp()
-        } else if unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b } {
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
+        } else if self.sregs[BxSegregs::Ss as usize].cache.u.segment_d_b() {
             self.esp() as u64
         } else {
             self.sp() as u64
@@ -2432,7 +2464,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                         .wrapping_add(stack_param_offset)
                         .wrapping_add(pop_bytes as u64),
                 );
-            } else if unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b } {
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            } else if self.sregs[BxSegregs::Ss as usize].cache.u.segment_d_b() {
                 let val = self
                     .esp()
                     .wrapping_add(stack_param_offset as u32)
@@ -2545,7 +2578,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
             if self.long64_mode() {
                 self.set_rsp(return_rsp.wrapping_add(pop_bytes as u64));
-            } else if unsafe { ss_descriptor.u.segment.d_b } {
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            } else if ss_descriptor.u.segment_d_b() {
                 self.set_esp((return_rsp as u32).wrapping_add(pop_bytes as u32));
             } else {
                 self.set_sp((return_rsp as u16).wrapping_add(pop_bytes));
@@ -2578,7 +2612,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         // Determine temp_RSP based on mode
         let temp_rsp: u64 = if self.long64_mode() {
             self.rsp()
-        } else if unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b } {
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
+        } else if self.sregs[BxSegregs::Ss as usize].cache.u.segment_d_b() {
             self.esp() as u64
         } else {
             self.sp() as u64
@@ -2667,7 +2702,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             self.write_eflags(new_eflags, change_mask_val);
 
             // We are NOT in 64-bit mode for this path
-            if unsafe { self.sregs[BxSegregs::Ss as usize].cache.u.segment.d_b } {
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            if self.sregs[BxSegregs::Ss as usize].cache.u.segment_d_b() {
                 self.set_esp(self.esp().wrapping_add(top_nbytes_same as u32));
             } else {
                 self.set_sp(self.sp().wrapping_add(top_nbytes_same as u16));
@@ -2778,7 +2814,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
             if self.long64_mode() {
                 self.set_rsp(new_rsp);
-            } else if unsafe { ss_descriptor.u.segment.d_b } {
+            // SAFETY: segment cache populated during segment load; union read matches descriptor type
+            } else if ss_descriptor.u.segment_d_b() {
                 self.set_esp(new_rsp as u32);
             } else {
                 self.set_sp(new_rsp as u16);

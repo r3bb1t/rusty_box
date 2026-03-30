@@ -852,23 +852,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return self.exception(Exception::Gp, 0);
             }
 
-            // ISOLINUX __farcall diagnostic: log RM RETF targets
-            // Log first 20, then only non-VGA-BIOS targets (not c000:0147)
-            let is_vga = cs_raw == 0xC000 && ip == 0x0147;
-            // For Alpine debugging: log AH=09 (char write) from VGA BIOS
-            let is_char_write = is_vga && self.ah() == 0x09;
-            if self.diag_retf16_count < 20 || !is_vga || is_char_write {
-                if self.diag_retf16_count < 2000 {
-                    tracing::warn!(
-                        "RETF16 #{}: -> {:04x}:{:04x} AH={:02x} AL={:02x} DL={:02x} BX={:04x} CX={:04x} icount={}",
-                        self.diag_retf16_count,
-                        cs_raw, ip, self.ah(), self.al(), self.dl(),
-                        self.bx() as u16, self.cx() as u16,
-                        self.icount
-                    );
-                }
-            }
-            self.diag_retf16_count += 1;
 
             self.load_seg_reg_real_mode(BxSegregs::Cs, cs_raw);
             self.set_eip(ip as u32);

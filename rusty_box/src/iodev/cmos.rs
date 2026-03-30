@@ -30,7 +30,6 @@
 //! - 0x70: CMOS address register (write-only on most machines; reads return 0xFF)
 //! - 0x71: CMOS data register
 
-use core::ffi::c_void;
 
 /// CMOS I/O port addresses
 pub const CMOS_ADDR: u16 = 0x0070;
@@ -908,17 +907,6 @@ impl BxCmosC {
     }
 }
 
-/// CMOS read handler for I/O port infrastructure
-pub fn cmos_read_handler(this_ptr: *mut c_void, port: u16, io_len: u8) -> u32 {
-    let cmos = unsafe { &mut *(this_ptr as *mut BxCmosC) };
-    cmos.read(port, io_len)
-}
-
-/// CMOS write handler for I/O port infrastructure
-pub fn cmos_write_handler(this_ptr: *mut c_void, port: u16, value: u32, io_len: u8) {
-    let cmos = unsafe { &mut *(this_ptr as *mut BxCmosC) };
-    cmos.write(port, value, io_len);
-}
 
 #[cfg(test)]
 mod tests {

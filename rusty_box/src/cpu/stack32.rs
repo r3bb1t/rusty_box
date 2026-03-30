@@ -278,6 +278,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg_idx = instr.src() as usize; // Bochs: i->src() for PUSH Sw
         let val_16 = self.sregs[seg_idx].selector.value;
         // Bochs writes only a word at ESP-4, not a full dword
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
         let ss_d_b = unsafe {
             self.sregs[super::decoder::BxSegregs::Ss as usize]
                 .cache
@@ -367,6 +368,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// LEAVE (32-bit operand size)
     /// Based on Bochs stack32.cc:258-273
     pub fn leave_op32(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
         let ss_d_b = unsafe {
             self.sregs[super::decoder::BxSegregs::Ss as usize]
                 .cache

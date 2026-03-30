@@ -17,9 +17,7 @@ mod register_preservation_tests {
         let mut cpu = create_test_cpu();
 
         // Set EAX to 0xF0000000 (upper bits set)
-        unsafe {
-            cpu.gen_reg[0].rrx = 0xF0000000;
-        }
+        cpu.gen_reg[0].set_rrx(0xF0000000);
         assert_eq!(cpu.get_gpr32(0), 0xF0000000, "Initial setup failed");
 
         // Set AX to 0xFF53 (should only modify lower 16 bits)
@@ -43,34 +41,30 @@ mod register_preservation_tests {
         let mut cpu = create_test_cpu();
 
         // Test 1: Setting 64-bit value
-        unsafe {
-            cpu.gen_reg[0].rrx = 0x0123456789ABCDEF;
-        }
+        cpu.gen_reg[0].set_rrx(0x0123456789ABCDEF);
 
         // Verify we can read it back correctly
-        assert_eq!(unsafe { cpu.gen_reg[0].rrx }, 0x0123456789ABCDEF);
+        assert_eq!(cpu.gen_reg[0].rrx(), 0x0123456789ABCDEF);
 
         // Test 2: Read as 32-bit (should get lower 32 bits)
         assert_eq!(
-            unsafe { cpu.gen_reg[0].dword.erx },
+            cpu.gen_reg[0].erx(),
             0x89ABCDEF,
             "32-bit lower dword read failed"
         );
 
         // Test 3: Read as 16-bit (should get lower 16 bits)
         assert_eq!(
-            unsafe { cpu.gen_reg[0].word.rx },
+            cpu.gen_reg[0].rx(),
             0xCDEF,
             "16-bit word read failed"
         );
 
         // Test 4: Write to 16-bit field, verify upper bits unchanged
-        unsafe {
-            cpu.gen_reg[0].word.rx = 0x5555;
-        }
+        cpu.gen_reg[0].set_rx(0x5555);
 
         assert_eq!(
-            unsafe { cpu.gen_reg[0].rrx },
+            cpu.gen_reg[0].rrx(),
             0x0123456789AB5555,
             "Writing 16-bit modified upper bits!"
         );

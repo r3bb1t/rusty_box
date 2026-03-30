@@ -51,14 +51,15 @@ fn read_opmask_for_write<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, instr: &Instructi
     if k == 0 {
         u64::MAX // k0 = all elements active
     } else {
-        unsafe { cpu.opmask[k as usize].rrx }
+        // SAFETY: opmask register union always valid for rrx (full 64-bit) access
+        unsafe { cpu.opmask[k as usize].rrx() }
     }
 }
 
 /// Read ZMM register as a ZMM-width value
 #[inline]
 fn read_zmm<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, reg: u8) -> BxPackedZmmRegister {
-    unsafe { cpu.vmm[reg as usize] }
+    cpu.vmm[reg as usize]
 }
 
 /// Write ZMM register with dword-granularity masking, zeroing upper bits beyond VL
@@ -71,20 +72,18 @@ fn write_zmm_masked<I: BxCpuIdTrait>(
     vl: u8,
 ) {
     let nelements = dword_elements(vl);
-    unsafe {
-        let dst = &mut cpu.vmm[reg as usize];
-        for i in 0..nelements {
-            if (mask >> i) & 1 != 0 {
-                dst.zmm32u[i] = result.zmm32u[i];
-            } else if zero_masking {
-                dst.zmm32u[i] = 0;
-            }
-            // else: merge masking — keep original value
+    let dst = &mut cpu.vmm[reg as usize];
+    for i in 0..nelements {
+        if (mask >> i) & 1 != 0 {
+            dst.set_zmm32u(i, result.zmm32u(i));
+        } else if zero_masking {
+            dst.set_zmm32u(i, 0);
         }
-        // Zero upper elements beyond VL (EVEX always clears upper)
-        for i in nelements..16 {
-            dst.zmm32u[i] = 0;
-        }
+        // else: merge masking — keep original value
+    }
+    // Zero upper elements beyond VL (EVEX always clears upper)
+    for i in nelements..16 {
+        dst.set_zmm32u(i, 0);
     }
 }
 
@@ -98,19 +97,17 @@ fn write_zmm_masked_q<I: BxCpuIdTrait>(
     vl: u8,
 ) {
     let nelements = qword_elements(vl);
-    unsafe {
-        let dst = &mut cpu.vmm[reg as usize];
-        for i in 0..nelements {
-            if (mask >> i) & 1 != 0 {
-                dst.zmm64u[i] = result.zmm64u[i];
-            } else if zero_masking {
-                dst.zmm64u[i] = 0;
-            }
+    let dst = &mut cpu.vmm[reg as usize];
+    for i in 0..nelements {
+        if (mask >> i) & 1 != 0 {
+            dst.set_zmm64u(i, result.zmm64u(i));
+        } else if zero_masking {
+            dst.set_zmm64u(i, 0);
         }
-        // Zero upper elements beyond VL
-        for i in nelements..8 {
-            dst.zmm64u[i] = 0;
-        }
+    }
+    // Zero upper elements beyond VL
+    for i in nelements..8 {
+        dst.set_zmm64u(i, 0);
     }
 }
 
@@ -126,12 +123,12 @@ fn read_rm_ps<I: BxCpuIdTrait>(
         Ok(read_zmm(cpu, instr.src1()))
     } else {
         let nelements = dword_elements(vl);
-        let mut tmp = BxPackedZmmRegister { zmm64u: [0; 8] };
+        let mut tmp = BxPackedZmmRegister::default();
         let laddr = cpu.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
         for i in 0..nelements {
             let val = cpu.v_read_dword(seg, laddr + (i * 4) as u64)?;
-            unsafe { tmp.zmm32u[i] = val; }
+            tmp.set_zmm32u(i, val);
         }
         Ok(tmp)
     }
@@ -149,13 +146,13 @@ fn read_rm_pd<I: BxCpuIdTrait>(
         Ok(read_zmm(cpu, instr.src1()))
     } else {
         let nelements = qword_elements(vl);
-        let mut tmp = BxPackedZmmRegister { zmm64u: [0; 8] };
+        let mut tmp = BxPackedZmmRegister::default();
         let laddr = cpu.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
         for i in 0..nelements {
             let lo = cpu.v_read_dword(seg, laddr + (i * 8) as u64)? as u64;
             let hi = cpu.v_read_dword(seg, laddr + (i * 8 + 4) as u64)? as u64;
-            unsafe { tmp.zmm64u[i] = lo | (hi << 32); }
+            tmp.set_zmm64u(i, lo | (hi << 32));
         }
         Ok(tmp)
     }
@@ -177,14 +174,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());       // V = nnn (destination)
         let h = read_zmm(self, instr.src2());       // H = vvvv
         let w = read_rm_ps(self, instr, vl)?;       // W = rm/memory
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let vf = f32::from_bits(v.zmm32u[i]);
-                let wf = f32::from_bits(w.zmm32u[i]);
-                let hf = f32::from_bits(h.zmm32u[i]);
-                result.zmm32u[i] = vf.mul_add(wf, hf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let vf = f32::from_bits(v.zmm32u(i));
+            let wf = f32::from_bits(w.zmm32u(i));
+            let hf = f32::from_bits(h.zmm32u(i));
+            result.set_zmm32u(i, vf.mul_add(wf, hf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -200,14 +195,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let vf = f64::from_bits(v.zmm64u[i]);
-                let wf = f64::from_bits(w.zmm64u[i]);
-                let hf = f64::from_bits(h.zmm64u[i]);
-                result.zmm64u[i] = vf.mul_add(wf, hf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let vf = f64::from_bits(v.zmm64u(i));
+            let wf = f64::from_bits(w.zmm64u(i));
+            let hf = f64::from_bits(h.zmm64u(i));
+            result.set_zmm64u(i, vf.mul_add(wf, hf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -223,14 +216,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let hf = f32::from_bits(h.zmm32u[i]);
-                let vf = f32::from_bits(v.zmm32u[i]);
-                let wf = f32::from_bits(w.zmm32u[i]);
-                result.zmm32u[i] = hf.mul_add(vf, wf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let hf = f32::from_bits(h.zmm32u(i));
+            let vf = f32::from_bits(v.zmm32u(i));
+            let wf = f32::from_bits(w.zmm32u(i));
+            result.set_zmm32u(i, hf.mul_add(vf, wf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -246,14 +237,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let hf = f64::from_bits(h.zmm64u[i]);
-                let vf = f64::from_bits(v.zmm64u[i]);
-                let wf = f64::from_bits(w.zmm64u[i]);
-                result.zmm64u[i] = hf.mul_add(vf, wf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let hf = f64::from_bits(h.zmm64u(i));
+            let vf = f64::from_bits(v.zmm64u(i));
+            let wf = f64::from_bits(w.zmm64u(i));
+            result.set_zmm64u(i, hf.mul_add(vf, wf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -269,14 +258,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let hf = f32::from_bits(h.zmm32u[i]);
-                let wf = f32::from_bits(w.zmm32u[i]);
-                let vf = f32::from_bits(v.zmm32u[i]);
-                result.zmm32u[i] = hf.mul_add(wf, vf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let hf = f32::from_bits(h.zmm32u(i));
+            let wf = f32::from_bits(w.zmm32u(i));
+            let vf = f32::from_bits(v.zmm32u(i));
+            result.set_zmm32u(i, hf.mul_add(wf, vf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -292,14 +279,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let hf = f64::from_bits(h.zmm64u[i]);
-                let wf = f64::from_bits(w.zmm64u[i]);
-                let vf = f64::from_bits(v.zmm64u[i]);
-                result.zmm64u[i] = hf.mul_add(wf, vf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let hf = f64::from_bits(h.zmm64u(i));
+            let wf = f64::from_bits(w.zmm64u(i));
+            let vf = f64::from_bits(v.zmm64u(i));
+            result.set_zmm64u(i, hf.mul_add(wf, vf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -322,14 +307,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let vf = f32::from_bits(v.zmm32u[i]);
-                let wf = f32::from_bits(w.zmm32u[i]);
-                let hf = f32::from_bits(h.zmm32u[i]);
-                result.zmm32u[i] = vf.mul_add(wf, -hf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let vf = f32::from_bits(v.zmm32u(i));
+            let wf = f32::from_bits(w.zmm32u(i));
+            let hf = f32::from_bits(h.zmm32u(i));
+            result.set_zmm32u(i, vf.mul_add(wf, -hf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -345,14 +328,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let vf = f64::from_bits(v.zmm64u[i]);
-                let wf = f64::from_bits(w.zmm64u[i]);
-                let hf = f64::from_bits(h.zmm64u[i]);
-                result.zmm64u[i] = vf.mul_add(wf, -hf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let vf = f64::from_bits(v.zmm64u(i));
+            let wf = f64::from_bits(w.zmm64u(i));
+            let hf = f64::from_bits(h.zmm64u(i));
+            result.set_zmm64u(i, vf.mul_add(wf, -hf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -368,14 +349,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let hf = f32::from_bits(h.zmm32u[i]);
-                let vf = f32::from_bits(v.zmm32u[i]);
-                let wf = f32::from_bits(w.zmm32u[i]);
-                result.zmm32u[i] = hf.mul_add(vf, -wf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let hf = f32::from_bits(h.zmm32u(i));
+            let vf = f32::from_bits(v.zmm32u(i));
+            let wf = f32::from_bits(w.zmm32u(i));
+            result.set_zmm32u(i, hf.mul_add(vf, -wf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -391,14 +370,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let hf = f64::from_bits(h.zmm64u[i]);
-                let vf = f64::from_bits(v.zmm64u[i]);
-                let wf = f64::from_bits(w.zmm64u[i]);
-                result.zmm64u[i] = hf.mul_add(vf, -wf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let hf = f64::from_bits(h.zmm64u(i));
+            let vf = f64::from_bits(v.zmm64u(i));
+            let wf = f64::from_bits(w.zmm64u(i));
+            result.set_zmm64u(i, hf.mul_add(vf, -wf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -414,14 +391,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let hf = f32::from_bits(h.zmm32u[i]);
-                let wf = f32::from_bits(w.zmm32u[i]);
-                let vf = f32::from_bits(v.zmm32u[i]);
-                result.zmm32u[i] = hf.mul_add(wf, -vf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let hf = f32::from_bits(h.zmm32u(i));
+            let wf = f32::from_bits(w.zmm32u(i));
+            let vf = f32::from_bits(v.zmm32u(i));
+            result.set_zmm32u(i, hf.mul_add(wf, -vf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -437,14 +412,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let hf = f64::from_bits(h.zmm64u[i]);
-                let wf = f64::from_bits(w.zmm64u[i]);
-                let vf = f64::from_bits(v.zmm64u[i]);
-                result.zmm64u[i] = hf.mul_add(wf, -vf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let hf = f64::from_bits(h.zmm64u(i));
+            let wf = f64::from_bits(w.zmm64u(i));
+            let vf = f64::from_bits(v.zmm64u(i));
+            result.set_zmm64u(i, hf.mul_add(wf, -vf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -467,14 +440,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let vf = f32::from_bits(v.zmm32u[i]);
-                let wf = f32::from_bits(w.zmm32u[i]);
-                let hf = f32::from_bits(h.zmm32u[i]);
-                result.zmm32u[i] = (-vf).mul_add(wf, hf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let vf = f32::from_bits(v.zmm32u(i));
+            let wf = f32::from_bits(w.zmm32u(i));
+            let hf = f32::from_bits(h.zmm32u(i));
+            result.set_zmm32u(i, (-vf).mul_add(wf, hf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -490,14 +461,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let vf = f64::from_bits(v.zmm64u[i]);
-                let wf = f64::from_bits(w.zmm64u[i]);
-                let hf = f64::from_bits(h.zmm64u[i]);
-                result.zmm64u[i] = (-vf).mul_add(wf, hf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let vf = f64::from_bits(v.zmm64u(i));
+            let wf = f64::from_bits(w.zmm64u(i));
+            let hf = f64::from_bits(h.zmm64u(i));
+            result.set_zmm64u(i, (-vf).mul_add(wf, hf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -513,14 +482,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let hf = f32::from_bits(h.zmm32u[i]);
-                let vf = f32::from_bits(v.zmm32u[i]);
-                let wf = f32::from_bits(w.zmm32u[i]);
-                result.zmm32u[i] = (-hf).mul_add(vf, wf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let hf = f32::from_bits(h.zmm32u(i));
+            let vf = f32::from_bits(v.zmm32u(i));
+            let wf = f32::from_bits(w.zmm32u(i));
+            result.set_zmm32u(i, (-hf).mul_add(vf, wf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -536,14 +503,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let hf = f64::from_bits(h.zmm64u[i]);
-                let vf = f64::from_bits(v.zmm64u[i]);
-                let wf = f64::from_bits(w.zmm64u[i]);
-                result.zmm64u[i] = (-hf).mul_add(vf, wf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let hf = f64::from_bits(h.zmm64u(i));
+            let vf = f64::from_bits(v.zmm64u(i));
+            let wf = f64::from_bits(w.zmm64u(i));
+            result.set_zmm64u(i, (-hf).mul_add(vf, wf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -559,14 +524,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let hf = f32::from_bits(h.zmm32u[i]);
-                let wf = f32::from_bits(w.zmm32u[i]);
-                let vf = f32::from_bits(v.zmm32u[i]);
-                result.zmm32u[i] = (-hf).mul_add(wf, vf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let hf = f32::from_bits(h.zmm32u(i));
+            let wf = f32::from_bits(w.zmm32u(i));
+            let vf = f32::from_bits(v.zmm32u(i));
+            result.set_zmm32u(i, (-hf).mul_add(wf, vf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -582,14 +545,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let hf = f64::from_bits(h.zmm64u[i]);
-                let wf = f64::from_bits(w.zmm64u[i]);
-                let vf = f64::from_bits(v.zmm64u[i]);
-                result.zmm64u[i] = (-hf).mul_add(wf, vf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let hf = f64::from_bits(h.zmm64u(i));
+            let wf = f64::from_bits(w.zmm64u(i));
+            let vf = f64::from_bits(v.zmm64u(i));
+            result.set_zmm64u(i, (-hf).mul_add(wf, vf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -612,14 +573,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let vf = f32::from_bits(v.zmm32u[i]);
-                let wf = f32::from_bits(w.zmm32u[i]);
-                let hf = f32::from_bits(h.zmm32u[i]);
-                result.zmm32u[i] = (-vf).mul_add(wf, -hf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let vf = f32::from_bits(v.zmm32u(i));
+            let wf = f32::from_bits(w.zmm32u(i));
+            let hf = f32::from_bits(h.zmm32u(i));
+            result.set_zmm32u(i, (-vf).mul_add(wf, -hf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -635,14 +594,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let vf = f64::from_bits(v.zmm64u[i]);
-                let wf = f64::from_bits(w.zmm64u[i]);
-                let hf = f64::from_bits(h.zmm64u[i]);
-                result.zmm64u[i] = (-vf).mul_add(wf, -hf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let vf = f64::from_bits(v.zmm64u(i));
+            let wf = f64::from_bits(w.zmm64u(i));
+            let hf = f64::from_bits(h.zmm64u(i));
+            result.set_zmm64u(i, (-vf).mul_add(wf, -hf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -658,14 +615,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let hf = f32::from_bits(h.zmm32u[i]);
-                let vf = f32::from_bits(v.zmm32u[i]);
-                let wf = f32::from_bits(w.zmm32u[i]);
-                result.zmm32u[i] = (-hf).mul_add(vf, -wf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let hf = f32::from_bits(h.zmm32u(i));
+            let vf = f32::from_bits(v.zmm32u(i));
+            let wf = f32::from_bits(w.zmm32u(i));
+            result.set_zmm32u(i, (-hf).mul_add(vf, -wf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -681,14 +636,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let hf = f64::from_bits(h.zmm64u[i]);
-                let vf = f64::from_bits(v.zmm64u[i]);
-                let wf = f64::from_bits(w.zmm64u[i]);
-                result.zmm64u[i] = (-hf).mul_add(vf, -wf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let hf = f64::from_bits(h.zmm64u(i));
+            let vf = f64::from_bits(v.zmm64u(i));
+            let wf = f64::from_bits(w.zmm64u(i));
+            result.set_zmm64u(i, (-hf).mul_add(vf, -wf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -704,14 +657,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_ps(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let hf = f32::from_bits(h.zmm32u[i]);
-                let wf = f32::from_bits(w.zmm32u[i]);
-                let vf = f32::from_bits(v.zmm32u[i]);
-                result.zmm32u[i] = (-hf).mul_add(wf, -vf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let hf = f32::from_bits(h.zmm32u(i));
+            let wf = f32::from_bits(w.zmm32u(i));
+            let vf = f32::from_bits(v.zmm32u(i));
+            result.set_zmm32u(i, (-hf).mul_add(wf, -vf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -727,14 +678,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let v = read_zmm(self, instr.dst());
         let h = read_zmm(self, instr.src2());
         let w = read_rm_pd(self, instr, vl)?;
-        let mut result = BxPackedZmmRegister { zmm64u: [0; 8] };
-        unsafe {
-            for i in 0..nelements {
-                let hf = f64::from_bits(h.zmm64u[i]);
-                let wf = f64::from_bits(w.zmm64u[i]);
-                let vf = f64::from_bits(v.zmm64u[i]);
-                result.zmm64u[i] = (-hf).mul_add(wf, -vf).to_bits();
-            }
+        let mut result = BxPackedZmmRegister::default();
+        for i in 0..nelements {
+            let hf = f64::from_bits(h.zmm64u(i));
+            let wf = f64::from_bits(w.zmm64u(i));
+            let vf = f64::from_bits(v.zmm64u(i));
+            result.set_zmm64u(i, (-hf).mul_add(wf, -vf).to_bits());
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;

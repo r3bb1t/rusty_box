@@ -151,7 +151,6 @@
 //! 0xFF: Reset (returns ACK + 0xAA + device ID 0x00)
 //! ```
 
-use core::ffi::c_void;
 
 // I/O Ports
 pub const KBD_DATA_PORT: u16 = 0x0060;
@@ -1817,18 +1816,6 @@ impl BxKeyboardC {
         self.irq12_lower_pending = false;
         pending
     }
-}
-
-/// Keyboard read handler for I/O port infrastructure
-pub fn keyboard_read_handler(this_ptr: *mut c_void, port: u16, io_len: u8) -> u32 {
-    let kbd = unsafe { &mut *(this_ptr as *mut BxKeyboardC) };
-    kbd.read(port, io_len)
-}
-
-/// Keyboard write handler for I/O port infrastructure
-pub fn keyboard_write_handler(this_ptr: *mut c_void, port: u16, value: u32, io_len: u8) {
-    let kbd = unsafe { &mut *(this_ptr as *mut BxKeyboardC) };
-    kbd.write(port, value, io_len);
 }
 
 #[cfg(test)]

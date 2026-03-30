@@ -167,15 +167,13 @@ fn affine_byte(src2: u64, src1byte: u8, imm8: u8) -> u8 {
 /// GF(2) affine transformation on all 16 bytes of an XMM register.
 ///
 /// Each byte of dst is transformed using the corresponding qword of src
-/// as the 8x8 bit matrix. Bytes 0-7 use src.xmm64u[0], bytes 8-15 use src.xmm64u[1].
+/// as the 8x8 bit matrix. Bytes 0-7 use src.xmm64u(0), bytes 8-15 use src.xmm64u(1).
 ///
 /// Matches Bochs xmm_gf2p8affineqb().
 fn xmm_gf2p8affineqb(dst: &mut BxPackedXmmRegister, src: &BxPackedXmmRegister, imm8: u8) {
-    unsafe {
         for i in 0..16 {
-            dst.xmmubyte[i] = affine_byte(src.xmm64u[i / 8], dst.xmmubyte[i], imm8);
+            dst.set_xmmubyte(i, affine_byte(src.xmm64u(i / 8), dst.xmmubyte(i), imm8));
         }
-    }
 }
 
 /// GF(2) affine transformation with multiplicative inverse on all 16 bytes.
@@ -185,11 +183,9 @@ fn xmm_gf2p8affineqb(dst: &mut BxPackedXmmRegister, src: &BxPackedXmmRegister, i
 ///
 /// Matches Bochs xmm_gf2p8affineinvqb().
 fn xmm_gf2p8affineinvqb(dst: &mut BxPackedXmmRegister, src: &BxPackedXmmRegister, imm8: u8) {
-    unsafe {
         for i in 0..16 {
-            dst.xmmubyte[i] = affine_byte(src.xmm64u[i / 8], GF256_INV[dst.xmmubyte[i] as usize], imm8);
+            dst.set_xmmubyte(i, affine_byte(src.xmm64u(i / 8), GF256_INV[dst.xmmubyte(i) as usize], imm8));
         }
-    }
 }
 
 /// GF(2^8) multiply two bytes with reduction polynomial 0x11B.
@@ -249,11 +245,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut dst = self.read_xmm_reg(instr.dst());
         let src = self.sse_read_op2_xmm(instr)?;
 
-        unsafe {
             for n in 0..16 {
-                dst.xmmubyte[n] = gf2p8mul(dst.xmmubyte[n], src.xmmubyte[n]);
+                dst.set_xmmubyte(n, gf2p8mul(dst.xmmubyte(n), src.xmmubyte(n)));
             }
-        }
 
         self.write_xmm_reg_lo128(instr.dst(), dst);
         Ok(())
