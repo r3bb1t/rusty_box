@@ -250,19 +250,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         }
         tracing::debug!("Devices initialized");
 
-        // Wire PIC→CPU interrupt signaling (Bochs BX_RAISE_INTR / BX_CLEAR_INTR).
-        // The PIC needs raw pointers to cpu.async_event and cpu.pending_event so it
-        // can break the CPU inner loop when master int_pin asserts/deasserts.
-        // Also give the CPU a raw pointer to the PIC for DEV_pic_iac() in
-        // handle_async_event()'s external interrupt delivery.
-        // SAFETY: CPU event field pointers valid for emulator lifetime; single-threaded access
-        unsafe {
-            let async_ptr = &mut self.cpu.async_event as *mut u32;
-            let pending_ptr = &mut self.cpu.pending_event as *mut u32;
-            self.device_manager
-                .pic
-                .set_cpu_signal_ptrs(async_ptr, pending_ptr);
-        }
 
         // Wire DMA→pc_system for set_HRQ and DMA→memory for physical DMA transfers
         let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
@@ -272,16 +259,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             ram_len,
         );
 
-        // Wire pc_system→CPU event pointers for raise_intr/clear_intr/set_hrq.
-        // Matches Bochs pc_system.cc: raise_INTR() calls BX_CPU(0)->signal_event(),
-        // set_HRQ() sets BX_CPU(0)->async_event = 1.
-        // SAFETY: CPU event field pointers valid for emulator lifetime; single-threaded access
-        unsafe {
-            self.pc_system.set_cpu_event_ptrs(
-                core::ptr::NonNull::from(&mut self.cpu.async_event),
-                core::ptr::NonNull::from(&mut self.cpu.pending_event),
-            );
-        }
 
         // Wire PCI IDE → pc_system, harddrv, memory for DMA timer
         self.device_manager.pci_ide.pc_system_ptr =
@@ -472,15 +449,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         }
         tracing::info!("Device initialization complete");
 
-        // Wire PIC→CPU interrupt signaling (same as in initialize())
-        // SAFETY: CPU event field pointers valid for emulator lifetime; single-threaded access
-        unsafe {
-            let async_ptr = &mut self.cpu.async_event as *mut u32;
-            let pending_ptr = &mut self.cpu.pending_event as *mut u32;
-            self.device_manager
-                .pic
-                .set_cpu_signal_ptrs(async_ptr, pending_ptr);
-        }
 
         // Wire DMA→pc_system for set_HRQ and DMA→memory for physical DMA transfers
         let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
@@ -490,14 +458,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             ram_len,
         );
 
-        // Wire pc_system→CPU event pointers (same as in initialize())
-        // SAFETY: CPU event field pointers valid for emulator lifetime; single-threaded access
-        unsafe {
-            self.pc_system.set_cpu_event_ptrs(
-                core::ptr::NonNull::from(&mut self.cpu.async_event),
-                core::ptr::NonNull::from(&mut self.cpu.pending_event),
-            );
-        }
 
         // Wire PCI IDE → pc_system, harddrv, memory for DMA timer
         self.device_manager.pci_ide.pc_system_ptr =
@@ -853,17 +813,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             self.device_manager.vga.set_icount_sync(ips);
         }
 
-        // Set up LAPIC pointers for direct event signaling.
-        // icount is now passed as a parameter to LAPIC read methods.
-        {
-            let pending_event_ptr = &mut self.cpu.pending_event as *mut u32;
-            let async_event_ptr = &mut self.cpu.async_event as *mut u32;
-            let lapic_ptr = self.cpu.lapic_ptr_mut();
-            // SAFETY: CPU fields outlive LAPIC; pointers only used during LAPIC MMIO access
-            unsafe {
-                (*lapic_ptr).set_event_ptrs(pending_event_ptr, async_event_ptr);
-            }
-        }
 
         self.start();
     }
@@ -1048,6 +997,51 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         #[cfg(feature = "bx_support_pci")]
         self.device_manager
             .process_pci_deferred::<I>(&mut self.devices, &mut self.memory);
+    }
+
+    /// Synchronize device event flags to CPU event fields.
+    ///
+    /// PIC, LAPIC, and pc_system set boolean flags when they need to
+    /// signal the CPU. This method reads those flags, applies the
+    /// corresponding bits to `cpu.pending_event` / `cpu.async_event`,
+    /// and clears the flags.
+    fn sync_event_flags(&mut self) {
+        // PIC: BX_RAISE_INTR
+        if self.device_manager.pic.irq_pending {
+            self.cpu.pending_event |= BxCpuC::<I>::BX_EVENT_PENDING_INTR;
+            self.cpu.async_event = 1;
+            self.device_manager.pic.irq_pending = false;
+        }
+        // PIC: BX_CLEAR_INTR
+        if self.device_manager.pic.irq_cleared {
+            self.cpu.pending_event &= !BxCpuC::<I>::BX_EVENT_PENDING_INTR;
+            self.device_manager.pic.irq_cleared = false;
+        }
+        // LAPIC: BX_EVENT_PENDING_LAPIC_INTR
+        {
+            let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
+            if lapic.intr_pending {
+                self.cpu.pending_event |= BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR;
+                self.cpu.async_event = 1;
+                lapic.intr_pending = false;
+            }
+        }
+        // pc_system: raise_intr
+        if self.pc_system.intr_raised {
+            self.cpu.pending_event |= BxCpuC::<I>::BX_EVENT_PENDING_INTR;
+            self.cpu.async_event = 1;
+            self.pc_system.intr_raised = false;
+        }
+        // pc_system: clear_intr
+        if self.pc_system.intr_cleared {
+            self.cpu.pending_event &= !BxCpuC::<I>::BX_EVENT_PENDING_INTR;
+            self.pc_system.intr_cleared = false;
+        }
+        // pc_system: async_event (HRQ/timer)
+        if self.pc_system.async_event_pending {
+            self.cpu.async_event = 1;
+            self.pc_system.async_event_pending = false;
+        }
     }
 
     /// Configure CMOS memory size from total RAM bytes.
@@ -2361,6 +2355,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 hlt_budget += step as u64;
                                 let dev_usec = (step as u64 * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
                                 self.tick_devices(dev_usec);
+                                self.sync_event_flags();
                                 // Wall-clock throttle: sleep if virtual time races ahead
                                 #[cfg(feature = "std")]
                                 {
@@ -2429,6 +2424,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     instructions_executed += ex2;
                                     let u2 = if self.config.ips != 0 { (ex2 * 1_000_000 / (self.config.ips as u64)).max(10) } else { 10 };
                                     self.tick_devices(u2);
+                                    self.sync_event_flags();
                                     self.pc_system.tickn(ex2 as u32);
                                     // LAPIC sync
                                     #[cfg(feature = "bx_support_apic")]
@@ -2488,6 +2484,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     hlt2 += s as u64;
                                     let du = (s as u64 * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
                                     self.tick_devices(du);
+                                    self.sync_event_flags();
                                 }
                                 #[cfg(feature = "bx_support_apic")]
                                 if self.cpu.lapic_has_intr() { self.cpu.signal_event(1 << 2); }
@@ -2498,6 +2495,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             // min 10 usec to prevent timer starvation at low instruction counts.
                             let usec = usec_from_instr.max(10);
                             self.tick_devices(usec);
+                            self.sync_event_flags();
                         }
                     }
 
@@ -2885,6 +2883,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             // --- Tick devices + pc_system ---
             let usec = (executed * 1_000_000).checked_div(ips).unwrap_or(0).max(10);
             self.tick_devices(usec);
+            self.sync_event_flags();
             self.pc_system.tickn(executed as u32);
 
             // --- LAPIC timer catchup ---
@@ -2989,6 +2988,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     hlt_budget += step as u64;
                     let dev_usec = (step as u64 * 1_000_000 / ips.max(1)).max(1);
                     self.tick_devices(dev_usec);
+                    self.sync_event_flags();
                     // Wall-clock throttle: sleep if virtual time races ahead
                     #[cfg(feature = "std")]
                     {

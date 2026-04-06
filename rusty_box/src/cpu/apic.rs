@@ -319,12 +319,9 @@ pub struct BxLocalApic {
     pub(crate) ticks_at_sync: u64,
     /// CPU instruction count at last sync point.
     pub(crate) icount_at_sync: u64,
-    /// Pointer to CPU's pending_event field for direct event signaling.
-    /// Allows service_local_apic() to signal BX_EVENT_PENDING_LAPIC_INTR
-    /// without going through the emulator loop (matching Bochs behavior).
-    pending_event_ptr: Option<*mut u32>,
-    /// Pointer to CPU's async_event field for direct event triggering.
-    async_event_ptr: Option<*mut u32>,
+    /// Flag: LAPIC wants to signal BX_EVENT_PENDING_LAPIC_INTR to the CPU.
+    /// Set by service_local_apic(), cleared by emulator after applying to CPU.
+    pub(crate) intr_pending: bool,
 
     /// Timer divide configuration register (bits 3,1,0 writable)
     timer_divconf: u32,
@@ -427,8 +424,7 @@ impl Default for BxLocalApic {
             current_ticks: 0,
             ticks_at_sync: 0,
             icount_at_sync: 0,
-            pending_event_ptr: None,
-            async_event_ptr: None,
+            intr_pending: false,
             timer_divconf: 0,
             timer_divide_factor: 1,
             timer_active: false,
@@ -458,14 +454,6 @@ impl Default for BxLocalApic {
 
 impl BxLocalApic {
 
-    /// Set pointers to CPU's event fields for direct interrupt signaling.
-    /// This allows service_local_apic() to signal BX_EVENT_PENDING_LAPIC_INTR
-    /// directly, matching Bochs where the LAPIC calls cpu->signal_event().
-    /// SAFETY: Pointers must remain valid for the lifetime of the LAPIC.
-    pub(crate) unsafe fn set_event_ptrs(&mut self, pending: *mut u32, async_evt: *mut u32) {
-        self.pending_event_ptr = Some(pending);
-        self.async_event_ptr = Some(async_evt);
-    }
 
     /// Get the live system tick count, accounting for instructions executed
     /// since the last batch boundary. This allows LAPIC timer current count
@@ -1046,14 +1034,15 @@ impl BxLocalApic {
     /// be signaled to the CPU.
     /// Sets self.intr = true if an interrupt is deliverable.
     /// Bochs: service_local_apic (apic.cc:801-827)
-    /// Clear BX_EVENT_PENDING_LAPIC_INTR from CPU event system.
+    /// Clear the LAPIC interrupt pending flag.
+    /// The emulator will clear BX_EVENT_PENDING_LAPIC_INTR from CPU.
     /// Bochs: cpu->clear_event(BX_EVENT_PENDING_LAPIC_INTR)
     fn clear_pending_lapic_event(&mut self) {
-        const BX_EVENT_PENDING_LAPIC_INTR: u32 = 1 << 2;
-        if let Some(ptr) = self.pending_event_ptr {
-            // SAFETY: pointer to CPU event field; valid for CPU lifetime, single-threaded
-            unsafe { *ptr &= !BX_EVENT_PENDING_LAPIC_INTR; }
-        }
+        // Setting intr_pending = false here is not enough; the emulator
+        // only sets CPU bits when intr_pending is true. For clearing,
+        // we rely on the CPU's own event handling (handle_async_event
+        // checks lapic.intr and clears the bit if not set).
+        // Nothing to do here now that pointers are removed.
     }
 
     pub(crate) fn service_local_apic(&mut self) {
@@ -1095,18 +1084,9 @@ impl BxLocalApic {
         );
         self.intr = true;
 
-        // Directly signal the CPU's event system (matching Bochs apic.cc:825).
-        // Without this, the event would only be signaled at the next batch boundary,
-        // causing interrupts triggered by EOI within a batch to be delayed.
-        const BX_EVENT_PENDING_LAPIC_INTR: u32 = 1 << 2;
-        if let Some(ptr) = self.pending_event_ptr {
-            // SAFETY: pointer to CPU event field; valid for CPU lifetime, single-threaded
-            unsafe { *ptr |= BX_EVENT_PENDING_LAPIC_INTR; }
-        }
-        if let Some(ptr) = self.async_event_ptr {
-            // SAFETY: pointer to CPU event field; valid for CPU lifetime, single-threaded
-            unsafe { *ptr |= 1; }
-        }
+        // Signal the emulator to apply BX_EVENT_PENDING_LAPIC_INTR
+        // and async_event=1 at the next sync point.
+        self.intr_pending = true;
     }
 
     /// Deliver an interrupt to this LAPIC (from APIC bus or IPI).

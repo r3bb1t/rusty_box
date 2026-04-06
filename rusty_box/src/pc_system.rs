@@ -17,7 +17,6 @@
 //! - `time_ticks()` returns precise current time including partial countdown
 
 use core::ffi::c_void;
-use core::ptr::NonNull;
 
 use bitflags::bitflags;
 use thiserror::Error;
@@ -141,15 +140,15 @@ pub struct BxPcSystemC {
     /// HRQ pending flag — set by set_hrq(true), checked by emulator loop.
     /// Bochs pc_system.cc:82-83: set_HRQ sets HRQ and signals async_event.
     pub(crate) hrq_pending: bool,
-    /// Pointer to CPU's `async_event` field.
-    /// Used by `raise_intr()` and `set_hrq()` to break the CPU out of the
-    /// inner trace loop, matching Bochs pc_system.cc:83/91.
-    cpu_async_event_ptr: Option<NonNull<u32>>,
-    /// Pointer to CPU's `pending_event` field.
-    /// Used by `raise_intr()` / `clear_intr()` to set/clear
-    /// `BX_EVENT_PENDING_INTR`, matching Bochs pc_system.cc:86-100
-    /// which forwards to `BX_CPU(0)->signal_event/clear_event`.
-    cpu_pending_event_ptr: Option<NonNull<u32>>,
+    /// Flag: set_hrq(true) wants async_event=1 on the CPU.
+    /// The emulator reads and clears this.
+    pub(crate) async_event_pending: bool,
+    /// Flag: raise_intr() wants BX_EVENT_PENDING_INTR set on the CPU.
+    /// The emulator reads and clears this.
+    pub(crate) intr_raised: bool,
+    /// Flag: clear_intr() wants BX_EVENT_PENDING_INTR cleared on the CPU.
+    /// The emulator reads and clears this.
+    pub(crate) intr_cleared: bool,
     /// Request to terminate emulation
     pub(crate) kill_bochs_request: bool,
 }
@@ -182,8 +181,9 @@ impl BxPcSystemC {
             m_ips: 1.0,
             hrq: false,
             hrq_pending: false,
-            cpu_async_event_ptr: None,
-            cpu_pending_event_ptr: None,
+            async_event_pending: false,
+            intr_raised: false,
+            intr_cleared: false,
             kill_bochs_request: false,
         };
 
@@ -401,34 +401,16 @@ impl BxPcSystemC {
     // ========================================================================
 
     /// Set the Hardware Request (DMA) line.
-    /// Matches Bochs pc_system.cc:79-84: sets HRQ flag and signals async_event
-    /// directly on the CPU via raw pointer.
+    /// Matches Bochs pc_system.cc:79-84: sets HRQ flag and signals async_event.
     pub fn set_hrq(&mut self, value: bool) {
         self.hrq = value;
         if value {
             self.hrq_pending = true;
             // Bochs pc_system.cc:83: BX_CPU(0)->async_event = 1
-            if let Some(ptr) = self.cpu_async_event_ptr {
-                unsafe {
-                    *ptr.as_ptr() = 1;
-                }
-            }
+            self.async_event_pending = true;
         }
     }
 
-    /// Wire CPU signal pointers so `raise_intr()`, `clear_intr()`, and `set_hrq()`
-    /// can break the CPU out of its inner trace loop.
-    ///
-    /// Matches Bochs pc_system.cc where `raise_INTR()` calls
-    /// `BX_CPU(0)->signal_event(BX_EVENT_PENDING_INTR)` and `set_HRQ()` sets
-    /// `BX_CPU(0)->async_event = 1`.
-    ///
-    /// # Safety
-    /// The pointers must remain valid for the lifetime of the emulator.
-    pub unsafe fn set_cpu_event_ptrs(&mut self, async_event: NonNull<u32>, pending_event: NonNull<u32>) {
-        self.cpu_async_event_ptr = Some(async_event);
-        self.cpu_pending_event_ptr = Some(pending_event);
-    }
 
     /// Get the Hardware Request (DMA) line state
     pub fn get_hrq(&self) -> bool {
@@ -437,36 +419,18 @@ impl BxPcSystemC {
 
     /// Signal external interrupt to bootstrap CPU (Bochs pc_system.cc:86-93).
     ///
-    /// Matches Bochs: `raise_INTR()` calls `BX_CPU(0)->raise_INTR()` which calls
-    /// `signal_event(BX_EVENT_PENDING_INTR)`. This sets the pending_event bit and
-    /// (if unmasked) sets async_event=1 to break the CPU inner loop.
-    ///
-    /// `BX_EVENT_PENDING_INTR` is bit 0 in our event encoding.
+    /// Sets `intr_raised` so the emulator applies BX_EVENT_PENDING_INTR
+    /// and async_event=1 to the CPU.
     pub fn raise_intr(&mut self) {
-        const BX_EVENT_PENDING_INTR: u32 = 1 << 0;
-        if let Some(pending_ptr) = self.cpu_pending_event_ptr {
-            unsafe {
-                *pending_ptr.as_ptr() |= BX_EVENT_PENDING_INTR;
-            }
-        }
-        if let Some(async_ptr) = self.cpu_async_event_ptr {
-            unsafe {
-                *async_ptr.as_ptr() = 1;
-            }
-        }
+        self.intr_raised = true;
     }
 
     /// Clear external interrupt signal (Bochs pc_system.cc:95-100).
     ///
-    /// Matches Bochs: `clear_INTR()` calls `BX_CPU(0)->clear_INTR()` which calls
-    /// `clear_event(BX_EVENT_PENDING_INTR)`. This clears the pending_event bit.
+    /// Sets `intr_cleared` so the emulator clears BX_EVENT_PENDING_INTR
+    /// from the CPU.
     pub fn clear_intr(&mut self) {
-        const BX_EVENT_PENDING_INTR: u32 = 1 << 0;
-        if let Some(pending_ptr) = self.cpu_pending_event_ptr {
-            unsafe {
-                *pending_ptr.as_ptr() &= !BX_EVENT_PENDING_INTR;
-            }
-        }
+        self.intr_cleared = true;
     }
 
     /// Perform a system reset
