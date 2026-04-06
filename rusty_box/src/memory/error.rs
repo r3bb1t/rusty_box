@@ -53,8 +53,6 @@ pub enum MemoryError {
     // Memory handlers
     #[error("Invalid address range for memory handler")]
     InvalidAddressRange,
-    #[error("Invalid memory handler")]
-    InvalidHandler,
     #[error("Overlapping memory handlers")]
     OverlappingHandlers,
 

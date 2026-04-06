@@ -208,7 +208,7 @@ impl BxPciIde {
     /// DMA engine is fully implemented, this will process PRD tables
     /// and perform bus-master DMA transfers via parameters passed from
     /// the emulator timer dispatch.
-    fn timer(&mut self, _channel: usize) {
+    pub(crate) fn timer(&mut self, _channel: usize) {
         // DMA timer disabled — PIO path handles all transfers.
         // When DMA is re-enabled, this method will take &mut BxPcSystemC,
         // &mut BxHardDriveC, &mut BxPicC, and &mut [u8] (RAM) as parameters

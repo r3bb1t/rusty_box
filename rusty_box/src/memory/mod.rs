@@ -9,7 +9,7 @@ pub mod misc_mem;
 pub use super::error::Result;
 use crate::{
     config::BxPhyAddress,
-    cpu::{rusty_box::MemoryAccessType, BxCpuC, BxCpuIdTrait},
+    cpu::{BxCpuC, BxCpuIdTrait},
 };
 use alloc::{boxed::Box, vec::Vec};
 pub use error::*;
@@ -59,24 +59,33 @@ pub struct BxMemoryStubC {
 
 type Unsigned = u32;
 
-// Memory handler signature: (addr, len, data, param) -> bool
-// data is mutable for reads (handler writes to it) and const for writes (handler reads from it)
-// Using *mut for both to match C void* semantics
-pub(super) type MemoryHandlerT =
-    fn(BxPhyAddress, u32, *mut core::ffi::c_void, *const core::ffi::c_void) -> bool;
-pub(super) type MemoryDirectAccessHandlerT<'a> =
-    fn(&dyn core::any::Any, BxPhyAddress, MemoryAccessType, &dyn core::any::Any) -> &'a mut [u8];
+/// Identifies which device owns a memory-mapped I/O handler.
+///
+/// Each variant carries a raw pointer to the device instance, replacing the
+/// former `*const c_void` param + fn-ptr pair with a typed discriminant that
+/// the dispatch code in `misc_mem.rs` matches on directly.
+#[derive(Clone, Copy)]
+pub(crate) enum MemoryDeviceId {
+    Vga(*mut crate::iodev::vga::BxVgaC),
+    IoApic(*mut crate::iodev::ioapic::BxIoApic),
+}
+
+impl core::fmt::Debug for MemoryDeviceId {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        match self {
+            Self::Vga(p) => write!(f, "Vga({:p})", p),
+            Self::IoApic(p) => write!(f, "IoApic({:p})", p),
+        }
+    }
+}
 
 #[derive(Debug)]
-pub(super) struct MemoryHandlerStruct<'a> {
-    next: Option<Box<MemoryHandlerStruct<'a>>>, // Correctly represent the linked list
-    param: *const core::ffi::c_void,            // Pointer to device instance (like I/O handlers)
-    begin: BxPhyAddress,
-    end: BxPhyAddress,
+pub(super) struct MemoryHandlerStruct {
+    next: Option<Box<MemoryHandlerStruct>>,
+    pub(super) begin: BxPhyAddress,
+    pub(super) end: BxPhyAddress,
     bitmap: u16,
-    read_handler: MemoryHandlerT,
-    write_handler: MemoryHandlerT,
-    da_handler: Option<MemoryDirectAccessHandlerT<'a>>,
+    pub(super) device_id: MemoryDeviceId,
 }
 
 //#define BIOS_MAP_LAST128K(addr) (((addr) | 0xfff00000) & BIOS_MASK)
@@ -87,7 +96,7 @@ static BIOS_ROM_1MEG: u8 = 0x04;
 
 #[derive(Debug)]
 pub struct BxMemC<'a> {
-    memory_handlers: Vec<Option<MemoryHandlerStruct<'a>>>,
+    memory_handlers: Vec<Option<MemoryHandlerStruct>>,
     pci_enabled: bool,
     bios_write_enabled: bool,
 
@@ -109,6 +118,9 @@ pub struct BxMemC<'a> {
     /// A20 address mask - controls address line 20 gating
     /// This is synchronized from BxPcSystemC when A20 state changes
     a20_mask: BxPhyAddress,
+
+    /// Keeps the lifetime parameter used by callers (CPU borrows, emulator context).
+    _marker: core::marker::PhantomData<&'a ()>,
 }
 
 impl BxMemC<'_> {

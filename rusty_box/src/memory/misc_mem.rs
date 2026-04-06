@@ -1,12 +1,11 @@
 use alloc::{boxed::Box, vec::Vec};
-use core::ffi::c_void;
 
 use crate::{
     config::BxPhyAddress,
     cpu::{rusty_box::MemoryAccessType, BxCpuC, BxCpuIdTrait},
     memory::{
         memory_rusty_box::{bios_map_last128k, MemoryAreaT, BIOSROMSZ, BIOS_MASK, EXROM_MASK},
-        BxMemC, BxMemoryStubC,
+        BxMemC, BxMemoryStubC, MemoryDeviceId,
     },
 };
 
@@ -59,6 +58,7 @@ impl BxMemC<'_> {
 
             // A20 starts DISABLED at boot (synced from PC system during init)
             a20_mask: 0xFFFF_FFFF_FFEF_FFFFu64,
+            _marker: core::marker::PhantomData,
         }
     }
 }
@@ -108,32 +108,14 @@ impl<'c> BxMemC<'c> {
         let page_idx = (a20_addr >> 20) as usize;
         if page_idx < self.memory_handlers.len() {
             if let Some(handler_struct) = &self.memory_handlers[page_idx] {
-                // Traverse the handler linked list
                 let mut current_handler: Option<&super::MemoryHandlerStruct> = Some(handler_struct);
 
                 while let Some(handler) = current_handler {
-                    // Check if the address is within this handler's range
                     if handler.begin <= a20_addr && handler.end >= a20_addr {
-                        // Try direct access handler first (for get_host_mem_addr)
-                        if let Some(da_handler) = handler.da_handler {
-                            return Ok(Some(da_handler(
-                                &handler.param,
-                                a20_addr,
-                                rw,
-                                &handler.param,
-                            )));
-                        }
-                        // If no direct access handler, the read/write handlers will be called
-                        // from readPhysicalPage/writePhysicalPage methods
-                        // For get_host_mem_addr, return None to veto (handler will process it)
-                        if !write && (handler.read_handler as usize) != 0 {
-                            return Ok(None); // Vetoed - handler will process via readPhysicalPage
-                        }
-                        if write && (handler.write_handler as usize) != 0 {
-                            return Ok(None); // Vetoed - handler will process via writePhysicalPage
-                        }
+                        // A device handler covers this address — veto direct access.
+                        // The actual read/write goes through read/writePhysicalPage.
+                        return Ok(None);
                     }
-                    // Move to next handler in the list
                     current_handler = handler.next.as_ref().map(|b| b.as_ref());
                 }
             }
@@ -516,17 +498,21 @@ impl BxMemC<'_> {
                 let mut current_handler: Option<&super::MemoryHandlerStruct> = Some(handler_struct);
 
                 while let Some(handler) = current_handler {
-                    if handler.write_handler as usize != 0
-                        && handler.begin <= a20_addr
-                        && handler.end >= a20_addr
-                        && (handler.write_handler)(
-                            a20_addr,
-                            len as u32,
-                            data.as_mut_ptr() as *mut c_void,
-                            handler.param,
-                        ) {
-                            return Ok(()); // Handler processed the write
+                    if handler.begin <= a20_addr && handler.end >= a20_addr {
+                        let handled = match handler.device_id {
+                            MemoryDeviceId::Vga(vga_ptr) => {
+                                let vga = unsafe { &mut *vga_ptr };
+                                vga.mem_write(a20_addr, len as u32, &data[..len])
+                            }
+                            MemoryDeviceId::IoApic(ioapic_ptr) => {
+                                let ioapic = unsafe { &mut *ioapic_ptr };
+                                ioapic.mem_write(a20_addr, len as u32, &data[..len])
+                            }
+                        };
+                        if handled {
+                            return Ok(());
                         }
+                    }
                     current_handler = handler.next.as_ref().map(|b| b.as_ref());
                 }
             }
@@ -699,15 +685,18 @@ impl BxMemC<'_> {
                 let mut current_handler: Option<&super::MemoryHandlerStruct> = Some(handler_struct);
 
                 while let Some(handler) = current_handler {
-                    if handler.read_handler as usize != 0
-                        && handler.begin <= a20_addr
-                        && handler.end >= a20_addr
-                        && (handler.read_handler)(
-                            a20_addr,
-                            len as u32,
-                            data.as_mut_ptr() as *mut c_void,
-                            handler.param,
-                        ) {
+                    if handler.begin <= a20_addr && handler.end >= a20_addr {
+                        let handled = match handler.device_id {
+                            MemoryDeviceId::Vga(vga_ptr) => {
+                                let vga = unsafe { &mut *vga_ptr };
+                                vga.mem_read(a20_addr, len as u32, data)
+                            }
+                            MemoryDeviceId::IoApic(ioapic_ptr) => {
+                                let ioapic = unsafe { &mut *ioapic_ptr };
+                                ioapic.mem_read(a20_addr, len as u32, data)
+                            }
+                        };
+                        if handled {
                             #[cfg(feature = "bx_support_pci")]
                             if self.pci_enabled && ((a20_addr & 0xfffc0000) == 0x000c0000) {
                                 let area = ((a20_addr >> 14) & 0x0f) as usize;
@@ -721,6 +710,7 @@ impl BxMemC<'_> {
                                 return Ok(()); // Handler processed the read
                             }
                         }
+                    }
                     current_handler = handler.next.as_ref().map(|b| b.as_ref());
                 }
             }
@@ -858,21 +848,17 @@ impl BxMemC<'_> {
         }
     }
 
-    /// Register memory handlers for a specific address range
+    /// Register a memory-mapped I/O handler for a specific address range.
     ///
     /// Based on BX_MEM_C::registerMemoryHandlers in misc_mem.cc
     ///
     /// # Arguments
-    /// * `param` - Pointer to device instance (e.g., VGA controller)
-    /// * `read_handler` - Function to handle memory reads
-    /// * `write_handler` - Function to handle memory writes (can be null)
+    /// * `device_id` - Identifies the device and carries a pointer to its instance
     /// * `begin_addr` - Start address of the range
     /// * `end_addr` - End address of the range (inclusive)
     pub fn register_memory_handlers(
         &mut self,
-        param: *const core::ffi::c_void,
-        read_handler: super::MemoryHandlerT,
-        write_handler: super::MemoryHandlerT,
+        device_id: super::MemoryDeviceId,
         begin_addr: BxPhyAddress,
         end_addr: BxPhyAddress,
     ) -> Result<()> {
@@ -880,10 +866,6 @@ impl BxMemC<'_> {
 
         if end_addr < begin_addr {
             return Err(MemoryError::InvalidAddressRange.into());
-        }
-
-        if read_handler as usize == 0 {
-            return Err(MemoryError::InvalidHandler.into());
         }
 
         tracing::info!(
@@ -899,7 +881,6 @@ impl BxMemC<'_> {
         // Ensure handlers vector is large enough
         let required_len = end_page + 1;
         if required_len > self.memory_handlers.len() {
-            // Extend the handlers vector if needed
             let current_len = self.memory_handlers.len();
             self.memory_handlers.reserve(required_len - current_len);
             for _ in current_len..required_len {
@@ -931,17 +912,12 @@ impl BxMemC<'_> {
                 bitmap |= existing.bitmap;
             }
 
-            // Create new handler struct
-            // Store handler on each page that the range covers
             let handler = super::MemoryHandlerStruct {
                 next: self.memory_handlers[page_idx].take().map(Box::new),
-                param, // Pointer can be copied
                 begin: begin_addr,
                 end: end_addr,
                 bitmap,
-                read_handler,
-                write_handler,
-                da_handler: None,
+                device_id,
             };
             self.memory_handlers[page_idx] = Some(handler);
         }

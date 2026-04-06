@@ -261,12 +261,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
         // Register PCI IDE BM-DMA timers (Bochs pci_ide.cc:77-78)
         {
-            let pci_ide_ptr =
-                &mut self.device_manager.pci_ide as *mut crate::iodev::pci_ide::BxPciIde;
             // Channel 0 timer
             match self.pc_system.register_timer(
-                crate::iodev::pci_ide::BxPciIde::timer_handler_ch0,
-                pci_ide_ptr as *mut core::ffi::c_void,
+                crate::pc_system::TimerOwner::PciIdeCh0,
                 0,
                 false,
                 false,
@@ -282,8 +279,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             }
             // Channel 1 timer
             match self.pc_system.register_timer(
-                crate::iodev::pci_ide::BxPciIde::timer_handler_ch1,
-                pci_ide_ptr as *mut core::ffi::c_void,
+                crate::pc_system::TimerOwner::PciIdeCh1,
                 0,
                 false,
                 false,
@@ -313,8 +309,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         {
             let lapic_ptr = self.cpu.lapic_ptr_mut();
             let timer_handle = self.pc_system.register_timer(
-                crate::cpu::apic::BxLocalApic::timer_handler,
-                lapic_ptr as *mut core::ffi::c_void,
+                crate::pc_system::TimerOwner::Lapic,
                 0,     // period=0 (inactive)
                 false, // continuous=false (one-shot, re-armed by periodic())
                 false, // active=false
@@ -446,12 +441,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
         // Register PCI IDE BM-DMA timers (Bochs pci_ide.cc:77-78)
         {
-            let pci_ide_ptr =
-                &mut self.device_manager.pci_ide as *mut crate::iodev::pci_ide::BxPciIde;
             // Channel 0 timer
             match self.pc_system.register_timer(
-                crate::iodev::pci_ide::BxPciIde::timer_handler_ch0,
-                pci_ide_ptr as *mut core::ffi::c_void,
+                crate::pc_system::TimerOwner::PciIdeCh0,
                 0,
                 false,
                 false,
@@ -467,8 +459,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             }
             // Channel 1 timer
             match self.pc_system.register_timer(
-                crate::iodev::pci_ide::BxPciIde::timer_handler_ch1,
-                pci_ide_ptr as *mut core::ffi::c_void,
+                crate::pc_system::TimerOwner::PciIdeCh1,
                 0,
                 false,
                 false,
@@ -493,8 +484,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         {
             let lapic_ptr = self.cpu.lapic_ptr_mut();
             let timer_handle = self.pc_system.register_timer(
-                crate::cpu::apic::BxLocalApic::timer_handler,
-                lapic_ptr as *mut core::ffi::c_void,
+                crate::pc_system::TimerOwner::Lapic,
                 0,     // period=0 (inactive)
                 false, // continuous=false (one-shot, re-armed by periodic())
                 false, // active=false
@@ -969,6 +959,33 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         #[cfg(feature = "bx_support_pci")]
         self.device_manager
             .process_pci_deferred::<I>(&mut self.devices, &mut self.memory);
+    }
+
+    /// Dispatch timer fires accumulated by `pc_system.tickn()`.
+    ///
+    /// `countdown_event` records fired timer owners instead of calling fn ptrs.
+    /// This method drains them and performs the device-specific action.
+    fn dispatch_timer_fires(&mut self) {
+        let (owners, count) = self.pc_system.take_fired_timers();
+        for &owner in &owners[..count] {
+            match owner {
+                crate::pc_system::TimerOwner::NullTimer => {}
+                crate::pc_system::TimerOwner::PciIdeCh0 => {
+                    self.device_manager.pci_ide.timer(0);
+                }
+                crate::pc_system::TimerOwner::PciIdeCh1 => {
+                    self.device_manager.pci_ide.timer(1);
+                }
+                crate::pc_system::TimerOwner::Lapic => {
+                    #[cfg(feature = "bx_support_apic")]
+                    {
+                        // SAFETY: lapic_ptr set during CPU init; single-threaded access
+                        let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
+                        lapic.timer_fired = true;
+                    }
+                }
+            }
+        }
     }
 
     /// Synchronize device event flags to CPU event fields.
@@ -2324,6 +2341,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 // 2. Now get accurate countdown and advance
                                 let step = self.pc_system.get_num_ticks_left_next_event().clamp(1, 100_000);
                                 self.pc_system.tickn(step);
+                                self.dispatch_timer_fires();
                                 hlt_budget += step as u64;
                                 let dev_usec = (step as u64 * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
                                 self.tick_devices(dev_usec);
@@ -2398,6 +2416,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     self.tick_devices(u2);
                                     self.sync_event_flags();
                                     self.pc_system.tickn(ex2 as u32);
+                                    self.dispatch_timer_fires();
                                     // LAPIC sync
                                     #[cfg(feature = "bx_support_apic")]
                                     {
@@ -2453,6 +2472,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     }
                                     let s = self.pc_system.get_num_ticks_left_next_event().clamp(1, 100_000);
                                     self.pc_system.tickn(s);
+                                    self.dispatch_timer_fires();
                                     hlt2 += s as u64;
                                     let du = (s as u64 * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
                                     self.tick_devices(du);
@@ -2473,6 +2493,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
                     // Drive pc_system timers via Bochs-exact tickn() mechanism.
                     self.pc_system.tickn(executed as u32);
+                    self.dispatch_timer_fires();
 
                     // Handle LAPIC timer fires. With small batches (500 ticks) and
                     // typical LAPIC period (~24K ticks), at most 1 fire per batch.
@@ -2543,6 +2564,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             // tickn(0) fires countdown_event() only if curr_countdown==0,
                             // which happens when reactivate_timer_relative set it to 0.
                             self.pc_system.tickn(0);
+                            self.dispatch_timer_fires();
                         }
 
                         // Handle non-fire deactivate/activate requests (from
@@ -2857,6 +2879,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             self.tick_devices(usec);
             self.sync_event_flags();
             self.pc_system.tickn(executed as u32);
+            self.dispatch_timer_fires();
 
             // --- LAPIC timer catchup ---
             #[cfg(feature = "bx_support_apic")]
@@ -2892,6 +2915,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     }
                     catchup_count += 1;
                     self.pc_system.tickn(0);
+                    self.dispatch_timer_fires();
                 }
                 {
                     // SAFETY: lapic_ptr set during CPU init; single-threaded access
@@ -2957,6 +2981,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     }
                     let step = self.pc_system.get_num_ticks_left_next_event().clamp(1, 100_000);
                     self.pc_system.tickn(step);
+                    self.dispatch_timer_fires();
                     hlt_budget += step as u64;
                     let dev_usec = (step as u64 * 1_000_000 / ips.max(1)).max(1);
                     self.tick_devices(dev_usec);

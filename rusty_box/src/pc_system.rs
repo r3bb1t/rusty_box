@@ -16,7 +16,6 @@
 //! - `countdown_event()` recalculates the next countdown period
 //! - `time_ticks()` returns precise current time including partial countdown
 
-use core::ffi::c_void;
 
 use bitflags::bitflags;
 use thiserror::Error;
@@ -70,11 +69,21 @@ const NULL_TIMER_INTERVAL: u64 = 0xFFFF_FFFF;
 /// when IPS is set too low.
 const MIN_ALLOWABLE_TIMER_PERIOD: u64 = 1;
 
-/// Timer handler function type
-pub type BxTimerHandlerT = fn(this_ptr: *mut c_void);
+/// Identifies which device owns a timer, used for dispatch after firing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TimerOwner {
+    /// The null timer (index 0) — keeps the timing system alive.
+    NullTimer,
+    /// PCI IDE BM-DMA channel 0.
+    PciIdeCh0,
+    /// PCI IDE BM-DMA channel 1.
+    PciIdeCh1,
+    /// Local APIC timer.
+    Lapic,
+}
 
 /// Individual timer structure
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Timer {
     /// Timer state flags (in_use, active, continuous)
     pub(crate) flags: TimerFlags,
@@ -82,12 +91,10 @@ pub struct Timer {
     pub(crate) period: u64,
     /// Absolute tick count when timer should fire
     pub(crate) time_to_fire: u64,
-    /// Handler function to call when timer fires
-    pub(crate) handler: Option<BxTimerHandlerT>,
+    /// Which device owns this timer (used for dispatch)
+    pub(crate) owner: TimerOwner,
     /// Timer identifier string
     pub(crate) id: [u8; BX_MAX_TIMER_ID_LEN],
-    /// User parameter passed to handler
-    pub(crate) param: *mut c_void,
 }
 
 impl Default for Timer {
@@ -96,16 +103,11 @@ impl Default for Timer {
             flags: TimerFlags::empty(),
             period: 0,
             time_to_fire: 0,
-            handler: None,
+            owner: TimerOwner::NullTimer,
             id: [0; BX_MAX_TIMER_ID_LEN],
-            param: core::ptr::null_mut(),
         }
     }
 }
-
-// SAFETY: Timer's raw pointer is only dereferenced within single-threaded emulator context
-unsafe impl Send for Timer {}
-unsafe impl Sync for Timer {}
 
 /// PC System controller - manages timers, A20 line, and system-level operations
 ///
@@ -151,6 +153,11 @@ pub struct BxPcSystemC {
     pub(crate) intr_cleared: bool,
     /// Request to terminate emulation
     pub(crate) kill_bochs_request: bool,
+    /// Buffer of timer owners whose timers fired during the last tickn/tick1.
+    /// Drained by the emulator via `take_fired_timers()`.
+    fired_owners: [TimerOwner; BX_MAX_TIMERS],
+    /// Number of entries in `fired_owners`.
+    num_fired: usize,
 }
 
 impl Default for BxPcSystemC {
@@ -185,13 +192,15 @@ impl BxPcSystemC {
             intr_raised: false,
             intr_cleared: false,
             kill_bochs_request: false,
+            fired_owners: [TimerOwner::NullTimer; BX_MAX_TIMERS],
+            num_fired: 0,
         };
 
         // Register the null timer as timer 0
         sys.timers[0].flags = TimerFlags::IN_USE | TimerFlags::ACTIVE | TimerFlags::CONTINUOUS;
         sys.timers[0].period = NULL_TIMER_INTERVAL;
         sys.timers[0].time_to_fire = NULL_TIMER_INTERVAL;
-        sys.timers[0].handler = Some(Self::null_timer_handler);
+        sys.timers[0].owner = TimerOwner::NullTimer;
         sys.num_timers = 1;
 
         sys
@@ -300,24 +309,27 @@ impl BxPcSystemC {
             }
         }
 
-        // Step 3: Calculate next countdown period BEFORE firing callbacks
-        // Callbacks may call activate_timer_ticks which needs the new countdown.
+        // Step 3: Calculate next countdown period BEFORE recording fires.
+        // Timer reactivation during dispatch needs the new countdown.
         // Bochs pc_system.cc:374-375
         let next_period = (min_time_to_fire - self.ticks_total) as u32;
         self.curr_countdown = next_period;
         self.curr_countdown_period = next_period;
 
-        // Step 4: Fire all triggered callbacks (in timer index order)
-        // Bochs pc_system.cc:377-385
+        // Step 4: Record all triggered timers for dispatch by the emulator.
+        // Bochs pc_system.cc:377-385 called handlers here; we defer to the
+        // emulator so pc_system doesn't need device pointers.
         if first <= last {
             for (offset, &triggered_flag) in triggered[first..=last].iter().enumerate() {
                 let i = first + offset;
                 if triggered_flag {
-                    if let Some(handler) = self.timers[i].handler {
-                        self.triggered_timer = i;
-                        handler(self.timers[i].param);
-                        self.triggered_timer = 0;
+                    self.triggered_timer = i;
+                    let owner = self.timers[i].owner;
+                    if owner != TimerOwner::NullTimer {
+                        self.fired_owners[self.num_fired] = owner;
+                        self.num_fired += 1;
                     }
+                    self.triggered_timer = 0;
                 }
             }
         }
@@ -486,8 +498,7 @@ impl BxPcSystemC {
     /// Returns the timer index on success, or `PcSystemError::NoFreeTimerSlots` if full.
     pub fn register_timer(
         &mut self,
-        handler: BxTimerHandlerT,
-        param: *mut c_void,
+        owner: TimerOwner,
         period: u64,
         continuous: bool,
         active: bool,
@@ -511,8 +522,7 @@ impl BxPcSystemC {
                 } else {
                     0
                 };
-                self.timers[i].handler = Some(handler);
-                self.timers[i].param = param;
+                self.timers[i].owner = owner;
 
                 // Copy ID string
                 let id_bytes = id.as_bytes();
@@ -545,8 +555,7 @@ impl BxPcSystemC {
     /// Converts microseconds to ticks using IPS setting, then delegates to register_timer.
     pub fn register_timer_usec(
         &mut self,
-        handler: BxTimerHandlerT,
-        param: *mut c_void,
+        owner: TimerOwner,
         useconds: u32,
         continuous: bool,
         active: bool,
@@ -554,7 +563,7 @@ impl BxPcSystemC {
     ) -> Result<usize, PcSystemError> {
         // Convert useconds to number of ticks (Bochs pc_system.cc:257)
         let ticks = (f64::from(useconds) * self.m_ips) as u64;
-        self.register_timer(handler, param, ticks, continuous, active, id)
+        self.register_timer(owner, ticks, continuous, active, id)
     }
 
     /// Activate a timer with period in ticks.
@@ -677,8 +686,7 @@ impl BxPcSystemC {
         self.timers[timer_index].flags = TimerFlags::empty();
         self.timers[timer_index].period = u64::MAX;
         self.timers[timer_index].time_to_fire = u64::MAX;
-        self.timers[timer_index].handler = None;
-        self.timers[timer_index].param = core::ptr::null_mut();
+        self.timers[timer_index].owner = TimerOwner::NullTimer;
         self.timers[timer_index].id = [0; BX_MAX_TIMER_ID_LEN];
 
         if timer_index == self.num_timers - 1 {
@@ -687,20 +695,6 @@ impl BxPcSystemC {
         Ok(())
     }
 
-    /// Set a timer's user parameter.
-    ///
-    /// Corresponds to `bx_pc_system_c::setTimerParam()` in Bochs (pc_system.cc:605).
-    pub fn set_timer_param(
-        &mut self,
-        timer_index: usize,
-        param: *mut c_void,
-    ) -> Result<(), PcSystemError> {
-        if timer_index >= self.num_timers {
-            return Err(PcSystemError::TimerIndexOutOfBounds(timer_index));
-        }
-        self.timers[timer_index].param = param;
-        Ok(())
-    }
 
     /// Get the number of ticks until next timer event.
     /// Matches Bochs pc_system.h:135-137 `getNumCpuTicksLeftNextEvent()`.
@@ -787,11 +781,12 @@ impl BxPcSystemC {
         }
     }
 
-    /// Null timer handler (does nothing, just maintains timing).
-    /// Bochs pc_system.cc:388-411.
-    fn null_timer_handler(_param: *mut c_void) {
-        // The null timer exists to keep the timing system running and
-        // ensure countdown always fits in a u32.
+    /// Drain the buffer of timer owners that fired since the last drain.
+    /// Returns `(owners, count)` — iterate `owners[..count]` and dispatch.
+    pub fn take_fired_timers(&mut self) -> ([TimerOwner; BX_MAX_TIMERS], usize) {
+        let result = (self.fired_owners, self.num_fired);
+        self.num_fired = 0;
+        result
     }
 }
 
@@ -850,7 +845,6 @@ mod tests {
         assert_eq!(pc2.time_ticks(), 0);
     }
 
-    fn dummy_handler(_: *mut c_void) {}
 
     #[test]
     fn test_timer_registration() {
@@ -860,8 +854,7 @@ mod tests {
         // Register a timer — should get slot 1 (slot 0 is null timer)
         let idx = pc
             .register_timer(
-                dummy_handler,
-                core::ptr::null_mut(),
+                TimerOwner::PciIdeCh0,
                 1000,
                 true,
                 true,
@@ -883,8 +876,7 @@ mod tests {
         // 1000 usec at 15 MIPS = 15000 ticks
         let idx = pc
             .register_timer_usec(
-                dummy_handler,
-                core::ptr::null_mut(),
+                TimerOwner::PciIdeCh0,
                 1000,
                 true,
                 true,
@@ -903,8 +895,7 @@ mod tests {
         // Register a timer with period 100
         let _idx = pc
             .register_timer(
-                dummy_handler,
-                core::ptr::null_mut(),
+                TimerOwner::PciIdeCh0,
                 100,
                 true,
                 true,
@@ -937,8 +928,7 @@ mod tests {
 
         let idx = pc
             .register_timer(
-                dummy_handler,
-                core::ptr::null_mut(),
+                TimerOwner::PciIdeCh0,
                 100,
                 false, // one-shot
                 true,
@@ -960,18 +950,9 @@ mod tests {
         let mut pc = BxPcSystemC::new();
         pc.initialize(1_000_000);
 
-        static FIRE_COUNT: core::sync::atomic::AtomicU32 =
-            core::sync::atomic::AtomicU32::new(0);
-        FIRE_COUNT.store(0, core::sync::atomic::Ordering::SeqCst);
-
-        fn counting_handler(_: *mut c_void) {
-            FIRE_COUNT.fetch_add(1, core::sync::atomic::Ordering::SeqCst);
-        }
-
         let _idx = pc
             .register_timer(
-                counting_handler,
-                core::ptr::null_mut(),
+                TimerOwner::PciIdeCh0,
                 100,
                 true, // continuous
                 true,
@@ -981,10 +962,11 @@ mod tests {
 
         // Advance 500 ticks — should fire 5 times (at 100, 200, 300, 400, 500)
         pc.tickn(500);
-        assert_eq!(
-            FIRE_COUNT.load(core::sync::atomic::Ordering::SeqCst),
-            5
-        );
+        let (owners, count) = pc.take_fired_timers();
+        assert_eq!(count, 5);
+        for &owner in &owners[..count] {
+            assert_eq!(owner, TimerOwner::PciIdeCh0);
+        }
     }
 
     #[test]
@@ -992,8 +974,7 @@ mod tests {
         let mut pc = BxPcSystemC::new();
         let idx = pc
             .register_timer(
-                dummy_handler,
-                core::ptr::null_mut(),
+                TimerOwner::PciIdeCh0,
                 1000,
                 true,
                 false, // inactive
@@ -1016,8 +997,7 @@ mod tests {
         // Register timer with period 1000
         let _t1 = pc
             .register_timer(
-                dummy_handler,
-                core::ptr::null_mut(),
+                TimerOwner::PciIdeCh0,
                 1000,
                 true,
                 true,
@@ -1033,8 +1013,7 @@ mod tests {
         // Now activate a second timer with period 500 — should adjust countdown
         let t2 = pc
             .register_timer(
-                dummy_handler,
-                core::ptr::null_mut(),
+                TimerOwner::PciIdeCh1,
                 500,
                 true,
                 true,

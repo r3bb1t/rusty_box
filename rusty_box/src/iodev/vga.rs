@@ -24,7 +24,6 @@
 #[cfg(not(feature = "std"))]
 use alloc::vec;
 use alloc::{string::String, vec::Vec};
-use core::ffi::c_void;
 
 use crate::{config::BxPhyAddress, memory::BxMemC, Result};
 
@@ -638,11 +637,9 @@ impl BxVgaC {
 
         // Register memory handlers for VGA memory range (0xA0000-0xBFFFF)
         // This matches DEV_register_memory_handlers in vgacore.cc line 177
-        let vga_ptr_const = self as *const BxVgaC as *const c_void;
+        let device_id = crate::memory::MemoryDeviceId::Vga(self as *mut BxVgaC);
         mem.register_memory_handlers(
-            vga_ptr_const,
-            vga_mem_read_handler,
-            vga_mem_write_handler,
+            device_id,
             VGA_WINDOW_GRAPHICS_BASE,
             VGA_WINDOW_GRAPHICS_END,
         )?;
@@ -1542,30 +1539,28 @@ impl BxVgaC {
 /// Based on bx_vgacore_c::mem_read / mem_read_handler in vgacore.cc:1696-1795
 /// Implements read mode 0 (return selected plane) and read mode 1 (color compare).
 /// Loads latch register on every read.
-pub(super) fn vga_mem_read_handler(
-    addr: crate::config::BxPhyAddress,
-    len: u32,
-    data: *mut c_void,
-    param: *const c_void,
-) -> bool {
-    if param.is_null() || data.is_null() {
-        return false;
-    }
-
-    // Need mutable access for latch update (matching Bochs which mutates latch on read)
-    let vga = unsafe { &mut *(param as *mut BxVgaC) };
-
-    let mut data_ptr = data as *mut u8;
-
-    for current_addr in addr..(addr + len as u64) {
-        let val = vga_mem_read_byte(vga, current_addr);
-        unsafe {
-            *data_ptr = val;
-            data_ptr = data_ptr.add(1);
+impl BxVgaC {
+    pub(crate) fn mem_read(&mut self, addr: BxPhyAddress, len: u32, data: &mut [u8]) -> bool {
+        for (i, current_addr) in (addr..(addr + len as u64)).enumerate() {
+            if let Some(byte) = data.get_mut(i) {
+                *byte = vga_mem_read_byte(self, current_addr);
+            }
         }
+        true
     }
 
-    true
+    /// VGA memory write handler (called from memory system)
+    /// Based on bx_vgacore_c::mem_write / mem_write_handler in vgacore.cc:1797-2228
+    /// Implements all 4 write modes with full planar memory support.
+    pub(crate) fn mem_write(&mut self, addr: BxPhyAddress, len: u32, data: &[u8]) -> bool {
+        self.probe_handler_calls = self.probe_handler_calls.wrapping_add(1);
+        for (i, current_addr) in (addr..(addr + len as u64)).enumerate() {
+            if let Some(&value) = data.get(i) {
+                vga_mem_write_byte(self, current_addr, value);
+            }
+        }
+        true
+    }
 }
 
 /// Read a single byte from VGA memory. Matches Bochs vgacore.cc:1717-1795 `mem_read`.
@@ -1656,33 +1651,6 @@ fn vga_mem_read_byte(vga: &mut BxVgaC, addr: BxPhyAddress) -> u8 {
             !(latch0 | latch1 | latch2 | latch3)
         }
     }
-}
-
-/// VGA memory write handler (called from memory system)
-/// Based on bx_vgacore_c::mem_write / mem_write_handler in vgacore.cc:1797-2228
-/// Implements all 4 write modes with full planar memory support.
-pub(super) fn vga_mem_write_handler(
-    addr: crate::config::BxPhyAddress,
-    len: u32,
-    data: *mut c_void,
-    param: *const c_void,
-) -> bool {
-    if param.is_null() || data.is_null() {
-        return false;
-    }
-
-    let vga = unsafe { &mut *(param as *mut BxVgaC) };
-    vga.probe_handler_calls = vga.probe_handler_calls.wrapping_add(1);
-
-    let mut data_ptr = data as *const u8;
-
-    for current_addr in addr..(addr + len as u64) {
-        let value = unsafe { *data_ptr };
-        vga_mem_write_byte(vga, current_addr, value);
-        unsafe { data_ptr = data_ptr.add(1); }
-    }
-
-    true
 }
 
 /// Write a single byte to VGA memory. Matches Bochs vgacore.cc:1818-2228 `mem_write`.

@@ -26,7 +26,6 @@
 //! Ported from `cpp_orig/bochs/iodev/ioapic.cc` (370 lines) and
 //! `cpp_orig/bochs/iodev/ioapic.h` (117 lines).
 
-use core::ffi::c_void;
 
 use crate::config::BxPhyAddress;
 use crate::memory::BxMemC;
@@ -587,11 +586,9 @@ impl BxIoApic {
                 // Bochs: DEV_register_memory_handlers(..., base_addr, base_addr + 0xfff);
                 // (ioapic.cc:243-244)
                 let base = self.base_addr as BxPhyAddress;
-                let self_ptr = self as *const BxIoApic as *const core::ffi::c_void;
+                let device_id = crate::memory::MemoryDeviceId::IoApic(self as *mut BxIoApic);
                 mem.register_memory_handlers(
-                    self_ptr,
-                    ioapic_mem_read_handler,
-                    ioapic_mem_write_handler,
+                    device_id,
                     base,
                     base + (IOAPIC_MMIO_SIZE as BxPhyAddress) - 1,
                 )?;
@@ -604,11 +601,9 @@ impl BxIoApic {
             // Bochs: (ioapic.cc:249-253)
             self.base_addr = IOAPIC_BASE_ADDR | (base_offset as u32);
             let base = self.base_addr as BxPhyAddress;
-            let self_ptr = self as *const BxIoApic as *const core::ffi::c_void;
+            let device_id = crate::memory::MemoryDeviceId::IoApic(self as *mut BxIoApic);
             mem.register_memory_handlers(
-                self_ptr,
-                ioapic_mem_read_handler,
-                ioapic_mem_write_handler,
+                device_id,
                 base,
                 base + (IOAPIC_MMIO_SIZE as BxPhyAddress) - 1,
             )?;
@@ -921,93 +916,63 @@ fn apic_bus_deliver_interrupt(
 ///
 /// Bochs: `static bool ioapic_read(bx_phy_address a20addr, unsigned len, void *data, void *param)`
 /// (ioapic.cc:53-74)
-pub(crate) fn ioapic_mem_read_handler(
-    addr: BxPhyAddress,
-    len: u32,
-    data: *mut c_void,
-    param: *const c_void,
-) -> bool {
-    // Safety: param points to BxIoApic instance (set during registration).
-    // The pointer is valid for the lifetime of the emulator.
-    let ioapic = unsafe {
-        if param.is_null() {
-            tracing::error!("IOAPIC: read handler called with null param");
-            return false;
+impl BxIoApic {
+    pub(crate) fn mem_read(&self, addr: BxPhyAddress, len: u32, data: &mut [u8]) -> bool {
+        // Check that access doesn't span a 32-bit boundary
+        // Bochs: if((a20addr & ~0x3) != ((a20addr+len-1) & ~0x3)) (ioapic.cc:55)
+        if (addr & !0x3) != ((addr + len as u64 - 1) & !0x3) {
+            tracing::error!(
+                "IOAPIC: read at address {:#x} spans 32-bit boundary (len={})",
+                addr,
+                len
+            );
+            return true;
         }
-        &*(param as *const BxIoApic)
-    };
 
-    // Check that access doesn't span a 32-bit boundary
-    // Bochs: if((a20addr & ~0x3) != ((a20addr+len-1) & ~0x3)) (ioapic.cc:55)
-    if (addr & !0x3) != ((addr + len as u64 - 1) & !0x3) {
-        tracing::error!(
-            "IOAPIC: read at address {:#x} spans 32-bit boundary (len={})",
-            addr,
-            len
-        );
-        return true;
-    }
+        let value = self.read_aligned(addr & !0x3);
 
-    // Read the aligned 32-bit value
-    // Bochs: Bit32u value = theIOAPIC->read_aligned(a20addr & ~0x3); (ioapic.cc:59)
-    let value = ioapic.read_aligned(addr & !0x3);
-
-    // Write result to caller's data buffer
-    // Bochs: (ioapic.cc:60-71)
-    unsafe {
-        if len == 4 {
-            // Full 32-bit aligned read
-            *(data as *mut u32) = value;
-        } else {
-            // Partial read: shift by byte offset within the 32-bit word
-            let shifted = value >> ((addr & 3) * 8) as u32;
-            if len == 1 {
-                *(data as *mut u8) = (shifted & 0xFF) as u8;
-            } else if len == 2 {
-                *(data as *mut u16) = (shifted & 0xFFFF) as u16;
-            } else {
+        // Write result to caller's data buffer (Bochs ioapic.cc:60-71)
+        match len {
+            4 => {
+                data[..4].copy_from_slice(&value.to_ne_bytes());
+            }
+            2 => {
+                let shifted = value >> ((addr & 3) * 8) as u32;
+                data[..2].copy_from_slice(&(shifted as u16).to_ne_bytes());
+            }
+            1 => {
+                let shifted = value >> ((addr & 3) * 8) as u32;
+                data[0] = (shifted & 0xFF) as u8;
+            }
+            _ => {
                 tracing::error!("IOAPIC: unsupported read len={} at addr={:#x}", len, addr);
             }
         }
+        true
     }
 
-    true
-}
-
-/// MMIO write handler for the I/O APIC.
-///
-/// Writes must be 16-byte aligned. Non-4-byte writes are zero-extended to 32 bits
-/// when writing to IOREGSEL (offset 0x00).
-///
-/// Bochs: `static bool ioapic_write(bx_phy_address a20addr, unsigned len, void *data, void *param)`
-/// (ioapic.cc:76-99)
-pub(crate) fn ioapic_mem_write_handler(
-    addr: BxPhyAddress,
-    len: u32,
-    data: *mut c_void,
-    param: *const c_void,
-) -> bool {
-    // Safety: param points to BxIoApic instance (set during registration).
-    let ioapic = unsafe {
-        if param.is_null() {
-            tracing::error!("IOAPIC: write handler called with null param");
-            return false;
+    /// MMIO write handler for the I/O APIC.
+    ///
+    /// Writes must be 16-byte aligned. Non-4-byte writes are zero-extended to 32 bits
+    /// when writing to IOREGSEL (offset 0x00).
+    ///
+    /// Bochs: `static bool ioapic_write(bx_phy_address a20addr, unsigned len, void *data, void *param)`
+    /// (ioapic.cc:76-99)
+    pub(crate) fn mem_write(&mut self, addr: BxPhyAddress, len: u32, data: &[u8]) -> bool {
+        // Bochs: if(a20addr & 0xf) { BX_PANIC(...); return 1; } (ioapic.cc:78-81)
+        if addr & 0xF != 0 {
+            tracing::error!("IOAPIC: write at unaligned address {:#x}", addr);
+            return true;
         }
-        &mut *(param as *mut BxIoApic)
-    };
 
-    // Bochs: if(a20addr & 0xf) { BX_PANIC(...); return 1; } (ioapic.cc:78-81)
-    if addr & 0xF != 0 {
-        tracing::error!("IOAPIC: write at unaligned address {:#x}", addr);
-        return true;
-    }
-
-    // Bochs: (ioapic.cc:83-96)
-    unsafe {
+        // Bochs: (ioapic.cc:83-96)
         if len == 4 {
-            ioapic.write_aligned(
+            let value = u32::from_ne_bytes(
+                data[..4].try_into().expect("IOAPIC write: data too short for 4-byte access"),
+            );
+            self.write_aligned(
                 addr,
-                *(data as *const u32),
+                value,
                 None, // no PIC available in MMIO callback
                 #[cfg(feature = "bx_support_apic")]
                 None, // no LAPIC available in MMIO callback
@@ -1024,15 +989,17 @@ pub(crate) fn ioapic_mem_write_handler(
                 return true;
             }
 
-            let value = if len == 2 {
-                *(data as *const u16) as u32
-            } else if len == 1 {
-                *(data as *const u8) as u32
-            } else {
-                tracing::error!("IOAPIC: unsupported write len={} at addr={:#x}", len, addr);
-                return true;
+            let value = match len {
+                2 => u16::from_ne_bytes(
+                    data[..2].try_into().expect("IOAPIC write: data too short for 2-byte access"),
+                ) as u32,
+                1 => data[0] as u32,
+                _ => {
+                    tracing::error!("IOAPIC: unsupported write len={} at addr={:#x}", len, addr);
+                    return true;
+                }
             };
-            ioapic.write_aligned(
+            self.write_aligned(
                 addr,
                 value,
                 None, // no PIC available in MMIO callback
@@ -1040,9 +1007,8 @@ pub(crate) fn ioapic_mem_write_handler(
                 None, // no LAPIC available in MMIO callback
             );
         }
+        true
     }
-
-    true
 }
 
 // ---------------------------------------------------------------------------
