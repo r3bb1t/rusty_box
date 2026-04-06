@@ -4382,6 +4382,7 @@ back_to_enum! {
     }
 }
 
+#[allow(clippy::derivable_impls)]
 impl Default for Opcode {
     fn default() -> Self {
         Self::IaError

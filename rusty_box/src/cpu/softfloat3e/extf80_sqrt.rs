@@ -76,7 +76,7 @@ pub fn extf80_sqrt(a: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
         .wrapping_sub((sig32_z as u64).wrapping_mul(sig32_z as u64));
 
     // First Newton-Raphson refinement
-    let mut q = (((rem.0 >> 2) as u32 as u64).wrapping_mul(recip_sqrt32 as u64) >> 32) as u64;
+    let mut q = ((rem.0 >> 2) as u32 as u64).wrapping_mul(recip_sqrt32 as u64) >> 32;
     let x64 = (sig32_z as u64) << 32;
     let mut sig_z = x64.wrapping_add(q << 3);
     let y = short_shift_left128(rem.0, rem.1, 29);
@@ -92,7 +92,7 @@ pub fn extf80_sqrt(a: floatx80, status: &mut SoftFloatStatus) -> floatx80 {
     }
 
     // Second refinement
-    q = ((((rem.0 >> 2).wrapping_mul(recip_sqrt32 as u64)) >> 32) as u64).wrapping_add(2);
+    q = (((rem.0 >> 2).wrapping_mul(recip_sqrt32 as u64)) >> 32).wrapping_add(2);
     let x64 = sig_z;
     sig_z = (sig_z << 1).wrapping_add(q >> 25);
     let mut sig_z_extra = q << 39;

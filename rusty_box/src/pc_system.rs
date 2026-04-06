@@ -269,12 +269,12 @@ impl BxPcSystemC {
         // We use `>=` to catch overdue timers when countdown period overshoots
         // the timer period. This was the root cause of LAPIC timer interrupts
         // never firing during HLT (session 53 fix).
-        for i in 0..self.num_timers {
-            triggered[i] = false;
+        for (i, triggered_flag) in triggered.iter_mut().enumerate().take(self.num_timers) {
+            *triggered_flag = false;
             if self.timers[i].flags.contains(TimerFlags::ACTIVE) {
                 if self.ticks_total >= self.timers[i].time_to_fire {
                     // Timer is ready to fire (may be overdue)
-                    triggered[i] = true;
+                    *triggered_flag = true;
                     if !self.timers[i].flags.contains(TimerFlags::CONTINUOUS) {
                         // One-shot: deactivate
                         self.timers[i].flags.remove(TimerFlags::ACTIVE);
@@ -310,8 +310,9 @@ impl BxPcSystemC {
         // Step 4: Fire all triggered callbacks (in timer index order)
         // Bochs pc_system.cc:377-385
         if first <= last {
-            for i in first..=last {
-                if triggered[i] {
+            for (offset, &triggered_flag) in triggered[first..=last].iter().enumerate() {
+                let i = first + offset;
+                if triggered_flag {
                     if let Some(handler) = self.timers[i].handler {
                         self.triggered_timer = i;
                         handler(self.timers[i].param);

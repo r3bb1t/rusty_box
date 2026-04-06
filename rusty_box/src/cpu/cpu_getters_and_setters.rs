@@ -702,6 +702,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
     /// Get first HLT in PM diagnostic data
     /// Returns (captured, icount, rip, cs, ss, eflags, regs[8], stack[16])
+    #[allow(clippy::type_complexity)]
     pub fn get_first_pm_hlt(&self) -> Option<(u64, u32, u16, u16, u32, [u32; 8], [u32; 16])> {
         if self.diag_first_pm_hlt_captured {
             Some((

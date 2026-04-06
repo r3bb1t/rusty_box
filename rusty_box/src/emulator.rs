@@ -774,7 +774,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     &update_result.text_snapshot,
                     &update_result.text_buffer,
                     cursor_x as u32,
-                    cursor_y as u32,
+                    cursor_y,
                     &update_result.tm_info,
                 );
             }
@@ -1503,7 +1503,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             xsdt[28..32].copy_from_slice(b"RBOX");
             xsdt[32..36].copy_from_slice(&1u32.to_le_bytes());
             // Pointer to MADT (64-bit)
-            xsdt[36..44].copy_from_slice(&(MADT_ADDR as u64).to_le_bytes());
+            xsdt[36..44].copy_from_slice(&MADT_ADDR.to_le_bytes());
             let sum: u8 = xsdt.iter().fold(0u8, |a, &b| a.wrapping_add(b));
             xsdt[9] = 0u8.wrapping_sub(sum);
             self.memory.load_RAM(&xsdt, XSDT_ADDR)?;
@@ -1520,7 +1520,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             // Length (offset 20) — v2.0 extended length
             rsdp[20..24].copy_from_slice(&36u32.to_le_bytes());
             // XSDT address (offset 24) — 64-bit
-            rsdp[24..32].copy_from_slice(&(XSDT_ADDR as u64).to_le_bytes());
+            rsdp[24..32].copy_from_slice(&XSDT_ADDR.to_le_bytes());
             // Extended checksum (byte 32) — filled later
             // v1 checksum covers bytes 0-19
             let v1_sum: u8 = rsdp[0..20].iter().fold(0u8, |a, &b| a.wrapping_add(b));
@@ -2260,15 +2260,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 let sp = self.cpu.sp() as usize;
                                 let stack_addr = ss_base + sp;
                                 let mut stack_words = [0u16; 16];
-                                for i in 0..16 {
-                                    stack_words[i] = read_u16(stack_addr + i * 2);
+                                for (i, word) in stack_words.iter_mut().enumerate() {
+                                    *word = read_u16(stack_addr + i * 2);
                                 }
                                 // Also dump the full stack from SP to 0xFFFE
                                 let full_stack_start = stack_addr;
                                 let full_stack_end = (ss_base + 0xFFFE).min(mem.len());
                                 let full_words: Vec<u16> = (full_stack_start..full_stack_end)
                                     .step_by(2)
-                                    .map(|a| read_u16(a))
+                                    .map(&read_u16)
                                     .collect();
                                 let full_hex: Vec<String> =
                                     full_words.iter().map(|w| format!("{:04x}", w)).collect();
@@ -2408,9 +2408,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     }
                                 }
                                 // 2. Now get accurate countdown and advance
-                                let step = self.pc_system.get_num_ticks_left_next_event()
-                                    .max(1)
-                                    .min(100_000);
+                                let step = self.pc_system.get_num_ticks_left_next_event().clamp(1, 100_000);
                                 self.pc_system.tickn(step);
                                 hlt_budget += step as u64;
                                 let dev_usec = (step as u64 * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
@@ -2529,7 +2527,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                         if let Some(eoi_vec) = lapic.pending_eoi_vector.take() { self.device_manager.ioapic.receive_eoi(eoi_vec); }
                                         if lapic.intr && (self.cpu.interrupts_enabled() || mwait_if2) { self.cpu.signal_event(1 << 2); break; }
                                     }
-                                    let s = self.pc_system.get_num_ticks_left_next_event().max(1).min(100_000);
+                                    let s = self.pc_system.get_num_ticks_left_next_event().clamp(1, 100_000);
                                     self.pc_system.tickn(s);
                                     hlt2 += s as u64;
                                     let du = (s as u64 * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
@@ -2925,7 +2923,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             total_executed += executed;
 
             // --- Tick devices + pc_system ---
-            let usec = if ips > 0 { (executed * 1_000_000 / ips).max(10) } else { 10 };
+            let usec = (executed * 1_000_000).checked_div(ips).unwrap_or(0).max(10);
             self.tick_devices(usec);
             self.pc_system.tickn(executed as u32);
 
@@ -3025,9 +3023,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             break;
                         }
                     }
-                    let step = self.pc_system.get_num_ticks_left_next_event()
-                        .max(1)
-                        .min(100_000);
+                    let step = self.pc_system.get_num_ticks_left_next_event().clamp(1, 100_000);
                     self.pc_system.tickn(step);
                     hlt_budget += step as u64;
                     let dev_usec = (step as u64 * 1_000_000 / ips.max(1)).max(1);
@@ -3065,11 +3061,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             // --- Tight loop: if CPU was woken from MWAIT and wall budget remains,
             // run another cycle instead of returning to egui event loop.
             // This matches Bochs's dedicated CPU thread which never yields to GUI.
-            if matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::Active) {
-                if wall_start.elapsed() < wall_budget {
+            if matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::Active)
+                && wall_start.elapsed() < wall_budget {
                     continue 'batch;
                 }
-            }
 
             break 'batch;
         }
@@ -3171,16 +3166,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
             if update_result.dimension_changed {
                 display.resize(
-                    if update_result.fwidth > 0 {
-                        update_result.iwidth / update_result.fwidth
-                    } else {
-                        update_result.iwidth
-                    },
-                    if update_result.fheight > 0 {
-                        update_result.iheight / update_result.fheight
-                    } else {
-                        update_result.iheight
-                    },
+                    update_result.iwidth.checked_div(update_result.fwidth).unwrap_or(update_result.iwidth),
+                    update_result.iheight.checked_div(update_result.fheight).unwrap_or(update_result.iheight),
                     update_result.fwidth,
                     update_result.fheight,
                 );
@@ -3189,7 +3176,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             display.render_text_to_framebuffer(
                 &update_result.text_buffer,
                 cursor_x as u32,
-                cursor_y as u32,
+                cursor_y,
                 update_result.tm_info.cs_start,
                 update_result.tm_info.cs_end,
                 update_result.tm_info.line_graphics,
@@ -3378,7 +3365,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     pub fn get_dtlb_info(&self, laddr: u64) -> (u64, u64, u32, u64) {
         let idx = self.cpu.dtlb.get_index_of(laddr, 3);
         let entry = &self.cpu.dtlb.entries[idx];
-        (entry.lpf, entry.ppf, entry.access_bits, entry.host_page_addr as u64)
+        (entry.lpf, entry.ppf, entry.access_bits, entry.host_page_addr)
     }
 
     /// Get user_pl flag (true = CPL==3).
@@ -3439,9 +3426,7 @@ impl<I: BxCpuIdTrait> Emulator<'_, I> {
             self.cpu.diag_syscall_count.saturating_sub(self.cpu.diag_sysret_count));
         {
             let count = self.cpu.diag_syscall_ring_idx.min(32);
-            let start = if self.cpu.diag_syscall_ring_idx > 32 {
-                self.cpu.diag_syscall_ring_idx - 32
-            } else { 0 };
+            let start = self.cpu.diag_syscall_ring_idx.saturating_sub(32);
             for i in start..self.cpu.diag_syscall_ring_idx {
                 let (nr, arg0, ic) = self.cpu.diag_syscall_ring[i % 32];
                 tracing::debug!("  syscall nr={} arg0={:#x} icount={}", nr, arg0, ic);

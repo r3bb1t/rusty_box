@@ -189,7 +189,7 @@ impl BxPciBridge {
     pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> bool {
         let mut pam_changed = false;
         // BARs are read-only (pci.cc:275-276)
-        if address >= 0x10 && address < 0x34 {
+        if (0x10..0x34).contains(&address) {
             return false;
         }
 
@@ -248,7 +248,7 @@ impl BxPciBridge {
                 // DRBA registers (pci.cc:353-369)
                 0x60..=0x67 => {
                     self.pci_conf[addr] = value8;
-                    let drba_reg = (addr & 0x07) as usize;
+                    let drba_reg = addr & 0x07;
                     let drba_changed = self.pci_conf[0x60 + drba_reg] != self.drba[drba_reg];
                     if drba_changed {
                         self.dram_detect |= 1 << drba_reg;

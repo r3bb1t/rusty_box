@@ -132,7 +132,7 @@ impl I387 {
 
     #[inline]
     pub fn get_status_word(&self) -> u16 {
-        (self.swd & !FPU_SW_TOP & 0xFFFF) | (((self.tos as u16) << 11) & FPU_SW_TOP)
+        (self.swd & !FPU_SW_TOP) | (((self.tos as u16) << 11) & FPU_SW_TOP)
     }
 
     #[inline]

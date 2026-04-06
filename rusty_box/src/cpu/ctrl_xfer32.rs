@@ -748,7 +748,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.set_gpr32(4, esp.wrapping_add(imm16 as u32));
             } else {
                 let sp = self.get_gpr16(4);
-                self.set_gpr16(4, sp.wrapping_add(imm16 as u16));
+                self.set_gpr16(4, sp.wrapping_add(imm16));
             }
         }
 

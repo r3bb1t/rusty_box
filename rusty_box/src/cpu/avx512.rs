@@ -514,7 +514,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let laddr = self.resolve_addr(instr);
             let seg = BxSegregs::from(instr.seg());
             if self.long64_mode() {
-                self.read_virtual_qword_64(seg, laddr as u64)?
+                self.read_virtual_qword_64(seg, laddr)?
             } else {
                 let lo = self.v_read_dword(seg, laddr)? as u64;
                 let hi = self.v_read_dword(seg, laddr + 4)? as u64;
@@ -1387,8 +1387,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         for lane in 0..lanes {
             let base = lane * 4;
             // Interleave low halves of each 128-bit lane
-            result.set_zmm32u(base + 0, src1.zmm32u(base + 0));
-            result.set_zmm32u(base + 1, src2.zmm32u(base + 0));
+            result.set_zmm32u(base, src1.zmm32u(base));
+            result.set_zmm32u(base + 1, src2.zmm32u(base));
             result.set_zmm32u(base + 2, src1.zmm32u(base + 1));
             result.set_zmm32u(base + 3, src2.zmm32u(base + 1));
         }
@@ -1420,8 +1420,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let lanes = vl_bytes(vl) / 16;
         for lane in 0..lanes {
             let base = lane * 2;
-            result.set_zmm64u(base + 0, src1.zmm64u(base + 0));
-            result.set_zmm64u(base + 1, src2.zmm64u(base + 0));
+            result.set_zmm64u(base, src1.zmm64u(base));
+            result.set_zmm64u(base + 1, src2.zmm64u(base));
         }
         let mask = read_opmask_for_write(self, instr);
         let zmask = instr.is_zero_masking() != 0;
@@ -1451,7 +1451,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let lanes = vl_bytes(vl) / 16;
         for lane in 0..lanes {
             let base = lane * 2;
-            result.set_zmm64u(base + 0, src1.zmm64u(base + 1));
+            result.set_zmm64u(base, src1.zmm64u(base + 1));
             result.set_zmm64u(base + 1, src2.zmm64u(base + 1));
         }
         let mask = read_opmask_for_write(self, instr);
@@ -1653,7 +1653,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         for lane in 0..lanes {
             let base = lane * 4;
             // Interleave high halves of each 128-bit lane
-            result.set_zmm32u(base + 0, src1.zmm32u(base + 2));
+            result.set_zmm32u(base, src1.zmm32u(base + 2));
             result.set_zmm32u(base + 1, src2.zmm32u(base + 2));
             result.set_zmm32u(base + 2, src1.zmm32u(base + 3));
             result.set_zmm32u(base + 3, src2.zmm32u(base + 3));
@@ -1885,8 +1885,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let base = lane * 16;
             // Concatenate [src1:src2] as 32 bytes, shift right by imm8 bytes
             let mut concat = [0u8; 32];
-            for j in 0..16 { concat[j] = s2.zmmubyte(base + j); }
-            for j in 0..16 { concat[16 + j] = s1.zmmubyte(base + j); }
+            for (j, elem) in concat[..16].iter_mut().enumerate() { *elem = s2.zmmubyte(base + j); }
+            for (j, elem) in concat[16..32].iter_mut().enumerate() { *elem = s1.zmmubyte(base + j); }
             for j in 0..16 {
                 let idx = j + shift;
                 r.set_zmmubyte(base + j, if idx < 32 { concat[idx] } else { 0 });

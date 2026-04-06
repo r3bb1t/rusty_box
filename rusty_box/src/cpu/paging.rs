@@ -394,8 +394,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         page_write_stamp_table: &mut crate::cpu::icache::BxPageWriteStampTable,
     ) -> Result<()> {
         // Update PDE accessed bit if needed (when accessing PTE)
-        if leaf == BX_LEVEL_PTE {
-            if (entry[BX_LEVEL_PDE] & pte_bits32::ACCESSED) == 0 {
+        if leaf == BX_LEVEL_PTE
+            && (entry[BX_LEVEL_PDE] & pte_bits32::ACCESSED) == 0 {
                 entry[BX_LEVEL_PDE] |= pte_bits32::ACCESSED;
                 self.write_physical_dword(
                     entry_addr[BX_LEVEL_PDE],
@@ -404,7 +404,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     page_write_stamp_table,
                 )?;
             }
-        }
 
         // Update PTE accessed/dirty bits
         let set_dirty = write && (entry[leaf] & pte_bits32::DIRTY) == 0;
@@ -424,6 +423,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Translate a linear address to a physical address
     /// Based on BX_CPU_C::translate_linear in paging.cc:1261
     /// Returns Ok(paddr) on success, or Err with page fault info that caller should handle
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn translate_linear(
         &mut self,
         _tlb_entry: &TLBEntry,
@@ -485,9 +485,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
 
                 // Raise page fault exception (based on page_fault function in paging.cc:539)
-                if let Err(exc_err) = self.exception(super::cpu::Exception::Pf, error_code as u16) {
-                    return Err(exc_err);
-                }
+                self.exception(super::cpu::Exception::Pf, error_code as u16)?;
                 Err(e)
             }
         }
@@ -738,7 +736,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             BX_LEVEL_PML4
         };
         let mut ppf = self.cr3 & BX_CR3_PAGING_MASK_PAE;
-        let mut offset_mask = ((1u64 << self.linaddr_width as u64) - 1) as u64;
+        let mut offset_mask = (1u64 << self.linaddr_width as u64) - 1;
 
         let mut entry_addr = [0u64; 5];
         let mut entry = [PteBits::empty(); 5];
@@ -1061,7 +1059,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             BX_LEVEL_PML4
         };
         let mut ppf = self.cr3 & BX_CR3_PAGING_MASK_PAE;
-        let mut offset_mask = ((1u64 << self.linaddr_width as u64) - 1) as u64;
+        let mut offset_mask = (1u64 << self.linaddr_width as u64) - 1;
 
         let mut entry_addr = [0u64; 5];
         let mut entry = [PteBits::empty(); 5];
@@ -1232,7 +1230,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             BX_LEVEL_PML4
         };
         let mut ppf = self.cr3 & BX_CR3_PAGING_MASK_PAE;
-        let mut offset_mask = ((1u64 << self.linaddr_width as u64) - 1) as u64;
+        let mut offset_mask = (1u64 << self.linaddr_width as u64) - 1;
         let mut leaf = start_leaf;
 
         loop {
@@ -1712,12 +1710,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
 
             // SMAP check for 2MB page
-            if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0 {
-                if self.get_ac() == 0 {
+            if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0
+                && self.get_ac() == 0 {
                     self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                     return Err(super::CpuError::CpuLoopRestart);
                 }
-            }
 
             // Update A/D bits on PDE (leaf for 2MB page)
             let needed = PteBits::ACCESSED | if is_write { PteBits::DIRTY } else { PteBits::empty() };
@@ -1768,12 +1765,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // SMAP check: supervisor data access to user page when AC=0
-        if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0 {
-            if self.get_ac() == 0 {
+        if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0
+            && self.get_ac() == 0 {
                 self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
-        }
 
         // Update A/D bits — PDE gets A bit, PTE gets A+D
         if !entry[BX_LEVEL_PDE].contains(PteBits::ACCESSED) {
@@ -1823,7 +1819,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Offset mask tracks how many bits of the linear address are used as the page offset.
         // We start with the full linear address width mask and shift right 9 bits per level.
-        let mut offset_mask = ((1u64 << self.linaddr_width as u64) - 1) as u64;
+        let mut offset_mask = (1u64 << self.linaddr_width as u64) - 1;
         let mut lpf_mask = 0xFFFu32;
 
         loop {
@@ -1899,12 +1895,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // SMAP check: supervisor data access to user page when AC=0
         // Bochs paging.cc:740-749
-        if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0 {
-            if self.get_ac() == 0 {
+        if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0
+            && self.get_ac() == 0 {
                 self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;
                 return Err(super::CpuError::CpuLoopRestart);
             }
-        }
 
         // Update A/D bits for all levels
         // Non-leaf levels get A bit, leaf gets A+D

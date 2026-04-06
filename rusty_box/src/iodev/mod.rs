@@ -129,6 +129,7 @@ pub struct BxDevicesC {
     /// Bochs' rombios uses:
     /// - `INFO_PORT`  0x402
     /// - `DEBUG_PORT` 0x403
+    ///
     /// VGABIOS also supports an info port (0x500).
     ///
     /// We funnel these into a single byte stream buffer. Host code (examples/GUI)
@@ -354,7 +355,6 @@ impl BxDevicesC {
                 self.port_e9_output.pop_front();
             }
             self.port_e9_output.push_back(value as u8);
-            return;
         }
 
     }

@@ -9,6 +9,12 @@ pub struct BxCpuBuilder<I: BxCpuIdTrait> {
     cpuid: I,
 }
 
+impl<I: BxCpuIdTrait> Default for BxCpuBuilder<I> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
     pub fn new() -> Self {
         let cpuid = I::new();

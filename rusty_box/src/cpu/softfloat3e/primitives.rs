@@ -11,7 +11,7 @@
 /// Shifts 'a' right by 'dist' (1..63), jamming discarded bits into LSB.
 #[inline]
 pub fn short_shift_right_jam64(a: u64, dist: u8) -> u64 {
-    debug_assert!(dist >= 1 && dist <= 63);
+    debug_assert!((1..=63).contains(&dist));
     (a >> dist) | (((a & ((1u64 << dist) - 1)) != 0) as u64)
 }
 
@@ -42,7 +42,7 @@ pub fn shift_right_jam64(a: u64, dist: u32) -> u64 {
 /// Shifts the 128-bit value (a64, a0) left by 'dist' (1..63).
 #[inline]
 pub fn short_shift_left128(a64: u64, a0: u64, dist: u8) -> (u64, u64) {
-    debug_assert!(dist >= 1 && dist <= 63);
+    debug_assert!((1..=63).contains(&dist));
     let z64 = (a64 << dist) | (a0 >> (64 - dist));
     let z0 = a0 << dist;
     (z64, z0)
@@ -51,7 +51,7 @@ pub fn short_shift_left128(a64: u64, a0: u64, dist: u8) -> (u64, u64) {
 /// Shifts the 128-bit value (a64, a0) right by 'dist' (1..63).
 #[inline]
 pub fn short_shift_right128(a64: u64, a0: u64, dist: u8) -> (u64, u64) {
-    debug_assert!(dist >= 1 && dist <= 63);
+    debug_assert!((1..=63).contains(&dist));
     let z64 = a64 >> dist;
     let z0 = (a64 << (64 - dist)) | (a0 >> dist);
     (z64, z0)
@@ -191,7 +191,7 @@ pub fn lt128(a64: u64, a0: u64, b64: u64, b0: u64) -> bool {
 /// extra = (bits shifted out of a, with old extra jammed into LSB)
 #[inline]
 pub fn short_shift_right_jam64_extra(a: u64, extra: u64, dist: u8) -> (u64, u64) {
-    debug_assert!(dist >= 1 && dist <= 63);
+    debug_assert!((1..=63).contains(&dist));
     let v = a >> dist;
     let new_extra = (a << ((!dist).wrapping_add(1) & 63)) | ((extra != 0) as u64);
     (v, new_extra)
@@ -243,9 +243,8 @@ pub fn approx_recip_sqrt32_1(odd_exp: u32, a: u32) -> u32 {
     let eps = (a >> 12) as u16;
     let r0 = (APPROX_RECIP_SQRT_1K0S[index] as u32)
         .wrapping_sub(((APPROX_RECIP_SQRT_1K1S[index] as u32).wrapping_mul(eps as u32)) >> 20);
-    let r0 = r0 as u32;
     let sigma0 = !(r0.wrapping_mul(r0) as u64).wrapping_mul(a as u64);
-    let r = ((r0 as u32) << 16)
-        .wrapping_add(((r0 as u64).wrapping_mul((sigma0 >> 25) as u64) >> 25) as u32);
-    r
+    
+    (r0 << 16)
+        .wrapping_add(((r0 as u64).wrapping_mul(sigma0 >> 25) >> 25) as u32)
 }

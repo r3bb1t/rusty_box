@@ -90,7 +90,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // MSR block
-        buf.extend_from_slice(&(self.msr.apicbase as u64).to_le_bytes());
+        buf.extend_from_slice(&self.msr.apicbase.to_le_bytes());
         buf.extend_from_slice(&self.msr.star.to_le_bytes());
         buf.extend_from_slice(&self.msr.lstar.to_le_bytes());
         buf.extend_from_slice(&self.msr.cstar.to_le_bytes());

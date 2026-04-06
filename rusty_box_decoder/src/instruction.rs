@@ -55,7 +55,9 @@ use super::BxSegregs;
 /// determines which portion of the register is used.
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Default)]
 pub enum GprIndex {
+    #[default]
     Rax = 0,
     Rcx = 1,
     Rdx = 2,
@@ -82,11 +84,6 @@ pub enum GprIndex {
     Nil = 19,
 }
 
-impl Default for GprIndex {
-    fn default() -> Self {
-        GprIndex::Rax
-    }
-}
 
 impl GprIndex {
     /// Number of architectural general-purpose registers (RAX-R15).
@@ -801,6 +798,7 @@ impl Instruction {
     }
 
     /// Set foo (x87 instruction field) — stored in low 16 bits of immediate
+    #[allow(clippy::disallowed_names)]
     #[inline]
     pub fn set_foo(&mut self, foo: u16) {
         // Preserve upper 16 bits, set lower 16 bits

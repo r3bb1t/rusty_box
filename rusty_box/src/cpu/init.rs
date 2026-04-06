@@ -391,9 +391,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.mxcsr_mask |= MXCSR_MISALIGNED_EXCEPTION_MASK
             }
 
-            (0..8)
-                .into_iter()
-                .for_each(|index| self.bx_write_opmask(index, 0));
+            (0..8).for_each(|index| self.bx_write_opmask(index, 0));
         }
 
         self.in_vmx = false;

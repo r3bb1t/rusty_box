@@ -72,13 +72,11 @@ macro_rules! packed_reg_accessors {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
+#[derive(Default)]
 pub struct BxPackedXmmRegister {
     pub(crate) bytes: [u8; 16],
 }
 
-impl Default for BxPackedXmmRegister {
-    fn default() -> Self { Self { bytes: [0; 16] } }
-}
 
 impl BxPackedXmmRegister {
     packed_reg_accessors!(uint xmm64u, set_xmm64u, u64, 8);
@@ -113,13 +111,11 @@ pub type BxXmmReg = BxPackedXmmRegister;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]
+#[derive(Default)]
 pub struct BxPackedYmmRegister {
     pub(crate) bytes: [u8; 32],
 }
 
-impl Default for BxPackedYmmRegister {
-    fn default() -> Self { Self { bytes: [0; 32] } }
-}
 
 impl BxPackedYmmRegister {
     packed_reg_accessors!(uint ymm64u, set_ymm64u, u64, 8);

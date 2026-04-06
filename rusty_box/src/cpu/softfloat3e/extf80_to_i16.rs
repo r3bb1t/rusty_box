@@ -8,7 +8,7 @@ use super::specialize::*;
 
 pub fn extf80_to_i16(a: floatx80, status: &mut SoftFloatStatus) -> i16 {
     let val = extf80_to_i32(a, status);
-    if (val < -32768) || (val > 32767) {
+    if !(-32768..=32767).contains(&val) {
         softfloat_raiseFlags(status, FLAG_INVALID);
         return INT16_INDEFINITE;
     }
@@ -17,7 +17,7 @@ pub fn extf80_to_i16(a: floatx80, status: &mut SoftFloatStatus) -> i16 {
 
 pub fn extf80_to_i16_round_to_zero(a: floatx80, status: &mut SoftFloatStatus) -> i16 {
     let val = extf80_to_i32_round_to_zero(a, status);
-    if (val < -32768) || (val > 32767) {
+    if !(-32768..=32767).contains(&val) {
         softfloat_raiseFlags(status, FLAG_INVALID);
         return INT16_INDEFINITE;
     }

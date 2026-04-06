@@ -332,7 +332,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let mut r = BxPackedRegister { bytes: [0; 8] };
             for j in 0..4usize {
-                let t = ((op1.S16(j) as i32) * (op2.S16(j) as i32) >> 14) + 1;
+                let t = (((op1.S16(j) as i32) * (op2.S16(j) as i32)) >> 14) + 1;
                 r.set_S16(j, (t >> 1) as i16);
             }
         self.write_mmx_reg(instr.dst(), r);

@@ -24,6 +24,7 @@ pub(super) const BX_TASK_FROM_IRET: u32 = 0x3;
 impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     /// Perform task switch
     /// Based on BX_CPU_C::task_switch in tasking.cc:113
+    #[allow(clippy::too_many_arguments)]
     pub(super) fn task_switch(
         &mut self,
         tss_selector: &BxSelector,
@@ -280,8 +281,8 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             .set32(self.dr7.get32() & !Self::DR7_LOCAL_ENABLE_MASK);
 
         // CR3 change — after commit point (Bochs tasking.cc:543-567)
-        if tss_descriptor.r#type >= 9 && self.cr0.pg() {
-            if new_cr3 != 0 && (new_cr3 as u64) != self.cr3 {
+        if tss_descriptor.r#type >= 9 && self.cr0.pg()
+            && new_cr3 != 0 && (new_cr3 as u64) != self.cr3 {
                 tracing::debug!("task_switch(): changing CR3 to {:#x}", new_cr3);
                 self.cr3 = new_cr3 as u64;
                 if self.cr4.pge() {
@@ -290,7 +291,6 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     self.tlb_flush();
                 }
             }
-        }
 
         // Step 10: If call or interrupt, set the NT flag in the eflags (matches lines 481-484)
         let mut final_eflags = new_eflags;
@@ -603,14 +603,12 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     }
 
                     // If data or non-conforming code, RPL and CPL must be <= DPL
-                    if is_data_segment(descriptor.r#type)
-                        || is_code_segment_non_conforming(descriptor.r#type)
-                    {
-                        if selector.rpl > descriptor.dpl || cs_rpl > descriptor.dpl {
+                    if (is_data_segment(descriptor.r#type)
+                        || is_code_segment_non_conforming(descriptor.r#type))
+                        && (selector.rpl > descriptor.dpl || cs_rpl > descriptor.dpl) {
                             tracing::error!("task_switch({:?}): RPL & CPL must be <= DPL", seg);
                             return self.exception(Exception::Ts, raw_selector & 0xfffc);
                         }
-                    }
 
                     if !descriptor.p {
                         tracing::error!("task_switch({:?}): descriptor not present", seg);

@@ -34,6 +34,7 @@ use super::{
 ///   1: 'ranges' comparison (even index = <=, odd index = >=)
 ///
 /// For each pair (i,j), the result is stored in bool_res[j][i].
+#[allow(clippy::needless_range_loop)]
 fn compare_strings(
     bool_res: &mut [[u8; 16]; 16],
     op1: &BxPackedXmmRegister,
@@ -168,14 +169,14 @@ fn find_eos(op: &BxPackedXmmRegister, imm: u8) -> usize {
 fn find_eos32(reg32: i32, imm: u8) -> usize {
     if imm & 0x1 != 0 {
         // 8 elements
-        if reg32 > 8 || reg32 < -8 {
+        if !(-8..=8).contains(&reg32) {
             8
         } else {
             reg32.unsigned_abs() as usize
         }
     } else {
         // 16 elements
-        if reg32 > 16 || reg32 < -16 {
+        if !(-16..=16).contains(&reg32) {
             16
         } else {
             reg32.unsigned_abs() as usize
@@ -190,14 +191,14 @@ fn find_eos32(reg32: i32, imm: u8) -> usize {
 fn find_eos64(reg64: i64, imm: u8) -> usize {
     if imm & 0x1 != 0 {
         // 8 elements
-        if reg64 > 8 || reg64 < -8 {
+        if !(-8..=8).contains(&reg64) {
             8
         } else {
             reg64.unsigned_abs() as usize
         }
     } else {
         // 16 elements
-        if reg64 > 16 || reg64 < -16 {
+        if !(-16..=16).contains(&reg64) {
             16
         } else {
             reg64.unsigned_abs() as usize
@@ -263,6 +264,7 @@ fn override_if_data_invalid(val: bool, i_valid: bool, j_valid: bool, imm: u8) ->
 ///   0,2: no change
 ///   1: XOR with all-ones mask
 ///   3: XOR only valid positions (j < len2)
+#[allow(clippy::needless_range_loop)]
 fn aggregate(bool_res: &[[u8; 16]; 16], len1: usize, len2: usize, imm: u8) -> u16 {
     let aggregation_operation = ((imm >> 2) & 3) as usize;
     let num_elements: usize = if imm & 0x1 != 0 { 8 } else { 16 };

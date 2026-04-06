@@ -207,10 +207,10 @@ impl VgaMemoryMapping {
     /// Returns true if the given address falls within the VGA memory window for this mapping mode.
     fn contains_addr(self, addr: BxPhyAddress) -> bool {
         match self {
-            Self::MonoText32k => addr >= VGA_WINDOW_MONO_BASE && addr <= VGA_WINDOW_MONO_END,
-            Self::ColorText32k => addr >= VGA_WINDOW_COLOR_BASE && addr <= VGA_WINDOW_COLOR_END,
-            Self::Vga64k => addr >= VGA_WINDOW_GRAPHICS_BASE && addr <= VGA_WINDOW_VGA64K_END,
-            Self::Ega128k => addr >= VGA_WINDOW_GRAPHICS_BASE && addr <= VGA_WINDOW_GRAPHICS_END,
+            Self::MonoText32k => (VGA_WINDOW_MONO_BASE..=VGA_WINDOW_MONO_END).contains(&addr),
+            Self::ColorText32k => (VGA_WINDOW_COLOR_BASE..=VGA_WINDOW_COLOR_END).contains(&addr),
+            Self::Vga64k => (VGA_WINDOW_GRAPHICS_BASE..=VGA_WINDOW_VGA64K_END).contains(&addr),
+            Self::Ega128k => (VGA_WINDOW_GRAPHICS_BASE..=VGA_WINDOW_GRAPHICS_END).contains(&addr),
         }
     }
 }
@@ -853,9 +853,7 @@ impl BxVgaC {
             self.pel_data[i] = *color;
         }
         // Also set entries for bright colors (palette indices 0x38-0x3F)
-        for i in 0..8 {
-            self.pel_data[0x38 + i] = dac_colors[8 + i];
-        }
+        self.pel_data[0x38..0x40].copy_from_slice(&dac_colors[8..16]);
 
         // Force text buffer refresh
         self.text_buffer_update = true;
@@ -865,10 +863,10 @@ impl BxVgaC {
     /// Read from I/O port
     pub(crate) fn read_port(&mut self, port: u16, _io_len: u8) -> u32 {
         // Bochs vgacore.cc:487-494: port gating based on color_emulation
-        if port >= 0x3B0 && port <= 0x3BF && self.misc_color_emulation {
+        if (0x3B0..=0x3BF).contains(&port) && self.misc_color_emulation {
             return 0xFF; // mono ports disabled in color mode
         }
-        if port >= 0x3D0 && port <= 0x3DF && !self.misc_color_emulation {
+        if (0x3D0..=0x3DF).contains(&port) && !self.misc_color_emulation {
             return 0xFF; // color ports disabled in mono mode
         }
         match port {
@@ -997,10 +995,10 @@ impl BxVgaC {
     /// Write to I/O port
     pub(crate) fn write_port(&mut self, port: u16, value: u32, io_len: u8) {
         // Bochs vgacore.cc:812-817: port gating based on color_emulation
-        if port >= 0x3B0 && port <= 0x3BF && self.misc_color_emulation {
+        if (0x3B0..=0x3BF).contains(&port) && self.misc_color_emulation {
             return; // mono ports disabled in color mode
         }
-        if port >= 0x3D0 && port <= 0x3DF && !self.misc_color_emulation {
+        if (0x3D0..=0x3DF).contains(&port) && !self.misc_color_emulation {
             return; // color ports disabled in mono mode
         }
         // Word writes: split into two byte writes (Bochs vgacore.cc:806-809)
@@ -1014,8 +1012,8 @@ impl BxVgaC {
             VGA_CRTC_INDEX | VGA_CRTC_INDEX_MONO => {
                 self.crtc_index = value & CRTC_INDEX_MASK;
             }
-            VGA_CRTC_DATA | VGA_CRTC_DATA_MONO => {
-                if self.crtc_index < 25 {
+            VGA_CRTC_DATA | VGA_CRTC_DATA_MONO
+                if self.crtc_index < 25 => {
                     self.crtc_regs[self.crtc_index as usize] = value;
 
                     // Update cursor position if cursor location registers changed
@@ -1047,7 +1045,6 @@ impl BxVgaC {
                         _ => {}
                     }
                 }
-            }
             VGA_ATTRIB_ADDR => {
                 // Writing to 0x3C0 toggles flip-flop
                 // Bochs vgacore.cc:821-843
@@ -1074,17 +1071,16 @@ impl BxVgaC {
                 }
                 self.attr_flip_flop = !self.attr_flip_flop;
             }
-            VGA_ATTRIB_DATA => {
+            VGA_ATTRIB_DATA
                 // Writing to 0x3C1 is not standard, but some code may try
-                if self.attr_index < 21 {
+                if self.attr_index < 21 => {
                     self.attr_regs[self.attr_index as usize] = value;
                 }
-            }
             VGA_SEQ_INDEX => {
                 self.seq_index = value & SEQ_INDEX_MASK;
             }
-            VGA_SEQ_DATA => {
-                if self.seq_index < 5 {
+            VGA_SEQ_DATA
+                if self.seq_index < 5 => {
                     self.seq_regs[self.seq_index as usize] = value;
                     match self.seq_index {
                         1 => {
@@ -1101,12 +1097,11 @@ impl BxVgaC {
                         _ => {}
                     }
                 }
-            }
             VGA_GRAPHICS_INDEX => {
                 self.graphics_index = value & GFX_INDEX_MASK;
             }
-            VGA_GRAPHICS_DATA => {
-                if self.graphics_index < 9 {
+            VGA_GRAPHICS_DATA
+                if self.graphics_index < 9 => {
                     let old_value = self.graphics_regs[self.graphics_index as usize];
                     self.graphics_regs[self.graphics_index as usize] = value;
 
@@ -1129,7 +1124,6 @@ impl BxVgaC {
                         }
                     }
                 }
-            }
 
             // Misc Output Read port (0x3CC) - also accept writes for compatibility
             VGA_MISC_OUTPUT => {
@@ -1254,7 +1248,7 @@ impl BxVgaC {
             for col in 0..TEXT_COLS {
                 let off = (row_base + col * BYTES_PER_CHAR) & mem_mask;
                 let ch = self.text_memory.get(off).copied().unwrap_or(0);
-                if ch >= 0x20 && ch < 0x7F {
+                if (0x20..0x7F).contains(&ch) {
                     result.push(ch as char);
                 } else if ch == 0 {
                     result.push(' ');
@@ -1291,7 +1285,7 @@ impl BxVgaC {
         let mut chars = String::new();
         for chunk in self.text_memory.chunks_exact(2) {
             let ch = chunk[0];
-            if ch >= 0x20 && ch < 0x7F && ch != b' ' {
+            if (0x20..0x7F).contains(&ch) && ch != b' ' {
                 chars.push(ch as char);
                 if chars.len() >= 256 {
                     break;
@@ -1318,7 +1312,7 @@ impl BxVgaC {
             for col in 0..TEXT_COLS {
                 let off = row_base + col * BYTES_PER_CHAR;
                 let ch = self.text_memory.get(off).copied().unwrap_or(0);
-                if ch >= 0x20 && ch < 0x7F {
+                if (0x20..0x7F).contains(&ch) {
                     row_str.push(ch as char);
                 } else {
                     row_str.push(' ');
@@ -1394,7 +1388,7 @@ impl BxVgaC {
         // Calculate text mode parameters (matching vgacore.cc:1601-1632)
         let start_addr = ((self.crtc_regs[CRTC_START_ADDR_HIGH] as u16) << 8)
             | (self.crtc_regs[CRTC_START_ADDR_LOW] as u16);
-        let start_address = (start_addr << 1) as u16;
+        let start_address = start_addr << 1;
 
         let cs_start = self.crtc_regs[CRTC_CURSOR_START] & CRTC_CURSOR_START_MASK;
         let cs_end = self.crtc_regs[CRTC_CURSOR_END] & CRTC_CURSOR_END_MASK;
@@ -1418,8 +1412,8 @@ impl BxVgaC {
 
         // Build palette (matching vgacore.cc:1629-1632)
         let mut actl_palette = [0u8; 16];
-        for i in 0..16 {
-            actl_palette[i] = self.attr_regs[i] & 0x0f; // Simplified - no pel.mask for now
+        for (i, palette) in actl_palette.iter_mut().enumerate() {
+            *palette = self.attr_regs[i] & 0x0f; // Simplified - no pel.mask for now
         }
 
         // Calculate rows and cols (matching vgacore.cc:1634-1648)
@@ -1564,16 +1558,14 @@ pub(super) fn vga_mem_read_handler(
     // Need mutable access for latch update (matching Bochs which mutates latch on read)
     let vga = unsafe { &mut *(param as *mut BxVgaC) };
 
-    let mut current_addr = addr;
     let mut data_ptr = data as *mut u8;
 
-    for _ in 0..len {
+    for current_addr in addr..(addr + len as u64) {
         let val = vga_mem_read_byte(vga, current_addr);
         unsafe {
             *data_ptr = val;
             data_ptr = data_ptr.add(1);
         }
-        current_addr += 1;
     }
 
     true
@@ -1592,7 +1584,7 @@ fn vga_mem_read_byte(vga: &mut BxVgaC, addr: BxPhyAddress) -> u8 {
                 (addr & 0xFFFF) as u32
             }
             2 => { // 0xB0000..0xB7FFF
-                if addr < 0xB0000 || addr > 0xB7FFF { return 0xFF; }
+                if !(0xB0000..=0xB7FFF).contains(&addr) { return 0xFF; }
                 (addr & 0x7FFF) as u32
             }
             3 => { // 0xB8000..0xBFFFF
@@ -1685,13 +1677,11 @@ pub(super) fn vga_mem_write_handler(
     let vga = unsafe { &mut *(param as *mut BxVgaC) };
     vga.probe_handler_calls = vga.probe_handler_calls.wrapping_add(1);
 
-    let mut current_addr = addr;
     let mut data_ptr = data as *const u8;
 
-    for _ in 0..len {
+    for current_addr in addr..(addr + len as u64) {
         let value = unsafe { *data_ptr };
         vga_mem_write_byte(vga, current_addr, value);
-        current_addr += 1;
         unsafe { data_ptr = data_ptr.add(1); }
     }
 
@@ -1708,19 +1698,19 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
     let offset = if addr >= 0xA0000 {
         match memory_mapping {
             1 => { // 0xA0000..0xAFFFF
-                if addr < 0xA0000 || addr > 0xAFFFF { return; }
+                if !(0xA0000..=0xAFFFF).contains(&addr) { return; }
                 (addr & 0xFFFF) as u32
             }
             2 => { // 0xB0000..0xB7FFF
-                if addr < 0xB0000 || addr > 0xB7FFF { return; }
+                if !(0xB0000..=0xB7FFF).contains(&addr) { return; }
                 (addr & 0x7FFF) as u32
             }
             3 => { // 0xB8000..0xBFFFF
-                if addr < 0xB8000 || addr > 0xBFFFF { return; }
+                if !(0xB8000..=0xBFFFF).contains(&addr) { return; }
                 (addr & 0x7FFF) as u32
             }
             _ => { // 0xA0000..0xBFFFF
-                if addr < 0xA0000 || addr > 0xBFFFF { return; }
+                if !(0xA0000..=0xBFFFF).contains(&addr) { return; }
                 (addr & 0x1FFFF) as u32
             }
         }
@@ -1760,7 +1750,7 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
 
             // Rotate CPU data
             if data_rotate > 0 {
-                value = (value >> data_rotate) | (value << (8 - data_rotate));
+                value = value.rotate_right(data_rotate.into());
             }
 
             // Start from latch values masked by ~bitmask
@@ -1812,7 +1802,7 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
                         if (set_reset & 8) != 0 { bitmask } else { vga.latch[3] & bitmask }
                     } else { (value | vga.latch[3]) & bitmask };
                 }
-                3 | _ => { // XOR
+                _ => { // XOR
                     new_val[0] |= if (enable_set_reset & 1) != 0 {
                         if (set_reset & 1) != 0 { !vga.latch[0] & bitmask } else { vga.latch[0] & bitmask }
                     } else { (value ^ vga.latch[0]) & bitmask };
@@ -1864,7 +1854,7 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
                     new_val[2] |= if (value & 4) != 0 { bitmask } else { vga.latch[2] & bitmask };
                     new_val[3] |= if (value & 8) != 0 { bitmask } else { vga.latch[3] & bitmask };
                 }
-                3 | _ => { // XOR
+                _ => { // XOR
                     new_val[0] |= if (value & 1) != 0 { !vga.latch[0] & bitmask } else { vga.latch[0] & bitmask };
                     new_val[1] |= if (value & 2) != 0 { !vga.latch[1] & bitmask } else { vga.latch[1] & bitmask };
                     new_val[2] |= if (value & 4) != 0 { !vga.latch[2] & bitmask } else { vga.latch[2] & bitmask };
@@ -1872,7 +1862,7 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
                 }
             }
         }
-        3 | _ => {
+        _ => {
             // Write mode 3 — Bochs vgacore.cc:2066-2123
             let data_rotate = vga.graphics_regs[GFX_REG_DATA_ROTATE] & 0x07;
             let raster_op = (vga.graphics_regs[GFX_REG_DATA_ROTATE] >> 3) & 0x03;
@@ -1880,7 +1870,7 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
 
             // Rotate CPU data
             if data_rotate > 0 {
-                value = (value >> data_rotate) | (value << (8 - data_rotate));
+                value = value.rotate_right(data_rotate.into());
             }
 
             let bitmask = vga.graphics_regs[GFX_REG_BIT_MASK] & value;
@@ -1913,7 +1903,7 @@ fn vga_mem_write_byte(vga: &mut BxVgaC, addr: BxPhyAddress, value: u8) {
                     new_val[2] |= (if (set_reset & 4) != 0 { masked_value } else { 0 }) | vga.latch[2];
                     new_val[3] |= (if (set_reset & 8) != 0 { masked_value } else { 0 }) | vga.latch[3];
                 }
-                3 | _ => { // XOR
+                _ => { // XOR
                     new_val[0] |= (if (set_reset & 1) != 0 { masked_value } else { 0 }) ^ vga.latch[0];
                     new_val[1] |= (if (set_reset & 2) != 0 { masked_value } else { 0 }) ^ vga.latch[1];
                     new_val[2] |= (if (set_reset & 4) != 0 { masked_value } else { 0 }) ^ vga.latch[2];

@@ -1282,7 +1282,7 @@ const fn get_immediate_size_32(b1: u32, map: u8, os_32: bool, as_32: bool, nnn: 
             // A1 = MOV AX/EAX, [moffs]
             // A2 = MOV [moffs8], AL
             // A3 = MOV [moffs], AX/EAX
-            0xA0 | 0xA1 | 0xA2 | 0xA3 => {
+            0xA0..=0xA3 => {
                 if as_32 {
                     4 // 32-bit address = 4-byte offset
                 } else {
@@ -1319,26 +1319,20 @@ const fn get_immediate_size_32(b1: u32, map: u8, os_32: bool, as_32: bool, nnn: 
             // Group 3a (F6): TEST (nnn=0,1) has Ib, others have no immediate
             // Based on Bochs cpu/decoder/fetchdecode32.cc:888-1077 (fetchImmediate)
             // and opcodes table entries for Group 3a
-            0xF6 => {
-                if nnn == 0 || nnn == 1 {
+            0xF6
+                if (nnn == 0 || nnn == 1) => {
                     1 // TEST r/m8, imm8
-                } else {
-                    0 // NOT/NEG/MUL/IMUL/DIV/IDIV - no immediate
                 }
-            }
 
             // Group 3b (F7): TEST (nnn=0,1) has Iv, others have no immediate
-            0xF7 => {
-                if nnn == 0 || nnn == 1 {
+            0xF7
+                if (nnn == 0 || nnn == 1) => {
                     if os_32 {
                         4 // TEST r/m32, imm32
                     } else {
                         2 // TEST r/m16, imm16
                     }
-                } else {
-                    0 // NOT/NEG/MUL/IMUL/DIV/IDIV - no immediate
                 }
-            }
 
             // Iw
             0xC2 | 0xCA => 2,

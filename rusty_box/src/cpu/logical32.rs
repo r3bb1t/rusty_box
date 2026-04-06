@@ -18,7 +18,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn set_flags_oszapc_logic_32(&mut self, result: u32) {
         let sf = (result & 0x80000000) != 0;
         let zf = result == 0;
-        let pf = (result as u8).count_ones() % 2 == 0;
+        let pf = (result as u8).count_ones().is_multiple_of(2);
 
         self.eflags.remove(EFlags::LOGIC_MASK);
 
@@ -40,7 +40,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let sf = (result & 0x80000000) != 0;
         let of = ((op1 ^ op2) & (op1 ^ result) & 0x80000000) != 0;
         let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
-        let pf = (result as u8).count_ones() % 2 == 0;
+        let pf = (result as u8).count_ones().is_multiple_of(2);
 
         self.eflags.remove(EFlags::OSZAPC);
 
@@ -311,7 +311,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let sf = (result & 0x80000000) != 0;
         let of = result == 0x80000000;
         let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
-        let pf = (result as u8).count_ones() % 2 == 0;
+        let pf = (result as u8).count_ones().is_multiple_of(2);
 
         const OSZAP: EFlags = EFlags::PF
             .union(EFlags::AF)
@@ -348,7 +348,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let sf = (result & 0x80000000) != 0;
         let of = op1 == 0x80000000;
         let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
-        let pf = (result as u8).count_ones() % 2 == 0;
+        let pf = (result as u8).count_ones().is_multiple_of(2);
 
         const OSZAP: EFlags = EFlags::PF
             .union(EFlags::AF)
@@ -386,7 +386,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let sf = (result & 0x80000000) != 0;
         let of = result == 0x80000000;
         let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
-        let pf = (result as u8).count_ones() % 2 == 0;
+        let pf = (result as u8).count_ones().is_multiple_of(2);
 
         const OSZAP: EFlags = EFlags::PF
             .union(EFlags::AF)
@@ -425,7 +425,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let sf = (result & 0x80000000) != 0;
         let of = op1 == 0x80000000;
         let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
-        let pf = (result as u8).count_ones() % 2 == 0;
+        let pf = (result as u8).count_ones().is_multiple_of(2);
 
         const OSZAP: EFlags = EFlags::PF
             .union(EFlags::AF)
@@ -496,12 +496,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Cross-page (pages == 2): split write (little-endian)
             let bytes = val.to_le_bytes();
             let len1 = self.address_xlation.len1 as usize;
-            for i in 0..len1 {
-                self.mem_write_byte(self.address_xlation.paddress1 + i as u64, bytes[i]);
+            for (i, &byte) in bytes[..len1].iter().enumerate() {
+                self.mem_write_byte(self.address_xlation.paddress1 + i as u64, byte);
             }
             let len2 = self.address_xlation.len2 as usize;
-            for i in 0..len2 {
-                self.mem_write_byte(self.address_xlation.paddress2 + i as u64, bytes[len1 + i]);
+            for (i, &byte) in bytes[len1..len1+len2].iter().enumerate() {
+                self.mem_write_byte(self.address_xlation.paddress2 + i as u64, byte);
             }
         }
     }

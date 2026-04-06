@@ -102,7 +102,7 @@ pub(crate) fn f2xm1_impl(a: floatx80, status: &mut SoftFloatStatus) -> floatx80 
     softfloat_raiseFlags(status, FLAG_INEXACT);
 
     if a_exp < 0x3FFF {
-        if a_exp < (FLOATX80_EXP_BIAS as i32) - 68 {
+        if a_exp < FLOATX80_EXP_BIAS - 68 {
             // tiny_argument: 2^x - 1 ~ x * ln(2) via 192-bit integer multiply
             let (z_sig0, z_sig1, _z_sig2) = mul128_by_64_to_192(LN2_SIG_HI, LN2_SIG_LO, a_sig);
             let (mut z_sig0, mut z_sig1) = (z_sig0, z_sig1);

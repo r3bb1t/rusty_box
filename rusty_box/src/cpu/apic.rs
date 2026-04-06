@@ -689,7 +689,7 @@ impl BxLocalApic {
                     let delta64 = ticks.saturating_sub(self.ticks_initial)
                         / self.timer_divide_factor as u64;
                     let delta32 = delta64 as u32;
-                    data = if delta32 >= self.timer_initial { 0 } else { self.timer_initial - delta32 };
+                    data = self.timer_initial.saturating_sub(delta32);
                 } else {
                     data = self.timer_current;
                 }
@@ -910,14 +910,13 @@ impl BxLocalApic {
         let vector = (lo_cmd & 0xFF) as u8;
 
         // INIT Level Deassert — special no-op mode (apic.cc:663-673)
-        if delivery_mode == ApicDeliveryMode::Init as u8 {
-            if level == 0 && trig_mode == 1 {
+        if delivery_mode == ApicDeliveryMode::Init as u8
+            && level == 0 && trig_mode == 1 {
                 // "INIT Level Deassert": causes all APICs to set their
                 // arbitration ID to their APIC ID. Not supported by P4/Xeon.
                 // We don't model APIC bus arbitration ID, so just return.
                 return;
             }
-        }
 
         match dest_shorthand {
             // 0: no shorthand — use real destination value (apic.cc:676-678)
@@ -1331,14 +1330,13 @@ impl BxLocalApic {
         let isrv = ((first_isr as u32) >> 4) & 0xF;
         let irrv = ((first_irr as u32) >> 4) & 0xF;
 
-        let apr: u8;
-        if tpr >= irrv && tpr > isrv {
-            apr = (self.task_priority & 0xFF) as u8;
+        let apr: u8 = if tpr >= irrv && tpr > isrv {
+            (self.task_priority & 0xFF) as u8
         } else {
             let combined = tpr & isrv;
             let chosen = if combined > irrv { combined } else { irrv };
-            apr = (chosen << 4) as u8;
-        }
+            (chosen << 4) as u8
+        };
 
         debug!("apr = {}", apr);
         apr
@@ -1375,7 +1373,7 @@ impl BxLocalApic {
         if !timervec.contains(LvtBits::MASKED) {
             // Log first few and transition events
             let fire_num = self.diag_timer_fires; // incremented by caller after this
-            if fire_num < 5 || (fire_num < 200 && fire_num % 50 == 0) {
+            if fire_num < 5 || (fire_num < 200 && fire_num.is_multiple_of(50)) {
                 debug!("[LAPIC] periodic FIRE #{}: vec={:#x} mode={} ticks={} irr_set={} isr_set={} intr={}",
                     fire_num, timervec.vector(), timervec.timer_mode_field(), current_ticks,
                     Self::get_vector(&self.irr, timervec.vector() as u32),

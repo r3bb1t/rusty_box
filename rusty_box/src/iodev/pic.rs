@@ -360,15 +360,19 @@ impl Default for BxPicC {
 impl BxPicC {
     /// Create a new PIC controller (Bochs `bx_pic_c::init`)
     pub fn new() -> Self {
-        let mut master = Pic8259State::default();
-        master.master = true;
-        master.interrupt_offset = 0x08; // IRQ0 = INT 0x08
-        master.master_slave = true;
+        let master = Pic8259State {
+            master: true,
+            interrupt_offset: 0x08, // IRQ0 = INT 0x08
+            master_slave: true,
+            ..Pic8259State::default()
+        };
 
-        let mut slave = Pic8259State::default();
-        slave.master = false;
-        slave.interrupt_offset = 0x70; // IRQ8 = INT 0x70
-        slave.master_slave = false;
+        let slave = Pic8259State {
+            master: false,
+            interrupt_offset: 0x70, // IRQ8 = INT 0x70
+            master_slave: false,
+            ..Pic8259State::default()
+        };
 
         Self {
             master,

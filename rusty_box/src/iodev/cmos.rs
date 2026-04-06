@@ -83,7 +83,7 @@ fn bin_to_bcd(value: u8, is_binary: bool) -> u8 {
 
 /// Check if year is a leap year
 fn is_leap_year(year: u32) -> bool {
-    (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0)
+    (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400)
 }
 
 /// CMOS/RTC Controller (matching Bochs cmos.cc structure)
@@ -378,8 +378,8 @@ impl BxCmosC {
 
         // Calculate month and day
         let mut month: u8 = 1;
-        for m in 0..12 {
-            let mut dim = DAYS_IN_MONTH[m] as u32;
+        for (m, &days_in_month) in DAYS_IN_MONTH.iter().enumerate() {
+            let mut dim = days_in_month as u32;
             if m == 1 && is_leap_year(year) {
                 dim += 1;
             }
@@ -622,12 +622,11 @@ impl BxCmosC {
                         }
 
                         // Bochs cmos.cc:594-597: Exiting SET mode (bit 7: 1→0)
-                        if (old_val & 0x80) != 0 && (new_val & 0x80) == 0 {
-                            if self.timeval_change {
+                        if (old_val & 0x80) != 0 && (new_val & 0x80) == 0
+                            && self.timeval_change {
                                 self.update_timeval();
                                 self.timeval_change = false;
                             }
-                        }
                     }
                     REG_STAT_C | REG_STAT_D => {
                         // Read-only registers — writes ignored

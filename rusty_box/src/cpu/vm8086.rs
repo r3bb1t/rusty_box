@@ -221,7 +221,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Redirection bitmap is 32 bytes before the I/O bitmap (vm8086.cc:213)
             let offset = io_base.wrapping_sub(32).wrapping_add((vector >> 3) as u32);
 
-            if offset > tr_limit as u32 {
+            if offset > tr_limit {
                 tracing::error!("v86_redirect_interrupt(): failed to fetch VME redirection bitmap");
                 return self.exception(super::cpu::Exception::Gp, 0).map(|_| false);
             }

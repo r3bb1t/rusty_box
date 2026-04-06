@@ -62,15 +62,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else {
             // V8086 mode software interrupt: try VME redirect first
             // Bochs exception.cc: v86_redirect_interrupt checked before protected_mode_int
-            if self.v8086_mode() && soft_int {
-                if self.v86_redirect_interrupt(vector)? {
+            if self.v8086_mode() && soft_int
+                && self.v86_redirect_interrupt(vector)? {
                     // Interrupt was redirected through virtual IVT
                     self.speculative_rsp = false;
                     self.ext = false;
                     self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
                     return Err(super::error::CpuError::CpuLoopRestart);
                 }
-            }
 
             // Long mode: dispatch through 16-byte IDT entries
             // Protected mode (or V86 non-redirected): dispatch through 8-byte IDT entries
@@ -462,7 +461,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sp() as u32
         };
 
-        let new_eip = self.stack_read_dword(temp_esp + 0)?;
+        let new_eip = self.stack_read_dword(temp_esp)?;
         let raw_cs_raw = self.stack_read_dword(temp_esp + 4)? as u16;
         let new_eflags = self.stack_read_dword(temp_esp + 8)?;
 
@@ -706,7 +705,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sp() as u32
         };
 
-        let new_ip = self.stack_read_word(temp_esp + 0)? as u32;
+        let new_ip = self.stack_read_word(temp_esp)? as u32;
         let raw_cs_raw = self.stack_read_word(temp_esp + 2)?;
         let new_flags = self.stack_read_word(temp_esp + 4)? as u32;
 
@@ -1079,13 +1078,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     edx = 0;
                 }
             }
-            0x80000001 => {
+            0x80000001
                 // EDX bit 11 (SYSCALL/SYSRET): only in long mode
                 // Bochs cpuid.cc:860-861
-                if self.long64_mode() {
+                if self.long64_mode() => {
                     edx |= 1 << 11; // BX_CPUID_EXT1_EDX_SYSCALL_SYSRET
                 }
-            }
             _ => {}
         }
 

@@ -209,8 +209,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn pushf_fw(&mut self, _instr: &Instruction) -> super::Result<()> {
         let mut flags = (self.eflags.bits() & 0xFFFF) as u16;
 
-        if self.v8086_mode() {
-            if self.eflags.iopl() < 3 {
+        if self.v8086_mode()
+            && self.eflags.iopl() < 3 {
                 if self.cr4.vme() {
                     // VME: push IOPL=3, replace IF with VIF
                     flags |= EFlags::IOPL_MASK.bits() as u16;
@@ -224,7 +224,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     self.exception(super::cpu::Exception::Gp, 0)?;
                 }
             }
-        }
 
         self.push_16(flags)?;
         Ok(())

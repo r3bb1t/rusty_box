@@ -243,7 +243,7 @@ impl BxPiix3 {
     /// Bochs: bx_piix3_c::pci_write_handler() (pci2isa.cc:329-420)
     pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) {
         // BARs are read-only
-        if address >= 0x10 && address < 0x34 {
+        if (0x10..0x34).contains(&address) {
             return;
         }
 

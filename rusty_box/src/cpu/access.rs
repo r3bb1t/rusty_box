@@ -753,11 +753,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let len2 = self.address_xlation.len2 as usize;
             let p0 = self.address_xlation.paddress1;
             let p1 = self.address_xlation.paddress2;
-            for i in 0..len1 {
-                self.mem_write_byte(p0 + i as u64, bytes[i]);
+            for (i, &byte) in bytes[..len1].iter().enumerate() {
+                self.mem_write_byte(p0 + i as u64, byte);
             }
-            for i in 0..len2 {
-                self.mem_write_byte(p1 + i as u64, bytes[len1 + i]);
+            for (i, &byte) in bytes[len1..len1+len2].iter().enumerate() {
+                self.mem_write_byte(p1 + i as u64, byte);
             }
         }
     }
@@ -1120,11 +1120,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let next_page = (laddr | 0xFFF).wrapping_add(1);
             let p1 = self.translate_data_write(next_page)?;
             let mut buf = [0u8; 8];
-            for i in 0..len1 as usize {
-                buf[i] = self.mem_read_byte(p0 + i as u64);
+            for (i, byte) in buf[..len1 as usize].iter_mut().enumerate() {
+                *byte = self.mem_read_byte(p0 + i as u64);
             }
-            for i in 0..len2 as usize {
-                buf[len1 as usize + i] = self.mem_read_byte(p1 + i as u64);
+            for (i, byte) in buf[len1 as usize..].iter_mut().enumerate() {
+                *byte = self.mem_read_byte(p1 + i as u64);
             }
             self.address_xlation.pages = 2;
             self.address_xlation.paddress1 = p0;
@@ -1238,11 +1238,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let next_page = (laddr | 0xFFF).wrapping_add(1);
             let p1 = self.translate_data_write(next_page)?;
             let mut buf = [0u8; 4];
-            for i in 0..len1 as usize {
-                buf[i] = self.mem_read_byte(p0 + i as u64);
+            for (i, byte) in buf[..len1 as usize].iter_mut().enumerate() {
+                *byte = self.mem_read_byte(p0 + i as u64);
             }
-            for i in 0..len2 as usize {
-                buf[len1 as usize + i] = self.mem_read_byte(p1 + i as u64);
+            for (i, byte) in buf[len1 as usize..].iter_mut().enumerate() {
+                *byte = self.mem_read_byte(p1 + i as u64);
             }
             self.address_xlation.pages = 2;
             self.address_xlation.paddress1 = p0;
@@ -1270,11 +1270,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let len2 = self.address_xlation.len2 as usize;
             let p0 = self.address_xlation.paddress1;
             let p1 = self.address_xlation.paddress2;
-            for i in 0..len1 {
-                self.mem_write_byte(p0 + i as u64, bytes[i]);
+            for (i, &byte) in bytes[..len1].iter().enumerate() {
+                self.mem_write_byte(p0 + i as u64, byte);
             }
-            for i in 0..len2 {
-                self.mem_write_byte(p1 + i as u64, bytes[len1 + i]);
+            for (i, &byte) in bytes[len1..len1+len2].iter().enumerate() {
+                self.mem_write_byte(p1 + i as u64, byte);
             }
         }
     }

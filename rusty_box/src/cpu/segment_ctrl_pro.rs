@@ -24,11 +24,9 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     /// Based on BX_CPU_C::fetch_raw_descriptor in segment_ctrl_pro.cc:536
     pub(super) fn fetch_raw_descriptor(&mut self, selector: &BxSelector) -> Result<(u32, u32)> {
         let index = selector.index as u32;
-        let offset: BxAddress;
-
-        if selector.ti == 0 {
+        let offset: BxAddress = if selector.ti == 0 {
             // GDT
-            let index_offset = (index as u32) * 8 + 7;
+            let index_offset = index * 8 + 7;
             if index_offset > self.gdtr.limit as u32 {
                 tracing::debug!(
                     "fetch_raw_descriptor: GDT: index ({}) {} > limit ({}) GDTR.base={:#x}",
@@ -39,22 +37,22 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 );
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
-                    error_code: (selector.value & 0xfffc) as u16,
+                    error_code: (selector.value & 0xfffc),
                 });
             }
-            offset = self.gdtr.base + (index as u64 * 8);
+            self.gdtr.base + (index as u64 * 8)
         } else {
             // LDT
             if self.ldtr.cache.valid == 0 {
                 tracing::debug!("fetch_raw_descriptor: LDTR.valid=0");
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
-                    error_code: (selector.value & 0xfffc) as u16,
+                    error_code: (selector.value & 0xfffc),
                 });
             }
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
             let ldt_limit = self.ldtr.cache.u.segment_limit_scaled();
-            let index_offset = (index as u32) * 8 + 7;
+            let index_offset = index * 8 + 7;
             if index_offset > ldt_limit {
                 tracing::debug!(
                     "fetch_raw_descriptor: LDT: index ({}) {} > limit ({})",
@@ -64,12 +62,12 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 );
                 return Err(super::error::CpuError::BadVector {
                     vector: Exception::Gp,
-                    error_code: (selector.value & 0xfffc) as u16,
+                    error_code: (selector.value & 0xfffc),
                 });
             }
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
-            offset = self.ldtr.cache.u.segment_base() + (index as u64 * 8);
-        }
+            self.ldtr.cache.u.segment_base() + (index as u64 * 8)
+        };
 
         // Read descriptor as qword (64 bits = 2 dwords)
         let qword = self.system_read_qword(offset)?;
@@ -139,7 +137,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     // 286 call/interrupt/trap gate
                     let param_count = (dword2 & 0x1F) as u8;
                     let dest_selector = (dword1 >> 16) as u16;
-                    let dest_offset = (dword1 & 0xFFFF) as u32;
+                    let dest_offset = dword1 & 0xFFFF ;
 
                     descriptor.u.gate = DescriptorGate {
                         param_count,
@@ -152,7 +150,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     // 386 call/interrupt/trap gate
                     let param_count = (dword2 & 0x1F) as u8;
                     let dest_selector = (dword1 >> 16) as u16;
-                    let dest_offset = ((dword2 & 0xFFFF0000) | (dword1 & 0xFFFF)) as u32;
+                    let dest_offset = (dword2 & 0xFFFF0000) | (dword1 & 0xFFFF) ;
 
                     descriptor.u.gate = DescriptorGate {
                         param_count,
@@ -251,10 +249,10 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             Ok((ss, esp))
         } else {
             tracing::error!("get_ss_esp_from_tss: TR is bogus type ({:#x})", tss_type);
-            return Err(super::error::CpuError::BadVector {
+            Err(super::error::CpuError::BadVector {
                 vector: Exception::Ts,
                 error_code: 0,
-            });
+            })
         }
     }
 
@@ -299,9 +297,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     /// Based on BX_CPU_C::fetch_raw_descriptor_64 in segment_ctrl_pro.cc:599
     pub(super) fn fetch_raw_descriptor_64(&mut self, selector: &BxSelector) -> Result<(u32, u32, u32)> {
         let index = selector.index as u32;
-        let offset: u64;
-
-        if selector.ti == 0 {
+        let offset: u64 = if selector.ti == 0 {
             // GDT — need 16 bytes (index*8 + 15)
             let index_offset = index * 8 + 15;
             if index_offset > self.gdtr.limit as u32 {
@@ -316,7 +312,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     error_code: selector.value & 0xfffc,
                 });
             }
-            offset = self.gdtr.base + (index as u64 * 8);
+            self.gdtr.base + (index as u64 * 8)
         } else {
             // LDT
             if self.ldtr.cache.valid == 0 {
@@ -342,8 +338,8 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 });
             }
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
-            offset = self.ldtr.cache.u.segment_base() + (index as u64 * 8);
-        }
+            self.ldtr.cache.u.segment_base() + (index as u64 * 8)
+        };
 
         // Read two qwords (16 bytes total = 128-bit descriptor)
         let raw_descriptor1 = self.system_read_qword(offset)?;
@@ -498,15 +494,14 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         // Bochs ctrl_xfer_pro.cc:39-44 — L+D_B both set is invalid in long mode
-        if self.long_mode() {
-            if descriptor.u.segment_l() && descriptor.u.segment_d_b() {
+        if self.long_mode()
+            && descriptor.u.segment_l() && descriptor.u.segment_d_b() {
                 tracing::error!(
                     "check_cs({:#06x}): Both CS.L and CS.D_B bits enabled!",
                     cs_raw
                 );
                 return self.exception(Exception::Gp, cs_raw & 0xfffc);
             }
-        }
 
         // Non-conforming code segment: DPL must = CPL
         if is_code_segment_non_conforming(descriptor.r#type) {
@@ -1251,16 +1246,15 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         use super::descriptor::{is_code_segment_non_conforming, is_data_segment};
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         let cache = &self.sregs[seg].cache;
-        if cache.dpl < cpl {
-            if cache.valid == 0
+        if cache.dpl < cpl
+            && (cache.valid == 0
                 || !cache.segment
                 || is_data_segment(cache.r#type)
-                || is_code_segment_non_conforming(cache.r#type)
+                || is_code_segment_non_conforming(cache.r#type))
             {
                 self.sregs[seg].selector.value = 0;
                 self.sregs[seg].cache.valid = 0;
             }
-        }
     }
 
     /// Validate ES/DS/FS/GS after privilege level change
@@ -1576,7 +1570,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     for n in (1..=param_count as u32).rev() {
                         temp_esp = temp_esp.wrapping_sub(2);
                         let param =
-                            self.stack_read_word(return_esp.wrapping_add((n - 1) * 2))? as u16;
+                            self.stack_read_word(return_esp.wrapping_add((n - 1) * 2))?;
                         self.write_new_stack_word(&new_stack, temp_esp, cs_descriptor.dpl, param)?;
                     }
 
@@ -1661,7 +1655,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     for n in (1..=param_count as u32).rev() {
                         temp_sp = temp_sp.wrapping_sub(2);
                         let param =
-                            self.stack_read_word(return_esp.wrapping_add((n - 1) * 2))? as u16;
+                            self.stack_read_word(return_esp.wrapping_add((n - 1) * 2))?;
                         self.write_new_stack_word(
                             &new_stack,
                             temp_sp as u32,

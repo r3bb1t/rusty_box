@@ -212,7 +212,7 @@ pub fn AND_EbGbM<'c, I: BxCpuIdTrait>(
     // Update flags for logical operation (AND)
     let sf = (result & 0x80) != 0;
     let zf = result == 0;
-    let pf = result.count_ones() % 2 == 0;
+    let pf = result.count_ones().is_multiple_of(2);
     const MASK: EFlags = EFlags::CF
         .union(EFlags::PF)
         .union(EFlags::ZF)
@@ -247,7 +247,7 @@ pub fn AND_GbEbR<'c, I: BxCpuIdTrait>(
     // Update flags for logical operation (AND)
     let sf = (result & 0x80) != 0;
     let zf = result == 0;
-    let pf = result.count_ones() % 2 == 0;
+    let pf = result.count_ones().is_multiple_of(2);
     const MASK: EFlags = EFlags::CF
         .union(EFlags::PF)
         .union(EFlags::ZF)
@@ -284,7 +284,7 @@ pub fn AND_EbGb<'c, I: BxCpuIdTrait>(
                                                                                   // Update flags for logical operation (AND)
         let sf = (result & 0x80) != 0;
         let zf = result == 0;
-        let pf = result.count_ones() % 2 == 0;
+        let pf = result.count_ones().is_multiple_of(2);
         const MASK: EFlags = EFlags::CF
             .union(EFlags::PF)
             .union(EFlags::ZF)
@@ -717,7 +717,7 @@ pub fn INC_Eb<'c, I: BxCpuIdTrait>(
     let sf = (result & 0x80) != 0;
     let of = result == 0x80; // Overflow if we wrapped from 0x7F to 0x80
     let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
-    let pf = result.count_ones() % 2 == 0;
+    let pf = result.count_ones().is_multiple_of(2);
 
     // Update all flags except CF (bit 0)
     const MASK: EFlags = EFlags::PF
@@ -763,7 +763,7 @@ pub fn DEC_Eb<'c, I: BxCpuIdTrait>(
     let sf = (result & 0x80) != 0;
     let of = result == 0x7F; // Overflow if we wrapped from 0x80 to 0x7F
     let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
-    let pf = result.count_ones() % 2 == 0;
+    let pf = result.count_ones().is_multiple_of(2);
 
     const MASK: EFlags = EFlags::PF
         .union(EFlags::AF)

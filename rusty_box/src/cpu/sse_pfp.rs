@@ -65,6 +65,7 @@ use super::{
 
 /// Evaluate SSE compare predicate (imm8 bits[2:0]) for f32 operands.
 /// Returns true if the comparison is satisfied.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 #[inline]
 fn sse_compare_f32(op1: f32, op2: f32, predicate: u8) -> bool {
     match predicate & 7 {
@@ -82,6 +83,7 @@ fn sse_compare_f32(op1: f32, op2: f32, predicate: u8) -> bool {
 
 /// Evaluate SSE compare predicate (imm8 bits[2:0]) for f64 operands.
 /// Returns true if the comparison is satisfied.
+#[allow(clippy::neg_cmp_op_on_partial_ord)]
 #[inline]
 fn sse_compare_f64(op1: f64, op2: f64, predicate: u8) -> bool {
     match predicate & 7 {

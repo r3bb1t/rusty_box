@@ -133,8 +133,8 @@ impl<const SIZE: usize> Tlb<SIZE> {
     pub fn get_index_of(&self, lpf: u64, len: u32) -> usize {
         // Mirror: ((size-1)<<12) mask, then shift down by 12
         let tlb_mask = ((SIZE - 1) as u64) << 12;
-        let idx = ((lpf.wrapping_add(len as u64) & tlb_mask) >> 12) as usize;
-        idx
+        
+        ((lpf.wrapping_add(len as u64) & tlb_mask) >> 12) as usize
     }
 
     /// Get a mutable reference to the matching entry

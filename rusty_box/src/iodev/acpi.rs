@@ -102,6 +102,7 @@ const ACPI_SM_IOMASK: [u8; 16] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 2, 0, 0, 0
 
 /// SMBus host controller state (Bochs acpi.h:74-83)
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct SmBusState {
     pub stat: u8,
     pub ctl: u8,
@@ -113,20 +114,6 @@ pub struct SmBusState {
     pub data: [u8; 32],
 }
 
-impl Default for SmBusState {
-    fn default() -> Self {
-        Self {
-            stat: 0,
-            ctl: 0,
-            cmd: 0,
-            addr: 0,
-            data0: 0,
-            data1: 0,
-            index: 0,
-            data: [0; 32],
-        }
-    }
-}
 
 // ─── PCI Configuration Space ─────────────────────────────────────────────────
 
@@ -564,7 +551,7 @@ impl BxAcpiCtrl {
         let mut sm_base_change = false;
 
         // Addresses 0x10-0x33 are ignored (BAR region) — acpi.cc:530-531
-        if address >= 0x10 && address < 0x34 {
+        if (0x10..0x34).contains(&address) {
             return (false, false);
         }
 
@@ -685,7 +672,7 @@ impl BxAcpiCtrl {
 /// Ported from QEMU/Bochs: muldiv64() (acpi.cc:85-109)
 fn muldiv64(a: u64, b: u32, c: u32) -> u64 {
     let a_lo = a as u32 as u64;
-    let a_hi = (a >> 32) as u64;
+    let a_hi = a >> 32;
 
     let rl = a_lo * b as u64;
     let mut rh = a_hi * b as u64;

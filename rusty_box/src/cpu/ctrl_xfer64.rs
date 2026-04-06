@@ -36,7 +36,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Flag getters for conditional jumps
     // =========================================================================
 
-    /// Get Carry Flag
+    // Get Carry Flag
     // Flag getters (get_cf, get_zf, get_sf, get_of, get_pf, get_af) are defined in ctrl_xfer32.rs
     // to avoid duplicate definitions across multiple impl blocks
 

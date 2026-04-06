@@ -227,7 +227,7 @@ pub(crate) fn fpatan_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatus
 
     let x_exp = exp_f128_ui64(x.v64);
 
-    if x_exp <= (FLOATX80_EXP_BIAS as i32) - 40 {
+    if x_exp <= FLOATX80_EXP_BIAS - 40 {
         // Skip polynomial, tiny argument
     } else if x.v64 >= 0x3ffe800000000000 {
         // 3/4 < x < 1: arctan(x) = arctan((x-1)/(x+1)) + pi/4

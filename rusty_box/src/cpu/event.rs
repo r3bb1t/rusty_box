@@ -99,10 +99,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             self.ext = false;
             match result {
                 Ok(()) => {
-                    self.prev_rip = self.rip() as u64;
+                    self.prev_rip = self.rip();
                 }
                 Err(super::error::CpuError::CpuLoopRestart) => {
-                    self.prev_rip = self.rip() as u64;
+                    self.prev_rip = self.rip();
                     return false;
                 }
                 Err(e) => {
@@ -133,12 +133,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     match result {
                         Ok(()) => {
                             // Bochs event.cc:183 — update prev_rip after delivery
-                            self.prev_rip = self.rip() as u64;
+                            self.prev_rip = self.rip();
                         }
                         Err(super::error::CpuError::CpuLoopRestart) => {
                             // interrupt() delivered via exception path (CpuLoopRestart).
                             // Bochs event.cc:183: prev_rip = RIP after successful delivery.
-                            self.prev_rip = self.rip() as u64;
+                            self.prev_rip = self.rip();
                             return false;
                         }
                         Err(e) => {
@@ -166,10 +166,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     self.ext = false;
                     match result {
                         Ok(()) => {
-                            self.prev_rip = self.rip() as u64;
+                            self.prev_rip = self.rip();
                         }
                         Err(super::error::CpuError::CpuLoopRestart) => {
-                            self.prev_rip = self.rip() as u64;
+                            self.prev_rip = self.rip();
                             return false;
                         }
                         Err(e) => {
@@ -191,13 +191,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // DMA HRQ handling (Bochs event.cc:390-393)
         // NOTE: similar code in handleWaitForEvent (event.cc:83-86)
         // Assert Hold Acknowledge (HLDA) and perform DMA transfer
-        if self.get_hrq() {
-            if !self.dma_ptr.is_null() {
+        if self.get_hrq()
+            && !self.dma_ptr.is_null() {
                 // SAFETY: dma_ptr set during emulator init; single-threaded access
                 let dma = unsafe { &mut *self.dma_ptr };
                 dma.raise_hlda();
             }
-        }
 
         // End of handleAsyncEvent: schedule TF->debug_trap for next boundary
         // Bochs event.cc:396-402
@@ -228,13 +227,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
 
         // Handle DMA also when CPU is halted (Bochs event.cc:83-86)
-        if self.get_hrq() {
-            if !self.dma_ptr.is_null() {
+        if self.get_hrq()
+            && !self.dma_ptr.is_null() {
                 // SAFETY: dma_ptr set during emulator init; single-threaded access
                 let dma = unsafe { &mut *self.dma_ptr };
                 dma.raise_hlda();
             }
-        }
 
         // For single processor, check if an external interrupt can wake us.
         // Matches Bochs event.cc:52-113
@@ -257,8 +255,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
 
         // PIC interrupt can wake from HLT/MWAIT if IF=1
-        if self.pending_event & Self::BX_EVENT_PENDING_INTR != 0 {
-            if self.eflags.contains(EFlags::IF_) || mwait_if {
+        if self.pending_event & Self::BX_EVENT_PENDING_INTR != 0
+            && (self.eflags.contains(EFlags::IF_) || mwait_if) {
                 // Bochs event.cc:63-66: reset monitor when waking from MWAIT
                 #[cfg(feature = "bx_support_monitor_mwait")]
                 if in_mwait {
@@ -268,11 +266,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.inhibit_mask = 0;
                 return false; // Continue to interrupt delivery
             }
-        }
 
         // LAPIC interrupt can also wake from HLT/MWAIT if IF=1
-        if self.pending_event & Self::BX_EVENT_PENDING_LAPIC_INTR != 0 || self.lapic.intr {
-            if self.eflags.contains(EFlags::IF_) || mwait_if {
+        if (self.pending_event & Self::BX_EVENT_PENDING_LAPIC_INTR != 0 || self.lapic.intr)
+            && (self.eflags.contains(EFlags::IF_) || mwait_if) {
                 // Bochs event.cc:63-66: reset monitor when waking from MWAIT
                 #[cfg(feature = "bx_support_monitor_mwait")]
                 if in_mwait {
@@ -282,7 +279,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.inhibit_mask = 0;
                 return false; // Continue to LAPIC interrupt delivery
             }
-        }
 
         // Monitor triggered by a write (wakeup_monitor set activity_state to Active)
         if matches!(self.activity_state, CpuActivityState::Active) {

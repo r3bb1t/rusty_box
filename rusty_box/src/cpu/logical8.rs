@@ -21,7 +21,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // AF is undefined
         let sf = (result & 0x80) != 0;
         let zf = result == 0;
-        let pf = result.count_ones() % 2 == 0;
+        let pf = result.count_ones().is_multiple_of(2);
 
         self.eflags.remove(EFlags::LOGIC_MASK);
 
@@ -44,7 +44,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let sf = (result & 0x80) != 0;
         let of = ((op1 ^ op2) & (op1 ^ result) & 0x80) != 0;
         let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
-        let pf = result.count_ones() % 2 == 0;
+        let pf = result.count_ones().is_multiple_of(2);
 
         self.eflags.remove(EFlags::OSZAPC);
 

@@ -14,12 +14,14 @@ use super::{
 };
 
 // AMX stub types (moved from old avx/amx.rs)
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Default)]
 pub struct TILECFG {
     pub rows: u32,
     pub bytes_per_row: u32,
 }
 
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Default)]
 pub struct AMX {
     pub palette_id: u32,
@@ -564,8 +566,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 q.to_le_bytes()
             };
             let mut result = BxPackedYmmRegister::default();
-            for i in 0..8 {
-                    result.set_ymm32u(i, src_bytes[i] as u32);
+            for (i, &byte) in src_bytes.iter().enumerate() {
+                    result.set_ymm32u(i, byte as u32);
                 }
             self.write_ymm_reg(dst_idx, result);
         } else {
@@ -582,8 +584,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 d.to_le_bytes()
             };
             let mut result = BxPackedXmmRegister::default();
-            for i in 0..4 {
-                    result.set_xmm32u(i, src_bytes[i] as u32);
+            for (i, &byte) in src_bytes.iter().enumerate() {
+                    result.set_xmm32u(i, byte as u32);
                 }
             self.write_xmm_reg(dst_idx, result);
         }

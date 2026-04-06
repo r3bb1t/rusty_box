@@ -79,12 +79,11 @@ pub fn ascii_to_scancode(ch: char) -> Option<(u8, u8)> {
 
 /// Check if a character needs shift modifier
 pub fn needs_shift(ch: char) -> bool {
-    match ch {
-        'A'..='Z' => true,
-        '!' | '@' | '#' | '$' | '%' | '^' | '&' | '*' | '(' | ')' => true,
-        '_' | '+' | '{' | '}' | '|' | ':' | '"' | '~' | '<' | '>' | '?' => true,
-        _ => false,
-    }
+    matches!(ch,
+        'A'..='Z'
+        | '!' | '@' | '#' | '$' | '%' | '^' | '&' | '*' | '(' | ')'
+        | '_' | '+' | '{' | '}' | '|' | ':' | '"' | '~' | '<' | '>' | '?'
+    )
 }
 
 /// Convert a character to scancode sequence (including shift if needed)

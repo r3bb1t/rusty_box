@@ -131,14 +131,14 @@ impl PitCounter {
 
     /// Bochs pit82c54.cc:126-130 set_count
     fn set_count(&mut self, data: u16) {
-        self.count = data & 0xFFFF;
+        self.count = data;
         self.set_binary_to_count();
     }
 
     /// Bochs pit82c54.cc:145-156 set_binary_to_count (count → count_binary)
     fn set_binary_to_count(&mut self) {
         if self.bcd_mode {
-            self.count_binary = (1 * ((self.count >> 0) & 0xF))
+            self.count_binary = (self.count & 0xF)
                 + (10 * ((self.count >> 4) & 0xF))
                 + (100 * ((self.count >> 8) & 0xF))
                 + (1000 * ((self.count >> 12) & 0xF));
@@ -150,7 +150,7 @@ impl PitCounter {
     /// Bochs pit82c54.cc:132-143 set_count_to_binary (count_binary → count)
     fn set_count_to_binary(&mut self) {
         if self.bcd_mode {
-            self.count = (((self.count_binary / 1) % 10) << 0)
+            self.count = (self.count_binary % 10)
                 | (((self.count_binary / 10) % 10) << 4)
                 | (((self.count_binary / 100) % 10) << 8)
                 | (((self.count_binary / 1000) % 10) << 12);
@@ -212,22 +212,22 @@ impl PitCounter {
         }
         match self.read_state {
             RWState::MsByte => {
-                self.outlatch = self.count & 0xFFFF;
+                self.outlatch = self.count;
                 self.count_msb_latched = true;
             }
             RWState::LsByte => {
-                self.outlatch = self.count & 0xFFFF;
+                self.outlatch = self.count;
                 self.count_lsb_latched = true;
             }
             RWState::LsByteMultiple => {
-                self.outlatch = self.count & 0xFFFF;
+                self.outlatch = self.count;
                 self.count_lsb_latched = true;
                 self.count_msb_latched = true;
             }
             RWState::MsByteMultiple => {
                 // Latching during 2-part read — reset to LSB first
                 self.read_state = RWState::LsByteMultiple;
-                self.outlatch = self.count & 0xFFFF;
+                self.outlatch = self.count;
                 self.count_lsb_latched = true;
                 self.count_msb_latched = true;
             }
@@ -317,11 +317,10 @@ impl PitCounter {
                 }
                 self.next_change_time = 1;
             }
-            1 => {
-                if self.trigger_gate {
+            1
+                if self.trigger_gate => {
                     self.next_change_time = 1;
                 }
-            }
             2 | 6 => {
                 self.next_change_time = 1;
             }
@@ -331,11 +330,10 @@ impl PitCounter {
             4 => {
                 self.next_change_time = 1;
             }
-            5 => {
-                if self.trigger_gate {
+            5
+                if self.trigger_gate => {
                     self.next_change_time = 1;
                 }
-            }
             _ => {}
         }
     }
@@ -424,7 +422,7 @@ impl PitCounter {
                     if self.trigger_gate || self.first_pass {
                         // RELOAD phase: load count, set output HIGH
                         self.set_count(self.inlatch);
-                        self.next_change_time = (self.count_binary.wrapping_sub(1) & 0xFFFF) as u32;
+                        self.next_change_time = self.count_binary.wrapping_sub(1) as u32;
                         self.null_count = false;
                         if !self.output {
                             self.set_out(true);
@@ -435,7 +433,7 @@ impl PitCounter {
                         if self.gate {
                             self.decrement();
                             self.next_change_time =
-                                (self.count_binary.wrapping_sub(1) & 0xFFFF) as u32;
+                                self.count_binary.wrapping_sub(1) as u32;
                             if self.count == 1 {
                                 // Terminal: pulse LOW, schedule reload
                                 self.next_change_time = 1;
@@ -487,7 +485,7 @@ impl PitCounter {
                             self.decrement();
                             if !self.output || !self.state_bit_1 {
                                 self.next_change_time =
-                                    ((self.count_binary / 2).wrapping_sub(1) & 0xFFFF) as u32;
+                                    (self.count_binary / 2).wrapping_sub(1) as u32;
                             } else {
                                 self.next_change_time = (self.count_binary / 2) as u32;
                             }
@@ -628,11 +626,10 @@ impl PitCounter {
                     self.next_change_time = 0;
                 }
             }
-            1 => {
-                if data && self.count_written {
+            1
+                if data && self.count_written => {
                     self.next_change_time = 1;
                 }
-            }
             2 | 6 => {
                 if !data {
                     // GATE dropped LOW: force output HIGH, stop counting
@@ -672,11 +669,10 @@ impl PitCounter {
                     self.next_change_time = 0;
                 }
             }
-            5 => {
-                if data && self.count_written {
+            5
+                if data && self.count_written => {
                     self.next_change_time = 1;
                 }
-            }
             _ => {}
         }
     }
@@ -745,7 +741,8 @@ impl BxPitC {
 
     /// Set the icount pointer for fine-grained PIT synchronization.
     /// When set, PIT counter reads will advance counters to match elapsed CPU time.
-    /// SAFETY: The pointer must remain valid for the lifetime of the PIT.
+    /// # Safety
+    /// The pointer must remain valid for the lifetime of the PIT.
     pub unsafe fn set_icount_sync(&mut self, icount_ptr: *const u64, ips: u64) {
         self.icount_ptr = Some(icount_ptr);
         self.ips = ips;

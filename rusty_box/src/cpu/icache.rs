@@ -31,8 +31,8 @@ impl<'a> BxPageWriteStampTable<'a> {
             return;
         }
         let index = Self::hash(p_addr);
-        if index < self.fine_granularity_mapping.len() {
-            if self.fine_granularity_mapping[index] != 0 {
+        if index < self.fine_granularity_mapping.len()
+            && self.fine_granularity_mapping[index] != 0 {
                 // Calculate mask for affected cache lines (128-byte granularity)
                 let page_offset = (p_addr as u32) & 0xfff;
                 let shift1 = (page_offset >> 7).min(31);
@@ -47,7 +47,6 @@ impl<'a> BxPageWriteStampTable<'a> {
                     self.fine_granularity_mapping[index] &= !mask;
                 }
             }
-        }
     }
 
     /// Decrement write stamp for a whole page
@@ -63,8 +62,8 @@ impl<'a> BxPageWriteStampTable<'a> {
             return;
         }
         let index = Self::hash(p_addr);
-        if index < self.fine_granularity_mapping.len() {
-            if self.fine_granularity_mapping[index] != 0 {
+        if index < self.fine_granularity_mapping.len()
+            && self.fine_granularity_mapping[index] != 0 {
                 // Calculate mask for affected cache lines (128-byte granularity)
                 let page_offset = (p_addr as u32) & 0xfff;
                 let shift1 = (page_offset >> 7).min(31);
@@ -79,7 +78,6 @@ impl<'a> BxPageWriteStampTable<'a> {
                     self.fine_granularity_mapping[index] &= !mask;
                 }
             }
-        }
     }
 
     pub fn mark_icache_mask(&mut self, p_addr: BxPhyAddress, mask: u32) {
@@ -299,21 +297,19 @@ impl BxICache {
         let entry = &mut self.entry[index];
 
         if let IcacheAddress::Address(addr) = entry.p_addr {
-            if addr == p_addr {
-                if entry.trace_mask & mask != 0 {
+            if addr == p_addr
+                && entry.trace_mask & mask != 0 {
                     flush_smc(entry);
                 }
-            }
         }
 
         // Check page split entries
         let ppf = ppf_of(p_addr);
         for i in 0..BX_ICACHE_ENTRIES {
-            if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-                if ppf_of(self.page_split_index[i].ppf) == ppf {
+            if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS
+                && ppf_of(self.page_split_index[i].ppf) == ppf {
                     flush_smc(&mut self.page_split_index[i].e);
                 }
-            }
         }
     }
 
@@ -329,11 +325,10 @@ impl BxICache {
 
         // Flush page split entries
         for i in 0..BX_ICACHE_ENTRIES {
-            if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-                if ppf_of(self.page_split_index[i].ppf) == ppf {
+            if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS
+                && ppf_of(self.page_split_index[i].ppf) == ppf {
                     flush_smc(&mut self.page_split_index[i].e);
                 }
-            }
         }
     }
 
@@ -382,12 +377,11 @@ impl BxICache {
 
         // Invalidate page split entries
         for i in 0..BX_ICACHE_ENTRIES {
-            if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS {
-                if ppf_of(self.page_split_index[i].ppf) == ppf {
+            if self.page_split_index[i].ppf != BX_ICACHE_INVALID_PHY_ADDRESS
+                && ppf_of(self.page_split_index[i].ppf) == ppf {
                     self.page_split_index[i].ppf = BX_ICACHE_INVALID_PHY_ADDRESS;
                     flush_smc(&mut self.page_split_index[i].e);
                 }
-            }
         }
     }
 
@@ -719,7 +713,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let mut current_fetch_ptr = fetch_ptr;
         // Preserve original remaining_in_page for boundary_fetch
         let _original_remaining_in_page = remaining_in_page;
-        let mut remaining = remaining_in_page as u32;
+        let mut remaining = remaining_in_page;
         let mut tlen = 0usize;
 
         for n in 0..quantum {
@@ -1050,9 +1044,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
 
         // Read all leftover bytes in current page up to boundary
-        for j in 0..remaining_in_page {
-            fetch_buffer[j] = fetch_ptr[j];
-        }
+        fetch_buffer[..remaining_in_page].copy_from_slice(&fetch_ptr[..remaining_in_page]);
 
         // The 2nd chunk of the instruction is on the next page.
         // Set RIP to the 0th byte of the 2nd page, and force a prefetch
@@ -1061,10 +1053,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Call prefetch directly - same lifetime as serve_icache_miss
         self.prefetch(mem, cpus)?;
 
-        let mut fetch_buffer_limit = 15usize;
-        if self.eip_page_window_size < 15 {
-            fetch_buffer_limit = self.eip_page_window_size as usize;
-        }
+        let fetch_buffer_limit = (self.eip_page_window_size as usize).min(15);
 
         // We can fetch straight from the 0th byte, which is eipFetchPtr
         let next_page_fetch_ptr = self
@@ -1072,11 +1061,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             .ok_or(crate::cpu::CpuError::CpuNotInitialized)?;
 
         // Read leftover bytes in next page (matching C++ line 287-289)
-        let mut j = remaining_in_page;
-        for k in 0..fetch_buffer_limit {
-            fetch_buffer[j] = next_page_fetch_ptr[k];
-            j += 1;
-        }
+        fetch_buffer[remaining_in_page..remaining_in_page + fetch_buffer_limit]
+            .copy_from_slice(&next_page_fetch_ptr[..fetch_buffer_limit]);
 
         // Get is_32_bit_mode from CS segment descriptor d_b flag
         // SAFETY: segment cache populated during segment load; union read matches descriptor type

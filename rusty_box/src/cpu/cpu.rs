@@ -116,6 +116,7 @@ impl core::fmt::Debug for BxGenReg {
 // <TAG-INSTRUMENTATION_COMMON-BEGIN>
 
 // possible types passed to BX_INSTR_TLB_CNTRL()
+#[allow(clippy::upper_case_acronyms)]
 pub(super) enum InstrTLBControl {
     MovCr0 = 10,
     MovCr3 = 11,
@@ -129,6 +130,7 @@ pub(super) enum InstrTLBControl {
 }
 
 // possible types passed to BX_INSTR_CACHE_CNTRL()
+#[allow(clippy::upper_case_acronyms)]
 pub(super) enum InstrCacheControl {
     INVD = 10,
     WBINVD = 11,
@@ -165,6 +167,7 @@ pub(super) enum InstrPrefetchHint {
 // <TAG-INSTRUMENTATION_COMMON-END>
 
 // passed to internal debugger together with BX_READ/BX_WRITE/BX_EXECUTE/BX_RW
+#[allow(clippy::enum_variant_names)]
 pub(super) enum AccessReason {
     AccessReasonNotSpecified = 0,
     Pdptr0Access = 1,
@@ -239,6 +242,7 @@ pub enum Exception {
     Sx = 30,
 }
 
+#[allow(clippy::upper_case_acronyms)]
 pub(super) enum CpExceptionErrorCode {
     NearRet = 1,
     FarRetIret = 2,
@@ -1309,7 +1313,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Commit prev_rip after successful delivery (Bochs event.cc:183)
         if result.is_ok() {
-            self.prev_rip = self.rip() as u64;
+            self.prev_rip = self.rip();
         }
 
         // CpuLoopRestart is expected from interrupt() — convert to Ok for external callers
@@ -1400,7 +1404,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Wire the memory system pointer for the duration of this execution call.
         // This enables Bochs-style "host-pointer-or-fallback" access in mem_read/mem_write.
         // Reborrow `mem` so we don't move the `&mut` binding.
-        self.a20_mask = mem.a20_mask() as u64;
+        self.a20_mask = mem.a20_mask();
         self.set_mem_bus_ptr(NonNull::from(&mut *mem));
 
         // Set memory pointer for instruction execution
@@ -1440,7 +1444,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let result = 'cpu_loop: loop {
             outer_loop_count += 1;
             // Detect spinning: log every 100K outer-loop iterations
-            if outer_loop_count % 100_000 == 0 {
+            if outer_loop_count.is_multiple_of(100_000) {
                 tracing::debug!(
                     "[cpu_loop-spin] outer={} iter={}/{} RIP={:#010x} async={} activity={:?}",
                     outer_loop_count,
@@ -1580,12 +1584,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         eflags: self.eflags.bits(), icount: self.icount,
                     };
                     let rip_before = self.prev_rip;
-                    // SAFETY: `.is_some()` guard above ensures this won't panic.
-                    // We can't use `if let Some(cb) = self.instrumentation.as_mut()` because
-                    // building `snap` above borrows `self` immutably through the getters.
-                    self.instrumentation.as_mut()
-                        .expect("guarded by is_some")
-                        .before_execution(rip_before, opcode as u16, ilen_val, &snap);
+                    // Immutable borrows of `self` (via getters) are now done.
+                    // Safe to take mutable borrow of the instrumentation field.
+                    if let Some(cb) = self.instrumentation.as_mut() {
+                        cb.before_execution(rip_before, opcode as u16, ilen_val, &snap);
+                    }
                 }
 
                 // SAFETY: i_ptr is valid for the lifetime of this loop iteration
@@ -1597,7 +1600,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         // speculative_rsp = false, then continue outer loop.
                         self.icount += 1;
                         iteration += 1;
-                        self.prev_rip = self.rip() as u64;
+                        self.prev_rip = self.rip();
                         self.speculative_rsp = false;
                         // If triple fault set Shutdown, exit cleanly instead of restarting.
                         if matches!(self.activity_state, CpuActivityState::Shutdown) {
@@ -1706,7 +1709,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // SAFETY: segment cache populated during segment load; union read matches descriptor type
                 let cs_value = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
                 let instr_bytes = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
-                    let page_base = cs_base + (self.eip_page_bias as u64);
+                    let page_base = cs_base + self.eip_page_bias;
                     let offset = (rip.wrapping_sub(page_base)) as usize;
                     let ilen = instr.ilen() as usize;
                     if offset < fetch_ptr.len() && offset + ilen <= fetch_ptr.len() {
@@ -1911,7 +1914,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let of = ((op1 ^ res) & (op2 ^ res) & 0x8000_0000) != 0;
         let af = (cout_vec >> 3) & 1 != 0;
         let low = (res & 0xff) as u8;
-        let parity = low.count_ones() % 2 == 0;
+        let parity = low.count_ones().is_multiple_of(2);
 
         // clear relevant flags
         self.eflags.remove(EFlags::OSZAPC);
@@ -1947,7 +1950,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         let of = ((op1 ^ op2) & (op1 ^ res) & 0x8000_0000) != 0;
         let af = (cout_vec >> 3) & 1 != 0;
         let low = (res & 0xff) as u8;
-        let parity = low.count_ones() % 2 == 0;
+        let parity = low.count_ones().is_multiple_of(2);
 
         self.eflags.remove(EFlags::OSZAPC);
 
@@ -1984,7 +1987,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Bochs GET_ADD_OVERFLOW
         let of = ((op1 ^ result) & (op2 ^ result) & 0x80) != 0;
         let af = (cout_vec >> 3) & 1 != 0;
-        let pf = (result.count_ones() % 2) == 0;
+        let pf = result.count_ones().is_multiple_of(2);
 
         self.eflags.remove(EFlags::OSZAPC);
 
@@ -2017,7 +2020,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Bochs GET_ADD_OVERFLOW
         let of = ((op1 ^ result) & (op2 ^ result) & 0x8000) != 0;
         let af = (cout_vec >> 3) & 1 != 0;
-        let pf = ((result & 0xFF) as u8).count_ones() % 2 == 0;
+        let pf = ((result & 0xFF) as u8).count_ones().is_multiple_of(2);
 
         self.eflags.remove(EFlags::OSZAPC);
 
@@ -2050,7 +2053,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Bochs GET_SUB_OVERFLOW
         let of = ((op1 ^ op2) & (op1 ^ result) & 0x80) != 0;
         let af = (cout_vec >> 3) & 1 != 0;
-        let pf = (result.count_ones() % 2) == 0;
+        let pf = result.count_ones().is_multiple_of(2);
 
         self.eflags.remove(EFlags::OSZAPC);
 
@@ -2083,7 +2086,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Bochs GET_SUB_OVERFLOW
         let of = ((op1 ^ op2) & (op1 ^ result) & 0x8000) != 0;
         let af = (cout_vec >> 3) & 1 != 0;
-        let pf = ((result & 0xFF) as u8).count_ones() % 2 == 0;
+        let pf = ((result & 0xFF) as u8).count_ones().is_multiple_of(2);
 
         self.eflags.remove(EFlags::OSZAPC);
 
@@ -2112,7 +2115,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.eflags.remove(EFlags::OF | EFlags::CF | EFlags::AF);
         self.eflags.set(EFlags::SF, (result & 0x80) != 0);
         self.eflags.set(EFlags::ZF, result == 0);
-        self.eflags.set(EFlags::PF, (result.count_ones() % 2) == 0);
+        self.eflags.set(EFlags::PF, result.count_ones().is_multiple_of(2));
     }
 
     pub(super) fn update_flags_logic16(&mut self, result: u16) {
@@ -2120,7 +2123,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.eflags.set(EFlags::SF, (result & 0x8000) != 0);
         self.eflags.set(EFlags::ZF, result == 0);
         self.eflags
-            .set(EFlags::PF, (((result & 0xFF) as u8).count_ones() % 2) == 0);
+            .set(EFlags::PF, ((result & 0xFF) as u8).count_ones().is_multiple_of(2));
     }
 
     /// Get segment base address safely
@@ -2155,7 +2158,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Set PF (parity flag), based on low 8 bits
         let low_byte = (result & 0xFF) as u8;
-        self.eflags.set(EFlags::PF, low_byte.count_ones() % 2 == 0);
+        self.eflags.set(EFlags::PF, low_byte.count_ones().is_multiple_of(2));
     }
 
     fn before_execution(&mut self, _cpu_id: u32) {
@@ -2380,7 +2383,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         } else {
             let mem_len = mem.get_memory_len();
 
-            let p_addr_fetch_page = self.p_addr_fetch_page.clone();
+            let p_addr_fetch_page = self.p_addr_fetch_page;
 
             match self.get_host_mem_addr(p_addr_fetch_page, MemoryAccessType::Execute, mem) {
                 Ok(Some(fetch_ptr)) => {
@@ -2768,20 +2771,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 selected_handler = Some(entry.execute1);
 
                 // Special case: MOV with SS segment override (matching lines 2049-2056)
-                if ia_opcode == Opcode::MovOp32GdEd {
-                    if instr.seg() == BxSegregs::Ss as u8 {
+                if ia_opcode == Opcode::MovOp32GdEd
+                    && instr.seg() == BxSegregs::Ss as u8 {
                         // Use MOV32S_GdEdM handler (matching C++ line 2051)
                         use super::opcodes_table::mov32s_gd_ed_m_wrapper;
                         selected_handler = Some(mov32s_gd_ed_m_wrapper);
                     }
-                }
-                if ia_opcode == Opcode::MovOp32EdGd {
-                    if instr.seg() == BxSegregs::Ss as u8 {
+                if ia_opcode == Opcode::MovOp32EdGd
+                    && instr.seg() == BxSegregs::Ss as u8 {
                         // Use MOV32S_EdGdM handler (matching C++ line 2055)
                         use super::opcodes_table::mov32s_ed_gd_m_wrapper;
                         selected_handler = Some(mov32s_ed_gd_m_wrapper);
                     }
-                }
             } else {
                 // Register form: use execute2 from table as execute1 (matching line 2059)
                 if let Some(execute2) = entry.execute2 {
@@ -2915,8 +2916,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Check AMX availability
         #[cfg(feature = "bx_support_amx")]
         {
-            if !fetch_mode_mask.contains(FetchModeMask::AMX_OK) {
-                if op_flags.contains(OpFlags::PREPARE_AMX) {
+            if !fetch_mode_mask.contains(FetchModeMask::AMX_OK)
+                && op_flags.contains(OpFlags::PREPARE_AMX) {
                     // Matching C++ line 2126: only assign if execute1 != BxError
                     if !is_bx_error {
                         use super::opcodes_table::bx_no_amx_wrapper;
@@ -2924,7 +2925,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     }
                     return Ok((true, selected_handler)); // Stop trace
                 }
-            }
         }
 
         // Check if trace should end (matching line 2135)

@@ -25,7 +25,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
     fn shift_write8(&mut self, instr: &Instruction, paddr: Option<()>, result: u8) {
-        if let Some(_) = paddr {
+        if paddr.is_some() {
             self.write_rmw_linear_byte(result);
         } else {
             self.write_8bit_regx(instr.dst() as usize, instr.extend8bit_l(), result);

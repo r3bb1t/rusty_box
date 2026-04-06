@@ -103,8 +103,8 @@ mod bridge_impl {
 
         fn dimension_update(&mut self, x: u32, y: u32, fheight: u32, fwidth: u32, _bpp: u32) {
             if let Ok(mut display) = self.shared.lock() {
-                let cols = if fwidth > 0 { x / fwidth } else { x };
-                let rows = if fheight > 0 { y / fheight } else { y };
+                let cols = x.checked_div(fwidth).unwrap_or(x);
+                let rows = y.checked_div(fheight).unwrap_or(y);
                 display.resize(cols, rows, fwidth, fheight);
             }
         }

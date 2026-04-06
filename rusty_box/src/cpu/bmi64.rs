@@ -186,15 +186,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn bzhi_gq_bq_eq(&mut self, instr: &Instruction) -> super::Result<()> {
         let control = self.get_gpr32(instr.src2() as usize) as u8;
         let mut op1 = self.read_eq64(instr, instr.src1())?;
-        let tmp_cf;
-
-        if (control as u32) < 64 {
+        let tmp_cf = if (control as u32) < 64 {
             let mask = (1u64 << control) - 1;
             op1 &= mask;
-            tmp_cf = false;
+            false
         } else {
-            tmp_cf = true;
-        }
+            true
+        };
 
         self.set_flags_oszaxc_logic_64(op1);
         if tmp_cf {

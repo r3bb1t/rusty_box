@@ -28,7 +28,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // In PM: check if we need I/O permission bitmap
         // Bochs: if (PE && (VM || CPL > IOPL))
-        if vm || cpl > iopl as u8 {
+        if vm || cpl > iopl {
             // Must consult TSS I/O permission bitmap
             // Check TR points to a valid 386 TSS
             if self.tr.cache.valid == 0
@@ -500,8 +500,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Fast path: direct host memory write, matching Bochs FastRepINSW
         // (io.cc:39-117). DF=0 only, no pending async events.
-        if !self.get_df() && self.async_event == 0 {
-            if self.allow_io(port, 2)? {
+        if !self.get_df() && self.async_event == 0
+            && self.allow_io(port, 2)? {
                 while ecx != 0 {
                     let edi = self.edi();
                     // Pre-fault the destination word via RMW to populate TLB
@@ -591,7 +591,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     break;
                 }
             }
-        }
 
         // Per-word fallback (handles DF=1, non-TLB-resolvable pages, or remainder)
         while ecx != 0 {
@@ -613,8 +612,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Fast path for IDE data ports: direct host memory write.
         // Matches Bochs FastRepINSW pattern (io.cc:39-117) adapted for dwords.
         // Only DF=0 (forward), no pending async events, I/O permission OK.
-        if !self.get_df() && self.async_event == 0 {
-            if self.allow_io(port, 4)? {
+        if !self.get_df() && self.async_event == 0
+            && self.allow_io(port, 4)? {
                 while ecx != 0 {
                     let edi = self.edi();
                     // Pre-fault the destination dword via RMW to populate TLB
@@ -707,7 +706,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     break;
                 }
             }
-        }
 
         // Per-dword fallback (handles DF=1, non-TLB-resolvable pages, or remainder)
         while ecx != 0 {
@@ -931,8 +929,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Fast path: direct host memory write, matching Bochs FastRepINSW
         // (io.cc:39-117) adapted for 64-bit address mode. DF=0 only.
-        if !self.get_df() && self.async_event == 0 {
-            if self.allow_io(port, 2)? {
+        if !self.get_df() && self.async_event == 0
+            && self.allow_io(port, 2)? {
                 while rcx != 0 {
                     let rdi = self.rdi();
                     // Pre-fault the destination word via RMW to populate TLB
@@ -1016,7 +1014,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     break;
                 }
             }
-        }
 
         // Per-word fallback
         while rcx != 0 {
@@ -1037,8 +1034,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Fast path: direct host memory write, matching Bochs FastRepINSW
         // pattern adapted for dwords in 64-bit address mode. DF=0 only.
-        if !self.get_df() && self.async_event == 0 {
-            if self.allow_io(port, 4)? {
+        if !self.get_df() && self.async_event == 0
+            && self.allow_io(port, 4)? {
                 while rcx != 0 {
                     let rdi = self.rdi();
                     // Pre-fault the destination dword via RMW to populate TLB
@@ -1124,7 +1121,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     break;
                 }
             }
-        }
 
         // Per-dword fallback
         while rcx != 0 {
@@ -1297,13 +1293,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Fallback (no bus wired)
-        let value = match len {
+        
+        match len {
             1 => 0xFF,
             2 => 0xFFFF,
             4 => 0xFFFFFFFF,
             _ => 0xFF,
-        };
-        value
+        }
     }
 
     /// Write to I/O port.

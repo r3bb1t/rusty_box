@@ -26,13 +26,13 @@ use super::{
 /// Rotate left 32-bit (matching Bochs scalar_arith.h rol32)
 #[inline]
 fn rol32(v32: u32, count: u32) -> u32 {
-    (v32 << count) | (v32 >> (32 - count))
+    v32.rotate_left(count)
 }
 
 /// Rotate right 32-bit (matching Bochs scalar_arith.h ror32)
 #[inline]
 fn ror32(v32: u32, count: u32) -> u32 {
-    (v32 >> count) | (v32 << (32 - count))
+    v32.rotate_right(count)
 }
 
 /// sha_f0(B,C,D) := (B AND C) XOR ((NOT B) AND D)
@@ -287,10 +287,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             let w = [op2.xmm32u(3), op2.xmm32u(2), op2.xmm32u(1), op2.xmm32u(0)];
 
-            for n in 0..4 {
+            for &wn in &w {
                 let a_next = sha_f(b, c, d, imm)
                     .wrapping_add(rol32(a, 5))
-                    .wrapping_add(w[n])
+                    .wrapping_add(wn)
                     .wrapping_add(e)
                     .wrapping_add(k);
 

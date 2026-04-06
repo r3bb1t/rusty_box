@@ -242,15 +242,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Decoder convention for 0x63 (ARPL Ew,Gw): dst()=nnn=Gw, src1()=rm=Ew
         // Bochs: i->dst()=Ew(rm), i->src()=Gw(nnn) — opposite of our decoder!
         // So: op1_16 = Ew = src1()=rm, op2_16 = Gw = dst()=nnn
-        let op1_16: u16;
-        if instr.mod_c0() {
+        let op1_16: u16 = if instr.mod_c0() {
             // Register form: op1 comes from rm = src1()
-            op1_16 = self.get_gpr16(instr.src1() as usize);
+            self.get_gpr16(instr.src1() as usize)
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
-            op1_16 = self.v_read_word(seg, eaddr)?;
-        }
+            self.v_read_word(seg, eaddr)?
+        };
         // op2_16 = Gw = nnn = dst()
         let op2_16 = self.get_gpr16(instr.dst() as usize);
 
@@ -317,14 +316,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        let raw_selector: u16;
-        if instr.mod_c0() {
-            raw_selector = self.get_gpr16(instr.src1() as usize);
+        let raw_selector: u16 = if instr.mod_c0() {
+            self.get_gpr16(instr.src1() as usize)
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
-            raw_selector = self.v_read_word(seg, eaddr)?;
-        }
+            self.v_read_word(seg, eaddr)?
+        };
 
         // Null selector → clear ZF
         if (raw_selector & 0xfffc) == 0 {
@@ -365,12 +363,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Conforming code segments ignore DPL
             let is_code = SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::CODE);
             let is_conforming = SegTypeBits::from_raw(descriptor.r#type).contains(SegTypeBits::CONFORMING);
-            if !(is_code && is_conforming) {
-                if descriptor.dpl < cpl || descriptor.dpl < selector.rpl {
+            if !(is_code && is_conforming)
+                && (descriptor.dpl < cpl || descriptor.dpl < selector.rpl) {
                     self.eflags.remove(EFlags::ZF);
                     return Ok(());
                 }
-            }
         } else {
             // System/gate segment — only certain types accepted
             // Based on Bochs protect_ctrl.cc:134-168
@@ -413,14 +410,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        let raw_selector: u16;
-        if instr.mod_c0() {
-            raw_selector = self.get_gpr16(instr.src1() as usize);
+        let raw_selector: u16 = if instr.mod_c0() {
+            self.get_gpr16(instr.src1() as usize)
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
-            raw_selector = self.v_read_word(seg, eaddr)?;
-        }
+            self.v_read_word(seg, eaddr)?
+        };
 
         // Null selector → clear ZF
         if (raw_selector & 0xfffc) == 0 {
@@ -479,12 +475,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             };
             // Non-conforming code segments need privilege check
             // (dword2 & 0x00000c00) == 0x00000c00 means conforming code (bits 10+11 both set)
-            if (dword2 & 0x00000c00) != 0x00000c00 {
-                if descriptor_dpl < cpl || descriptor_dpl < selector.rpl {
+            if (dword2 & 0x00000c00) != 0x00000c00
+                && (descriptor_dpl < cpl || descriptor_dpl < selector.rpl) {
                     self.eflags.remove(EFlags::ZF);
                     return Ok(());
                 }
-            }
         }
 
         // All checks passed
@@ -504,15 +499,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        let raw_selector: u16;
-        if instr.mod_c0() {
+        let raw_selector: u16 = if instr.mod_c0() {
             // Group 6 (0F 00): dst()=rm (Bochs: i->dst())
-            raw_selector = self.get_gpr16(instr.dst() as usize);
+            self.get_gpr16(instr.dst() as usize)
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
-            raw_selector = self.v_read_word(seg, eaddr)?;
-        }
+            self.v_read_word(seg, eaddr)?
+        };
 
         // Null selector → clear ZF
         if (raw_selector & 0xfffc) == 0 {
@@ -597,15 +591,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        let raw_selector: u16;
-        if instr.mod_c0() {
+        let raw_selector: u16 = if instr.mod_c0() {
             // Group 6 (0F 00): dst()=rm (Bochs: i->dst())
-            raw_selector = self.get_gpr16(instr.dst() as usize);
+            self.get_gpr16(instr.dst() as usize)
         } else {
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
-            raw_selector = self.v_read_word(seg, eaddr)?;
-        }
+            self.v_read_word(seg, eaddr)?
+        };
 
         // Null selector → clear ZF
         if (raw_selector & 0xfffc) == 0 {

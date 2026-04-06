@@ -172,7 +172,7 @@ impl BxMemC<'_> {
 // implement getters and setters for memory stub
 impl BxMemoryStubC {
     #[allow(clippy::mut_from_ref)]
-    pub fn actual_vector<'a>(&'a mut self) -> &'a mut [u8] {
+    pub fn actual_vector(&mut self) -> &mut [u8] {
         //unsafe { &mut (*self.actual_vector.get()) }
         //unsafe { &mut (*self.actual_vector.get()) }
         &mut self.actual_vector
@@ -183,7 +183,7 @@ impl BxMemoryStubC {
         unsafe { &mut (*self.blocks_offsets.get()) }
     }
 
-    pub fn vector<'a>(&'a mut self) -> &'a mut [u8] {
+    pub fn vector(&mut self) -> &mut [u8] {
         //&mut self.actual_vector()[self.vector_offset..]
         &mut self.actual_vector[self.vector_offset..]
     }

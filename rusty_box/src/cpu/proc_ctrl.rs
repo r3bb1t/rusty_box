@@ -326,7 +326,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             eaddr
         } else {
             let seg_base = self.get_segment_base(seg);
-            seg_base.wrapping_add(eaddr as u64)
+            seg_base.wrapping_add(eaddr)
         };
         let paddr = self.translate_data_read(laddr)?;
 
@@ -481,8 +481,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         let ticks = self.get_tsc(self.system_ticks());
-        self.set_rax((ticks & 0xFFFF_FFFF) as u64);
-        self.set_rdx((ticks >> 32) as u64);
+        self.set_rax(ticks & 0xFFFF_FFFF  );
+        self.set_rdx(ticks >> 32  );
         // ECX = IA32_TSC_AUX MSR (processor ID) — Bochs proc_ctrl.cc:834
         self.set_rcx(self.msr.tsc_aux as u64);
 
@@ -510,8 +510,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // time_ticks advances during HLT via tickn(), matching Bochs behavior.
         let ticks = self.get_tsc(self.system_ticks());
 
-        self.set_rax((ticks & 0xFFFF_FFFF) as u64);
-        self.set_rdx((ticks >> 32) as u64);
+        self.set_rax(ticks & 0xFFFF_FFFF  );
+        self.set_rdx(ticks >> 32  );
 
 
         Ok(())
@@ -538,7 +538,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val: u64 = match msr {
             BX_MSR_TSC => self.get_tsc(self.system_ticks()),
             #[cfg(feature = "bx_support_apic")]
-            BX_MSR_APICBASE => self.msr.apicbase as u64,
+            BX_MSR_APICBASE => self.msr.apicbase,
             #[cfg(not(feature = "bx_support_apic"))]
             BX_MSR_APICBASE => BX_MSR_APICBASE_DEFAULT,
             BX_MSR_BIOS_SIGN_ID => 0x02000065, // Skylake-X microcode revision
@@ -1475,7 +1475,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[ss_idx].cache.u.set_segment_avl(false);
 
             // Mask RFLAGS with FMASK, clear RF (Bochs proc_ctrl.cc:1146)
-            let new_flags = saved_rflags & !(self.msr.fmask as u32) & !EFlags::RF.bits();
+            let new_flags = saved_rflags & !self.msr.fmask & !EFlags::RF.bits();
             self.write_eflags(new_flags, EFlags::VALID_MASK.bits());
             self.set_rip(temp_rip);
         } else {
@@ -1714,7 +1714,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // XGETBV ECX=1 returns XINUSE vector (requires XSAVEC support)
             let xinuse = self.get_xinuse_vector(self.xcr0.get32() as u64);
             self.set_rdx(0);
-            self.set_rax(xinuse as u64);
+            self.set_rax(xinuse);
             return Ok(());
         }
 
@@ -1964,8 +1964,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.restore_ftw_from_abridged(aftw);
 
         // Restore FOP (opcode, 11 bits)
-        let foo = self.v_read_word(seg, eaddr.wrapping_add(6))?;
-        self.the_i387.foo = foo & 0x7FF;
+        let fop_raw = self.v_read_word(seg, eaddr.wrapping_add(6))?;
+        self.the_i387.foo = fop_raw & 0x7FF;
 
         // Restore FIP/FCS/FDP/FDS — format depends on operand size, not CPU mode
         if os64 {

@@ -1183,7 +1183,7 @@ pub(crate) fn f128_mul_add(
             // goto sigZ path
             let sig_z_extra = sig256z[1] | sig256z[0];
             let sig_z_extra_jammed =
-                ((sig_z.1 as u64) << (64 - shift_dist as u32)) | ((sig_z_extra != 0) as u64);
+                (sig_z.1 << (64 - shift_dist as u32)) | ((sig_z_extra != 0) as u64);
             let (z64, z0) = short_shift_right128(sig_z.0, sig_z.1, shift_dist as u8);
             return round_pack_to_f128(sign_z, exp_z - 1, z64, z0, sig_z_extra_jammed, status);
         }
@@ -1238,16 +1238,16 @@ pub(crate) fn f128_mul_add(
             let sig_z_extra = sig256z[1] | sig256z[0];
             let extra_jammed = (zz0 << (64 - sd as u32)) | ((sig_z_extra != 0) as u64);
             let (z64, z0) = short_shift_right128(zz64, zz0, sd as u8);
-            return round_pack_to_f128(sign_z, exp_z - 1, z64, z0, extra_jammed, status);
+            round_pack_to_f128(sign_z, exp_z - 1, z64, z0, extra_jammed, status)
         } else {
             // Product has larger exponent
             if shift_dist != 0 {
                 // Double sig256z (shift left by 1)
                 // sig256z = sig256z + sig256z
                 let mut carry = 0u64;
-                for i in 0..4 {
-                    let sum = (sig256z[i] as u128) * 2 + carry as u128;
-                    sig256z[i] = sum as u64;
+                for elem in sig256z.iter_mut() {
+                    let sum = (*elem as u128) * 2 + carry as u128;
+                    *elem = sum as u64;
                     carry = (sum >> 64) as u64;
                 }
                 sig_z = (sig256z[3], sig256z[2]);
@@ -1272,7 +1272,7 @@ pub(crate) fn f128_mul_add(
             let sig_z_extra = sig256z[1] | sig256z[0];
             let extra_jammed = (zz0 << (64 - sd as u32)) | ((sig_z_extra != 0) as u64);
             let (z64, z0) = short_shift_right128(zz64, zz0, sd as u8);
-            return round_pack_to_f128(sign_z, exp_z - 1, z64, z0, extra_jammed, status);
+            round_pack_to_f128(sign_z, exp_z - 1, z64, z0, extra_jammed, status)
         }
     } else {
         // Different signs: subtract magnitudes
@@ -1300,7 +1300,7 @@ pub(crate) fn f128_mul_add(
                 zz0 = sub0;
             }
             // Normalize
-            return norm_round_pack_to_f128(sign_z, exp_z - 1 + 8 - 15, zz64, zz0, status);
+            norm_round_pack_to_f128(sign_z, exp_z - 1 + 8 - 15, zz64, zz0, status)
         } else if exp_diff == 0 {
             // Same exponent — subtract and figure out which is larger
             if shift_dist != 0 {
@@ -1320,14 +1320,14 @@ pub(crate) fn f128_mul_add(
                 zz64 = neg64;
                 zz0 = neg0;
             }
-            return norm_round_pack_to_f128(sign_z, exp_z - 1 + 8 - 15, zz64, zz0, status);
+            norm_round_pack_to_f128(sign_z, exp_z - 1 + 8 - 15, zz64, zz0, status)
         } else {
             // Product has larger exponent
             if shift_dist != 0 {
                 let mut carry = 0u64;
-                for i in 0..4 {
-                    let sum = (sig256z[i] as u128) * 2 + carry as u128;
-                    sig256z[i] = sum as u64;
+                for elem in sig256z.iter_mut() {
+                    let sum = (*elem as u128) * 2 + carry as u128;
+                    *elem = sum as u64;
                     carry = (sum >> 64) as u64;
                 }
                 sig_z = (sig256z[3], sig256z[2]);
@@ -1348,7 +1348,7 @@ pub(crate) fn f128_mul_add(
             let sig_z_extra = sig256z[1] | sig256z[0];
             let extra_jammed = (zz0 << (64 - sd as u32)) | ((sig_z_extra != 0) as u64);
             let (z64, z0) = short_shift_right128(zz64, zz0, sd as u8);
-            return round_pack_to_f128(sign_z, exp_z - 1, z64, z0, extra_jammed, status);
+            round_pack_to_f128(sign_z, exp_z - 1, z64, z0, extra_jammed, status)
         }
     }
 }
@@ -1368,7 +1368,7 @@ pub(crate) fn extf80_to_f128(a: floatx80, status: &mut SoftFloatStatus) -> Float
         return FLOAT128_DEFAULT_NAN;
     }
 
-    let exp = (ui_a64 & 0x7FFF) as u16;
+    let exp = ui_a64 & 0x7FFF;
     let frac = ui_a0 & 0x7FFFFFFFFFFFFFFF;
 
     if exp == 0x7FFF && frac != 0 {
@@ -1467,7 +1467,7 @@ pub(crate) fn i64_to_f128(a: i64) -> Float128 {
     let exp = 0x403E - shift_dist;
     if shift_dist >= 49 {
         // Entire significand fits in v64
-        let v64 = pack_to_f128_ui64(sign, exp, (abs_a as u64) << (shift_dist - 49));
+        let v64 = pack_to_f128_ui64(sign, exp, abs_a << (shift_dist - 49));
         Float128 { v64, v0: 0 }
     } else if shift_dist >= 0 {
         let (hi, lo) = short_shift_left128(0, abs_a, (shift_dist + 15) as u8);

@@ -646,6 +646,7 @@ enum Xcr0Enum {
     BxXcr0Last, // make sure it is < 32
 }
 
+#[allow(clippy::upper_case_acronyms)]
 #[derive(Debug, Default, Clone, Copy)]
 pub struct MSR {
     /// MSR index

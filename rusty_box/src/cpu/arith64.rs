@@ -38,7 +38,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // result has a different sign.
         let of = ((op1 ^ res) & (op2 ^ res) & 0x8000_0000_0000_0000) != 0;
         let af = (cout_vec >> 3) & 1 != 0;
-        let parity = (res as u8).count_ones() % 2 == 0;
+        let parity = (res as u8).count_ones().is_multiple_of(2);
 
         self.eflags.remove(EFlags::OSZAPC);
 
@@ -73,7 +73,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // result sign differs from op1.
         let of = ((op1 ^ op2) & (op1 ^ res) & 0x8000_0000_0000_0000) != 0;
         let af = (cout_vec >> 3) & 1 != 0;
-        let parity = (res as u8).count_ones() % 2 == 0;
+        let parity = (res as u8).count_ones().is_multiple_of(2);
 
         self.eflags.remove(EFlags::OSZAPC);
 
@@ -105,7 +105,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let sf = (res & 0x8000_0000_0000_0000) != 0;
         let of = ((op1 ^ res) & (op2 ^ res) & 0x8000_0000_0000_0000) != 0;
         let af = (cout_vec >> 3) & 1 != 0;
-        let parity = (res as u8).count_ones() % 2 == 0;
+        let parity = (res as u8).count_ones().is_multiple_of(2);
 
         // Clear OSZAP but preserve CF
         self.eflags
@@ -136,7 +136,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let sf = (res & 0x8000_0000_0000_0000) != 0;
         let of = ((op1 ^ op2) & (op1 ^ res) & 0x8000_0000_0000_0000) != 0;
         let af = (cout_vec >> 3) & 1 != 0;
-        let parity = (res as u8).count_ones() % 2 == 0;
+        let parity = (res as u8).count_ones().is_multiple_of(2);
 
         // Clear OSZAP but preserve CF
         self.eflags

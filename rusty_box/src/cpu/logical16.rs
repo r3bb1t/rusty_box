@@ -18,7 +18,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn set_flags_oszapc_logic_16(&mut self, result: u16) {
         let sf = (result & 0x8000) != 0;
         let zf = result == 0;
-        let pf = (result as u8).count_ones() % 2 == 0;
+        let pf = (result as u8).count_ones().is_multiple_of(2);
 
         self.eflags.remove(EFlags::LOGIC_MASK);
 
@@ -40,7 +40,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let sf = (result & 0x8000) != 0;
         let of = ((op1 ^ op2) & (op1 ^ result) & 0x8000) != 0;
         let af = ((op1 ^ op2 ^ result) & 0x10) != 0;
-        let pf = (result as u8).count_ones() % 2 == 0;
+        let pf = (result as u8).count_ones().is_multiple_of(2);
 
         self.eflags.remove(EFlags::OSZAPC);
 
@@ -70,7 +70,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let sf = (result & 0x8000) != 0;
         let of = result == 0x8000; // Only overflow when 0x7FFF -> 0x8000
         let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
-        let pf = (result as u8).count_ones() % 2 == 0;
+        let pf = (result as u8).count_ones().is_multiple_of(2);
 
         // CF is not affected by INC
         const OSZAP: EFlags = EFlags::PF
@@ -103,7 +103,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let sf = (result & 0x8000) != 0;
         let of = result == 0x7FFF && op1 == 0x8000;
         let af = ((op1 ^ 1 ^ result) & 0x10) != 0;
-        let pf = (result as u8).count_ones() % 2 == 0;
+        let pf = (result as u8).count_ones().is_multiple_of(2);
 
         const OSZAP: EFlags = EFlags::PF
             .union(EFlags::AF)

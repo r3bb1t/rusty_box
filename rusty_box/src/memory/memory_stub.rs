@@ -56,7 +56,7 @@ impl BxMemoryStubC {
         // accept only memory size which is multiply of 1M
         const ONE_MEGABYTE: usize = 1 << 20; // 1 MB in bytes
 
-        if (host % ONE_MEGABYTE) != 0 || (guest % ONE_MEGABYTE) != 0 {
+        if !host.is_multiple_of(ONE_MEGABYTE) || !guest.is_multiple_of(ONE_MEGABYTE) {
             return Err(MemoryError::MemorySizeIsNotAMultiplyOf1Megabyte.into());
         }
 
@@ -269,8 +269,8 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    pub fn dbg_fetch_mem<'a, I: BxCpuIdTrait>(
-        &'a mut self,
+    pub fn dbg_fetch_mem<I: BxCpuIdTrait>(
+        &mut self,
         _cpu: BxCpuC<I>,
         addr: BxPhyAddress,
         mut len: u32,
@@ -287,9 +287,6 @@ impl BxMemoryStubC {
                 buf[buf_offset] = *self.get_vector(a20_addr, cpus)?
                     .first()
                     .ok_or(MemoryError::Internal("get_vector returned empty slice"))?;
-            } else if cfg!(feature = "bx_phy_address_long") && a20_addr > 0xffffffff {
-                buf[buf_offset] = 0xff;
-                ret = false;
             } else {
                 buf[buf_offset] = 0xff;
                 ret = false;
@@ -391,8 +388,8 @@ impl BxMemoryStubC {
         }
     }
 
-    pub(crate) fn write_physical_page<'a, I: BxCpuIdTrait>(
-        &'a mut self,
+    pub(crate) fn write_physical_page<I: BxCpuIdTrait>(
+        &mut self,
         cpus: &[&BxCpuC<I>],
         page_write_stamp_table: &mut BxPageWriteStampTable,
         addr: BxPhyAddress,
@@ -485,8 +482,8 @@ impl BxMemoryStubC {
         Ok(())
     }
 
-    pub(crate) fn read_physical_page<'a, I: BxCpuIdTrait>(
-        &'a mut self,
+    pub(crate) fn read_physical_page<I: BxCpuIdTrait>(
+        &mut self,
         cpus: &[&BxCpuC<I>],
         addr: BxPhyAddress,
         len: usize,

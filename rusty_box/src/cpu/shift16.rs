@@ -25,7 +25,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
     fn shift_write16(&mut self, instr: &Instruction, paddr: Option<()>, result: u16) {
-        if let Some(_) = paddr {
+        if paddr.is_some() {
             self.write_rmw_linear_word(result);
         } else {
             self.set_gpr16(instr.dst() as usize, result);

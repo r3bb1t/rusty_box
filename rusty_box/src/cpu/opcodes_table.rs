@@ -140,6 +140,7 @@ pub(super) struct BxOpcodeEntry<I: BxCpuIdTrait> {
 
     /// Handler function for register form or secondary handler
     /// None if instruction doesn't have a register form
+    #[allow(clippy::type_complexity)]
     pub(super) execute2: Option<fn(&mut BxCpuC<'_, I>, &Instruction) -> Result<()>>,
 
     /// Feature requirements and special handling flags

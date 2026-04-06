@@ -95,7 +95,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.the_i387.fds = self.sregs[seg_idx].selector.value;
             // Resolve the effective address that the instruction references.
             let eaddr = self.resolve_addr(instr);
-            self.the_i387.fdp = eaddr as u64;
+            self.the_i387.fdp = eaddr;
         }
     }
 
@@ -130,11 +130,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // --- Invalid ---
         if exception & (FPU_SW_INVALID as u32) != 0 {
             self.the_i387.swd |= exception as u16;
-            if exception & (FPU_SW_STACK_FAULT as u32) != 0 {
-                if exception & (FPU_SW_C1 as u32) == 0 {
+            if exception & (FPU_SW_STACK_FAULT as u32) != 0
+                && exception & (FPU_SW_C1 as u32) == 0 {
                     self.the_i387.swd &= !(FPU_SW_C1);
                 }
-            }
             return unmasked;
         }
 
@@ -155,11 +154,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // --- Remaining exceptions (Precision, Overflow, Underflow) ---
         self.the_i387.swd |= exception as u16;
 
-        if exception & (FPU_SW_PRECISION as u32) != 0 {
-            if exception & (FPU_SW_C1 as u32) == 0 {
+        if exception & (FPU_SW_PRECISION as u32) != 0
+            && exception & (FPU_SW_C1 as u32) == 0 {
                 self.the_i387.swd &= !(FPU_SW_C1);
             }
-        }
 
         // For overflow/underflow, masking depends on whether this is a store.
         let mut unmasked = unmasked & !(FPU_SW_PRECISION as u32);
@@ -331,7 +329,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 // ST(0) > src: CF=0, PF=0, ZF=0
                 // (all cleared above)
             }
-            RELATION_UNORDERED | _ => {
+            _ => {
                 // Unordered (NaN): CF=1, PF=1, ZF=1
                 self.eflags.insert(EFlags::CF | EFlags::PF | EFlags::ZF);
             }

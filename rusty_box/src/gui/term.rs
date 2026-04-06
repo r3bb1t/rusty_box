@@ -288,7 +288,7 @@ impl TermGui {
                     print!("{}", ch_to_print);
                 }
             }
-            print!("\n");
+            println!();
         }
 
         print!("\x1b[0m");

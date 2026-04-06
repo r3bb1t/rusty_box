@@ -77,7 +77,7 @@ impl<'c> BxMemC<'c> {
         // This is critical for rombios32 which is linked to run at 0xE0000!
         // From cpp_orig/bochs/memory/misc_mem.cc:674 and memory-bochs.h:40
         let is_bios =
-            (a20_addr >= 0xE0000 && a20_addr < 0x100000) || a20_addr >= self.bios_rom_addr.into();
+            (0xE0000..0x100000).contains(&a20_addr) || a20_addr >= self.bios_rom_addr.into();
 
         #[cfg(feature = "bx_phy_address_long")]
         let is_bios = if a20_addr > 0xffffffffu64 {
@@ -91,11 +91,10 @@ impl<'c> BxMemC<'c> {
         // allow direct access to SMRAM memory space for code and veto data
         if let Some(cpu) = cpus.first() {
             // reading from SMRAM memory space
-            if (a20_addr >= 0x000a0000 && a20_addr < 0x000c0000) && (self.smram_available) {
-                if self.smram_enable || cpu.smm_mode() {
+            if (0x000a0000..0x000c0000).contains(&a20_addr) && (self.smram_available)
+                && (self.smram_enable || cpu.smm_mode()) {
                     return Ok(Some(self.get_vector(cpus, a20_addr)?));
                 }
-            }
         }
 
         #[cfg(feature = "bx_support_monitor_mwait")]
@@ -141,12 +140,12 @@ impl<'c> BxMemC<'c> {
         }
 
         if !write {
-            if a20_addr >= 0x000a0000 && a20_addr < 0x000c0000 {
+            if (0x000a0000..0x000c0000).contains(&a20_addr) {
                 // VGA memory area - vetoed (no handler registered)
                 Ok(None)
             } else if cfg!(feature = "bx_support_pci")
                 && self.pci_enabled
-                && (a20_addr >= 0x000c0000 && a20_addr < 0x00100000)
+                && (0x000c0000..0x00100000).contains(&a20_addr)
             {
                 // PCI path for C0000-FFFFF: check memory_type to decide ROM vs ShadowRAM.
                 // Bochs: misc_mem.cc:714-729 — this check MUST come before the unconditional
@@ -172,7 +171,7 @@ impl<'c> BxMemC<'c> {
                 }
             } else if (a20_addr < self.inherited_memory_stub.len.try_into()?) && !is_bios {
                 // Regular RAM or non-PCI ROM
-                if a20_addr < 0x000c0000 || a20_addr >= 0x00100000 {
+                if !(0x000c0000..0x00100000).contains(&a20_addr) {
                     Ok(Some(self.get_vector(cpus, a20_addr)?))
                 }
                 // must be in C0000 - FFFFF range (non-PCI path)
@@ -195,7 +194,7 @@ impl<'c> BxMemC<'c> {
                 Ok(Some(
                     &mut self.inherited_memory_stub.bogus()[(a20_addr & 0xfff).try_into()?..],
                 ))
-            } else if a20_addr >= 0xFEE00000 && a20_addr < 0xFEF00000 {
+            } else if (0xFEE00000..0xFEF00000).contains(&a20_addr) {
                 // APIC MMIO at 0xFEE00000-0xFEEFFFFF: veto direct access.
                 // LAPIC register reads have side effects and must go through
                 // the CPU's mem_read_dword → lapic.read() intercept path.
@@ -212,7 +211,7 @@ impl<'c> BxMemC<'c> {
             }
         } else {
             // op == {BX_WRITE, BX_RW}
-            if a20_addr >= 0xFEE00000 && a20_addr < 0xFEF00000 {
+            if (0xFEE00000..0xFEF00000).contains(&a20_addr) {
                 // APIC MMIO at 0xFEE00000-0xFEEFFFFF: veto direct access.
                 // LAPIC register writes have side effects (EOI, ICR, timer, etc.)
                 // and must go through the CPU's mem_write_dword → lapic.write() intercept.
@@ -222,17 +221,17 @@ impl<'c> BxMemC<'c> {
                 // Error, requested addr is out of bounds or writing to BIOS ROM
                 // From cpp_orig/bochs/memory/misc_mem.cc:763-764
                 Ok(None)
-            } else if a20_addr >= 0x000a0000 && a20_addr < 0x000c0000 {
+            } else if (0x000a0000..0x000c0000).contains(&a20_addr) {
                 Ok(None) // Vetoed!  Mem mapped IO (VGA)
             } else if cfg!(feature = "bx_support_pci")
-                && (self.pci_enabled && (a20_addr >= 0x000c0000 && a20_addr < 0x00100000))
+                && (self.pci_enabled && (0x000c0000..0x00100000).contains(&a20_addr))
             {
                 // Veto direct writes to this area. Otherwise, there is a chance
                 // for Guest2HostTLB and memory consistency problems, for example
                 // when some 16K block marked as write-only using PAM registers.
                 Ok(None)
             } else {
-                if a20_addr < 0x000c0000 || a20_addr >= 0x00100000 {
+                if !(0x000c0000..0x00100000).contains(&a20_addr) {
                     Ok(Some(self.get_vector(cpus, a20_addr)?))
                 } else {
                     Ok(None) // Vetoed!  ROMs
@@ -335,10 +334,10 @@ impl BxMemC<'_> {
             return Ok(());
         }
         // vga/option roms
-        if (size % 512) != 0 {
+        if !size.is_multiple_of(512) {
             return Err(MemoryError::RomSizeNotMultipleOf512.into());
         }
-        if (rom_address % 2048) != 0 {
+        if !rom_address.is_multiple_of(2048) {
             return Err(MemoryError::RomNot2kAligned.into());
         }
         if rom_address < 0xc0000 {
@@ -373,8 +372,8 @@ impl BxMemC<'_> {
         );
 
         // For option ROMs (type > 0), check signature and entry point
-        if rom_type > 0 {
-            if size >= 4 {
+        if rom_type > 0
+            && size >= 4 {
                 let signature = u16::from_le_bytes([rom[offset], rom[offset + 1]]);
                 if signature == 0xAA55 {
                     tracing::info!("✓ Option ROM signature valid (55 AA)");
@@ -398,7 +397,6 @@ impl BxMemC<'_> {
                     );
                 }
             }
-        }
 
         // For system BIOS (type 0), verify reset vector
         if rom_type == 0 && offset + 0x1FFF0 + 5 <= rom.len() {
@@ -481,7 +479,7 @@ impl BxMemC<'_> {
         // Match Bochs: 0xE0000-0xFFFFF is ALWAYS BIOS ROM, plus addresses >= bios_rom_addr
         // This is critical for rombios32 which is linked to run at 0xE0000!
         let is_bios =
-            (a20_addr >= 0xE0000 && a20_addr < 0x100000) || a20_addr >= self.bios_rom_addr.into();
+            (0xE0000..0x100000).contains(&a20_addr) || a20_addr >= self.bios_rom_addr.into();
         #[cfg(feature = "bx_phy_address_long")]
         let is_bios = if a20_addr > 0xffffffffu64 {
             false
@@ -493,7 +491,7 @@ impl BxMemC<'_> {
 
         // Check SMRAM first (before memory handlers)
         if cpu_opt.is_some()
-            && (a20_addr >= 0x000a0000 && a20_addr < 0x000c0000)
+            && (0x000a0000..0x000c0000).contains(&a20_addr)
             && self.smram_available
         {
             if let Some(cpu) = cpu_opt {
@@ -521,8 +519,7 @@ impl BxMemC<'_> {
                     if handler.write_handler as usize != 0
                         && handler.begin <= a20_addr
                         && handler.end >= a20_addr
-                    {
-                        if (handler.write_handler)(
+                        && (handler.write_handler)(
                             a20_addr,
                             len as u32,
                             data.as_mut_ptr() as *mut c_void,
@@ -530,7 +527,6 @@ impl BxMemC<'_> {
                         ) {
                             return Ok(()); // Handler processed the write
                         }
-                    }
                     current_handler = handler.next.as_ref().map(|b| b.as_ref());
                 }
             }
@@ -545,7 +541,7 @@ impl BxMemC<'_> {
         // above RAM len so the `a20_addr < len` check naturally excludes them.
         if a20_addr < self.inherited_memory_stub.len.try_into()? {
             // All of data is within limits of physical memory
-            if a20_addr < 0x000a0000 || a20_addr >= 0x00100000 {
+            if !(0x000a0000..0x00100000).contains(&a20_addr) {
                 // Log writes to very low RAM (first 4KB) - these might be IVT/BDA initialization
                 // Regular RAM - delegate to stub
                 return self.inherited_memory_stub.write_physical_page(
@@ -561,14 +557,14 @@ impl BxMemC<'_> {
             // Address must be in range 0x000A0000..0x000FFFFF
             page_write_stamp_table.dec_write_stamp(a20_addr);
 
-            for i in 0..len {
+            for &data_byte in &data[..len] {
                 // SMMRAM (0xA0000-0xBFFFF)
                 if a20_addr < 0x000c0000 {
                     // Devices are not allowed to access SMMRAM under VGA memory
                     if cpu_opt.is_some() {
                         let vector = self.get_vector(cpus, a20_addr)?;
                         if let Some(byte) = vector.get_mut(0) {
-                            *byte = data[i];
+                            *byte = data_byte;
                         }
                     }
                     a20_addr += 1;
@@ -586,11 +582,11 @@ impl BxMemC<'_> {
                         tracing::debug!(
                             "Writing to ShadowRAM: address {:#x}, data {:02x}",
                             a20_addr,
-                            data[i]
+                            data_byte
                         );
                         let vector = self.get_vector(cpus, a20_addr)?;
                         if let Some(byte) = vector.get_mut(0) {
-                            *byte = data[i];
+                            *byte = data_byte;
                         }
                     } else if (area >= MemoryAreaT::E0000 as usize) && self.bios_write_enabled {
                         // Volatile BIOS write support (flash ROM path)
@@ -598,7 +594,7 @@ impl BxMemC<'_> {
                         if rom_offset < BIOSROMSZ {
                             let rom = self.inherited_memory_stub.rom();
                             if let Some(byte) = rom.get_mut(rom_offset) {
-                                *byte = data[i];
+                                *byte = data_byte;
                             }
                         }
                     } else {
@@ -606,7 +602,7 @@ impl BxMemC<'_> {
                         tracing::debug!(
                             "Write to ROM ignored: address {:#x}, data {:02x}",
                             a20_addr,
-                            data[i]
+                            data_byte
                         );
                     }
                 }
@@ -617,30 +613,30 @@ impl BxMemC<'_> {
                     tracing::debug!(
                         "Write to ROM ignored (no PCI): address {:#x}, data {:02x}",
                         a20_addr,
-                        data[i]
+                        data_byte
                     );
                 }
 
                 a20_addr += 1;
             }
 
-            return Ok(());
+            Ok(())
         } else if self.bios_write_enabled && is_bios {
             // Volatile BIOS write support (from memory.cc:151-170)
-            for i in 0..len {
+            for &data_byte in &data[..len] {
                 let rom_offset = bios_map_last128k(a20_addr as usize);
                 if rom_offset < BIOSROMSZ {
                     let rom = self.inherited_memory_stub.rom();
                     if let Some(byte) = rom.get_mut(rom_offset) {
-                        *byte = data[i];
+                        *byte = data_byte;
                     }
                 }
                 a20_addr += 1;
             }
-            return Ok(());
+            Ok(())
         } else {
             // Access outside limits of physical memory, ignore (from memory.cc:172-174)
-            return Ok(());
+            Ok(())
         }
     }
 
@@ -667,7 +663,7 @@ impl BxMemC<'_> {
         // Match Bochs: 0xE0000-0xFFFFF is ALWAYS BIOS ROM, plus addresses >= bios_rom_addr
         // This is critical for rombios32 which is linked to run at 0xE0000!
         let is_bios =
-            (a20_addr >= 0xE0000 && a20_addr < 0x100000) || a20_addr >= self.bios_rom_addr.into();
+            (0xE0000..0x100000).contains(&a20_addr) || a20_addr >= self.bios_rom_addr.into();
         #[cfg(feature = "bx_phy_address_long")]
         let is_bios = if a20_addr > 0xffffffffu64 {
             false
@@ -679,7 +675,7 @@ impl BxMemC<'_> {
 
         // Check SMRAM first (before memory handlers)
         if cpu_opt.is_some()
-            && (a20_addr >= 0x000a0000 && a20_addr < 0x000c0000)
+            && (0x000a0000..0x000c0000).contains(&a20_addr)
             && self.smram_available
         {
             if let Some(cpu) = cpu_opt {
@@ -706,8 +702,7 @@ impl BxMemC<'_> {
                     if handler.read_handler as usize != 0
                         && handler.begin <= a20_addr
                         && handler.end >= a20_addr
-                    {
-                        if (handler.read_handler)(
+                        && (handler.read_handler)(
                             a20_addr,
                             len as u32,
                             data.as_mut_ptr() as *mut c_void,
@@ -726,7 +721,6 @@ impl BxMemC<'_> {
                                 return Ok(()); // Handler processed the read
                             }
                         }
-                    }
                     current_handler = handler.next.as_ref().map(|b| b.as_ref());
                 }
             }
@@ -737,7 +731,7 @@ impl BxMemC<'_> {
         // must enter this block to reach the PCI shadow RAM read path.
         if a20_addr < self.inherited_memory_stub.len.try_into()? {
             // All of data is within limits of physical memory
-            if a20_addr < 0x000a0000 || a20_addr >= 0x00100000 {
+            if !(0x000a0000..0x00100000).contains(&a20_addr) {
                 // Regular RAM - delegate to stub
                 return self.inherited_memory_stub.read_physical_page(
                     cpus,
@@ -749,14 +743,14 @@ impl BxMemC<'_> {
             }
 
             // Address must be in range 0x000A0000..0x000FFFFF
-            for i in 0..len {
+            for data_byte in &mut data[..len] {
                 // SMMRAM (0xA0000-0xBFFFF)
                 if a20_addr < 0x000c0000 {
                     // Devices are not allowed to access SMMRAM under VGA memory
                     if cpu_opt.is_some() {
                         let vector = self.get_vector(cpus, a20_addr)?;
-                        if let Some(byte) = vector.get(0) {
-                            data[i] = *byte;
+                        if let Some(byte) = vector.first() {
+                            *data_byte = *byte;
                         }
                     }
                     a20_addr += 1;
@@ -777,7 +771,7 @@ impl BxMemC<'_> {
                             if rom_offset < BIOSROMSZ {
                                 let rom = self.inherited_memory_stub.rom();
                                 if let Some(byte) = rom.get(rom_offset) {
-                                    data[i] = *byte;
+                                    *data_byte = *byte;
                                 }
                             }
                         } else {
@@ -786,14 +780,14 @@ impl BxMemC<'_> {
                                 ((a20_addr & EXROM_MASK as u64) + BIOSROMSZ as u64) as usize;
                             let rom = self.inherited_memory_stub.rom();
                             if let Some(byte) = rom.get(rom_offset) {
-                                data[i] = *byte;
+                                *data_byte = *byte;
                             }
                         }
                     } else {
                         // Read from ShadowRAM
                         let vector = self.get_vector(cpus, a20_addr)?;
-                        if let Some(byte) = vector.get(0) {
-                            data[i] = *byte;
+                        if let Some(byte) = vector.first() {
+                            *data_byte = *byte;
                         }
                     }
                 }
@@ -804,7 +798,7 @@ impl BxMemC<'_> {
                     if (a20_addr & 0xfffc0000) != 0x000c0000 {
                         let vector = self.get_vector(cpus, a20_addr)?;
                         if let Some(byte) = vector.get(0) {
-                            data[i] = *byte;
+                            *data_byte = *byte;
                         }
                     } else if (a20_addr & 0xfffe0000) == 0x000e0000 {
                         // Last 128K of BIOS ROM mapped to 0xE0000-0xFFFFF
@@ -812,7 +806,7 @@ impl BxMemC<'_> {
                         if rom_offset < BIOSROMSZ {
                             let rom = self.inherited_memory_stub.rom();
                             if let Some(byte) = rom.get(rom_offset) {
-                                data[i] = *byte;
+                                *data_byte = *byte;
                             }
                         }
                     } else {
@@ -821,7 +815,7 @@ impl BxMemC<'_> {
                             ((a20_addr & EXROM_MASK as u64) + BIOSROMSZ as u64) as usize;
                         let rom = self.inherited_memory_stub.rom();
                         if let Some(byte) = rom.get(rom_offset) {
-                            data[i] = *byte;
+                            *data_byte = *byte;
                         }
                     }
                 }
@@ -829,7 +823,7 @@ impl BxMemC<'_> {
                 a20_addr += 1;
             }
 
-            return Ok(());
+            Ok(())
         } else {
             // Access outside limits of physical memory
 
@@ -841,17 +835,17 @@ impl BxMemC<'_> {
 
             if is_bios {
                 // Read from BIOS ROM
-                for i in 0..len {
+                for data_byte in &mut data[..len] {
                     let rom_offset = bios_map_last128k(a20_addr as usize);
                     if rom_offset < BIOSROMSZ {
                         let rom = self.inherited_memory_stub.rom();
                         if let Some(byte) = rom.get(rom_offset) {
-                            data[i] = *byte;
+                            *data_byte = *byte;
                         } else {
-                            data[i] = 0xFF;
+                            *data_byte = 0xFF;
                         }
                     } else {
-                        data[i] = 0xFF;
+                        *data_byte = 0xFF;
                     }
                     a20_addr += 1;
                 }
@@ -860,7 +854,7 @@ impl BxMemC<'_> {
                 data.fill(0xFF);
             }
 
-            return Ok(());
+            Ok(())
         }
     }
 

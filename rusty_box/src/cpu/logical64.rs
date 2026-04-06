@@ -26,7 +26,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn set_flags_oszapc_logic_64(&mut self, result: u64) {
         let sf = (result & 0x8000_0000_0000_0000) != 0;
         let zf = result == 0;
-        let pf = (result as u8).count_ones() % 2 == 0;
+        let pf = (result as u8).count_ones().is_multiple_of(2);
 
         self.eflags.remove(EFlags::LOGIC_MASK);
 

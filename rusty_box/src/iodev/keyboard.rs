@@ -653,7 +653,8 @@ impl BxKeyboardC {
     /// Set pointer to PIT for port 0x61 integration.
     /// Port 0x61 bit 5 must reflect PIT counter 2 output state (Bochs keyboard.cc).
     /// Port 0x61 bit 0 must control PIT counter 2 GATE input (Bochs keyboard.cc).
-    /// SAFETY: The pointer must remain valid for the lifetime of the keyboard.
+    /// # Safety
+    /// The pointer must remain valid for the lifetime of the keyboard.
     pub unsafe fn set_pit_ptr(&mut self, ptr: *mut super::pit::BxPitC) {
         self.pit_ptr = Some(ptr);
     }
@@ -881,7 +882,7 @@ impl BxKeyboardC {
                     let disable_aux = (value >> 5) & 0x01 != 0;
                     let disable_keyboard = (value >> 4) & 0x01 != 0;
                     self.kbd_controller.sysf = (value >> 2) & 0x01 != 0;
-                    self.kbd_controller.allow_irq1 = (value >> 0) & 0x01 != 0;
+                    self.kbd_controller.allow_irq1 = value & 0x01 != 0;
                     self.kbd_controller.allow_irq12 = (value >> 1) & 0x01 != 0;
                     self.set_kbd_clock_enable(!disable_keyboard);
                     self.set_aux_clock_enable(!disable_aux);
@@ -966,10 +967,9 @@ impl BxKeyboardC {
                     tracing::warn!("Keyboard: OUTB set for GET_CCB cmd");
                     return;
                 }
-                let command_byte = ((self.kbd_controller.scancodes_translate as u8) << 6)
+                let command_byte = (((self.kbd_controller.scancodes_translate as u8) << 6)
                     | ((!self.kbd_controller.aux_clock_enabled as u8) << 5)
-                    | ((!self.kbd_controller.kbd_clock_enabled as u8) << 4)
-                    | (0 << 3)
+                    | ((!self.kbd_controller.kbd_clock_enabled as u8) << 4))
                     | ((self.kbd_controller.sysf as u8) << 2)
                     | ((self.kbd_controller.allow_irq12 as u8) << 1)
                     | (self.kbd_controller.allow_irq1 as u8);
@@ -1097,7 +1097,7 @@ impl BxKeyboardC {
                 tracing::warn!("Keyboard: System reset via 0xFE");
             }
             _ => {
-                if value == 0xFF || (value >= 0xF0 && value <= 0xFD) {
+                if value == 0xFF || (0xF0..=0xFD).contains(&value) {
                     // Useless pulse output bit commands
                 } else {
                     tracing::warn!("Keyboard: Unknown command {:#04x}", value);
@@ -1458,12 +1458,11 @@ impl BxKeyboardC {
         self.kbd_controller.last_mouse_command = value;
 
         // Wrap mode handling
-        if self.mouse.mode == MOUSE_MODE_WRAP {
-            if value != MOUSE_CMD_RESET && value != MOUSE_CMD_RESET_WRAP_MODE {
+        if self.mouse.mode == MOUSE_MODE_WRAP
+            && value != MOUSE_CMD_RESET && value != MOUSE_CMD_RESET_WRAP_MODE {
                 self.controller_enq(value, 1);
                 return;
             }
-        }
 
         match value {
             MOUSE_CMD_SET_SCALING_1_1 => {
@@ -1677,10 +1676,10 @@ impl BxKeyboardC {
     ///    (host hasn't read the previous byte yet)
     /// 5. Transfer priority:
     ///    a. **Keyboard buffer** (if `kbd_clock_enabled` or `bat_in_progress`):
-    ///       Dequeue from `kbd_internal_buffer.head`, set `outb=true`, request IRQ1
+    ///    Dequeue from `kbd_internal_buffer.head`, set `outb=true`, request IRQ1
     ///    b. **Mouse buffer** (if `aux_clock_enabled`):
-    ///       Dequeue from `mouse_internal_buffer.head`, set `outb=true`, `auxb=true`,
-    ///       request IRQ12
+    ///    Dequeue from `mouse_internal_buffer.head`, set `outb=true`, `auxb=true`,
+    ///    request IRQ12
     ///    c. Neither: log "no keys waiting"
     pub fn periodic(&mut self, usec_delta: u32) -> u8 {
         // Collect pending IRQ requests

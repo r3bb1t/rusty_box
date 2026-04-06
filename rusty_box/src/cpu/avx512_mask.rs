@@ -97,7 +97,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let laddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
         let val = if self.long64_mode() {
-            self.read_virtual_qword_64(seg, laddr as u64)?
+            self.read_virtual_qword_64(seg, laddr)?
         } else {
             self.v_read_dword(seg, laddr)? as u64
         };
@@ -137,7 +137,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let laddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
         if self.long64_mode() {
-            self.write_virtual_qword_64(seg, laddr as u64, val)?;
+            self.write_virtual_qword_64(seg, laddr, val)?;
         } else {
             self.v_write_dword(seg, laddr, val as u32)?;
         }

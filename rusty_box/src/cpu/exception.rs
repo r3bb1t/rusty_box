@@ -267,8 +267,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
          * least significant bit set correctly. This correction is applied first
          * to make the change transparent to any instrumentation.
          */
-        if push_error {
-            if vector != Exception::Pf
+        if push_error
+            && vector != Exception::Pf
                 && vector != Exception::Df
                 && vector != Exception::Cp
                 && vector != Exception::Sx
@@ -277,7 +277,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 // Our `ext` is a bool, so convert explicitly.
                 error_code = (error_code & 0xfffe) | (u16::from(self.ext));
             }
-        }
 
         // Reduce verbosity for common exceptions (#GP(0) is very common during boot)
         if vector != Exception::Gp || error_code != 0 {

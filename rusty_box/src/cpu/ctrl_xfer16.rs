@@ -41,7 +41,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Flag getters for conditional jumps
     // =========================================================================
 
-    /// Get Carry Flag
+    // Get Carry Flag
     // Flag getters (get_cf, get_zf, get_sf, get_of, get_pf, get_af) are defined in ctrl_xfer32.rs
     // to avoid duplicate definitions across multiple impl blocks
 
@@ -676,7 +676,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Helper function for loading segment register in real mode
     // =========================================================================
 
-    /// Load segment register in real mode (matching load_seg_reg for real mode)
+    // Load segment register in real mode (matching load_seg_reg for real mode)
     // load_seg_reg_real_mode is defined in ctrl_xfer32.rs to avoid duplicate definitions
 
     // =========================================================================
@@ -902,7 +902,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.set_gpr32(4, esp.wrapping_add(imm16 as u32));
             } else {
                 let sp = self.get_gpr16(4);
-                self.set_gpr16(4, sp.wrapping_add(imm16 as u16));
+                self.set_gpr16(4, sp.wrapping_add(imm16));
             }
         }
 

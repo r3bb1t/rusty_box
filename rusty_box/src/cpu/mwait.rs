@@ -5,7 +5,7 @@ use super::{
 };
 use crate::config::BxPhyAddress;
 
-impl<'c, I: BxCpuIdTrait> BxCpuC<'_, I> {
+impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Check if the given address range overlaps with the monitored address range
     pub fn is_monitor(&self, begin_addr: BxPhyAddress, len: u32) -> bool {
         if !self.monitor.armed() {
@@ -17,11 +17,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'_, I> {
         let monitor_end = monitor_begin + CACHE_LINE_SIZE - 1;
 
         let end_addr = begin_addr + len as u64;
-        if begin_addr >= monitor_end || end_addr <= monitor_begin {
-            false
-        } else {
-            true
-        }
+        !(begin_addr >= monitor_end || end_addr <= monitor_begin)
     }
 
     /// Check if monitor should be triggered and wake up if so

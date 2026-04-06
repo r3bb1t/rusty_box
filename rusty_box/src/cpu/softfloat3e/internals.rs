@@ -241,7 +241,7 @@ pub fn round_pack_to_f64(sign: bool, exp: i16, sig: u64, status: &mut SoftFloatS
         }
     }
     sig = sig.wrapping_add(round_increment);
-    if sig < round_increment as u64 {
+    if sig < round_increment {
         exp += 1;
     }
     if round_near_even && ((round_bits ^ 0x200) == 0) {

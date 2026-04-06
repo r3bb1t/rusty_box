@@ -72,11 +72,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.fpu_exception(instr, FPU_EX_STACK_UNDERFLOW as u32, false);
             self.setcc(FPU_SW_C0 | FPU_SW_C2 | FPU_SW_C3);
 
-            if self.the_i387.is_ia_masked() {
-                if pop_stack {
+            if self.the_i387.is_ia_masked()
+                && pop_stack {
                     self.the_i387.fpu_pop();
                 }
-            }
             return Ok(());
         }
 
@@ -90,11 +89,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         );
         self.setcc(status_word_flags_fpu_compare(rc));
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
-            if pop_stack {
+        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0
+            && pop_stack {
                 self.the_i387.fpu_pop();
             }
-        }
 
         Ok(())
     }
@@ -124,11 +122,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.fpu_exception(instr, FPU_EX_STACK_UNDERFLOW as u32, false);
             self.setcc(FPU_SW_C0 | FPU_SW_C2 | FPU_SW_C3);
 
-            if self.the_i387.is_ia_masked() {
-                if pop_stack {
+            if self.the_i387.is_ia_masked()
+                && pop_stack {
                     self.the_i387.fpu_pop();
                 }
-            }
             return Ok(());
         }
 
@@ -142,11 +139,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         );
         self.setcc(status_word_flags_fpu_compare(rc));
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
-            if pop_stack {
+        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0
+            && pop_stack {
                 self.the_i387.fpu_pop();
             }
-        }
 
         Ok(())
     }
@@ -180,11 +176,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.fpu_exception(instr, FPU_EX_STACK_UNDERFLOW as u32, false);
             self.setcc(FPU_SW_C0 | FPU_SW_C2 | FPU_SW_C3);
 
-            if self.the_i387.is_ia_masked() {
-                if pop_stack {
+            if self.the_i387.is_ia_masked()
+                && pop_stack {
                     self.the_i387.fpu_pop();
                 }
-            }
             return Ok(());
         }
 
@@ -201,11 +196,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         };
         self.setcc(status_word_flags_fpu_compare(rc));
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
-            if pop_stack {
+        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0
+            && pop_stack {
                 self.the_i387.fpu_pop();
             }
-        }
 
         Ok(())
     }
@@ -242,11 +236,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.fpu_exception(instr, FPU_EX_STACK_UNDERFLOW as u32, false);
             self.setcc(FPU_SW_C0 | FPU_SW_C2 | FPU_SW_C3);
 
-            if self.the_i387.is_ia_masked() {
-                if pop_stack {
+            if self.the_i387.is_ia_masked()
+                && pop_stack {
                     self.the_i387.fpu_pop();
                 }
-            }
             return Ok(());
         }
 
@@ -263,11 +256,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         };
         self.setcc(status_word_flags_fpu_compare(rc));
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
-            if pop_stack {
+        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0
+            && pop_stack {
                 self.the_i387.fpu_pop();
             }
-        }
 
         Ok(())
     }
@@ -301,11 +293,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.fpu_exception(instr, FPU_EX_STACK_UNDERFLOW as u32, false);
             self.setcc(FPU_SW_C0 | FPU_SW_C2 | FPU_SW_C3);
 
-            if self.the_i387.is_ia_masked() {
-                if pop_stack {
+            if self.the_i387.is_ia_masked()
+                && pop_stack {
                     self.the_i387.fpu_pop();
                 }
-            }
             return Ok(());
         }
 
@@ -319,11 +310,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         );
         self.setcc(status_word_flags_fpu_compare(rc));
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
-            if pop_stack {
+        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0
+            && pop_stack {
                 self.the_i387.fpu_pop();
             }
-        }
 
         Ok(())
     }
@@ -357,11 +347,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.fpu_exception(instr, FPU_EX_STACK_UNDERFLOW as u32, false);
             self.setcc(FPU_SW_C0 | FPU_SW_C2 | FPU_SW_C3);
 
-            if self.the_i387.is_ia_masked() {
-                if pop_stack {
+            if self.the_i387.is_ia_masked()
+                && pop_stack {
                     self.the_i387.fpu_pop();
                 }
-            }
             return Ok(());
         }
 
@@ -375,11 +364,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         );
         self.setcc(status_word_flags_fpu_compare(rc));
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
-            if pop_stack {
+        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0
+            && pop_stack {
                 self.the_i387.fpu_pop();
             }
-        }
 
         Ok(())
     }
@@ -453,11 +441,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Set EFLAGS to unordered: ZF=1, PF=1, CF=1
             self.write_eflags_fpu_compare(RELATION_UNORDERED);
 
-            if self.the_i387.is_ia_masked() {
-                if pop_stack {
+            if self.the_i387.is_ia_masked()
+                && pop_stack {
                     self.the_i387.fpu_pop();
                 }
-            }
             return Ok(());
         }
 
@@ -471,11 +458,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         );
         self.write_eflags_fpu_compare(rc);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
-            if pop_stack {
+        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0
+            && pop_stack {
                 self.the_i387.fpu_pop();
             }
-        }
 
         Ok(())
     }
@@ -506,11 +492,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Set EFLAGS to unordered: ZF=1, PF=1, CF=1
             self.write_eflags_fpu_compare(RELATION_UNORDERED);
 
-            if self.the_i387.is_ia_masked() {
-                if pop_stack {
+            if self.the_i387.is_ia_masked()
+                && pop_stack {
                     self.the_i387.fpu_pop();
                 }
-            }
             return Ok(());
         }
 
@@ -524,11 +509,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         );
         self.write_eflags_fpu_compare(rc);
 
-        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0 {
-            if pop_stack {
+        if self.fpu_exception(instr, status.softfloat_exceptionFlags as u32, false) == 0
+            && pop_stack {
                 self.the_i387.fpu_pop();
             }
-        }
 
         Ok(())
     }

@@ -1649,7 +1649,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if let Ok(Some(slice)) =
                 mem.get_host_mem_addr(paddr, MemoryAccessType::Read, &[cpu_ref])
             {
-                let val = slice.get(0).copied().unwrap_or(0);
+                let val = slice.first().copied().unwrap_or(0);
                 return val;
             }
 

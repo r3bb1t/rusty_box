@@ -392,7 +392,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         {
             // INTERRUPT TO INNER PRIVILEGE
             self.handle_interrupt_to_inner_privilege(
-                &gate_descriptor,
+                gate_descriptor,
                 &cs_selector,
                 &cs_descriptor,
                 old_esp,
@@ -423,6 +423,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Handle interrupt to inner privilege level (DPL < CPL)
     /// Based on exception.cc:435-665
+    #[allow(clippy::too_many_arguments)]
     fn handle_interrupt_to_inner_privilege(
         &mut self,
         gate_descriptor: &BxDescriptor,
@@ -930,7 +931,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if gate_descriptor.valid == 0 || gate_descriptor.segment {
             tracing::debug!(
                 "long_mode_int(): gate descriptor is not valid sys seg: vector={} type={:#x} dword1={:#010x} dword2={:#010x} dword3={:#010x} idt_addr={:#x} icount={}",
-                vector as u8, gate_descriptor.r#type, dword1, dword2, dword3, idt_entry_addr, self.icount
+                { vector }, gate_descriptor.r#type, dword1, dword2, dword3, idt_entry_addr, self.icount
             );
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
@@ -979,7 +980,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // IST (Interrupt Stack Table) index from gate param_count bits 0-2
         // SAFETY: descriptor type verified as gate before union access
-        let ist = (gate_descriptor.u.gate_param_count() & 0x7) as u8;
+        let ist = gate_descriptor.u.gate_param_count() & 0x7;
 
         // CS selector must be non-null
         if (gate_dest_selector & 0xfffc) == 0 {

@@ -31,7 +31,7 @@ pub fn extf80_to_f32(a: floatx80, status: &mut SoftFloatStatus) -> float32 {
 
     // Short shift right with jam to get 32-bit significand
     let sig32 = short_shift_right_jam64(sig, 33) as u32;
-    if (exp as u32 | sig32 as u32) == 0 {
+    if (exp as u32 | sig32) == 0 {
         return pack_float32(sign, 0, 0);
     }
 

@@ -235,6 +235,7 @@ pub enum SsePrefix {
 ///
 /// 18 variants (0-17), no Rust-only extensions.
 #[derive(Debug, Copy, Clone, Hash, PartialEq, Eq)]
+#[derive(Default)]
 pub enum BxDecodeError {
     BxDecodeOk = 0,
     BxIllegalOpcode = 1,
@@ -245,6 +246,7 @@ pub enum BxDecodeError {
     BxIllegalVexXopOpcodeMap = 6,
     BxVexXopBadVectorLength = 7,
     BxVsibForbiddenAsize16 = 8,
+    #[default]
     BxVsibIllegalSibIndex = 9,
     BxEvexReservedBitsSet = 10,
     BxEvexIllegalEvexBSaeNotAllowed = 11,
@@ -256,11 +258,6 @@ pub enum BxDecodeError {
     BxAmxIllegalTileRegister = 17,
 }
 
-impl Default for BxDecodeError {
-    fn default() -> Self {
-        Self::BxVsibIllegalSibIndex
-    }
-}
 
 // ============================================================================
 // Operand descriptor enums (Bochs fetchdecode.h lines 112-201)

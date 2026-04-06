@@ -257,12 +257,12 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                 metainfo1_bits |= MetaInfoFlags::Os64.bits() | MetaInfoFlags::Os32.bits();
             }
 
-            vex_vvv = (15 - ((vex_byte2 >> 3) & 0xF)) as u8;
+            vex_vvv = 15 - ((vex_byte2 >> 3) & 0xF);
             vex_l = (vex_byte2 >> 2) & 0x1;
             sse_prefix = vex_byte2 & 0x3; // pp field = SSE prefix
         } else {
             // 2-byte VEX prefix: C5 [RvvvvLpp]
-            vex_vvv = (15 - ((vex_byte1 >> 3) & 0xF)) as u8;
+            vex_vvv = 15 - ((vex_byte1 >> 3) & 0xF);
             vex_l = (vex_byte1 >> 2) & 0x1;
             sse_prefix = vex_byte1 & 0x3; // pp field = SSE prefix
         }
@@ -344,7 +344,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
         }
         vex_w = (p1 >> 7) & 1;
-        vex_vvv = (15 - ((p1 >> 3) & 0xF)) as u8;
+        vex_vvv = 15 - ((p1 >> 3) & 0xF);
         sse_prefix = p1 & 0x03;
 
         if vex_w != 0 {
@@ -548,8 +548,8 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
                 pos += 1;
 
                 let scale = (sib >> 6) & 0x3;
-                let mut index = ((sib >> 3) & 0x7) as u8;
-                let mut base = (sib & 0x7) as u8;
+                let mut index = (sib >> 3) & 0x7;
+                let mut base = sib & 0x7;
 
                 // REX extensions
                 if (rex_prefix & 0x02) != 0 {
@@ -2199,7 +2199,7 @@ const fn get_immediate_size_64(b1: u32, map: u8, _sse_prefix: u8, metainfo1: u8,
             // A1 = MOV AX/EAX/RAX, [moffs]
             // A2 = MOV [moffs8], AL
             // A3 = MOV [moffs], AX/EAX/RAX
-            0xA0 | 0xA1 | 0xA2 | 0xA3 => {
+            0xA0..=0xA3 => {
                 if as64 {
                     8 // 64-bit address = 8-byte offset
                 } else {
@@ -2235,29 +2235,21 @@ const fn get_immediate_size_64(b1: u32, map: u8, _sse_prefix: u8, metainfo1: u8,
 
             // Group 3a (F6): TEST (nnn=0,1) has Ib, others have no immediate
             // Based on Bochs cpu/decoder/fetchdecode64.cc (fetchImmediate)
-            0xF6 => {
+            0xF6
                 // Mask to 3 bits: REX.R may extend nnn to 8+
-                if (nnn & 7) == 0 || (nnn & 7) == 1 {
+                if ((nnn & 7) == 0 || (nnn & 7) == 1) => {
                     1 // TEST r/m8, imm8
-                } else {
-                    0 // NOT/NEG/MUL/IMUL/DIV/IDIV - no immediate
                 }
-            }
 
             // Group 3b (F7): TEST (nnn=0,1) has Iv, others have no immediate
-            0xF7 => {
-                if (nnn & 7) == 0 || (nnn & 7) == 1 {
-                    if os64 {
-                        4 // TEST r/m64, imm32 (sign-extended)
-                    } else if os32 {
-                        4 // TEST r/m32, imm32
+            0xF7
+                if ((nnn & 7) == 0 || (nnn & 7) == 1) => {
+                    if os64 || os32 {
+                        4 // TEST r/m64 or r/m32, imm32 (sign-extended in 64-bit mode)
                     } else {
                         2 // TEST r/m16, imm16
                     }
-                } else {
-                    0 // NOT/NEG/MUL/IMUL/DIV/IDIV - no immediate
                 }
-            }
 
             // Iw
             0xC2 | 0xCA => 2,

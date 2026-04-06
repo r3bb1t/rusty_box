@@ -186,15 +186,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn bzhi_gd_bd_ed(&mut self, instr: &Instruction) -> super::Result<()> {
         let control = self.get_gpr32(instr.src2() as usize) as u8;
         let mut op1 = self.read_ed32(instr, instr.src1())?;
-        let tmp_cf;
-
-        if (control as u32) < 32 {
+        let tmp_cf = if (control as u32) < 32 {
             let mask = (1u32 << control) - 1;
             op1 &= mask;
-            tmp_cf = false;
+            false
         } else {
-            tmp_cf = true;
-        }
+            true
+        };
 
         self.set_flags_oszaxc_logic_32(op1);
         if tmp_cf {

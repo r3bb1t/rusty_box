@@ -64,7 +64,7 @@ fn fpu_handle_nan_inner_f32(
             }
             return if a_q.sign_exp < b.sign_exp { a_q } else { b };
         }
-        return if b_is_nan { b } else { a_q };
+        if b_is_nan { b } else { a_q }
     } else if a_is_nan {
         if b_is_signaling_nan {
             return a_q;
@@ -76,10 +76,10 @@ fn fpu_handle_nan_inner_f32(
         if b.signif < a_q.signif {
             return a_q;
         }
-        return if a_q.sign_exp < b.sign_exp { a_q } else { b };
+        if a_q.sign_exp < b.sign_exp { a_q } else { b }
     } else {
         // Only b is NaN
-        return b;
+        b
     }
 }
 
@@ -138,7 +138,7 @@ fn fpu_handle_nan_inner_f64(
             }
             return if a_q.sign_exp < b.sign_exp { a_q } else { b };
         }
-        return if b_is_nan { b } else { a_q };
+        if b_is_nan { b } else { a_q }
     } else if a_is_nan {
         if b_is_signaling_nan {
             return a_q;
@@ -150,10 +150,10 @@ fn fpu_handle_nan_inner_f64(
         if b.signif < a_q.signif {
             return a_q;
         }
-        return if a_q.sign_exp < b.sign_exp { a_q } else { b };
+        if a_q.sign_exp < b.sign_exp { a_q } else { b }
     } else {
         // Only b is NaN
-        return b;
+        b
     }
 }
 

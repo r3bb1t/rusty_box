@@ -279,7 +279,7 @@ fn aes_sub_word(x: u32) -> u32 {
 /// Rotate u32 right by 8 bits (Bochs AES_RotWord)
 #[inline]
 fn aes_rot_word(x: u32) -> u32 {
-    (x >> 8) | (x << 24)
+    x.rotate_right(8)
 }
 
 /// XOR two XMM registers (Bochs xmm_xorps)

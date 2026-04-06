@@ -355,7 +355,7 @@ impl BxPciIde {
             // Read next PRD size for timer period calculation
             let next_prd_size_raw =
                 self.mem_read_physical_dword(self.bmdma[channel].prd_current + 4);
-            let mut next_size = (next_prd_size_raw & 0xFFFE) as u32;
+            let mut next_size = next_prd_size_raw & 0xFFFE;
             if next_size == 0 {
                 next_size = 0x10000;
             }
@@ -611,7 +611,7 @@ impl BxPciIde {
         let bar4_changed = false;
 
         // BAR0-BAR3 and some reserved ranges are read-only (pci_ide.cc:435-437)
-        if (address >= 0x10 && address < 0x20) || (address > 0x23 && address < 0x40) {
+        if (0x10..0x20).contains(&address) || (address > 0x23 && address < 0x40) {
             return false;
         }
 

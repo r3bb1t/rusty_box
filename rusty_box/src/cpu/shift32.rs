@@ -35,7 +35,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
     fn shift_write32(&mut self, instr: &Instruction, paddr: Option<()>, result: u32) {
-        if let Some(_) = paddr {
+        if paddr.is_some() {
             self.write_rmw_linear_dword(result);
         } else {
             self.set_gpr32(instr.dst() as usize, result);

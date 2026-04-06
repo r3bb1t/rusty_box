@@ -285,7 +285,7 @@ pub(crate) fn fyl2xp1_impl(a: floatx80, b: floatx80, status: &mut SoftFloatStatu
     };
 
     // Handle tiny argument: first-order approximation (a*b)/ln(2)
-    if a_exp < (FLOATX80_EXP_BIAS as i32) - 70 {
+    if a_exp < FLOATX80_EXP_BIAS - 70 {
         let mut z_exp = a_exp + FLOAT_LN2INV_EXP - 0x3FFE;
 
         let (mut z_sig0, mut z_sig1, _z_sig2) =

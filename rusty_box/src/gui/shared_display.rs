@@ -103,6 +103,7 @@ impl SharedDisplay {
     /// - `line_graphics`: if true, chars 0xC0-0xDF duplicate bit 0 to 9th pixel
     /// - `start_address`: CRTC start address (byte offset into text buffer)
     /// - `line_offset`: CRTC line offset (bytes per row in VGA memory)
+    #[allow(clippy::too_many_arguments)]
     pub fn render_text_to_framebuffer(
         &mut self,
         text: &[u8],

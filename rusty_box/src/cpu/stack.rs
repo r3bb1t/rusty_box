@@ -40,7 +40,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         } else if self.is_stack_32bit() {
             let esp = self.esp();
             let new_esp = esp.wrapping_sub(2);
-            self.stack_write_word(new_esp as u32, value)?;
+            self.stack_write_word(new_esp, value)?;
             self.set_esp(new_esp);
         } else {
             let sp = self.sp();
@@ -61,7 +61,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             Ok(value)
         } else if self.is_stack_32bit() {
             let esp = self.esp();
-            let value = self.stack_read_word(esp as u32)?;
+            let value = self.stack_read_word(esp)?;
             self.set_esp(esp.wrapping_add(2));
             Ok(value)
         } else {

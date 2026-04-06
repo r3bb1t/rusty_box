@@ -82,6 +82,7 @@ struct FifoControl {
 
 /// Line Control Register state
 #[derive(Debug, Clone, Copy)]
+#[derive(Default)]
 struct LineControl {
     wordlen_sel: u8, // 0=5, 1=6, 2=7, 3=8 bits
     stopbits: bool,  // 0=1 stop, 1=1.5/2 stop
@@ -92,19 +93,6 @@ struct LineControl {
     dlab: bool, // Divisor Latch Access Bit
 }
 
-impl Default for LineControl {
-    fn default() -> Self {
-        Self {
-            wordlen_sel: 0,
-            stopbits: false,
-            parity_enable: false,
-            evenparity_sel: false,
-            stick_parity: false,
-            break_cntl: false,
-            dlab: false,
-        }
-    }
-}
 
 /// Modem Control Register state
 #[derive(Debug, Default, Clone, Copy)]
@@ -384,12 +372,7 @@ impl BxSerialC {
     /// Identify which COM port a given I/O address belongs to
     fn port_for_addr(&self, addr: u16) -> Option<usize> {
         let base = addr & 0xFFF8; // Mask off low 3 bits
-        for i in 0..self.num_ports {
-            if base == COM_BASES[i] {
-                return Some(i);
-            }
-        }
-        None
+        COM_BASES[..self.num_ports].iter().position(|&b| b == base)
     }
 
     // ========================================================================
@@ -837,12 +820,11 @@ impl BxSerialC {
                             s.ms_interrupt = true;
                             s.ms_ipending = false;
                         }
-                    } else if !new_modstat && s.int_enable.modstat_enable {
-                        if s.ms_interrupt {
+                    } else if !new_modstat && s.int_enable.modstat_enable
+                        && s.ms_interrupt {
                             s.ms_ipending = true;
                             s.ms_interrupt = false;
                         }
-                    }
 
                     // TX hold enable transition
                     if new_txhold && !s.int_enable.txhold_enable {
@@ -880,12 +862,11 @@ impl BxSerialC {
                             s.ls_interrupt = true;
                             s.ls_ipending = false;
                         }
-                    } else if !new_rxlstat && s.int_enable.rxlstat_enable {
-                        if s.ls_interrupt {
+                    } else if !new_rxlstat && s.int_enable.rxlstat_enable
+                        && s.ls_interrupt {
                             s.ls_ipending = true;
                             s.ls_interrupt = false;
                         }
-                    }
 
                     s.int_enable.rxdata_enable = new_rxdata;
                     s.int_enable.txhold_enable = new_txhold;

@@ -157,7 +157,7 @@ pub(crate) fn do_fprem(
 
     if exp_diff >= 64 {
         let n = ((exp_diff & 0x1f) | 0x20) as u8;
-        remainder_kernel(a_sig0, b_sig as u64, n, &mut a_sig0, &mut a_sig1);
+        remainder_kernel(a_sig0, b_sig, n, &mut a_sig0, &mut a_sig1);
         z_exp = a_exp - n as i32;
         overflow = 1;
     } else {
@@ -179,23 +179,23 @@ pub(crate) fn do_fprem(
         } else if exp_diff > 0 {
             *q = remainder_kernel(
                 a_sig0,
-                b_sig as u64,
+                b_sig,
                 exp_diff as u8,
                 &mut a_sig0,
                 &mut a_sig1,
             );
         } else {
             // exp_diff == 0
-            if b_sig as u64 <= a_sig0 {
-                a_sig0 -= b_sig as u64;
+            if b_sig <= a_sig0 {
+                a_sig0 -= b_sig;
                 *q = 1;
             }
         }
 
         if rounding_mode == ROUND_NEAR_EVEN {
             // shortShift128Right(b_sig, 0, 1, &term0, &term1)
-            let term0 = (b_sig as u64) >> 1;
-            let term1 = (b_sig as u64) << 63;
+            let term0 = b_sig >> 1;
+            let term1 = b_sig << 63;
 
             if !lt128(a_sig0, a_sig1, term0, term1) {
                 let is_lt = lt128(term0, term1, a_sig0, a_sig1);
@@ -206,7 +206,7 @@ pub(crate) fn do_fprem(
                     *q = q.wrapping_add(1);
                 }
                 if is_lt {
-                    let (sh, sl) = sub128(b_sig as u64, 0, a_sig0, a_sig1);
+                    let (sh, sl) = sub128(b_sig, 0, a_sig0, a_sig1);
                     a_sig0 = sh;
                     a_sig1 = sl;
                 }

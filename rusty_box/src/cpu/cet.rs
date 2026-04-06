@@ -1,7 +1,7 @@
-/// Intel CET (Control-flow Enforcement Technology) implementation.
-///
-/// Mirrors Bochs cpu/cet.cc — ENDBR32/ENDBR64, shadow stack helpers,
-/// indirect branch tracking, and legacy endbranch treatment.
+//! Intel CET (Control-flow Enforcement Technology) implementation.
+//!
+//! Mirrors Bochs cpu/cet.cc — ENDBR32/ENDBR64, shadow stack helpers,
+//! indirect branch tracking, and legacy endbranch treatment.
 
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 

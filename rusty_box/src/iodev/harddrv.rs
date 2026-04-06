@@ -404,6 +404,7 @@ pub struct AtapiState {
 
 /// CD-ROM state (Bochs harddrv.h:134-146)
 #[derive(Debug, Clone)]
+#[derive(Default)]
 pub struct CdromState {
     pub ready: bool,
     pub locked: bool,
@@ -413,18 +414,6 @@ pub struct CdromState {
     pub remaining_blocks: i32,
 }
 
-impl Default for CdromState {
-    fn default() -> Self {
-        Self {
-            ready: false,
-            locked: false,
-            max_lba: 0,
-            curr_lba: 0,
-            next_lba: 0,
-            remaining_blocks: 0,
-        }
-    }
-}
 
 impl Default for AtaController {
     fn default() -> Self {
@@ -500,6 +489,7 @@ pub struct AtaDrive {
     cdrom_file: Option<File>,
 }
 
+#[allow(clippy::new_without_default)]
 impl AtaDrive {
     /// Create a new empty drive
     pub fn new() -> Self {
@@ -694,7 +684,7 @@ impl AtaDrive {
         self.id_drive = [0u16; 256];
 
         // Word 0: General config — ATAPI device, removable, CMD DRQ, 12-byte packets
-        self.id_drive[0] = (2 << 14) | (5 << 8) | (1 << 7) | (2 << 5) | (0 << 0);
+        self.id_drive[0] = (2 << 14) | (5 << 8) | (1 << 7) | (2 << 5);
 
         // Words 10-19: Serial number (ASCII, byte-swapped pairs)
         let serial = b"RBCD0001            "; // 20 chars
@@ -1842,7 +1832,7 @@ impl BxHardDriveC {
                     self.raise_interrupt(channel_num);
                 }
 
-                return value;
+                value
             }
             ATA_ERROR => {
                 // Bochs harddrv.cc:1036-1040: HOB read-back for LBA48
@@ -2186,7 +2176,7 @@ impl BxHardDriveC {
 
         // Bochs harddrv.cc:1223-1224: clear HOB (bit 7 of control) on command block writes
         // (ports 0x01-0x07, i.e., all except ATA_DATA and ATA_ALT_STATUS)
-        if offset >= 1 && offset <= 7 {
+        if (1..=7).contains(&offset) {
             for drive in &mut channel.drives {
                 drive.controller.control &= !0x80u8;
             }
@@ -2501,7 +2491,7 @@ impl BxHardDriveC {
         if byte_count == 0xffff_i32 {
             byte_count = 0xfffe;
         }
-        if (byte_count & 1) != 0 && !(alloc_length <= byte_count) {
+        if (byte_count & 1) != 0 && (alloc_length > byte_count) {
             byte_count -= 1;
         }
 
@@ -2953,7 +2943,7 @@ impl BxHardDriveC {
                         drive.controller.buffer[ptr + 3] = 4; // additional length = 1*4
                         drive.controller.buffer[ptr + 4] = 0x00; // profile 0x0008
                         drive.controller.buffer[ptr + 5] = 0x08;
-                        drive.controller.buffer[ptr + 6] = (0 << 1) | inserted_bit; // current=inserted
+                        drive.controller.buffer[ptr + 6] = inserted_bit; // current=inserted
                         drive.controller.buffer[ptr + 7] = 0;
                         ptr += 8;
                     }
@@ -2962,7 +2952,7 @@ impl BxHardDriveC {
                     if start_feature <= 0x0001 {
                         drive.controller.buffer[ptr] = 0x00; // Feature Code 0x001
                         drive.controller.buffer[ptr + 1] = 0x01;
-                        drive.controller.buffer[ptr + 2] = (0 << 6) | (1 << 2) | (1 << 1) | 1; // version=1, persistent=1, current=1
+                        drive.controller.buffer[ptr + 2] = (1 << 2) | (1 << 1) | 1; // version=1, persistent=1, current=1
                         drive.controller.buffer[ptr + 3] = 8; // additional length = 8
                         drive.controller.buffer[ptr + 4] = 0; // physical interface: ATAPI = 2
                         drive.controller.buffer[ptr + 5] = 0;
@@ -2979,7 +2969,7 @@ impl BxHardDriveC {
                     if start_feature <= 0x0002 {
                         drive.controller.buffer[ptr] = 0x00; // Feature Code 0x002
                         drive.controller.buffer[ptr + 1] = 0x02;
-                        drive.controller.buffer[ptr + 2] = (0 << 6) | (1 << 2) | (1 << 1) | 1; // version=1, persistent=1, current=1
+                        drive.controller.buffer[ptr + 2] = (1 << 2) | (1 << 1) | 1; // version=1, persistent=1, current=1
                         drive.controller.buffer[ptr + 3] = 4; // additional length = 4
                         drive.controller.buffer[ptr + 4] = 0; // OCEvent=0, ASYNC=0
                         drive.controller.buffer[ptr + 5] = 0;
@@ -3023,7 +3013,7 @@ impl BxHardDriveC {
                     if start_feature <= 0x001E {
                         drive.controller.buffer[ptr] = 0x00; // Feature Code 0x01E
                         drive.controller.buffer[ptr + 1] = 0x1E;
-                        drive.controller.buffer[ptr + 2] = (0 << 6) | (2 << 2) | (1 << 1) | 1; // version=2, persistent=1, current=1
+                        drive.controller.buffer[ptr + 2] = (2 << 2) | (1 << 1) | 1; // version=2, persistent=1, current=1
                         drive.controller.buffer[ptr + 3] = 4; // additional length = 4
                         drive.controller.buffer[ptr + 4] = 0; // DAP=0, C2 Flags=0, CD-Text=0
                         drive.controller.buffer[ptr + 5] = 0;
@@ -3045,7 +3035,7 @@ impl BxHardDriveC {
                     if start_feature <= 0x0105 {
                         drive.controller.buffer[ptr] = 0x01; // Feature Code 0x105
                         drive.controller.buffer[ptr + 1] = 0x05;
-                        drive.controller.buffer[ptr + 2] = (0 << 6) | (1 << 2) | (1 << 1) | 1; // version=1, persistent=1, current=1
+                        drive.controller.buffer[ptr + 2] = (1 << 2) | (1 << 1) | 1; // version=1, persistent=1, current=1
                         drive.controller.buffer[ptr + 3] = 4; // additional length = 4
                         drive.controller.buffer[ptr + 4] = 0; // Group 3 = 0
                         drive.controller.buffer[ptr + 5] = 0;
@@ -3098,7 +3088,7 @@ impl BxHardDriveC {
                         let drive = self.channels[channel_num].selected_drive_mut();
                         drive.controller.buffer[0] = 0;
                         drive.controller.buffer[1] = 4; // MEDIA event is 4 bytes long
-                        drive.controller.buffer[2] = (0 << 7) | 4; // 4 = MEDIA event
+                        drive.controller.buffer[2] = 4; // 4 = MEDIA event
                         drive.controller.buffer[3] = 1 << 4; // we only support MEDIA event (bit 4)
                         // Event code based on status_changed (Bochs harddrv.cc:1901-1903)
                         drive.controller.buffer[4] = if drive.status_changed == 0 {
@@ -3427,7 +3417,7 @@ impl BxHardDriveC {
 
         // Record command in history (circular buffer — keep last 256 commands so
         // BIOS-phase entries don't crowd out kernel-phase ATA activity).
-        let lba = drive.get_lba() as u32;
+        let lba = drive.get_lba();
         if self.cmd_history.len() >= 256 {
             self.cmd_history.remove(0);
         }
@@ -3611,7 +3601,7 @@ impl BxHardDriveC {
                 let disk_heads = drive.geometry.heads;
                 tracing::debug!("ATA: Initialize params sec={} head={}", spt, head_no);
 
-                if spt != disk_spt as u8 {
+                if spt != disk_spt {
                     tracing::error!(
                         "ATA: init drive params: logical sector count {} not supported (expected {})",
                         spt, disk_spt
@@ -3623,7 +3613,7 @@ impl BxHardDriveC {
                     tracing::debug!("ATA: init drive params: max. logical head number 0");
                     drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC;
                     drive.controller.interrupt_pending = true;
-                } else if head_no != (disk_heads - 1) as u8 {
+                } else if head_no != (disk_heads - 1) {
                     tracing::error!(
                         "ATA: init drive params: max. logical head number {} not supported (expected {})",
                         head_no, disk_heads - 1

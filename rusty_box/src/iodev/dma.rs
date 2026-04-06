@@ -295,7 +295,7 @@ impl BxDmaC {
         dma_write: DmaWrite16Handler,
         name: &str,
     ) -> bool {
-        if channel < 4 || channel > 7 {
+        if !(4..=7).contains(&channel) {
             tracing::error!(
                 "registerDMA16Channel: invalid channel number({})",
                 channel
@@ -655,10 +655,10 @@ impl BxDmaC {
             Some(ptr) => ptr.as_ptr(),
             None => return,
         };
-        for i in 0..(len as usize).min(buffer.len()) {
+        for (i, &byte) in buffer[..(len as usize).min(buffer.len())].iter().enumerate() {
             let offset = addr as usize + i;
             if offset < self.memory_len {
-                unsafe { *base.add(offset) = buffer[i] };
+                unsafe { *base.add(offset) = byte };
             }
         }
     }

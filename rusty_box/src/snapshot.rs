@@ -145,7 +145,7 @@ impl<I: BxCpuIdTrait> Emulator<'_, I> {
                 SEC_PIT => restore_pit_state(&mut self.device_manager.pit, &data),
                 SEC_CMOS => {
                     let reg_len = self.device_manager.cmos.ram.len();
-                    if data.len() >= reg_len + 1 {
+                    if data.len() > reg_len {
                         self.device_manager.cmos.ram.copy_from_slice(&data[..reg_len]);
                         self.device_manager.cmos.address = data[reg_len];
                     }
