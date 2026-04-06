@@ -823,12 +823,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Track PM↔RM transitions for diagnostics
-        let old_pe = BxCr0::from_bits_retain(old_cr0).contains(BxCr0::PE);
-        let new_pe = BxCr0::from_bits_retain(val_32).contains(BxCr0::PE);
-        if old_pe && !new_pe {
-            self.diag_pm_to_rm_count += 1;
-        } else if !old_pe && new_pe {
-            self.diag_rm_to_pm_count += 1;
+        #[cfg(debug_assertions)] {
+            let old_pe = BxCr0::from_bits_retain(old_cr0).contains(BxCr0::PE);
+            let new_pe = BxCr0::from_bits_retain(val_32).contains(BxCr0::PE);
+            if old_pe && !new_pe {
+                self.diag_pm_to_rm_count += 1;
+            } else if !old_pe && new_pe {
+                self.diag_rm_to_pm_count += 1;
+            }
         }
 
         self.cr0.set32(val_32);

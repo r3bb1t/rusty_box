@@ -1565,15 +1565,19 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         let mut last_port92_value: u8 = self.device_manager.port92.value;
 
         const INSTRUCTION_BATCH_SIZE: u64 = 100_000;
+        const PROGRESS_LOG_INTERVAL: u64 = 10_000_000;
+        let mut next_progress_log: i64 = PROGRESS_LOG_INTERVAL as i64;
 
         tracing::info!("Starting interactive execution loop");
         tracing::debug!(
             "[Emulator] Starting execution... (instructions will be processed in batches)"
         );
 
-        // Progress tracking: detect stuck loops
+        #[cfg(debug_assertions)]
         let mut last_rip: u64 = u64::MAX;
+        #[cfg(debug_assertions)]
         let mut stuck_count: u32 = 0;
+        #[cfg(debug_assertions)]
         let mut stuck_reported = false;
         // Counter for consecutive HLT+IF=0 zero-batches (transient recovery)
         let mut hlt_if0_count: u32 = 0;
@@ -1626,6 +1630,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     }
 
                     // Milestone progress print every 500K instructions
+                    #[cfg(debug_assertions)]
                     if instructions_executed % 500_000 < INSTRUCTION_BATCH_SIZE {
                         tracing::debug!(
                             "[{}k instr] RIP={:#010x} CS={:#06x} mode={} batch_returned={} activity={:?}",
@@ -1699,8 +1704,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     // -- Progress tracking --
                     let current_rip = self.cpu.rip();
 
-                    // Log progress every 10M instructions
-                    if instructions_executed % 10_000_000 < INSTRUCTION_BATCH_SIZE {
+                    // Log progress every 10M instructions (countdown-based)
+                    next_progress_log -= executed as i64;
+                    if next_progress_log <= 0 {
+                        next_progress_log += PROGRESS_LOG_INTERVAL as i64;
                         tracing::info!(
                             "Progress: {}M instructions, RIP={:#x}",
                             instructions_executed / 1_000_000,
@@ -1712,6 +1719,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
                     // Detailed EIP trace to track POST progression
                     // Log every batch in the critical PM→POST transition range
+                    #[cfg(debug_assertions)]
                     if (440_000..480_000).contains(&instructions_executed) {
                         let mem = self.memory.ram_slice();
                         let ipl_count = if 0x9FF81 < mem.len() {
@@ -1734,511 +1742,49 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         );
                     }
 
-                    // Detect stuck loop: RIP unchanged for many batches
-                    if current_rip == last_rip {
-                        stuck_count += 1;
-                        if stuck_count >= 10 && !stuck_reported {
-                            stuck_reported = true;
-                            let bp = self.cpu.bp() as usize;
-                            let ss_base = self.cpu.get_ss_base() as usize;
-                            let bp_phys = ss_base + bp;
-                            let ax = self.cpu.eax() as u16;
-                            // Read [BP+2] (return addr) and [BP+4] (action) from memory
-                            let mem_peek = self.memory.ram_slice();
-                            let bp2 = if bp_phys + 3 < mem_peek.len() {
-                                u16::from_le_bytes([mem_peek[bp_phys + 2], mem_peek[bp_phys + 3]])
-                            } else {
-                                0
-                            };
-                            let bp4 = if bp_phys + 5 < mem_peek.len() {
-                                u16::from_le_bytes([mem_peek[bp_phys + 4], mem_peek[bp_phys + 5]])
-                            } else {
-                                0
-                            };
-                            let bp6 = if bp_phys + 7 < mem_peek.len() {
-                                u16::from_le_bytes([mem_peek[bp_phys + 6], mem_peek[bp_phys + 7]])
-                            } else {
-                                0
-                            };
-                            tracing::debug!(
-                                "STUCK at RIP={:#x} after {}k instructions, last I/O read: port={:#06x} value={:#x}, CS={:#06x} mode={}, BP={:#06x} AX={:#06x} [BP+2]={:#06x} [BP+4]={:#06x} [BP+6]={:#06x}",
-                                current_rip,
-                                instructions_executed / 1000,
-                                self.devices.last_io_read_port,
-                                self.devices.last_io_read_value,
-                                self.cpu.get_cs_selector(),
-                                self.cpu.get_cpu_mode(),
-                                bp, ax, bp2, bp4, bp6,
-                            );
-                            // Dump code bytes at stuck RIP for disassembly
-                            {
-                                let mem = self.memory.ram_slice();
-                                let rip_usize = current_rip as usize;
-                                if rip_usize + 32 < mem.len() {
-                                    let bytes: Vec<String> = mem[rip_usize..rip_usize + 32]
-                                        .iter()
-                                        .map(|b| format!("{:02x}", b))
-                                        .collect();
-                                    tracing::debug!(
-                                        "Code at RIP={:#x}: {}",
-                                        current_rip,
-                                        bytes.join(" ")
-                                    );
-                                }
-                                // Also dump all general registers + CR0
-                                tracing::debug!(
-                                    "Regs: EAX={:#010x} EBX={:#010x} ECX={:#010x} EDX={:#010x} ESI={:#010x} EDI={:#010x} ESP={:#010x} EBP={:#010x} CR0={:#010x}",
-                                    self.cpu.eax(), self.cpu.ebx(), self.cpu.ecx(), self.cpu.edx(),
-                                    self.cpu.esi(), self.cpu.edi(), self.cpu.esp(), self.cpu.ebp(),
-                                    self.cpu.get_cr0_val(),
-                                );
-                                // IOAPIC IRQ14/15 diagnostic: check if IDE pins are configured
-                                #[cfg(feature = "bx_support_apic")]
-                                {
-                                    let (vec14, masked14, trig14, dmode14) = self.device_manager.ioapic.redirect_entry_diag(14);
-                                    let (intin14, irr14) = self.device_manager.ioapic.pin_state(14);
-                                    let (vec15, masked15, trig15, dmode15) = self.device_manager.ioapic.redirect_entry_diag(15);
-                                    let (intin15, irr15) = self.device_manager.ioapic.pin_state(15);
-                                    // SAFETY: lapic_ptr set during CPU init; single-threaded access
-                                    let lapic = unsafe { &*self.cpu.lapic_ptr_mut() };
-                                    let (tmr_active, tmr_init, tmr_period, tmr_vec, tmr_act_pend, tmr_deact_pend) = lapic.hlt_timer_diag();
-                                    tracing::debug!(
-                                        "IOAPIC pin14: vec={:#04x} masked={} trig={} dmode={} intin={} irr={} | LAPIC intr={} activity={:?} timer_active={} timer_vec={:#04x} timer_period={}",
-                                        vec14, masked14, trig14, dmode14, intin14, irr14,
-                                        lapic.intr, self.cpu.activity_state, tmr_active, tmr_vec, tmr_period,
-                                    );
-                                    tracing::debug!(
-                                        "IOAPIC pin15: vec={:#04x} masked={} trig={} dmode={} intin={} irr={}",
-                                        vec15, masked15, trig15, dmode15, intin15, irr15,
-                                    );
-                                }
-                                // For PM stuck points: dump 32-bit stack frame (saved EBP, return addr, args)
-                                let ebp = self.cpu.ebp() as usize;
-                                if ebp + 16 < mem.len() {
-                                    let saved_ebp = u32::from_le_bytes([
-                                        mem[ebp],
-                                        mem[ebp + 1],
-                                        mem[ebp + 2],
-                                        mem[ebp + 3],
-                                    ]);
-                                    let ret_addr = u32::from_le_bytes([
-                                        mem[ebp + 4],
-                                        mem[ebp + 5],
-                                        mem[ebp + 6],
-                                        mem[ebp + 7],
-                                    ]);
-                                    let arg1 = u32::from_le_bytes([
-                                        mem[ebp + 8],
-                                        mem[ebp + 9],
-                                        mem[ebp + 10],
-                                        mem[ebp + 11],
-                                    ]);
-                                    let arg2 = u32::from_le_bytes([
-                                        mem[ebp + 12],
-                                        mem[ebp + 13],
-                                        mem[ebp + 14],
-                                        mem[ebp + 15],
-                                    ]);
-                                    tracing::debug!(
-                                        "Stack frame: saved_EBP={:#010x} ret_addr={:#010x} arg1={:#010x} arg2={:#010x}",
-                                        saved_ebp, ret_addr, arg1, arg2,
-                                    );
-                                    // Follow up: dump code around the return address (128 bytes before)
-                                    let ra = ret_addr as usize;
-                                    if ra > 128 && ra + 32 < mem.len() {
-                                        for off in (ra.saturating_sub(128)..ra).step_by(32) {
-                                            let end = (off + 32).min(ra);
-                                            let bytes: Vec<String> = mem[off..end]
-                                                .iter()
-                                                .map(|b| format!("{:02x}", b))
-                                                .collect();
-                                            tracing::debug!(
-                                                "Caller@{:#06x}: {}",
-                                                off,
-                                                bytes.join(" ")
-                                            );
-                                        }
-                                        let after: Vec<String> = mem[ra..ra + 32]
-                                            .iter()
-                                            .map(|b| format!("{:02x}", b))
-                                            .collect();
-                                        tracing::debug!(
-                                            "Caller code at ret_addr: {}",
-                                            after.join(" ")
-                                        );
-                                    }
-                                    // Dump the error message string (EBX = msg ptr in error())
-                                    let ebx = self.cpu.ebx() as usize;
-                                    if ebx + 64 < mem.len() {
-                                        let msg_bytes = &mem[ebx..ebx + 64];
-                                        let msg_end =
-                                            msg_bytes.iter().position(|&b| b == 0).unwrap_or(64);
-                                        let msg_str =
-                                            String::from_utf8_lossy(&msg_bytes[..msg_end]);
-                                        tracing::debug!(
-                                            "Error msg at EBX={:#x}: {:?}",
-                                            ebx,
-                                            msg_str
-                                        );
-                                    }
-                                    // Also dump string at arg1
-                                    let a1 = arg1 as usize;
-                                    if a1 + 64 < mem.len() && a1 != ebx {
-                                        let msg_bytes = &mem[a1..a1 + 64];
-                                        let msg_end =
-                                            msg_bytes.iter().position(|&b| b == 0).unwrap_or(64);
-                                        let msg_str =
-                                            String::from_utf8_lossy(&msg_bytes[..msg_end]);
-                                        tracing::debug!(
-                                            "Error msg at arg1={:#x}: {:?}",
-                                            a1,
-                                            msg_str
-                                        );
-                                    }
-                                    // Walk one more frame up
-                                    let parent_ebp = saved_ebp as usize;
-                                    if parent_ebp + 16 < mem.len() {
-                                        let p_saved = u32::from_le_bytes([
-                                            mem[parent_ebp],
-                                            mem[parent_ebp + 1],
-                                            mem[parent_ebp + 2],
-                                            mem[parent_ebp + 3],
-                                        ]);
-                                        let p_ret = u32::from_le_bytes([
-                                            mem[parent_ebp + 4],
-                                            mem[parent_ebp + 5],
-                                            mem[parent_ebp + 6],
-                                            mem[parent_ebp + 7],
-                                        ]);
-                                        tracing::debug!(
-                                            "Parent frame: saved_EBP={:#010x} ret_addr={:#010x}",
-                                            p_saved,
-                                            p_ret
-                                        );
-                                    }
-                                }
-                                // Search memory for gzip magic (1f 8b 08) to find where compressed kernel data is
-                                {
-                                    let search_end = mem.len().min(0x200000); // search first 2MB
-                                    let mut found_count = 0;
-                                    for i in 0..search_end.saturating_sub(3) {
-                                        if mem[i] == 0x1f
-                                            && mem[i + 1] == 0x8b
-                                            && mem[i + 2] == 0x08
-                                        {
-                                            let context: Vec<String> = mem[i..i
-                                                .min(search_end)
-                                                .wrapping_add(32)
-                                                .min(search_end)]
-                                                .iter()
-                                                .map(|b| format!("{:02x}", b))
-                                                .collect();
-                                            tracing::debug!(
-                                                "GZIP magic found at {:#x}: {}",
-                                                i,
-                                                context.join(" ")
-                                            );
-                                            found_count += 1;
-                                            if found_count >= 10 {
-                                                break;
-                                            }
-                                        }
-                                    }
-                                    if found_count == 0 {
-                                        tracing::debug!("NO gzip magic (1f 8b 08) found in first 2MB of memory!");
-                                    }
-                                    // Dump expected locations for compressed kernel data:
-                                    // After head.S relocates: system code at 0x1000, compressed data at offset ~0x2000-0x4000
-                                    for addr in [
-                                        0x1000usize,
-                                        0x2000,
-                                        0x3000,
-                                        0x4000,
-                                        0x5000,
-                                        0x10000,
-                                        0x11000,
-                                        0x52E00,
-                                        0x53E00,
-                                        0x62E00,
-                                        0x63E00,
-                                    ] {
-                                        if addr + 16 < mem.len() {
-                                            let bytes: Vec<String> = mem[addr..addr + 16]
-                                                .iter()
-                                                .map(|b| format!("{:02x}", b))
-                                                .collect();
-                                            tracing::debug!(
-                                                "Mem@{:#07x}: {}",
-                                                addr,
-                                                bytes.join(" ")
-                                            );
-                                        }
-                                    }
-                                    // Dump the decompressor's input_data pointer
-                                    let esi = self.cpu.esi() as usize;
-                                    if esi + 32 < mem.len() {
-                                        let bytes: Vec<String> = mem[esi..esi + 32]
-                                            .iter()
-                                            .map(|b| format!("{:02x}", b))
-                                            .collect();
-                                        tracing::debug!(
-                                            "Data at ESI={:#x}: {}",
-                                            esi,
-                                            bytes.join(" ")
-                                        );
-                                    }
-                                    // Search for the address 0x41d8 (little-endian) in code region 0x1000-0x4200
-                                    // This should appear in instructions that reference input_data
-                                    let search_val = [0xd8u8, 0x41, 0x00, 0x00];
-                                    for i in 0x1000..0x4200usize {
-                                        if i + 4 <= mem.len() && mem[i..i + 4] == search_val {
-                                            let ctx_start = i.saturating_sub(4);
-                                            let ctx_end = (i + 8).min(mem.len());
-                                            let ctx: Vec<String> = mem[ctx_start..ctx_end]
-                                                .iter()
-                                                .map(|b| format!("{:02x}", b))
-                                                .collect();
-                                            tracing::debug!(
-                                                "Found 0x41d8 ref at {:#06x}: {}",
-                                                i,
-                                                ctx.join(" ")
-                                            );
-                                        }
-                                    }
-                                    // Dump memory right around the gzip data to check alignment
-                                    for addr in [0x41d0usize, 0x41d8, 0x41e0, 0x41e8, 0x41f0] {
-                                        if addr + 16 < mem.len() {
-                                            let bytes: Vec<String> = mem[addr..addr + 16]
-                                                .iter()
-                                                .map(|b| format!("{:02x}", b))
-                                                .collect();
-                                            tracing::debug!(
-                                                "Mem@{:#07x}: {}",
-                                                addr,
-                                                bytes.join(" ")
-                                            );
-                                        }
-                                    }
-                                    // Dump decompressor key variables (found from code analysis):
-                                    // inbuf pointer at 0x510B0, input_len at 0x510AC
-                                    // Also dump surrounding BSS to find inptr/insize
-                                    for addr in (0x51080..0x51100).step_by(16) {
-                                        if addr + 16 < mem.len() {
-                                            let v0 = u32::from_le_bytes([
-                                                mem[addr],
-                                                mem[addr + 1],
-                                                mem[addr + 2],
-                                                mem[addr + 3],
-                                            ]);
-                                            let v1 = u32::from_le_bytes([
-                                                mem[addr + 4],
-                                                mem[addr + 5],
-                                                mem[addr + 6],
-                                                mem[addr + 7],
-                                            ]);
-                                            let v2 = u32::from_le_bytes([
-                                                mem[addr + 8],
-                                                mem[addr + 9],
-                                                mem[addr + 10],
-                                                mem[addr + 11],
-                                            ]);
-                                            let v3 = u32::from_le_bytes([
-                                                mem[addr + 12],
-                                                mem[addr + 13],
-                                                mem[addr + 14],
-                                                mem[addr + 15],
-                                            ]);
-                                            tracing::debug!(
-                                                "BSS@{:#07x}: {:08x} {:08x} {:08x} {:08x}",
-                                                addr,
-                                                v0,
-                                                v1,
-                                                v2,
-                                                v3
-                                            );
-                                        }
-                                    }
-                                    // Also dump inbuf pointer specifically
-                                    if 0x510B4 < mem.len() {
-                                        let inbuf_ptr = u32::from_le_bytes([
-                                            mem[0x510B0],
-                                            mem[0x510B1],
-                                            mem[0x510B2],
-                                            mem[0x510B3],
-                                        ]);
-                                        let insize = u32::from_le_bytes([
-                                            mem[0x510AC],
-                                            mem[0x510AD],
-                                            mem[0x510AE],
-                                            mem[0x510AF],
-                                        ]);
-                                        tracing::debug!("Decompressor: inbuf={:#010x} (should be 0x41d8), val_at_0x510AC={:#010x}", inbuf_ptr, insize);
-                                        // DIRECT CHECK: Read via peek_ram (which applies vector_offset)
-                                        let peek = self.memory.peek_ram(0x510B0, 4);
-                                        let peek_val = if peek.len() >= 4 {
-                                            u32::from_le_bytes([peek[0], peek[1], peek[2], peek[3]])
-                                        } else {
-                                            0xDEAD
-                                        };
-                                        tracing::debug!(
-                                            "  DIRECT CHECK: peek_ram(0x510B0)={:#010x} ram_slice[0x510B0]={:#010x}",
-                                            peek_val, inbuf_ptr,
-                                        );
-                                        // Also try reading via CPU's public read_physical_byte path
-                                        // (mem_read_dword is private, so use peek_ram from a different offset)
-                                        let peek2 = self.memory.peek_ram(0x510A0, 32);
-                                        if peek2.len() >= 32 {
-                                            let bytes: Vec<String> = peek2
-                                                .iter()
-                                                .map(|b| format!("{:02x}", b))
-                                                .collect();
-                                            tracing::debug!(
-                                                "  peek_ram(0x510A0..0x510C0): {}",
-                                                bytes.join(" ")
-                                            );
-                                        }
-                                        // If inbuf is valid, dump what inbuf points to
-                                        let ibp = inbuf_ptr as usize;
-                                        if ibp + 16 < mem.len() {
-                                            let bytes: Vec<String> = mem[ibp..ibp + 16]
-                                                .iter()
-                                                .map(|b| format!("{:02x}", b))
-                                                .collect();
-                                            tracing::debug!("  *inbuf = {}", bytes.join(" "));
-                                        }
-                                    }
-                                    // Also dump wider BSS around 0x50000-0x51200 to find all decompressor globals
-                                    for addr in (0x50F80..0x51200).step_by(32) {
-                                        if addr + 32 < mem.len() {
-                                            let bytes: Vec<String> = mem[addr..addr + 32]
-                                                .iter()
-                                                .map(|b| format!("{:02x}", b))
-                                                .collect();
-                                            tracing::debug!(
-                                                "WiderBSS@{:#07x}: {}",
-                                                addr,
-                                                bytes.join(" ")
-                                            );
-                                        }
-                                    }
-                                }
-                                // Dump Linux boot parameters (memory detection)
-                                if mem.len() > 0x90100 {
-                                    let ext_mem_k =
-                                        u16::from_le_bytes([mem[0x90002], mem[0x90003]]);
-                                    let alt_mem_k = u32::from_le_bytes([
-                                        mem[0x901e0],
-                                        mem[0x901e1],
-                                        mem[0x901e2],
-                                        mem[0x901e3],
-                                    ]);
-                                    // Also check BDA memory size at 0x413
-                                    let bda_mem = u16::from_le_bytes([mem[0x413], mem[0x414]]);
-                                    // Check CMOS values directly (what the BIOS should have read)
-                                    let _cmos_ext_lo = mem.get(0x90030).copied().unwrap_or(0);
-                                    let _cmos_ext_hi = mem.get(0x90031).copied().unwrap_or(0);
-                                    tracing::debug!(
-                                        "Boot params: ext_mem_k(0x90002)={} KB, alt_mem_k(0x901e0)={} KB, BDA_mem(0x413)={} KB",
-                                        ext_mem_k, alt_mem_k, bda_mem,
-                                    );
-                                    // Dump first 16 bytes of boot params header at 0x90000
-                                    let hdr: Vec<String> = mem[0x90000..0x90010]
-                                        .iter()
-                                        .map(|b| format!("{:02x}", b))
-                                        .collect();
-                                    tracing::debug!("Boot params @0x90000: {}", hdr.join(" "));
-                                    // Dump setup header at 0x901F1+ (boot protocol version)
-                                    let setup_hdr: Vec<String> = mem[0x901F0..0x90200]
-                                        .iter()
-                                        .map(|b| format!("{:02x}", b))
-                                        .collect();
-                                    tracing::debug!(
-                                        "Setup header @0x901F0: {}",
-                                        setup_hdr.join(" ")
-                                    );
-                                }
-                            }
-                            // Dump IPL table and stack for debugging
-                            {
-                                let mem = self.memory.ram_slice();
-                                let read_u16 = |addr: usize| -> u16 {
-                                    if addr + 1 < mem.len() {
-                                        u16::from_le_bytes([mem[addr], mem[addr + 1]])
-                                    } else {
-                                        0
-                                    }
-                                };
-                                let ipl_count = read_u16(0x9FF80);
-                                let ipl_seq = read_u16(0x9FF82);
-                                let ipl_bootfirst = read_u16(0x9FF84);
-                                let ipl0_type = read_u16(0x9FF00);
-                                let ipl1_type = read_u16(0x9FF10);
-                                // Also check the WRONG address (get_vector bug: addr % 128KB)
-                                let wrong_ipl_count = read_u16(0x1FF80);
-                                let wrong_ipl0_type = read_u16(0x1FF00);
-                                let wrong_ipl1_type = read_u16(0x1FF10);
-                                tracing::debug!(
-                                    "IPL table @0x9FF00: count={:#x} seq={:#x} bootfirst={:#x} entry0_type={:#x} entry1_type={:#x}",
-                                    ipl_count, ipl_seq, ipl_bootfirst, ipl0_type, ipl1_type,
-                                );
-                                tracing::debug!(
-                                    "IPL table @0x1FF00 (get_vector mapped): count={:#x} entry0_type={:#x} entry1_type={:#x}",
-                                    wrong_ipl_count, wrong_ipl0_type, wrong_ipl1_type,
-                                );
-                                // Dump stack to find caller of bios_printf/BX_PANIC
-                                let ss_sel = self.cpu.get_ss_selector();
+                    // Detect stuck loop: RIP unchanged for many batches (debug only)
+                    #[cfg(debug_assertions)]
+                    {
+                        if current_rip == last_rip {
+                            stuck_count += 1;
+                            if stuck_count >= 10 && !stuck_reported {
+                                stuck_reported = true;
+                                let bp = self.cpu.bp() as usize;
                                 let ss_base = self.cpu.get_ss_base() as usize;
-                                let sp = self.cpu.sp() as usize;
-                                let stack_addr = ss_base + sp;
-                                let mut stack_words = [0u16; 16];
-                                for (i, word) in stack_words.iter_mut().enumerate() {
-                                    *word = read_u16(stack_addr + i * 2);
-                                }
-                                // Also dump the full stack from SP to 0xFFFE
-                                let full_stack_start = stack_addr;
-                                let full_stack_end = (ss_base + 0xFFFE).min(mem.len());
-                                let full_words: Vec<u16> = (full_stack_start..full_stack_end)
-                                    .step_by(2)
-                                    .map(&read_u16)
-                                    .collect();
-                                let full_hex: Vec<String> =
-                                    full_words.iter().map(|w| format!("{:04x}", w)).collect();
+                                let bp_phys = ss_base + bp;
+                                let ax = self.cpu.eax() as u16;
+                                let mem_peek = self.memory.ram_slice();
+                                let bp2 = if bp_phys + 3 < mem_peek.len() {
+                                    u16::from_le_bytes([mem_peek[bp_phys + 2], mem_peek[bp_phys + 3]])
+                                } else {
+                                    0
+                                };
+                                let bp4 = if bp_phys + 5 < mem_peek.len() {
+                                    u16::from_le_bytes([mem_peek[bp_phys + 4], mem_peek[bp_phys + 5]])
+                                } else {
+                                    0
+                                };
+                                let bp6 = if bp_phys + 7 < mem_peek.len() {
+                                    u16::from_le_bytes([mem_peek[bp_phys + 6], mem_peek[bp_phys + 7]])
+                                } else {
+                                    0
+                                };
                                 tracing::debug!(
-                                    "Full stack SS:SP={:#06x}:{:#06x} ({} words): {}",
-                                    ss_sel,
-                                    sp,
-                                    full_words.len(),
-                                    full_hex.join(" "),
-                                );
-                                tracing::debug!(
-                                    "Stack dump SS:SP={:#06x}:{:#06x} (phys {:#x}): {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x} {:04x}",
-                                    ss_sel, sp, stack_addr,
-                                    stack_words[0], stack_words[1], stack_words[2], stack_words[3],
-                                    stack_words[4], stack_words[5], stack_words[6], stack_words[7],
-                                    stack_words[8], stack_words[9], stack_words[10], stack_words[11],
-                                    stack_words[12], stack_words[13], stack_words[14], stack_words[15],
-                                );
-                                // Also dump BDA and IVT for diagnostics
-                                let ebda_seg = read_u16(0x040E);
-                                let int08_vec =
-                                    read_u16(0x0020) as u32 | ((read_u16(0x0022) as u32) << 16);
-                                let int13_vec =
-                                    read_u16(0x004C) as u32 | ((read_u16(0x004E) as u32) << 16);
-                                let int19_vec =
-                                    read_u16(0x0064) as u32 | ((read_u16(0x0066) as u32) << 16);
-                                let bda_ticks =
-                                    read_u16(0x046C) as u32 | ((read_u16(0x046E) as u32) << 16);
-                                let bda_kbd_head = read_u16(0x041A);
-                                tracing::debug!(
-                                    "IVT: INT08={:#010x} INT13={:#010x} INT19={:#010x} | BDA: EBDA={:#06x} ticks={} kbd_head={:#06x}",
-                                    int08_vec, int13_vec, int19_vec, ebda_seg, bda_ticks, bda_kbd_head,
+                                    "STUCK at RIP={:#x} after {}k instructions, last I/O read: port={:#06x} value={:#x}, CS={:#06x} mode={}, BP={:#06x} AX={:#06x} [BP+2]={:#06x} [BP+4]={:#06x} [BP+6]={:#06x}",
+                                    current_rip,
+                                    instructions_executed / 1000,
+                                    self.devices.last_io_read_port,
+                                    self.devices.last_io_read_value,
+                                    self.cpu.get_cs_selector(),
+                                    self.cpu.get_cpu_mode(),
+                                    bp, ax, bp2, bp4, bp6,
                                 );
                             }
+                        } else {
+                            stuck_count = 0;
+                            stuck_reported = false;
+                            last_rip = current_rip;
                         }
-                    } else {
-                        stuck_count = 0;
-                        stuck_reported = false;
-                        last_rip = current_rip;
                     }
 
                     // Drain Bochs-style port 0xE9 output (if any) and print it.
@@ -2612,6 +2158,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     }
 
                     // Log batch sizes and check if timer ticking works
+                    #[cfg(debug_assertions)]
                     if instructions_executed < 5 * INSTRUCTION_BATCH_SIZE
                         || instructions_executed % 100_000 < INSTRUCTION_BATCH_SIZE
                     {
@@ -2635,6 +2182,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     }
 
                     // Periodic interrupt-chain diagnostic (every ~1M instructions)
+                    #[cfg(debug_assertions)]
                     if instructions_executed % 1_000_000 < INSTRUCTION_BATCH_SIZE {
                         let has_int = self.has_interrupt();
                         let if_flag = self.cpu.get_b_if();
@@ -3364,7 +2912,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
 impl<I: BxCpuIdTrait> Emulator<'_, I> {
     /// Dump comprehensive diagnostic state (for Alpine debugging).
-    #[cfg(feature = "std")]
+    #[cfg(all(feature = "std", debug_assertions))]
     pub fn dump_alpine_diag(&mut self) {
         tracing::debug!("\n=== DIAGNOSTIC DUMP ===");
         tracing::debug!("RIP={:#018x} RSP={:#018x} RBP={:#018x}",
@@ -3380,21 +2928,24 @@ impl<I: BxCpuIdTrait> Emulator<'_, I> {
             self.cpu.cr0.bits(), self.cpu.cr3);
         tracing::debug!("pending_event={:#010x} event_mask={:#010x} async_event={}",
             self.cpu.pending_event, self.cpu.event_mask, self.cpu.async_event);
-        tracing::debug!("diag: intr_delivered={} if_blocked={} pic_empty={}",
-            self.cpu.diag_hae_intr_delivered, self.cpu.diag_hae_intr_if_blocked,
-            self.cpu.diag_hae_intr_pic_empty);
-        // SYSCALL ring buffer
-        tracing::debug!("--- Last {} SYSCALLs (total={}, sysret={}, blocked={}) ---",
-            self.cpu.diag_syscall_ring_idx.min(32),
-            self.cpu.diag_syscall_count,
-            self.cpu.diag_sysret_count,
-            self.cpu.diag_syscall_count.saturating_sub(self.cpu.diag_sysret_count));
+        #[cfg(debug_assertions)]
         {
-            let count = self.cpu.diag_syscall_ring_idx.min(32);
-            let start = self.cpu.diag_syscall_ring_idx.saturating_sub(32);
-            for i in start..self.cpu.diag_syscall_ring_idx {
-                let (nr, arg0, ic) = self.cpu.diag_syscall_ring[i % 32];
-                tracing::debug!("  syscall nr={} arg0={:#x} icount={}", nr, arg0, ic);
+            tracing::debug!("diag: intr_delivered={} if_blocked={} pic_empty={}",
+                self.cpu.diag_hae_intr_delivered, self.cpu.diag_hae_intr_if_blocked,
+                self.cpu.diag_hae_intr_pic_empty);
+            // SYSCALL ring buffer
+            tracing::debug!("--- Last {} SYSCALLs (total={}, sysret={}, blocked={}) ---",
+                self.cpu.diag_syscall_ring_idx.min(32),
+                self.cpu.diag_syscall_count,
+                self.cpu.diag_sysret_count,
+                self.cpu.diag_syscall_count.saturating_sub(self.cpu.diag_sysret_count));
+            {
+                let count = self.cpu.diag_syscall_ring_idx.min(32);
+                let start = self.cpu.diag_syscall_ring_idx.saturating_sub(32);
+                for i in start..self.cpu.diag_syscall_ring_idx {
+                    let (nr, arg0, ic) = self.cpu.diag_syscall_ring[i % 32];
+                    tracing::debug!("  syscall nr={} arg0={:#x} icount={}", nr, arg0, ic);
+                }
             }
         }
         // PIC state

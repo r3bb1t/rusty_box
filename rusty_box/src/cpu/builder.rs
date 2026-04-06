@@ -176,45 +176,85 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             pic_ptr: None,
             dma_ptr: None,
             boot_debug_flags: 0,
+            #[cfg(debug_assertions)]
             diag_hae_intr_delivered: 0,
+            #[cfg(debug_assertions)]
             diag_hae_intr_if_blocked: 0,
+            #[cfg(debug_assertions)]
             diag_hae_intr_no_pic: 0,
+            #[cfg(debug_assertions)]
             diag_hae_intr_pic_empty: 0,
+            #[cfg(debug_assertions)]
             diag_exception_counts: [0; 32],
+            #[cfg(debug_assertions)]
             diag_ia_error_count: 0,
+            #[cfg(debug_assertions)]
             diag_ia_error_last_rip: 0,
+            #[cfg(debug_assertions)]
             diag_iac_vectors: [0; 256],
+            #[cfg(debug_assertions)]
             diag_inject_ext_intr_count: 0,
+            #[cfg(debug_assertions)]
             diag_inject_ext_intr_vectors: [0; 256],
+            #[cfg(debug_assertions)]
             diag_soft_int_vectors: [0; 256],
+            #[cfg(debug_assertions)]
             diag_soft_int_vectors_late: [0; 256],
+            #[cfg(debug_assertions)]
             diag_syscall_ring: [(0, 0, 0); 32],
+            #[cfg(debug_assertions)]
             diag_syscall_ring_idx: 0,
+            #[cfg(debug_assertions)]
             diag_syscall_count: 0,
+            #[cfg(debug_assertions)]
             diag_sysret_count: 0,
+            #[cfg(debug_assertions)]
             diag_awk_trace_active: false,
+            #[cfg(debug_assertions)]
             diag_addr_hits: [(0, 0); 8],
+            #[cfg(debug_assertions)]
             diag_int10h_ah_hist: [0; 256],
+            #[cfg(debug_assertions)]
             diag_int10h_tty_chars: [0; 128],
+            #[cfg(debug_assertions)]
             diag_int10h_tty_count: 0,
+            #[cfg(debug_assertions)]
             diag_int10h_first_icount: 0,
+            #[cfg(debug_assertions)]
             diag_int10h_last_icount: 0,
+            #[cfg(debug_assertions)]
             diag_int10h_tty_first_icount: 0,
+            #[cfg(debug_assertions)]
             diag_int10h_tty_last_icount: 0,
+            #[cfg(debug_assertions)]
             diag_first_pm_hlt_captured: false,
+            #[cfg(debug_assertions)]
             diag_first_pm_hlt_icount: 0,
+            #[cfg(debug_assertions)]
             diag_first_pm_hlt_regs: [0; 8],
+            #[cfg(debug_assertions)]
             diag_first_pm_hlt_cs: 0,
+            #[cfg(debug_assertions)]
             diag_first_pm_hlt_ss: 0,
+            #[cfg(debug_assertions)]
             diag_first_pm_hlt_eflags: 0,
+            #[cfg(debug_assertions)]
             diag_first_pm_hlt_rip: 0,
+            #[cfg(debug_assertions)]
             diag_first_pm_hlt_stack: [0; 16],
+            #[cfg(debug_assertions)]
             diag_rip_ring: [0; 8192],
+            #[cfg(debug_assertions)]
             diag_opcode_ring: [0; 256],
+            #[cfg(debug_assertions)]
             diag_rip_ring_idx: 0,
+            #[cfg(debug_assertions)]
             diag_current_opcode: 0,
+            #[cfg(debug_assertions)]
             diag_gpr64_corrupt_count: 0,
+            #[cfg(debug_assertions)]
             diag_pm_to_rm_count: 0,
+            #[cfg(debug_assertions)]
             diag_rm_to_pm_count: 0,
         };
 

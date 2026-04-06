@@ -1403,7 +1403,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Record syscall in diagnostic ring buffer
-        {
+        #[cfg(debug_assertions)] {
             let nr = self.rax();
             let arg0 = self.rdi();
             let arg1 = self.rsi();
@@ -1545,7 +1545,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         use super::eflags::EFlags;
 
         // Track SYSRET for diagnostics
-        self.diag_sysret_count += 1;
+        #[cfg(debug_assertions)] { self.diag_sysret_count += 1; }
 
         if !self.efer.sce() {
             return self.exception(super::cpu::Exception::Ud, 0);

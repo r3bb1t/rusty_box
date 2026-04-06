@@ -3551,8 +3551,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
 
             _ => {
-                self.diag_ia_error_count += 1;
-                self.diag_ia_error_last_rip = self.prev_rip;
+                #[cfg(debug_assertions)] {
+                    self.diag_ia_error_count += 1;
+                    self.diag_ia_error_last_rip = self.prev_rip;
+                }
                 tracing::error!("Unimplemented opcode: {:?} at RIP={:#x}", instr.get_ia_opcode(), self.prev_rip);
                 Err(crate::cpu::CpuError::UnimplementedOpcode {
                     opcode: alloc::format!("{:?}", instr.get_ia_opcode()),

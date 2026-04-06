@@ -532,71 +532,111 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     pub(crate) perf_instructions: u64,
 
     // Diagnostic counters for handle_async_event interrupt delivery
+    #[cfg(debug_assertions)]
     pub(crate) diag_hae_intr_delivered: u64,
+    #[cfg(debug_assertions)]
     pub(crate) diag_hae_intr_if_blocked: u64,
+    #[cfg(debug_assertions)]
     pub(crate) diag_hae_intr_no_pic: u64,
+    #[cfg(debug_assertions)]
     pub(crate) diag_hae_intr_pic_empty: u64,
 
     /// Exception counts by vector (0=DE, 6=UD, 13=GP, 14=PF, etc.)
+    #[cfg(debug_assertions)]
     pub(crate) diag_exception_counts: [u64; 32],
     /// Count of IaError (decoder failures) encountered
+    #[cfg(debug_assertions)]
     pub(crate) diag_ia_error_count: u64,
     /// RIP of last IaError
+    #[cfg(debug_assertions)]
     pub(crate) diag_ia_error_last_rip: u64,
     /// Count of interrupt() calls by vector (0-255)
+    #[cfg(debug_assertions)]
     pub(crate) diag_iac_vectors: [u64; 256],
     /// Count of inject_external_interrupt() calls (emulator-path delivery)
+    #[cfg(debug_assertions)]
     pub(crate) diag_inject_ext_intr_count: u64,
     /// Vector histogram for inject_external_interrupt() calls
+    #[cfg(debug_assertions)]
     pub(crate) diag_inject_ext_intr_vectors: [u64; 256],
     /// Software INT (INT nn) vector histogram — tracks BIOS calls via int_ib()
+    #[cfg(debug_assertions)]
     pub(crate) diag_soft_int_vectors: [u64; 256],
     /// Software INT vector histogram for late calls (icount > 2M, after BIOS POST)
+    #[cfg(debug_assertions)]
     pub(crate) diag_soft_int_vectors_late: [u64; 256],
     /// INT 10h AH subfunction histogram (late calls only)
+    #[cfg(debug_assertions)]
     pub(crate) diag_int10h_ah_hist: [u64; 256],
     /// First 128 chars written via INT 10h AH=0Eh (TTY) — late calls only
+    #[cfg(debug_assertions)]
     pub(crate) diag_int10h_tty_chars: [u8; 128],
+    #[cfg(debug_assertions)]
     pub(crate) diag_int10h_tty_count: usize,
     /// Instruction count of first and last INT 10h call (any AH)
+    #[cfg(debug_assertions)]
     pub(crate) diag_int10h_first_icount: u64,
+    #[cfg(debug_assertions)]
     pub(crate) diag_int10h_last_icount: u64,
     /// Instruction count of first and last INT 10h AH=0Eh call
+    #[cfg(debug_assertions)]
     pub(crate) diag_int10h_tty_first_icount: u64,
+    #[cfg(debug_assertions)]
     pub(crate) diag_int10h_tty_last_icount: u64,
     /// First HLT in PM capture: icount, EAX-EDI, ESP, EBP, CS, SS, EFLAGS
+    #[cfg(debug_assertions)]
     pub(crate) diag_first_pm_hlt_captured: bool,
+    #[cfg(debug_assertions)]
     pub(crate) diag_first_pm_hlt_icount: u64,
+    #[cfg(debug_assertions)]
     pub(crate) diag_first_pm_hlt_regs: [u32; 8], // EAX, ECX, EDX, EBX, ESP, EBP, ESI, EDI
+    #[cfg(debug_assertions)]
     pub(crate) diag_first_pm_hlt_cs: u16,
+    #[cfg(debug_assertions)]
     pub(crate) diag_first_pm_hlt_ss: u16,
+    #[cfg(debug_assertions)]
     pub(crate) diag_first_pm_hlt_eflags: u32,
+    #[cfg(debug_assertions)]
     pub(crate) diag_first_pm_hlt_rip: u32,
     /// Stack snapshot at first PM HLT (16 dwords from ESP)
+    #[cfg(debug_assertions)]
     pub(crate) diag_first_pm_hlt_stack: [u32; 16],
     /// RIP ring buffer for tracing last N instructions before HLT
+    #[cfg(debug_assertions)]
     pub(super) diag_rip_ring: [u64; 8192],
     /// Opcode ring buffer (parallel to diag_rip_ring)
+    #[cfg(debug_assertions)]
     pub(super) diag_opcode_ring: [u16; 256],
+    #[cfg(debug_assertions)]
     pub(super) diag_rip_ring_idx: usize,
     /// Current instruction opcode being executed (for corruption detection)
+    #[cfg(debug_assertions)]
     pub(super) diag_current_opcode: u16,
     /// Count of GPR64 corruption hits (to limit ring dumps)
+    #[cfg(debug_assertions)]
     pub(super) diag_gpr64_corrupt_count: u64,
     /// PM→RM transition count (CR0 PE: 1→0)
+    #[cfg(debug_assertions)]
     pub(crate) diag_pm_to_rm_count: u64,
     /// RM→PM transition count (CR0 PE: 0→1)
+    #[cfg(debug_assertions)]
     pub(crate) diag_rm_to_pm_count: u64,
     /// Address hit counters: [addr, count] pairs for tracking specific RIP values
+    #[cfg(debug_assertions)]
     pub(crate) diag_addr_hits: [(u32, u64); 8],
 
     /// SYSCALL ring buffer: last 32 syscalls [syscall_nr, arg0 (RDI), icount]
+    #[cfg(debug_assertions)]
     pub(crate) diag_syscall_ring: [(u64, u64, u64); 32],
+    #[cfg(debug_assertions)]
     pub(crate) diag_syscall_ring_idx: usize,
+    #[cfg(debug_assertions)]
     pub(crate) diag_syscall_count: u64,
     /// SYSRET count — compare with diag_syscall_count to find blocked syscalls
+    #[cfg(debug_assertions)]
     pub(crate) diag_sysret_count: u64,
     /// When true, log every userspace instruction to stderr (awk trace mode)
+    #[cfg(debug_assertions)]
     pub(crate) diag_awk_trace_active: bool,
 
     // Boundaries of current code page, based on EIP
@@ -1291,8 +1331,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Sets EXT=1, uses the unified interrupt() for proper inhibit_mask clearing,
     /// speculative_rsp, and BadVector recovery, then commits prev_rip.
     pub(crate) fn inject_external_interrupt(&mut self, vector: u8) -> Result<()> {
-        self.diag_inject_ext_intr_count += 1;
-        self.diag_inject_ext_intr_vectors[vector as usize] += 1;
+        #[cfg(debug_assertions)] {
+            self.diag_inject_ext_intr_count += 1;
+            self.diag_inject_ext_intr_vectors[vector as usize] += 1;
+        }
 
         // Wake from halt/wait state.
         self.activity_state = CpuActivityState::Active;
@@ -1345,6 +1387,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     ///
     /// This sets the bus, pc_system, pic, and dma pointers for the duration of the call
     /// and clears them afterwards.
+    #[allow(clippy::too_many_arguments)]
     #[inline]
     pub fn cpu_loop_n_with_io(
         &mut self,
@@ -1578,7 +1621,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // Execute instruction (matching C++ BX_CPU_CALL_METHOD)
                 // SAFETY: i_ptr is valid for the lifetime of this loop iteration (see above).
                 let opcode = unsafe { (*i_ptr).get_ia_opcode() };
-                self.diag_current_opcode = opcode as u16;
+                #[cfg(debug_assertions)] { self.diag_current_opcode = opcode as u16; }
 
                 // Bochs BX_INSTR_BEFORE_EXECUTION(cpu_id, i)
                 #[cfg(feature = "bx_instrumentation")]
@@ -2174,9 +2217,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     fn before_execution(&mut self, _cpu_id: u32) {
         // Populate RIP ring buffer for post-mortem analysis.
         // Cheap: one array write per instruction, no I/O.
-        let idx = self.diag_rip_ring_idx % 256;
-        self.diag_rip_ring[idx] = self.rip();
-        self.diag_rip_ring_idx += 1;
+        #[cfg(debug_assertions)] {
+            let idx = self.diag_rip_ring_idx % 256;
+            self.diag_rip_ring[idx] = self.rip();
+            self.diag_rip_ring_idx += 1;
+        }
     }
 
     // boundaries of consideration:

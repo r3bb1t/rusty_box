@@ -497,6 +497,7 @@ fn run_alpine() -> Result<()> {
         total_executed as f64 / elapsed.as_secs_f64() / 1_000_000.0,
     );
 
+    #[cfg(debug_assertions)]
     emu.dump_alpine_diag();
 
     // VGA text dump

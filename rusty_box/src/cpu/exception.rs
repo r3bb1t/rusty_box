@@ -244,9 +244,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     #[track_caller]
     pub(super) fn exception(&mut self, vector: Exception, mut error_code: u16) -> Result<()> {
         // Track exception counts for diagnostics
-        let vec_idx = vector as usize;
-        if vec_idx < 32 {
-            self.diag_exception_counts[vec_idx] += 1;
+        #[cfg(debug_assertions)] {
+            let vec_idx = vector as usize;
+            if vec_idx < 32 {
+                self.diag_exception_counts[vec_idx] += 1;
+            }
         }
         // Log the caller site for #GP to identify spurious exceptions during debugging
         if vector == Exception::Gp && !self.real_mode() {

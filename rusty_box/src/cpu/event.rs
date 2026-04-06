@@ -123,8 +123,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 self.clear_event(Self::BX_EVENT_PENDING_LAPIC_INTR);
                 let vector = self.lapic.acknowledge_int();
                 if vector > 0 {
-                    self.diag_hae_intr_delivered += 1;
-                    self.diag_iac_vectors[vector as usize] += 1;
+                    #[cfg(debug_assertions)] {
+                        self.diag_hae_intr_delivered += 1;
+                        self.diag_iac_vectors[vector as usize] += 1;
+                    }
                     self.activity_state = CpuActivityState::Active;
                     self.ext = true;
                     let result = self.interrupt(vector, false, false, 0);
@@ -177,7 +179,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         }
                     }
                 } else {
-                    self.diag_hae_intr_pic_empty += 1;
+                    #[cfg(debug_assertions)] { self.diag_hae_intr_pic_empty += 1; }
                 }
             }
         } else if self.pending_event
@@ -185,18 +187,19 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             != 0
         {
             // Event is pending but masked (IF=0) — don't clear it, just count
-            self.diag_hae_intr_if_blocked += 1;
+            #[cfg(debug_assertions)] { self.diag_hae_intr_if_blocked += 1; }
         }
 
         // DMA HRQ handling (Bochs event.cc:390-393)
         // NOTE: similar code in handleWaitForEvent (event.cc:83-86)
         // Assert Hold Acknowledge (HLDA) and perform DMA transfer
-        if self.get_hrq()
-            && self.dma_ptr.is_some() {
+        if let Some(mut dma_nn) = self.dma_ptr {
+            if self.get_hrq() {
                 // SAFETY: dma_ptr set for duration of cpu_loop_n_with_io; single-threaded access
-                let dma = unsafe { self.dma_ptr.unwrap().as_mut() };
+                let dma = unsafe { dma_nn.as_mut() };
                 dma.raise_hlda();
             }
+        }
 
         // End of handleAsyncEvent: schedule TF->debug_trap for next boundary
         // Bochs event.cc:396-402
@@ -227,12 +230,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
 
         // Handle DMA also when CPU is halted (Bochs event.cc:83-86)
-        if self.get_hrq()
-            && self.dma_ptr.is_some() {
+        if let Some(mut dma_nn) = self.dma_ptr {
+            if self.get_hrq() {
                 // SAFETY: dma_ptr set for duration of cpu_loop_n_with_io; single-threaded access
-                let dma = unsafe { self.dma_ptr.unwrap().as_mut() };
+                let dma = unsafe { dma_nn.as_mut() };
                 dma.raise_hlda();
             }
+        }
 
         // For single processor, check if an external interrupt can wake us.
         // Matches Bochs event.cc:52-113

@@ -125,10 +125,7 @@ impl Descriptor {
     }
     #[inline(always)]
     pub(crate) fn set_segment_base(&mut self, val: BxAddress) {
-        match self {
-            Self::Segment(s) => s.base = val,
-            _ => {}
-        }
+        if let Self::Segment(s) = self { s.base = val }
     }
 
     #[inline(always)]
@@ -140,10 +137,7 @@ impl Descriptor {
     }
     #[inline(always)]
     pub(crate) fn set_segment_limit_scaled(&mut self, val: u32) {
-        match self {
-            Self::Segment(s) => s.limit_scaled = val,
-            _ => {}
-        }
+        if let Self::Segment(s) = self { s.limit_scaled = val }
     }
 
     #[inline(always)]
@@ -155,10 +149,7 @@ impl Descriptor {
     }
     #[inline(always)]
     pub(crate) fn set_segment_g(&mut self, val: bool) {
-        match self {
-            Self::Segment(s) => s.g = val,
-            _ => {}
-        }
+        if let Self::Segment(s) = self { s.g = val }
     }
 
     #[inline(always)]
@@ -170,10 +161,7 @@ impl Descriptor {
     }
     #[inline(always)]
     pub(crate) fn set_segment_d_b(&mut self, val: bool) {
-        match self {
-            Self::Segment(s) => s.d_b = val,
-            _ => {}
-        }
+        if let Self::Segment(s) = self { s.d_b = val }
     }
 
     #[inline(always)]
@@ -185,10 +173,7 @@ impl Descriptor {
     }
     #[inline(always)]
     pub(crate) fn set_segment_l(&mut self, val: bool) {
-        match self {
-            Self::Segment(s) => s.l = val,
-            _ => {}
-        }
+        if let Self::Segment(s) = self { s.l = val }
     }
 
     #[inline(always)]
@@ -200,10 +185,7 @@ impl Descriptor {
     }
     #[inline(always)]
     pub(crate) fn set_segment_avl(&mut self, val: bool) {
-        match self {
-            Self::Segment(s) => s.avl = val,
-            _ => {}
-        }
+        if let Self::Segment(s) = self { s.avl = val }
     }
 
     // -- Gate accessors --
@@ -218,10 +200,7 @@ impl Descriptor {
     }
     #[inline(always)]
     pub(crate) fn set_gate_dest_offset(&mut self, val: u32) {
-        match self {
-            Self::Gate(g) => g.dest_offset = val,
-            _ => {}
-        }
+        if let Self::Gate(g) = self { g.dest_offset = val }
     }
 
     #[inline(always)]
@@ -233,10 +212,7 @@ impl Descriptor {
     }
     #[inline(always)]
     pub(crate) fn set_gate_dest_selector(&mut self, val: u16) {
-        match self {
-            Self::Gate(g) => g.dest_selector = val,
-            _ => {}
-        }
+        if let Self::Gate(g) = self { g.dest_selector = val }
     }
 
     #[inline(always)]

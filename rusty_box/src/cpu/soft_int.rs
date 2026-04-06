@@ -925,23 +925,25 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::debug!("HLT: CPU halted with IF=0 (interrupts disabled) - CPU will be stuck!");
         }
 
-        if !self.diag_first_pm_hlt_captured && self.protected_mode() {
-            self.diag_first_pm_hlt_captured = true;
-            self.diag_first_pm_hlt_icount = self.icount;
-            self.diag_first_pm_hlt_rip = self.eip();
-            self.diag_first_pm_hlt_regs = [
-                self.eax(), self.ecx(), self.edx(), self.ebx(),
-                self.esp(), self.ebp(), self.esi(), self.edi(),
-            ];
-            self.diag_first_pm_hlt_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
-            self.diag_first_pm_hlt_ss = self.sregs[BxSegregs::Ss as usize].selector.value;
-            self.diag_first_pm_hlt_eflags = self.eflags.bits();
-            // Read 16 dwords from stack
-            let esp = self.esp();
-            for i in 0..16u32 {
-                self.diag_first_pm_hlt_stack[i as usize] = self
-                    .stack_read_dword(esp.wrapping_add(i * 4))
-                    .unwrap_or(0xDEADDEAD);
+        #[cfg(debug_assertions)] {
+            if !self.diag_first_pm_hlt_captured && self.protected_mode() {
+                self.diag_first_pm_hlt_captured = true;
+                self.diag_first_pm_hlt_icount = self.icount;
+                self.diag_first_pm_hlt_rip = self.eip();
+                self.diag_first_pm_hlt_regs = [
+                    self.eax(), self.ecx(), self.edx(), self.ebx(),
+                    self.esp(), self.ebp(), self.esi(), self.edi(),
+                ];
+                self.diag_first_pm_hlt_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
+                self.diag_first_pm_hlt_ss = self.sregs[BxSegregs::Ss as usize].selector.value;
+                self.diag_first_pm_hlt_eflags = self.eflags.bits();
+                // Read 16 dwords from stack
+                let esp = self.esp();
+                for i in 0..16u32 {
+                    self.diag_first_pm_hlt_stack[i as usize] = self
+                        .stack_read_dword(esp.wrapping_add(i * 4))
+                        .unwrap_or(0xDEADDEAD);
+                }
             }
         }
 

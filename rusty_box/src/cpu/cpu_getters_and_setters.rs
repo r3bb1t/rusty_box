@@ -288,6 +288,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     /// Get CPU diagnostic string (IF, activity, inhibit)
+    #[cfg(debug_assertions)]
     pub fn cpu_diag_string(&self) -> alloc::string::String {
         alloc::format!(
             "IF={} activity={:?} inhibit={} async_event={:#x}",
@@ -296,6 +297,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             self.interrupts_inhibited(0x01),
             self.async_event,
         )
+    }
+
+    #[cfg(not(debug_assertions))]
+    pub fn cpu_diag_string(&self) -> alloc::string::String {
+        alloc::string::String::new()
     }
 
     /// Get CS selector value (for diagnostics)
@@ -641,57 +647,115 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
     /// Get handle_async_event interrupt delivery diagnostics
     pub fn get_hae_intr_diag(&self) -> (u64, u64, u64, u64) {
-        (
-            self.diag_hae_intr_delivered,
-            self.diag_hae_intr_if_blocked,
-            self.diag_hae_intr_no_pic,
-            self.diag_hae_intr_pic_empty,
-        )
+        #[cfg(debug_assertions)]
+        {
+            (self.diag_hae_intr_delivered, self.diag_hae_intr_if_blocked, self.diag_hae_intr_no_pic, self.diag_hae_intr_pic_empty)
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            (0, 0, 0, 0)
+        }
     }
 
     /// Get exception counts by vector (0=DE, 6=UD, 13=GP, 14=PF)
+    #[cfg(debug_assertions)]
     pub fn get_exception_diag(&self) -> &[u64; 32] {
         &self.diag_exception_counts
     }
 
+    #[cfg(not(debug_assertions))]
+    pub fn get_exception_diag(&self) -> &'static [u64; 32] {
+        static EMPTY: [u64; 32] = [0; 32];
+        &EMPTY
+    }
+
     /// Get IaError (unimplemented opcode) diagnostics
     pub fn get_ia_error_diag(&self) -> (u64, u64) {
-        (self.diag_ia_error_count, self.diag_ia_error_last_rip)
+        #[cfg(debug_assertions)]
+        {
+            (self.diag_ia_error_count, self.diag_ia_error_last_rip)
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            (0, 0)
+        }
     }
 
     /// Get interrupt acknowledge vector counts
+    #[cfg(debug_assertions)]
     pub fn get_iac_vectors(&self) -> &[u64; 256] {
         &self.diag_iac_vectors
     }
 
+    #[cfg(not(debug_assertions))]
+    pub fn get_iac_vectors(&self) -> &'static [u64; 256] {
+        static EMPTY: [u64; 256] = [0; 256];
+        &EMPTY
+    }
+
     /// Get inject_external_interrupt diagnostics
+    #[cfg(debug_assertions)]
     pub fn get_inject_ext_intr_diag(&self) -> (u64, &[u64; 256]) {
         (self.diag_inject_ext_intr_count, &self.diag_inject_ext_intr_vectors)
     }
 
+    #[cfg(not(debug_assertions))]
+    pub fn get_inject_ext_intr_diag(&self) -> (u64, &'static [u64; 256]) {
+        static EMPTY: [u64; 256] = [0; 256];
+        (0, &EMPTY)
+    }
+
     /// Get software INT (INT nn) vector histogram
+    #[cfg(debug_assertions)]
     pub fn get_soft_int_vectors(&self) -> &[u64; 256] {
         &self.diag_soft_int_vectors
     }
 
+    #[cfg(not(debug_assertions))]
+    pub fn get_soft_int_vectors(&self) -> &'static [u64; 256] {
+        static EMPTY: [u64; 256] = [0; 256];
+        &EMPTY
+    }
+
     /// Get software INT vector histogram for late calls (after BIOS POST, icount > 2M)
+    #[cfg(debug_assertions)]
     pub fn get_soft_int_vectors_late(&self) -> &[u64; 256] {
         &self.diag_soft_int_vectors_late
     }
 
+    #[cfg(not(debug_assertions))]
+    pub fn get_soft_int_vectors_late(&self) -> &'static [u64; 256] {
+        static EMPTY: [u64; 256] = [0; 256];
+        &EMPTY
+    }
+
     /// Get INT 10h AH subfunction histogram (late calls only)
+    #[cfg(debug_assertions)]
     pub fn get_int10h_ah_hist(&self) -> &[u64; 256] {
         &self.diag_int10h_ah_hist
     }
 
+    #[cfg(not(debug_assertions))]
+    pub fn get_int10h_ah_hist(&self) -> &'static [u64; 256] {
+        static EMPTY: [u64; 256] = [0; 256];
+        &EMPTY
+    }
+
     /// Get TTY characters written via INT 10h AH=0Eh
+    #[cfg(debug_assertions)]
     pub fn get_int10h_tty_chars(&self) -> &[u8] {
         &self.diag_int10h_tty_chars[..self.diag_int10h_tty_count]
+    }
+
+    #[cfg(not(debug_assertions))]
+    pub fn get_int10h_tty_chars(&self) -> &[u8] {
+        &[]
     }
 
     /// Get first HLT in PM diagnostic data
     /// Returns (captured, icount, rip, cs, ss, eflags, regs[8], stack[16])
     #[allow(clippy::type_complexity)]
+    #[cfg(debug_assertions)]
     pub fn get_first_pm_hlt(&self) -> Option<(u64, u32, u16, u16, u32, [u32; 8], [u32; 16])> {
         if self.diag_first_pm_hlt_captured {
             Some((
@@ -708,34 +772,63 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
     }
 
+    #[allow(clippy::type_complexity)]
+    #[cfg(not(debug_assertions))]
+    pub fn get_first_pm_hlt(&self) -> Option<(u64, u32, u16, u16, u32, [u32; 8], [u32; 16])> {
+        None
+    }
+
     /// Get PM↔RM transition counts
     pub fn get_pm_rm_transition_counts(&self) -> (u64, u64) {
-        (self.diag_pm_to_rm_count, self.diag_rm_to_pm_count)
+        #[cfg(debug_assertions)]
+        {
+            (self.diag_pm_to_rm_count, self.diag_rm_to_pm_count)
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            (0, 0)
+        }
     }
 
     /// Set up address hit tracking. Provide up to 8 (addr, 0) pairs.
+    #[allow(unused_variables)]
     pub fn set_addr_hit_watches(&mut self, watches: &[(u32, u64)]) {
-        for (i, &(addr, count)) in watches.iter().enumerate().take(8) {
-            self.diag_addr_hits[i] = (addr, count);
+        #[cfg(debug_assertions)]
+        {
+            for (i, &(addr, count)) in watches.iter().enumerate().take(8) {
+                self.diag_addr_hits[i] = (addr, count);
+            }
         }
     }
 
     /// Get address hit counters
+    #[cfg(debug_assertions)]
     pub fn get_addr_hits(&self) -> &[(u32, u64); 8] {
         &self.diag_addr_hits
     }
 
+    #[cfg(not(debug_assertions))]
+    pub fn get_addr_hits(&self) -> &[(u32, u64); 8] {
+        static EMPTY: [(u32, u64); 8] = [(0, 0); 8];
+        &EMPTY
+    }
+
     /// Check and count address hits (call from cpu_loop hot path)
+    #[allow(unused_variables)]
     #[inline(always)]
     pub(crate) fn check_addr_hits(&mut self, rip: u32) {
-        for entry in self.diag_addr_hits.iter_mut() {
-            if entry.0 != 0 && entry.0 == rip {
-                entry.1 += 1;
+        #[cfg(debug_assertions)]
+        {
+            for entry in self.diag_addr_hits.iter_mut() {
+                if entry.0 != 0 && entry.0 == rip {
+                    entry.1 += 1;
+                }
             }
         }
     }
 
     /// Get INT 10h icount range (first, last) and TTY icount range
+    #[cfg(debug_assertions)]
     pub fn get_int10h_icount_range(&self) -> (u64, u64, u64, u64) {
         (
             self.diag_int10h_first_icount,
@@ -743,6 +836,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             self.diag_int10h_tty_first_icount,
             self.diag_int10h_tty_last_icount,
         )
+    }
+
+    /// Get INT 10h icount range stub for release builds
+    #[cfg(not(debug_assertions))]
+    pub fn get_int10h_icount_range(&self) -> (u64, u64, u64, u64) {
+        (0, 0, 0, 0)
     }
 
 }
