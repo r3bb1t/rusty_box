@@ -756,10 +756,4 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         )
     }
 
-    /// Get a raw pointer to the icount field for device synchronization.
-    /// SAFETY: The pointer is valid for the lifetime of the CPU struct.
-    /// Used by PIT to synchronize counter reads with elapsed CPU time.
-    pub fn icount_ptr(&self) -> *const u64 {
-        &self.icount as *const u64
-    }
 }

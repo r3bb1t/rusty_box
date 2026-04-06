@@ -319,9 +319,6 @@ pub struct BxLocalApic {
     pub(crate) ticks_at_sync: u64,
     /// CPU instruction count at last sync point.
     pub(crate) icount_at_sync: u64,
-    /// Pointer to CPU's icount field for live tick computation during MMIO reads.
-    /// Set during emulator initialization. Same pattern as PIT's icount_ptr.
-    icount_ptr: Option<*const u64>,
     /// Pointer to CPU's pending_event field for direct event signaling.
     /// Allows service_local_apic() to signal BX_EVENT_PENDING_LAPIC_INTR
     /// without going through the emulator loop (matching Bochs behavior).
@@ -430,7 +427,6 @@ impl Default for BxLocalApic {
             current_ticks: 0,
             ticks_at_sync: 0,
             icount_at_sync: 0,
-            icount_ptr: None,
             pending_event_ptr: None,
             async_event_ptr: None,
             timer_divconf: 0,
@@ -461,11 +457,6 @@ impl Default for BxLocalApic {
 // ─── Static helper functions (Bochs: apic.cc:768-781) ────────────────────────
 
 impl BxLocalApic {
-    /// Set the pointer to CPU's icount for live tick computation.
-    /// SAFETY: The pointer must remain valid for the lifetime of the LAPIC.
-    pub(crate) unsafe fn set_icount_ptr(&mut self, ptr: *const u64) {
-        self.icount_ptr = Some(ptr);
-    }
 
     /// Set pointers to CPU's event fields for direct interrupt signaling.
     /// This allows service_local_apic() to signal BX_EVENT_PENDING_LAPIC_INTR
@@ -480,11 +471,9 @@ impl BxLocalApic {
     /// since the last batch boundary. This allows LAPIC timer current count
     /// reads to see progress within a CPU batch (critical for calibration loops).
     #[inline]
-    fn live_ticks(&self) -> u64 {
-        if let Some(ptr) = self.icount_ptr {
-            // SAFETY: pointer to CPU icount field; valid for CPU lifetime, single-threaded
-            let cpu_icount = unsafe { *ptr };
-            self.ticks_at_sync + (cpu_icount - self.icount_at_sync)
+    fn live_ticks(&self, icount: u64) -> u64 {
+        if icount >= self.icount_at_sync {
+            self.ticks_at_sync + (icount - self.icount_at_sync)
         } else {
             self.current_ticks
         }
@@ -588,7 +577,7 @@ impl BxLocalApic {
 
     /// Read from a 16-byte-aligned APIC register.
     /// Bochs: read_aligned (apic.cc:357-492)
-    pub(crate) fn read_aligned(&self, addr: BxPhyAddress) -> u32 {
+    pub(crate) fn read_aligned(&self, addr: BxPhyAddress, icount: u64) -> u32 {
         debug_assert!((addr & 0xF) == 0);
         let mut data: u32 = 0;
         let apic_reg = (addr & 0xFF0) as u32;
@@ -677,7 +666,7 @@ impl BxLocalApic {
             }
             // Timer current count (apic.cc:452-454)
             // Bochs calls get_current_timer_count(bx_pc_system.time_ticks()) here.
-            // We use live_ticks() which reads CPU icount via pointer for accuracy
+            // We use live_ticks() with the passed icount for accuracy
             // within CPU batches (critical for kernel timer calibration loops).
             0x390 => {
                 let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
@@ -685,7 +674,7 @@ impl BxLocalApic {
                     // TSC-deadline mode: current count always reads 0
                     data = 0;
                 } else if self.timer_active && self.timer_divide_factor > 0 {
-                    let ticks = self.live_ticks();
+                    let ticks = self.live_ticks(icount);
                     let delta64 = ticks.saturating_sub(self.ticks_initial)
                         / self.timer_divide_factor as u64;
                     let delta32 = delta64 as u32;
@@ -829,12 +818,12 @@ impl BxLocalApic {
 
     /// Handle a read from the LAPIC MMIO region.
     /// Bochs: read (apic.cc:320-339)
-    pub(crate) fn read(&self, addr: BxPhyAddress, len: u32) -> u32 {
+    pub(crate) fn read(&self, addr: BxPhyAddress, len: u32, icount: u64) -> u32 {
         if (addr & !0x3) != ((addr + len as BxPhyAddress - 1) & !0x3) {
             error!("APIC read at address {:#x} spans 32-bit boundary!", addr);
             return 0;
         }
-        let value = self.read_aligned(addr & !0x3);
+        let value = self.read_aligned(addr & !0x3, icount);
         if len == 4 {
             return value;
         }
@@ -2020,15 +2009,15 @@ mod tests {
         assert_eq!(lapic.task_priority, 0x42);
 
         // Read TPR
-        let val = lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x080);
+        let val = lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x080, 0);
         assert_eq!(val, 0x42);
 
         // Read APIC ID (default 0)
-        let val = lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x020);
+        let val = lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x020, 0);
         assert_eq!(val, 0); // apic_id=0, shifted left by 24
 
         // Read version
-        let val = lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x030);
+        let val = lapic.read_aligned(BX_LAPIC_BASE_ADDR | 0x030, 0);
         assert_eq!(val, 0x00050014); // P4 xapic version
     }
 

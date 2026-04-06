@@ -1288,7 +1288,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // SAFETY: `io_bus` is set by the emulator for the duration of execution
             // and cleared afterwards. Single-CPU execution avoids concurrent access.
             // SAFETY: io_bus valid for duration of execution; single-threaded access
-            let value = unsafe { io_bus.as_mut().inp(port, len) };
+            let value = unsafe { io_bus.as_mut().inp(port, len, self.icount) };
             return value;
         }
 

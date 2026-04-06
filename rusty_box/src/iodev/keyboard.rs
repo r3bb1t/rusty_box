@@ -706,7 +706,7 @@ impl BxKeyboardC {
     ///   simulate PIT channel 2 output transitions for BIOS `delay_ms()` loops.
     /// - **Port 0x64**: Status register (assembled from boolean flags each read).
     ///   TIM bit is cleared on each read.
-    pub fn read(&mut self, port: u16, _io_len: u8) -> u32 {
+    pub fn read(&mut self, port: u16, _io_len: u8, icount: u64) -> u32 {
         match port {
             KBD_DATA_PORT => self.read_port_60(),
             KBD_STATUS_PORT => self.read_port_64(),
@@ -721,7 +721,7 @@ impl BxKeyboardC {
                 if let Some(pit_ptr) = self.pit_ptr {
                     let pit = unsafe { &mut *pit_ptr };
                     // Sync PIT to current icount so counter 2 is up-to-date
-                    pit.sync_to_icount();
+                    pit.sync_to_icount(icount);
                     if pit.get_output2() {
                         self.system_control_b |= 0x20; // bit 5 = PIT C2 output HIGH
                     } else {
@@ -1847,7 +1847,7 @@ mod tests {
         assert!(kbd.kbd_controller.outb);
         assert!(kbd.kbd_controller.sysf);
 
-        let response = kbd.read(KBD_DATA_PORT, 1);
+        let response = kbd.read(KBD_DATA_PORT, 1, 0);
         assert_eq!(response, KBD_RESP_SELF_TEST_OK as u32);
     }
 
@@ -1857,13 +1857,13 @@ mod tests {
 
         // Self test first
         kbd.write(KBD_COMMAND_PORT, CTRL_CMD_SELF_TEST as u32, 1);
-        kbd.read(KBD_DATA_PORT, 1);
+        kbd.read(KBD_DATA_PORT, 1, 0);
 
         // Interface test
         kbd.write(KBD_COMMAND_PORT, CTRL_CMD_INTERFACE_TEST as u32, 1);
         assert!(kbd.kbd_controller.outb);
 
-        let response = kbd.read(KBD_DATA_PORT, 1);
+        let response = kbd.read(KBD_DATA_PORT, 1, 0);
         assert_eq!(response, KBD_RESP_TEST_OK as u32);
     }
 
@@ -1873,7 +1873,7 @@ mod tests {
 
         // Self-test first
         kbd.write(KBD_COMMAND_PORT, CTRL_CMD_SELF_TEST as u32, 1);
-        kbd.read(KBD_DATA_PORT, 1);
+        kbd.read(KBD_DATA_PORT, 1, 0);
 
         // Enable keyboard
         kbd.write(KBD_COMMAND_PORT, CTRL_CMD_ENABLE_KBD as u32, 1);
@@ -1888,14 +1888,14 @@ mod tests {
         // Transfer ACK
         let irq = kbd.periodic(10);
         assert!(kbd.kbd_controller.outb);
-        let ack = kbd.read(KBD_DATA_PORT, 1);
+        let ack = kbd.read(KBD_DATA_PORT, 1, 0);
         assert_eq!(ack, KBD_RESP_ACK as u32);
 
         // Activate timer for next transfer
         // (read_port_60 calls activate_timer internally)
         let _irq = kbd.periodic(10);
         assert!(kbd.kbd_controller.outb);
-        let bat = kbd.read(KBD_DATA_PORT, 1);
+        let bat = kbd.read(KBD_DATA_PORT, 1, 0);
         assert_eq!(bat, KBD_RESP_BAT_OK as u32);
     }
 
@@ -1917,13 +1917,13 @@ mod tests {
         let mut kbd = BxKeyboardC::new();
 
         // After init: keyl=1, c_d=1, everything else 0
-        let status = kbd.read(KBD_STATUS_PORT, 1);
+        let status = kbd.read(KBD_STATUS_PORT, 1, 0);
         // keyl(bit4)=1, c_d(bit3)=1 => 0x18
         assert_eq!(status, 0x18);
 
         // After self-test: sysf=1, outb=1 (0x55 in buffer)
         kbd.write(KBD_COMMAND_PORT, CTRL_CMD_SELF_TEST as u32, 1);
-        let status = kbd.read(KBD_STATUS_PORT, 1);
+        let status = kbd.read(KBD_STATUS_PORT, 1, 0);
         // keyl=1, c_d=1, sysf=1, outb=1 => 0x1D
         assert_eq!(status, 0x1D);
     }
@@ -1934,7 +1934,7 @@ mod tests {
 
         // Self-test first
         kbd.write(KBD_COMMAND_PORT, CTRL_CMD_SELF_TEST as u32, 1);
-        kbd.read(KBD_DATA_PORT, 1);
+        kbd.read(KBD_DATA_PORT, 1, 0);
 
         // Write CCB: translate=1, disable_aux=1, sysf=1, irq1=1
         // = 0b01100101 = 0x65
@@ -1950,7 +1950,7 @@ mod tests {
 
         // Read CCB back
         kbd.write(KBD_COMMAND_PORT, CTRL_CMD_GET_CCB as u32, 1);
-        let ccb = kbd.read(KBD_DATA_PORT, 1);
+        let ccb = kbd.read(KBD_DATA_PORT, 1, 0);
         assert_eq!(ccb, 0x65);
     }
 }

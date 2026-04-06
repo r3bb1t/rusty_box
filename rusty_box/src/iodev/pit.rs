@@ -689,10 +689,6 @@ pub struct BxPitC {
     pub(crate) timer_handles: [Option<usize>; 3],
     /// IRQ0 callback (for system timer)
     irq0_pending: bool,
-    /// Pointer to CPU's icount for fine-grained PIT synchronization.
-    /// When set, the PIT advances counters on port reads (not just batch boundaries),
-    /// allowing the kernel's PIT-polling calibration loops to see the counter decrement.
-    icount_ptr: Option<*const u64>,
     /// IPS (instructions per second) for converting icount to PIT ticks.
     ips: u64,
     /// icount value at last PIT synchronization point.
@@ -717,7 +713,6 @@ impl BxPitC {
             total_ticks: 0,
             timer_handles: [None; 3],
             irq0_pending: false,
-            icount_ptr: None,
             ips: 0,
             icount_at_last_sync: 0,
             pit_tick_accumulator: 0,
@@ -739,14 +734,12 @@ impl BxPitC {
         self.pit_tick_accumulator = 0;
     }
 
-    /// Set the icount pointer for fine-grained PIT synchronization.
-    /// When set, PIT counter reads will advance counters to match elapsed CPU time.
-    /// # Safety
-    /// The pointer must remain valid for the lifetime of the PIT.
-    pub unsafe fn set_icount_sync(&mut self, icount_ptr: *const u64, ips: u64) {
-        self.icount_ptr = Some(icount_ptr);
+    /// Initialize icount synchronization for fine-grained PIT timing.
+    /// Stores IPS and the initial icount baseline so that subsequent
+    /// `sync_to_icount()` and `tick()` calls can compute elapsed time.
+    pub fn init_icount_sync(&mut self, icount: u64, ips: u64) {
         self.ips = ips;
-        self.icount_at_last_sync = *icount_ptr;
+        self.icount_at_last_sync = icount;
     }
 
     /// Synchronize PIT counters to match elapsed CPU time.
@@ -754,11 +747,10 @@ impl BxPitC {
     /// Uses a fractional accumulator to avoid losing ticks when only a few
     /// instructions have elapsed between reads (~13 instructions per PIT tick
     /// at 15M IPS).
-    pub fn sync_to_icount(&mut self) {
-        if let Some(ptr) = self.icount_ptr {
-            let current_icount = unsafe { *ptr };
-            let elapsed_instr = current_icount.saturating_sub(self.icount_at_last_sync);
-            if elapsed_instr > 0 && self.ips > 0 {
+    pub fn sync_to_icount(&mut self, icount: u64) {
+        if self.ips > 0 {
+            let elapsed_instr = icount.saturating_sub(self.icount_at_last_sync);
+            if elapsed_instr > 0 {
                 // Accumulate fractional PIT ticks
                 self.pit_tick_accumulator += elapsed_instr as u128 * TICKS_PER_SECOND as u128;
                 let pit_ticks = (self.pit_tick_accumulator / self.ips as u128) as u64;
@@ -795,16 +787,16 @@ impl BxPitC {
                         remaining -= 1;
                     }
                 }
-                self.icount_at_last_sync = current_icount;
+                self.icount_at_last_sync = icount;
             }
         }
     }
 
     /// Read from PIT I/O port
-    pub fn read(&mut self, port: u16, _io_len: u8) -> u32 {
+    pub fn read(&mut self, port: u16, _io_len: u8, icount: u64) -> u32 {
         // Synchronize counters to current CPU time before reading.
         // This ensures the kernel's PIT-polling calibration loops see the counter decrement.
-        self.sync_to_icount();
+        self.sync_to_icount(icount);
         match port {
             PIT_COUNTER0 => self.counters[0].read() as u32,
             PIT_COUNTER1 => self.counters[1].read() as u32,
@@ -930,7 +922,7 @@ impl BxPitC {
     }
 
     /// Simulate time passing (in microseconds)
-    pub fn tick(&mut self, usec: u64) -> bool {
+    pub fn tick(&mut self, usec: u64, icount: u64) -> bool {
         let pit_ticks = (usec * TICKS_PER_SECOND as u64) / USEC_PER_SECOND as u64;
 
         let mut irq0 = false;
@@ -955,8 +947,8 @@ impl BxPitC {
 
         // Reset icount baseline and accumulator so that read()-based sync
         // doesn't double-count the ticks we just advanced via usec.
-        if let Some(ptr) = self.icount_ptr {
-            self.icount_at_last_sync = unsafe { *ptr };
+        if self.ips > 0 {
+            self.icount_at_last_sync = icount;
             self.pit_tick_accumulator = 0;
         }
 

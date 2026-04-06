@@ -1633,7 +1633,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if self.lapic.is_selected(a20_addr) {
                 // Read aligned dword, extract requested byte
                 let aligned = a20_addr & !0x3;
-                let dword = self.lapic.read(aligned, 4);
+                let dword = self.lapic.read(aligned, 4, self.icount);
                 let byte_offset = (a20_addr & 0x3) as u32;
                 return (dword >> (byte_offset * 8)) as u8;
             }
@@ -1706,7 +1706,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 // Byte-level write to LAPIC: read-modify-write the aligned dword.
                 // In practice, LAPIC is always accessed as dword — this is a safety net.
                 let aligned = a20_addr & !0x3;
-                let old = self.lapic.read(aligned, 4);
+                let old = self.lapic.read(aligned, 4, self.icount);
                 let byte_offset = (a20_addr & 0x3) as u32;
                 let mask = !(0xFFu32 << (byte_offset * 8));
                 let new_val = (old & mask) | ((value as u32) << (byte_offset * 8));
@@ -1806,7 +1806,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Bochs apic.cc read() — LAPIC registers are always dword-accessed.
         #[cfg(feature = "bx_support_apic")]
         if self.lapic.is_selected(a20_addr as BxPhyAddress) {
-            return self.lapic.read(a20_addr as BxPhyAddress, 4);
+            return self.lapic.read(a20_addr as BxPhyAddress, 4, self.icount);
         }
         // Slow path: route through read_physical_page to hit registered MMIO handlers
         // (IOAPIC, VGA, etc.) with proper dword access width.

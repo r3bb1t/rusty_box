@@ -245,7 +245,7 @@ impl BxDevicesC {
     ///
     /// # Returns
     /// The value read from the port
-    pub fn inp(&mut self, port: u16, io_len: u8) -> u32 {
+    pub fn inp(&mut self, port: u16, io_len: u8, icount: u64) -> u32 {
         self.diag_io_reads += 1;
         let entry = &self.read_handlers[port as usize];
         let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
@@ -254,7 +254,7 @@ impl BxDevicesC {
             if let Some(mut dm) = self.device_manager {
                 // SAFETY: device_manager set by emulator for execution duration; single-threaded
                 let dm = unsafe { dm.as_mut() };
-                Self::dispatch_read(dm, entry.device_id, port, io_len)
+                Self::dispatch_read(dm, entry.device_id, port, io_len, icount)
             } else {
                 self.default_read_handler(port, io_len)
             }
@@ -393,16 +393,16 @@ impl BxDevicesC {
     }
 
     /// Dispatch a port read to the device identified by `id`.
-    fn dispatch_read(dm: &mut devices::DeviceManager, id: DeviceId, port: u16, io_len: u8) -> u32 {
+    fn dispatch_read(dm: &mut devices::DeviceManager, id: DeviceId, port: u16, io_len: u8, icount: u64) -> u32 {
         match id {
             DeviceId::Pic => dm.pic.read(port, io_len),
-            DeviceId::Pit => dm.pit.read(port, io_len),
+            DeviceId::Pit => dm.pit.read(port, io_len, icount),
             DeviceId::Cmos => dm.cmos.read(port, io_len),
             DeviceId::Dma => dm.dma.read(port, io_len),
-            DeviceId::Keyboard => dm.keyboard.read(port, io_len),
+            DeviceId::Keyboard => dm.keyboard.read(port, io_len, icount),
             DeviceId::HardDrive => dm.harddrv.read(port, io_len),
             DeviceId::Serial => dm.serial.read(port, io_len),
-            DeviceId::Vga => dm.vga.read_port(port, io_len),
+            DeviceId::Vga => dm.vga.read_port(port, io_len, icount),
             DeviceId::Port92 => dm.port92_read(port, io_len),
             #[cfg(feature = "bx_support_pci")]
             DeviceId::Pci => dm.pci_read(port, io_len),
@@ -453,9 +453,9 @@ mod tests {
         let mut devices = BxDevicesC::new();
 
         // Reading unhandled port should return 0xFF/0xFFFF/0xFFFFFFFF
-        assert_eq!(devices.inp(0x1234, 1), 0xFF);
-        assert_eq!(devices.inp(0x1234, 2), 0xFFFF);
-        assert_eq!(devices.inp(0x1234, 4), 0xFFFFFFFF);
+        assert_eq!(devices.inp(0x1234, 1, 0), 0xFF);
+        assert_eq!(devices.inp(0x1234, 2, 0), 0xFFFF);
+        assert_eq!(devices.inp(0x1234, 4, 0), 0xFFFFFFFF);
     }
 
     #[test]
@@ -468,7 +468,7 @@ mod tests {
 
         // dev1 has a device registered, dev2 does not.
         // Without a device_manager, both return default.
-        assert_eq!(dev1.inp(0x100, 1), 0xFF);
-        assert_eq!(dev2.inp(0x100, 1), 0xFF);
+        assert_eq!(dev1.inp(0x100, 1, 0), 0xFF);
+        assert_eq!(dev2.inp(0x100, 1, 0), 0xFF);
     }
 }

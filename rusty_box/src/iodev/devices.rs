@@ -535,12 +535,12 @@ impl DeviceManager {
 
     /// Simulate time passing for timer-based devices
     /// Returns true if any interrupt is pending
-    pub fn tick(&mut self, usec: u64) -> bool {
+    pub fn tick(&mut self, usec: u64, icount: u64) -> bool {
         self.diag_tick_count += 1;
         self.diag_total_usec += usec;
         // Tick PIT/RTC first to generate periodic interrupts (Bochs-like behavior).
         // PIT drives IRQ0, CMOS/RTC drives IRQ8 when enabled.
-        let _pit_fired = self.pit.tick(usec);
+        let _pit_fired = self.pit.tick(usec, icount);
         if self.pit.check_irq0() {
             self.diag_pit_fires += 1;
             // Track whether raise_irq will actually latch

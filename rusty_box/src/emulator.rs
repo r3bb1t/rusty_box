@@ -900,42 +900,27 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
 
 
-        // Wire PIT icount sync so PIT counter reads advance with CPU time.
+        // Initialize PIT icount sync so PIT counter reads advance with CPU time.
         // This is critical for kernel PIT-polling calibration loops (e.g., Alpine Linux).
         let ips = self.config.ips as u64;
         if ips > 0 {
-            let icount_ptr = self.cpu.icount_ptr();
-            // SAFETY: The CPU struct outlives the PIT — both live in the Emulator.
-            // The pointer is only used for reads during I/O dispatch.
-            unsafe {
-                self.device_manager.pit.set_icount_sync(icount_ptr, ips);
-            }
+            self.device_manager.pit.init_icount_sync(self.cpu.icount, ips);
         }
 
-        // Wire VGA icount pointer for timing-based retrace computation.
-        // SAFETY: CPU struct outlives VGA — both live in the Emulator.
-        // The pointer is only read during VGA status register reads (port 0x3DA).
+        // Initialize VGA icount-based timing for retrace computation.
         {
-            let icount_ptr = self.cpu.icount_ptr();
             let ips = self.config.ips as u64;
-            // SAFETY: CPU outlives VGA; pointer only read during VGA status register reads
-            unsafe {
-                self.device_manager.vga.set_icount_ptr(icount_ptr, ips);
-            }
+            self.device_manager.vga.set_icount_sync(ips);
         }
 
-        // Set up LAPIC pointers for live tick computation and direct event signaling.
-        // SAFETY: CPU struct fields outlive LAPIC (it's a field of CPU). Pointers are
-        // only dereferenced during LAPIC MMIO reads (icount) and service_local_apic()
-        // (pending_event/async_event).
+        // Set up LAPIC pointers for direct event signaling.
+        // icount is now passed as a parameter to LAPIC read methods.
         {
-            let icount_ptr = self.cpu.icount_ptr();
             let pending_event_ptr = &mut self.cpu.pending_event as *mut u32;
             let async_event_ptr = &mut self.cpu.async_event as *mut u32;
             let lapic_ptr = self.cpu.lapic_ptr_mut();
             // SAFETY: CPU fields outlive LAPIC; pointers only used during LAPIC MMIO access
             unsafe {
-                (*lapic_ptr).set_icount_ptr(icount_ptr);
                 (*lapic_ptr).set_event_ptrs(pending_event_ptr, async_event_ptr);
             }
         }
@@ -1091,7 +1076,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
     /// Simulate time passing (for timer-based devices)
     pub fn tick_devices(&mut self, usec: u64) {
-        self.device_manager.tick(usec);
+        self.device_manager.tick(usec, self.cpu.icount);
         // Process deferred ATAPI seek completion (Bochs seek_timer pattern).
         // In Bochs, start_seek() activates a timer that fires after a seek
         // delay and calls ready_to_send_atapi(). We process it here during

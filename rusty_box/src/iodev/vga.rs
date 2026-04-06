@@ -426,9 +426,9 @@ pub(crate) struct BxVgaC {
     /// Vertical retrace end in microseconds (Bochs s.vrend_usec)
     vrend_usec: u32,
 
-    /// Pointer to CPU icount for timing-based retrace computation.
-    /// Set by `set_icount_ptr()`. If null, falls back to toggle behavior.
-    icount_ptr: *const u64,
+    /// Whether icount-based timing has been initialized.
+    /// When false, falls back to toggle behavior for retrace.
+    has_icount_sync: bool,
     /// Instructions per second, used to convert icount to microseconds.
     ips: u64,
 
@@ -523,7 +523,7 @@ impl BxVgaC {
             vrstart_usec: 13000,
             vrend_usec: 13155,
 
-            icount_ptr: core::ptr::null(),
+            has_icount_sync: false,
             ips: 15_000_000, // Default 15 MIPS
 
             video_enabled: false, // PAS bit, set by 0x3C0 address writes
@@ -653,20 +653,18 @@ impl BxVgaC {
 
     /// Reset VGA controller
     pub(crate) fn reset(&mut self) {
-        // Save pointers that should persist across reset
-        let icount_ptr = self.icount_ptr;
+        // Save state that should persist across reset
+        let has_icount_sync = self.has_icount_sync;
         let ips = self.ips;
         *self = Self::new();
-        self.icount_ptr = icount_ptr;
+        self.has_icount_sync = has_icount_sync;
         self.ips = ips;
     }
 
-    /// Set the icount pointer and IPS for retrace timing computation.
+    /// Initialize icount-based timing for retrace computation.
     /// Must be called after CPU initialization.
-    /// # Safety
-    /// The pointer must remain valid for the lifetime of the VGA controller.
-    pub(crate) unsafe fn set_icount_ptr(&mut self, ptr: *const u64, ips: u64) {
-        self.icount_ptr = ptr;
+    pub(crate) fn set_icount_sync(&mut self, ips: u64) {
+        self.has_icount_sync = true;
         self.ips = if ips > 0 { ips } else { 15_000_000 };
     }
 
@@ -742,11 +740,10 @@ impl BxVgaC {
 
     /// Get current time in microseconds from icount.
     /// Returns a monotonically increasing value based on instructions executed.
-    fn current_usec(&self) -> u64 {
-        if self.icount_ptr.is_null() {
+    fn current_usec(&self, icount: u64) -> u64 {
+        if !self.has_icount_sync {
             return 0;
         }
-        let icount = unsafe { *self.icount_ptr };
         if self.ips > 0 {
             (icount as u128 * 1_000_000 / self.ips as u128) as u64
         } else {
@@ -861,7 +858,7 @@ impl BxVgaC {
     }
 
     /// Read from I/O port
-    pub(crate) fn read_port(&mut self, port: u16, _io_len: u8) -> u32 {
+    pub(crate) fn read_port(&mut self, port: u16, _io_len: u8, icount: u64) -> u32 {
         // Bochs vgacore.cc:487-494: port gating based on color_emulation
         if (0x3B0..=0x3BF).contains(&port) && self.misc_color_emulation {
             return 0xFF; // mono ports disabled in color mode
@@ -883,9 +880,9 @@ impl BxVgaC {
                 // Matching Bochs vgacore.cc:501-530
                 // bit 0: Display Enable (1 = in blanking period)
                 // bit 3: Vertical Retrace (1 = in vertical retrace)
-                let retval = if !self.icount_ptr.is_null() && self.vtotal_usec > 0 {
+                let retval = if self.has_icount_sync && self.vtotal_usec > 0 {
                     // Timing-based retrace matching Bochs vgacore.cc:511-526
-                    let time_usec = self.current_usec();
+                    let time_usec = self.current_usec(icount);
                     let display_usec = time_usec % self.vtotal_usec as u64;
                     let mut r = 0u8;
                     // Vertical retrace (bit 3)
