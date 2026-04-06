@@ -246,15 +246,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         {
             let ramsize_mb = (self.config.guest_memory_size / (1024 * 1024)) as u32;
             self.device_manager.pci_bridge.init_dram(ramsize_mb);
-            // Give PCI bridge a raw pointer to memory_type so PAM writes
-            // take effect immediately (matches Bochs DEV_mem_set_memory_type).
-            let memory_type_ptr = self.memory.memory_type_ptr();
-            // SAFETY: memory_type_ptr valid for emulator lifetime; single-threaded access
-            unsafe {
-                self.device_manager
-                    .pci_bridge
-                    .set_memory_type_ptr(memory_type_ptr);
-            }
             tracing::debug!("PCI bridge DRAM initialized for {}MB", ramsize_mb);
         }
         tracing::debug!("Devices initialized");
@@ -292,19 +283,13 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             );
         }
 
-        // Wire HardDrive→PIC for immediate IRQ raise/lower (matches Bochs DEV_pic_raise_irq)
-        self.device_manager.harddrv.pic_ptr =
-            &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
-
-        // Wire HardDrive→PCI IDE for BM-DMA set_irq (Bochs harddrv.cc:3509)
-        self.device_manager.harddrv.pci_ide_ptr =
-            &mut self.device_manager.pci_ide as *mut crate::iodev::pci_ide::BxPciIde;
-
         // Wire PCI IDE → pc_system, harddrv, memory for DMA timer
         self.device_manager.pci_ide.pc_system_ptr =
             &mut self.pc_system as *mut crate::pc_system::BxPcSystemC;
         self.device_manager.pci_ide.harddrv_ptr =
             &mut self.device_manager.harddrv as *mut crate::iodev::harddrv::BxHardDriveC;
+        self.device_manager.pci_ide.pic_ptr =
+            &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
         {
             let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
             self.device_manager.pci_ide.ram_ptr = ram_base;
@@ -351,26 +336,13 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             }
         }
 
-        // Wire PIC→IOAPIC for synchronous forwarding (Bochs pic.cc:499-500)
-        #[cfg(feature = "bx_support_apic")]
-        // SAFETY: ioapic_ptr valid for emulator lifetime; single-threaded access
-        unsafe {
-            let ioapic_ptr = &mut self.device_manager.ioapic as *mut crate::iodev::ioapic::BxIoApic;
-            self.device_manager.pic.set_ioapic_ptr(ioapic_ptr);
-        }
+        // PIC→IOAPIC forwarding is now handled at call sites: PIC's raise/lower_irq
+        // return forwarding info, and the caller (DeviceManager::tick, etc.) forwards
+        // to IOAPIC. No stored pointers needed.
 
-        // Wire IOAPIC→PIC for ExtINT delivery mode (Bochs ioapic.cc:312 DEV_pic_iac)
-        {
-            let pic_ptr = &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
-            self.device_manager.ioapic.set_pic_ptr(pic_ptr);
-        }
-
-        // Wire I/O APIC → LAPIC for interrupt delivery (matches Bochs apic_bus_deliver_interrupt)
-        #[cfg(feature = "bx_support_apic")]
-        {
-            let lapic_ptr = self.cpu.lapic_ptr_mut();
-            self.device_manager.ioapic.set_lapic_ptr(lapic_ptr);
-        }
+        // IOAPIC→PIC (ExtINT) and IOAPIC→LAPIC (interrupt delivery) are now passed
+        // as parameters to service_ioapic/set_irq_level/write_aligned.
+        // The MMIO callback path uses fallback stubs (no PIC/LAPIC available).
 
         // Register LAPIC timer with pc_system (matches Bochs apic.cc:190-191)
         // Timer is registered inactive; activated when LAPIC timer ICR is written.
@@ -491,19 +463,11 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.device_manager
             .init(&mut self.devices, &mut self.memory)?;
 
-        // Initialize PCI bridge DRAM row boundaries from RAM size,
-        // and wire PCI bridge to memory_type for immediate PAM updates.
+        // Initialize PCI bridge DRAM row boundaries from RAM size.
         #[cfg(feature = "bx_support_pci")]
         {
             let ramsize_mb = (self.config.guest_memory_size / (1024 * 1024)) as u32;
             self.device_manager.pci_bridge.init_dram(ramsize_mb);
-            let memory_type_ptr = self.memory.memory_type_ptr();
-            // SAFETY: memory_type_ptr valid for emulator lifetime; single-threaded access
-            unsafe {
-                self.device_manager
-                    .pci_bridge
-                    .set_memory_type_ptr(memory_type_ptr);
-            }
             tracing::debug!("PCI bridge DRAM initialized for {}MB", ramsize_mb);
         }
         tracing::info!("Device initialization complete");
@@ -535,19 +499,13 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             );
         }
 
-        // Wire HardDrive→PIC for immediate IRQ raise/lower (matches Bochs DEV_pic_raise_irq)
-        self.device_manager.harddrv.pic_ptr =
-            &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
-
-        // Wire HardDrive→PCI IDE for BM-DMA set_irq (Bochs harddrv.cc:3509)
-        self.device_manager.harddrv.pci_ide_ptr =
-            &mut self.device_manager.pci_ide as *mut crate::iodev::pci_ide::BxPciIde;
-
         // Wire PCI IDE → pc_system, harddrv, memory for DMA timer
         self.device_manager.pci_ide.pc_system_ptr =
             &mut self.pc_system as *mut crate::pc_system::BxPcSystemC;
         self.device_manager.pci_ide.harddrv_ptr =
             &mut self.device_manager.harddrv as *mut crate::iodev::harddrv::BxHardDriveC;
+        self.device_manager.pci_ide.pic_ptr =
+            &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
         {
             let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
             self.device_manager.pci_ide.ram_ptr = ram_base;
@@ -594,26 +552,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             }
         }
 
-        // Wire PIC→IOAPIC for synchronous forwarding (Bochs pic.cc:499-500)
-        #[cfg(feature = "bx_support_apic")]
-        // SAFETY: ioapic_ptr valid for emulator lifetime; single-threaded access
-        unsafe {
-            let ioapic_ptr = &mut self.device_manager.ioapic as *mut crate::iodev::ioapic::BxIoApic;
-            self.device_manager.pic.set_ioapic_ptr(ioapic_ptr);
-        }
-
-        // Wire IOAPIC→PIC for ExtINT delivery mode (Bochs ioapic.cc:312 DEV_pic_iac)
-        {
-            let pic_ptr = &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
-            self.device_manager.ioapic.set_pic_ptr(pic_ptr);
-        }
-
-        // Wire I/O APIC → LAPIC for interrupt delivery (matches Bochs apic_bus_deliver_interrupt)
-        #[cfg(feature = "bx_support_apic")]
-        {
-            let lapic_ptr = self.cpu.lapic_ptr_mut();
-            self.device_manager.ioapic.set_lapic_ptr(lapic_ptr);
-        }
+        // PIC→IOAPIC, IOAPIC→PIC, IOAPIC→LAPIC: pointer wiring removed.
+        // Forwarding is now done via parameters at call sites.
 
         // Register LAPIC timer with pc_system (matches Bochs apic.cc:190-191)
         // Timer is registered inactive; activated when LAPIC timer ICR is written.
@@ -1082,10 +1022,26 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // delay and calls ready_to_send_atapi(). We process it here during
         // the next tick, providing the minimum 1-tick delay that separates
         // the PACKET CDB write from the data-ready interrupt.
-        for ch in 0..2 {
-            if self.device_manager.harddrv.seek_complete_pending[ch] {
-                self.device_manager.harddrv.seek_complete_pending[ch] = false;
-                self.device_manager.harddrv.ready_to_send_atapi(ch);
+        #[cfg(feature = "bx_support_pci")]
+        {
+            let dm = &mut self.device_manager;
+            for ch in 0..2 {
+                if dm.harddrv.seek_complete_pending[ch] {
+                    dm.harddrv.seek_complete_pending[ch] = false;
+                    let crate::iodev::devices::DeviceManager { ref mut harddrv, ref mut pic, ref mut pci_ide, .. } = *dm;
+                    harddrv.ready_to_send_atapi(ch, pic, pci_ide);
+                }
+            }
+        }
+        #[cfg(not(feature = "bx_support_pci"))]
+        {
+            for ch in 0..2 {
+                if self.device_manager.harddrv.seek_complete_pending[ch] {
+                    self.device_manager.harddrv.seek_complete_pending[ch] = false;
+                    let crate::iodev::devices::DeviceManager { ref mut harddrv, ref mut pic, .. } = self.device_manager;
+                    let mut stub_pci_ide = crate::iodev::pci_ide::BxPciIde::new();
+                    harddrv.ready_to_send_atapi(ch, pic, &mut stub_pci_ide);
+                }
             }
         }
         // Process any deferred PCI port re-registrations and PAM changes

@@ -52,10 +52,6 @@ pub struct BxPciBridge {
     /// DRAM detection state (bitmask of changed DRBA registers)
     /// Bochs: dram_detect (pci.h:68)
     dram_detect: u8,
-    /// Raw pointer to BxMemC.memory_type for immediate PAM updates.
-    /// Mirrors how Bochs calls DEV_mem_set_memory_type() from the PCI handler.
-    /// SAFETY: Valid as long as the owning Emulator is alive and not moved.
-    memory_type_ptr: Option<*mut [[bool; 2]; 13]>,
 }
 
 impl Default for BxPciBridge {
@@ -72,18 +68,9 @@ impl BxPciBridge {
             pci_conf: [0; PCI_CONF_SIZE],
             drba: [0; 8],
             dram_detect: 0,
-            memory_type_ptr: None,
         };
         bridge.init_pci_conf();
         bridge
-    }
-
-    /// Set the raw pointer to BxMemC.memory_type for immediate PAM updates.
-    ///
-    /// # Safety
-    /// Caller must ensure the pointer remains valid for the lifetime of this bridge.
-    pub unsafe fn set_memory_type_ptr(&mut self, ptr: *mut [[bool; 2]; 13]) {
-        self.memory_type_ptr = Some(ptr);
     }
 
     /// Initialize PCI configuration space with i440FX identity.
@@ -239,10 +226,6 @@ impl BxPciBridge {
                             addr,
                             value8
                         );
-                        // Apply PAM changes IMMEDIATELY via raw pointer.
-                        // This matches Bochs calling DEV_mem_set_memory_type()
-                        // synchronously from within the PCI write handler.
-                        self.apply_pam_immediate();
                     }
                 }
                 // DRBA registers (pci.cc:353-369)
@@ -282,50 +265,9 @@ impl BxPciBridge {
         pam_changed
     }
 
-    /// Apply PAM register settings immediately via stored raw pointer.
-    /// Bochs: pci.cc:328-352 calls DEV_mem_set_memory_type() for each PAM area.
-    ///
-    /// This is called directly from pci_write() when PAM registers change,
-    /// ensuring memory_type is updated BEFORE the next instruction executes.
-    ///
-    /// PAM register layout:
-    /// - 0x59: F0000-FFFFF (area = F0000 = 12)
-    ///   bits[5:4] = F-seg RE/WE
-    /// - 0x5A-0x5F: C0000-EFFFF (two 16KB areas per register)
-    ///   bit0 = RE for low area, bit1 = WE for low area
-    ///   bit4 = RE for high area, bit5 = WE for high area
-    fn apply_pam_immediate(&self) {
-        let memory_type = if let Some(ptr) = self.memory_type_ptr {
-            unsafe { &mut *ptr }
-        } else {
-            tracing::warn!("PAM changed but no memory_type_ptr set — deferred update needed");
-            return;
-        };
 
-        // PAM 0x59 controls F-segment (area 12 = F0000)
-        let pam59 = self.pci_conf[0x59];
-        memory_type[12][0] = (pam59 >> 4) & 0x1 != 0; // F0000 read
-        memory_type[12][1] = (pam59 >> 5) & 0x1 != 0; // F0000 write
-
-        // PAM 0x5A-0x5F control areas 0-11 (C0000-EFFFF), two areas per register
-        for reg_idx in 0x5Au8..=0x5F {
-            let pam_val = self.pci_conf[reg_idx as usize];
-            let base_area = ((reg_idx - 0x5A) as usize) << 1;
-
-            // Low area (bits 0-1)
-            memory_type[base_area][0] = pam_val & 0x1 != 0;
-            memory_type[base_area][1] = (pam_val >> 1) & 0x1 != 0;
-
-            // High area (bits 4-5)
-            memory_type[base_area + 1][0] = (pam_val >> 4) & 0x1 != 0;
-            memory_type[base_area + 1][1] = (pam_val >> 5) & 0x1 != 0;
-        }
-
-        tracing::info!("PAM registers applied to memory_type (immediate)");
-    }
-
-    /// Apply PAM register settings to memory subsystem (deferred path).
-    /// Fallback for when immediate pointer is not available.
+    /// Apply PAM register settings to the memory subsystem.
+    /// Called after pci_write returns pam_changed=true.
     pub fn apply_pam_to_memory<'c, I: crate::cpu::BxCpuIdTrait>(
         &self,
         mem: &mut crate::memory::BxMemC<'c>,

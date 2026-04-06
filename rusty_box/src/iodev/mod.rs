@@ -303,7 +303,17 @@ impl BxDevicesC {
         if let Some(mut dm) = self.device_manager {
             // SAFETY: device_manager set by emulator for execution duration; single-threaded
             let dm = unsafe { dm.as_mut() };
-            dm.harddrv.bulk_read_data(port, buf)
+            #[cfg(feature = "bx_support_pci")]
+            {
+                let devices::DeviceManager { ref mut harddrv, ref mut pic, ref mut pci_ide, .. } = *dm;
+                harddrv.bulk_read_data(port, buf, pic, pci_ide)
+            }
+            #[cfg(not(feature = "bx_support_pci"))]
+            {
+                let devices::DeviceManager { ref mut harddrv, ref mut pic, .. } = *dm;
+                let mut stub_pci_ide = super::pci_ide::BxPciIde::new();
+                harddrv.bulk_read_data(port, buf, pic, &mut stub_pci_ide)
+            }
         } else {
             0
         }
@@ -399,8 +409,21 @@ impl BxDevicesC {
             DeviceId::Pit => dm.pit.read(port, io_len, icount),
             DeviceId::Cmos => dm.cmos.read(port, io_len),
             DeviceId::Dma => dm.dma.read(port, io_len),
-            DeviceId::Keyboard => dm.keyboard.read(port, io_len, icount),
-            DeviceId::HardDrive => dm.harddrv.read(port, io_len),
+            DeviceId::Keyboard => {
+                let devices::DeviceManager { ref mut keyboard, ref mut pit, .. } = *dm;
+                keyboard.read(port, io_len, icount, Some(pit))
+            }
+            #[cfg(feature = "bx_support_pci")]
+            DeviceId::HardDrive => {
+                let devices::DeviceManager { ref mut harddrv, ref mut pic, ref mut pci_ide, .. } = *dm;
+                harddrv.read(port, io_len, pic, pci_ide)
+            }
+            #[cfg(not(feature = "bx_support_pci"))]
+            DeviceId::HardDrive => {
+                let devices::DeviceManager { ref mut harddrv, ref mut pic, .. } = *dm;
+                let mut stub_pci_ide = super::pci_ide::BxPciIde::new();
+                harddrv.read(port, io_len, pic, &mut stub_pci_ide)
+            }
             DeviceId::Serial => dm.serial.read(port, io_len),
             DeviceId::Vga => dm.vga.read_port(port, io_len, icount),
             DeviceId::Port92 => dm.port92_read(port, io_len),
@@ -425,8 +448,21 @@ impl BxDevicesC {
             DeviceId::Pit => dm.pit.write(port, value, io_len),
             DeviceId::Cmos => dm.cmos.write(port, value, io_len),
             DeviceId::Dma => dm.dma.write(port, value, io_len),
-            DeviceId::Keyboard => dm.keyboard.write(port, value, io_len),
-            DeviceId::HardDrive => dm.harddrv.write(port, value, io_len),
+            DeviceId::Keyboard => {
+                let devices::DeviceManager { ref mut keyboard, ref mut pit, .. } = *dm;
+                keyboard.write(port, value, io_len, Some(pit))
+            }
+            #[cfg(feature = "bx_support_pci")]
+            DeviceId::HardDrive => {
+                let devices::DeviceManager { ref mut harddrv, ref mut pic, ref mut pci_ide, .. } = *dm;
+                harddrv.write(port, value, io_len, pic, pci_ide)
+            }
+            #[cfg(not(feature = "bx_support_pci"))]
+            DeviceId::HardDrive => {
+                let devices::DeviceManager { ref mut harddrv, ref mut pic, .. } = *dm;
+                let mut stub_pci_ide = super::pci_ide::BxPciIde::new();
+                harddrv.write(port, value, io_len, pic, &mut stub_pci_ide)
+            }
             DeviceId::Serial => dm.serial.write(port, value, io_len),
             DeviceId::Vga => dm.vga.write_port(port, value, io_len),
             DeviceId::Port92 => dm.port92_write(port, value, io_len),

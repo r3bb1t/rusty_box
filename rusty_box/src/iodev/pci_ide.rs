@@ -99,6 +99,9 @@ pub struct BxPciIde {
     /// Raw pointer to hard drive controller for bmdma_read/write_sector
     pub harddrv_ptr: *mut BxHardDriveC,
 
+    /// Raw pointer to PIC for passing to harddrv bmdma methods
+    pub pic_ptr: *mut super::pic::BxPicC,
+
     /// Raw pointer to guest physical RAM base (from BxMemC::get_ram_base_ptr)
     pub ram_ptr: *mut u8,
 
@@ -136,6 +139,7 @@ impl BxPciIde {
             bmdma_base: 0,
             pc_system_ptr: core::ptr::null_mut(),
             harddrv_ptr: core::ptr::null_mut(),
+            pic_ptr: core::ptr::null_mut(),
             ram_ptr: core::ptr::null_mut(),
             ram_len: 0,
         };
@@ -449,40 +453,59 @@ impl BxPciIde {
     /// Call harddrv.bmdma_read_sector() via raw pointer.
     /// Bochs: DEV_hd_bmdma_read_sector (pci_ide.cc:282)
     fn harddrv_bmdma_read_sector(&mut self, channel: u8, sector_size: &mut u32) -> bool {
-        if self.harddrv_ptr.is_null() {
+        if self.harddrv_ptr.is_null() || self.pic_ptr.is_null() {
             return false;
         }
-        let harddrv = unsafe { &mut *self.harddrv_ptr };
         let buffer_top = self.bmdma[channel as usize].buffer_top;
-        harddrv.bmdma_read_sector(
-            channel,
-            &mut self.bmdma[channel as usize].buffer[buffer_top..],
-            sector_size,
-        )
+        // SAFETY: single-threaded emulator; raw pointers valid for execution duration.
+        // Aliased &mut refs to self/harddrv/pic match existing Bochs-style device
+        // interconnection and will be cleaned up when pci_ide pointers are removed.
+        unsafe {
+            let self_ptr = self as *mut Self;
+            let harddrv = &mut *self.harddrv_ptr;
+            let pic = &mut *self.pic_ptr;
+            harddrv.bmdma_read_sector(
+                channel,
+                &mut (*(&mut (*self_ptr).bmdma[channel as usize].buffer))[buffer_top..],
+                sector_size,
+                pic,
+                &mut *self_ptr,
+            )
+        }
     }
 
     /// Call harddrv.bmdma_write_sector() via raw pointer.
     /// Bochs: DEV_hd_bmdma_write_sector (pci_ide.cc:299)
     fn harddrv_bmdma_write_sector(&mut self, channel: u8) -> bool {
-        if self.harddrv_ptr.is_null() {
+        if self.harddrv_ptr.is_null() || self.pic_ptr.is_null() {
             return false;
         }
-        let harddrv = unsafe { &mut *self.harddrv_ptr };
         let buffer_idx = self.bmdma[channel as usize].buffer_idx;
         let buffer_end = buffer_idx + 512;
         let mut sector_buf = [0u8; 512];
         sector_buf.copy_from_slice(&self.bmdma[channel as usize].buffer[buffer_idx..buffer_end]);
-        harddrv.bmdma_write_sector(channel, &sector_buf)
+        // SAFETY: see harddrv_bmdma_read_sector safety comment
+        unsafe {
+            let self_ptr = self as *mut Self;
+            let harddrv = &mut *self.harddrv_ptr;
+            let pic = &mut *self.pic_ptr;
+            harddrv.bmdma_write_sector(channel, &sector_buf, pic, &mut *self_ptr)
+        }
     }
 
     /// Call harddrv.bmdma_complete() via raw pointer.
     /// Bochs: DEV_hd_bmdma_complete (pci_ide.cc:291, 305, 311)
-    fn harddrv_bmdma_complete(&self, channel: u8) {
-        if self.harddrv_ptr.is_null() {
+    fn harddrv_bmdma_complete(&mut self, channel: u8) {
+        if self.harddrv_ptr.is_null() || self.pic_ptr.is_null() {
             return;
         }
-        let harddrv = unsafe { &mut *self.harddrv_ptr };
-        harddrv.bmdma_complete(channel);
+        // SAFETY: see harddrv_bmdma_read_sector safety comment
+        unsafe {
+            let self_ptr = self as *mut Self;
+            let harddrv = &mut *self.harddrv_ptr;
+            let pic = &mut *self.pic_ptr;
+            harddrv.bmdma_complete(channel, pic, &mut *self_ptr);
+        }
     }
 
     // ─── BM-DMA I/O Read ─────────────────────────────────────────────────

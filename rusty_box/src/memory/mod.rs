@@ -155,18 +155,6 @@ impl BxMemC<'_> {
         self.smram_enable = false;
         self.smram_restricted = false;
     }
-
-    /// Get a raw pointer to the memory_type array for immediate PAM updates.
-    ///
-    /// This is used by the PCI bridge to update memory_type directly when PAM
-    /// registers change, matching how Bochs uses `DEV_mem_set_memory_type()`
-    /// as a global call from the PCI handler.
-    ///
-    /// # Safety
-    /// The returned pointer is valid as long as this BxMemC is alive and not moved.
-    pub fn memory_type_ptr(&mut self) -> *mut [[bool; 2]; 13] {
-        &mut self.memory_type as *mut _
-    }
 }
 
 // implement getters and setters for memory stub

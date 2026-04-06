@@ -328,19 +328,6 @@ pub struct BxIoApic {
     /// Stuck interrupt delivery counter for diagnostics.
     /// Bochs: `static unsigned int stuck` (ioapic.cc:301) — moved to instance field.
     stuck_count: u32,
-
-    /// Raw pointer to the Local APIC for interrupt delivery.
-    /// Set during emulator initialization via `set_lapic_ptr()`.
-    /// Matches Bochs single-CPU model where apic_bus_deliver_interrupt()
-    /// routes directly to BX_CPU(0)->local_apic.
-    #[cfg(feature = "bx_support_apic")]
-    lapic_ptr: *mut crate::cpu::apic::BxLocalApic,
-
-    /// Raw pointer to the PIC for ExtINT delivery mode (delivery_mode == 7).
-    /// Bochs: `DEV_pic_iac()` in ioapic.cc:312 — reads the vector from the
-    /// 8259 PIC via an interrupt acknowledge cycle.
-    /// Set during emulator initialization via `set_pic_ptr()`.
-    pic_ptr: *mut super::pic::BxPicC,
 }
 
 impl Default for BxIoApic {
@@ -363,9 +350,6 @@ impl BxIoApic {
             irr: 0,
             ioredtbl: [IoRedirectEntry::default(); IOAPIC_NUM_PINS],
             stuck_count: 0,
-            #[cfg(feature = "bx_support_apic")]
-            lapic_ptr: core::ptr::null_mut(),
-            pic_ptr: core::ptr::null_mut(),
         }
     }
 
@@ -382,28 +366,8 @@ impl BxIoApic {
         Ok(())
     }
 
+
     /// Reset all I/O APIC state.
-    ///
-    /// Set the Local APIC pointer for interrupt delivery.
-    ///
-    /// Must be called during emulator initialization after the CPU is created.
-    /// The pointer remains valid for the lifetime of the emulator.
-    #[cfg(feature = "bx_support_apic")]
-    pub fn set_lapic_ptr(&mut self, ptr: *mut crate::cpu::apic::BxLocalApic) {
-        self.lapic_ptr = ptr;
-        tracing::debug!("IOAPIC: LAPIC pointer set for interrupt delivery");
-    }
-
-    /// Set the PIC pointer for ExtINT delivery mode (delivery_mode == 7).
-    ///
-    /// Bochs calls `DEV_pic_iac()` in `service_ioapic()` when a redirect entry
-    /// has delivery_mode == 7. This performs an interrupt acknowledge cycle on the
-    /// 8259 PIC to read the vector. Must be called during emulator initialization.
-    pub fn set_pic_ptr(&mut self, ptr: *mut super::pic::BxPicC) {
-        self.pic_ptr = ptr;
-        tracing::debug!("IOAPIC: PIC pointer set for ExtINT delivery");
-    }
-
     /// All redirection entries are masked, IRR and input state are cleared.
     ///
     /// Bochs: `bx_ioapic_c::reset(unsigned type)` (ioapic.cc:146-156)
@@ -512,7 +476,14 @@ impl BxIoApic {
     ///
     /// Bochs: `void bx_ioapic_c::write_aligned(bx_phy_address address, Bit32u value)`
     /// (ioapic.cc:196-236)
-    pub fn write_aligned(&mut self, address: BxPhyAddress, value: u32) {
+    pub fn write_aligned(
+        &mut self,
+        address: BxPhyAddress,
+        value: u32,
+        pic: Option<&mut super::pic::BxPicC>,
+        #[cfg(feature = "bx_support_apic")]
+        lapic: Option<&mut crate::cpu::apic::BxLocalApic>,
+    ) {
         let offset = (address as u32) & 0xFF;
         tracing::debug!(
             "IOAPIC: write aligned addr={:#010x} offset={:#04x} data={:#010x}",
@@ -580,7 +551,11 @@ impl BxIoApic {
                         entry.vector(),
                     );
                     // Bochs: service_ioapic(); (ioapic.cc:231)
-                    self.service_ioapic();
+                    self.service_ioapic(
+                        pic,
+                        #[cfg(feature = "bx_support_apic")]
+                        lapic,
+                    );
                 } else {
                     tracing::error!(
                         "IOAPIC: IOREGSEL points to undefined register {:#04x}",
@@ -659,7 +634,17 @@ impl BxIoApic {
     /// also sets `irr` and attempts delivery. A falling edge only clears `intin`.
     ///
     /// Bochs: `void bx_ioapic_c::set_irq_level(Bit8u int_in, bool level)` (ioapic.cc:258-292)
-    pub fn set_irq_level(&mut self, mut int_in: u8, level: bool) {
+    ///
+    /// `pic` and `lapic` are threaded through to `service_ioapic()` for
+    /// ExtINT vector lookup and LAPIC delivery respectively.
+    pub fn set_irq_level(
+        &mut self,
+        mut int_in: u8,
+        level: bool,
+        pic: Option<&mut super::pic::BxPicC>,
+        #[cfg(feature = "bx_support_apic")]
+        lapic: Option<&mut crate::cpu::apic::BxLocalApic>,
+    ) {
         // Bochs: if (int_in == 0) int_in = 2; // timer connected to pin #2 (ioapic.cc:260-262)
         if int_in == 0 {
             int_in = 2;
@@ -688,7 +673,11 @@ impl BxIoApic {
                 if level {
                     self.intin |= bit;
                     self.irr |= bit;
-                    self.service_ioapic();
+                    self.service_ioapic(
+                        pic,
+                        #[cfg(feature = "bx_support_apic")]
+                        lapic,
+                    );
                 } else {
                     self.intin &= !bit;
                     self.irr &= !bit;
@@ -700,7 +689,11 @@ impl BxIoApic {
                     self.intin |= bit;
                     if !entry.is_masked() {
                         self.irr |= bit;
-                        self.service_ioapic();
+                        self.service_ioapic(
+                            pic,
+                            #[cfg(feature = "bx_support_apic")]
+                            lapic,
+                        );
                     }
                 } else {
                     self.intin &= !bit;
@@ -736,7 +729,16 @@ impl BxIoApic {
     /// If delivery fails, delivery status is set and a stuck counter increments.
     ///
     /// Bochs: `void bx_ioapic_c::service_ioapic()` (ioapic.cc:299-334)
-    fn service_ioapic(&mut self) {
+    ///
+    /// `pic` is needed for ExtINT delivery mode (calls `pic.iac()`).
+    /// `lapic` is needed for direct LAPIC interrupt delivery.
+    /// Either may be `None`; fallback paths handle the missing dependency.
+    fn service_ioapic(
+        &mut self,
+        mut pic: Option<&mut super::pic::BxPicC>,
+        #[cfg(feature = "bx_support_apic")]
+        mut lapic: Option<&mut crate::cpu::apic::BxLocalApic>,
+    ) {
         tracing::debug!("IOAPIC: servicing (irr={:#010x})", self.irr);
 
         for pin in 0..IOAPIC_NUM_PINS {
@@ -756,9 +758,7 @@ impl BxIoApic {
             // else vector = entry->vector(); (ioapic.cc:311-315)
             let vector = if entry.delivery_mode() == IoApicDeliveryMode::ExtInt as u8 {
                 // ExtINT: Bochs calls DEV_pic_iac() for the vector (ioapic.cc:312).
-                // This performs an interrupt acknowledge cycle on the 8259 PIC.
-                if !self.pic_ptr.is_null() {
-                    let pic = unsafe { &mut *self.pic_ptr };
+                if let Some(pic) = pic.as_deref_mut() {
                     let v = pic.iac();
                     tracing::debug!(
                         "IOAPIC: ExtINT mode on pin {} — PIC IAC vector {:#04x}",
@@ -767,7 +767,7 @@ impl BxIoApic {
                     );
                     v
                 } else {
-                    // Fallback: no PIC wired, use entry vector
+                    // Fallback: no PIC reference, use entry vector
                     tracing::debug!(
                         "IOAPIC: ExtINT mode on pin {} — no PIC, using entry vector {:#04x}",
                         pin,
@@ -780,14 +780,9 @@ impl BxIoApic {
             };
 
             // Attempt delivery via APIC bus → Local APIC
-            // Bochs: bool done = apic_bus_deliver_interrupt(vector, entry->destination(),
-            //   entry->delivery_mode(), entry->destination_mode(),
-            //   entry->pin_polarity(), entry->trigger_mode()); (ioapic.cc:316)
             #[cfg(feature = "bx_support_apic")]
-            let done = if !self.lapic_ptr.is_null() {
-                let lapic = unsafe { &mut *self.lapic_ptr };
+            let done = if let Some(lapic) = lapic.as_deref_mut() {
                 // Single-CPU: deliver directly to the LAPIC.
-                // Bochs apic_bus_deliver_interrupt iterates CPUs; we have one.
                 let trigger = entry.trigger_mode();
                 lapic.deliver(vector, entry.delivery_mode(), trigger);
                 true
@@ -885,9 +880,9 @@ impl BxIoApic {
 /// (declared in ioapic.h:31, implemented in cpu/apic.cc:30-120)
 ///
 /// This is the fallback path used when `bx_support_apic` is disabled or when
-/// `lapic_ptr` is null. The primary code path (when APIC is enabled) delivers
-/// directly to the LAPIC via the `lapic_ptr` raw pointer (see `service_ioapic()`
-/// lines 744-750). For a single-CPU emulator, that direct path handles all
+/// no LAPIC reference is provided. The primary code path (when APIC is enabled)
+/// delivers directly to the LAPIC via the `lapic` parameter passed to
+/// `service_ioapic()`. For a single-CPU emulator, that direct path handles all
 /// destination modes — physical dest=0 or logical with flat model always matches
 /// the single LAPIC.
 ///
@@ -1010,7 +1005,13 @@ pub(crate) fn ioapic_mem_write_handler(
     // Bochs: (ioapic.cc:83-96)
     unsafe {
         if len == 4 {
-            ioapic.write_aligned(addr, *(data as *const u32));
+            ioapic.write_aligned(
+                addr,
+                *(data as *const u32),
+                None, // no PIC available in MMIO callback
+                #[cfg(feature = "bx_support_apic")]
+                None, // no LAPIC available in MMIO callback
+            );
         } else {
             // Non-4-byte writes: only accepted at IOREGSEL offset (0x00)
             let data_offset = (addr & 0xFF) as u32;
@@ -1031,7 +1032,13 @@ pub(crate) fn ioapic_mem_write_handler(
                 tracing::error!("IOAPIC: unsupported write len={} at addr={:#x}", len, addr);
                 return true;
             };
-            ioapic.write_aligned(addr, value);
+            ioapic.write_aligned(
+                addr,
+                value,
+                None, // no PIC available in MMIO callback
+                #[cfg(feature = "bx_support_apic")]
+                None, // no LAPIC available in MMIO callback
+            );
         }
     }
 
@@ -1179,7 +1186,7 @@ mod tests {
 
         // Write low word of entry 0 (IOREGSEL = 0x10)
         ioapic.ioregsel = 0x10;
-        ioapic.write_aligned(0xFEC00010, 0x00000042); // vector=0x42, unmasked
+        ioapic.write_aligned(0xFEC00010, 0x00000042, None, #[cfg(feature = "bx_support_apic")] None); // vector=0x42, unmasked
 
         // Read it back
         ioapic.ioregsel = 0x10;
@@ -1189,7 +1196,7 @@ mod tests {
 
         // Write high word of entry 0 (IOREGSEL = 0x11)
         ioapic.ioregsel = 0x11;
-        ioapic.write_aligned(0xFEC00010, 0x03000000); // dest = 3
+        ioapic.write_aligned(0xFEC00010, 0x03000000, None, #[cfg(feature = "bx_support_apic")] None); // dest = 3
 
         // Read it back
         ioapic.ioregsel = 0x11;
@@ -1204,13 +1211,13 @@ mod tests {
         ioapic.ioredtbl[2].set_lo_part(0x00000020); // vector=0x20, unmasked
 
         // Assert IRQ 0 — should be remapped to pin 2
-        ioapic.set_irq_level(0, true);
+        ioapic.set_irq_level(0, true, None, #[cfg(feature = "bx_support_apic")] None);
         assert_eq!(ioapic.intin & (1 << 2), 1 << 2);
         // IRR is cleared because service_ioapic() delivered successfully (edge-triggered)
         assert_eq!(ioapic.irr & (1 << 2), 0);
 
         // Deassert
-        ioapic.set_irq_level(0, false);
+        ioapic.set_irq_level(0, false, None, #[cfg(feature = "bx_support_apic")] None);
         assert_eq!(ioapic.intin & (1 << 2), 0);
     }
 
@@ -1222,13 +1229,13 @@ mod tests {
 
         // Rising edge triggers interrupt — delivery succeeds immediately (stub)
         // so IRR is cleared for edge-triggered entries after service_ioapic().
-        ioapic.set_irq_level(5, true);
+        ioapic.set_irq_level(5, true, None, #[cfg(feature = "bx_support_apic")] None);
         assert_ne!(ioapic.intin & (1 << 5), 0);
         // IRR was cleared by service_ioapic (delivery succeeded via stub)
         assert_eq!(ioapic.irr & (1 << 5), 0);
 
         // Falling edge clears input
-        ioapic.set_irq_level(5, false);
+        ioapic.set_irq_level(5, false, None, #[cfg(feature = "bx_support_apic")] None);
         assert_eq!(ioapic.intin & (1 << 5), 0);
     }
 
@@ -1239,12 +1246,12 @@ mod tests {
         ioapic.ioredtbl[10].set_lo_part(0x0000802A); // bit 15 set
 
         // Assert level
-        ioapic.set_irq_level(10, true);
+        ioapic.set_irq_level(10, true, None, #[cfg(feature = "bx_support_apic")] None);
         assert_ne!(ioapic.intin & (1 << 10), 0);
         assert_ne!(ioapic.irr & (1 << 10), 0);
 
         // Deassert level — both intin and irr cleared
-        ioapic.set_irq_level(10, false);
+        ioapic.set_irq_level(10, false, None, #[cfg(feature = "bx_support_apic")] None);
         assert_eq!(ioapic.intin & (1 << 10), 0);
         assert_eq!(ioapic.irr & (1 << 10), 0);
     }
@@ -1256,7 +1263,7 @@ mod tests {
         assert!(ioapic.ioredtbl[3].is_masked());
 
         // Rising edge sets intin but NOT irr (because masked)
-        ioapic.set_irq_level(3, true);
+        ioapic.set_irq_level(3, true, None, #[cfg(feature = "bx_support_apic")] None);
         assert_ne!(ioapic.intin & (1 << 3), 0);
         assert_eq!(ioapic.irr & (1 << 3), 0); // Not set because masked
     }

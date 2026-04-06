@@ -1291,13 +1291,6 @@ impl AtaChannel {
 pub struct BxHardDriveC {
     /// ATA channels
     pub(crate) channels: [AtaChannel; 2],
-    /// Raw pointer to PIC for immediate raise/lower (matching Bochs
-    /// DEV_pic_raise_irq / DEV_pic_lower_irq calls in harddrv.cc).
-    /// PIC now forwards to IOAPIC synchronously (Bochs pic.cc:499-500).
-    pub(crate) pic_ptr: *mut super::pic::BxPicC,
-    /// Raw pointer to PCI IDE controller for BM-DMA set_irq.
-    /// Bochs: DEV_ide_bmdma_set_irq() in harddrv.cc:3509
-    pub(crate) pci_ide_ptr: *mut super::pci_ide::BxPciIde,
     /// Deferred seek completion flag per channel (Bochs seek_timer pattern).
     /// When set, the emulator's tick loop calls ready_to_send_atapi().
     /// Matches Bochs start_seek() + seek_timer_handler() flow.
@@ -1320,8 +1313,6 @@ impl BxHardDriveC {
                 AtaChannel::new(0x1F0, 0x3F0, 14), // Primary
                 AtaChannel::new(0x170, 0x370, 15), // Secondary
             ],
-            pic_ptr: core::ptr::null_mut(),
-            pci_ide_ptr: core::ptr::null_mut(),
             cmd_history: Vec::new(),
             seek_complete_pending: [false; 2],
         }
@@ -1429,7 +1420,7 @@ impl BxHardDriveC {
     ///
     /// If nIEN=1 (interrupts disabled), this is a no-op. The BSY/DRQ/status bits
     /// are still updated by the caller — the host can poll Alternate Status instead.
-    fn raise_interrupt(&mut self, channel_num: usize) {
+    fn raise_interrupt(&mut self, channel_num: usize, pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) {
         let drive = self.channels[channel_num].selected_drive_mut();
         // Always record that the drive wants an interrupt (the drive asserts
         // its interrupt line regardless of nIEN). Bochs doesn't have this field
@@ -1446,16 +1437,10 @@ impl BxHardDriveC {
                 _ => 15u8,
             };
             // Bochs harddrv.cc:3509: DEV_ide_bmdma_set_irq(channel)
-            if !self.pci_ide_ptr.is_null() {
-                let pci_ide = unsafe { &mut *self.pci_ide_ptr };
-                pci_ide.bmdma_set_irq(channel_num as u8);
-            }
-            if !self.pic_ptr.is_null() {
-                // Bochs harddrv.cc:3511: DEV_pic_raise_irq(irq)
-                // PIC forwards to IOAPIC synchronously (Bochs pic.cc:499-500).
-                let pic = unsafe { &mut *self.pic_ptr };
-                pic.raise_irq(irq);
-            }
+            pci_ide.bmdma_set_irq(channel_num as u8);
+            // Bochs harddrv.cc:3511: DEV_pic_raise_irq(irq)
+            // PIC forwards to IOAPIC synchronously (Bochs pic.cc:499-500).
+            pic.raise_irq(irq);
         }
     }
 
@@ -1482,6 +1467,8 @@ impl BxHardDriveC {
         channel: u8,
         buffer: &mut [u8],
         sector_size: &mut u32,
+        pic: &mut super::pic::BxPicC,
+        pci_ide: &mut super::pci_ide::BxPciIde,
     ) -> bool {
         let ch = channel as usize;
         if ch >= 2 {
@@ -1510,7 +1497,7 @@ impl BxHardDriveC {
             let drive = &mut self.channels[ch].drives[selected as usize];
             if !drive.controller.packet_dma {
                 tracing::warn!("ATAPI: PACKET-DMA not active");
-                self.command_aborted(ch, current_command);
+                self.command_aborted(ch, current_command, pic, pci_ide);
                 return false;
             }
             let atapi_cmd = drive.atapi.command;
@@ -1556,13 +1543,13 @@ impl BxHardDriveC {
         }
 
         tracing::warn!("BM-DMA read: command {:#04x} not a DMA command", current_command);
-        self.command_aborted(channel as usize, current_command);
+        self.command_aborted(channel as usize, current_command, pic, pci_ide);
         false
     }
 
     /// Write a sector for BM-DMA transfer.
     /// Bochs: bx_hard_drive_c::bmdma_write_sector() (harddrv.cc:3657-3673)
-    pub fn bmdma_write_sector(&mut self, channel: u8, buffer: &[u8]) -> bool {
+    pub fn bmdma_write_sector(&mut self, channel: u8, buffer: &[u8], pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) -> bool {
         let ch = channel as usize;
         if ch >= 2 {
             return false;
@@ -1572,7 +1559,7 @@ impl BxHardDriveC {
 
         if current_command != 0xCA && current_command != 0x35 {
             tracing::warn!("BM-DMA write: command {:#04x} not a DMA write", current_command);
-            self.command_aborted(ch, current_command);
+            self.command_aborted(ch, current_command, pic, pci_ide);
             return false;
         }
         let drive = &mut self.channels[ch].drives[selected as usize];
@@ -1591,7 +1578,7 @@ impl BxHardDriveC {
 
     /// Complete a BM-DMA transfer — set final status and raise interrupt.
     /// Bochs: bx_hard_drive_c::bmdma_complete() (harddrv.cc:3675-3694)
-    pub fn bmdma_complete(&mut self, channel: u8) {
+    pub fn bmdma_complete(&mut self, channel: u8, pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) {
         let ch = channel as usize;
         if ch >= 2 {
             return;
@@ -1612,7 +1599,7 @@ impl BxHardDriveC {
             drive.controller.status.insert(AtaStatus::DSC);
         }
 
-        self.raise_interrupt(ch);
+        self.raise_interrupt(ch, pic, pci_ide);
     }
 
     /// Read from ATA I/O port (Bochs `bx_hard_drive_c::read`, harddrv.cc:770-1152).
@@ -1640,7 +1627,7 @@ impl BxHardDriveC {
     ///
     /// For READ MULTIPLE (0xC4), multiple sectors are buffered at once.
     /// The buffer_size is set to `min(multiple_sectors, num_sectors) * sect_size`.
-    pub fn read(&mut self, port: u16, io_len: u8) -> u32 {
+    pub fn read(&mut self, port: u16, io_len: u8, pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) -> u32 {
         let channel_num = match self.port_to_channel(port) {
             Some(c) => c,
             None => return 0xFF,
@@ -1827,9 +1814,9 @@ impl BxHardDriveC {
 
                 // drive borrow ends here (NLL); now we can call &mut self methods
                 if let Some(cmd) = need_abort_cmd {
-                    self.command_aborted(channel_num, cmd);
+                    self.command_aborted(channel_num, cmd, pic, pci_ide);
                 } else if need_raise_irq {
-                    self.raise_interrupt(channel_num);
+                    self.raise_interrupt(channel_num, pic, pci_ide);
                 }
 
                 value
@@ -1896,11 +1883,8 @@ impl BxHardDriveC {
                         0 => 14u8,
                         _ => 15u8,
                     };
-                    if !self.pic_ptr.is_null() {
-                        // Bochs DEV_pic_lower_irq() — PIC forwards to IOAPIC synchronously.
-                        let pic = unsafe { &mut *self.pic_ptr };
-                        pic.lower_irq(irq);
-                    }
+                    // Bochs DEV_pic_lower_irq() — PIC forwards to IOAPIC synchronously.
+                    pic.lower_irq(irq);
                 }
                 tracing::debug!(
                     "ATA: Status read {:#04x} (port={:#06x}) cmd={:#04x} drq={}",
@@ -1920,7 +1904,7 @@ impl BxHardDriveC {
     /// Equivalent to calling `read(port, 2)` in a loop but avoids per-word
     /// handler dispatch overhead. Returns the number of bytes actually copied.
     /// Handles ATAPI lazy-load, sector transitions, and DRQ completion.
-    pub fn bulk_read_data(&mut self, port: u16, buf: &mut [u8]) -> usize {
+    pub fn bulk_read_data(&mut self, port: u16, buf: &mut [u8], pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) -> usize {
         let channel_num = match self.port_to_channel(port) {
             Some(c) => c,
             None => return 0,
@@ -2112,9 +2096,9 @@ impl BxHardDriveC {
 
         // Raise interrupt after drive borrow is released
         if let Some(cmd) = need_abort_cmd {
-            self.command_aborted(channel_num, cmd);
+            self.command_aborted(channel_num, cmd, pic, pci_ide);
         } else if need_raise_irq {
-            self.raise_interrupt(channel_num);
+            self.raise_interrupt(channel_num, pic, pci_ide);
         }
 
         total_copied
@@ -2160,7 +2144,7 @@ impl BxHardDriveC {
     /// - Decrements `num_sectors` via `increment_address()`
     /// - If `num_sectors > 0`: keeps DRQ=1, raises IRQ for next sector
     /// - If `num_sectors == 0`: clears DRQ, raises final completion IRQ
-    pub fn write(&mut self, port: u16, value: u32, io_len: u8) {
+    pub fn write(&mut self, port: u16, value: u32, io_len: u8, pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) {
         let channel_num = match self.port_to_channel(port) {
             Some(c) => c,
             None => return,
@@ -2239,7 +2223,7 @@ impl BxHardDriveC {
 
                                 // Bochs harddrv.cc: raise_interrupt(channel)
                                 // Raises for both "more sectors" and "done"
-                                self.raise_interrupt(channel_num);
+                                self.raise_interrupt(channel_num, pic, pci_ide);
                             } else {
                                 // Write error
                                 tracing::error!("ATA: ide_write_sector failed");
@@ -2251,7 +2235,7 @@ impl BxHardDriveC {
                         ATA_CMD_PACKET => {
                             // ATAPI: 12-byte CDB completely written — dispatch ATAPI command
                             // Bochs harddrv.cc:1304-1830
-                            self.handle_atapi_command(channel_num);
+                            self.handle_atapi_command(channel_num, pic, pci_ide);
                         }
                         _ => {
                             // Unknown command writing data — shouldn't happen
@@ -2338,11 +2322,8 @@ impl BxHardDriveC {
                         0 => 14u8,
                         _ => 15u8,
                     };
-                    if !self.pic_ptr.is_null() {
-                        // Bochs DEV_pic_lower_irq() — PIC forwards to IOAPIC synchronously.
-                        let pic = unsafe { &mut *self.pic_ptr };
-                        pic.lower_irq(irq);
-                    }
+                    // Bochs DEV_pic_lower_irq() — PIC forwards to IOAPIC synchronously.
+                    pic.lower_irq(irq);
                 }
 
                 // Bochs harddrv.cc:2179-2182: check BSY before executing command
@@ -2356,7 +2337,7 @@ impl BxHardDriveC {
                     return;
                 }
 
-                self.execute_command(channel_num, value as u8);
+                self.execute_command(channel_num, value as u8, pic, pci_ide);
             }
             ATA_ALT_STATUS => {
                 // Device control register (Bochs harddrv.cc:2806-2864)
@@ -2394,14 +2375,8 @@ impl BxHardDriveC {
                         && drv.controller.status.contains(AtaStatus::DRQ)
                     {
                         let irq = if channel_num == 0 { 14u8 } else { 15u8 };
-                        if !self.pci_ide_ptr.is_null() {
-                            let pci_ide = unsafe { &mut *self.pci_ide_ptr };
-                            pci_ide.bmdma_set_irq(channel_num as u8);
-                        }
-                        if !self.pic_ptr.is_null() {
-                            let pic = unsafe { &mut *self.pic_ptr };
-                            pic.raise_irq(irq);
-                        }
+                        pci_ide.bmdma_set_irq(channel_num as u8);
+                        pic.raise_irq(irq);
                     }
                 }
 
@@ -2423,11 +2398,9 @@ impl BxHardDriveC {
                         channel.drives[d].controller.interrupt_pending = false;
                     }
                     // Bochs harddrv.cc:2848: DEV_pic_lower_irq()
-                    if !self.pic_ptr.is_null() {
-                        let pic = unsafe { &mut *self.pic_ptr };
-                        let irq = if channel_num == 0 { 14u8 } else { 15u8 };
-                        pic.lower_irq(irq);
-                    }
+                    let irq = if channel_num == 0 { 14u8 } else { 15u8 };
+                    // Bochs DEV_pic_lower_irq() — PIC forwards to IOAPIC synchronously.
+                    pic.lower_irq(irq);
                 } else if (value & 0x04) == 0 && channel.drives[0].controller.reset_in_progress {
                     // Transition 1→0: Deassert SRST (Bochs harddrv.cc:2850-2861)
                     tracing::debug!("ATA: Software reset deasserted ch={}", channel_num);
@@ -2461,7 +2434,7 @@ impl BxHardDriveC {
     ///
     /// Sets error register to ABRT, clears BSY/DRQ/CORR, sets DRDY/ERR.
     /// Preserves DSC (seek_complete) — matches Bochs harddrv.cc:3526-3531.
-    fn command_aborted(&mut self, channel_num: usize, _value: u8) {
+    fn command_aborted(&mut self, channel_num: usize, _value: u8, pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) {
         {
             let drive = self.channels[channel_num].selected_drive_mut();
             drive.controller.current_command = 0;
@@ -2473,7 +2446,7 @@ impl BxHardDriveC {
             drive.controller.buffer_index = 0;
         }
         // Bochs harddrv.cc:3533: raise_interrupt(channel)
-        self.raise_interrupt(channel_num);
+        self.raise_interrupt(channel_num, pic, pci_ide);
     }
 
     /// Initialize an ATAPI command response (Bochs init_send_atapi_command, harddrv.cc:3372-3421)
@@ -2565,7 +2538,7 @@ impl BxHardDriveC {
     /// If packet_dma is set (features bit 0 was 1 on PACKET command),
     /// signals DMA engine instead of raising interrupt for PIO.
     /// Bochs harddrv.cc:3493-3498
-    pub(crate) fn ready_to_send_atapi(&mut self, channel_num: usize) {
+    pub(crate) fn ready_to_send_atapi(&mut self, channel_num: usize, pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) {
         let drive = self.channels[channel_num].selected_drive_mut();
         drive.controller.sector_count = (drive.controller.sector_count & 0xF8) | 0x02; // i_o=1, c_d=0
         drive.controller.status.remove(AtaStatus::BSY | AtaStatus::ERR);
@@ -2574,17 +2547,14 @@ impl BxHardDriveC {
         // Bochs harddrv.cc:3493-3498: DMA vs PIO branch
         if drive.controller.packet_dma {
             tracing::debug!("ATAPI: ready_to_send_atapi DMA path ch={}", channel_num);
-            if !self.pci_ide_ptr.is_null() {
-                let pci_ide = unsafe { &mut *self.pci_ide_ptr };
-                pci_ide.bmdma_start_transfer(channel_num as u8);
-            }
+            pci_ide.bmdma_start_transfer(channel_num as u8);
         } else {
-            self.raise_interrupt(channel_num);
+            self.raise_interrupt(channel_num, pic, pci_ide);
         }
     }
 
     /// Handle an ATAPI command (Bochs harddrv.cc:1304-1830)
-    fn handle_atapi_command(&mut self, channel_num: usize) {
+    fn handle_atapi_command(&mut self, channel_num: usize, pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) {
         let drive = self.channels[channel_num].selected_drive_mut();
         let atapi_command = drive.controller.buffer[0];
         drive.controller.buffer_size = CDROM_SECTOR_SIZE;
@@ -2621,7 +2591,7 @@ impl BxHardDriveC {
                 } else {
                     self.atapi_cmd_error(channel_num, SenseKey::NotReady, Asc::MediumNotPresent);
                 }
-                self.raise_interrupt(channel_num);
+                self.raise_interrupt(channel_num, pic, pci_ide);
             }
             0x03 => {
                 // REQUEST SENSE
@@ -2650,7 +2620,7 @@ impl BxHardDriveC {
                 if drive.sense.sense_key == SenseKey::UnitAttention as u8 {
                     drive.sense.sense_key = SenseKey::None as u8;
                 }
-                self.ready_to_send_atapi(channel_num);
+                self.ready_to_send_atapi(channel_num, pic, pci_ide);
             }
             0x12 => {
                 // INQUIRY
@@ -2684,12 +2654,12 @@ impl BxHardDriveC {
                     drive.controller.buffer[32 + i] = b;
                 }
 
-                self.ready_to_send_atapi(channel_num);
+                self.ready_to_send_atapi(channel_num, pic, pci_ide);
             }
             0x1b => {
                 // START STOP UNIT — just succeed
                 self.atapi_cmd_nop(channel_num);
-                self.raise_interrupt(channel_num);
+                self.raise_interrupt(channel_num, pic, pci_ide);
             }
             0x1e => {
                 // PREVENT/ALLOW MEDIUM REMOVAL
@@ -2705,7 +2675,7 @@ impl BxHardDriveC {
                         Asc::MediumNotPresent,
                     );
                 }
-                self.raise_interrupt(channel_num);
+                self.raise_interrupt(channel_num, pic, pci_ide);
             }
             0x25 => {
                 // READ CAPACITY
@@ -2723,14 +2693,14 @@ impl BxHardDriveC {
                     drive.controller.buffer[5] = 0;
                     drive.controller.buffer[6] = (CDROM_SECTOR_SIZE >> 8) as u8;
                     drive.controller.buffer[7] = (CDROM_SECTOR_SIZE & 0xff) as u8;
-                    self.ready_to_send_atapi(channel_num);
+                    self.ready_to_send_atapi(channel_num, pic, pci_ide);
                 } else {
                     self.atapi_cmd_error(
                         channel_num,
                         SenseKey::NotReady,
                         Asc::MediumNotPresent,
                     );
-                    self.raise_interrupt(channel_num);
+                    self.raise_interrupt(channel_num, pic, pci_ide);
                 }
             }
             0x28 | 0xa8 => {
@@ -2759,7 +2729,7 @@ impl BxHardDriveC {
                         SenseKey::NotReady,
                         Asc::MediumNotPresent,
                     );
-                    self.raise_interrupt(channel_num);
+                    self.raise_interrupt(channel_num, pic, pci_ide);
                     return;
                 }
                 if lba > max_lba {
@@ -2768,7 +2738,7 @@ impl BxHardDriveC {
                         SenseKey::IllegalRequest,
                         Asc::LogicalBlockOor,
                     );
-                    self.raise_interrupt(channel_num);
+                    self.raise_interrupt(channel_num, pic, pci_ide);
                     return;
                 }
                 // Bochs harddrv.cc:1774-1776 — clip transfer when read extends past end of disc
@@ -2777,7 +2747,7 @@ impl BxHardDriveC {
                 }
                 if transfer_length <= 0 {
                     self.atapi_cmd_nop(channel_num);
-                    self.raise_interrupt(channel_num);
+                    self.raise_interrupt(channel_num, pic, pci_ide);
                     return;
                 }
 
@@ -2820,7 +2790,7 @@ impl BxHardDriveC {
                         SenseKey::NotReady,
                         Asc::MediumNotPresent,
                     );
-                    self.raise_interrupt(channel_num);
+                    self.raise_interrupt(channel_num, pic, pci_ide);
                     return;
                 }
 
@@ -2880,7 +2850,7 @@ impl BxHardDriveC {
                             drive.controller.buffer[18] = ((blocks >> 8) & 0xff) as u8;
                             drive.controller.buffer[19] = (blocks & 0xff) as u8;
                         }
-                        self.ready_to_send_atapi(channel_num);
+                        self.ready_to_send_atapi(channel_num, pic, pci_ide);
                     }
                     1 => {
                         // Multi-session info — single session
@@ -2899,7 +2869,7 @@ impl BxHardDriveC {
                         for i in 4..12 {
                             drive.controller.buffer[i] = 0;
                         }
-                        self.ready_to_send_atapi(channel_num);
+                        self.ready_to_send_atapi(channel_num, pic, pci_ide);
                     }
                     _ => {
                         self.atapi_cmd_error(
@@ -2907,7 +2877,7 @@ impl BxHardDriveC {
                             SenseKey::IllegalRequest,
                             Asc::InvFieldInCmdPacket,
                         );
-                        self.raise_interrupt(channel_num);
+                        self.raise_interrupt(channel_num, pic, pci_ide);
                     }
                 }
             }
@@ -3062,14 +3032,14 @@ impl BxHardDriveC {
                         total,
                         false,
                     );
-                    self.ready_to_send_atapi(channel_num);
+                    self.ready_to_send_atapi(channel_num, pic, pci_ide);
                 } else {
                     self.atapi_cmd_error(
                         channel_num,
                         SenseKey::IllegalRequest,
                         Asc::InvFieldInCmdPacket,
                     );
-                    self.raise_interrupt(channel_num);
+                    self.raise_interrupt(channel_num, pic, pci_ide);
                 }
             }
             0x4a => {
@@ -3121,7 +3091,7 @@ impl BxHardDriveC {
                         event_length,
                         false,
                     );
-                    self.ready_to_send_atapi(channel_num);
+                    self.ready_to_send_atapi(channel_num, pic, pci_ide);
                 } else {
                     tracing::debug!("ATAPI: Event Status Notification — polled only supported");
                     self.atapi_cmd_error(
@@ -3129,7 +3099,7 @@ impl BxHardDriveC {
                         SenseKey::IllegalRequest,
                         Asc::InvFieldInCmdPacket,
                     );
-                    self.raise_interrupt(channel_num);
+                    self.raise_interrupt(channel_num, pic, pci_ide);
                 }
             }
             0x51 => {
@@ -3140,7 +3110,7 @@ impl BxHardDriveC {
                     SenseKey::IllegalRequest,
                     Asc::InvFieldInCmdPacket,
                 );
-                self.raise_interrupt(channel_num);
+                self.raise_interrupt(channel_num, pic, pci_ide);
             }
             0xbd => {
                 // MECHANISM STATUS
@@ -3159,7 +3129,7 @@ impl BxHardDriveC {
                     drive.controller.buffer[i] = 0;
                 }
                 drive.controller.buffer[5] = 1; // one slot
-                self.ready_to_send_atapi(channel_num);
+                self.ready_to_send_atapi(channel_num, pic, pci_ide);
             }
             0x1a => {
                 // MODE SENSE (6) — Bochs harddrv.cc:1450
@@ -3186,7 +3156,7 @@ impl BxHardDriveC {
                         drive.controller.buffer[9] = 0x00;
                         drive.controller.buffer[10] = 0x00;
                         drive.controller.buffer[11] = 0x00;
-                        self.ready_to_send_atapi(channel_num);
+                        self.ready_to_send_atapi(channel_num, pic, pci_ide);
                     }
                     0x2a => {
                         // CD-ROM capabilities page (same as MODE SENSE 10)
@@ -3214,11 +3184,11 @@ impl BxHardDriveC {
                         drive.controller.buffer[18] = ((16 * 176) >> 8) as u8;
                         drive.controller.buffer[19] = ((16 * 176) & 0xff) as u8;
                         for i in 20..24 { drive.controller.buffer[i] = 0; }
-                        self.ready_to_send_atapi(channel_num);
+                        self.ready_to_send_atapi(channel_num, pic, pci_ide);
                     }
                     _ => {
                         self.atapi_cmd_error(channel_num, SenseKey::IllegalRequest, Asc::InvFieldInCmdPacket);
-                        self.raise_interrupt(channel_num);
+                        self.raise_interrupt(channel_num, pic, pci_ide);
                     }
                 }
             }
@@ -3249,7 +3219,7 @@ impl BxHardDriveC {
                         drive.controller.buffer[14] = 0x00;
                         drive.controller.buffer[15] = 0x00;
                         for i in 16..20 { drive.controller.buffer[i] = 0; }
-                        self.ready_to_send_atapi(channel_num);
+                        self.ready_to_send_atapi(channel_num, pic, pci_ide);
                     }
                     0x2a => {
                         // CD-ROM capabilities
@@ -3288,7 +3258,7 @@ impl BxHardDriveC {
                         for i in 24..28 {
                             drive.controller.buffer[i] = 0;
                         }
-                        self.ready_to_send_atapi(channel_num);
+                        self.ready_to_send_atapi(channel_num, pic, pci_ide);
                     }
                     _ => {
                         self.atapi_cmd_error(
@@ -3296,7 +3266,7 @@ impl BxHardDriveC {
                             SenseKey::IllegalRequest,
                             Asc::InvFieldInCmdPacket,
                         );
-                        self.raise_interrupt(channel_num);
+                        self.raise_interrupt(channel_num, pic, pci_ide);
                     }
                 }
             }
@@ -3319,12 +3289,12 @@ impl BxHardDriveC {
                         SenseKey::NotReady,
                         Asc::MediumNotPresent,
                     );
-                    self.raise_interrupt(channel_num);
+                    self.raise_interrupt(channel_num, pic, pci_ide);
                     return;
                 }
                 if transfer_length == 0 || (transfer_req & 0xf8) == 0 {
                     self.atapi_cmd_nop(channel_num);
-                    self.raise_interrupt(channel_num);
+                    self.raise_interrupt(channel_num, pic, pci_ide);
                     return;
                 }
                 let sector_size = if (transfer_req & 0xf8) == 0xf8 {
@@ -3360,18 +3330,18 @@ impl BxHardDriveC {
                         SenseKey::NotReady,
                         Asc::MediumNotPresent,
                     );
-                    self.raise_interrupt(channel_num);
+                    self.raise_interrupt(channel_num, pic, pci_ide);
                 } else if lba > drive.cdrom.max_lba {
                     self.atapi_cmd_error(
                         channel_num,
                         SenseKey::IllegalRequest,
                         Asc::LogicalBlockOor,
                     );
-                    self.raise_interrupt(channel_num);
+                    self.raise_interrupt(channel_num, pic, pci_ide);
                 } else {
                     drive.cdrom.curr_lba = lba;
                     self.atapi_cmd_nop(channel_num);
-                    self.raise_interrupt(channel_num);
+                    self.raise_interrupt(channel_num, pic, pci_ide);
                 }
             }
             _ => {
@@ -3381,7 +3351,7 @@ impl BxHardDriveC {
                     SenseKey::IllegalRequest,
                     Asc::IllegalOpcode,
                 );
-                self.raise_interrupt(channel_num);
+                self.raise_interrupt(channel_num, pic, pci_ide);
             }
         }
     }
@@ -3402,7 +3372,7 @@ impl BxHardDriveC {
     /// 3. Host writes 256 words to data port
     /// 4. When buffer full: ide_write_sector writes to disk
     /// 5. If num_sectors > 0: keep DRQ for next sector; else clear DRQ
-    fn execute_command(&mut self, channel_num: usize, command: u8) {
+    fn execute_command(&mut self, channel_num: usize, command: u8, pic: &mut super::pic::BxPicC, pci_ide: &mut super::pci_ide::BxPciIde) {
         // Bochs harddrv.cc:2183-2184: RECALIBRATE range masking
         // Commands 0x10-0x1F all map to RECALIBRATE (only top nibble matters)
         let command = if (command & 0xF0) == 0x10 {
@@ -3448,7 +3418,7 @@ impl BxHardDriveC {
             ATA_CMD_RECALIBRATE => {
                 // Bochs harddrv.cc:2188-2216
                 if drive.device_type != DeviceType::Disk {
-                    self.command_aborted(channel_num, command);
+                    self.command_aborted(channel_num, command, pic, pci_ide);
                     return;
                 }
                 drive.controller.error = AtaError::empty();
@@ -3473,7 +3443,7 @@ impl BxHardDriveC {
 
                 // Bochs harddrv.cc:2263-2265: validate LBA before reading
                 if drive.calculate_logical_address().is_none() {
-                    self.command_aborted(channel_num, command);
+                    self.command_aborted(channel_num, command, pic, pci_ide);
                     return;
                 }
 
@@ -3486,7 +3456,7 @@ impl BxHardDriveC {
                     drive.controller.interrupt_pending = true;
                 } else {
                     // Bochs harddrv.cc:2279-2282: command_aborted on read failure
-                    self.command_aborted(channel_num, command);
+                    self.command_aborted(channel_num, command, pic, pci_ide);
                     return;
                 }
             }
@@ -3606,7 +3576,7 @@ impl BxHardDriveC {
                         "ATA: init drive params: logical sector count {} not supported (expected {})",
                         spt, disk_spt
                     );
-                    self.command_aborted(channel_num, command);
+                    self.command_aborted(channel_num, command, pic, pci_ide);
                     return;
                 } else if head_no == 0 {
                     // Linux 2.6.x kernels use head_no=0 — log but don't abort (Bochs behavior)
@@ -3618,7 +3588,7 @@ impl BxHardDriveC {
                         "ATA: init drive params: max. logical head number {} not supported (expected {})",
                         head_no, disk_heads - 1
                     );
-                    self.command_aborted(channel_num, command);
+                    self.command_aborted(channel_num, command, pic, pci_ide);
                     return;
                 } else {
                     drive.controller.status = AtaStatus::DRDY | AtaStatus::DSC;
@@ -3632,7 +3602,7 @@ impl BxHardDriveC {
                     drive.controller.sector_count = 1;
                     drive.controller.sector_no = 1;
                     drive.controller.cylinder_no = 0xEB14;
-                    self.command_aborted(channel_num, command);
+                    self.command_aborted(channel_num, command, pic, pci_ide);
                     return;
                 }
                 tracing::debug!("ATA: IDENTIFY command");
@@ -3677,7 +3647,7 @@ impl BxHardDriveC {
                                     "ATA: SET FEATURES: unknown transfer mode type {:#04x}",
                                     xfer_type
                                 );
-                                self.command_aborted(channel_num, command);
+                                self.command_aborted(channel_num, command, pic, pci_ide);
                                 return;
                             }
                         }
@@ -3708,7 +3678,7 @@ impl BxHardDriveC {
                             "ATA: SET FEATURES: unknown subcommand {:#04x}",
                             subcommand
                         );
-                        self.command_aborted(channel_num, command);
+                        self.command_aborted(channel_num, command, pic, pci_ide);
                         return;
                     }
                 }
@@ -3719,7 +3689,7 @@ impl BxHardDriveC {
                 // Sector count must be a power of 2, 1-128
                 let count = drive.controller.sector_count;
                 if count == 0 || count > 128 || (count & (count - 1)) != 0 {
-                    self.command_aborted(channel_num, command);
+                    self.command_aborted(channel_num, command, pic, pci_ide);
                     return;
                 }
                 drive.controller.multiple_sectors = count;
@@ -3774,7 +3744,7 @@ impl BxHardDriveC {
                     drive.controller.buffer_size = 512;
                     drive.controller.interrupt_pending = true;
                 } else {
-                    self.command_aborted(channel_num, command);
+                    self.command_aborted(channel_num, command, pic, pci_ide);
                     return;
                 }
             }
@@ -3789,7 +3759,7 @@ impl BxHardDriveC {
                     drive.controller.status = AtaStatus::empty();
                     drive.controller.error = AtaError::from_bits_retain(drive.controller.error.bits() & !(1 << 7));
                 } else {
-                    self.command_aborted(channel_num, command);
+                    self.command_aborted(channel_num, command, pic, pci_ide);
                     return;
                 }
             }
@@ -3804,7 +3774,7 @@ impl BxHardDriveC {
                     }
                     if (features & (1 << 1)) != 0 {
                         tracing::debug!("ATA: PACKET-overlapped not supported");
-                        self.command_aborted(channel_num, ATA_CMD_PACKET);
+                        self.command_aborted(channel_num, ATA_CMD_PACKET, pic, pci_ide);
                         return;
                     }
                     drive.controller.sector_count = 1; // c_d=1 (command)
@@ -3818,13 +3788,13 @@ impl BxHardDriveC {
                     // No interrupt here (Bochs harddrv.cc:2604)
                     return; // Don't raise interrupt
                 } else {
-                    self.command_aborted(channel_num, command);
+                    self.command_aborted(channel_num, command, pic, pci_ide);
                     return;
                 }
             }
             _ => {
                 tracing::warn!("ATA: Unknown command {:#04x}", command);
-                self.command_aborted(channel_num, command);
+                self.command_aborted(channel_num, command, pic, pci_ide);
                 return;
             }
         }
@@ -3837,7 +3807,7 @@ impl BxHardDriveC {
             .controller
             .interrupt_pending
         {
-            self.raise_interrupt(channel_num);
+            self.raise_interrupt(channel_num, pic, pci_ide);
         }
     }
 

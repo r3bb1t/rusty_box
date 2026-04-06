@@ -345,10 +345,6 @@ pub struct BxPicC {
     cpu_async_event_ptr: *mut u32,
     /// Raw pointer to CPU's `pending_event` for event-bit management.
     cpu_pending_event_ptr: *mut u32,
-    /// Raw pointer to I/O APIC for synchronous forwarding (Bochs pic.cc:499-500).
-    /// PIC raise/lower_irq forwards to IOAPIC immediately, matching Bochs.
-    #[cfg(feature = "bx_support_apic")]
-    ioapic_ptr: *mut super::ioapic::BxIoApic,
 }
 
 impl Default for BxPicC {
@@ -380,19 +376,9 @@ impl BxPicC {
             elcr: [0, 0],
             cpu_async_event_ptr: core::ptr::null_mut(),
             cpu_pending_event_ptr: core::ptr::null_mut(),
-            #[cfg(feature = "bx_support_apic")]
-            ioapic_ptr: core::ptr::null_mut(),
         }
     }
 
-    /// Wire I/O APIC pointer for synchronous forwarding (Bochs pic.cc:499-500).
-    ///
-    /// # Safety
-    /// The pointer must remain valid for the lifetime of the PIC.
-    #[cfg(feature = "bx_support_apic")]
-    pub unsafe fn set_ioapic_ptr(&mut self, ptr: *mut super::ioapic::BxIoApic) {
-        self.ioapic_ptr = ptr;
-    }
 
     /// Wire CPU signal pointers for BX_RAISE_INTR / BX_CLEAR_INTR.
     ///
@@ -477,10 +463,10 @@ impl BxPicC {
             let action = self.slave.service();
             match action {
                 PicServiceAction::RaiseCascade => {
-                    self.raise_irq(2);
+                    let _ = self.raise_irq(2);
                 }
                 PicServiceAction::LowerCascade => {
-                    self.lower_irq(2);
+                    let _ = self.lower_irq(2);
                 }
                 _ => {}
             }
@@ -821,22 +807,19 @@ impl BxPicC {
     /// was not already asserted. For edge-triggered IRQs, the device must
     /// call `lower_irq` first to create a new edge.
     ///
-    /// Bochs uses `IRQ_in[n]` as a bitmask of `irq_type` flags (ISA, PCI)
-    /// to support shared IRQ lines. We simplify to 0/1 since we don't have
-    /// PCI IRQ sharing. The logic is equivalent for single-type IRQs.
-    pub fn raise_irq(&mut self, irq_no: u8) {
+    /// Returns `Some((irq_no, true))` when the caller should forward to IOAPIC
+    /// (Bochs pic.cc:499-500 synchronous forwarding). The caller is responsible
+    /// for calling `ioapic.set_irq_level(irq, level)` with the returned values.
+    pub fn raise_irq(&mut self, irq_no: u8) -> Option<(u8, bool)> {
         if irq_no < 8 {
             // Master PIC — Bochs pic.cc:491-496
-            // Bochs guard: `(IRQ_in[n] & ~irq_type) == 0` allows re-assertion of same type.
-            // For our single-type model, always set irq_in and check IRR.
             self.master.irq_in[irq_no as usize] = 1;
             if (self.master.irr & (1 << irq_no)) == 0 {
                 self.master.irr |= 1 << irq_no;
                 self.service_pic_dispatch(true);
                 // Bochs pic.cc:499-500: forward to IOAPIC on LOW→HIGH edge
-                #[cfg(feature = "bx_support_apic")]
-                if !self.ioapic_ptr.is_null() && irq_no != 2 {
-                    unsafe { (*self.ioapic_ptr).set_irq_level(irq_no, true) };
+                if irq_no != 2 {
+                    return Some((irq_no, true));
                 }
             }
         } else if irq_no < 16 {
@@ -847,29 +830,26 @@ impl BxPicC {
                 self.slave.irr |= 1 << slave_irq;
                 self.service_pic_dispatch(false);
                 // Bochs pic.cc:499-500: forward to IOAPIC
-                #[cfg(feature = "bx_support_apic")]
-                if !self.ioapic_ptr.is_null() {
-                    unsafe { (*self.ioapic_ptr).set_irq_level(irq_no, true) };
-                }
+                return Some((irq_no, true));
             } else if irq_no == 15 {
                 // IRQ 15 raise while slave IRR bit 7 already set — IOAPIC skipped!
             }
         }
+        None
     }
 
     /// Lower an IRQ line (Bochs `bx_pic_c::lower_irq`)
     ///
     /// Clears the IRQ assertion flag and the IRR bit.
-    /// Bochs clears IRR unconditionally when all types are deasserted.
-    pub fn lower_irq(&mut self, irq_no: u8) {
+    /// Returns `Some((irq_no, false))` when the caller should forward to IOAPIC.
+    pub fn lower_irq(&mut self, irq_no: u8) -> Option<(u8, bool)> {
         if irq_no < 8 {
             if self.master.irq_in[irq_no as usize] != 0 {
                 self.master.irq_in[irq_no as usize] = 0;
                 self.master.irr &= !(1 << irq_no);
                 // Bochs pic.cc:470-478: forward to IOAPIC
-                #[cfg(feature = "bx_support_apic")]
-                if !self.ioapic_ptr.is_null() && irq_no != 2 {
-                    unsafe { (*self.ioapic_ptr).set_irq_level(irq_no, false) };
+                if irq_no != 2 {
+                    return Some((irq_no, false));
                 }
             }
         } else if irq_no < 16 {
@@ -878,22 +858,21 @@ impl BxPicC {
                 self.slave.irq_in[slave_irq as usize] = 0;
                 self.slave.irr &= !(1 << slave_irq);
                 // Bochs pic.cc:470-478: forward to IOAPIC
-                #[cfg(feature = "bx_support_apic")]
-                if !self.ioapic_ptr.is_null() {
-                    unsafe { (*self.ioapic_ptr).set_irq_level(irq_no, false) };
-                }
+                return Some((irq_no, false));
             }
         }
+        None
     }
 
     /// Set IRQ level — raise or lower based on level (Bochs `bx_pic_c::set_irq_level`)
     ///
     /// Convenience wrapper used by devices that track IRQ state as a bool.
-    pub fn set_irq_level(&mut self, irq_no: u8, level: bool) {
+    /// Returns IOAPIC forwarding info, same as raise_irq/lower_irq.
+    pub fn set_irq_level(&mut self, irq_no: u8, level: bool) -> Option<(u8, bool)> {
         if level {
-            self.raise_irq(irq_no);
+            self.raise_irq(irq_no)
         } else {
-            self.lower_irq(irq_no);
+            self.lower_irq(irq_no)
         }
     }
 
@@ -1018,7 +997,7 @@ mod tests {
     fn test_pic_irq() {
         let mut pic = BxPicC::new();
         pic.master.imr = 0x00; // Unmask all
-        pic.raise_irq(0);
+        let _ = pic.raise_irq(0);
         assert!(pic.has_interrupt());
         let vector = pic.iac();
         assert_eq!(vector, 0x08); // IRQ0 -> INT 0x08
@@ -1037,7 +1016,7 @@ mod tests {
     fn test_pic_specific_eoi() {
         let mut pic = BxPicC::new();
         pic.master.imr = 0x00;
-        pic.raise_irq(3);
+        let _ = pic.raise_irq(3);
         assert!(pic.has_interrupt());
         let vector = pic.iac();
         assert_eq!(vector, 0x08 + 3);
@@ -1051,7 +1030,7 @@ mod tests {
     fn test_pic_nonspecific_eoi() {
         let mut pic = BxPicC::new();
         pic.master.imr = 0x00;
-        pic.raise_irq(0);
+        let _ = pic.raise_irq(0);
         pic.iac();
         assert_eq!(pic.master.isr, 1 << 0); // IRQ0 in service
                                             // Non-specific EOI (0x20)
@@ -1118,7 +1097,7 @@ mod tests {
         let mut pic = BxPicC::new();
         pic.master.imr = 0x00;
         pic.master.lowest_priority = 7; // Priority: 0 highest
-        pic.raise_irq(0);
+        let _ = pic.raise_irq(0);
         pic.iac();
         assert_eq!(pic.master.isr, 1 << 0);
         // Rotate on non-specific EOI (0xA0): clears highest ISR, increments lowest_priority
