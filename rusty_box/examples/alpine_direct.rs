@@ -221,7 +221,7 @@ fn run_alpine() -> Result<()> {
     let config = EmulatorConfig {
         guest_memory_size: ram_bytes,
         host_memory_size: ram_bytes,
-        ips: 15_000_000,
+        ips: 300_000_000,
         pci_enabled: true,
         ..EmulatorConfig::default()
     };

@@ -277,7 +277,7 @@ fn run_alpine() -> Result<()> {
         guest_memory_size: ram_bytes,
         host_memory_size: ram_bytes,
         memory_block_size: 128 * 1024,
-        ips: 15_000_000,
+        ips: 300_000_000,
         pci_enabled: true,
         ..Default::default()
     };
