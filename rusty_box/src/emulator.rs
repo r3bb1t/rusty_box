@@ -19,7 +19,7 @@ use crate::{
     Result,
 };
 
-use alloc::{boxed::Box, string::String, sync::Arc, vec::Vec};
+use alloc::{boxed::Box, format, string::String, sync::Arc, vec::Vec};
 use core::sync::atomic::AtomicBool;
 #[cfg(feature = "std")]
 use core::sync::atomic::Ordering;
@@ -2378,6 +2378,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             // MwaitIf: wake on interrupt even when IF=0 (ECX[0]=1).
                             let mwait_if = matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::MwaitIf);
                             let mut hlt_budget = 0u64;
+                            #[cfg(feature = "std")]
                             let hlt_wall_start = std::time::Instant::now();
                             while hlt_budget < 100_000_000 {
                                 if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if) {
@@ -2426,11 +2427,14 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 let dev_usec = (step as u64 * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
                                 self.tick_devices(dev_usec);
                                 // Wall-clock throttle: sleep if virtual time races ahead
-                                let virtual_usec = hlt_budget * 1_000_000 / (self.config.ips as u64).max(1);
-                                let wall_usec = hlt_wall_start.elapsed().as_micros() as u64;
-                                if virtual_usec > wall_usec + 1_000 {
-                                    let sleep_usec = (virtual_usec - wall_usec).min(15_000);
-                                    std::thread::sleep(std::time::Duration::from_micros(sleep_usec));
+                                #[cfg(feature = "std")]
+                                {
+                                    let virtual_usec = hlt_budget * 1_000_000 / (self.config.ips as u64).max(1);
+                                    let wall_usec = hlt_wall_start.elapsed().as_micros() as u64;
+                                    if virtual_usec > wall_usec + 1_000 {
+                                        let sleep_usec = (virtual_usec - wall_usec).min(15_000);
+                                        std::thread::sleep(std::time::Duration::from_micros(sleep_usec));
+                                    }
                                 }
                             }
 
@@ -2444,11 +2448,14 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             // cycles without returning to the outer loop. This matches
                             // Bochs's dedicated CPU thread which never yields to GUI
                             // between MWAIT wakes. Budget: 15ms wall-clock.
+                            #[cfg(feature = "std")]
                             let mwait_wall_start = std::time::Instant::now();
+                            #[cfg(feature = "std")]
                             let mwait_wall_budget = std::time::Duration::from_millis(15);
-                            while mwait_wall_start.elapsed() < mwait_wall_budget
-                                && !self.stop_flag.load(core::sync::atomic::Ordering::Relaxed)
-                            {
+                            loop {
+                                #[cfg(feature = "std")]
+                                if mwait_wall_start.elapsed() >= mwait_wall_budget { break; }
+                                if self.stop_flag.load(core::sync::atomic::Ordering::Relaxed) { break; }
                                 // Deliver PIC interrupt if pending
                                 if self.device_manager.has_interrupt()
                                     && self.cpu.get_b_if() != 0
@@ -2910,7 +2917,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Wall-clock budget: 15ms keeps GUI responsive at 60 fps.
         // Bochs runs CPU on a dedicated thread with no frame budget; we emulate
         // that throughput by processing multiple MWAIT→wake→execute cycles here.
+        #[cfg(feature = "std")]
         let wall_start = std::time::Instant::now();
+        #[cfg(feature = "std")]
         let wall_budget = std::time::Duration::from_millis(15);
 
         'batch: loop {
@@ -3004,6 +3013,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             ) {
                 let mwait_if = matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::MwaitIf);
                 let mut hlt_budget = 0u64;
+                #[cfg(feature = "std")]
                 let hlt_wall_start = std::time::Instant::now();
                 while hlt_budget < 100_000_000 {
                     if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if) { break; }
@@ -3041,11 +3051,14 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     let dev_usec = (step as u64 * 1_000_000 / ips.max(1)).max(1);
                     self.tick_devices(dev_usec);
                     // Wall-clock throttle: sleep if virtual time races ahead
-                    let virtual_usec = hlt_budget * 1_000_000 / ips.max(1);
-                    let wall_usec = hlt_wall_start.elapsed().as_micros() as u64;
-                    if virtual_usec > wall_usec + 1_000 {
-                        let sleep_usec = (virtual_usec - wall_usec).min(15_000);
-                        std::thread::sleep(std::time::Duration::from_micros(sleep_usec));
+                    #[cfg(feature = "std")]
+                    {
+                        let virtual_usec = hlt_budget * 1_000_000 / ips.max(1);
+                        let wall_usec = hlt_wall_start.elapsed().as_micros() as u64;
+                        if virtual_usec > wall_usec + 1_000 {
+                            let sleep_usec = (virtual_usec - wall_usec).min(15_000);
+                            std::thread::sleep(std::time::Duration::from_micros(sleep_usec));
+                        }
                     }
                 }
                 #[cfg(feature = "bx_support_apic")]
@@ -3074,7 +3087,12 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             // run another cycle instead of returning to egui event loop.
             // This matches Bochs's dedicated CPU thread which never yields to GUI.
             if matches!(self.cpu.activity_state, crate::cpu::cpu::CpuActivityState::Active)
-                && wall_start.elapsed() < wall_budget {
+                && {
+                    #[cfg(feature = "std")]
+                    { wall_start.elapsed() < wall_budget }
+                    #[cfg(not(feature = "std"))]
+                    { true }
+                } {
                     continue 'batch;
                 }
 

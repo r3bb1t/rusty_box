@@ -8,6 +8,7 @@ use bitflags::bitflags;
 /// When RUSTY_BOX_NO_AVX is set, strip AVX/AVX2/FMA/BMI1/BMI2/AVX-512 from
 /// CPUID and ISA extensions. Forces kernel to SSE2-only code paths for
 /// diagnosing instruction emulation bugs.
+#[cfg(feature = "std")]
 fn no_avx_mode() -> bool {
     static NO_AVX: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *NO_AVX.get_or_init(|| {
@@ -17,6 +18,11 @@ fn no_avx_mode() -> bool {
         }
         active
     })
+}
+
+#[cfg(not(feature = "std"))]
+fn no_avx_mode() -> bool {
+    false
 }
 
 // ─── CPUID Leaf 1 ECX feature flags (Bochs cpuid.h:313-344) ────────────────
