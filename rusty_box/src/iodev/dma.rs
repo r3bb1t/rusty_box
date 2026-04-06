@@ -159,9 +159,6 @@ pub struct BxDmaC {
     pub(crate) ext_page_reg: [u8; 16],
     /// Per-channel DMA handlers (Bochs dma.h:99-104, h[4])
     handlers: [DmaHandlers; 4],
-    /// Pointer to pc_system for set_hrq() calls (set during init).
-    /// Matches Bochs bx_pc_system.set_HRQ() calls from DMA control_hrq().
-    pc_system_ptr: Option<core::ptr::NonNull<crate::pc_system::BxPcSystemC>>,
     /// Pointer to emulator RAM for DMA physical read/write.
     /// Matches Bochs DEV_MEM_READ_PHYSICAL_DMA / DEV_MEM_WRITE_PHYSICAL_DMA.
     memory_base: Option<core::ptr::NonNull<u8>>,
@@ -189,7 +186,6 @@ impl BxDmaC {
                 DmaHandlers::default(),
                 DmaHandlers::default(),
             ],
-            pc_system_ptr: None,
             memory_base: None,
             memory_len: 0,
         }
@@ -230,17 +226,14 @@ impl BxDmaC {
         tracing::info!("DMA: channel 4 used by cascade");
     }
 
-    /// Set pointers needed for DMA operation.
-    /// Must be called after init() with valid pointers to pc_system.
-    /// `mem_base` and `mem_len` provide direct access to emulator RAM
-    /// for DMA physical transfers (matching Bochs DEV_MEM_*_PHYSICAL_DMA).
-    pub fn set_system_ptrs(
+    /// Set RAM pointer for physical DMA transfers.
+    /// Must be called after init() with valid pointer to emulator RAM.
+    /// Matches Bochs DEV_MEM_READ_PHYSICAL_DMA / DEV_MEM_WRITE_PHYSICAL_DMA.
+    pub fn set_memory_ptrs(
         &mut self,
-        pc_system: *mut crate::pc_system::BxPcSystemC,
         mem_base: *mut u8,
         mem_len: usize,
     ) {
-        self.pc_system_ptr = core::ptr::NonNull::new(pc_system);
         self.memory_base = core::ptr::NonNull::new(mem_base);
         self.memory_len = mem_len;
     }
@@ -398,11 +391,11 @@ impl BxDmaC {
         // Deassert HRQ if no DRQ is pending (Bochs dma.cc:631-638)
         if (self.s[ma_sl].status_reg & 0xF0) == 0 {
             if ma_sl != 0 {
-                // DMA2: deassert HRQ to CPU
-                if let Some(pc_ptr) = self.pc_system_ptr {
-                    let pc = unsafe { &mut *pc_ptr.as_ptr() };
-                    pc.set_hrq(false);
-                }
+                // DMA2: deassert HRQ to CPU.
+                // NOTE: pc_system is not wired here yet. When DMA devices are
+                // connected, the I/O dispatch path must provide pc_system so
+                // control_hrq can signal HRQ to the CPU.
+                tracing::trace!("DMA: would deassert HRQ (pc_system not wired)");
             } else {
                 // DMA1: clear cascade DRQ on DMA2 channel 0
                 self.set_drq(4, false);
@@ -414,11 +407,8 @@ impl BxDmaC {
         for ch in 0..4 {
             if (self.s[ma_sl].status_reg & (1 << (ch + 4))) != 0 && !self.s[ma_sl].mask[ch] {
                 if ma_sl != 0 {
-                    // DMA2: assert HRQ to CPU
-                    if let Some(pc_ptr) = self.pc_system_ptr {
-                        let pc = unsafe { &mut *pc_ptr.as_ptr() };
-                        pc.set_hrq(true);
-                    }
+                    // DMA2: assert HRQ to CPU (see deassert note above).
+                    tracing::trace!("DMA: would assert HRQ (pc_system not wired)")
                 } else {
                     // DMA1: send DRQ to cascade channel of the master
                     self.set_drq(4, true);
@@ -614,10 +604,9 @@ impl BxDmaC {
             // Clear TC, HLDA, HRQ, DACK (Bochs dma.cc:782-789)
             self.tc = false;
             self.hlda = false;
-            if let Some(pc_ptr) = self.pc_system_ptr {
-                let pc = unsafe { &mut *pc_ptr.as_ptr() };
-                pc.set_hrq(false);
-            }
+            // NOTE: pc_system not wired here; HRQ deassert is a no-op.
+            // When DMA devices are connected, raise_hlda must receive
+            // &mut BxPcSystemC to call set_hrq(false).
             self.s[ma_sl].dack[channel] = false;
             if ma_sl == 0 {
                 // Clear cascade (Bochs dma.cc:787-788)

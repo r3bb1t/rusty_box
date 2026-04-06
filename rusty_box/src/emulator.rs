@@ -251,27 +251,13 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         tracing::debug!("Devices initialized");
 
 
-        // Wire DMA→pc_system for set_HRQ and DMA→memory for physical DMA transfers
+        // Wire DMA→memory for physical DMA transfers
         let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
-        self.device_manager.dma.set_system_ptrs(
-            &mut self.pc_system as *mut crate::pc_system::BxPcSystemC,
+        self.device_manager.dma.set_memory_ptrs(
             ram_base,
             ram_len,
         );
 
-
-        // Wire PCI IDE → pc_system, harddrv, memory for DMA timer
-        self.device_manager.pci_ide.pc_system_ptr =
-            &mut self.pc_system as *mut crate::pc_system::BxPcSystemC;
-        self.device_manager.pci_ide.harddrv_ptr =
-            &mut self.device_manager.harddrv as *mut crate::iodev::harddrv::BxHardDriveC;
-        self.device_manager.pci_ide.pic_ptr =
-            &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
-        {
-            let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
-            self.device_manager.pci_ide.ram_ptr = ram_base;
-            self.device_manager.pci_ide.ram_len = ram_len;
-        }
 
         // Register PCI IDE BM-DMA timers (Bochs pci_ide.cc:77-78)
         {
@@ -450,27 +436,13 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         tracing::info!("Device initialization complete");
 
 
-        // Wire DMA→pc_system for set_HRQ and DMA→memory for physical DMA transfers
+        // Wire DMA→memory for physical DMA transfers
         let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
-        self.device_manager.dma.set_system_ptrs(
-            &mut self.pc_system as *mut crate::pc_system::BxPcSystemC,
+        self.device_manager.dma.set_memory_ptrs(
             ram_base,
             ram_len,
         );
 
-
-        // Wire PCI IDE → pc_system, harddrv, memory for DMA timer
-        self.device_manager.pci_ide.pc_system_ptr =
-            &mut self.pc_system as *mut crate::pc_system::BxPcSystemC;
-        self.device_manager.pci_ide.harddrv_ptr =
-            &mut self.device_manager.harddrv as *mut crate::iodev::harddrv::BxHardDriveC;
-        self.device_manager.pci_ide.pic_ptr =
-            &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
-        {
-            let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
-            self.device_manager.pci_ide.ram_ptr = ram_base;
-            self.device_manager.pci_ide.ram_len = ram_len;
-        }
 
         // Register PCI IDE BM-DMA timers (Bochs pci_ide.cc:77-78)
         {

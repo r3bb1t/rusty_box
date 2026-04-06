@@ -14,9 +14,6 @@ use alloc::vec;
 use alloc::vec::Vec;
 use core::ffi::c_void;
 
-use super::harddrv::BxHardDriveC;
-use crate::pc_system::BxPcSystemC;
-
 /// PCI configuration space size
 const PCI_CONF_SIZE: usize = 256;
 
@@ -83,6 +80,7 @@ impl BmDmaChannel {
 
 /// PIIX3 PCI IDE controller.
 /// Bochs: bx_pci_ide_c (pci_ide.h:37-83, pci_ide.cc)
+#[derive(Debug)]
 pub struct BxPciIde {
     /// PCI configuration space (256 bytes)
     pub pci_conf: [u8; PCI_CONF_SIZE],
@@ -92,36 +90,7 @@ pub struct BxPciIde {
 
     /// BAR4 I/O base address (BM-DMA registers)
     pub bmdma_base: u32,
-
-    /// Raw pointer to pc_system for timer activation (Bochs bx_pc_system)
-    pub pc_system_ptr: *mut BxPcSystemC,
-
-    /// Raw pointer to hard drive controller for bmdma_read/write_sector
-    pub harddrv_ptr: *mut BxHardDriveC,
-
-    /// Raw pointer to PIC for passing to harddrv bmdma methods
-    pub pic_ptr: *mut super::pic::BxPicC,
-
-    /// Raw pointer to guest physical RAM base (from BxMemC::get_ram_base_ptr)
-    pub ram_ptr: *mut u8,
-
-    /// Guest RAM size in bytes
-    pub ram_len: usize,
 }
-
-// Debug impl that skips raw pointers
-impl core::fmt::Debug for BxPciIde {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.debug_struct("BxPciIde")
-            .field("bmdma_base", &self.bmdma_base)
-            .field("bmdma", &self.bmdma)
-            .finish()
-    }
-}
-
-// SAFETY: Raw pointers are only dereferenced within single-threaded emulator context
-unsafe impl Send for BxPciIde {}
-unsafe impl Sync for BxPciIde {}
 
 impl Default for BxPciIde {
     fn default() -> Self {
@@ -137,11 +106,6 @@ impl BxPciIde {
             pci_conf: [0; PCI_CONF_SIZE],
             bmdma: [BmDmaChannel::new(), BmDmaChannel::new()],
             bmdma_base: 0,
-            pc_system_ptr: core::ptr::null_mut(),
-            harddrv_ptr: core::ptr::null_mut(),
-            pic_ptr: core::ptr::null_mut(),
-            ram_ptr: core::ptr::null_mut(),
-            ram_len: 0,
         };
         ide.init_pci_conf();
         ide
@@ -240,272 +204,15 @@ impl BxPciIde {
     /// BM-DMA timer function — processes PRD tables and transfers data.
     /// Bochs: bx_pci_ide_c::timer() (pci_ide.cc:251-336)
     ///
-    /// TEMPORARILY DISABLED: The DMA timer interferes with PIO ATAPI
-    /// transfers by calling bmdma_complete() which clears DRQ. Until
-    /// DMA is fully working end-to-end, disable the timer to allow
-    /// PIO to work correctly for modloop mounting.
-    #[allow(unreachable_code)]
-    fn timer(&mut self, channel: usize) {
-        // DMA timer disabled — PIO path handles all transfers
-        return;
-        if channel >= 2 {
-            return;
-        }
-
-        // Guard: return if DMA not active or no PRD address
-        // Bochs pci_ide.cc:264-267
-        if (self.bmdma[channel].status & 0x01) == 0
-            || self.bmdma[channel].prd_current == 0
-        {
-            return;
-        }
-
-        // Bochs pci_ide.cc:268-271: for READ DMA, wait until device signals
-        // data_ready via bmdma_start_transfer(). WRITE DMA proceeds immediately
-        // (it reads from guest RAM, doesn't need device data).
-        if self.bmdma[channel].cmd_rwcon && !self.bmdma[channel].data_ready {
-            self.activate_channel_timer(channel, 1);
-            return;
-        }
-
-        // Read PRD entry from guest RAM: addr(4 bytes) + size(4 bytes)
-        // Bochs pci_ide.cc:272-276
-        let prd_addr = self.mem_read_physical_dword(self.bmdma[channel].prd_current);
-        let prd_size_raw = self.mem_read_physical_dword(self.bmdma[channel].prd_current + 4);
-        let mut size = (prd_size_raw & 0xFFFE) as usize;
-        if size == 0 {
-            size = 0x10000;
-        }
-
-        if self.bmdma[channel].cmd_rwcon {
-            // READ DMA: device → memory
-            // Bochs pci_ide.cc:278-292
-            tracing::debug!("BM-DMA READ to addr={:#010x}, size={:#x}", prd_addr, size);
-            let mut count = size as i32
-                - (self.bmdma[channel].buffer_top as i32 - self.bmdma[channel].buffer_idx as i32);
-            while count > 0 {
-                let mut sector_size = count as u32;
-                if self.harddrv_bmdma_read_sector(channel as u8, &mut sector_size) {
-                    self.bmdma[channel].buffer_top += sector_size as usize;
-                    count -= sector_size as i32;
-                } else {
-                    break;
-                }
-            }
-            if count > 0 {
-                // Not enough data — complete the transfer
-                self.harddrv_bmdma_complete(channel as u8);
-                return;
-            }
-            // Write buffer data to guest physical memory
-            self.mem_write_physical_dma(
-                prd_addr,
-                size,
-                self.bmdma[channel].buffer_idx,
-                channel,
-            );
-            self.bmdma[channel].buffer_idx += size;
-        } else {
-            // WRITE DMA: memory → device
-            // Bochs pci_ide.cc:293-306
-            tracing::debug!("BM-DMA WRITE from addr={:#010x}, size={:#x}", prd_addr, size);
-            self.mem_read_physical_dma(
-                prd_addr,
-                size,
-                self.bmdma[channel].buffer_top,
-                channel,
-            );
-            self.bmdma[channel].buffer_top += size;
-            let mut count = (self.bmdma[channel].buffer_top - self.bmdma[channel].buffer_idx) as i32;
-            while count > 511 {
-                if self.harddrv_bmdma_write_sector(channel as u8) {
-                    self.bmdma[channel].buffer_idx += 512;
-                    count -= 512;
-                } else {
-                    break;
-                }
-            }
-            if count >= 512 {
-                // Write failed — complete
-                self.harddrv_bmdma_complete(channel as u8);
-                return;
-            }
-        }
-
-        // Check EOT (End Of Table) bit in PRD size field
-        // Bochs pci_ide.cc:307-336
-        if (prd_size_raw & 0x8000_0000) != 0 {
-            // EOT: transfer complete
-            self.bmdma[channel].status &= !0x01; // clear active
-            self.bmdma[channel].status |= 0x04; // set IRQ
-            self.bmdma[channel].prd_current = 0;
-            self.harddrv_bmdma_complete(channel as u8);
-        } else {
-            // More PRDs: compact buffer, advance to next PRD
-            // Bochs pci_ide.cc:315-333
-            let remaining =
-                self.bmdma[channel].buffer_top - self.bmdma[channel].buffer_idx;
-            if remaining > 0 {
-                self.bmdma[channel]
-                    .buffer
-                    .copy_within(self.bmdma[channel].buffer_idx..self.bmdma[channel].buffer_top, 0);
-            }
-            self.bmdma[channel].buffer_top = remaining;
-            self.bmdma[channel].buffer_idx = 0;
-
-            // Advance to next PRD entry
-            self.bmdma[channel].prd_current += 8;
-
-            // Read next PRD size for timer period calculation
-            let next_prd_size_raw =
-                self.mem_read_physical_dword(self.bmdma[channel].prd_current + 4);
-            let mut next_size = next_prd_size_raw & 0xFFFE;
-            if next_size == 0 {
-                next_size = 0x10000;
-            }
-            // Bochs pci_ide.cc:335: (size >> 4) | 0x10
-            let timer_period = (next_size >> 4) | 0x10;
-            self.activate_channel_timer(channel, timer_period as u64);
-        }
-    }
-
-    // ─── Timer Activation Helper ────────────────────────────────────────
-
-    /// Activate the timer for a specific channel.
-    /// Bochs: bx_pc_system.activate_timer() calls
-    fn activate_channel_timer(&mut self, channel: usize, period: u64) {
-        if self.pc_system_ptr.is_null() {
-            return;
-        }
-        if let Some(handle) = self.bmdma[channel].timer_index {
-            let pc_system = unsafe { &mut *self.pc_system_ptr };
-            let _ = pc_system.activate_timer(handle, period, false);
-        }
-    }
-
-    // ─── Physical Memory Access Helpers ─────────────────────────────────
-
-    /// Read a dword from guest physical memory.
-    /// Bochs: DEV_MEM_READ_PHYSICAL (pci_ide.cc:272-273)
-    fn mem_read_physical_dword(&self, addr: u32) -> u32 {
-        if self.ram_ptr.is_null() {
-            return 0;
-        }
-        let a = addr as usize;
-        if a + 4 > self.ram_len {
-            return 0;
-        }
-        unsafe {
-            let p = self.ram_ptr.add(a);
-            u32::from_le_bytes([*p, *p.add(1), *p.add(2), *p.add(3)])
-        }
-    }
-
-    /// Write DMA buffer data to guest physical memory.
-    /// Bochs: DEV_MEM_WRITE_PHYSICAL_DMA (pci_ide.cc:289)
-    fn mem_write_physical_dma(
-        &self,
-        guest_addr: u32,
-        size: usize,
-        buffer_offset: usize,
-        channel: usize,
-    ) {
-        if self.ram_ptr.is_null() {
-            return;
-        }
-        let a = guest_addr as usize;
-        if a + size > self.ram_len {
-            tracing::warn!("BM-DMA write out of bounds: addr={:#x} size={:#x}", guest_addr, size);
-            return;
-        }
-        let src = &self.bmdma[channel].buffer[buffer_offset..buffer_offset + size];
-        unsafe {
-            core::ptr::copy_nonoverlapping(src.as_ptr(), self.ram_ptr.add(a), size);
-        }
-    }
-
-    /// Read guest physical memory into DMA buffer.
-    /// Bochs: DEV_MEM_READ_PHYSICAL_DMA (pci_ide.cc:294)
-    fn mem_read_physical_dma(
-        &mut self,
-        guest_addr: u32,
-        size: usize,
-        buffer_offset: usize,
-        channel: usize,
-    ) {
-        if self.ram_ptr.is_null() {
-            return;
-        }
-        let a = guest_addr as usize;
-        if a + size > self.ram_len {
-            tracing::warn!("BM-DMA read out of bounds: addr={:#x} size={:#x}", guest_addr, size);
-            return;
-        }
-        let dst = &mut self.bmdma[channel].buffer[buffer_offset..buffer_offset + size];
-        unsafe {
-            core::ptr::copy_nonoverlapping(self.ram_ptr.add(a), dst.as_mut_ptr(), size);
-        }
-    }
-
-    // ─── Hard Drive DMA Callbacks ───────────────────────────────────────
-    // These delegate to BxHardDriveC methods via raw pointer.
-
-    /// Call harddrv.bmdma_read_sector() via raw pointer.
-    /// Bochs: DEV_hd_bmdma_read_sector (pci_ide.cc:282)
-    fn harddrv_bmdma_read_sector(&mut self, channel: u8, sector_size: &mut u32) -> bool {
-        if self.harddrv_ptr.is_null() || self.pic_ptr.is_null() {
-            return false;
-        }
-        let buffer_top = self.bmdma[channel as usize].buffer_top;
-        // SAFETY: single-threaded emulator; raw pointers valid for execution duration.
-        // Aliased &mut refs to self/harddrv/pic match existing Bochs-style device
-        // interconnection and will be cleaned up when pci_ide pointers are removed.
-        unsafe {
-            let self_ptr = self as *mut Self;
-            let harddrv = &mut *self.harddrv_ptr;
-            let pic = &mut *self.pic_ptr;
-            harddrv.bmdma_read_sector(
-                channel,
-                &mut (*(&mut (*self_ptr).bmdma[channel as usize].buffer))[buffer_top..],
-                sector_size,
-                pic,
-                &mut *self_ptr,
-            )
-        }
-    }
-
-    /// Call harddrv.bmdma_write_sector() via raw pointer.
-    /// Bochs: DEV_hd_bmdma_write_sector (pci_ide.cc:299)
-    fn harddrv_bmdma_write_sector(&mut self, channel: u8) -> bool {
-        if self.harddrv_ptr.is_null() || self.pic_ptr.is_null() {
-            return false;
-        }
-        let buffer_idx = self.bmdma[channel as usize].buffer_idx;
-        let buffer_end = buffer_idx + 512;
-        let mut sector_buf = [0u8; 512];
-        sector_buf.copy_from_slice(&self.bmdma[channel as usize].buffer[buffer_idx..buffer_end]);
-        // SAFETY: see harddrv_bmdma_read_sector safety comment
-        unsafe {
-            let self_ptr = self as *mut Self;
-            let harddrv = &mut *self.harddrv_ptr;
-            let pic = &mut *self.pic_ptr;
-            harddrv.bmdma_write_sector(channel, &sector_buf, pic, &mut *self_ptr)
-        }
-    }
-
-    /// Call harddrv.bmdma_complete() via raw pointer.
-    /// Bochs: DEV_hd_bmdma_complete (pci_ide.cc:291, 305, 311)
-    fn harddrv_bmdma_complete(&mut self, channel: u8) {
-        if self.harddrv_ptr.is_null() || self.pic_ptr.is_null() {
-            return;
-        }
-        // SAFETY: see harddrv_bmdma_read_sector safety comment
-        unsafe {
-            let self_ptr = self as *mut Self;
-            let harddrv = &mut *self.harddrv_ptr;
-            let pic = &mut *self.pic_ptr;
-            harddrv.bmdma_complete(channel, pic, &mut *self_ptr);
-        }
+    /// TEMPORARILY DISABLED: The DMA timer is not connected. When the
+    /// DMA engine is fully implemented, this will process PRD tables
+    /// and perform bus-master DMA transfers via parameters passed from
+    /// the emulator timer dispatch.
+    fn timer(&mut self, _channel: usize) {
+        // DMA timer disabled — PIO path handles all transfers.
+        // When DMA is re-enabled, this method will take &mut BxPcSystemC,
+        // &mut BxHardDriveC, &mut BxPicC, and &mut [u8] (RAM) as parameters
+        // from the emulator's timer dispatch.
     }
 
     // ─── BM-DMA I/O Read ─────────────────────────────────────────────────
@@ -582,9 +289,8 @@ impl BxPciIde {
                         self.bmdma[channel].dtpr,
                         if self.bmdma[channel].cmd_rwcon { "read" } else { "write" },
                     );
-                    // Activate timer with period=1 (fires ASAP)
-                    // Bochs pci_ide.cc:411
-                    self.activate_channel_timer(channel, 1);
+                    // TODO: activate DMA timer when DMA engine is connected.
+                    // Bochs pci_ide.cc:411: bx_pc_system.activate_timer(period=1)
                 } else if (value & 0x01 == 0) && self.bmdma[channel].cmd_ssbm {
                     // Stop DMA — Bochs pci_ide.cc:413-416
                     self.bmdma[channel].cmd_ssbm = false;
@@ -763,10 +469,11 @@ mod tests {
     fn test_bar4_pci_write() {
         let mut ide = BxPciIde::new();
         ide.reset();
-        // Write BAR4 = 0xC001 (I/O type indicator in bit 0)
+        // BAR4 writes are currently hardwired to 0 (DMA disabled),
+        // so pci_write should return false (no BAR change).
         let changed = ide.pci_write(0x20, 0x0000C001, 4);
-        assert!(changed);
-        assert_eq!(ide.bmdma_base, 0xC000); // masked to 16-port alignment
+        assert!(!changed);
+        assert_eq!(ide.bmdma_base, 0); // BAR4 stays 0 while DMA is disabled
     }
 
     #[test]
@@ -775,7 +482,7 @@ mod tests {
         ide.bmdma_base = 0xC000;
         ide.bmdma[0].dtpr = 0x1000;
 
-        // Start DMA (timer activation will be no-op since pc_system_ptr is null)
+        // Start DMA (timer activation is a no-op since DMA timer is not connected)
         ide.bmdma_write(0xC000, 0x01, 1);
         assert!(ide.bmdma[0].cmd_ssbm);
         assert_eq!(ide.bmdma[0].status & 0x01, 0x01);
