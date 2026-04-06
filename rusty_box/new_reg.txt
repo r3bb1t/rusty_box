@@ -1,0 +1,26 @@
+            io.register_io_handler(
+            io.register_io_handler(
+        io.register_io_handler(DeviceId::Cmos, CMOS_ADDR, "CMOS Address", 0x1);
+        io.register_io_handler(DeviceId::Cmos, CMOS_DATA, "CMOS Data", 0x1);
+        io.register_io_handler(DeviceId::Cmos, 0x0072, "Ext CMOS RAM", 0x1);
+        io.register_io_handler(DeviceId::Cmos, 0x0073, "Ext CMOS RAM", 0x1);
+            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x1);
+            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x1);
+            io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x1);
+        io.register_io_handler(DeviceId::Keyboard, KBD_DATA_PORT, "Keyboard Data", 0x1);
+        io.register_io_handler(DeviceId::Keyboard, KBD_STATUS_PORT, "Keyboard Status/Command", 0x1);
+        io.register_io_handler(DeviceId::Keyboard, SYSTEM_CONTROL_B, "System Control B", 0x1);
+            io.register_io_handler(DeviceId::HardDrive, port, "ATA Primary", 0x7);
+        io.register_io_handler(DeviceId::HardDrive, 0x3F6, "ATA Primary Control", 0x1);
+            io.register_io_handler(DeviceId::HardDrive, port, "ATA Secondary", 0x7);
+        io.register_io_handler(DeviceId::HardDrive, 0x376, "ATA Secondary Control", 0x1);
+            io.register_io_handler(DeviceId::Serial, port, "16550 COM1", 0x1);
+        io.register_io_write_handler(DeviceId::Acpi, 0x00B2, "ACPI SMI Command", 0x1);
+        io.register_io_handler(DeviceId::Acpi, 0xB044, "ACPI Debug", 0x7);
+                io.register_io_handler(DeviceId::Acpi, base + offset, "ACPI PM", mask);
+                io.register_io_handler(DeviceId::Acpi, base + offset, "ACPI SMBus", mask);
+        io.register_io_handler(DeviceId::Pci, super::pci::PCI_CONFIG_ADDR, "PCI Config Addr", 0x4);
+            io.register_io_handler(DeviceId::PciConfData, port, "PCI Config Data", 0x7);
+            io.register_io_handler(DeviceId::Pci2Isa, port, "PIIX3", 0x1);
+                io.register_io_handler(DeviceId::PciIde, base + offset, "PCI IDE BM-DMA", mask);
+        self.register_io_handler(

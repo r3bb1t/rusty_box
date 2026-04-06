@@ -2710,300 +2710,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         );
                     }
 
-                    // Decompressor progress check (every 1M instructions) — DISABLED (decompressor works)
-                    if false && instructions_executed % 1_000_000 < INSTRUCTION_BATCH_SIZE {
-                        let rip = self.cpu.rip();
-                        // Check if we're in the decompressor (RIP in 0x1000-0x6000 range)
-                        if rip >= 0x1000 && rip < 0x6000 {
-                            let peek_inptr = self.memory.peek_ram(0x4004, 4);
-                            let inptr_val = u32::from_le_bytes([
-                                peek_inptr[0],
-                                peek_inptr[1],
-                                peek_inptr[2],
-                                peek_inptr[3],
-                            ]);
-                            // Dump code at the inflate loop addresses
-                            let mem = self.memory.ram_slice();
-                            let _code_23e0: Vec<String> = mem[0x23E0..0x2420]
-                                .iter()
-                                .map(|b| format!("{:02x}", b))
-                                .collect();
-                            // Decompressor global vars
-                            let peek = |addr: usize| -> u32 {
-                                let p = self.memory.peek_ram(addr, 4);
-                                u32::from_le_bytes([p[0], p[1], p[2], p[3]])
-                            };
-                            let outcnt = peek(0x4008);
-                            let bytes_out = peek(0x400C);
-                            let _wp = peek(0x4010); // window position / output_ptr
-                                                    // Check output at 0x100000 and 0x108000
-                            let peek_out = self.memory.peek_ram(0x100000, 8);
-                            let out_hex: Vec<String> =
-                                peek_out.iter().map(|b| format!("{:02x}", b)).collect();
-                            let peek_out2 = self.memory.peek_ram(0x108000, 8);
-                            let _out2_hex: Vec<String> =
-                                peek_out2.iter().map(|b| format!("{:02x}", b)).collect();
-                            // Check the window buffer area (0x51100-0x59100 based on BSS layout)
-                            let peek_win = self.memory.peek_ram(0x51100, 8);
-                            let _win_hex: Vec<String> =
-                                peek_win.iter().map(|b| format!("{:02x}", b)).collect();
-                            // Also check window buffer contents (wider sample)
-                            let peek_win16 = self.memory.peek_ram(0x510b8, 32);
-                            let win16_hex: Vec<String> =
-                                peek_win16.iter().map(|b| format!("{:02x}", b)).collect();
-                            // Check Huffman table area — tl/td pointers stored somewhere
-                            // Dump the key inflate globals (bb, bk might be on stack)
-                            let esp_val = self.cpu.esp() as usize;
-                            let stack_peek = if esp_val > 0 && esp_val < 0x100000 {
-                                let s = self.memory.peek_ram(esp_val, 32);
-                                let h: Vec<String> =
-                                    s.iter().map(|b| format!("{:02x}", b)).collect();
-                                h.join(" ")
-                            } else {
-                                "N/A".to_string()
-                            };
-                            tracing::debug!(
-                                "DECOMP-PROGRESS: {}M instr, inptr={}/{} outcnt={} bytes_out={:#x} RIP={:#x} out@100000:{} win@510b8:{} stack@ESP:{}",
-                                instructions_executed / 1_000_000,
-                                inptr_val, 0x4CED4u32,
-                                outcnt, bytes_out,
-                                rip, out_hex.join(" "), win16_hex.join(" "), stack_peek,
-                            );
-                            if instructions_executed / 1_000_000 >= 1
-                                && instructions_executed / 1_000_000 <= 3
-                            {
-                                // inflate_codes EBP is 0x5CF1C (from trace), not the current EBP (which may be memcpy's)
-                                let ic_ebp = 0x5CF1Cu32 as usize;
-                                if ic_ebp + 0x30 < mem.len() {
-                                    let rd = |off: usize| -> u32 {
-                                        u32::from_le_bytes([
-                                            mem[ic_ebp + off],
-                                            mem[ic_ebp + off + 1],
-                                            mem[ic_ebp + off + 2],
-                                            mem[ic_ebp + off + 3],
-                                        ])
-                                    };
-                                    let saved_ebp = rd(0);
-                                    let ret_addr = rd(4);
-                                    let arg1 = rd(8); // tl
-                                    let arg2 = rd(0xC); // td
-                                    let arg3 = rd(0x10); // bl
-                                    let arg4 = rd(0x14); // bd
-                                    tracing::debug!("INFLATE-CODES @EBP=0x5CF1C: saved_EBP={:#x} ret={:#x} tl={:#x} td={:#x} bl={} bd={}",
-                                        saved_ebp, ret_addr, arg1, arg2, arg3, arg4);
-                                    // Also dump the inflate_codes local variables
-                                    let locals = self.memory.peek_ram(ic_ebp - 0x30, 0x60);
-                                    let locals_hex: Vec<String> =
-                                        locals.iter().map(|b| format!("{:02x}", b)).collect();
-                                    tracing::debug!(
-                                        "inflate_codes frame [EBP-0x30..EBP+0x30]: {}",
-                                        locals_hex.join(" ")
-                                    );
-                                    // Check heap pointer
-                                    let free_mem_ptr = u32::from_le_bytes([
-                                        mem[0x4014],
-                                        mem[0x4015],
-                                        mem[0x4016],
-                                        mem[0x4017],
-                                    ]);
-                                    tracing::debug!("free_mem_ptr@0x4014={:#x}", free_mem_ptr);
-                                    // Dump compressed data (gzip+deflate) at 0x41D8
-                                    let cdata = self.memory.peek_ram(0x41D8, 64);
-                                    let cdata_hex: Vec<String> =
-                                        cdata.iter().map(|b| format!("{:02x}", b)).collect();
-                                    tracing::debug!(
-                                        "Compressed data @0x41D8: {}",
-                                        cdata_hex.join(" ")
-                                    );
-                                    // Check who called inflate_codes (return address 0x253D)
-                                    // Dump code around 0x2530 to see the CALL instruction
-                                    let call_area = self.memory.peek_ram(0x2520, 64);
-                                    let call_hex: Vec<String> =
-                                        call_area.iter().map(|b| format!("{:02x}", b)).collect();
-                                    tracing::debug!(
-                                        "Code around inflate_codes CALL @0x2520: {}",
-                                        call_hex.join(" ")
-                                    );
-                                    // Dump the full inflate_dynamic loop body (0x21A0-0x2430)
-                                    let loop_code1 = self.memory.peek_ram(0x21A0, 96);
-                                    let lc1_hex: Vec<String> =
-                                        loop_code1.iter().map(|b| format!("{:02x}", b)).collect();
-                                    tracing::debug!("Code @0x21A0-0x21FF: {}", lc1_hex.join(" "));
-                                    let loop_code2 = self.memory.peek_ram(0x2200, 32);
-                                    let lc2_hex: Vec<String> =
-                                        loop_code2.iter().map(|b| format!("{:02x}", b)).collect();
-                                    tracing::debug!("Code @0x2200-0x221F: {}", lc2_hex.join(" "));
-                                    let loop_code3 = self.memory.peek_ram(0x2410, 32);
-                                    let lc3_hex: Vec<String> =
-                                        loop_code3.iter().map(|b| format!("{:02x}", b)).collect();
-                                    tracing::debug!("Code @0x2410-0x242F: {}", lc3_hex.join(" "));
-                                    // Dump code before the second loop to find the first loop
-                                    let code_2100 = self.memory.peek_ram(0x2100, 96);
-                                    let c2100_hex: Vec<String> =
-                                        code_2100.iter().map(|b| format!("{:02x}", b)).collect();
-                                    tracing::debug!("Code @0x2100-0x215F: {}", c2100_hex.join(" "));
-                                    let code_2160 = self.memory.peek_ram(0x2160, 64);
-                                    let c2160_hex: Vec<String> =
-                                        code_2160.iter().map(|b| format!("{:02x}", b)).collect();
-                                    tracing::debug!("Code @0x2160-0x219F: {}", c2160_hex.join(" "));
-                                    // Dump huft_build function (starts at 0x108C)
-                                    for chunk_start in (0x108Cu32..0x1700u32).step_by(64) {
-                                        let cs = chunk_start as usize;
-                                        let code = self.memory.peek_ram(cs, 64);
-                                        let hex: Vec<String> =
-                                            code.iter().map(|b| format!("{:02x}", b)).collect();
-                                        tracing::debug!(
-                                            "Code @{:#06x}: {}",
-                                            chunk_start,
-                                            hex.join(" ")
-                                        );
-                                    }
-                                    // Also check the caller's (inflate_fixed/dynamic) stack frame
-                                    // Dump code-length Huffman table at tl=0x5d4e0
-                                    // Each entry is 8 bytes: [exop:1][bits:1][pad:2][base:4]
-                                    // Bochs inflate huft: { e:u8, b:u8, v:{n:u16 or t:ptr} }
-                                    let tl_addr = 0x5d4e0usize;
-                                    if tl_addr + 128 * 8 < mem.len() {
-                                        // Dump ALL non-zero entries in first 128
-                                        let mut nonzero_count = 0;
-                                        for idx in 0..128 {
-                                            let off = tl_addr + idx * 8;
-                                            let e = mem[off];
-                                            let b = mem[off + 1];
-                                            let vn =
-                                                u16::from_le_bytes([mem[off + 4], mem[off + 5]]);
-                                            if e != 0 || b != 0 || vn != 0 {
-                                                nonzero_count += 1;
-                                                if nonzero_count <= 40 {
-                                                    tracing::debug!(
-                                                        "HUFT[{}] @{:#x}: e={} b={} v.n={}",
-                                                        idx,
-                                                        off,
-                                                        e,
-                                                        b,
-                                                        vn
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        tracing::debug!(
-                                            "HUFT table: {} non-zero entries out of 128",
-                                            nonzero_count
-                                        );
-                                        // Also dump entry 39
-                                        let idx = 39;
-                                        let off = tl_addr + idx * 8;
-                                        tracing::debug!("HUFT[39] raw: {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x} {:02x}",
-                                            mem[off], mem[off+1], mem[off+2], mem[off+3], mem[off+4], mem[off+5], mem[off+6], mem[off+7]);
-                                    }
-                                    // Dump ll[] array (inflate_dynamic local at [EBP-0x4F0])
-                                    // inflate_dynamic EBP = 0x5D45C
-                                    let id_ebp = 0x5D45Cusize;
-                                    let ll_base = id_ebp - 0x4F0; // 0x5CF6C
-                                                                  // ll[] has 19 entries for code-length codes (border[0..18])
-                                                                  // Actually ll[] is 286+30=316 entries of unsigned int
-                                                                  // First dump the 19 code-length code lengths
-                                    let mut ll_vals = Vec::new();
-                                    for idx in 0..19 {
-                                        let off = ll_base + idx * 4;
-                                        if off + 4 <= mem.len() {
-                                            let v = u32::from_le_bytes([
-                                                mem[off],
-                                                mem[off + 1],
-                                                mem[off + 2],
-                                                mem[off + 3],
-                                            ]);
-                                            ll_vals.push(format!("{}:{}", idx, v));
-                                        }
-                                    }
-                                    tracing::debug!(
-                                        "ll[0..19] (code-length code lengths): {}",
-                                        ll_vals.join(" ")
-                                    );
-                                    // Also check bl and nb values
-                                    let bl_val = u32::from_le_bytes([
-                                        mem[id_ebp - 0x4F8],
-                                        mem[id_ebp - 0x4F7],
-                                        mem[id_ebp - 0x4F6],
-                                        mem[id_ebp - 0x4F5],
-                                    ]);
-                                    tracing::debug!(
-                                        "inflate_dynamic: bl=[EBP-0x4F8]={}, tl=[EBP-0x4F4]={:#x}",
-                                        bl_val,
-                                        u32::from_le_bytes([
-                                            mem[id_ebp - 0x4F4],
-                                            mem[id_ebp - 0x4F3],
-                                            mem[id_ebp - 0x4F2],
-                                            mem[id_ebp - 0x4F1]
-                                        ])
-                                    );
-                                    // Dump border[] array at 0x4024 (19 entries of 4 bytes)
-                                    let border_addr = 0x4024usize;
-                                    if border_addr + 19 * 4 <= mem.len() {
-                                        let mut bvals = Vec::new();
-                                        for idx in 0..19 {
-                                            let off = border_addr + idx * 4;
-                                            let v = u32::from_le_bytes([
-                                                mem[off],
-                                                mem[off + 1],
-                                                mem[off + 2],
-                                                mem[off + 3],
-                                            ]);
-                                            bvals.push(format!("{}", v));
-                                        }
-                                        tracing::debug!("border[] @0x4024: {}", bvals.join(" "));
-                                    }
-                                    // Dump mask_bits[] array (used for lookup mask)
-                                    // mask_bits is at 0x4064 based on code patterns (17 entries of 2 bytes: ush)
-                                    // Actually, let's find it. mask_bits[bl] was loaded as [EBP-0x508].
-                                    // The code at 0x2160 references 0x4164:
-                                    //   0f b7 04 45 64 41 00 00 = MOVZX EAX, word [EAX*2+0x4164]
-                                    // So mask_bits is at 0x4164
-                                    let mask_addr = 0x4164usize;
-                                    if mask_addr + 17 * 2 <= mem.len() {
-                                        let mut mvals = Vec::new();
-                                        for idx in 0..17 {
-                                            let off = mask_addr + idx * 2;
-                                            let v = u16::from_le_bytes([mem[off], mem[off + 1]]);
-                                            mvals.push(format!("{}", v));
-                                        }
-                                        tracing::debug!("mask_bits[] @0x4164: {}", mvals.join(" "));
-                                    }
-                                    // saved_EBP from inflate_codes points to caller
-                                    if saved_ebp > 0 && (saved_ebp as usize) + 0x30 < mem.len() {
-                                        let caller_ebp = saved_ebp as usize;
-                                        let caller_ret = u32::from_le_bytes([
-                                            mem[caller_ebp + 4],
-                                            mem[caller_ebp + 5],
-                                            mem[caller_ebp + 6],
-                                            mem[caller_ebp + 7],
-                                        ]);
-                                        tracing::debug!(
-                                            "Caller frame @EBP={:#x}: ret={:#x}",
-                                            saved_ebp,
-                                            caller_ret
-                                        );
-                                        // Dump caller's local variables
-                                        let caller_locals =
-                                            self.memory.peek_ram(caller_ebp - 0x10, 0x30);
-                                        let cl_hex: Vec<String> = caller_locals
-                                            .iter()
-                                            .map(|b| format!("{:02x}", b))
-                                            .collect();
-                                        tracing::debug!(
-                                            "Caller locals [EBP-0x10..EBP+0x20]: {}",
-                                            cl_hex.join(" ")
-                                        );
-                                    }
-                                }
-                                // Also dump registers
-                                tracing::debug!("REGS: EAX={:#x} ECX={:#x} EDX={:#x} EBX={:#x} ESP={:#x} EBP={:#x} ESI={:#x} EDI={:#x}",
-                                    self.cpu.eax(), self.cpu.ecx(), self.cpu.edx(), self.cpu.ebx(),
-                                    self.cpu.esp(), self.cpu.ebp(), self.cpu.esi(), self.cpu.edi());
-                            }
-                        }
-                    }
-
                     // Deliver pending PIC interrupts to the CPU (Bochs-like).
                     // Only use PIC path — LAPIC interrupts are delivered via
                     // handleAsyncEvent() through the CPU event system.
@@ -3916,38 +3622,59 @@ mod tests {
 
     #[test]
     fn test_emulator_creation() {
-        let config = EmulatorConfig::default();
-        let emu = Emulator::<Corei7SkylakeX>::new(config);
-        assert!(emu.is_ok());
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let config = EmulatorConfig::default();
+                let emu = Emulator::<Corei7SkylakeX>::new(config);
+                assert!(emu.is_ok());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
     fn test_emulator_initialization() {
-        let config = EmulatorConfig::default();
-        let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
-        assert!(!emu.is_initialized());
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let config = EmulatorConfig::default();
+                let mut emu = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                assert!(!emu.is_initialized());
 
-        let result = emu.initialize();
-        assert!(result.is_ok());
-        assert!(emu.is_initialized());
+                let result = emu.initialize();
+                assert!(result.is_ok());
+                assert!(emu.is_initialized());
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 
     #[test]
     fn test_multiple_instances_independent() {
-        let config = EmulatorConfig::default();
+        std::thread::Builder::new()
+            .stack_size(64 * 1024 * 1024)
+            .spawn(|| {
+                let config = EmulatorConfig::default();
 
-        let mut emu1 = Emulator::<Corei7SkylakeX>::new(config.clone()).unwrap();
-        let emu2 = Emulator::<Corei7SkylakeX>::new(config).unwrap();
+                let mut emu1 = Emulator::<Corei7SkylakeX>::new(config.clone()).unwrap();
+                let emu2 = Emulator::<Corei7SkylakeX>::new(config).unwrap();
 
-        emu1.initialize().unwrap();
+                emu1.initialize().unwrap();
 
-        // emu2 should still be uninitialized
-        assert!(emu1.is_initialized());
-        assert!(!emu2.is_initialized());
+                // emu2 should still be uninitialized
+                assert!(emu1.is_initialized());
+                assert!(!emu2.is_initialized());
 
-        // Different tick counts
-        emu1.pc_system.tickn(1000);
-        assert_eq!(emu1.ticks(), 1000);
-        assert_eq!(emu2.ticks(), 0);
+                // Different tick counts
+                emu1.pc_system.tickn(1000);
+                assert_eq!(emu1.ticks(), 1000);
+                assert_eq!(emu2.ticks(), 0);
+            })
+            .unwrap()
+            .join()
+            .unwrap();
     }
 }

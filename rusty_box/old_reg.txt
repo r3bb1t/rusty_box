@@ -1,0 +1,27 @@
+            io.register_io_handler(
+            io.register_io_handler(
+        io.register_io_handler(
+        io.register_io_handler(
+        io.register_io_handler(
+        io.register_io_handler(
+            io.register_io_handler(
+            io.register_io_handler(
+            io.register_io_handler(
+        io.register_io_handler(
+        io.register_io_handler(
+        io.register_io_handler(
+            io.register_io_handler(
+        io.register_io_handler(
+            io.register_io_handler(
+        io.register_io_handler(
+            io.register_io_handler(
+        io.register_io_write_handler(
+        io.register_io_handler(
+                io.register_io_handler(
+                io.register_io_handler(
+        // Bochs: devices.cc register_io_* for 0xCF8
+        io.register_io_handler(
+            io.register_io_handler(
+            io.register_io_handler(
+                io.register_io_handler(
+        self.register_io_handler(

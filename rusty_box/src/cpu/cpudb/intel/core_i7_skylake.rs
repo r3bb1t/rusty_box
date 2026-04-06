@@ -649,7 +649,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             // ── Default: beyond max leaf → return leaf 0x16 data ────────
             // Bochs corei7_skylake-x.cc:199-201
             _ => {
-                if eax >= 0x80000000 && eax > 0x80000008 {
+                if eax > 0x80000008 {
                     (0, 0, 0, 0) // beyond max extended leaf
                 } else if eax > 0x00000016 && eax < 0x80000000 {
                     // Beyond max standard leaf — Bochs returns leaf 0x16 data

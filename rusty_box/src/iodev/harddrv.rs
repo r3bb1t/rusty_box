@@ -2949,7 +2949,7 @@ impl BxHardDriveC {
                         let inserted_bit = if inserted { 1u8 } else { 0u8 };
                         drive.controller.buffer[ptr] = 0x00; // Feature Code 0x000
                         drive.controller.buffer[ptr + 1] = 0x00;
-                        drive.controller.buffer[ptr + 2] = (0 << 6) | (0 << 2) | (1 << 1) | inserted_bit; // persistent=1, current=inserted
+                        drive.controller.buffer[ptr + 2] = (1 << 1) | inserted_bit; // persistent=1, current=inserted
                         drive.controller.buffer[ptr + 3] = 4; // additional length = 1*4
                         drive.controller.buffer[ptr + 4] = 0x00; // profile 0x0008
                         drive.controller.buffer[ptr + 5] = 0x08;
@@ -2992,12 +2992,9 @@ impl BxHardDriveC {
                     if start_feature <= 0x0003 {
                         drive.controller.buffer[ptr] = 0x00; // Feature Code 0x003
                         drive.controller.buffer[ptr + 1] = 0x03;
-                        drive.controller.buffer[ptr + 2] = (0 << 6) | (0 << 2) | (1 << 1) | 1; // version=0, persistent=1, current=1
+                        drive.controller.buffer[ptr + 2] = (1 << 1) | 1; // version=0, persistent=1, current=1
                         drive.controller.buffer[ptr + 3] = 4; // additional length = 4
-                        drive.controller.buffer[ptr + 4] = (0 << 5) // Loading Mech type: 0
-                            | (0 << 3)  // No Eject Mech
-                            | (1 << 2)  // No Pvnt Jumper
-                            | (0 << 0); // Lock = 0
+                        drive.controller.buffer[ptr + 4] = 1 << 2; // Loading Mech: 0, No Eject: 0, No Pvnt Jumper: 1, Lock: 0
                         drive.controller.buffer[ptr + 5] = 0;
                         drive.controller.buffer[ptr + 6] = 0;
                         drive.controller.buffer[ptr + 7] = 0;
@@ -3009,7 +3006,7 @@ impl BxHardDriveC {
                         const MAX_MULTIPLE_SECTORS: u16 = 16;
                         drive.controller.buffer[ptr] = 0x00; // Feature Code 0x010
                         drive.controller.buffer[ptr + 1] = 0x10;
-                        drive.controller.buffer[ptr + 2] = (0 << 6) | (0 << 2) | (1 << 1) | 1; // version=0, persistent=1, current=1
+                        drive.controller.buffer[ptr + 2] = (1 << 1) | 1; // version=0, persistent=1, current=1
                         drive.controller.buffer[ptr + 3] = 8; // additional length = 8
                         drive.controller.buffer[ptr + 4] = 0x00; // Logical Block Size: 2048 (0x800)
                         drive.controller.buffer[ptr + 5] = 0x00;
@@ -3039,7 +3036,7 @@ impl BxHardDriveC {
                     if start_feature <= 0x0100 {
                         drive.controller.buffer[ptr] = 0x01; // Feature Code 0x100
                         drive.controller.buffer[ptr + 1] = 0x00;
-                        drive.controller.buffer[ptr + 2] = (0 << 6) | (0 << 2) | (1 << 1) | 1; // version=0, persistent=1, current=1
+                        drive.controller.buffer[ptr + 2] = (1 << 1) | 1; // version=0, persistent=1, current=1
                         drive.controller.buffer[ptr + 3] = 0; // additional length = 0
                         ptr += 4;
                     }

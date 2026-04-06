@@ -1,0 +1,5 @@
+{
+  "dependencies": {
+    "@oh-my-pi/pi-natives": "^13.16.2"
+  }
+}
