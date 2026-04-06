@@ -1,3 +1,5 @@
+#![allow(non_snake_case, dead_code)]
+
 // 8-bit data transfer operations: MOV, etc.
 // Mirrors Bochs cpp/cpu/data_xfer8.cc
 

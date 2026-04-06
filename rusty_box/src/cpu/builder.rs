@@ -1,3 +1,5 @@
+#![allow(unused_assignments, dead_code)]
+
 use crate::cpu::{
     cpu::BX_MSR_MAX_INDEX, cpuid::BxCpuIdTrait, smm::SMMRAM_Fields, tlb::Tlb, BxCpuC,
 };

@@ -1,3 +1,4 @@
+#![allow(unused_assignments, dead_code)]
 //! Device Initialization and Management
 //!
 //! This module implements the device initialization sequence from Bochs,

@@ -1,3 +1,7 @@
+#![allow(private_interfaces, dead_code)]
+
+#![allow(non_snake_case)]
+
 use alloc::{boxed::Box, vec::Vec};
 
 use crate::{

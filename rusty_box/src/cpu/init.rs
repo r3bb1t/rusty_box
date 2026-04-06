@@ -1,3 +1,5 @@
+#![allow(non_snake_case, dead_code)]
+
 use alloc::vec::Vec;
 use tracing::info;
 

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! VGA Display Controller
 //!
 //! Implements VGA text mode (80x25) and graphics mode memory access.

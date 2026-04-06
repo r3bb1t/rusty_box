@@ -1,3 +1,4 @@
+#![allow(unused_assignments, dead_code)]
 //! Local APIC (Advanced Programmable Interrupt Controller) implementation.
 //!
 //! Ported from Bochs cpu/apic.cc (1466 lines) with exact logic parity.

@@ -1,3 +1,5 @@
+#![allow(unused_assignments, dead_code)]
+
 use crate::cpu::decoder::features::X86Feature;
 use alloc::vec::Vec;
 

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // MSR (Model Specific Register) constants and initialization
 // Mirrors Bochs cpu/msr.h
 

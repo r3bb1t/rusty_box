@@ -1,3 +1,4 @@
+#![allow(unused_assignments, dead_code)]
 //! 16550 UART Serial Port Controller
 //!
 //! Based on Bochs iodev/serial.cc (1815 lines) + serial.h (264 lines)

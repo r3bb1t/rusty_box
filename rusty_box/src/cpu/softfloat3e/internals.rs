@@ -1,4 +1,4 @@
-#![allow(non_camel_case_types, dead_code, non_snake_case)]
+#![allow(non_camel_case_types, dead_code, non_snake_case, unused_assignments)]
 //! Internal routines: field extraction, normalization, round-and-pack.
 //! Ported from Berkeley SoftFloat 3e internals.h / s_roundPackTo*.c / s_normRoundPackTo*.c.
 

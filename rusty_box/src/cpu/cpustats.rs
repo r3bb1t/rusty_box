@@ -1,3 +1,5 @@
+#![allow(unused_assignments, dead_code)]
+
 #[derive(Debug, Default)]
 pub struct BxCpuStatistics {
     // icache statistics

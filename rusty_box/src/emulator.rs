@@ -1,3 +1,4 @@
+#![allow(unused_variables)]
 //! Emulator Container
 //!
 //! This module provides the `Emulator` struct that owns and coordinates all

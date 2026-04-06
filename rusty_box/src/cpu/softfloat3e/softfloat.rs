@@ -1,4 +1,4 @@
-#![allow(non_camel_case_types, dead_code)]
+#![allow(non_camel_case_types, non_snake_case, dead_code)]
 //! SoftFloat status, rounding modes, exception flags, and helper functions.
 //! Ported from Berkeley SoftFloat 3e.
 

@@ -1,3 +1,5 @@
+#![allow(unused_unsafe)]
+
 //! AVX-512F/DQ extract and insert instruction handlers for all lane sizes.
 //!
 //! Implements VEXTRACTI/F64x2, VEXTRACTI/F32x8, VEXTRACTI/F64x4,

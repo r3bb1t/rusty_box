@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Protected mode interrupt handling
 //!
 //! Based on Bochs cpu/exception.cc protected_mode_int

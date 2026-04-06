@@ -1,3 +1,5 @@
+#![allow(non_snake_case, dead_code)]
+
 // 16-bit arithmetic operations: ADD, ADC, SUB, SBB, CMP, INC, DEC
 // Mirrors Bochs cpp/cpu/arith16.cc
 

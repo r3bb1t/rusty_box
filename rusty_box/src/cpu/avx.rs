@@ -1,3 +1,4 @@
+#![allow(unused_assignments, dead_code)]
 //! AVX/AVX2/AVX-512 instruction handlers for VEX.256 and EVEX operations
 //!
 //! Implements the subset of VEX.256 and EVEX instructions used by the Linux kernel,

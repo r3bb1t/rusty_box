@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! Opcodes table for instruction handler assignment
 //!
 //! This module defines the opcodes table structure matching the original C++ `BxOpcodesTable`

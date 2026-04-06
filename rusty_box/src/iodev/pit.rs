@@ -1,3 +1,5 @@
+#![allow(private_interfaces, unused_assignments, dead_code)]
+
 //! 8254 PIT (Programmable Interval Timer) Emulation
 //!
 //! Based on Bochs pit82c54.cc — faithful port of the Bochs state machine.

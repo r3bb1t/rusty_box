@@ -1,3 +1,6 @@
+#![allow(non_snake_case, unused_variables, unused_assignments, dead_code)]
+#![allow(unused_unsafe)]
+
 use alloc::vec;
 use core::{marker::PhantomData, ptr::NonNull};
 

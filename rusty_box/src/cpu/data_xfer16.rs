@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 // 16-bit data transfer operations: MOV, etc.
 // Mirrors Bochs cpp/cpu/data_xfer16.cc
 

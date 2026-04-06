@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 /// memory access type (read/write/execute/rw)
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub(crate) enum MemoryAccessType {

@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 // 32-bit arithmetic operations: ADD, SUB, etc.
 // Mirrors Bochs cpp/cpu/arith32.cc
 

@@ -81,3 +81,6 @@ criterion = { version = "0.5", features = ["html_reports"] }
 name = "cpu_bench"
 harness = false
 
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("bx_support_sse", "bx_support_avx", "bx_support_evex", "bx_support_vmx", "bx_support_svm", "profiling"))'] }

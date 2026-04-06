@@ -1,3 +1,7 @@
+#![allow(unused_variables)]
+
+#![allow(unused_unsafe)]
+
 use crate::cpu::{BxCpuC, BxCpuIdTrait};
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {

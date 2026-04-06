@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! PIIX4 ACPI Power Management Controller
 //!
 //! Matches Bochs `iodev/acpi.cc` (583 lines) + `acpi.h` (88 lines).

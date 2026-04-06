@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code, unused_assignments)]
 //! FSIN, FCOS, FSINCOS, FPTAN implementation.
 //! Ported from Bochs cpu/fpu/fsincos.cc using Float128 polynomial evaluation.
 

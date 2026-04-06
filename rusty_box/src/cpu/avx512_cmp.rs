@@ -1,3 +1,5 @@
+#![allow(unused_unsafe, dead_code)]
+
 //! AVX-512F comparison and miscellaneous handlers
 //!
 //! Implements VCMPPS, VCMPPD (floating-point compare to opmask),

@@ -1,3 +1,5 @@
+#![allow(unused_unsafe)]
+
 //! AVX-512F additional integer operation handlers
 //!
 //! Implements packed integer multiply, multiply-add, min/max, and SAD operations

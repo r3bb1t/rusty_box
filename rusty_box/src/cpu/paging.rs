@@ -1,3 +1,4 @@
+#![allow(unused_variables, unused_assignments, dead_code)]
 //! Paging support
 //!
 //! Based on Bochs cpu/paging.cc

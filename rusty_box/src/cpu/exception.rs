@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::cpu::{
     cpu::{Exception, ExceptionClass, BX_CPU_HANDLED_EXCEPTIONS},
     decoder::features::X86Feature,

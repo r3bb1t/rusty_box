@@ -1,3 +1,4 @@
+#![allow(unused_variables)]
 //! Task switching implementation
 //!
 //! Based on Bochs cpu/tasking.cc

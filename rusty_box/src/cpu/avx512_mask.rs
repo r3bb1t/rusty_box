@@ -1,3 +1,5 @@
+#![allow(unused_unsafe)]
+
 //! AVX-512 Opmask (k-register) instruction handlers
 //!
 //! Implements KMOV, KAND, KOR, KXOR, KXNOR, KNOT, KADD, KUNPCK,

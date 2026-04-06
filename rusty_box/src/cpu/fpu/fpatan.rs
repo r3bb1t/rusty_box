@@ -1,4 +1,4 @@
-#![allow(dead_code)]
+#![allow(dead_code, unused_assignments)]
 //! FPATAN implementation: compute atan2(y, x).
 //! Ported from Bochs cpu/fpu/fpatan.cc using Float128 polynomial evaluation.
 

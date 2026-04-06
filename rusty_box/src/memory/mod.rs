@@ -1,3 +1,5 @@
+#![allow(unused_assignments, dead_code)]
+
 mod error;
 pub(crate) mod memory_rusty_box;
 pub mod memory_stub;

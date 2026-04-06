@@ -1,3 +1,5 @@
+#![allow(non_snake_case, dead_code)]
+
 // 8-bit arithmetic operations: ADD, SUB, etc.
 // Mirrors Bochs cpp/cpu/arith8.cc
 

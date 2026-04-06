@@ -1,3 +1,5 @@
+#![allow(private_interfaces, dead_code)]
+
 //
 // |---------------------------------------------|
 // |             Segment Descriptor              |

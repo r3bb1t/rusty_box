@@ -1,3 +1,5 @@
+#![allow(unused_unsafe)]
+
 //! AVX-512F compress, expand, and miscellaneous instruction handlers
 //!
 //! Implements VPCOMPRESSD/Q, VPEXPANDD/Q, VPMOVDB, VPMOVDW, VPMOVQD

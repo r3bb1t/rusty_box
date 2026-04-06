@@ -1,3 +1,5 @@
+#![allow(unused_unsafe)]
+
 //! AVX-512F scalar floating-point instruction handlers
 //!
 //! Implements EVEX-encoded scalar FP operations (VADDSS/SD, VSUBSS/SD,

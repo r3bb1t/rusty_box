@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! XMM/YMM/ZMM register types and MXCSR for SSE/AVX/AVX-512
 //!
 //! Based on Bochs cpu/simd_int.h and cpu/xmm.h.

@@ -1,3 +1,5 @@
+#![allow(unused_unsafe)]
+
 //! AVX-512 Foundation (AVX-512F) instruction handlers
 //!
 //! Implements core 512-bit vector operations with opmask support.

@@ -1,4 +1,4 @@
-#![allow(dead_code, non_snake_case, non_camel_case_types)]
+#![allow(dead_code, non_snake_case, non_camel_case_types, unused_assignments)]
 //! Float128 (quad-precision) arithmetic library for the Rusty Box FPU.
 //!
 //! Ported from Berkeley SoftFloat 3e f128_*.c files and Bochs

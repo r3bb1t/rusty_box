@@ -1,3 +1,5 @@
+#![allow(unused_unsafe, dead_code)]
+
 //! AVX-512F floating-point conversion instruction handlers
 //!
 //! Implements packed integer <-> floating-point conversions with EVEX opmask support.

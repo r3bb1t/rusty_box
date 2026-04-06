@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! 8237 DMA Controller Emulation
 //!
 //! Matches Bochs `iodev/dma.cc` and `iodev/dma.h`.

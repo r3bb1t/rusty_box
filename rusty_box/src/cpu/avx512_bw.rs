@@ -1,3 +1,5 @@
+#![allow(unused_unsafe)]
+
 //! AVX-512BW byte/word operation handlers
 //!
 //! Implements EVEX-encoded packed byte and word operations with opmask support.

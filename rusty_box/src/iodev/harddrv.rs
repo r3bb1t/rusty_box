@@ -1,3 +1,4 @@
+#![allow(unused_assignments, dead_code)]
 //! ATA/IDE Hard Drive Controller Emulation
 //!
 //! Ported from Bochs `iodev/harddrv.cc` (AT Attachment with Packet Interface).

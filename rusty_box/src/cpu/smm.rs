@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! System Management Mode (SMM) entry/exit
 //! Matching Bochs cpu/smm.cc
 //!

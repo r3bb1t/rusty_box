@@ -1,4 +1,4 @@
-#![allow(non_camel_case_types)]
+#![allow(non_camel_case_types, dead_code)]
 //! Software IEC/IEEE floating-point types.
 //! Ported from Berkeley SoftFloat 3e.
 

@@ -1,3 +1,5 @@
+#![allow(unused_assignments, dead_code)]
+
 use crate::cpu::vmx_ctrls::{VmxPinBasedVmexecControls, VmxVmexec1Controls, VmxVmexec2Controls};
 
 pub type VmcsCache = BxVmcs;

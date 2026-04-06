@@ -1,3 +1,5 @@
+#![allow(unused_unsafe, dead_code)]
+
 //! Intel CET (Control-flow Enforcement Technology) implementation.
 //!
 //! Mirrors Bochs cpu/cet.cc — ENDBR32/ENDBR64, shadow stack helpers,

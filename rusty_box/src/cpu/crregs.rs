@@ -1,3 +1,5 @@
+#![allow(non_camel_case_types, unused_variables, unused_assignments, dead_code)]
+
 use super::{cpuid::BxCpuIdTrait, decoder::Instruction, BxCpuC};
 
 // CR0 notes:

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 //! SSE/SSE2 data movement instruction handlers
 //!
 //! Based on Bochs cpu/sse_move.cc

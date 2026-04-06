@@ -1,3 +1,5 @@
+#![allow(unused_unsafe)]
+
 //! AVX-512F rounding, scale, exponent, and mantissa instruction handlers
 //!
 //! Implements VRNDSCALE, VSCALEF, VGETEXP, VGETMANT (packed and scalar).

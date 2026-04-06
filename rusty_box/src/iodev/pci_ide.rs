@@ -1,3 +1,4 @@
+#![allow(unused_variables)]
 //! PIIX3 PCI IDE Controller with Bus Master DMA
 //!
 //! Matches Bochs `iodev/pci_ide.cc` (459 lines) + `pci_ide.h` (84 lines).

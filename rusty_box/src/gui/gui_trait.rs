@@ -1,3 +1,4 @@
+#![allow(unused_assignments, dead_code)]
 //! GUI trait definition
 //!
 //! Based on bx_gui_c class from gui/gui.h

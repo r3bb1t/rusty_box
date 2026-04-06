@@ -1,3 +1,5 @@
+#![allow(unused_unsafe)]
+
 //! AVX-512F shuffle, permute, and miscellaneous handlers
 //!
 //! Implements VSHUFF32x4/64x2, VPERMILPS/PD, VPERMPD, VPERMPS,

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 // access.rs — Virtual memory access functions
 //
 // Ported from Bochs cpu/access.cc + cpu/access2.cc

@@ -1,3 +1,4 @@
+#![allow(unused_assignments, dead_code)]
 //! 8042 Keyboard Controller (PS/2 Controller) Emulation
 //!
 //! Ported from Bochs `iodev/keyboard.cc` (1477 lines).

@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use alloc::{vec, vec::Vec};
 use byteorder::{ByteOrder, LittleEndian};
 #[cfg(feature = "std")]

@@ -1,3 +1,5 @@
+#![allow(private_interfaces, unused_assignments, dead_code)]
+
 use alloc::vec::Vec;
 
 use crate::config::{BxAddress, BxPhyAddress, BxPtrEquiv};

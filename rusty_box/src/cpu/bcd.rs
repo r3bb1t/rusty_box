@@ -1,3 +1,5 @@
+#![allow(non_snake_case)]
+
 // BCD (Binary Coded Decimal) instructions: DAA, DAS, AAA, AAS, AAM, AAD
 // Mirrors Bochs cpp/cpu/bcd.cc
 

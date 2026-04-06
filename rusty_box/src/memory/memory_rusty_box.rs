@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 /// 4M BIOS ROM @0xffc00000, must be a power of 2
 pub(super) static BIOSROMSZ: usize = 1 << 22;
 /// ROMs 0xc0000-0xdffff (area 0xe0000-0xfffff=bios mapped)

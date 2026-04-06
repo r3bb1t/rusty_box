@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use bitflags::bitflags;
 
 use super::{decoder::BX_ISA_EXTENSIONS_ARRAY_SIZE, BxCpuC, Result};

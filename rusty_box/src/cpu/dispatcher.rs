@@ -1,3 +1,5 @@
+#![allow(unused_unsafe)]
+
 //! Instruction dispatcher for x86 CPU emulation
 //!
 //! Maps decoded opcodes to their implementation methods.

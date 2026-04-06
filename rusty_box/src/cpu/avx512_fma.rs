@@ -1,3 +1,5 @@
+#![allow(unused_unsafe)]
+
 //! AVX-512F Fused Multiply-Add (FMA) instruction handlers
 //!
 //! Implements VFMADD, VFMSUB, VFNMADD, VFNMSUB in all three forms (132, 213, 231)

@@ -1,3 +1,5 @@
+#![allow(unused_unsafe)]
+
 //! AVX-512F broadcast instruction handlers
 //!
 //! Implements EVEX-encoded broadcast operations:
