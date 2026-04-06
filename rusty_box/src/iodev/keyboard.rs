@@ -563,6 +563,9 @@ pub struct BxKeyboardC {
     /// Port 0x61 bit 0 controls PIT counter 2 gate (Bochs keyboard.cc write handler).
     /// SAFETY: Must remain valid for the lifetime of the keyboard.
     pit_ptr: Option<*mut super::pit::BxPitC>,
+    /// System reset requested via controller command 0xFE.
+    /// Checked by emulator loop to trigger hardware reset.
+    pub(crate) reset_requested: bool,
 }
 
 impl Default for BxKeyboardC {
@@ -647,6 +650,7 @@ impl BxKeyboardC {
             kbd_initialized: false,
             scancode_escaped: false,
             pit_ptr: None,
+            reset_requested: false,
         }
     }
 
@@ -1095,6 +1099,7 @@ impl BxKeyboardC {
             CTRL_CMD_SYSTEM_RESET => {
                 // System reset — keyboard.cc:625-627
                 tracing::warn!("Keyboard: System reset via 0xFE");
+                self.reset_requested = true;
             }
             _ => {
                 if value == 0xFF || (0xF0..=0xFD).contains(&value) {

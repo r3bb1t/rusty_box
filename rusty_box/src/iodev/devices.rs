@@ -122,6 +122,8 @@ pub struct DeviceManager {
     pub diag_total_usec: u64,
     /// Diagnostic: iac vector histogram [0..256]
     pub diag_vector_hist: [u32; 256],
+    /// System Control Port (Port 92h) — A20 gate and fast reset
+    pub(crate) port92: SystemControlPort,
 }
 
 impl Default for DeviceManager {
@@ -169,6 +171,7 @@ impl DeviceManager {
             diag_tick_count: 0,
             diag_total_usec: 0,
             diag_vector_hist: [0; 256],
+            port92: SystemControlPort::new(),
         }
     }
 
@@ -707,19 +710,12 @@ impl DeviceManager {
 
     /// Port 92h read dispatch (System Control Port)
     pub(crate) fn port92_read(&self, _port: u16, _io_len: u8) -> u32 {
-        // Reads current A20 gate state (bit 1)
-        // TODO: When DeviceManager owns SystemControlPort, read from it directly.
-        // For now, return default A20-enabled.
-        0x02
+        self.port92.read() as u32
     }
 
     /// Port 92h write dispatch (System Control Port)
     pub(crate) fn port92_write(&mut self, _port: u16, value: u32, _io_len: u8) {
-        let _value = value as u8;
-        // Port92 state is owned by Emulator (SystemControlPort), not DeviceManager.
-        // The emulator polls system_control after each batch for A20/reset changes.
-        // Writes here are a no-op until we move SystemControlPort into DeviceManager.
-        tracing::debug!("Port 92h write: value={:#04x} (dispatch stub)", _value);
+        self.port92.write(value as u8);
     }
 
     /// PCI I/O read dispatch
@@ -835,7 +831,6 @@ impl BxDevicesC {
     pub fn init(
         &mut self,
         _mem: &mut BxMemC,
-        _port92_state: Option<*mut SystemControlPort>,
     ) -> Result<()> {
         tracing::info!("Initializing device subsystem");
 
@@ -853,9 +848,8 @@ impl BxDevicesC {
         &mut self,
         _mem: &mut BxMemC,
         _pc_system: &mut BxPcSystemC,
-        port92_state: Option<*mut SystemControlPort>,
     ) -> Result<()> {
-        self.init(_mem, port92_state)
+        self.init(_mem)
     }
 
     /// Reset all devices

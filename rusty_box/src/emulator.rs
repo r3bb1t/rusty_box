@@ -95,8 +95,6 @@ pub struct Emulator<'a, I: BxCpuIdTrait> {
     pub device_manager: DeviceManager,
     /// PC system (timers, A20, etc.)
     pub pc_system: BxPcSystemC,
-    /// System Control Port state (Port 0x92)
-    pub system_control: SystemControlPort,
     /// Configuration
     config: EmulatorConfig,
     /// Whether the emulator has been initialized
@@ -161,7 +159,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             devices,
             device_manager,
             pc_system,
-            system_control: SystemControlPort::new(),
             config,
             initialized: false,
             gui: None,
@@ -238,9 +235,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // This is optional and not yet implemented in Rust version
 
         // Step 9: Initialize devices (line 1353)
-        // Pass pointer to system_control for Port 92h handling
-        let port92_ptr = &mut self.system_control as *mut SystemControlPort;
-        self.devices.init(&mut self.memory, Some(port92_ptr))?;
+        self.devices.init(&mut self.memory)?;
 
         // Initialize device manager (actual hardware + I/O handler registration)
         self.device_manager
@@ -494,9 +489,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // This is optional and not yet implemented in Rust version
 
         // Step 9: Initialize devices (line 1353)
-        // Pass pointer to system_control for Port 92h handling
-        let port92_ptr = &mut self.system_control as *mut SystemControlPort;
-        self.devices.init(&mut self.memory, Some(port92_ptr))?;
+        self.devices.init(&mut self.memory)?;
 
         // Initialize device manager (actual hardware + I/O handler registration)
         self.device_manager
@@ -869,8 +862,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             // Note: release_keys() at line 407 and paste.stop at line 409 not yet implemented
         }
 
-        // Reset system control port state
-        self.system_control = SystemControlPort::new();
+        // Reset system control port and keyboard reset flag
+        self.device_manager.port92 = SystemControlPort::new();
+        self.device_manager.keyboard.reset_requested = false;
 
         // Note: start_timers() is called separately after GUI signal handlers
         // to match original Bochs order: reset -> init_signal_handlers -> start_timers
@@ -1013,7 +1007,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     ///
     /// Call this after Port 92h writes to update A20 state throughout the system.
     pub fn sync_a20_state(&mut self) {
-        self.pc_system.set_enable_a20(self.system_control.a20_gate);
+        self.pc_system.set_enable_a20(self.device_manager.port92.a20_gate);
         self.memory.set_a20_mask(self.pc_system.a20_mask());
         // Bochs pc_system.cc MemoryMappingChanged() calls BX_CPU(0)->TLB_flush()
         // after A20 changes, since A20 masking affects physical address translation.
@@ -1025,18 +1019,18 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     /// This updates the A20 state and checks for reset requests.
     /// Returns true if a reset was requested.
     pub fn write_port_92h(&mut self, value: u8) -> bool {
-        let a20_changed = self.system_control.write(value);
+        let a20_changed = self.device_manager.port92.write(value);
 
         if a20_changed {
             self.sync_a20_state();
         }
 
-        self.system_control.reset_request
+        self.device_manager.port92.reset_request
     }
 
     /// Read Port 92h value
     pub fn read_port_92h(&self) -> u8 {
-        self.system_control.read()
+        self.device_manager.port92.read()
     }
 
     /// Set BIOS output file for port 0x402/0x403/0xE9 messages (requires std feature)
@@ -1651,7 +1645,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         const GUI_UPDATE_INTERVAL: std::time::Duration = std::time::Duration::from_millis(40);
         const IPS_SHOW_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
         const MIPS_LOG_INTERVAL: u64 = 50_000_000;
-        let mut last_port92_value: u8 = self.system_control.value;
+        let mut last_port92_value: u8 = self.device_manager.port92.value;
 
         const INSTRUCTION_BATCH_SIZE: u64 = 100_000;
 
@@ -1760,9 +1754,27 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
                     // Port 92h (System Control) may have changed A20 during execution.
                     // Sync PC system + memory masks if any writes occurred.
-                    if self.system_control.value != last_port92_value {
-                        last_port92_value = self.system_control.value;
+                    if self.device_manager.port92.value != last_port92_value {
+                        last_port92_value = self.device_manager.port92.value;
                         self.sync_a20_state();
+                    }
+
+                    // Check for reset requests: Port 92h fast reset or keyboard 0xFE
+                    if self.device_manager.port92.reset_request || self.device_manager.keyboard.reset_requested {
+                        if self.device_manager.port92.reset_request {
+                            tracing::info!("Reset requested via Port 92h (fast reset)");
+                        }
+                        if self.device_manager.keyboard.reset_requested {
+                            tracing::info!("Reset requested via keyboard controller 0xFE");
+                        }
+                        self.device_manager.port92.reset_request = false;
+                        self.device_manager.keyboard.reset_requested = false;
+                        if let Err(e) = self.reset(ResetReason::Hardware) {
+                            tracing::error!("Reset failed: {}", e);
+                            break;
+                        }
+                        last_port92_value = self.device_manager.port92.value;
+                        continue;
                     }
 
                     // -- Progress tracking --
