@@ -149,9 +149,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
 
             // Then check PIC (legacy 8259 path) — only if LAPIC didn't deliver
-            if !delivered && !self.pic_ptr.is_null() {
-                // SAFETY: pic_ptr set during emulator init; single-threaded access
-                let pic = unsafe { &mut *self.pic_ptr };
+            if !delivered && self.pic_ptr.is_some() {
+                // SAFETY: pic_ptr set for duration of cpu_loop_n_with_io; single-threaded access
+                let pic = unsafe { self.pic_ptr.unwrap().as_mut() };
                 if pic.has_interrupt() {
                     let vector = pic.iac();
                     tracing::debug!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
@@ -192,9 +192,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // NOTE: similar code in handleWaitForEvent (event.cc:83-86)
         // Assert Hold Acknowledge (HLDA) and perform DMA transfer
         if self.get_hrq()
-            && !self.dma_ptr.is_null() {
-                // SAFETY: dma_ptr set during emulator init; single-threaded access
-                let dma = unsafe { &mut *self.dma_ptr };
+            && self.dma_ptr.is_some() {
+                // SAFETY: dma_ptr set for duration of cpu_loop_n_with_io; single-threaded access
+                let dma = unsafe { self.dma_ptr.unwrap().as_mut() };
                 dma.raise_hlda();
             }
 
@@ -228,9 +228,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Handle DMA also when CPU is halted (Bochs event.cc:83-86)
         if self.get_hrq()
-            && !self.dma_ptr.is_null() {
-                // SAFETY: dma_ptr set during emulator init; single-threaded access
-                let dma = unsafe { &mut *self.dma_ptr };
+            && self.dma_ptr.is_some() {
+                // SAFETY: dma_ptr set for duration of cpu_loop_n_with_io; single-threaded access
+                let dma = unsafe { self.dma_ptr.unwrap().as_mut() };
                 dma.raise_hlda();
             }
 

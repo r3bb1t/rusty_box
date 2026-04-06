@@ -272,10 +272,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 .pic
                 .set_cpu_signal_ptrs(async_ptr, pending_ptr);
         }
-        self.cpu.pic_ptr = &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
-
-        // Wire CPU→DMA for raise_HLDA during HRQ handling (matches Bochs DEV_dma_raise_hlda)
-        self.cpu.dma_ptr = &mut self.device_manager.dma as *mut crate::iodev::dma::BxDmaC;
 
         // Wire DMA→pc_system for set_HRQ and DMA→memory for physical DMA transfers
         let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
@@ -521,10 +517,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 .pic
                 .set_cpu_signal_ptrs(async_ptr, pending_ptr);
         }
-        self.cpu.pic_ptr = &mut self.device_manager.pic as *mut crate::iodev::pic::BxPicC;
-
-        // Wire CPU→DMA for raise_HLDA during HRQ handling (same as in initialize())
-        self.cpu.dma_ptr = &mut self.device_manager.dma as *mut crate::iodev::dma::BxDmaC;
 
         // Wire DMA→pc_system for set_HRQ and DMA→memory for physical DMA transfers
         let (ram_base, ram_len) = self.memory.get_ram_base_ptr();
@@ -1691,8 +1683,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 // Wire DeviceManager into BxDevicesC for enum-based I/O dispatch
                 let dm_ptr = core::ptr::NonNull::from(&mut self.device_manager);
                 io_ptr.as_ptr().as_mut().unwrap_unchecked().set_device_manager(dm_ptr);
+                let pic_ptr = core::ptr::NonNull::from(&mut self.device_manager.pic);
+                let dma_ptr = core::ptr::NonNull::from(&mut self.device_manager.dma);
                 let r = self.cpu
-                    .cpu_loop_n_with_io(mem_extended, &[], batch_size, io_ptr, ps_ptr);
+                    .cpu_loop_n_with_io(mem_extended, &[], batch_size, io_ptr, ps_ptr, Some(pic_ptr), Some(dma_ptr));
                 self.devices.clear_device_manager();
                 r
             };
@@ -2484,7 +2478,9 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     let ps2 = core::ptr::NonNull::from(&mut self.pc_system);
                                     let dm2 = core::ptr::NonNull::from(&mut self.device_manager);
                                     io2.as_ptr().as_mut().unwrap_unchecked().set_device_manager(dm2);
-                                    let r = self.cpu.cpu_loop_n_with_io(mem_ext, &[], batch2, io2, ps2);
+                                    let pic2 = core::ptr::NonNull::from(&mut self.device_manager.pic);
+                                    let dma2 = core::ptr::NonNull::from(&mut self.device_manager.dma);
+                                    let r = self.cpu.cpu_loop_n_with_io(mem_ext, &[], batch2, io2, ps2, Some(pic2), Some(dma2));
                                     self.devices.clear_device_manager();
                                     r
                                 };
@@ -2931,8 +2927,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
                 let dm_ptr = core::ptr::NonNull::from(&mut self.device_manager);
                 io_ptr.as_ptr().as_mut().unwrap_unchecked().set_device_manager(dm_ptr);
+                let pic_ptr = core::ptr::NonNull::from(&mut self.device_manager.pic);
+                let dma_ptr = core::ptr::NonNull::from(&mut self.device_manager.dma);
                 let r = self.cpu
-                    .cpu_loop_n_with_io(mem_extended, &[], max_instructions, io_ptr, ps_ptr);
+                    .cpu_loop_n_with_io(mem_extended, &[], max_instructions, io_ptr, ps_ptr, Some(pic_ptr), Some(dma_ptr));
                 self.devices.clear_device_manager();
                 r
             };

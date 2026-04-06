@@ -702,17 +702,17 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     /// Wired by the emulator during execution, cleared afterwards.
     pub(super) pc_system_ptr: Option<NonNull<crate::pc_system::BxPcSystemC>>,
 
-    /// Raw pointer to PIC for interrupt delivery inside handle_async_event().
+    /// Optional PIC pointer for interrupt delivery inside handle_async_event().
     ///
     /// Matches Bochs' `DEV_pic_iac()` call in `HandleExtInterrupt()`.
-    /// Set once during emulator initialization, valid for the emulator's lifetime.
-    pub(crate) pic_ptr: *mut crate::iodev::pic::BxPicC,
+    /// Set for the duration of a CPU execution call via cpu_loop_n_with_io and cleared afterwards.
+    pub(super) pic_ptr: Option<NonNull<crate::iodev::pic::BxPicC>>,
 
-    /// Raw pointer to DMA controller for raise_HLDA inside handle_async_event().
+    /// Optional DMA controller pointer for raise_HLDA inside handle_async_event().
     ///
     /// Matches Bochs' `DEV_dma_raise_hlda()` call in event.cc:83,390,505.
-    /// Set during emulator initialization, valid for the emulator's lifetime.
-    pub(crate) dma_ptr: *mut crate::iodev::dma::BxDmaC,
+    /// Set for the duration of a CPU execution call via cpu_loop_n_with_io and cleared afterwards.
+    pub(super) dma_ptr: Option<NonNull<crate::iodev::dma::BxDmaC>>,
 
     /// Debug flags for one-time boot diagnostics (no globals).
     ///
@@ -1340,7 +1340,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
     /// Execute CPU loop with an attached I/O bus (port handlers).
     ///
-    /// This sets the bus pointer for the duration of the call and clears it afterwards.
+    /// This sets the bus, pc_system, pic, and dma pointers for the duration of the call
+    /// and clears them afterwards.
     #[inline]
     pub fn cpu_loop_n_with_io(
         &mut self,
@@ -1349,12 +1350,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         max_instructions: u64,
         io: NonNull<crate::iodev::BxDevicesC>,
         pc_system: NonNull<crate::pc_system::BxPcSystemC>,
+        pic: Option<NonNull<crate::iodev::pic::BxPicC>>,
+        dma: Option<NonNull<crate::iodev::dma::BxDmaC>>,
     ) -> super::Result<u64> {
         self.set_io_bus_ptr(io);
         self.set_pc_system_ptr(pc_system);
+        self.pic_ptr = pic;
+        self.dma_ptr = dma;
         let result = self.cpu_loop_n(mem, cpus, max_instructions);
         self.clear_io_bus();
         self.clear_pc_system();
+        self.pic_ptr = None;
+        self.dma_ptr = None;
         result
     }
 
