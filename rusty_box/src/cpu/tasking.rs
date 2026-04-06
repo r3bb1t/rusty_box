@@ -547,14 +547,10 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         // Instruction pointer must be in CS limit, else #GP(0) (Bochs tasking.cc:831-834)
-        // SAFETY: segment cache populated during segment load; union read matches descriptor type
-        let cs_limit = unsafe {
-            self.sregs[BxSegregs::Cs as usize]
-                .cache
-                .u
-                .segment
-                .limit_scaled
-        };
+        let cs_limit = self.sregs[BxSegregs::Cs as usize]
+            .cache
+            .u
+            .segment_limit_scaled();
         if new_eip > cs_limit {
             tracing::error!(
                 "task_switch: EIP ({:#x}) > CS.limit ({:#x})",

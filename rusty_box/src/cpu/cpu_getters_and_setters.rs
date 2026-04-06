@@ -312,14 +312,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     pub fn get_ss_base(&self) -> u64 {
-        // SAFETY: segment cache populated during segment load; union read matches descriptor type
-        unsafe {
-            self.sregs[super::decoder::BxSegregs::Ss as usize]
-                .cache
-                .u
-                .segment
-                .base
-        }
+        self.sregs[super::decoder::BxSegregs::Ss as usize]
+            .cache
+            .u
+            .segment_base()
     }
 
     // getters for 64 bit general registers
@@ -607,27 +603,19 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Get CS base from cached descriptor (for diagnostics)
     #[inline]
     pub fn get_cs_base(&self) -> u64 {
-        // SAFETY: segment cache populated during segment load; union read matches descriptor type
-        unsafe {
-            self.sregs[super::decoder::BxSegregs::Cs as usize]
-                .cache
-                .u
-                .segment
-                .base
-        }
+        self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .cache
+            .u
+            .segment_base()
     }
 
     /// Get DS base from cached descriptor (for diagnostics)
     #[inline]
     pub fn get_ds_base(&self) -> u64 {
-        // SAFETY: segment cache populated during segment load; union read matches descriptor type
-        unsafe {
-            self.sregs[super::decoder::BxSegregs::Ds as usize]
-                .cache
-                .u
-                .segment
-                .base
-        }
+        self.sregs[super::decoder::BxSegregs::Ds as usize]
+            .cache
+            .u
+            .segment_base()
     }
 
     /// Get DS selector (for diagnostics)

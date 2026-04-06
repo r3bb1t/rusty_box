@@ -36,14 +36,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 tracing::error!("handle_cpu_mode_change: EFER.LMA is set when CR0.PE=0!");
             }
             // Bochs proc_ctrl.cc:366 — check CS.L bit for 64-bit vs compat mode
-            // SAFETY: segment cache populated during segment load; union read matches descriptor type
-            let cs_l = unsafe {
-                self.sregs[super::decoder::BxSegregs::Cs as usize]
-                    .cache
-                    .u
-                    .segment
-                    .l
-            };
+        // SAFETY: segment cache populated during segment load; union read matches descriptor type
+        let cs_l = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .cache
+            .u
+            .segment_l();
             if cs_l {
                 self.cpu_mode = CpuMode::Long64;
             } else {
@@ -146,13 +143,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         // Bochs: fetchModeMask = cpu_state_use_ok | (long64<<1) | d_b
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
-        let d_b = unsafe {
-            self.sregs[super::decoder::BxSegregs::Cs as usize]
-                .cache
-                .u
-                .segment
-                .d_b
-        };
+        let d_b = self.sregs[super::decoder::BxSegregs::Cs as usize]
+            .cache
+            .u
+            .segment_d_b();
         let long64 = self.cpu_mode == CpuMode::Long64;
 
         // Keep FPU/SSE/AVX readiness (bits 2-7), update D_B and LONG64 (bits 0-1)

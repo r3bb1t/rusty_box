@@ -778,13 +778,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 // SAFETY: segment cache populated during segment load; union read matches descriptor type
-                let cs_l = unsafe {
-                    self.sregs[super::decoder::BxSegregs::Cs as usize]
-                        .cache
-                        .u
-                        .segment
-                        .l
-                };
+                let cs_l = self.sregs[super::decoder::BxSegregs::Cs as usize]
+                    .cache
+                    .u
+                    .segment_l();
                 if cs_l {
                     tracing::debug!("MOV CR0: attempt to enter long mode with CS.L=1, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);

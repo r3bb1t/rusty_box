@@ -3290,10 +3290,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         if seg_idx < 6 {
             let selector = self.cpu.sregs[seg_idx].selector.value;
             let valid = self.cpu.sregs[seg_idx].cache.valid;
-            // SAFETY: segment cache populated during segment load; union read matches descriptor type
-            let base = unsafe { self.cpu.sregs[seg_idx].cache.u.segment.base };
-            // SAFETY: segment cache populated during segment load; union read matches descriptor type
-            let limit = unsafe { self.cpu.sregs[seg_idx].cache.u.segment.limit_scaled };
+            let base = self.cpu.sregs[seg_idx].cache.u.segment_base();
+            let limit = self.cpu.sregs[seg_idx].cache.u.segment_limit_scaled();
             (selector, base, limit, valid)
         } else {
             (0, 0, 0, 0)

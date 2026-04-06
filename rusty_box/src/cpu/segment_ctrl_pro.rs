@@ -94,16 +94,14 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             dpl,
             segment,
             r#type,
-            u: super::descriptor::Descriptor {
-                segment: DescriptorSegment {
-                    base: 0,
-                    limit_scaled: 0,
-                    g: false,
-                    d_b: false,
-                    l: false,
-                    avl: false,
-                },
-            },
+            u: super::descriptor::Descriptor::Segment(DescriptorSegment {
+                base: 0,
+                limit_scaled: 0,
+                g: false,
+                d_b: false,
+                l: false,
+                avl: false,
+            }),
         };
 
         if segment {
@@ -120,14 +118,14 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
             let limit_scaled = if g { (limit << 12) | 0xFFF } else { limit };
 
-            descriptor.u.segment = DescriptorSegment {
+            descriptor.u = super::descriptor::Descriptor::Segment(DescriptorSegment {
                 base,
                 limit_scaled,
                 g,
                 d_b,
-                l: (dword2 & 0x00200000) != 0, // L bit for 64-bit mode
+                l: (dword2 & 0x00200000) != 0,
                 avl,
-            };
+            });
 
             descriptor.valid = super::descriptor::SEG_VALID_CACHE;
         } else {
@@ -139,11 +137,11 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     let dest_selector = (dword1 >> 16) as u16;
                     let dest_offset = dword1 & 0xFFFF ;
 
-                    descriptor.u.gate = DescriptorGate {
+                    descriptor.u = super::descriptor::Descriptor::Gate(DescriptorGate {
                         param_count,
                         dest_selector,
                         dest_offset,
-                    };
+                    });
                     descriptor.valid = super::descriptor::SEG_VALID_CACHE;
                 }
                 0xC | 0xE | 0xF => {
@@ -152,17 +150,17 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                     let dest_selector = (dword1 >> 16) as u16;
                     let dest_offset = (dword2 & 0xFFFF0000) | (dword1 & 0xFFFF) ;
 
-                    descriptor.u.gate = DescriptorGate {
+                    descriptor.u = super::descriptor::Descriptor::Gate(DescriptorGate {
                         param_count,
                         dest_selector,
                         dest_offset,
-                    };
+                    });
                     descriptor.valid = super::descriptor::SEG_VALID_CACHE;
                 }
                 0x5 => {
                     // Task gate
                     let tss_selector = (dword1 >> 16) as u16;
-                    descriptor.u.task_gate = DescriptorTaskGate { tss_selector };
+                    descriptor.u = super::descriptor::Descriptor::TaskGate(DescriptorTaskGate { tss_selector });
                     descriptor.valid = super::descriptor::SEG_VALID_CACHE;
                 }
                 0x2 | 0x1 | 0x3 | 0x9 | 0xB => {
@@ -177,14 +175,14 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
                     let limit_scaled = if g { (limit << 12) | 0xFFF } else { limit };
 
-                    descriptor.u.segment = DescriptorSegment {
+                    descriptor.u = super::descriptor::Descriptor::Segment(DescriptorSegment {
                         base,
                         limit_scaled,
                         g,
                         d_b,
                         l: false,
                         avl,
-                    };
+                    });
                     descriptor.valid = super::descriptor::SEG_VALID_CACHE;
                 }
                 _ => {

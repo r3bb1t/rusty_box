@@ -2242,14 +2242,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             // Calculate RIP at the beginning of the page.
             let eip_page_bias_calc = BxAddress::from(page_offset.wrapping_sub(eip));
 
-            // SAFETY: segment cache populated during segment load; union read matches descriptor type
-            let limit: u32 = unsafe {
-                self.sregs[BxSegregs::Cs as usize]
-                    .cache
-                    .u
-                    .segment
-                    .limit_scaled
-            };
+            let limit: u32 = self.sregs[BxSegregs::Cs as usize]
+                .cache
+                .u
+                .segment_limit_scaled();
             if eip > limit {
                 // Matching C++ cpu.cc:656-659 - raise exception (does not return normally)
                 tracing::error!("prefetch: EIP [{eip:#x}] > CS.limit [{limit:#x}]",);
@@ -2260,14 +2256,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // After exception handler runs, check if the new EIP is valid
                 // If not, we're in a loop (exception handler also has invalid EIP)
                 let new_eip = self.eip();
-                // SAFETY: segment cache populated during segment load; union read matches descriptor type
-                let new_limit: u32 = unsafe {
-                    self.sregs[BxSegregs::Cs as usize]
-                        .cache
-                        .u
-                        .segment
-                        .limit_scaled
-                };
+                let new_limit: u32 = self.sregs[BxSegregs::Cs as usize]
+                    .cache
+                    .u
+                    .segment_limit_scaled();
                 if new_eip > new_limit {
                     // Exception handler set invalid EIP - this would cause double-fault in real hardware
                     tracing::error!("prefetch: exception handler set invalid EIP [{new_eip:#x}] > CS.limit [{new_limit:#x}] - double-fault condition");

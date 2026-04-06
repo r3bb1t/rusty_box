@@ -666,13 +666,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
 
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
-        let is_32_bit_mode = unsafe {
-            self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
-                .cache
-                .u
-                .segment
-                .d_b
-        };
+        let is_32_bit_mode = self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
+            .cache
+            .u
+            .segment_d_b();
         let quantum = BX_MAX_TRACE_LENGTH;
 
         // Matching Bochs: when mpool is nearly full, flush all icache entries and
@@ -856,14 +853,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                             "DECODE-FAIL: remaining={} RIP={:#x} CS.base={:#x} EIP={:#x} icount={}",
                             current_remaining,
                             self.rip(),
-                            // SAFETY: segment cache populated during segment load; union read matches descriptor type
-                            unsafe {
-                                self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
-                                    .cache
-                                    .u
-                                    .segment
-                                    .base
-                            },
+                            self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
+                                .cache
+                                .u
+                                .segment_base(),
                             self.eip(),
                             self.icount,
                         );
@@ -1030,14 +1023,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                  or boundary_fetch was called with an incorrect remaining_in_page value.",
                 remaining_in_page,
                 self.rip(),
-                // SAFETY: segment cache populated during segment load; union read matches descriptor type
-                unsafe {
-                    self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
-                        .cache
-                        .u
-                        .segment
-                        .base
-                },
+                self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
+                    .cache
+                    .u
+                    .segment_base(),
                 self.eip()
             );
             self.exception(crate::cpu::cpu::Exception::Gp, 0)?;
@@ -1066,13 +1055,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Get is_32_bit_mode from CS segment descriptor d_b flag
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
-        let is_32_bit_mode = unsafe {
-            self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
-                .cache
-                .u
-                .segment
-                .d_b
-        };
+        let is_32_bit_mode = self.sregs[crate::cpu::decoder::BxSegregs::Cs as usize]
+            .cache
+            .u
+            .segment_d_b();
 
         // Decode instruction from combined buffer (matching C++ line 291-296)
         let total_bytes = remaining_in_page + fetch_buffer_limit;

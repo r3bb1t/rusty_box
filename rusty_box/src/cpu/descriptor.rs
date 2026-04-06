@@ -67,10 +67,10 @@ struct Taskgate {
 //}
 
 #[derive(Clone, Copy)]
-pub(crate) union Descriptor {
-    pub(crate) segment: DescriptorSegment,
-    pub(crate) gate: DescriptorGate,
-    pub(crate) task_gate: DescriptorTaskGate,
+pub(crate) enum Descriptor {
+    Segment(DescriptorSegment),
+    Gate(DescriptorGate),
+    TaskGate(DescriptorTaskGate),
 }
 
 #[derive(Clone, Copy)]
@@ -105,114 +105,155 @@ pub(super) struct DescriptorTaskGate {
 
 impl Default for Descriptor {
     fn default() -> Self {
-        Self {
-            task_gate: DescriptorTaskGate { tss_selector: 0 },
-        }
+        Self::TaskGate(DescriptorTaskGate { tss_selector: 0 })
     }
 }
 
 impl Descriptor {
     // -- Segment accessors --
-    // SAFETY for all: caller must ensure the descriptor is a segment type
-    //   (BxDescriptor.segment == true) before calling segment_* methods.
-    //   This matches the existing invariant maintained throughout the codebase.
+    // Caller contract: only call segment_* on Segment variants.
+    // Returns default (0/false) for wrong variant.
 
     #[inline(always)]
     pub(crate) fn segment_base(&self) -> BxAddress {
-        // SAFETY: union read; caller verified descriptor is segment type
-        unsafe { self.segment.base }
+        match self {
+            Self::Segment(s) => s.base,
+            _ => 0,
+        }
     }
     #[inline(always)]
     pub(crate) fn set_segment_base(&mut self, val: BxAddress) {
-        self.segment.base = val;
+        match self {
+            Self::Segment(s) => s.base = val,
+            _ => {}
+        }
     }
 
     #[inline(always)]
     pub(crate) fn segment_limit_scaled(&self) -> u32 {
-        // SAFETY: union read; caller verified descriptor is segment type
-        unsafe { self.segment.limit_scaled }
+        match self {
+            Self::Segment(s) => s.limit_scaled,
+            _ => 0,
+        }
     }
     #[inline(always)]
     pub(crate) fn set_segment_limit_scaled(&mut self, val: u32) {
-        self.segment.limit_scaled = val;
+        match self {
+            Self::Segment(s) => s.limit_scaled = val,
+            _ => {}
+        }
     }
 
     #[inline(always)]
     pub(crate) fn segment_g(&self) -> bool {
-        // SAFETY: union read; caller verified descriptor is segment type
-        unsafe { self.segment.g }
+        match self {
+            Self::Segment(s) => s.g,
+            _ => false,
+        }
     }
     #[inline(always)]
     pub(crate) fn set_segment_g(&mut self, val: bool) {
-        self.segment.g = val;
+        match self {
+            Self::Segment(s) => s.g = val,
+            _ => {}
+        }
     }
 
     #[inline(always)]
     pub(crate) fn segment_d_b(&self) -> bool {
-        // SAFETY: union read; caller verified descriptor is segment type
-        unsafe { self.segment.d_b }
+        match self {
+            Self::Segment(s) => s.d_b,
+            _ => false,
+        }
     }
     #[inline(always)]
     pub(crate) fn set_segment_d_b(&mut self, val: bool) {
-        self.segment.d_b = val;
+        match self {
+            Self::Segment(s) => s.d_b = val,
+            _ => {}
+        }
     }
 
     #[inline(always)]
     pub(crate) fn segment_l(&self) -> bool {
-        // SAFETY: union read; caller verified descriptor is segment type
-        unsafe { self.segment.l }
+        match self {
+            Self::Segment(s) => s.l,
+            _ => false,
+        }
     }
     #[inline(always)]
     pub(crate) fn set_segment_l(&mut self, val: bool) {
-        self.segment.l = val;
+        match self {
+            Self::Segment(s) => s.l = val,
+            _ => {}
+        }
     }
 
     #[inline(always)]
     pub(crate) fn segment_avl(&self) -> bool {
-        // SAFETY: union read; caller verified descriptor is segment type
-        unsafe { self.segment.avl }
+        match self {
+            Self::Segment(s) => s.avl,
+            _ => false,
+        }
     }
     #[inline(always)]
     pub(crate) fn set_segment_avl(&mut self, val: bool) {
-        self.segment.avl = val;
+        match self {
+            Self::Segment(s) => s.avl = val,
+            _ => {}
+        }
     }
 
     // -- Gate accessors --
-    // SAFETY: caller must ensure the descriptor is a gate type.
+    // Caller contract: only call gate_* on Gate variants.
 
     #[inline(always)]
     pub(crate) fn gate_dest_offset(&self) -> u32 {
-        // SAFETY: union read; caller verified descriptor is gate type
-        unsafe { self.gate.dest_offset }
+        match self {
+            Self::Gate(g) => g.dest_offset,
+            _ => 0,
+        }
     }
     #[inline(always)]
     pub(crate) fn set_gate_dest_offset(&mut self, val: u32) {
-        self.gate.dest_offset = val;
+        match self {
+            Self::Gate(g) => g.dest_offset = val,
+            _ => {}
+        }
     }
 
     #[inline(always)]
     pub(crate) fn gate_dest_selector(&self) -> u16 {
-        // SAFETY: union read; caller verified descriptor is gate type
-        unsafe { self.gate.dest_selector }
+        match self {
+            Self::Gate(g) => g.dest_selector,
+            _ => 0,
+        }
     }
     #[inline(always)]
     pub(crate) fn set_gate_dest_selector(&mut self, val: u16) {
-        self.gate.dest_selector = val;
+        match self {
+            Self::Gate(g) => g.dest_selector = val,
+            _ => {}
+        }
     }
 
     #[inline(always)]
     pub(crate) fn gate_param_count(&self) -> u8 {
-        // SAFETY: union read; caller verified descriptor is gate type
-        unsafe { self.gate.param_count }
+        match self {
+            Self::Gate(g) => g.param_count,
+            _ => 0,
+        }
     }
 
     // -- TaskGate accessors --
-    // SAFETY: caller must ensure the descriptor is a task gate type.
+    // Caller contract: only call task_gate_* on TaskGate variants.
 
     #[inline(always)]
     pub(crate) fn task_gate_tss_selector(&self) -> u16 {
-        // SAFETY: union read; caller verified descriptor is task gate type
-        unsafe { self.task_gate.tss_selector }
+        match self {
+            Self::TaskGate(t) => t.tss_selector,
+            _ => 0,
+        }
     }
 }
 

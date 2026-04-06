@@ -279,13 +279,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val_16 = self.sregs[seg_idx].selector.value;
         // Bochs writes only a word at ESP-4, not a full dword
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
-        let ss_d_b = unsafe {
-            self.sregs[super::decoder::BxSegregs::Ss as usize]
-                .cache
-                .u
-                .segment
-                .d_b
-        };
+        let ss_d_b = self.sregs[super::decoder::BxSegregs::Ss as usize]
+            .cache
+            .u
+            .segment_d_b();
         if ss_d_b {
             let esp = self.get_gpr32(4);
             self.stack_write_word(esp.wrapping_sub(4), val_16)?;
@@ -369,13 +366,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Based on Bochs stack32.cc:258-273
     pub fn leave_op32(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
-        let ss_d_b = unsafe {
-            self.sregs[super::decoder::BxSegregs::Ss as usize]
-                .cache
-                .u
-                .segment
-                .d_b
-        };
+        let ss_d_b = self.sregs[super::decoder::BxSegregs::Ss as usize]
+            .cache
+            .u
+            .segment_d_b();
         let value32 = if ss_d_b {
             // 32-bit stack
             let ebp = self.get_gpr32(5); // EBP
