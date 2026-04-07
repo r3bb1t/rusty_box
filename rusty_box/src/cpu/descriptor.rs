@@ -107,7 +107,16 @@ pub(super) struct DescriptorTaskGate {
 
 impl Default for Descriptor {
     fn default() -> Self {
-        Self::TaskGate(DescriptorTaskGate { tss_selector: 0 })
+        // Default to Segment with all zeros — matches the old union's zeroed layout
+        // and ensures set_segment_*() calls on default descriptors work correctly.
+        Self::Segment(DescriptorSegment {
+            base: 0,
+            limit_scaled: 0,
+            g: false,
+            d_b: false,
+            l: false,
+            avl: false,
+        })
     }
 }
 
