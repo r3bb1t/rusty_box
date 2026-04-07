@@ -22,6 +22,7 @@ use thiserror::Error;
 
 use crate::config::BxPhyAddress;
 use crate::cpu::ResetReason;
+use core::ptr::NonNull;
 
 bitflags! {
     /// Timer state flags (replaces individual `in_use`, `active`, `continuous` bools).
@@ -68,6 +69,9 @@ const NULL_TIMER_INTERVAL: u64 = 0xFFFF_FFFF;
 /// Bochs pc_system.cc:37 — prevents ridiculously low timer frequencies
 /// when IPS is set too low.
 const MIN_ALLOWABLE_TIMER_PERIOD: u64 = 1;
+
+/// Event flag: pending interrupt to be handled by CPU
+const BX_EVENT_PENDING_INTR: u32 = 1 << 0;
 
 /// Identifies which device owns a timer, used for dispatch after firing.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -142,15 +146,10 @@ pub struct BxPcSystemC {
     /// HRQ pending flag — set by set_hrq(true), checked by emulator loop.
     /// Bochs pc_system.cc:82-83: set_HRQ sets HRQ and signals async_event.
     pub(crate) hrq_pending: bool,
-    /// Flag: set_hrq(true) wants async_event=1 on the CPU.
-    /// The emulator reads and clears this.
-    pub(crate) async_event_pending: bool,
-    /// Flag: raise_intr() wants BX_EVENT_PENDING_INTR set on the CPU.
-    /// The emulator reads and clears this.
-    pub(crate) intr_raised: bool,
-    /// Flag: clear_intr() wants BX_EVENT_PENDING_INTR cleared on the CPU.
-    /// The emulator reads and clears this.
-    pub(crate) intr_cleared: bool,
+    /// Pointers to CPU async_event and pending_event fields for direct signaling.
+    pub(crate) cpu_async_event_ptr: Option<NonNull<u32>>,
+    /// Pointer to CPU pending_event field for direct signaling.
+    pub(crate) cpu_pending_event_ptr: Option<NonNull<u32>>,
     /// Request to terminate emulation
     pub(crate) kill_bochs_request: bool,
     /// Buffer of timer owners whose timers fired during the last tickn/tick1.
@@ -188,9 +187,8 @@ impl BxPcSystemC {
             m_ips: 1.0,
             hrq: false,
             hrq_pending: false,
-            async_event_pending: false,
-            intr_raised: false,
-            intr_cleared: false,
+            cpu_async_event_ptr: None,
+            cpu_pending_event_ptr: None,
             kill_bochs_request: false,
             fired_owners: [TimerOwner::NullTimer; BX_MAX_TIMERS],
             num_fired: 0,
@@ -226,6 +224,15 @@ impl BxPcSystemC {
         self.m_ips = f64::from(ips) / 1_000_000.0;
 
         tracing::debug!("PC system initialized with ips = {}", ips);
+    }
+
+    /// Set CPU event pointers for direct signaling during instruction execution.
+    ///
+    /// # Safety
+    /// Pointers must remain valid for the lifetime of the emulator.
+    pub fn set_cpu_event_ptrs(&mut self, async_event: *mut u32, pending_event: *mut u32) {
+        self.cpu_async_event_ptr = NonNull::new(async_event);
+        self.cpu_pending_event_ptr = NonNull::new(pending_event);
     }
 
     // ========================================================================
@@ -419,7 +426,9 @@ impl BxPcSystemC {
         if value {
             self.hrq_pending = true;
             // Bochs pc_system.cc:83: BX_CPU(0)->async_event = 1
-            self.async_event_pending = true;
+            if let Some(ptr) = self.cpu_async_event_ptr {
+                unsafe { *ptr.as_ptr() = 1; }
+            }
         }
     }
 
@@ -431,18 +440,28 @@ impl BxPcSystemC {
 
     /// Signal external interrupt to bootstrap CPU (Bochs pc_system.cc:86-93).
     ///
-    /// Sets `intr_raised` so the emulator applies BX_EVENT_PENDING_INTR
-    /// and async_event=1 to the CPU.
+    /// Directly sets BX_EVENT_PENDING_INTR in CPU pending_event field
+    /// and async_event=1 in CPU async_event field.
     pub fn raise_intr(&mut self) {
-        self.intr_raised = true;
+        unsafe {
+            if let Some(ptr) = self.cpu_async_event_ptr {
+                *ptr.as_ptr() = 1;
+            }
+            if let Some(ptr) = self.cpu_pending_event_ptr {
+                *ptr.as_ptr() |= BX_EVENT_PENDING_INTR;
+            }
+        }
     }
 
     /// Clear external interrupt signal (Bochs pc_system.cc:95-100).
     ///
-    /// Sets `intr_cleared` so the emulator clears BX_EVENT_PENDING_INTR
-    /// from the CPU.
+    /// Directly clears BX_EVENT_PENDING_INTR in CPU pending_event field.
     pub fn clear_intr(&mut self) {
-        self.intr_cleared = true;
+        unsafe {
+            if let Some(ptr) = self.cpu_pending_event_ptr {
+                *ptr.as_ptr() &= !BX_EVENT_PENDING_INTR;
+            }
+        }
     }
 
     /// Perform a system reset

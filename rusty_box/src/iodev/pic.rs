@@ -123,6 +123,8 @@ pub const PIC_SLAVE_DATA: u16 = 0x00A1;
 pub const PIC_ELCR1: u16 = 0x04D0;
 pub const PIC_ELCR2: u16 = 0x04D1;
 
+const BX_EVENT_PENDING_INTR: u32 = 1 << 0;
+
 /// Action returned by `Pic8259State::service()`.
 ///
 /// Separates the PIC's internal state changes from external side effects,
@@ -339,12 +341,10 @@ pub struct BxPicC {
     pub(crate) slave: Pic8259State,
     /// Edge/Level Control Registers (ELCR)
     pub(crate) elcr: [u8; 2],
-    /// Flag: set when an external interrupt is pending (replaces raw pointer to CPU async_event).
-    /// The emulator reads and clears this, applying BX_EVENT_PENDING_INTR to the CPU.
-    pub(crate) irq_pending: bool,
-    /// Flag: set when PIC wants to clear the pending interrupt signal.
-    /// The emulator reads and clears this, removing BX_EVENT_PENDING_INTR from the CPU.
-    pub(crate) irq_cleared: bool,
+    /// Pointer to CPU async_event field for direct signaling
+    pub(crate) cpu_async_event_ptr: *mut u32,
+    /// Pointer to CPU pending_event field for direct signaling
+    pub(crate) cpu_pending_event_ptr: *mut u32,
 }
 
 impl Default for BxPicC {
@@ -374,28 +374,41 @@ impl BxPicC {
             master,
             slave,
             elcr: [0, 0],
-            irq_pending: false,
-            irq_cleared: false,
+            cpu_async_event_ptr: core::ptr::null_mut(),
+            cpu_pending_event_ptr: core::ptr::null_mut(),
         }
     }
 
 
+    /// Set CPU event signal pointers for direct interrupt notification
+    pub fn set_cpu_signal_ptrs(&mut self, async_event: *mut u32, pending_event: *mut u32) {
+        self.cpu_async_event_ptr = async_event;
+        self.cpu_pending_event_ptr = pending_event;
+    }
+
     /// BX_RAISE_INTR — signal CPU that an external interrupt is pending.
     ///
-    /// Sets `irq_pending` so the emulator can apply BX_EVENT_PENDING_INTR
-    /// and async_event=1 to the CPU at the next sync point.
+    /// Sets CPU async_event=1 and applies BX_EVENT_PENDING_INTR to pending_event
     #[inline]
     fn raise_intr(&mut self) {
-        self.irq_pending = true;
+        if !self.cpu_async_event_ptr.is_null() {
+            unsafe {
+                *self.cpu_async_event_ptr = 1;
+                *self.cpu_pending_event_ptr |= BX_EVENT_PENDING_INTR;
+            }
+        }
     }
 
     /// BX_CLEAR_INTR — clear the external interrupt pending signal.
     ///
-    /// Sets `irq_cleared` so the emulator can clear BX_EVENT_PENDING_INTR
-    /// from the CPU at the next sync point.
+    /// Clears BX_EVENT_PENDING_INTR from the CPU's pending_event field
     #[inline]
     fn clear_intr(&mut self) {
-        self.irq_cleared = true;
+        if !self.cpu_pending_event_ptr.is_null() {
+            unsafe {
+                *self.cpu_pending_event_ptr &= !BX_EVENT_PENDING_INTR;
+            }
+        }
     }
 
     /// Initialize the PIC (called during device init)
