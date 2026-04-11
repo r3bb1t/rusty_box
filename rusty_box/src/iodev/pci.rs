@@ -268,7 +268,7 @@ impl BxPciBridge {
 
     /// Apply PAM register settings to the memory subsystem.
     /// Called after pci_write returns pam_changed=true.
-    pub fn apply_pam_to_memory<'c, I: crate::cpu::BxCpuIdTrait>(
+    pub fn apply_pam_to_memory<'c>(
         &self,
         mem: &mut crate::memory::BxMemC<'c>,
     ) {

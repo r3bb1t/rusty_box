@@ -1230,6 +1230,28 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.pc_system_ptr = None;
     }
 
+    /// Propagate PIC interrupt flags to CPU event state.
+    ///
+    /// Called after every I/O port access so the CPU sees PIC-raised
+    /// interrupts within the current instruction batch rather than
+    /// waiting for the next `sync_event_flags()` between batches.
+    #[inline]
+    pub(super) fn sync_pic_flags(&mut self) {
+        if let Some(mut pic) = self.pic_ptr {
+            // SAFETY: pic_ptr valid for emulator lifetime; single-threaded access
+            let pic = unsafe { pic.as_mut() };
+            if pic.irq_pending {
+                self.pending_event |= Self::BX_EVENT_PENDING_INTR;
+                self.async_event = 1;
+                pic.irq_pending = false;
+            }
+            if pic.irq_cleared {
+                self.pending_event &= !Self::BX_EVENT_PENDING_INTR;
+                pic.irq_cleared = false;
+            }
+        }
+    }
+
     /// Check HRQ (DMA Hold Request) state from pc_system.
     /// Matches Bochs `BX_HRQ` macro (pc_system.h:196) which reads
     /// `bx_pc_system.HRQ`. Returns false if pc_system is not wired.

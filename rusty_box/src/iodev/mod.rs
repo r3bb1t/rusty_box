@@ -151,6 +151,9 @@ pub struct BxDevicesC {
     /// Pointer to DeviceManager for enum-based I/O dispatch.
     /// Set by the emulator before CPU execution; single-threaded.
     device_manager: Option<core::ptr::NonNull<devices::DeviceManager>>,
+    /// Pointer to BxMemC for immediate PAM updates during PCI writes.
+    /// Set by the emulator before CPU execution; single-threaded.
+    mem_ptr: Option<core::ptr::NonNull<crate::memory::BxMemC<'static>>>,
 }
 
 impl Default for BxDevicesC {
@@ -184,6 +187,7 @@ impl BxDevicesC {
             diag_io_reads: 0,
             diag_io_writes: 0,
             device_manager: None,
+            mem_ptr: None,
         }
     }
 
@@ -254,7 +258,22 @@ impl BxDevicesC {
             if let Some(mut dm) = self.device_manager {
                 // SAFETY: device_manager set by emulator for execution duration; single-threaded
                 let dm = unsafe { dm.as_mut() };
-                Self::dispatch_read(dm, entry.device_id, port, io_len, icount)
+                let result = Self::dispatch_read(dm, entry.device_id, port, io_len, icount);
+                // Drain PIC IOAPIC forwarding queue after device handler
+                #[cfg(feature = "bx_support_apic")]
+                {
+                    let (fwds, count) = dm.pic.take_ioapic_forwards();
+                    for &(irq, level) in &fwds[..count] {
+                        dm.ioapic.set_irq_level(
+                            irq,
+                            level,
+                            None,
+                            #[cfg(feature = "bx_support_apic")]
+                            None,
+                        );
+                    }
+                }
+                result
             } else {
                 self.default_read_handler(port, io_len)
             }
@@ -278,6 +297,30 @@ impl BxDevicesC {
                 // SAFETY: device_manager set by emulator for execution duration; single-threaded
                 let dm = unsafe { dm.as_mut() };
                 Self::dispatch_write(dm, entry.device_id, port, value, io_len);
+                // Drain PIC IOAPIC forwarding queue after device handler
+                #[cfg(feature = "bx_support_apic")]
+                {
+                    let (fwds, count) = dm.pic.take_ioapic_forwards();
+                    for &(irq, level) in &fwds[..count] {
+                        dm.ioapic.set_irq_level(
+                            irq,
+                            level,
+                            None,
+                            #[cfg(feature = "bx_support_apic")]
+                            None,
+                        );
+                    }
+                }
+                // Apply PAM register changes immediately during PCI writes.
+                // BIOS reads from shadowed regions right after writing PAM.
+                #[cfg(feature = "bx_support_pci")]
+                if dm.pam_needs_update {
+                    if let Some(mut mem) = self.mem_ptr {
+                        // SAFETY: mem_ptr set by emulator; single-threaded
+                        dm.pam_needs_update = false;
+                        dm.pci_bridge.apply_pam_to_memory(unsafe { mem.as_mut() });
+                    }
+                }
                 return;
             }
         }
@@ -400,6 +443,16 @@ impl BxDevicesC {
     /// Clear device_manager pointer after CPU execution.
     pub fn clear_device_manager(&mut self) {
         self.device_manager = None;
+    }
+
+    /// Set BxMemC pointer for immediate PAM updates during PCI writes.
+    pub fn set_mem_ptr(&mut self, mem: core::ptr::NonNull<crate::memory::BxMemC<'static>>) {
+        self.mem_ptr = Some(mem);
+    }
+
+    /// Clear mem pointer after CPU execution.
+    pub fn clear_mem_ptr(&mut self) {
+        self.mem_ptr = None;
     }
 
     /// Dispatch a port read to the device identified by `id`.

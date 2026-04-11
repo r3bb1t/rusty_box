@@ -123,8 +123,6 @@ pub const PIC_SLAVE_DATA: u16 = 0x00A1;
 pub const PIC_ELCR1: u16 = 0x04D0;
 pub const PIC_ELCR2: u16 = 0x04D1;
 
-const BX_EVENT_PENDING_INTR: u32 = 1 << 0;
-
 /// Action returned by `Pic8259State::service()`.
 ///
 /// Separates the PIC's internal state changes from external side effects,
@@ -341,10 +339,17 @@ pub struct BxPicC {
     pub(crate) slave: Pic8259State,
     /// Edge/Level Control Registers (ELCR)
     pub(crate) elcr: [u8; 2],
-    /// Pointer to CPU async_event field for direct signaling
-    pub(crate) cpu_async_event_ptr: *mut u32,
-    /// Pointer to CPU pending_event field for direct signaling
-    pub(crate) cpu_pending_event_ptr: *mut u32,
+    /// Flag: set when an external interrupt is pending (replaces raw pointer to CPU async_event).
+    /// The emulator reads and clears this, applying BX_EVENT_PENDING_INTR to the CPU.
+    pub(crate) irq_pending: bool,
+    /// Flag: set when PIC wants to clear the pending interrupt signal.
+    /// The emulator reads and clears this, removing BX_EVENT_PENDING_INTR from the CPU.
+    pub(crate) irq_cleared: bool,
+    /// IOAPIC forwarding queue: (irq, level) pairs from raise_irq/lower_irq.
+    /// Drained by I/O dispatch and DeviceManager::tick() to forward to IOAPIC.
+    pub(crate) ioapic_forwards: [(u8, bool); 8],
+    /// Number of pending IOAPIC forwarding entries.
+    pub(crate) num_ioapic_forwards: usize,
 }
 
 impl Default for BxPicC {
@@ -374,41 +379,47 @@ impl BxPicC {
             master,
             slave,
             elcr: [0, 0],
-            cpu_async_event_ptr: core::ptr::null_mut(),
-            cpu_pending_event_ptr: core::ptr::null_mut(),
+            irq_pending: false,
+            irq_cleared: false,
+            ioapic_forwards: [(0, false); 8],
+            num_ioapic_forwards: 0,
         }
     }
 
-
-    /// Set CPU event signal pointers for direct interrupt notification
-    pub fn set_cpu_signal_ptrs(&mut self, async_event: *mut u32, pending_event: *mut u32) {
-        self.cpu_async_event_ptr = async_event;
-        self.cpu_pending_event_ptr = pending_event;
-    }
 
     /// BX_RAISE_INTR — signal CPU that an external interrupt is pending.
     ///
-    /// Sets CPU async_event=1 and applies BX_EVENT_PENDING_INTR to pending_event
+    /// Sets `irq_pending` so the emulator can apply BX_EVENT_PENDING_INTR
+    /// and async_event=1 to the CPU at the next sync point.
     #[inline]
     fn raise_intr(&mut self) {
-        if !self.cpu_async_event_ptr.is_null() {
-            unsafe {
-                *self.cpu_async_event_ptr = 1;
-                *self.cpu_pending_event_ptr |= BX_EVENT_PENDING_INTR;
-            }
-        }
+        self.irq_pending = true;
     }
 
     /// BX_CLEAR_INTR — clear the external interrupt pending signal.
     ///
-    /// Clears BX_EVENT_PENDING_INTR from the CPU's pending_event field
+    /// Sets `irq_cleared` so the emulator can clear BX_EVENT_PENDING_INTR
+    /// from the CPU at the next sync point.
     #[inline]
     fn clear_intr(&mut self) {
-        if !self.cpu_pending_event_ptr.is_null() {
-            unsafe {
-                *self.cpu_pending_event_ptr &= !BX_EVENT_PENDING_INTR;
-            }
+        self.irq_cleared = true;
+    }
+
+    /// Enqueue an IOAPIC forward. Silently drops if the queue is full.
+    #[inline]
+    fn enqueue_ioapic_forward(&mut self, irq: u8, level: bool) {
+        if self.num_ioapic_forwards < self.ioapic_forwards.len() {
+            self.ioapic_forwards[self.num_ioapic_forwards] = (irq, level);
+            self.num_ioapic_forwards += 1;
         }
+    }
+
+    /// Drain all pending IOAPIC forwards, returning a copy of the queue.
+    /// Resets the internal queue to empty.
+    pub(crate) fn take_ioapic_forwards(&mut self) -> ([(u8, bool); 8], usize) {
+        let result = (self.ioapic_forwards, self.num_ioapic_forwards);
+        self.num_ioapic_forwards = 0;
+        result
     }
 
     /// Initialize the PIC (called during device init)
@@ -808,6 +819,7 @@ impl BxPicC {
                 self.service_pic_dispatch(true);
                 // Bochs pic.cc:499-500: forward to IOAPIC on LOW→HIGH edge
                 if irq_no != 2 {
+                    self.enqueue_ioapic_forward(irq_no, true);
                     return Some((irq_no, true));
                 }
             }
@@ -819,6 +831,7 @@ impl BxPicC {
                 self.slave.irr |= 1 << slave_irq;
                 self.service_pic_dispatch(false);
                 // Bochs pic.cc:499-500: forward to IOAPIC
+                self.enqueue_ioapic_forward(irq_no, true);
                 return Some((irq_no, true));
             } else if irq_no == 15 {
                 // IRQ 15 raise while slave IRR bit 7 already set — IOAPIC skipped!
@@ -838,6 +851,7 @@ impl BxPicC {
                 self.master.irr &= !(1 << irq_no);
                 // Bochs pic.cc:470-478: forward to IOAPIC
                 if irq_no != 2 {
+                    self.enqueue_ioapic_forward(irq_no, false);
                     return Some((irq_no, false));
                 }
             }
@@ -847,6 +861,7 @@ impl BxPicC {
                 self.slave.irq_in[slave_irq as usize] = 0;
                 self.slave.irr &= !(1 << slave_irq);
                 // Bochs pic.cc:470-478: forward to IOAPIC
+                self.enqueue_ioapic_forward(irq_no, false);
                 return Some((irq_no, false));
             }
         }

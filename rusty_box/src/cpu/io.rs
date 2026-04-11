@@ -1289,6 +1289,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // and cleared afterwards. Single-CPU execution avoids concurrent access.
             // SAFETY: io_bus valid for duration of execution; single-threaded access
             let value = unsafe { io_bus.as_mut().inp(port, len, self.icount) };
+            self.sync_pic_flags();
             return value;
         }
 
@@ -1324,6 +1325,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // and cleared afterwards. Single-CPU execution avoids concurrent access.
             // SAFETY: io_bus valid for duration of execution; single-threaded access
             unsafe { io_bus.as_mut().outp(port, value, len) };
+            self.sync_pic_flags();
         }
     }
 }

@@ -343,13 +343,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // This is only called if not restoring state, and is optional logging setup
 
         self.initialized = true;
-
-        // Wire PIC and pc_system to signal CPU events directly via raw pointers.
-        // This is critical for interrupt delivery during instruction execution.
-        let async_ptr = &mut self.cpu.async_event as *mut u32;
-        let pending_ptr = &mut self.cpu.pending_event as *mut u32;
-        self.device_manager.pic.set_cpu_signal_ptrs(async_ptr, pending_ptr);
-        self.pc_system.set_cpu_event_ptrs(async_ptr, pending_ptr);
         tracing::info!("Emulator initialization complete");
 
         // Note: Steps 12-14 (Reset, GUI signal handlers, Start timers) are done via:
@@ -525,12 +518,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // This is only called if not restoring state, and is optional logging setup
 
         self.initialized = true;
-
-        // Wire PIC and pc_system to signal CPU events directly via raw pointers.
-        let async_ptr = &mut self.cpu.async_event as *mut u32;
-        let pending_ptr = &mut self.cpu.pending_event as *mut u32;
-        self.device_manager.pic.set_cpu_signal_ptrs(async_ptr, pending_ptr);
-        self.pc_system.set_cpu_event_ptrs(async_ptr, pending_ptr);
         tracing::info!("Emulator initialization complete");
 
         // Note: Steps 12-14 (Reset, GUI signal handlers, Start timers) are done via:
@@ -941,7 +928,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
     /// Simulate time passing (for timer-based devices)
     pub fn tick_devices(&mut self, usec: u64) {
-        self.device_manager.tick(usec, self.cpu.icount);
+        let icount = self.cpu.icount;
+        // SAFETY: lapic_ptr_mut returns raw pointer to CPU-owned LAPIC; single-threaded
+        let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
+        self.device_manager.tick(usec, icount, Some(lapic));
         // Process deferred ATAPI seek completion (Bochs seek_timer pattern).
         // In Bochs, start_seek() activates a timer that fires after a seek
         // delay and calls ready_to_send_atapi(). We process it here during
@@ -972,7 +962,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Process any deferred PCI port re-registrations and PAM changes
         #[cfg(feature = "bx_support_pci")]
         self.device_manager
-            .process_pci_deferred::<I>(&mut self.devices, &mut self.memory);
+            .process_pci_deferred(&mut self.devices, &mut self.memory);
     }
 
     /// Dispatch timer fires accumulated by `pc_system.tickn()`.
@@ -1002,6 +992,61 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         }
     }
 
+    /// Synchronize device event flags to CPU event fields.
+    ///
+    /// PIC, LAPIC, and pc_system set boolean flags when they need to
+    /// signal the CPU. This method reads those flags, applies the
+    /// corresponding bits to `cpu.pending_event` / `cpu.async_event`,
+    /// and clears the flags.
+    fn sync_event_flags(&mut self) {
+        // PIC: BX_RAISE_INTR
+        if self.device_manager.pic.irq_pending {
+            self.cpu.pending_event |= BxCpuC::<I>::BX_EVENT_PENDING_INTR;
+            self.cpu.async_event = 1;
+            self.device_manager.pic.irq_pending = false;
+        }
+        // PIC: BX_CLEAR_INTR
+        if self.device_manager.pic.irq_cleared {
+            self.cpu.pending_event &= !BxCpuC::<I>::BX_EVENT_PENDING_INTR;
+            self.device_manager.pic.irq_cleared = false;
+        }
+        // LAPIC: BX_EVENT_PENDING_LAPIC_INTR
+        {
+            let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
+            if lapic.intr_pending {
+                self.cpu.pending_event |= BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR;
+                self.cpu.async_event = 1;
+                lapic.intr_pending = false;
+            }
+        }
+        // IOAPIC: drain pending deliveries to LAPIC
+        #[cfg(feature = "bx_support_apic")]
+        {
+            let (deliveries, count) = self.device_manager.ioapic.take_pending_deliveries();
+            if count > 0 {
+                let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
+                for &(vector, delivery_mode, trigger_mode) in &deliveries[..count] {
+                    lapic.deliver(vector, delivery_mode, trigger_mode);
+                }
+            }
+        }
+        // pc_system: raise_intr
+        if self.pc_system.intr_raised {
+            self.cpu.pending_event |= BxCpuC::<I>::BX_EVENT_PENDING_INTR;
+            self.cpu.async_event = 1;
+            self.pc_system.intr_raised = false;
+        }
+        // pc_system: clear_intr
+        if self.pc_system.intr_cleared {
+            self.cpu.pending_event &= !BxCpuC::<I>::BX_EVENT_PENDING_INTR;
+            self.pc_system.intr_cleared = false;
+        }
+        // pc_system: async_event (HRQ/timer)
+        if self.pc_system.async_event_pending {
+            self.cpu.async_event = 1;
+            self.pc_system.async_event_pending = false;
+        }
+    }
 
     /// Configure CMOS memory size from total RAM bytes.
     /// This is the preferred method — it matches Bochs devices.cc:320-345.
@@ -1581,13 +1626,25 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 // Wire DeviceManager into BxDevicesC for enum-based I/O dispatch
                 let dm_ptr = core::ptr::NonNull::from(&mut self.device_manager);
                 io_ptr.as_ptr().as_mut().unwrap_unchecked().set_device_manager(dm_ptr);
+                // Wire BxMemC into BxDevicesC for immediate PAM updates during PCI writes
+                let mem_nn = core::ptr::NonNull::from(&mut self.memory);
+                // SAFETY: transmute lifetime for NonNull — mem is owned by Emulator, valid for call
+                let mem_static: core::ptr::NonNull<crate::memory::BxMemC<'static>> = unsafe { core::mem::transmute(mem_nn) };
+                io_ptr.as_ptr().as_mut().unwrap_unchecked().set_mem_ptr(mem_static);
                 let pic_ptr = core::ptr::NonNull::from(&mut self.device_manager.pic);
                 let dma_ptr = core::ptr::NonNull::from(&mut self.device_manager.dma);
                 let r = self.cpu
                     .cpu_loop_n_with_io(mem_extended, &[], batch_size, io_ptr, ps_ptr, Some(pic_ptr), Some(dma_ptr));
                 self.devices.clear_device_manager();
+                self.devices.clear_mem_ptr();
                 r
             };
+
+            // Apply PAM register changes immediately (BIOS needs this before next batch)
+            #[cfg(feature = "bx_support_pci")]
+            if self.device_manager.pam_needs_update {
+                self.device_manager.process_pci_deferred(&mut self.devices, &mut self.memory);
+            }
 
             let should_update_gui = match result {
                 Ok(executed) => {
@@ -1861,6 +1918,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 hlt_budget += step as u64;
                                 let dev_usec = (step as u64 * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
                                 self.tick_devices(dev_usec);
+                                self.sync_event_flags();
                                 // Wall-clock throttle: sleep if virtual time races ahead
                                 #[cfg(feature = "std")]
                                 {
@@ -1919,18 +1977,24 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     let ps2 = core::ptr::NonNull::from(&mut self.pc_system);
                                     let dm2 = core::ptr::NonNull::from(&mut self.device_manager);
                                     io2.as_ptr().as_mut().unwrap_unchecked().set_device_manager(dm2);
+                                    let mem_nn2 = core::ptr::NonNull::from(&mut self.memory);
+                                    let mem_static2: core::ptr::NonNull<crate::memory::BxMemC<'static>> = core::mem::transmute(mem_nn2);
+                                    io2.as_ptr().as_mut().unwrap_unchecked().set_mem_ptr(mem_static2);
                                     let pic2 = core::ptr::NonNull::from(&mut self.device_manager.pic);
                                     let dma2 = core::ptr::NonNull::from(&mut self.device_manager.dma);
                                     let r = self.cpu.cpu_loop_n_with_io(mem_ext, &[], batch2, io2, ps2, Some(pic2), Some(dma2));
                                     self.devices.clear_device_manager();
+                                    self.devices.clear_mem_ptr();
                                     r
                                 };
                                 if let Ok(ex2) = r2 {
                                     instructions_executed += ex2;
                                     let u2 = if self.config.ips != 0 { (ex2 * 1_000_000 / (self.config.ips as u64)).max(10) } else { 10 };
                                     self.tick_devices(u2);
+                                    self.sync_event_flags();
                                     self.pc_system.tickn(ex2 as u32);
                                     self.dispatch_timer_fires();
+                                    self.sync_event_flags();
                                     // LAPIC sync
                                     #[cfg(feature = "bx_support_apic")]
                                     {
@@ -1990,6 +2054,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     hlt2 += s as u64;
                                     let du = (s as u64 * 1_000_000 / (self.config.ips as u64).max(1)).max(1);
                                     self.tick_devices(du);
+                                    self.sync_event_flags();
                                 }
                                 #[cfg(feature = "bx_support_apic")]
                                 if self.cpu.lapic_has_intr() { self.cpu.signal_event(1 << 2); }
@@ -2000,16 +2065,14 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             // min 10 usec to prevent timer starvation at low instruction counts.
                             let usec = usec_from_instr.max(10);
                             self.tick_devices(usec);
-                            #[cfg(feature = "bx_support_apic")]
-                            if self.cpu.lapic_has_intr() {
-                                self.cpu.signal_event(1 << 2); // BX_EVENT_PENDING_LAPIC_INTR
-                            }
+                            self.sync_event_flags();
                         }
                     }
 
                     // Drive pc_system timers via Bochs-exact tickn() mechanism.
                     self.pc_system.tickn(executed as u32);
                     self.dispatch_timer_fires();
+                    self.sync_event_flags();
 
                     // Handle LAPIC timer fires. With small batches (500 ticks) and
                     // typical LAPIC period (~24K ticks), at most 1 fire per batch.
@@ -2081,6 +2144,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             // which happens when reactivate_timer_relative set it to 0.
                             self.pc_system.tickn(0);
                             self.dispatch_timer_fires();
+                            self.sync_event_flags();
                         }
 
                         // Handle non-fire deactivate/activate requests (from
@@ -2378,11 +2442,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
                 let dm_ptr = core::ptr::NonNull::from(&mut self.device_manager);
                 io_ptr.as_ptr().as_mut().unwrap_unchecked().set_device_manager(dm_ptr);
+                let mem_nn = core::ptr::NonNull::from(&mut self.memory);
+                let mem_static: core::ptr::NonNull<crate::memory::BxMemC<'static>> = core::mem::transmute(mem_nn);
+                io_ptr.as_ptr().as_mut().unwrap_unchecked().set_mem_ptr(mem_static);
                 let pic_ptr = core::ptr::NonNull::from(&mut self.device_manager.pic);
                 let dma_ptr = core::ptr::NonNull::from(&mut self.device_manager.dma);
                 let r = self.cpu
                     .cpu_loop_n_with_io(mem_extended, &[], max_instructions, io_ptr, ps_ptr, Some(pic_ptr), Some(dma_ptr));
                 self.devices.clear_device_manager();
+                self.devices.clear_mem_ptr();
                 r
             };
 
@@ -2395,8 +2463,10 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             // --- Tick devices + pc_system ---
             let usec = (executed * 1_000_000).checked_div(ips).unwrap_or(0).max(10);
             self.tick_devices(usec);
+            self.sync_event_flags();
             self.pc_system.tickn(executed as u32);
             self.dispatch_timer_fires();
+            self.sync_event_flags();
 
             // --- LAPIC timer catchup ---
             #[cfg(feature = "bx_support_apic")]
@@ -2433,6 +2503,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     catchup_count += 1;
                     self.pc_system.tickn(0);
                     self.dispatch_timer_fires();
+                    self.sync_event_flags();
                 }
                 {
                     // SAFETY: lapic_ptr set during CPU init; single-threaded access
@@ -2502,6 +2573,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     hlt_budget += step as u64;
                     let dev_usec = (step as u64 * 1_000_000 / ips.max(1)).max(1);
                     self.tick_devices(dev_usec);
+                    self.sync_event_flags();
                     // Wall-clock throttle: sleep if virtual time races ahead
                     #[cfg(feature = "std")]
                     {

@@ -327,6 +327,11 @@ pub struct BxIoApic {
     /// Stuck interrupt delivery counter for diagnostics.
     /// Bochs: `static unsigned int stuck` (ioapic.cc:301) — moved to instance field.
     stuck_count: u32,
+
+    /// Pending interrupt deliveries queued when LAPIC is not available (MMIO path).
+    /// Drained by the emulator after each tick/sync cycle.
+    pub(crate) pending_deliveries: [(u8, u8, u8); 8],
+    pub(crate) num_pending_deliveries: usize,
 }
 
 impl Default for BxIoApic {
@@ -349,6 +354,8 @@ impl BxIoApic {
             irr: 0,
             ioredtbl: [IoRedirectEntry::default(); IOAPIC_NUM_PINS],
             stuck_count: 0,
+            pending_deliveries: [(0, 0, 0); 8],
+            num_pending_deliveries: 0,
         }
     }
 
@@ -782,24 +789,17 @@ impl BxIoApic {
                 lapic.deliver(vector, entry.delivery_mode(), trigger);
                 true
             } else {
-                apic_bus_deliver_interrupt(
-                    vector,
-                    entry.destination(),
-                    entry.delivery_mode(),
-                    entry.destination_mode(),
-                    entry.pin_polarity(),
-                    entry.trigger_mode(),
-                )
+                // No LAPIC available (MMIO path) — enqueue for later delivery
+                let trigger = entry.trigger_mode();
+                self.enqueue_delivery(vector, entry.delivery_mode(), trigger);
+                true
             };
             #[cfg(not(feature = "bx_support_apic"))]
-            let done = apic_bus_deliver_interrupt(
-                vector,
-                entry.destination(),
-                entry.delivery_mode(),
-                entry.destination_mode(),
-                entry.pin_polarity(),
-                entry.trigger_mode(),
-            );
+            let done = {
+                let trigger = entry.trigger_mode();
+                self.enqueue_delivery(vector, entry.delivery_mode(), trigger);
+                true
+            };
 
             // Bochs: (ioapic.cc:317-327)
             let entry = &mut self.ioredtbl[pin];
@@ -823,6 +823,21 @@ impl BxIoApic {
     /// Get a reference to a redirection table entry (for diagnostics).
     pub fn redirect_entry(&self, index: usize) -> Option<&IoRedirectEntry> {
         self.ioredtbl.get(index)
+    }
+
+    /// Enqueue an interrupt delivery for later drain by the emulator.
+    fn enqueue_delivery(&mut self, vector: u8, delivery_mode: u8, trigger_mode: u8) {
+        if self.num_pending_deliveries < self.pending_deliveries.len() {
+            self.pending_deliveries[self.num_pending_deliveries] = (vector, delivery_mode, trigger_mode);
+            self.num_pending_deliveries += 1;
+        }
+    }
+
+    /// Take all pending deliveries, resetting the queue.
+    pub(crate) fn take_pending_deliveries(&mut self) -> ([(u8, u8, u8); 8], usize) {
+        let result = (self.pending_deliveries, self.num_pending_deliveries);
+        self.num_pending_deliveries = 0;
+        result
     }
 
     /// Dump IOAPIC state for HLT diagnostics.

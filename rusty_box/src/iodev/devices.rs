@@ -499,7 +499,7 @@ impl DeviceManager {
     /// Process deferred PCI port re-registrations.
     /// Called from the emulator loop when both DeviceManager and BxDevicesC are available.
     #[cfg(feature = "bx_support_pci")]
-    pub fn process_pci_deferred<'c, I: crate::cpu::BxCpuIdTrait>(
+    pub fn process_pci_deferred<'c>(
         &mut self,
         io: &mut BxDevicesC,
         mem: &mut crate::memory::BxMemC<'c>,
@@ -524,7 +524,7 @@ impl DeviceManager {
         }
         if self.pam_needs_update {
             self.pam_needs_update = false;
-            self.pci_bridge.apply_pam_to_memory::<I>(mem);
+            self.pci_bridge.apply_pam_to_memory(mem);
         }
         // Sync pci_conf_addr to BxDevicesC
         io.pci_conf_addr = self.pci_conf_addr;
@@ -532,28 +532,9 @@ impl DeviceManager {
 
     /// Simulate time passing for timer-based devices
     /// Returns true if any interrupt is pending
-    pub fn tick(&mut self, usec: u64, icount: u64) -> bool {
+    pub fn tick(&mut self, usec: u64, icount: u64, mut lapic: Option<&mut crate::cpu::apic::BxLocalApic>) -> bool {
         self.diag_tick_count += 1;
         self.diag_total_usec += usec;
-
-        // Helper: forward PIC raise/lower results to IOAPIC.
-        // PIC returns Some((irq, level)) when IOAPIC should be notified.
-        // Borrows are sequential (pic borrow ends before ioapic borrow starts),
-        // so no split-borrow trick is needed.
-        #[cfg(feature = "bx_support_apic")]
-        macro_rules! forward_to_ioapic {
-            ($self:expr, $fwd:expr) => {
-                if let Some((irq, level)) = $fwd {
-                    $self.ioapic.set_irq_level(
-                        irq,
-                        level,
-                        None, // PIC not passed back to avoid circular borrow
-                        #[cfg(feature = "bx_support_apic")]
-                        None, // no LAPIC in device tick
-                    );
-                }
-            };
-        }
 
         // Tick PIT/RTC first to generate periodic interrupts (Bochs-like behavior).
         // PIT drives IRQ0, CMOS/RTC drives IRQ8 when enabled.
@@ -570,78 +551,72 @@ impl DeviceManager {
             // is still high from a previous fire that the CPU hasn't yet
             // acknowledged via INTA (common when our coarse batching delays
             // interrupt delivery).
-            let fwd = self.pic.lower_irq(0);
-            #[cfg(feature = "bx_support_apic")]
-            forward_to_ioapic!(self, fwd);
-            let fwd = self.pic.raise_irq(0);
-            #[cfg(feature = "bx_support_apic")]
-            forward_to_ioapic!(self, fwd);
+            self.pic.lower_irq(0);
+            self.pic.raise_irq(0);
             self.diag_irq0_latched += 1;
         }
 
         // CMOS: process IRQ8 lower BEFORE raise (from REG_STAT_C read)
         if self.cmos.check_irq8_lower() {
-            let fwd = self.pic.lower_irq(8);
-            #[cfg(feature = "bx_support_apic")]
-            forward_to_ioapic!(self, fwd);
+            self.pic.lower_irq(8);
         }
         self.cmos.tick(usec);
         if self.cmos.check_irq8() {
-            let fwd = self.pic.raise_irq(8);
-            #[cfg(feature = "bx_support_apic")]
-            forward_to_ioapic!(self, fwd);
+            self.pic.raise_irq(8);
         }
 
         // Keyboard: process IRQ lower requests BEFORE raises (matching Bochs
         // DEV_pic_lower_irq() calls in port 0x60 read handler, keyboard.cc:315/340)
         if self.keyboard.check_irq1_lower() {
-            let fwd = self.pic.lower_irq(1);
-            #[cfg(feature = "bx_support_apic")]
-            forward_to_ioapic!(self, fwd);
+            self.pic.lower_irq(1);
         }
         if self.keyboard.check_irq12_lower() {
-            let fwd = self.pic.lower_irq(12);
-            #[cfg(feature = "bx_support_apic")]
-            forward_to_ioapic!(self, fwd);
+            self.pic.lower_irq(12);
         }
 
         // Keyboard periodic: transfer internal buffers → output buffer,
         // collect IRQ requests. Returns bitmask: bit0=IRQ1, bit1=IRQ12.
         let kbd_irq = self.keyboard.periodic(usec as u32);
         if kbd_irq & 0x01 != 0 {
-            let fwd = self.pic.raise_irq(1);
-            #[cfg(feature = "bx_support_apic")]
-            forward_to_ioapic!(self, fwd);
+            self.pic.raise_irq(1);
         }
         if kbd_irq & 0x02 != 0 {
-            let fwd = self.pic.raise_irq(12);
-            #[cfg(feature = "bx_support_apic")]
-            forward_to_ioapic!(self, fwd);
+            self.pic.raise_irq(12);
         }
 
         // ACPI PM timer: tick and sync IRQ 9 (SCI) to PIC
         #[cfg(feature = "bx_support_pci")]
         {
             self.acpi.tick(usec);
-            let fwd = if self.acpi.irq9_level {
-                self.pic.raise_irq(9)
+            if self.acpi.irq9_level {
+                self.pic.raise_irq(9);
             } else {
-                self.pic.lower_irq(9)
-            };
-            #[cfg(feature = "bx_support_apic")]
-            forward_to_ioapic!(self, fwd);
+                self.pic.lower_irq(9);
+            }
         }
 
         // Serial port: forward pending IRQ raise/lower to PIC
-        // PIC now returns forwarding info; caller forwards to IOAPIC.
         for (irq, raise) in self.serial.take_pending_irqs() {
-            let fwd = if raise {
-                self.pic.raise_irq(irq)
+            if raise {
+                self.pic.raise_irq(irq);
             } else {
-                self.pic.lower_irq(irq)
-            };
-            #[cfg(feature = "bx_support_apic")]
-            forward_to_ioapic!(self, fwd);
+                self.pic.lower_irq(irq);
+            }
+        }
+
+        // Drain all IOAPIC forwards accumulated during device ticking
+        #[cfg(feature = "bx_support_apic")]
+        {
+            let (fwds, count) = self.pic.take_ioapic_forwards();
+            for &(irq, level) in &fwds[..count] {
+                self.ioapic.set_irq_level(
+                    irq,
+                    level,
+                    None,
+                    #[cfg(feature = "bx_support_apic")]
+                    lapic.as_mut().map(|l| &mut **l),
+                );
+            }
         }
 
         self.pic.has_interrupt()
