@@ -453,7 +453,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
 
     pub(super) monitor: MonitorAddr,
 
-    pub(super) lapic: BxLocalApic,
+    pub(crate) lapic: BxLocalApic,
 
     /// SMM base register
     pub(super) smbase: u32,
@@ -1510,7 +1510,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
         tracing::info!(
             "CPU loop starting at CS:IP = {:04X}:{:08X}",
-            unsafe { self.sregs[BxSegregs::Cs as usize].selector.value },
+            self.cs_selector_value(),
             self.rip()
         );
 
@@ -1781,8 +1781,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 let rip = self.prev_rip; // prev_rip was the RIP before advancement
                 let cs_base = self.sregs[BxSegregs::Cs as usize].cache.u.segment_base();
                 let laddr = cs_base + rip;
-                // SAFETY: segment cache populated during segment load; union read matches descriptor type
-                let cs_value = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
+                let cs_value = self.cs_selector_value();
                 let instr_bytes = if let Some(fetch_ptr) = &self.eip_fetch_ptr {
                     let page_base = cs_base + self.eip_page_bias;
                     let offset = (rip.wrapping_sub(page_base)) as usize;
@@ -1802,8 +1801,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
             _ => {
                 let rip = self.prev_rip;
-                // SAFETY: segment cache populated during segment load; union read matches descriptor type
-                let cs_value = unsafe { self.sregs[BxSegregs::Cs as usize].selector.value };
+                let cs_value = self.cs_selector_value();
                 let opcode = instr.get_ia_opcode();
                 tracing::error!(
                     "CPU ERROR at icount={} RIP={:#x} CS={:#x} opcode={:?}: {}",

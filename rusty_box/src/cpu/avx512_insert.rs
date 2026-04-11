@@ -1,4 +1,4 @@
-#![allow(unused_unsafe)]
+
 
 //! AVX-512F/DQ extract and insert instruction handlers for all lane sizes.
 //!
@@ -48,7 +48,7 @@ fn read_opmask_for_write<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, instr: &Instructi
         u64::MAX // k0 = all elements active
     } else {
         // SAFETY: opmask register union always valid for rrx (full 64-bit) access
-        unsafe { cpu.opmask[k as usize].rrx() }
+        cpu.opmask_rrx(k as usize)
     }
 }
 

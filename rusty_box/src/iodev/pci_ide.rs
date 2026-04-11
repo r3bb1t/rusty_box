@@ -13,7 +13,6 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
-use core::ffi::c_void;
 
 /// PCI configuration space size
 const PCI_CONF_SIZE: usize = 256;
@@ -181,26 +180,6 @@ impl BxPciIde {
         }
     }
 
-    // ─── Timer Handlers ─────────────────────────────────────────────────
-
-    /// Timer handler for channel 0.
-    /// Bochs: bx_pci_ide_c::timer_handler() (pci_ide.cc:245-250)
-    pub fn timer_handler_ch0(this_ptr: *mut c_void) {
-        if this_ptr.is_null() {
-            return;
-        }
-        let ide = unsafe { &mut *(this_ptr as *mut BxPciIde) };
-        ide.timer(0);
-    }
-
-    /// Timer handler for channel 1.
-    pub fn timer_handler_ch1(this_ptr: *mut c_void) {
-        if this_ptr.is_null() {
-            return;
-        }
-        let ide = unsafe { &mut *(this_ptr as *mut BxPciIde) };
-        ide.timer(1);
-    }
 
     /// BM-DMA timer function — processes PRD tables and transfers data.
     /// Bochs: bx_pci_ide_c::timer() (pci_ide.cc:251-336)

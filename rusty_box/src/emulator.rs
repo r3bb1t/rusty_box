@@ -308,7 +308,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Timer is registered inactive; activated when LAPIC timer ICR is written.
         #[cfg(feature = "bx_support_apic")]
         {
-            let lapic_ptr = self.cpu.lapic_ptr_mut();
             let timer_handle = self.pc_system.register_timer(
                 crate::pc_system::TimerOwner::Lapic,
                 0,     // period=0 (inactive)
@@ -318,9 +317,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             );
             match timer_handle {
                 Ok(handle) => {
-                    // SAFETY: lapic_ptr set during CPU init; single-threaded access
-                    let lapic = unsafe { &mut *lapic_ptr };
-                    lapic.timer_handle = Some(handle);
+                    self.cpu.lapic.timer_handle = Some(handle);
                     tracing::debug!("LAPIC timer registered with handle {}", handle);
                 }
                 Err(e) => {
@@ -483,7 +480,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // Timer is registered inactive; activated when LAPIC timer ICR is written.
         #[cfg(feature = "bx_support_apic")]
         {
-            let lapic_ptr = self.cpu.lapic_ptr_mut();
             let timer_handle = self.pc_system.register_timer(
                 crate::pc_system::TimerOwner::Lapic,
                 0,     // period=0 (inactive)
@@ -493,9 +489,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             );
             match timer_handle {
                 Ok(handle) => {
-                    // SAFETY: lapic_ptr set during CPU init; single-threaded access
-                    let lapic = unsafe { &mut *lapic_ptr };
-                    lapic.timer_handle = Some(handle);
+                    self.cpu.lapic.timer_handle = Some(handle);
                     tracing::debug!("LAPIC timer registered with handle {}", handle);
                 }
                 Err(e) => {
@@ -929,9 +923,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     /// Simulate time passing (for timer-based devices)
     pub fn tick_devices(&mut self, usec: u64) {
         let icount = self.cpu.icount;
-        // SAFETY: lapic_ptr_mut returns raw pointer to CPU-owned LAPIC; single-threaded
-        let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
-        self.device_manager.tick(usec, icount, Some(lapic));
+        self.device_manager.tick(usec, icount, Some(&mut self.cpu.lapic));
         // Process deferred ATAPI seek completion (Bochs seek_timer pattern).
         // In Bochs, start_seek() activates a timer that fires after a seek
         // delay and calls ready_to_send_atapi(). We process it here during
@@ -983,9 +975,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 crate::pc_system::TimerOwner::Lapic => {
                     #[cfg(feature = "bx_support_apic")]
                     {
-                        // SAFETY: lapic_ptr set during CPU init; single-threaded access
-                        let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
-                        lapic.timer_fired = true;
+                        self.cpu.lapic.timer_fired = true;
                     }
                 }
             }
@@ -1011,22 +1001,18 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             self.device_manager.pic.irq_cleared = false;
         }
         // LAPIC: BX_EVENT_PENDING_LAPIC_INTR
-        {
-            let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
-            if lapic.intr_pending {
-                self.cpu.pending_event |= BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR;
-                self.cpu.async_event = 1;
-                lapic.intr_pending = false;
-            }
+        if self.cpu.lapic.intr_pending {
+            self.cpu.pending_event |= BxCpuC::<I>::BX_EVENT_PENDING_LAPIC_INTR;
+            self.cpu.async_event = 1;
+            self.cpu.lapic.intr_pending = false;
         }
         // IOAPIC: drain pending deliveries to LAPIC
         #[cfg(feature = "bx_support_apic")]
         {
             let (deliveries, count) = self.device_manager.ioapic.take_pending_deliveries();
             if count > 0 {
-                let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
                 for &(vector, delivery_mode, trigger_mode) in &deliveries[..count] {
-                    lapic.deliver(vector, delivery_mode, trigger_mode);
+                    self.cpu.lapic.deliver(vector, delivery_mode, trigger_mode);
                 }
             }
         }
@@ -1881,32 +1867,32 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 // 1. Process pending LAPIC requests FIRST so timers are active
                                 #[cfg(feature = "bx_support_apic")]
                                 {
-                                    // SAFETY: lapic_ptr set during CPU init; single-threaded access
-                                    let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
-                                    if lapic.timer_fired {
-                                        lapic.timer_fired = false;
-                                        lapic.periodic(self.pc_system.time_ticks());
+                                    if self.cpu.lapic.timer_fired {
+                                        self.cpu.lapic.timer_fired = false;
+                                        let ticks = self.pc_system.time_ticks();
+                                        self.cpu.lapic.periodic(ticks);
                                     }
-                                    if lapic.timer_deactivate_request {
-                                        lapic.timer_deactivate_request = false;
-                                        if let Some(h) = lapic.timer_handle {
+                                    if self.cpu.lapic.timer_deactivate_request {
+                                        self.cpu.lapic.timer_deactivate_request = false;
+                                        if let Some(h) = self.cpu.lapic.timer_handle {
                                             if let Err(e) = self.pc_system.deactivate_timer(h) {
                                                 tracing::error!("LAPIC deactivate: {}", e);
                                             }
                                         }
                                     }
-                                    if let Some(period) = lapic.timer_activate_request.take() {
-                                        if let Some(h) = lapic.timer_handle {
+                                    if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
+                                        if let Some(h) = self.cpu.lapic.timer_handle {
                                             if let Err(e) = self.pc_system.activate_timer(h, period, false) {
                                                 tracing::error!("LAPIC activate: {}", e);
                                             }
                                         }
-                                        lapic.set_ticks_initial(self.pc_system.time_ticks());
+                                        let ticks = self.pc_system.time_ticks();
+                                        self.cpu.lapic.set_ticks_initial(ticks);
                                     }
-                                    if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
+                                    if let Some(eoi_vec) = self.cpu.lapic.pending_eoi_vector.take() {
                                         self.device_manager.ioapic.receive_eoi(eoi_vec);
                                     }
-                                    if lapic.intr && (self.cpu.interrupts_enabled() || mwait_if) {
+                                    if self.cpu.lapic.intr && (self.cpu.interrupts_enabled() || mwait_if) {
                                         self.cpu.signal_event(1 << 2);
                                         break;
                                     }
@@ -1998,25 +1984,24 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     // LAPIC sync
                                     #[cfg(feature = "bx_support_apic")]
                                     {
-                                        // SAFETY: lapic_ptr set during CPU init; single-threaded access
-                                        let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
                                         let tn = self.pc_system.time_ticks();
-                                        lapic.current_ticks = tn;
-                                        lapic.ticks_at_sync = tn;
-                                        lapic.icount_at_sync = self.cpu.icount;
-                                        if lapic.timer_fired { lapic.timer_fired = false; lapic.periodic(tn); }
-                                        if lapic.timer_deactivate_request {
-                                            lapic.timer_deactivate_request = false;
-                                            if let Some(h) = lapic.timer_handle { let _ = self.pc_system.deactivate_timer(h); }
+                                        self.cpu.lapic.current_ticks = tn;
+                                        self.cpu.lapic.ticks_at_sync = tn;
+                                        self.cpu.lapic.icount_at_sync = self.cpu.icount;
+                                        if self.cpu.lapic.timer_fired { self.cpu.lapic.timer_fired = false; self.cpu.lapic.periodic(tn); }
+                                        if self.cpu.lapic.timer_deactivate_request {
+                                            self.cpu.lapic.timer_deactivate_request = false;
+                                            if let Some(h) = self.cpu.lapic.timer_handle { let _ = self.pc_system.deactivate_timer(h); }
                                         }
-                                        if let Some(period) = lapic.timer_activate_request.take() {
-                                            if let Some(h) = lapic.timer_handle { let _ = self.pc_system.reactivate_timer_relative(h, period); }
-                                            lapic.set_ticks_initial(self.pc_system.time_ticks());
+                                        if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
+                                            if let Some(h) = self.cpu.lapic.timer_handle { let _ = self.pc_system.reactivate_timer_relative(h, period); }
+                                            let ticks = self.pc_system.time_ticks();
+                                            self.cpu.lapic.set_ticks_initial(ticks);
                                         }
-                                        if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
+                                        if let Some(eoi_vec) = self.cpu.lapic.pending_eoi_vector.take() {
                                             self.device_manager.ioapic.receive_eoi(eoi_vec);
                                         }
-                                        if lapic.intr { self.cpu.signal_event(1 << 2); }
+                                        if self.cpu.lapic.intr { self.cpu.signal_event(1 << 2); }
                                     }
                                 } else { break; }
                                 // If CPU re-entered MWAIT, advance time again
@@ -2034,19 +2019,18 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if2) { break; }
                                     #[cfg(feature = "bx_support_apic")]
                                     {
-                                        // SAFETY: lapic_ptr set during CPU init; single-threaded access
-                                        let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
-                                        if lapic.timer_fired { lapic.timer_fired = false; lapic.periodic(self.pc_system.time_ticks()); }
-                                        if lapic.timer_deactivate_request {
-                                            lapic.timer_deactivate_request = false;
-                                            if let Some(h) = lapic.timer_handle { let _ = self.pc_system.deactivate_timer(h); }
+                                        if self.cpu.lapic.timer_fired { self.cpu.lapic.timer_fired = false; let t = self.pc_system.time_ticks(); self.cpu.lapic.periodic(t); }
+                                        if self.cpu.lapic.timer_deactivate_request {
+                                            self.cpu.lapic.timer_deactivate_request = false;
+                                            if let Some(h) = self.cpu.lapic.timer_handle { let _ = self.pc_system.deactivate_timer(h); }
                                         }
-                                        if let Some(period) = lapic.timer_activate_request.take() {
-                                            if let Some(h) = lapic.timer_handle { let _ = self.pc_system.activate_timer(h, period, false); }
-                                            lapic.set_ticks_initial(self.pc_system.time_ticks());
+                                        if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
+                                            if let Some(h) = self.cpu.lapic.timer_handle { let _ = self.pc_system.activate_timer(h, period, false); }
+                                            let t = self.pc_system.time_ticks();
+                                            self.cpu.lapic.set_ticks_initial(t);
                                         }
-                                        if let Some(eoi_vec) = lapic.pending_eoi_vector.take() { self.device_manager.ioapic.receive_eoi(eoi_vec); }
-                                        if lapic.intr && (self.cpu.interrupts_enabled() || mwait_if2) { self.cpu.signal_event(1 << 2); break; }
+                                        if let Some(eoi_vec) = self.cpu.lapic.pending_eoi_vector.take() { self.device_manager.ioapic.receive_eoi(eoi_vec); }
+                                        if self.cpu.lapic.intr && (self.cpu.interrupts_enabled() || mwait_if2) { self.cpu.signal_event(1 << 2); break; }
                                     }
                                     let s = self.pc_system.get_num_ticks_left_next_event().clamp(1, 100_000);
                                     self.pc_system.tickn(s);
@@ -2078,23 +2062,16 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     // typical LAPIC period (~24K ticks), at most 1 fire per batch.
                     // The catch-up loop is retained as a safety net.
                     //
-                    // IMPORTANT: The `lapic` borrow must be dropped before calling
-                    // check_timers(), because the timer callback also mutably accesses
-                    // the same BxLocalApic via raw pointer. Holding &mut across that
-                    // call would be UB and the compiler may optimize away re-reads.
+                    // IMPORTANT: The lapic borrow must not be held across calls to
+                    // check_timers() / dispatch_timer_fires() / sync_event_flags(),
+                    // because the timer callback also accesses BxLocalApic.
                     #[cfg(feature = "bx_support_apic")]
                     {
-                        let lapic_ptr = self.cpu.lapic_ptr_mut();
-
                         // Sync LAPIC tick tracking for live timer reads
-                        {
-                            // SAFETY: lapic_ptr set during CPU init; single-threaded access
-                            let lapic = unsafe { &mut *lapic_ptr };
-                            let ticks_now = self.pc_system.time_ticks();
-                            lapic.current_ticks = ticks_now;
-                            lapic.ticks_at_sync = ticks_now;
-                            lapic.icount_at_sync = self.cpu.icount;
-                        }
+                        let ticks_now = self.pc_system.time_ticks();
+                        self.cpu.lapic.current_ticks = ticks_now;
+                        self.cpu.lapic.ticks_at_sync = ticks_now;
+                        self.cpu.lapic.icount_at_sync = self.cpu.icount;
 
                         // Catch-up loop: fire timer for each missed period in this batch.
                         // Each iteration: borrow lapic → process fire → drop lapic →
@@ -2102,42 +2079,32 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         let mut catchup_count = 0u32;
                         let max_catchup = 1000u32; // safety limit
                         loop {
-                            // Borrow lapic, check timer_fired, process fire, drop borrow
-                            let should_continue = {
-                                // SAFETY: lapic_ptr set during CPU init; single-threaded access
-                                let lapic = unsafe { &mut *lapic_ptr };
-                                if !lapic.timer_fired || catchup_count >= max_catchup {
-                                    false
-                                } else {
-                                    lapic.timer_fired = false;
-                                    lapic.diag_timer_fires += 1;
-                                    let ticks_now = self.pc_system.time_ticks();
-                                    lapic.periodic(ticks_now);
-
-                                    // Process pending timer deactivation
-                                    if lapic.timer_deactivate_request {
-                                        lapic.timer_deactivate_request = false;
-                                        if let Some(handle) = lapic.timer_handle {
-                                            let _ = self.pc_system.deactivate_timer(handle);
-                                        }
-                                    }
-
-                                    // Process pending timer reactivation (periodic catch-up)
-                                    if let Some(period) = lapic.timer_activate_request.take() {
-                                        if let Some(handle) = lapic.timer_handle {
-                                            let _ = self.pc_system.reactivate_timer_relative(handle, period);
-                                        }
-                                        lapic.set_ticks_initial(self.pc_system.time_ticks());
-                                    }
-
-                                    catchup_count += 1;
-                                    true
-                                }
-                            }; // lapic borrow dropped here
-
-                            if !should_continue {
+                            if !self.cpu.lapic.timer_fired || catchup_count >= max_catchup {
                                 break;
                             }
+                            self.cpu.lapic.timer_fired = false;
+                            self.cpu.lapic.diag_timer_fires += 1;
+                            let ticks_now = self.pc_system.time_ticks();
+                            self.cpu.lapic.periodic(ticks_now);
+
+                            // Process pending timer deactivation
+                            if self.cpu.lapic.timer_deactivate_request {
+                                self.cpu.lapic.timer_deactivate_request = false;
+                                if let Some(handle) = self.cpu.lapic.timer_handle {
+                                    let _ = self.pc_system.deactivate_timer(handle);
+                                }
+                            }
+
+                            // Process pending timer reactivation (periodic catch-up)
+                            if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
+                                if let Some(handle) = self.cpu.lapic.timer_handle {
+                                    let _ = self.pc_system.reactivate_timer_relative(handle, period);
+                                }
+                                let t = self.pc_system.time_ticks();
+                                self.cpu.lapic.set_ticks_initial(t);
+                            }
+
+                            catchup_count += 1;
 
                             // Trigger any timers due at exactly the current tick.
                             // tickn(0) fires countdown_event() only if curr_countdown==0,
@@ -2149,32 +2116,31 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
                         // Handle non-fire deactivate/activate requests (from
                         // set_initial_timer_count during instruction execution)
-                        {
-                            // SAFETY: lapic_ptr set during CPU init; single-threaded access
-                            let lapic = unsafe { &mut *lapic_ptr };
-                            if lapic.timer_deactivate_request {
-                                lapic.timer_deactivate_request = false;
-                                if let Some(handle) = lapic.timer_handle {
-                                    let _ = self.pc_system.deactivate_timer(handle);
-                                }
+                        // Handle non-fire deactivate/activate requests (from
+                        // set_initial_timer_count during instruction execution)
+                        if self.cpu.lapic.timer_deactivate_request {
+                            self.cpu.lapic.timer_deactivate_request = false;
+                            if let Some(handle) = self.cpu.lapic.timer_handle {
+                                let _ = self.pc_system.deactivate_timer(handle);
                             }
-                            if let Some(period) = lapic.timer_activate_request.take() {
-                                if let Some(handle) = lapic.timer_handle {
-                                    // Fresh activation — use absolute time_to_fire
-                                    let _ = self.pc_system.activate_timer(handle, period, false);
-                                }
-                                lapic.set_ticks_initial(self.pc_system.time_ticks());
+                        }
+                        if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
+                            if let Some(handle) = self.cpu.lapic.timer_handle {
+                                // Fresh activation — use absolute time_to_fire
+                                let _ = self.pc_system.activate_timer(handle, period, false);
                             }
+                            let t = self.pc_system.time_ticks();
+                            self.cpu.lapic.set_ticks_initial(t);
+                        }
 
-                            // Forward EOI broadcast from LAPIC to I/O APIC
-                            if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
-                                self.device_manager.ioapic.receive_eoi(eoi_vec);
-                            }
+                        // Forward EOI broadcast from LAPIC to I/O APIC
+                        if let Some(eoi_vec) = self.cpu.lapic.pending_eoi_vector.take() {
+                            self.device_manager.ioapic.receive_eoi(eoi_vec);
+                        }
 
-                            // Signal pending LAPIC interrupt to CPU event system
-                            if lapic.intr {
-                                self.cpu.signal_event(1 << 2); // BX_EVENT_PENDING_LAPIC_INTR
-                            }
+                        // Signal pending LAPIC interrupt to CPU event system
+                        if self.cpu.lapic.intr {
+                            self.cpu.signal_event(1 << 2); // BX_EVENT_PENDING_LAPIC_INTR
                         }
                     }
 
@@ -2471,58 +2437,50 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             // --- LAPIC timer catchup ---
             #[cfg(feature = "bx_support_apic")]
             {
-                let lapic_ptr = self.cpu.lapic_ptr_mut();
-                {
-                    // SAFETY: lapic_ptr set during CPU init; single-threaded access
-                    let lapic = unsafe { &mut *lapic_ptr };
-                    let ticks_now = self.pc_system.time_ticks();
-                    lapic.current_ticks = ticks_now;
-                    lapic.ticks_at_sync = ticks_now;
-                    lapic.icount_at_sync = self.cpu.icount;
-                }
+                let ticks_now = self.pc_system.time_ticks();
+                self.cpu.lapic.current_ticks = ticks_now;
+                self.cpu.lapic.ticks_at_sync = ticks_now;
+                self.cpu.lapic.icount_at_sync = self.cpu.icount;
                 let mut catchup_count = 0u32;
                 loop {
-                    // SAFETY: lapic_ptr set during CPU init; single-threaded access
-                    let lapic = unsafe { &mut *lapic_ptr };
-                    if !lapic.timer_fired || catchup_count >= 1000 { break; }
-                    lapic.timer_fired = false;
-                    lapic.diag_timer_fires += 1;
-                    lapic.periodic(self.pc_system.time_ticks());
-                    if lapic.timer_deactivate_request {
-                        lapic.timer_deactivate_request = false;
-                        if let Some(h) = lapic.timer_handle {
+                    if !self.cpu.lapic.timer_fired || catchup_count >= 1000 { break; }
+                    self.cpu.lapic.timer_fired = false;
+                    self.cpu.lapic.diag_timer_fires += 1;
+                    let t = self.pc_system.time_ticks();
+                    self.cpu.lapic.periodic(t);
+                    if self.cpu.lapic.timer_deactivate_request {
+                        self.cpu.lapic.timer_deactivate_request = false;
+                        if let Some(h) = self.cpu.lapic.timer_handle {
                             let _ = self.pc_system.deactivate_timer(h);
                         }
                     }
-                    if let Some(period) = lapic.timer_activate_request.take() {
-                        if let Some(h) = lapic.timer_handle {
+                    if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
+                        if let Some(h) = self.cpu.lapic.timer_handle {
                             let _ = self.pc_system.reactivate_timer_relative(h, period);
                         }
-                        lapic.set_ticks_initial(self.pc_system.time_ticks());
+                        let t = self.pc_system.time_ticks();
+                        self.cpu.lapic.set_ticks_initial(t);
                     }
                     catchup_count += 1;
                     self.pc_system.tickn(0);
                     self.dispatch_timer_fires();
                     self.sync_event_flags();
                 }
-                {
-                    // SAFETY: lapic_ptr set during CPU init; single-threaded access
-                    let lapic = unsafe { &mut *lapic_ptr };
-                    if lapic.timer_deactivate_request {
-                        lapic.timer_deactivate_request = false;
-                        if let Some(h) = lapic.timer_handle {
-                            let _ = self.pc_system.deactivate_timer(h);
-                        }
+                if self.cpu.lapic.timer_deactivate_request {
+                    self.cpu.lapic.timer_deactivate_request = false;
+                    if let Some(h) = self.cpu.lapic.timer_handle {
+                        let _ = self.pc_system.deactivate_timer(h);
                     }
-                    if let Some(period) = lapic.timer_activate_request.take() {
-                        if let Some(h) = lapic.timer_handle {
-                            let _ = self.pc_system.activate_timer(h, period, false);
-                        }
-                        lapic.set_ticks_initial(self.pc_system.time_ticks());
+                }
+                if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
+                    if let Some(h) = self.cpu.lapic.timer_handle {
+                        let _ = self.pc_system.activate_timer(h, period, false);
                     }
-                    if lapic.intr {
-                        self.cpu.signal_event(1 << 2);
-                    }
+                    let t = self.pc_system.time_ticks();
+                    self.cpu.lapic.set_ticks_initial(t);
+                }
+                if self.cpu.lapic.intr {
+                    self.cpu.signal_event(1 << 2);
                 }
             }
 
@@ -2541,28 +2499,28 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     if self.has_interrupt() && (self.cpu.interrupts_enabled() || mwait_if) { break; }
                     #[cfg(feature = "bx_support_apic")]
                     {
-                        // SAFETY: lapic_ptr set during CPU init; single-threaded access
-                        let lapic = unsafe { &mut *self.cpu.lapic_ptr_mut() };
-                        if lapic.timer_fired {
-                            lapic.timer_fired = false;
-                            lapic.periodic(self.pc_system.time_ticks());
+                        if self.cpu.lapic.timer_fired {
+                            self.cpu.lapic.timer_fired = false;
+                            let t = self.pc_system.time_ticks();
+                            self.cpu.lapic.periodic(t);
                         }
-                        if lapic.timer_deactivate_request {
-                            lapic.timer_deactivate_request = false;
-                            if let Some(h) = lapic.timer_handle {
+                        if self.cpu.lapic.timer_deactivate_request {
+                            self.cpu.lapic.timer_deactivate_request = false;
+                            if let Some(h) = self.cpu.lapic.timer_handle {
                                 let _ = self.pc_system.deactivate_timer(h);
                             }
                         }
-                        if let Some(period) = lapic.timer_activate_request.take() {
-                            if let Some(h) = lapic.timer_handle {
+                        if let Some(period) = self.cpu.lapic.timer_activate_request.take() {
+                            if let Some(h) = self.cpu.lapic.timer_handle {
                                 let _ = self.pc_system.activate_timer(h, period, false);
                             }
-                            lapic.set_ticks_initial(self.pc_system.time_ticks());
+                            let t = self.pc_system.time_ticks();
+                            self.cpu.lapic.set_ticks_initial(t);
                         }
-                        if let Some(eoi_vec) = lapic.pending_eoi_vector.take() {
+                        if let Some(eoi_vec) = self.cpu.lapic.pending_eoi_vector.take() {
                             self.device_manager.ioapic.receive_eoi(eoi_vec);
                         }
-                        if lapic.intr && (self.cpu.interrupts_enabled() || mwait_if) {
+                        if self.cpu.lapic.intr && (self.cpu.interrupts_enabled() || mwait_if) {
                             self.cpu.signal_event(1 << 2);
                             break;
                         }
@@ -3011,20 +2969,17 @@ impl<I: BxCpuIdTrait> Emulator<'_, I> {
             self.device_manager.diag_pit_fires,
             self.device_manager.diag_irq0_latched,
             self.device_manager.diag_iac_count);
-        let lapic = self.cpu.lapic_ptr_mut();
-        // SAFETY: lapic_ptr set during CPU init; single-threaded access
-        let lapic_ref = unsafe { &*lapic };
         tracing::debug!("  lapic_timer_fires={} set_initial_count={} timer_masked={}",
-            lapic_ref.diag_timer_fires, lapic_ref.diag_set_initial_count,
-            lapic_ref.diag_timer_masked);
+            self.cpu.lapic.diag_timer_fires, self.cpu.lapic.diag_set_initial_count,
+            self.cpu.lapic.diag_timer_masked);
         // Show pc_system timer state for LAPIC timer
-        if let Some(handle) = lapic_ref.timer_handle {
+        if let Some(handle) = self.cpu.lapic.timer_handle {
             let t = &self.pc_system.timers[handle];
             tracing::debug!("  pc_system_timer[{}]: flags={:?} time_to_fire={} period={} ticks_total={}",
                 handle, t.flags, t.time_to_fire, t.period,
                 self.pc_system.time_ticks());
         }
-        lapic_ref.dump_state();
+        self.cpu.lapic.dump_state();
         // ATA channel diagnostics
         tracing::debug!("--- ATA Diag ---");
         tracing::debug!("  cmd_history (last 10):");

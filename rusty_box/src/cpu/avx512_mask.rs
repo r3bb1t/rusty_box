@@ -1,4 +1,4 @@
-#![allow(unused_unsafe)]
+
 
 //! AVX-512 Opmask (k-register) instruction handlers
 //!
@@ -17,8 +17,7 @@ use super::{
 /// Helper: read opmask register value (full 64-bit)
 #[inline]
 fn read_opmask<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, idx: u8) -> u64 {
-    // SAFETY: opmask register union always valid for rrx (full 64-bit) access
-    unsafe { cpu.opmask[idx as usize].rrx() }
+    cpu.opmask_rrx(idx as usize)
 }
 
 /// Helper: write opmask register with width mask

@@ -496,13 +496,7 @@ impl BxDmaC {
                     }
                 } else {
                     if let Some(handler) = self.handlers[channel].dma_write16 {
-                        // Safety: buffer is aligned, reinterpret as u16 slice
-                        let word_buf = unsafe {
-                            core::slice::from_raw_parts_mut(
-                                buffer.as_mut_ptr() as *mut u16,
-                                BX_DMA_BUFFER_SIZE / 2,
-                            )
-                        };
+                        let word_buf = Self::buffer_as_word_slice_mut(&mut buffer);
                         len = handler(word_buf, maxlen / 2);
                     } else {
                         tracing::error!("DMA: no dmaWrite handler for channel {}", channel);
@@ -528,12 +522,7 @@ impl BxDmaC {
                     }
                 } else {
                     if let Some(handler) = self.handlers[channel].dma_read16 {
-                        let word_buf = unsafe {
-                            core::slice::from_raw_parts(
-                                buffer.as_ptr() as *const u16,
-                                BX_DMA_BUFFER_SIZE / 2,
-                            )
-                        };
+                        let word_buf = Self::buffer_as_word_slice(&buffer);
                         len = handler(word_buf, maxlen / 2);
                     } else {
                         len = maxlen;
@@ -551,12 +540,7 @@ impl BxDmaC {
                     }
                 } else {
                     if let Some(handler) = self.handlers[channel].dma_write16 {
-                        let word_buf = unsafe {
-                            core::slice::from_raw_parts_mut(
-                                buffer.as_mut_ptr() as *mut u16,
-                                BX_DMA_BUFFER_SIZE / 2,
-                            )
-                        };
+                        let word_buf = Self::buffer_as_word_slice_mut(&mut buffer);
                         len = handler(word_buf, 1);
                     } else {
                         tracing::error!("DMA: no dmaWrite handler for channel {}", channel);
@@ -622,34 +606,76 @@ impl BxDmaC {
     // Matches Bochs DEV_MEM_READ_PHYSICAL_DMA / DEV_MEM_WRITE_PHYSICAL_DMA
     // -----------------------------------------------------------------------
 
+    // -----------------------------------------------------------------------
+    // Safe memory accessors — centralize all raw pointer arithmetic here
+    // -----------------------------------------------------------------------
+
+    /// Read a single byte from emulator RAM at `offset`.
+    /// Returns 0xFF if out of bounds or no memory is attached.
+    #[inline]
+    fn read_memory_byte(&self, offset: usize) -> u8 {
+        match self.memory_base {
+            Some(ptr) if offset < self.memory_len => {
+                // SAFETY: bounds checked above; pointer valid for emulator lifetime.
+                unsafe { *ptr.as_ptr().add(offset) }
+            }
+            _ => 0xFF,
+        }
+    }
+
+    /// Write a single byte to emulator RAM at `offset`.
+    /// Silently drops the write if out of bounds or no memory is attached.
+    #[inline]
+    fn write_memory_byte(&mut self, offset: usize, value: u8) {
+        match self.memory_base {
+            Some(ptr) if offset < self.memory_len => {
+                // SAFETY: bounds checked above; pointer valid for emulator lifetime.
+                unsafe { *ptr.as_ptr().add(offset) = value; }
+            }
+            _ => {}
+        }
+    }
+
+    /// Reinterpret a `&[u8; BX_DMA_BUFFER_SIZE]` as `&[u16]` for 16-bit DMA.
+    #[inline]
+    fn buffer_as_word_slice(buffer: &[u8; BX_DMA_BUFFER_SIZE]) -> &[u16] {
+        // SAFETY: BX_DMA_BUFFER_SIZE is 512, even and power-of-two aligned on stack.
+        // The array is stack-allocated with natural alignment >= 2 for u16.
+        // Length BX_DMA_BUFFER_SIZE / 2 stays within the buffer.
+        unsafe {
+            core::slice::from_raw_parts(
+                buffer.as_ptr() as *const u16,
+                BX_DMA_BUFFER_SIZE / 2,
+            )
+        }
+    }
+
+    /// Reinterpret a `&mut [u8; BX_DMA_BUFFER_SIZE]` as `&mut [u16]` for 16-bit DMA.
+    #[inline]
+    fn buffer_as_word_slice_mut(buffer: &mut [u8; BX_DMA_BUFFER_SIZE]) -> &mut [u16] {
+        // SAFETY: same as buffer_as_word_slice; mutable borrow is exclusive.
+        unsafe {
+            core::slice::from_raw_parts_mut(
+                buffer.as_mut_ptr() as *mut u16,
+                BX_DMA_BUFFER_SIZE / 2,
+            )
+        }
+    }
+
     /// Read physical memory for DMA transfer.
     /// Uses raw memory pointer set during init. Safe because the pointer
     /// is valid for the lifetime of the emulator and DMA only accesses
     /// conventional memory (< 16MB).
     fn mem_read_physical_dma(&self, addr: u32, len: u32, buffer: &mut [u8]) {
-        let base = match self.memory_base {
-            Some(ptr) => ptr.as_ptr(),
-            None => return,
-        };
         for i in 0..(len as usize).min(buffer.len()) {
-            let offset = addr as usize + i;
-            if offset < self.memory_len {
-                buffer[i] = unsafe { *base.add(offset) };
-            }
+            buffer[i] = self.read_memory_byte(addr as usize + i);
         }
     }
 
     /// Write physical memory for DMA transfer.
     fn mem_write_physical_dma(&mut self, addr: u32, len: u32, buffer: &[u8]) {
-        let base = match self.memory_base {
-            Some(ptr) => ptr.as_ptr(),
-            None => return,
-        };
         for (i, &byte) in buffer[..(len as usize).min(buffer.len())].iter().enumerate() {
-            let offset = addr as usize + i;
-            if offset < self.memory_len {
-                unsafe { *base.add(offset) = byte };
-            }
+            self.write_memory_byte(addr as usize + i, byte);
         }
     }
 

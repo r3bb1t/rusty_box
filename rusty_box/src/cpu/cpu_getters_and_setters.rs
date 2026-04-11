@@ -844,4 +844,21 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         (0, 0, 0, 0)
     }
 
+    // Opmask register accessor
+    #[inline(always)]
+    pub(super) fn opmask_rrx(&self, k: usize) -> u64 {
+        self.opmask[k].rrx()
+    }
+
+    // Segment selector value accessors
+    #[inline(always)]
+    pub(crate) fn cs_selector_value(&self) -> u16 {
+        self.sregs[BxSegregs::Cs as usize].selector.value
+    }
+
+    #[inline(always)]
+    pub(crate) fn selector_value(&self, seg: usize) -> u16 {
+        self.sregs[seg].selector.value
+    }
+
 }

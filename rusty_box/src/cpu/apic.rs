@@ -1652,14 +1652,6 @@ impl BxLocalApic {
         // will be caught by the write_aligned path.
     }
 
-    /// Static timer handler for BxPcSystemC callback.
-    /// Sets timer_fired flag on the LAPIC instance.
-    pub(crate) fn timer_handler(this_ptr: *mut core::ffi::c_void) {
-        // SAFETY: this_ptr is a valid *mut BxLocalApic set during timer registration.
-        // Only called from single-threaded timer system.
-        let lapic = unsafe { &mut *(this_ptr as *mut BxLocalApic) };
-        lapic.timer_fired = true;
-    }
 }
 
 // ─── APIC error status (preserved for API compatibility) ────────────────────

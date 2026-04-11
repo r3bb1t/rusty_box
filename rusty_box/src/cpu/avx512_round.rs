@@ -1,4 +1,4 @@
-#![allow(unused_unsafe)]
+
 
 //! AVX-512F rounding, scale, exponent, and mantissa instruction handlers
 //!
@@ -40,7 +40,7 @@ fn read_opmask_for_write<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, instr: &Instructi
         u64::MAX
     } else {
         // SAFETY: opmask register union always valid for rrx (full 64-bit) access
-        unsafe { cpu.opmask[k as usize].rrx() }
+        cpu.opmask_rrx(k as usize)
     }
 }
 

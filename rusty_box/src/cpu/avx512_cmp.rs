@@ -54,7 +54,7 @@ fn read_opmask_for_write<I: BxCpuIdTrait>(cpu: &BxCpuC<'_, I>, instr: &Instructi
         u64::MAX
     } else {
         // SAFETY: opmask register union always valid for rrx (full 64-bit) access
-        unsafe { cpu.opmask[k as usize].rrx() }
+        cpu.opmask_rrx(k as usize)
     }
 }
 
@@ -500,8 +500,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn evex_vpmovm2d(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = dword_elements(vl);
-        // SAFETY: opmask register union always valid for rrx (full 64-bit) access
-        let mask = unsafe { self.opmask[instr.src() as usize].rrx() };
+        let mask = self.opmask_rrx(instr.src() as usize);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             result.set_zmm32u(i, if (mask >> i) & 1 != 0 {
@@ -525,8 +524,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn evex_vpmovm2q(&mut self, instr: &Instruction) -> super::Result<()> {
         let vl = instr.get_vl();
         let nelements = qword_elements(vl);
-        // SAFETY: opmask register union always valid for rrx (full 64-bit) access
-        let mask = unsafe { self.opmask[instr.src() as usize].rrx() };
+        let mask = self.opmask_rrx(instr.src() as usize);
         let mut result = BxPackedZmmRegister::default();
         for i in 0..nelements {
             result.set_zmm64u(i, if (mask >> i) & 1 != 0 {
