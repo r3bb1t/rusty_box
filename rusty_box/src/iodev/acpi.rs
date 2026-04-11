@@ -262,6 +262,7 @@ impl BxAcpiCtrl {
 
     /// Advance the internal time counter by the given microseconds.
     /// Called from the emulator's tick_devices() path.
+    #[inline]
     pub fn tick(&mut self, usec: u64) {
         self.time_usec += usec;
     }

@@ -249,6 +249,7 @@ impl BxDevicesC {
     ///
     /// # Returns
     /// The value read from the port
+    #[inline]
     pub fn inp(&mut self, port: u16, io_len: u8, icount: u64) -> u32 {
         self.diag_io_reads += 1;
         let entry = &self.read_handlers[port as usize];
@@ -287,6 +288,7 @@ impl BxDevicesC {
     }
 
     /// Write to an I/O port
+    #[inline]
     pub fn outp(&mut self, port: u16, value: u32, io_len: u8) {
         self.diag_io_writes += 1;
         let entry = &self.write_handlers[port as usize];
@@ -456,6 +458,7 @@ impl BxDevicesC {
     }
 
     /// Dispatch a port read to the device identified by `id`.
+    #[inline]
     fn dispatch_read(dm: &mut devices::DeviceManager, id: DeviceId, port: u16, io_len: u8, icount: u64) -> u32 {
         match id {
             DeviceId::Pic => dm.pic.read(port, io_len),
@@ -495,6 +498,7 @@ impl BxDevicesC {
     }
 
     /// Dispatch a port write to the device identified by `id`.
+    #[inline]
     fn dispatch_write(dm: &mut devices::DeviceManager, id: DeviceId, port: u16, value: u32, io_len: u8) {
         match id {
             DeviceId::Pic => dm.pic.write(port, value, io_len),

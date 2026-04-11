@@ -427,12 +427,11 @@ fn run_alpine() -> Result<()> {
         // BIOS boot: type the full kernel cmdline at ISOLINUX prompt.
         // Typing at the prompt REPLACES the syslinux.cfg APPEND line,
         // so we must include everything from the original APPEND plus
-        // console= for serial output. The original APPEND is:
-        //   modules=loop,squashfs,sd-mod,usb-storage quiet
-        // We add console=ttyS0,115200 and drop quiet for visibility.
+        // Just press Enter to use the ISO's default syslinux.cfg.
+        // Don't append console=ttyS0 — it spawns a serial getty that steals keyboard input.
         if !enter_injected && total_executed >= 18_000_000 {
-            println!("[{}M] Typing cmdline at ISOLINUX boot prompt", total_executed / 1_000_000);
-            emu.send_string("virt modules=loop,squashfs,sd-mod,usb-storage console=ttyS0,115200\n");
+            println!("[{}M] Pressing Enter at ISOLINUX boot prompt", total_executed / 1_000_000);
+            emu.send_string("\n");
             enter_injected = true;
         }
 

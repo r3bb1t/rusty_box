@@ -54,9 +54,8 @@ impl RustyBoxApp {
     /// and also serves as a fallback for letters when Text events aren't produced.
     fn process_input(&mut self, ctx: &egui::Context) {
         let mut scancodes = Vec::new();
-        let mut serial_bytes = Vec::new();
 
-        ctx.input(|i| {
+        ctx.input_mut(|i| {
             // Pass 1: check if any Text or Ime::Commit events exist in this frame.
             // If so, we rely on them for printable characters and skip the Key fallback
             // (avoids double-sending since Key events fire BEFORE Text events).
@@ -67,66 +66,45 @@ impl RustyBoxApp {
                 )
             });
 
-            // Pass 2: process events
-            for event in &i.events {
+            // Pass 2: process events and CONSUME them so egui doesn't use them
+            // for widget navigation (Tab = focus change, Enter = button click).
+            // Without this, Tab+Enter accidentally triggers the Reset button.
+            i.events.retain(|event| {
                 match event {
                     egui::Event::Text(text) => {
-                        // Printable characters (primary path on most platforms)
                         for ch in text.chars() {
                             let seq = char_to_scancode_sequence(ch);
                             scancodes.extend_from_slice(&seq);
-                            // Also send ASCII to serial console
-                            if ch.is_ascii() && ch as u32 <= 127 {
-                                serial_bytes.push(ch as u8);
-                            }
                         }
+                        false
                     }
                     egui::Event::Ime(egui::ImeEvent::Commit(text)) => {
-                        // IME commit — Windows may produce this instead of Event::Text
                         for ch in text.chars() {
                             let seq = char_to_scancode_sequence(ch);
                             scancodes.extend_from_slice(&seq);
-                            if ch.is_ascii() && ch as u32 <= 127 {
-                                serial_bytes.push(ch as u8);
-                            }
                         }
+                        false
                     }
                     egui::Event::Key { key, pressed, .. } => {
-                        // Special keys (not covered by Text events)
                         let seq = egui_key_to_scancodes(*key, *pressed);
                         if !seq.is_empty() {
                             scancodes.extend_from_slice(&seq);
                         } else if *pressed && !has_text_events {
-                            // Fallback: no Text/Ime events in this frame, so the platform
-                            // isn't producing character events. Convert Key → char directly.
                             if let Some(ch) = egui_key_to_char(*key) {
                                 let seq = char_to_scancode_sequence(ch);
                                 scancodes.extend_from_slice(&seq);
-                                if ch.is_ascii() && ch as u32 <= 127 {
-                                    serial_bytes.push(ch as u8);
-                                }
                             }
                         }
-                        // Send Enter/Backspace to serial as control chars
-                        if *pressed {
-                            match key {
-                                egui::Key::Enter => serial_bytes.push(b'\r'),
-                                egui::Key::Backspace => serial_bytes.push(0x7F),
-                                egui::Key::Tab => serial_bytes.push(b'\t'),
-                                egui::Key::Escape => serial_bytes.push(0x1B),
-                                _ => {}
-                            }
-                        }
+                        false
                     }
-                    _ => {}
+                    _ => true, // keep non-keyboard events for egui
                 }
-            }
+            });
         });
 
-        if !scancodes.is_empty() || !serial_bytes.is_empty() {
+        if !scancodes.is_empty() {
             if let Ok(mut display) = self.shared.lock() {
                 display.pending_scancodes.extend_from_slice(&scancodes);
-                display.pending_serial_input.extend_from_slice(&serial_bytes);
             }
         }
     }
@@ -300,6 +278,9 @@ impl eframe::App for RustyBoxApp {
                             1.0,
                             egui::Color32::from_rgb(0x44, 0x44, 0x66),
                         ));
+                        // Use click-only sense to exclude from Tab focus chain.
+                        // Without this, Tab+Enter accidentally triggers Reset.
+                        let btn = btn.sense(egui::Sense::click());
                         if ui.add(btn).clicked() {
                             if let Ok(mut d) = self.shared.lock() {
                                 d.stop_flag.store(true, Ordering::Relaxed);

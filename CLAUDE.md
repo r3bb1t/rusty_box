@@ -2,6 +2,13 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## Rules
+
+- Do NOT commit unless the user explicitly tells you to.
+- Do NOT push unless the user explicitly tells you to.
+- Prefer LSP tools (definition, references, hover, diagnostics) over grep for code navigation. LSP is more efficient and accurate.
+- Use `lsp references` before modifying any function, type, or exported symbol to find all consumers.
+
 ## Project Overview
 
 Rusty Box is a Rust port of the Bochs x86 emulator - a complete CPU/system emulator targeting 32/64-bit x86 architecture with virtualization support (VMX/SVM). The original C++ Bochs source is in `cpp_orig/bochs/` for reference during porting.

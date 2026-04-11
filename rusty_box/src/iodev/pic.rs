@@ -810,6 +810,7 @@ impl BxPicC {
     /// Returns `Some((irq_no, true))` when the caller should forward to IOAPIC
     /// (Bochs pic.cc:499-500 synchronous forwarding). The caller is responsible
     /// for calling `ioapic.set_irq_level(irq, level)` with the returned values.
+    #[inline]
     pub fn raise_irq(&mut self, irq_no: u8) -> Option<(u8, bool)> {
         if irq_no < 8 {
             // Master PIC — Bochs pic.cc:491-496
@@ -844,6 +845,7 @@ impl BxPicC {
     ///
     /// Clears the IRQ assertion flag and the IRR bit.
     /// Returns `Some((irq_no, false))` when the caller should forward to IOAPIC.
+    #[inline]
     pub fn lower_irq(&mut self, irq_no: u8) -> Option<(u8, bool)> {
         if irq_no < 8 {
             if self.master.irq_in[irq_no as usize] != 0 {
@@ -894,6 +896,7 @@ impl BxPicC {
     }
 
     /// Check if an interrupt is pending (master INT pin asserted)
+    #[inline]
     pub fn has_interrupt(&self) -> bool {
         self.master.int_pin
     }

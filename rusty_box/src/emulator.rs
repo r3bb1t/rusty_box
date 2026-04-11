@@ -1683,8 +1683,19 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     }
 
                     // If CPU triple-faulted into shutdown, stop emulation loop
+                    // Write reset diagnostics to file (always visible, survives terminal scroll)
+                    #[cfg(feature = "std")]
+                    fn log_reset(msg: &str) {
+                        use std::io::Write;
+                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("reset_log.txt") {
+                            let _ = writeln!(f, "{}", msg);
+                        }
+                        eprintln!("{}", msg);
+                    }
+
                     if self.cpu.is_in_shutdown() {
-                        tracing::error!("[Emulator] CPU triple-fault shutdown — stopping");
+                        #[cfg(feature = "std")]
+                        log_reset(&format!("TRIPLE-FAULT SHUTDOWN at RIP={:#x} CS={:#06x} icount={}", self.cpu.rip(), self.cpu.get_cs_selector(), self.cpu.icount));
                         break;
                     }
 
@@ -1695,13 +1706,20 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                         self.sync_a20_state();
                     }
 
-                    // Check for reset requests: Port 92h fast reset or keyboard 0xFE
-                    if self.device_manager.port92.reset_request || self.device_manager.keyboard.reset_requested {
+                    // Check for reset requests: Port 92h, keyboard 0xFE, or PCI CF9
+                    let pci_reset = self.device_manager.pci2isa.reset_request.take();
+                    if self.device_manager.port92.reset_request || self.device_manager.keyboard.reset_requested || pci_reset.is_some() {
                         if self.device_manager.port92.reset_request {
-                            tracing::info!("Reset requested via Port 92h (fast reset)");
+                            #[cfg(feature = "std")]
+                            log_reset(&format!("PORT 92h FAST RESET at RIP={:#x} icount={}", self.cpu.rip(), self.cpu.icount));
                         }
                         if self.device_manager.keyboard.reset_requested {
-                            tracing::info!("Reset requested via keyboard controller 0xFE");
+                            #[cfg(feature = "std")]
+                            log_reset(&format!("KEYBOARD 0xFE RESET at RIP={:#x} icount={}", self.cpu.rip(), self.cpu.icount));
+                        }
+                        if let Some(hw) = pci_reset {
+                            #[cfg(feature = "std")]
+                            log_reset(&format!("PCI CF9 {} RESET at RIP={:#x} icount={}", if hw {"HARDWARE"} else {"SOFTWARE"}, self.cpu.rip(), self.cpu.icount));
                         }
                         self.device_manager.port92.reset_request = false;
                         self.device_manager.keyboard.reset_requested = false;

@@ -303,6 +303,37 @@ impl SerialPort {
     }
 }
 
+/// Stack-allocated iterator for pending serial IRQ actions.
+/// Avoids heap allocation on the hot tick path.
+pub struct PendingIrqs {
+    buf: [(u8, bool); 8],
+    len: usize,
+    pos: usize,
+}
+
+impl Iterator for PendingIrqs {
+    type Item = (u8, bool);
+
+    #[inline]
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.pos < self.len {
+            let item = self.buf[self.pos];
+            self.pos += 1;
+            Some(item)
+        } else {
+            None
+        }
+    }
+
+    #[inline]
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.len - self.pos;
+        (remaining, Some(remaining))
+    }
+}
+
+impl ExactSizeIterator for PendingIrqs {}
+
 /// 16550 UART Serial Controller — supports up to 4 COM ports
 #[derive(Debug)]
 pub struct BxSerialC {
@@ -353,21 +384,26 @@ impl BxSerialC {
         self.ports[port_index].tx_output.len()
     }
 
-    /// Check if any IRQ actions are pending, and return them
-    /// Returns (irq_number, raise) pairs to process
-    pub fn take_pending_irqs(&mut self) -> impl Iterator<Item = (u8, bool)> + '_ {
-        let mut results = alloc::vec::Vec::new();
+    /// Check if any IRQ actions are pending, and return them.
+    /// Returns (irq_number, raise) pairs to process.
+    /// Uses a fixed-size buffer to avoid heap allocation on every tick.
+    #[inline]
+    pub fn take_pending_irqs(&mut self) -> PendingIrqs {
+        let mut buf = [(0u8, false); 8];
+        let mut len = 0usize;
         for i in 0..self.num_ports {
             if self.pending_irq_raise[i] {
                 self.pending_irq_raise[i] = false;
-                results.push((self.ports[i].irq, true));
+                buf[len] = (self.ports[i].irq, true);
+                len += 1;
             }
             if self.pending_irq_lower[i] {
                 self.pending_irq_lower[i] = false;
-                results.push((self.ports[i].irq, false));
+                buf[len] = (self.ports[i].irq, false);
+                len += 1;
             }
         }
-        results.into_iter()
+        PendingIrqs { buf, len, pos: 0 }
     }
 
     /// Identify which COM port a given I/O address belongs to

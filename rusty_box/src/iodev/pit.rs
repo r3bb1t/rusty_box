@@ -924,6 +924,7 @@ impl BxPitC {
     }
 
     /// Simulate time passing (in microseconds)
+    #[inline]
     pub fn tick(&mut self, usec: u64, icount: u64) -> bool {
         let pit_ticks = (usec * TICKS_PER_SECOND as u64) / USEC_PER_SECOND as u64;
 
@@ -958,6 +959,7 @@ impl BxPitC {
     }
 
     /// Check and clear IRQ0 pending flag
+    #[inline]
     pub fn check_irq0(&mut self) -> bool {
         let pending = self.irq0_pending;
         self.irq0_pending = false;

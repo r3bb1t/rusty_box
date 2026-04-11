@@ -1777,6 +1777,7 @@ impl BxKeyboardC {
     }
 
     /// Check and clear IRQ1 pending (compatibility — prefer periodic() return value)
+    #[inline]
     pub fn check_irq1(&mut self) -> bool {
         let pending = self.kbd_controller.irq1_requested;
         self.kbd_controller.irq1_requested = false;
@@ -1784,6 +1785,7 @@ impl BxKeyboardC {
     }
 
     /// Check and clear IRQ12 pending (compatibility — prefer periodic() return value)
+    #[inline]
     pub fn check_irq12(&mut self) -> bool {
         let pending = self.kbd_controller.irq12_requested;
         self.kbd_controller.irq12_requested = false;
@@ -1792,6 +1794,7 @@ impl BxKeyboardC {
 
     /// Check and clear IRQ1 lower pending (set on port 0x60 keyboard read)
     /// Bochs calls DEV_pic_lower_irq(1) immediately; we defer to tick().
+    #[inline]
     pub fn check_irq1_lower(&mut self) -> bool {
         let pending = self.irq1_lower_pending;
         self.irq1_lower_pending = false;
@@ -1800,6 +1803,7 @@ impl BxKeyboardC {
 
     /// Check and clear IRQ12 lower pending (set on port 0x60 mouse read)
     /// Bochs calls DEV_pic_lower_irq(12) immediately; we defer to tick().
+    #[inline]
     pub fn check_irq12_lower(&mut self) -> bool {
         let pending = self.irq12_lower_pending;
         self.irq12_lower_pending = false;

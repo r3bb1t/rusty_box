@@ -263,6 +263,7 @@ impl BxPcSystemC {
     /// Handle countdown reaching zero. Checks all timers, fires expired ones,
     /// and recalculates next countdown period.
     /// Matches Bochs pc_system.cc:322-386 exactly.
+    #[inline]
     fn countdown_event(&mut self) {
         let mut first = self.num_timers;
         let mut last = 0usize;

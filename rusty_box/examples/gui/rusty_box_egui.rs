@@ -318,8 +318,8 @@ fn run_emulator(
     // No PCI means no ata_piix/DMA — kernel uses legacy ISA IDE, matching Bochs.
     if matches!(profile, BootProfile::Alpine { .. }) {
         emu.prepare_run();
-        println!("Pre-queuing ISOLINUX boot: virt console=ttyS0,115200");
-        emu.send_string("    virt console=ttyS0,115200\n");
+        println!("Pre-queuing ISOLINUX boot: Enter (use ISO default config)");
+        emu.send_string("\n");
     }
 
     println!("Emulator started (max {} instructions)", max_instructions);

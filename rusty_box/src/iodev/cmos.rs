@@ -729,6 +729,7 @@ impl BxCmosC {
     }
 
     /// Check and clear IRQ8 raise pending flag
+    #[inline]
     pub fn check_irq8(&mut self) -> bool {
         let pending = self.irq8_pending;
         self.irq8_pending = false;
@@ -736,6 +737,7 @@ impl BxCmosC {
     }
 
     /// Check and clear IRQ8 lower pending flag (set on REG_STAT_C read)
+    #[inline]
     pub fn check_irq8_lower(&mut self) -> bool {
         let pending = self.irq8_lower_pending;
         self.irq8_lower_pending = false;

@@ -421,6 +421,8 @@ fn run_alpine() -> Result<()> {
         let mut run_result: Result<u64> = Ok(0);
         let mut logged_in = false;
         let mut enter_injected = false;
+        let mut mkdir_test_injected = false;
+        let mut mkdir_test_icount: u64 = 0;
 
         const PHASE_SIZE: u64 = 100_000;
         let mut last_rip: u64 = 0;
@@ -808,6 +810,19 @@ fn run_alpine() -> Result<()> {
                         emu.send_scancode(sc);
                     }
                     logged_in = true;
+                    mkdir_test_icount = total_executed;
+                } else if logged_in && !mkdir_test_injected && total_executed > mkdir_test_icount + 50_000_000 {
+                    // Phase 1: mkdir + create a file
+                    eprintln!("[TEST] Phase 1: mkdir testdir && echo hello > testdir/file at {}M instr", total_executed / 1_000_000);
+                    emu.send_string("mkdir testdir && echo hello > testdir/file\n");
+                    mkdir_test_injected = true;
+                    mkdir_test_icount = total_executed; // reuse for phase 2 timing
+                } else if mkdir_test_injected && total_executed > mkdir_test_icount + 30_000_000 {
+                    // Phase 2: cat the file then try tab completion
+                    eprintln!("[TEST] Phase 2: 'cat testdir/file' at {}M instr", total_executed / 1_000_000);
+                    emu.send_string("cat testdir/file\n");
+                    mkdir_test_injected = false;
+                    mkdir_test_icount = u64::MAX;
                 } else {
                     for &sc in KEEP_ALIVE_SCANCODE {
                         emu.send_scancode(sc);
