@@ -81,6 +81,34 @@ impl core::fmt::Debug for MemoryDeviceId {
     }
 }
 
+impl MemoryDeviceId {
+    /// Dereference the VGA device pointer.
+    ///
+    /// # Safety (internal)
+    /// The raw pointer was set once at init and remains valid for the emulator lifetime.
+    /// Aliasing is the caller's responsibility (same as the prior inline `unsafe` blocks).
+    #[inline(always)]
+    pub(crate) fn vga_mut(&self) -> Option<&mut crate::iodev::vga::BxVgaC> {
+        match self {
+            MemoryDeviceId::Vga(ptr) => Some(unsafe { &mut **ptr }),
+            _ => None,
+        }
+    }
+
+    /// Dereference the IOAPIC device pointer.
+    ///
+    /// # Safety (internal)
+    /// The raw pointer was set once at init and remains valid for the emulator lifetime.
+    /// Aliasing is the caller's responsibility (same as the prior inline `unsafe` blocks).
+    #[inline(always)]
+    pub(crate) fn ioapic_mut(&self) -> Option<&mut crate::iodev::ioapic::BxIoApic> {
+        match self {
+            MemoryDeviceId::IoApic(ptr) => Some(unsafe { &mut **ptr }),
+            _ => None,
+        }
+    }
+}
+
 #[derive(Debug)]
 pub(super) struct MemoryHandlerStruct {
     next: Option<Box<MemoryHandlerStruct>>,

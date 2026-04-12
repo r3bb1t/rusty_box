@@ -9,7 +9,7 @@ use crate::{
     cpu::{rusty_box::MemoryAccessType, BxCpuC, BxCpuIdTrait},
     memory::{
         memory_rusty_box::{bios_map_last128k, MemoryAreaT, BIOSROMSZ, BIOS_MASK, EXROM_MASK},
-        BxMemC, BxMemoryStubC, MemoryDeviceId,
+        BxMemC, BxMemoryStubC,
     },
 };
 
@@ -503,15 +503,12 @@ impl BxMemC<'_> {
 
                 while let Some(handler) = current_handler {
                     if handler.begin <= a20_addr && handler.end >= a20_addr {
-                        let handled = match handler.device_id {
-                            MemoryDeviceId::Vga(vga_ptr) => {
-                                let vga = unsafe { &mut *vga_ptr };
-                                vga.mem_write(a20_addr, len as u32, &data[..len])
-                            }
-                            MemoryDeviceId::IoApic(ioapic_ptr) => {
-                                let ioapic = unsafe { &mut *ioapic_ptr };
-                                ioapic.mem_write(a20_addr, len as u32, &data[..len])
-                            }
+                        let handled = if let Some(vga) = handler.device_id.vga_mut() {
+                            vga.mem_write(a20_addr, len as u32, &data[..len])
+                        } else if let Some(ioapic) = handler.device_id.ioapic_mut() {
+                            ioapic.mem_write(a20_addr, len as u32, &data[..len])
+                        } else {
+                            unreachable!()
                         };
                         if handled {
                             return Ok(());
@@ -690,15 +687,12 @@ impl BxMemC<'_> {
 
                 while let Some(handler) = current_handler {
                     if handler.begin <= a20_addr && handler.end >= a20_addr {
-                        let handled = match handler.device_id {
-                            MemoryDeviceId::Vga(vga_ptr) => {
-                                let vga = unsafe { &mut *vga_ptr };
-                                vga.mem_read(a20_addr, len as u32, data)
-                            }
-                            MemoryDeviceId::IoApic(ioapic_ptr) => {
-                                let ioapic = unsafe { &mut *ioapic_ptr };
-                                ioapic.mem_read(a20_addr, len as u32, data)
-                            }
+                        let handled = if let Some(vga) = handler.device_id.vga_mut() {
+                            vga.mem_read(a20_addr, len as u32, data)
+                        } else if let Some(ioapic) = handler.device_id.ioapic_mut() {
+                            ioapic.mem_read(a20_addr, len as u32, data)
+                        } else {
+                            unreachable!()
                         };
                         if handled {
                             #[cfg(feature = "bx_support_pci")]

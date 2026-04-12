@@ -151,9 +151,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
 
             // Then check PIC (legacy 8259 path) — only if LAPIC didn't deliver
-            if !delivered && self.pic_ptr.is_some() {
-                // SAFETY: pic_ptr set for duration of cpu_loop_n_with_io; single-threaded access
-                let pic = unsafe { self.pic_ptr.unwrap().as_mut() };
+            if !delivered {
+              if let Some(pic) = self.pic_mut() {
                 if pic.has_interrupt() {
                     let vector = pic.iac();
                     tracing::debug!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
@@ -182,6 +181,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     #[cfg(debug_assertions)] { self.diag_hae_intr_pic_empty += 1; }
                 }
             }
+            }
         } else if self.pending_event
             & (Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR)
             != 0
@@ -193,10 +193,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // DMA HRQ handling (Bochs event.cc:390-393)
         // NOTE: similar code in handleWaitForEvent (event.cc:83-86)
         // Assert Hold Acknowledge (HLDA) and perform DMA transfer
-        if let Some(mut dma_nn) = self.dma_ptr {
-            if self.get_hrq() {
-                // SAFETY: dma_ptr set for duration of cpu_loop_n_with_io; single-threaded access
-                let dma = unsafe { dma_nn.as_mut() };
+        if self.get_hrq() {
+            if let Some(dma) = self.dma_mut() {
                 dma.raise_hlda();
             }
         }
@@ -230,10 +228,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
 
         // Handle DMA also when CPU is halted (Bochs event.cc:83-86)
-        if let Some(mut dma_nn) = self.dma_ptr {
-            if self.get_hrq() {
-                // SAFETY: dma_ptr set for duration of cpu_loop_n_with_io; single-threaded access
-                let dma = unsafe { dma_nn.as_mut() };
+        if self.get_hrq() {
+            if let Some(dma) = self.dma_mut() {
                 dma.raise_hlda();
             }
         }

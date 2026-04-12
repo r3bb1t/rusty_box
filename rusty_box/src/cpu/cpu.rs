@@ -1230,6 +1230,39 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.pc_system_ptr = None;
     }
 
+    // ── Safe accessor methods for NonNull device pointers ──────────────
+    // Each centralizes the single `unsafe` deref so all call sites are safe.
+
+    #[inline(always)]
+    pub(super) fn io_bus_mut(&mut self) -> Option<&mut crate::iodev::BxDevicesC> {
+        self.io_bus.map(|mut p| unsafe { p.as_mut() })
+    }
+
+    #[inline(always)]
+    pub(super) fn pc_system_mut(&mut self) -> Option<&mut crate::pc_system::BxPcSystemC> {
+        self.pc_system_ptr.map(|mut p| unsafe { p.as_mut() })
+    }
+
+    #[inline(always)]
+    pub(super) fn pc_system_ref(&self) -> Option<&crate::pc_system::BxPcSystemC> {
+        self.pc_system_ptr.map(|p| unsafe { p.as_ref() })
+    }
+
+    #[inline(always)]
+    pub(super) fn mem_bus_mut(&mut self) -> Option<&mut crate::memory::BxMemC<'c>> {
+        self.mem_bus.map(|mut p| unsafe { p.as_mut() })
+    }
+
+    #[inline(always)]
+    pub(super) fn pic_mut(&mut self) -> Option<&mut crate::iodev::pic::BxPicC> {
+        self.pic_ptr.map(|mut p| unsafe { p.as_mut() })
+    }
+
+    #[inline(always)]
+    pub(super) fn dma_mut(&mut self) -> Option<&mut crate::iodev::dma::BxDmaC> {
+        self.dma_ptr.map(|mut p| unsafe { p.as_mut() })
+    }
+
     /// Propagate PIC interrupt flags to CPU event state.
     ///
     /// Called after every I/O port access so the CPU sees PIC-raised
@@ -1237,17 +1270,18 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// waiting for the next `sync_event_flags()` between batches.
     #[inline]
     pub(super) fn sync_pic_flags(&mut self) {
-        if let Some(mut pic) = self.pic_ptr {
-            // SAFETY: pic_ptr valid for emulator lifetime; single-threaded access
-            let pic = unsafe { pic.as_mut() };
-            if pic.irq_pending {
+        if let Some(pic) = self.pic_mut() {
+            let pending = pic.irq_pending;
+            let cleared = pic.irq_cleared;
+            if pending { pic.irq_pending = false; }
+            if cleared { pic.irq_cleared = false; }
+            // pic borrow ends here (NLL); safe to mutate self fields
+            if pending {
                 self.pending_event |= Self::BX_EVENT_PENDING_INTR;
                 self.async_event = 1;
-                pic.irq_pending = false;
             }
-            if pic.irq_cleared {
+            if cleared {
                 self.pending_event &= !Self::BX_EVENT_PENDING_INTR;
-                pic.irq_cleared = false;
             }
         }
     }
@@ -1257,9 +1291,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// `bx_pc_system.HRQ`. Returns false if pc_system is not wired.
     #[inline]
     pub(super) fn get_hrq(&self) -> bool {
-        if let Some(ps) = self.pc_system_ptr {
-            // SAFETY: PcSystem pointer valid for emulator lifetime; single-threaded access
-            unsafe { ps.as_ref().get_hrq() }
+        if let Some(ps) = self.pc_system_ref() {
+            ps.get_hrq()
         } else {
             false
         }
@@ -1269,9 +1302,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// so that timers fire on schedule.
     #[inline]
     pub(super) fn ticks_left_next_event(&self) -> u32 {
-        if let Some(ps) = self.pc_system_ptr {
-            // SAFETY: PcSystem pointer valid for emulator lifetime; single-threaded access
-            unsafe { ps.as_ref().get_num_cpu_ticks_left_next_event() }
+        if let Some(ps) = self.pc_system_ref() {
+            ps.get_num_cpu_ticks_left_next_event()
         } else {
             u32::MAX // no cap when not wired (tests)
         }
@@ -1286,9 +1318,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Bit 0 would persist and poison all subsequent instructions.
     #[inline]
     pub(super) fn tickn_fastrep(&mut self, n: usize) {
-        if let Some(mut ps) = self.pc_system_ptr {
-            // SAFETY: PcSystem pointer valid for emulator lifetime; single-threaded access
-            let expired = unsafe { ps.as_mut().sub_countdown(n as u32) };
+        if let Some(ps) = self.pc_system_mut() {
+            let expired = ps.sub_countdown(n as u32);
             if expired {
                 self.async_event |= BX_ASYNC_EVENT_STOP_TRACE;
             }
@@ -1307,9 +1338,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
     #[inline]
     pub(crate) fn debug_putc(&mut self, ch: u8) {
-        if let Some(mut io_bus) = self.io_bus {
-            // SAFETY: io_bus is execution-scoped and single-CPU today.
-            unsafe { io_bus.as_mut().outp(0x00E9, ch as u32, 1) };
+        if let Some(io) = self.io_bus_mut() {
+            io.outp(0x00E9, ch as u32, 1);
         }
     }
 

@@ -1270,10 +1270,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Returns the number of bytes actually read. If the port doesn't support
     /// bulk reads (or no IO bus is wired), returns 0.
     fn bulk_port_in(&mut self, port: u16, buf: &mut [u8]) -> usize {
-        if let Some(mut io_bus) = self.io_bus {
-            // SAFETY: io_bus valid for duration of execution; single-threaded access
-            let devices = unsafe { io_bus.as_mut() };
-            return devices.inp_bulk(port, buf);
+        if let Some(io) = self.io_bus_mut() {
+            return io.inp_bulk(port, buf);
         }
         0
     }
@@ -1284,11 +1282,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Otherwise it falls back to conservative defaults (useful for unit tests
     /// that don't wire devices and never execute real firmware).
     fn port_in(&mut self, port: u16, len: u8) -> u32 {
-        if let Some(mut io_bus) = self.io_bus {
-            // SAFETY: `io_bus` is set by the emulator for the duration of execution
-            // and cleared afterwards. Single-CPU execution avoids concurrent access.
-            // SAFETY: io_bus valid for duration of execution; single-threaded access
-            let value = unsafe { io_bus.as_mut().inp(port, len, self.icount) };
+        let icount = self.icount;
+        if let Some(io) = self.io_bus_mut() {
+            let value = io.inp(port, len, icount);
             self.sync_pic_flags();
             return value;
         }
@@ -1320,11 +1316,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.rip()
             );
         }
-        if let Some(mut io_bus) = self.io_bus {
-            // SAFETY: `io_bus` is set by the emulator for the duration of execution
-            // and cleared afterwards. Single-CPU execution avoids concurrent access.
-            // SAFETY: io_bus valid for duration of execution; single-threaded access
-            unsafe { io_bus.as_mut().outp(port, value, len) };
+        if let Some(io) = self.io_bus_mut() {
+            io.outp(port, value, len);
             self.sync_pic_flags();
         }
     }

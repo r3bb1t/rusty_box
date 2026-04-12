@@ -253,13 +253,13 @@ impl BxDevicesC {
     pub fn inp(&mut self, port: u16, io_len: u8, icount: u64) -> u32 {
         self.diag_io_reads += 1;
         let entry = &self.read_handlers[port as usize];
+        let device_id = entry.device_id;
         let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
+        let has_handler = device_id != DeviceId::None && (entry.mask & len_mask) != 0;
 
-        let value = if entry.device_id != DeviceId::None && (entry.mask & len_mask) != 0 {
-            if let Some(mut dm) = self.device_manager {
-                // SAFETY: device_manager set by emulator for execution duration; single-threaded
-                let dm = unsafe { dm.as_mut() };
-                let result = Self::dispatch_read(dm, entry.device_id, port, io_len, icount);
+        let value = if has_handler {
+            if let Some(dm) = self.device_manager_mut() {
+                let result = Self::dispatch_read(dm, device_id, port, io_len, icount);
                 // Drain PIC IOAPIC forwarding queue after device handler
                 #[cfg(feature = "bx_support_apic")]
                 {
@@ -292,13 +292,13 @@ impl BxDevicesC {
     pub fn outp(&mut self, port: u16, value: u32, io_len: u8) {
         self.diag_io_writes += 1;
         let entry = &self.write_handlers[port as usize];
+        let device_id = entry.device_id;
         let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
+        let has_handler = device_id != DeviceId::None && (entry.mask & len_mask) != 0;
 
-        if entry.device_id != DeviceId::None && (entry.mask & len_mask) != 0 {
-            if let Some(mut dm) = self.device_manager {
-                // SAFETY: device_manager set by emulator for execution duration; single-threaded
-                let dm = unsafe { dm.as_mut() };
-                Self::dispatch_write(dm, entry.device_id, port, value, io_len);
+        if has_handler {
+            let dispatched = if let Some(dm) = self.device_manager_mut() {
+                Self::dispatch_write(dm, device_id, port, value, io_len);
                 // Drain PIC IOAPIC forwarding queue after device handler
                 #[cfg(feature = "bx_support_apic")]
                 {
@@ -313,16 +313,14 @@ impl BxDevicesC {
                         );
                     }
                 }
-                // Apply PAM register changes immediately during PCI writes.
-                // BIOS reads from shadowed regions right after writing PAM.
+                true
+            } else {
+                false
+            };
+            // dm borrow dropped; apply PAM update with fresh borrows
+            if dispatched {
                 #[cfg(feature = "bx_support_pci")]
-                if dm.pam_needs_update {
-                    if let Some(mut mem) = self.mem_ptr {
-                        // SAFETY: mem_ptr set by emulator; single-threaded
-                        dm.pam_needs_update = false;
-                        dm.pci_bridge.apply_pam_to_memory(unsafe { mem.as_mut() });
-                    }
-                }
+                self.apply_pending_pam();
                 return;
             }
         }
@@ -345,9 +343,7 @@ impl BxDevicesC {
         if entry.device_id != DeviceId::HardDrive {
             return 0;
         }
-        if let Some(mut dm) = self.device_manager {
-            // SAFETY: device_manager set by emulator for execution duration; single-threaded
-            let dm = unsafe { dm.as_mut() };
+        if let Some(dm) = self.device_manager_mut() {
             #[cfg(feature = "bx_support_pci")]
             {
                 let devices::DeviceManager { ref mut harddrv, ref mut pic, ref mut pci_ide, .. } = *dm;
@@ -455,6 +451,43 @@ impl BxDevicesC {
     /// Clear mem pointer after CPU execution.
     pub fn clear_mem_ptr(&mut self) {
         self.mem_ptr = None;
+    }
+
+    /// Safe accessor for the device manager pointer.
+    /// SAFETY invariant: pointer is set by the emulator before CPU execution
+    /// and cleared after; access is single-threaded.
+    #[inline(always)]
+    fn device_manager_mut(&mut self) -> Option<&mut devices::DeviceManager> {
+        self.device_manager.map(|mut p| unsafe { p.as_mut() })
+    }
+
+    /// Safe accessor for the memory pointer.
+    /// SAFETY invariant: pointer is set by the emulator before CPU execution
+    /// and cleared after; access is single-threaded.
+    #[allow(dead_code)]
+    #[inline(always)]
+    fn mem_mut(&mut self) -> Option<&mut crate::memory::BxMemC<'static>> {
+        self.mem_ptr.map(|mut p| unsafe { p.as_mut() })
+    }
+
+    /// Apply pending PAM register changes to memory mapping.
+    /// Requires simultaneous access to device_manager (for pci_bridge) and mem,
+    /// so the two NonNull derefs are centralized here rather than using the
+    /// individual accessors (which would conflict on `&mut self`).
+    #[cfg(feature = "bx_support_pci")]
+    #[inline(always)]
+    fn apply_pending_pam(&mut self) {
+        // SAFETY: both pointers set by emulator for execution duration; single-threaded.
+        let dm = match self.device_manager {
+            Some(mut p) => unsafe { p.as_mut() },
+            None => return,
+        };
+        if dm.pam_needs_update {
+            dm.pam_needs_update = false;
+            if let Some(mut mem_p) = self.mem_ptr {
+                dm.pci_bridge.apply_pam_to_memory(unsafe { mem_p.as_mut() });
+            }
+        }
     }
 
     /// Dispatch a port read to the device identified by `id`.
