@@ -1,0 +1,86 @@
+[package]
+name = "rusty_box"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+name = "rusty_box"
+path = "src/lib.rs"
+
+[features]
+default = ["bx_full", "std"]
+
+std = ["tracing/std", "tempfile", "libc", "crossterm"]
+gui-egui = ["dep:egui", "dep:eframe"]
+
+bx_full = [
+    "bx_little_endian",
+    "bx_large_ram_file",
+    "bx_phy_address_long",
+    "bx_support_monitor_mwait",
+    "bx_support_pkeys",
+    "bx_support_apic",
+    "bx_configure_msrs",
+    "bx_support_handlers_chaining_speedups",
+    "bx_support_alignment_check",
+    "bx_support_pci",
+]
+
+bx_debugger = []
+bx_gdb_stub = []
+bx_large_ram_file = []
+bx_instrumentation = []
+
+bx_support_alignment_check = []
+bx_support_amx = []
+bx_support_apic = []
+bx_support_handlers_chaining_speedups = []
+bx_support_memtype = []
+bx_support_smp = []
+
+bx_big_endian = []
+bx_little_endian = []
+
+bx_phy_address_long = []
+bx_support_monitor_mwait = []
+bx_support_pkeys = []
+bx_configure_msrs = []
+bx_support_pci = []
+
+[dependencies]
+tracing.workspace = true
+thiserror.workspace = true
+byteorder.workspace = true
+tempfile = { version = "3.20", optional = true }
+spin.workspace = true
+bitflags.workspace = true
+paste.workspace = true
+rusty_box_decoder = { path = "../rusty_box_decoder" }
+libc = { version = "0.2", optional = true }
+crossterm = { version = "0.29", optional = true }
+egui = { version = "0.31", optional = true }
+eframe = { version = "0.31", optional = true, default-features = false, features = ["default_fonts", "glow"] }
+
+[[example]]
+name = "dlxlinux_egui"
+path = "examples/gui/dlxlinux_egui.rs"
+required-features = ["std", "gui-egui"]
+
+[[example]]
+name = "rusty_box_egui"
+path = "examples/gui/rusty_box_egui.rs"
+required-features = ["std", "gui-egui"]
+
+
+[dev-dependencies]
+tracing-subscriber.workspace = true
+criterion = { version = "0.5", features = ["html_reports"] }
+
+[[bench]]
+name = "cpu_bench"
+harness = false
+
+
+[lints.rust]
+unexpected_cfgs = { level = "allow", check-cfg = ['cfg(feature, values("bx_support_sse", "bx_support_avx", "bx_support_evex", "bx_support_vmx", "bx_support_svm", "profiling"))'] }

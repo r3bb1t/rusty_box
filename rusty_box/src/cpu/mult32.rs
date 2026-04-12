@@ -1,0 +1,466 @@
+//! 32-bit multiplication and division instructions for x86 CPU emulation
+//!
+//! Based on Bochs mult32.cc
+
+use super::{
+    cpu::{BxCpuC, Exception},
+    cpuid::BxCpuIdTrait,
+    decoder::Instruction,
+    eflags::EFlags,
+    error::Result,
+};
+
+impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    // =========================================================================
+    // 32-bit Multiplication and Division
+    // =========================================================================
+
+    /// MUL r/m32 - Unsigned multiply EAX by r/m32, result in EDX:EAX
+    /// Matching C++ mult32.cc:MUL_EAXEdR
+    pub fn mul_eax_ed_r(&mut self, instr: &Instruction) -> Result<()> {
+        let op1 = self.get_gpr32(0); // EAX
+        let src_reg = instr.dst() as usize;
+        let op2 = self.get_gpr32(src_reg);
+
+        let product_64 = (op1 as u64) * (op2 as u64);
+        let product_32l = (product_64 & 0xFFFFFFFF) as u32;
+        let product_32h = (product_64 >> 32) as u32;
+
+        // Write product to EDX:EAX
+        self.set_gpr32(0, product_32l); // EAX
+        self.set_gpr32(2, product_32h); // EDX (reg 2 = EDX)
+
+        // Set flags
+        self.update_flags_logic32(product_32l);
+        if product_32h != 0 {
+            // Set CF and OF if high dword is non-zero
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+        }
+
+        Ok(())
+    }
+
+    /// MUL r/m32 (memory form)
+    /// Matching C++ mult32.cc:MUL_EAXEdM
+    pub fn mul_eax_ed_m(&mut self, instr: &Instruction) -> Result<()> {
+        let op1 = self.get_gpr32(0); // EAX
+        let eaddr = self.resolve_addr(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let op2 = self.v_read_dword(seg, eaddr)?;
+
+        let product_64 = (op1 as u64) * (op2 as u64);
+        let product_32l = (product_64 & 0xFFFFFFFF) as u32;
+        let product_32h = (product_64 >> 32) as u32;
+
+        // Write product to EDX:EAX
+        self.set_gpr32(0, product_32l); // EAX
+        self.set_gpr32(2, product_32h); // EDX (reg 2 = EDX)
+
+        // Set flags
+        self.update_flags_logic32(product_32l);
+        if product_32h != 0 {
+            // Set CF and OF if high dword is non-zero
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+        }
+
+        Ok(())
+    }
+
+    /// IMUL r/m32 - Signed multiply EAX by r/m32, result in EDX:EAX
+    /// Matching C++ mult32.cc:IMUL_EAXEdR
+    pub fn imul_eax_ed_r(&mut self, instr: &Instruction) -> Result<()> {
+        let op1 = self.get_gpr32(0) as i32; // EAX
+        let src_reg = instr.dst() as usize;
+        let op2 = self.get_gpr32(src_reg) as i32;
+
+        let product_64 = (op1 as i64) * (op2 as i64);
+        let product_32l = (product_64 & 0xFFFFFFFF) as u32;
+        let product_32h = ((product_64 >> 32) & 0xFFFFFFFF) as u32;
+
+        // Write product to EDX:EAX
+        self.set_gpr32(0, product_32l); // EAX
+        self.set_gpr32(2, product_32h); // EDX (reg 2 = EDX)
+
+        // Set flags
+        self.update_flags_logic32(product_32l);
+        // CF and OF are set if product_64 doesn't fit in signed 32-bit
+        // Matching C++: if(product_64 != (Bit32s)product_64)
+        // This checks if the 64-bit value equals its sign-extended 32-bit version
+        if product_64 != (product_64 as i32 as i64) {
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+        }
+
+        Ok(())
+    }
+
+    /// IMUL r/m32 (memory form)
+    /// Matching C++ mult32.cc:IMUL_EAXEdM
+    pub fn imul_eax_ed_m(&mut self, instr: &Instruction) -> Result<()> {
+        let op1 = self.get_gpr32(0) as i32; // EAX
+        let eaddr = self.resolve_addr(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let op2 = self.v_read_dword(seg, eaddr)? as i32;
+
+        let product_64 = (op1 as i64) * (op2 as i64);
+        let product_32l = (product_64 & 0xFFFFFFFF) as u32;
+        let product_32h = ((product_64 >> 32) & 0xFFFFFFFF) as u32;
+
+        // Write product to EDX:EAX
+        self.set_gpr32(0, product_32l); // EAX
+        self.set_gpr32(2, product_32h); // EDX (reg 2 = EDX)
+
+        // Set flags
+        self.update_flags_logic32(product_32l);
+        // CF and OF are set if product_64 doesn't fit in signed 32-bit
+        // Matching C++: if(product_64 != (Bit32s)product_64)
+        // This checks if the 64-bit value equals its sign-extended 32-bit version
+        if product_64 != (product_64 as i32 as i64) {
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+        }
+
+        Ok(())
+    }
+
+    /// DIV r/m32 - Unsigned divide EDX:EAX by r/m32, quotient in EAX, remainder in EDX
+    /// Matching C++ mult32.cc:DIV_EAXEdR
+    pub fn div_eax_ed_r(&mut self, instr: &Instruction) -> Result<()> {
+        let src_reg = instr.dst() as usize;
+        let op2 = self.get_gpr32(src_reg);
+
+        if op2 == 0 {
+            return self.exception(Exception::De, 0);
+        }
+
+        let edx = self.get_gpr32(2); // EDX
+        let eax = self.get_gpr32(0); // EAX
+        let op1 = ((edx as u64) << 32) | (eax as u64);
+
+        let quotient_64 = op1 / (op2 as u64);
+        let remainder_32 = (op1 % (op2 as u64)) as u32;
+        let quotient_32l = (quotient_64 & 0xFFFFFFFF) as u32;
+
+        if quotient_64 != (quotient_32l as u64) {
+            return self.exception(Exception::De, 0);
+        }
+
+        // Write quotient to EAX, remainder to EDX
+        self.set_gpr32(0, quotient_32l); // EAX
+        self.set_gpr32(2, remainder_32); // EDX
+
+        Ok(())
+    }
+
+    /// DIV r/m32 (memory form)
+    /// Matching C++ mult32.cc:DIV_EAXEdM
+    pub fn div_eax_ed_m(&mut self, instr: &Instruction) -> Result<()> {
+        let eaddr = self.resolve_addr(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let op2 = self.v_read_dword(seg, eaddr)?;
+
+        if op2 == 0 {
+            return self.exception(Exception::De, 0);
+        }
+
+        let edx = self.get_gpr32(2); // EDX
+        let eax = self.get_gpr32(0); // EAX
+        let op1 = ((edx as u64) << 32) | (eax as u64);
+
+        let quotient_64 = op1 / (op2 as u64);
+        let remainder_32 = (op1 % (op2 as u64)) as u32;
+        let quotient_32l = (quotient_64 & 0xFFFFFFFF) as u32;
+
+        if quotient_64 != (quotient_32l as u64) {
+            return self.exception(Exception::De, 0);
+        }
+
+        // Write quotient to EAX, remainder to EDX
+        self.set_gpr32(0, quotient_32l); // EAX
+        self.set_gpr32(2, remainder_32); // EDX
+
+        Ok(())
+    }
+
+    /// IDIV r/m32 - Signed divide EDX:EAX by r/m32, quotient in EAX, remainder in EDX
+    /// Matching C++ mult32.cc:IDIV_EAXEdR
+    pub fn idiv_eax_ed_r(&mut self, instr: &Instruction) -> Result<()> {
+        let edx = self.get_gpr32(2); // EDX
+        let eax = self.get_gpr32(0); // EAX
+                                     // Matching C++: Bit64s op1_64 = GET64_FROM_HI32_LO32(EDX, EAX);
+                                     // GET64_FROM_HI32_LO32 is: (Bit64u(lo) | (Bit64u(hi) << 32))
+                                     // Construct as unsigned first, then cast to signed
+        let op1 = ((eax as u64) | ((edx as u64) << 32)) as i64;
+
+        // Check MIN_INT case
+        if op1 == 0x8000000000000000u64 as i64 {
+            return self.exception(Exception::De, 0);
+        }
+
+        let src_reg = instr.dst() as usize;
+        let op2 = self.get_gpr32(src_reg) as i32;
+
+        if op2 == 0 {
+            return self.exception(Exception::De, 0);
+        }
+
+        let quotient_64 = op1 / (op2 as i64);
+        let remainder_32 = (op1 % (op2 as i64)) as i32;
+        let quotient_32l = (quotient_64 & 0xFFFFFFFF) as i32;
+
+        if quotient_64 != (quotient_32l as i64) {
+            return self.exception(Exception::De, 0);
+        }
+
+        // Write quotient to EAX, remainder to EDX
+        self.set_gpr32(0, quotient_32l as u32); // EAX
+        self.set_gpr32(2, remainder_32 as u32); // EDX
+
+        Ok(())
+    }
+
+    /// IDIV r/m32 (memory form)
+    /// Matching C++ mult32.cc:IDIV_EAXEdM
+    pub fn idiv_eax_ed_m(&mut self, instr: &Instruction) -> Result<()> {
+        let edx = self.get_gpr32(2); // EDX
+        let eax = self.get_gpr32(0); // EAX
+                                     // Matching C++: Bit64s op1_64 = GET64_FROM_HI32_LO32(EDX, EAX);
+                                     // GET64_FROM_HI32_LO32 is: (Bit64u(lo) | (Bit64u(hi) << 32))
+                                     // Construct as unsigned first, then cast to signed
+        let op1 = ((eax as u64) | ((edx as u64) << 32)) as i64;
+
+        // Check MIN_INT case
+        if op1 == 0x8000000000000000u64 as i64 {
+            return self.exception(Exception::De, 0);
+        }
+
+        let eaddr = self.resolve_addr(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let op2 = self.v_read_dword(seg, eaddr)? as i32;
+
+        if op2 == 0 {
+            return self.exception(Exception::De, 0);
+        }
+
+        let quotient_64 = op1 / (op2 as i64);
+        let remainder_32 = (op1 % (op2 as i64)) as i32;
+        let quotient_32l = (quotient_64 & 0xFFFFFFFF) as i32;
+
+        if quotient_64 != (quotient_32l as i64) {
+            return self.exception(Exception::De, 0);
+        }
+
+        // Write quotient to EAX, remainder to EDX
+        self.set_gpr32(0, quotient_32l as u32); // EAX
+        self.set_gpr32(2, remainder_32 as u32); // EDX
+
+        Ok(())
+    }
+
+    /// IMUL Gd, Ed - Two-operand signed multiply (register form)
+    /// dst = dst * src, only lower 32 bits stored
+    /// Matching C++ mult32.cc:IMUL_GdEdR
+    pub fn imul_gd_ed_r(&mut self, instr: &Instruction) -> Result<()> {
+        let dst_reg = instr.dst() as usize;
+        let src_reg = instr.src() as usize;
+
+        let op1 = self.get_gpr32(dst_reg) as i32;
+        let op2 = self.get_gpr32(src_reg) as i32;
+
+        let product_64 = (op1 as i64) * (op2 as i64);
+        let product_32 = (product_64 & 0xFFFFFFFF) as u32;
+
+        self.set_gpr32(dst_reg, product_32);
+
+        self.update_flags_logic32(product_32);
+        if product_64 != (product_64 as i32 as i64) {
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+        }
+
+        Ok(())
+    }
+
+    /// IMUL Gd, Ed - Two-operand signed multiply (memory form)
+    /// Matching C++ mult32.cc:IMUL_GdEdM
+    pub fn imul_gd_ed_m(&mut self, instr: &Instruction) -> Result<()> {
+        let dst_reg = instr.dst() as usize;
+
+        let op1 = self.get_gpr32(dst_reg) as i32;
+        let eaddr = self.resolve_addr(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let op2 = self.v_read_dword(seg, eaddr)? as i32;
+
+        let product_64 = (op1 as i64) * (op2 as i64);
+        let product_32 = (product_64 & 0xFFFFFFFF) as u32;
+
+        self.set_gpr32(dst_reg, product_32);
+
+        self.update_flags_logic32(product_32);
+        if product_64 != (product_64 as i32 as i64) {
+            self.eflags.insert(EFlags::CF.union(EFlags::OF)); // CF=1, OF=1
+        }
+
+        Ok(())
+    }
+
+    /// IMUL Gd, Ed, sIb - Three-operand signed multiply with sign-extended 8-bit immediate
+    /// Opcode: 6B /r ib
+    /// Unified wrapper — dispatches to register or memory form
+    pub fn imul_gd_ed_ib(&mut self, instr: &Instruction) -> Result<()> {
+        if instr.mod_c0() {
+            self.imul_gd_ed_ib_r(instr)
+        } else {
+            self.imul_gd_ed_ib_m(instr)
+        }
+    }
+
+    /// IMUL Gd, Ed, sIb - register form
+    /// Bochs mult32.cc IMUL_GdEdIdR (same handler for both Id and sIb)
+    fn imul_gd_ed_ib_r(&mut self, instr: &Instruction) -> Result<()> {
+        let op1 = self.get_gpr32(instr.src() as usize) as i32;
+        let op2 = instr.ib() as i8 as i32;
+
+        let product_64 = (op1 as i64) * (op2 as i64);
+        let product_32 = product_64 as u32;
+
+        self.set_gpr32(instr.dst() as usize, product_32);
+
+        self.set_flags_oszapc_logic_32(product_32);
+        if product_64 != (product_32 as i32 as i64) {
+            self.eflags.insert(EFlags::CF.union(EFlags::OF));
+        }
+
+        Ok(())
+    }
+
+    /// IMUL Gd, Ed, sIb - memory form
+    /// Bochs mult32.cc IMUL_GdEdIdM (loads from memory)
+    fn imul_gd_ed_ib_m(&mut self, instr: &Instruction) -> Result<()> {
+        let eaddr = self.resolve_addr(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let op1 = self.v_read_dword(seg, eaddr)? as i32;
+        let op2 = instr.ib() as i8 as i32;
+
+        let product_64 = (op1 as i64) * (op2 as i64);
+        let product_32 = product_64 as u32;
+
+        self.set_gpr32(instr.dst() as usize, product_32);
+
+        self.set_flags_oszapc_logic_32(product_32);
+        if product_64 != (product_32 as i32 as i64) {
+            self.eflags.insert(EFlags::CF.union(EFlags::OF));
+        }
+
+        Ok(())
+    }
+
+    /// IMUL Gd, Ed, Id - Three-operand signed multiply with 32-bit immediate (register source)
+    /// dst = src * imm32
+    /// Opcode: 69 /r id
+    /// IMUL Gd, Ed, Id - Three-operand signed multiply (register source)
+    /// Bochs  — IMUL_GdEdIdR
+    pub fn imul_gd_ed_id_r(&mut self, instr: &Instruction) -> Result<()> {
+        let op2 = self.get_gpr32(instr.src() as usize) as i32;
+        let op3 = instr.id() as i32;
+
+        let product_64 = (op2 as i64) * (op3 as i64);
+        let product_32 = product_64 as u32;
+
+        self.set_gpr32(instr.dst() as usize, product_32);
+
+        // Bochs: SET_FLAGS_OSZAPC_LOGIC_32 then assert CF/OF if overflow
+        self.set_flags_oszapc_logic_32(product_32);
+        if product_64 != (product_32 as i32 as i64) {
+            self.eflags.insert(EFlags::CF.union(EFlags::OF));
+        }
+
+        Ok(())
+    }
+
+    /// IMUL Gd, Ed, Id - Three-operand signed multiply with 32-bit immediate (memory source)
+    /// IMUL Gd, Ed, Id - Three-operand signed multiply (memory source)
+    /// Bochs  (LOAD_Ed + IMUL_GdEdIdR pattern)
+    pub fn imul_gd_ed_id_m(&mut self, instr: &Instruction) -> Result<()> {
+        let eaddr = self.resolve_addr(instr);
+        let seg = super::decoder::BxSegregs::from(instr.seg());
+        let op2 = self.v_read_dword(seg, eaddr)? as i32;
+        let op3 = instr.id() as i32;
+
+        let product_64 = (op2 as i64) * (op3 as i64);
+        let product_32 = product_64 as u32;
+
+        self.set_gpr32(instr.dst() as usize, product_32);
+
+        // Bochs: SET_FLAGS_OSZAPC_LOGIC_32 then assert CF/OF if overflow
+        self.set_flags_oszapc_logic_32(product_32);
+        if product_64 != (product_32 as i32 as i64) {
+            self.eflags.insert(EFlags::CF.union(EFlags::OF));
+        }
+
+        Ok(())
+    }
+
+    // =========================================================================
+    // Unified wrappers (dispatch register vs memory form based on mod_c0)
+    // =========================================================================
+
+    /// MUL EAX, r/m32 - Unified wrapper
+    pub fn mul_eax_ed(&mut self, instr: &Instruction) -> Result<()> {
+        if instr.mod_c0() {
+            self.mul_eax_ed_r(instr)
+        } else {
+            self.mul_eax_ed_m(instr)
+        }
+    }
+
+    /// IMUL EAX, r/m32 - Unified wrapper
+    pub fn imul_eax_ed(&mut self, instr: &Instruction) -> Result<()> {
+        if instr.mod_c0() {
+            self.imul_eax_ed_r(instr)
+        } else {
+            self.imul_eax_ed_m(instr)
+        }
+    }
+
+    /// DIV EAX, r/m32 - Unified wrapper
+    pub fn div_eax_ed(&mut self, instr: &Instruction) -> Result<()> {
+        if instr.mod_c0() {
+            self.div_eax_ed_r(instr)
+        } else {
+            self.div_eax_ed_m(instr)
+        }
+    }
+
+    /// IDIV EAX, r/m32 - Unified wrapper
+    pub fn idiv_eax_ed(&mut self, instr: &Instruction) -> Result<()> {
+        if instr.mod_c0() {
+            self.idiv_eax_ed_r(instr)
+        } else {
+            self.idiv_eax_ed_m(instr)
+        }
+    }
+
+    /// IMUL Gd, Ed, Id - Three-operand signed multiply with 32-bit immediate - Unified wrapper
+    pub fn imul_gd_ed_id(&mut self, instr: &Instruction) -> Result<()> {
+        if instr.mod_c0() {
+            self.imul_gd_ed_id_r(instr)
+        } else {
+            self.imul_gd_ed_id_m(instr)
+        }
+    }
+
+    /// IMUL Gd, Ed - Two-operand signed multiply - Unified wrapper
+    pub fn imul_gd_ed(&mut self, instr: &Instruction) -> Result<()> {
+        if instr.mod_c0() {
+            self.imul_gd_ed_r(instr)
+        } else {
+            self.imul_gd_ed_m(instr)
+        }
+    }
+
+    // =========================================================================
+    // Helper functions
+    // =========================================================================
+
+    // Helper method (resolve_addr) is defined in logical32.rs to avoid duplicate definitions
+
+    // v_read_dword is defined in logical32.rs to avoid duplicate definitions
+}

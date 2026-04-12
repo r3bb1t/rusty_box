@@ -1,0 +1,3564 @@
+#![allow(unused_unsafe)]
+
+//! Instruction dispatcher for x86 CPU emulation
+//!
+//! Maps decoded opcodes to their implementation methods.
+//! This is the central dispatch table, equivalent to Bochs cpu.cc's
+//! BX_CPU_C::cpu_loop() switch statement.
+
+use super::{
+    cpu::BxCpuC,
+    cpuid::BxCpuIdTrait,
+    decoder::{Instruction, Opcode},
+    Result,
+};
+
+impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
+    pub(super) fn execute_instruction(&mut self, instr: &Instruction) -> Result<()> {
+        use crate::cpu::arith16;
+        use crate::cpu::arith32;
+        use crate::cpu::arith8;
+        use crate::cpu::data_xfer16;
+        use crate::cpu::data_xfer32;
+        use crate::cpu::data_xfer8;
+        #[allow(unused_imports)]
+        use crate::cpu::data_xfer_ext;
+
+        match instr.get_ia_opcode() {
+            // =========================================================================
+            // Data transfer (MOV) instructions - 32-bit
+            // =========================================================================
+            Opcode::MovOp32GdEd => {
+                data_xfer32::MOV_GdEd(self, instr)?;
+                Ok(())
+            }
+            Opcode::MovOp32EdGd => {
+                data_xfer32::MOV_EdGd(self, instr)?;
+                Ok(())
+            }
+            Opcode::MovEdId => {
+                data_xfer32::MOV_EdId(self, instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // Data transfer (MOV) instructions - 8-bit
+            // =========================================================================
+            Opcode::MovGbEb => {
+                self.mov_gb_eb(instr)?;
+                Ok(())
+            }
+            Opcode::MovEbGb => {
+                self.mov_eb_gb(instr)?;
+                Ok(())
+            }
+            Opcode::MovEbIb => {
+                self.mov_eb_ib(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // 8-bit Arithmetic instructions (ADD, SUB, etc.)
+            // =========================================================================
+            Opcode::AddEbGb => arith8::ADD_EbGb(self, instr),
+            Opcode::AddGbEb => arith8::ADD_GbEb(self, instr),
+            Opcode::AdcEbGb => arith8::ADC_EbGb(self, instr),
+            Opcode::AdcGbEb => arith8::ADC_GbEb(self, instr),
+            Opcode::AdcGwEw => arith16::ADC_GwEw(self, instr),
+            Opcode::AdcEwGw => arith16::ADC_EwGw(self, instr),
+            Opcode::AdcEwsIb => arith16::ADC_EwsIb(self, instr),
+            Opcode::AdcAxiw => arith16::ADC_AX_Iw(self, instr),
+            Opcode::AdcEwIw => arith16::ADC_EwIw(self, instr),
+            Opcode::AdcEdGd => arith32::ADC_EdGd(self, instr),
+            Opcode::AdcGdEd => arith32::ADC_GdEd(self, instr),
+            Opcode::AdcEaxid => {
+                arith32::ADC_EAX_Id(self, instr);
+                Ok(())
+            }
+            Opcode::AdcEdId => arith32::ADC_EdId(self, instr),
+            Opcode::AdcEdsIb => arith32::ADC_EdsIb(self, instr),
+            Opcode::SubEbGb => arith8::SUB_EbGb(self, instr),
+            Opcode::SubGbEb => arith8::SUB_GbEb(self, instr),
+            Opcode::AndEbGb => {
+                self.and_eb_gb(instr)?;
+                Ok(())
+            }
+            Opcode::AndGbEb => {
+                self.and_gb_eb(instr)?;
+                Ok(())
+            }
+            Opcode::AndEbIb => {
+                self.and_eb_ib(instr)?;
+                Ok(())
+            }
+            Opcode::OrEbGb => {
+                self.or_eb_gb(instr)?;
+                Ok(())
+            }
+            Opcode::OrGbEb => {
+                self.or_gb_eb(instr)?;
+                Ok(())
+            }
+            Opcode::OrEbIb => {
+                self.or_eb_ib(instr)?;
+                Ok(())
+            }
+            Opcode::XorEbGb => {
+                self.xor_eb_gb(instr)?;
+                Ok(())
+            }
+            Opcode::XorGbEb => {
+                self.xor_gb_eb(instr)?;
+                Ok(())
+            }
+            Opcode::XorEbIb => {
+                self.xor_eb_ib(instr)?;
+                Ok(())
+            }
+            Opcode::NotEb => {
+                self.not_eb(instr)?;
+                Ok(())
+            }
+            Opcode::TestEbGb => {
+                self.test_eb_gb(instr)?;
+                Ok(())
+            }
+            Opcode::TestEbIb => {
+                self.test_eb_ib(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // Data transfer (MOV) instructions - 16-bit
+            // =========================================================================
+            Opcode::MovGwEw => {
+                self.mov_gw_ew(instr)?;
+                Ok(())
+            }
+            Opcode::MovEwGw => {
+                self.mov_ew_gw(instr)?;
+                Ok(())
+            }
+            Opcode::MovEwIw => {
+                self.mov_ew_iw(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // Segment register MOV
+            // =========================================================================
+            Opcode::MovEwSw => {
+                self.mov_ew_sw(instr)?;
+                Ok(())
+            }
+            Opcode::MovSwEw => {
+                self.mov_sw_ew(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // MOV with direct memory offset
+            // =========================================================================
+            Opcode::MovAlod => data_xfer8::MOV_ALOd(self, instr),
+            Opcode::MovAxod => data_xfer16::MOV_AXOd(self, instr),
+            Opcode::MovOdAl => data_xfer8::MOV_OdAL(self, instr),
+            Opcode::MovOdAx => data_xfer16::MOV_OdAX(self, instr),
+            Opcode::MovEaxod => data_xfer32::MOV_EAXOd(self, instr),
+            Opcode::MovOdEax => data_xfer32::MOV_OdEAX(self, instr),
+
+            // =========================================================================
+            // PUSH/POP segment registers
+            // =========================================================================
+            Opcode::PushOp16Sw => self.push_op16_sw(instr),
+            Opcode::PopOp16Sw => self.pop_op16_sw(instr),
+            Opcode::PushIw => {
+                self.push_iw(instr)?;
+                Ok(())
+            }
+            Opcode::PushSIb16 => {
+                self.push_sib16(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // Arithmetic (ADD) instructions
+            // =========================================================================
+            Opcode::AddGdEd => {
+                arith32::ADD_GdEd(self, instr)?;
+                Ok(())
+            }
+            Opcode::AddEdGd => {
+                arith32::ADD_EdGd(self, instr)?;
+                Ok(())
+            }
+            Opcode::AddEaxid => {
+                arith32::ADD_EAX_Id(self, instr);
+                Ok(())
+            }
+            Opcode::AddAxiw => arith16::ADD_Axiw(self, instr),
+            Opcode::AddAlib => arith8::ADD_ALIb(self, instr),
+            Opcode::AddEbIb => arith8::ADD_EbIb(self, instr),
+            Opcode::SubEbIb => arith8::SUB_EbIb(self, instr),
+            Opcode::AdcAlib => arith8::ADC_ALIb(self, instr),
+            Opcode::AdcEbIb => arith8::ADC_EbIb(self, instr),
+            Opcode::SbbAlib => arith8::SBB_ALIb(self, instr),
+            Opcode::SbbEbIb => arith8::SBB_EbIb(self, instr),
+            Opcode::SbbEbGb => arith8::SBB_EbGb(self, instr),
+            Opcode::SbbGbEb => arith8::SBB_GbEb(self, instr),
+            Opcode::AddEwsIb => arith16::ADD_EwsIb(self, instr),
+            Opcode::AddEwIw => arith16::ADD_EwIw(self, instr),
+            Opcode::AddEwGw => arith16::ADD_EwGw(self, instr),
+            Opcode::AddGwEw => arith16::ADD_GwEw(self, instr),
+            Opcode::AddEdsIb | Opcode::AddEdId => {
+                arith32::ADD_EdId(self, instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // Arithmetic (SUB) instructions
+            // =========================================================================
+            Opcode::SubGdEd => {
+                arith32::SUB_GdEd(self, instr)?;
+                Ok(())
+            }
+            Opcode::SubEdGd => {
+                arith32::SUB_EdGd(self, instr)?;
+                Ok(())
+            }
+            Opcode::SubGwEw => arith16::SUB_GwEw(self, instr),
+            Opcode::SubEwGw => arith16::SUB_EwGw(self, instr),
+            Opcode::SbbGwEw => arith16::SBB_GwEw(self, instr),
+            Opcode::SbbEwGw => arith16::SBB_EwGw(self, instr),
+            Opcode::SbbAxiw => arith16::SBB_AX_Iw(self, instr),
+            Opcode::SbbEwIw => arith16::SBB_EwIw(self, instr),
+            Opcode::SbbEwsIb => arith16::SBB_EwsIb(self, instr),
+            Opcode::SbbEdGd => arith32::SBB_EdGd(self, instr),
+            Opcode::SbbGdEd => arith32::SBB_GdEd(self, instr),
+            Opcode::SbbEaxid => {
+                arith32::SBB_EAX_Id(self, instr);
+                Ok(())
+            }
+            Opcode::SbbEdId => arith32::SBB_EdId(self, instr),
+            Opcode::SbbEdsIb => arith32::SBB_EdsIb(self, instr),
+            Opcode::SubEaxid => {
+                arith32::SUB_EAX_Id(self, instr);
+                Ok(())
+            }
+            Opcode::SubAlib => arith8::SUB_AL_Ib(self, instr),
+            Opcode::SubAxiw => arith16::SUB_AX_Iw(self, instr),
+            Opcode::SubEwIw => arith16::SUB_EwIw(self, instr),
+            Opcode::SubEwsIb => arith16::SUB_EwsIb(self, instr),
+            Opcode::SubEdsIb | Opcode::SubEdId => {
+                arith32::SUB_EdId(self, instr)?;
+                Ok(())
+            }
+            // SUB zero idioms (SUB reg, reg where src==dst -> result is always 0)
+            Opcode::SubEwGwZeroIdiom | Opcode::SubGwEwZeroIdiom => {
+                self.zero_idiom_gw_r(instr);
+                Ok(())
+            }
+            Opcode::SubEdGdZeroIdiom | Opcode::SubGdEdZeroIdiom => {
+                self.zero_idiom_gd_r(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // XOR instructions
+            // =========================================================================
+            Opcode::XorEdGd => {
+                self.xor_ed_gd(instr)?;
+                Ok(())
+            }
+            Opcode::XorEdGdZeroIdiom | Opcode::XorGdEdZeroIdiom => {
+                self.zero_idiom_gd_r(instr);
+                Ok(())
+            }
+            Opcode::XorGdEd => {
+                self.xor_gd_ed(instr)?;
+                Ok(())
+            }
+            Opcode::XorEwGw => {
+                self.xor_ew_gw(instr)?;
+                Ok(())
+            }
+            Opcode::XorGwEw => {
+                self.xor_gw_ew(instr)?;
+                Ok(())
+            }
+            Opcode::XorEwGwZeroIdiom | Opcode::XorGwEwZeroIdiom => {
+                self.zero_idiom_gw_r(instr);
+                Ok(())
+            }
+            Opcode::XorAlib => {
+                self.xor_al_ib(instr);
+                Ok(())
+            }
+            Opcode::XorAxiw => {
+                self.xor_ax_iw(instr);
+                Ok(())
+            }
+            Opcode::XorEaxid => {
+                self.xor_eax_id(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // FAR JMP
+            // =========================================================================
+            Opcode::JmpfAp => {
+                tracing::trace!("DISPATCH JmpfAp: RIP={:#x} CS={:#x}", self.prev_rip, self.cs_selector_value());
+                self.jmpf_ap(instr)
+            }
+
+            // =========================================================================
+            // Flag manipulation instructions
+            // =========================================================================
+            Opcode::Clc => self.clc(instr),
+            Opcode::Stc => self.stc(instr),
+            Opcode::Cmc => self.cmc(instr),
+            Opcode::Cli => self.cli(instr),
+            Opcode::Sti => self.sti(instr),
+
+            // =========================================================================
+            // Descriptor table / task register loads
+            // =========================================================================
+            Opcode::LidtMs => {
+                self.lidt_ms(instr)?;
+                Ok(())
+            }
+            Opcode::LgdtMs => {
+                self.lgdt_ms(instr)?;
+                Ok(())
+            }
+            Opcode::LldtEw => {
+                self.lldt_ew(instr)?;
+                Ok(())
+            }
+            Opcode::LtrEw => {
+                self.ltr_ew(instr)?;
+                Ok(())
+            }
+            Opcode::SgdtMs => self.sgdt_ms(instr),
+            Opcode::SidtMs => self.sidt_ms(instr),
+            Opcode::SldtEw => self.sldt_ew(instr),
+            Opcode::StrEw => self.str_ew(instr),
+            Opcode::SmswEw => self.smsw_ew(instr),
+            Opcode::ArplEwGw => self.arpl_ew_gw(instr),
+            Opcode::LarGwEw | Opcode::LarGdEw => self.lar_gv_ew(instr),
+            Opcode::LslGwEw | Opcode::LslGdEw => self.lsl_gv_ew(instr),
+            Opcode::VerrEw => self.verr_ew(instr),
+            Opcode::VerwEw => self.verw_ew(instr),
+
+            // =========================================================================
+            // Control Register Read Operations (MOV r32, CRx)
+            // =========================================================================
+            Opcode::MovRdCr0 => {
+                self.mov_rd_cr0(instr)?;
+                Ok(())
+            }
+            Opcode::MovRdCr2 => {
+                self.mov_rd_cr2(instr)?;
+                Ok(())
+            }
+            Opcode::MovRdCr3 => {
+                self.mov_rd_cr3(instr)?;
+                Ok(())
+            }
+            Opcode::MovRdCr4 => {
+                self.mov_rd_cr4(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // Control Register Write Operations (MOV CRx, r32)
+            // =========================================================================
+            Opcode::MovCr0rd => {
+                self.mov_cr0_rd(instr)?;
+                Ok(())
+            }
+            Opcode::MovCr2rd => {
+                self.mov_cr2_rd(instr)?;
+                Ok(())
+            }
+            Opcode::MovCr3rd => {
+                self.mov_cr3_rd(instr)?;
+                Ok(())
+            }
+            Opcode::MovCr4rd => {
+                self.mov_cr4_rd(instr)?;
+                Ok(())
+            }
+
+            // Debug Register Operations (0F 21 / 0F 23)
+            Opcode::MovRdDd => self.mov_rd_dd(instr),
+            Opcode::MovDdRd => self.mov_dd_rd(instr),
+
+            Opcode::LmswEw => {
+                self.lmsw_ew(instr)?;
+                Ok(())
+            }
+
+            Opcode::Cld => self.cld(instr),
+            Opcode::Std => self.std_(instr),
+            Opcode::Nop => Ok(()), // NOP is architecturally defined as no-op (Bochs )
+            Opcode::Pause => self.pause(instr),
+            Opcode::Endbranch32 => self.endbranch32(instr),
+            Opcode::Endbranch64 => self.endbranch64(instr),
+
+            // =========================================================================
+            // I/O port instructions
+            // =========================================================================
+            Opcode::InAlib => self.in_al_ib(instr),
+            Opcode::InAxib => self.in_ax_ib(instr),
+            Opcode::InEaxib => self.in_eax_ib(instr),
+            Opcode::OutIbAl => self.out_ib_al(instr),
+            Opcode::OutIbAx => self.out_ib_ax(instr),
+            Opcode::OutIbEax => self.out_ib_eax(instr),
+            Opcode::InAlDx => self.in_al_dx(instr),
+            Opcode::InAxDx => self.in_ax_dx(instr),
+            Opcode::InEaxDx => self.in_eax_dx(instr),
+            Opcode::OutDxAl => self.out_dx_al(instr),
+            Opcode::OutDxAx => self.out_dx_ax(instr),
+            Opcode::OutDxEax => self.out_dx_eax(instr),
+
+            // INS/OUTS string I/O
+            Opcode::RepInsbYbDx => self.insb_dispatch(instr),
+            Opcode::RepInswYwDx => self.insw_dispatch(instr),
+            Opcode::RepInsdYdDx => self.insd_dispatch(instr),
+            Opcode::RepOutsbDxxb => self.outsb_dispatch(instr),
+            Opcode::RepOutswDxxw => self.outsw_dispatch(instr),
+            Opcode::RepOutsdDxxd => self.outsd_dispatch(instr),
+
+            // =========================================================================
+            // Conditional jumps (8-bit displacement, 16-bit mode)
+            // =========================================================================
+            Opcode::JoJbw => {
+                self.jo_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JnoJbw => {
+                self.jno_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JbJbw => {
+                self.jb_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JnbJbw => {
+                self.jnb_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JzJbw => {
+                self.jz_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JnzJbw => {
+                self.jnz_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JbeJbw => {
+                self.jbe_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JnbeJbw => {
+                self.jnbe_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JsJbw => {
+                self.js_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JnsJbw => {
+                self.jns_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JpJbw => {
+                self.jp_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JnpJbw => {
+                self.jnp_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JlJbw => {
+                self.jl_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JnlJbw => {
+                self.jnl_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JleJbw => {
+                self.jle_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JnleJbw => {
+                self.jnle_jb(instr)?;
+                Ok(())
+            }
+
+            // Conditional jumps (16-bit displacement)
+            Opcode::JzJw => {
+                self.jz_jw(instr)?;
+                Ok(())
+            }
+            Opcode::JnzJw => {
+                self.jnz_jw(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // JMP instructions
+            // =========================================================================
+            Opcode::JmpJbw => {
+                self.jmp_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JmpJw => {
+                self.jmp_jw(instr)?;
+                Ok(())
+            }
+            Opcode::JmpJd => {
+                self.jmp_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JmpJbd => {
+                self.jmp_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JmpEw => {
+                self.jmp_ew(instr)?;
+                Ok(())
+            }
+            Opcode::JmpEd => {
+                self.jmp_ed(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // CALL instructions
+            // =========================================================================
+            Opcode::CallJw => {
+                self.call_jw(instr)?;
+                Ok(())
+            }
+            Opcode::CallJd => {
+                self.call_jd(instr)?;
+                Ok(())
+            }
+            Opcode::CallEw => {
+                self.call_ew(instr)?;
+                Ok(())
+            }
+            Opcode::CallEd => {
+                self.call_ed(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // RET instructions
+            // =========================================================================
+            Opcode::RetOp16 => {
+                self.ret_near16(instr)?;
+                Ok(())
+            }
+            Opcode::RetOp16Iw => {
+                self.ret_near16_iw(instr)?;
+                Ok(())
+            }
+            Opcode::RetOp32 => {
+                self.ret_near32(instr)?;
+                Ok(())
+            }
+            Opcode::RetOp32Iw => {
+                self.ret_near32_iw(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // LOOP instructions
+            // =========================================================================
+            Opcode::LoopJbw => {
+                self.loop16_jb(instr)?;
+                Ok(())
+            }
+            Opcode::LoopeJbw => {
+                self.loope16_jb(instr)?;
+                Ok(())
+            }
+            Opcode::LoopneJbw => {
+                self.loopne16_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JcxzJbw => {
+                self.jcxz_jb(instr)?;
+                Ok(())
+            }
+            Opcode::JecxzJbd => {
+                self.jecxz_jb(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // Far CALL instructions (32-bit)
+            // =========================================================================
+            Opcode::CallfOp32Ap => self.call32_ap(instr),
+            Opcode::CallfOp32Ep => self.call32_ep(instr),
+
+            // =========================================================================
+            // Far JMP instructions (32-bit)
+            // =========================================================================
+            Opcode::JmpfOp32Ep => self.jmp32_ep(instr),
+
+            // =========================================================================
+            // Far RET instructions (32-bit)
+            // =========================================================================
+            Opcode::RetfOp32 => self.retfar32(instr),
+            Opcode::RetfOp32Iw => self.retfar32_iw(instr),
+
+            // =========================================================================
+            // Conditional jumps with 32-bit displacement (Jd variants)
+            // =========================================================================
+            Opcode::JoJd | Opcode::JoJbd => {
+                self.jo_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JnoJd | Opcode::JnoJbd => {
+                self.jno_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JbJd | Opcode::JbJbd => {
+                self.jb_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JnbJd | Opcode::JnbJbd => {
+                self.jnb_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JzJd | Opcode::JzJbd => {
+                self.jz_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JnzJd | Opcode::JnzJbd => {
+                self.jnz_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JbeJd | Opcode::JbeJbd => {
+                self.jbe_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JnbeJd | Opcode::JnbeJbd => {
+                self.jnbe_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JsJd | Opcode::JsJbd => {
+                self.js_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JnsJd | Opcode::JnsJbd => {
+                self.jns_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JpJd | Opcode::JpJbd => {
+                self.jp_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JnpJd | Opcode::JnpJbd => {
+                self.jnp_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JlJd | Opcode::JlJbd => {
+                self.jl_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JnlJd | Opcode::JnlJbd => {
+                self.jnl_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JleJd | Opcode::JleJbd => {
+                self.jle_jd(instr)?;
+                Ok(())
+            }
+            Opcode::JnleJd | Opcode::JnleJbd => {
+                self.jnle_jd(instr)?;
+                Ok(())
+            }
+
+            // LOOP instructions: 32-bit variants
+            Opcode::LoopJbd => {
+                self.loop32_jb(instr)?;
+                Ok(())
+            }
+            Opcode::LoopeJbd => {
+                self.loope32_jb(instr)?;
+                Ok(())
+            }
+            Opcode::LoopneJbd => {
+                self.loopne32_jb(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // Far CALL instructions (16-bit)
+            // =========================================================================
+            Opcode::CallfOp16Ap => self.call16_ap(instr),
+            Opcode::CallfOp16Ep => self.call16_ep(instr),
+
+            // =========================================================================
+            // Far JMP instructions (16-bit)
+            // =========================================================================
+            Opcode::JmpfOp16Ep => self.jmp16_ep(instr),
+
+            // =========================================================================
+            // Far RET instructions (16-bit)
+            // =========================================================================
+            Opcode::RetfOp16 => self.retfar16(instr),
+            Opcode::RetfOp16Iw => self.retfar16_iw(instr),
+
+            // =========================================================================
+            // Conditional jumps with 16-bit displacement (Jw variants)
+            // =========================================================================
+            Opcode::JoJw => {
+                self.jo_jw(instr)?;
+                Ok(())
+            }
+            Opcode::JnoJw => {
+                self.jno_jw(instr)?;
+                Ok(())
+            }
+            Opcode::JbJw => {
+                self.jb_jw(instr)?;
+                Ok(())
+            }
+            Opcode::JnbJw => {
+                self.jnb_jw(instr)?;
+                Ok(())
+            }
+            Opcode::JbeJw => {
+                self.jbe_jw(instr)?;
+                Ok(())
+            }
+            Opcode::JnbeJw => {
+                self.jnbe_jw(instr)?;
+                Ok(())
+            }
+            Opcode::JsJw => {
+                self.js_jw(instr)?;
+                Ok(())
+            }
+            Opcode::JnsJw => {
+                self.jns_jw(instr)?;
+                Ok(())
+            }
+            Opcode::JpJw => {
+                self.jp_jw(instr)?;
+                Ok(())
+            }
+            Opcode::JnpJw => {
+                self.jnp_jw(instr)?;
+                Ok(())
+            }
+            Opcode::JlJw => {
+                self.jl_jw(instr)?;
+                Ok(())
+            }
+            Opcode::JnlJw => {
+                self.jnl_jw(instr)?;
+                Ok(())
+            }
+            Opcode::JleJw => {
+                self.jle_jw(instr)?;
+                Ok(())
+            }
+            Opcode::JnleJw => {
+                self.jnle_jw(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // CMP instructions
+            // =========================================================================
+            Opcode::CmpGbEb => {
+                self.cmp_gb_eb(instr)?;
+                Ok(())
+            }
+            Opcode::CmpGwEw => {
+                self.cmp_gw_ew(instr)?;
+                Ok(())
+            }
+            Opcode::CmpGdEd => {
+                arith32::CMP_GdEd(self, instr)?;
+                Ok(())
+            }
+            Opcode::CmpEwGw => arith16::CMP_EwGw(self, instr),
+            Opcode::CmpAlib => {
+                self.cmp_al_ib(instr);
+                Ok(())
+            }
+            Opcode::CmpEbIb => {
+                self.cmp_eb_ib(instr)?;
+                Ok(())
+            }
+            Opcode::CmpEbGb => {
+                self.cmp_eb_gb(instr)?;
+                Ok(())
+            }
+            Opcode::CmpAxiw => {
+                self.cmp_ax_iw(instr);
+                Ok(())
+            }
+            Opcode::CmpEaxid => {
+                self.cmp_eax_id(instr);
+                Ok(())
+            }
+            Opcode::CmpEwIw | Opcode::CmpEwsIb => {
+                self.cmp_ew_iw(instr)?;
+                Ok(())
+            }
+            Opcode::CmpEdId | Opcode::CmpEdsIb => {
+                arith32::CMP_EdId(self, instr)?;
+                Ok(())
+            }
+            Opcode::CmpEdGd => {
+                arith32::CMP_EdGd(self, instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // TEST instructions
+            // =========================================================================
+            Opcode::TestEwGw => {
+                self.test_ew_gw(instr)?;
+                Ok(())
+            }
+            Opcode::TestEdGd => {
+                self.test_ed_gd(instr)?;
+                Ok(())
+            }
+            Opcode::TestAlib => {
+                self.test_al_ib(instr);
+                Ok(())
+            }
+            Opcode::TestAxiw => {
+                self.test_ax_iw(instr);
+                Ok(())
+            }
+            Opcode::TestEaxid => {
+                self.test_eax_id(instr);
+                Ok(())
+            }
+            Opcode::TestEwIw => {
+                self.test_ew_iw(instr)?;
+                Ok(())
+            }
+            Opcode::TestEdId => {
+                self.test_ed_id(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // AND/OR/NOT instructions
+            // =========================================================================
+            Opcode::AndGwEw => {
+                self.and_gw_ew(instr)?;
+                Ok(())
+            }
+            Opcode::AndEwGw => {
+                self.and_ew_gw(instr)?;
+                Ok(())
+            }
+            Opcode::AndGdEd => {
+                self.and_gd_ed(instr)?;
+                Ok(())
+            }
+            Opcode::AndEdGd => {
+                self.and_ed_gd(instr)?;
+                Ok(())
+            }
+            Opcode::AndAlib => {
+                self.and_al_ib(instr);
+                Ok(())
+            }
+            Opcode::AndAxiw => {
+                self.and_ax_iw(instr);
+                Ok(())
+            }
+            Opcode::AndEaxid => {
+                self.and_eax_id(instr);
+                Ok(())
+            }
+            Opcode::AndEwIw | Opcode::AndEwsIb => {
+                self.and_ew_iw(instr)?;
+                Ok(())
+            }
+            Opcode::AndEdId | Opcode::AndEdsIb => {
+                self.and_ed_id(instr)?;
+                Ok(())
+            }
+
+            Opcode::OrGwEw => {
+                self.or_gw_ew(instr)?;
+                Ok(())
+            }
+            Opcode::OrEwGw => {
+                self.or_ew_gw(instr)?;
+                Ok(())
+            }
+            Opcode::OrGdEd => {
+                self.or_gd_ed(instr)?;
+                Ok(())
+            }
+            Opcode::OrEdGd => {
+                self.or_ed_gd(instr)?;
+                Ok(())
+            }
+            Opcode::OrAlib => {
+                self.or_al_ib(instr);
+                Ok(())
+            }
+            Opcode::OrAxiw => {
+                self.or_ax_iw(instr);
+                Ok(())
+            }
+            Opcode::OrEaxid => {
+                self.or_eax_id(instr);
+                Ok(())
+            }
+            Opcode::OrEwIw | Opcode::OrEwsIb => {
+                self.or_ew_iw(instr)?;
+                Ok(())
+            }
+            Opcode::OrEdId | Opcode::OrEdsIb => {
+                self.or_ed_id(instr)?;
+                Ok(())
+            }
+            Opcode::XorEwIw | Opcode::XorEwsIb => {
+                self.xor_ew_iw(instr)?;
+                Ok(())
+            }
+            Opcode::XorEdId | Opcode::XorEdsIb => {
+                self.xor_ed_id(instr)?;
+                Ok(())
+            }
+            Opcode::NotEw => {
+                self.not_ew(instr)?;
+                Ok(())
+            }
+            Opcode::NotEd => {
+                self.not_ed(instr)?;
+                Ok(())
+            }
+            Opcode::NegEb => {
+                arith8::NEG_Eb(self, instr)?;
+                Ok(())
+            }
+            Opcode::NegEw => {
+                arith16::NEG_Ew(self, instr)?;
+                Ok(())
+            }
+            Opcode::NegEd => {
+                arith32::NEG_Ed(self, instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // Bit Test instructions (BT, BTS, BTR, BTC)
+            // =========================================================================
+            Opcode::BtEdIb => {
+                self.bt_ed_ib(instr)?;
+                Ok(())
+            }
+            Opcode::BtsEdIb => {
+                self.bts_ed_ib(instr)?;
+                Ok(())
+            }
+            Opcode::BtrEdIb => {
+                self.btr_ed_ib(instr)?;
+                Ok(())
+            }
+            Opcode::BtcEdIb => {
+                self.btc_ed_ib(instr)?;
+                Ok(())
+            }
+            Opcode::BtEdGd => {
+                self.bt_ed_gd(instr)?;
+                Ok(())
+            }
+            Opcode::BtsEdGd => {
+                self.bts_ed_gd(instr)?;
+                Ok(())
+            }
+            Opcode::BtrEdGd => {
+                self.btr_ed_gd(instr)?;
+                Ok(())
+            }
+            Opcode::BtcEdGd => {
+                self.btc_ed_gd(instr)?;
+                Ok(())
+            }
+            // 16-bit BT/BTS/BTR/BTC
+            Opcode::BtEwIb => self.bt_ew_ib(instr),
+            Opcode::BtsEwIb => self.bts_ew_ib(instr),
+            Opcode::BtrEwIb => self.btr_ew_ib(instr),
+            Opcode::BtcEwIb => self.btc_ew_ib(instr),
+            Opcode::BtEwGw => self.bt_ew_gw(instr),
+            Opcode::BtsEwGw => self.bts_ew_gw(instr),
+            Opcode::BtrEwGw => self.btr_ew_gw(instr),
+            Opcode::BtcEwGw => self.btc_ew_gw(instr),
+
+            // =========================================================================
+            // Bit Scan instructions (BSF, BSR)
+            // =========================================================================
+            Opcode::BsfGdEd => self.bsf_gd_ed(instr),
+            Opcode::BsrGdEd => self.bsr_gd_ed(instr),
+            Opcode::BsfGwEw => self.bsf_gw_ew(instr),
+            Opcode::BsrGwEw => self.bsr_gw_ew(instr),
+            Opcode::PopcntGdEd => self.popcnt_gd_ed(instr),
+            Opcode::PopcntGwEw => self.popcnt_gw_ew(instr),
+            Opcode::LzcntGdEd => self.lzcnt_gd_ed(instr),
+            Opcode::LzcntGwEw => self.lzcnt_gw_ew(instr),
+            Opcode::TzcntGdEd => self.tzcnt_gd_ed(instr),
+            Opcode::TzcntGwEw => self.tzcnt_gw_ew(instr),
+            Opcode::Crc32GdEb => self.crc32_gd_eb(instr),
+            Opcode::Crc32GdEd => self.crc32_gd_ed(instr),
+            Opcode::Crc32GdEw => self.crc32_gd_ew(instr),
+            Opcode::Crc32GdEq => self.crc32_gd_eq(instr),
+            Opcode::MovbeGdMd => self.movbe_gd_md(instr),
+            Opcode::MovbeMdGd => self.movbe_md_gd(instr),
+            Opcode::MovbeGwMw => self.movbe_gw_mw(instr),
+            Opcode::MovbeMwGw => self.movbe_mw_gw(instr),
+            Opcode::MovbeGqMq => self.movbe_gq_mq(instr),
+            Opcode::MovbeMqGq => self.movbe_mq_gq(instr),
+
+            // =========================================================================
+            // Multiplication and Division instructions
+            // =========================================================================
+            Opcode::MulAleb => self.mul_al_eb(instr),
+            Opcode::ImulAleb => self.imul_al_eb(instr),
+            Opcode::DivAleb => self.div_al_eb(instr),
+            Opcode::IdivAleb => self.idiv_al_eb(instr),
+            Opcode::MulAxew => self.mul_ax_ew(instr),
+            Opcode::ImulAxew => self.imul_ax_ew(instr),
+            Opcode::DivAxew => self.div_ax_ew(instr),
+            Opcode::IdivAxew => self.idiv_ax_ew(instr),
+            Opcode::MulEaxed => self.mul_eax_ed(instr),
+            Opcode::ImulEaxed => self.imul_eax_ed(instr),
+            Opcode::ImulGdEdsIb => self.imul_gd_ed_ib(instr),
+            Opcode::ImulGdEdId => self.imul_gd_ed_id(instr),
+            Opcode::ImulGdEd => self.imul_gd_ed(instr),
+            Opcode::ImulGwEw => self.imul_gw_ew(instr),
+            Opcode::ImulGwEwIw => self.imul_gw_ew_iw(instr),
+            Opcode::ImulGwEwsIb => self.imul_gw_ew_sib(instr),
+            Opcode::DivEaxed => self.div_eax_ed(instr),
+            Opcode::IdivEaxed => self.idiv_eax_ed(instr),
+
+            // =========================================================================
+            // INC/DEC instructions
+            // =========================================================================
+            Opcode::IncEb => arith8::inc_eb_dispatch(self, instr),
+            Opcode::DecEb => arith8::dec_eb_dispatch(self, instr),
+            Opcode::IncEw => self.inc_ew(instr),
+            Opcode::IncEd => self.inc_ed(instr),
+            Opcode::DecEw => self.dec_ew(instr),
+            Opcode::DecEd => self.dec_ed(instr),
+
+            // =========================================================================
+            // PUSH/POP instructions
+            // =========================================================================
+            Opcode::PushEw => self.push_ew(instr),
+            Opcode::PushEd => self.push_ed(instr),
+            Opcode::PushId => {
+                self.push_id(instr)?;
+                Ok(())
+            }
+            Opcode::PushSIb32 => {
+                self.push_id(instr)?;
+                Ok(())
+            }
+            Opcode::PopEw => self.pop_ew(instr),
+            Opcode::PopEd => self.pop_ed(instr),
+            Opcode::PopOp32Sw => {
+                self.pop32_sw(instr)?;
+                Ok(())
+            }
+            Opcode::EnterOp32IwIb => {
+                self.enter32_iw_ib(instr)?;
+                Ok(())
+            }
+            Opcode::LeaveOp32 => {
+                self.leave_op32(instr)?;
+                Ok(())
+            }
+            Opcode::PushOp32Sw => {
+                self.push_op32_sw(instr)?;
+                Ok(())
+            }
+            Opcode::PushaOp16 => {
+                self.pusha16(instr)?;
+                Ok(())
+            }
+            Opcode::PushaOp32 => {
+                self.pusha32(instr)?;
+                Ok(())
+            }
+            Opcode::PopaOp16 => {
+                self.popa16(instr)?;
+                Ok(())
+            }
+            Opcode::PopaOp32 => {
+                self.popa32(instr)?;
+                Ok(())
+            }
+            Opcode::PushfFw => {
+                self.pushf_fw(instr)?;
+                Ok(())
+            }
+            Opcode::PopfFw => {
+                self.popf_fw(instr)?;
+                Ok(())
+            }
+            Opcode::PushfFd => {
+                self.pushf_fd(instr)?;
+                Ok(())
+            }
+            Opcode::PopfFd => {
+                self.popf_fd(instr)?;
+                Ok(())
+            }
+            Opcode::EnterOp16IwIb => {
+                self.enter16_iw_ib(instr)?;
+                Ok(())
+            }
+            Opcode::LeaveOp16 => {
+                self.leave16(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // String instructions
+            // =========================================================================
+            Opcode::RepMovsbYbXb => self.movsb_dispatch(instr),
+            Opcode::RepMovswYwXw => self.movsw_dispatch(instr),
+            Opcode::RepMovsdYdXd => self.movsd_dispatch(instr),
+            Opcode::RepStosbYbAl => self.stosb_dispatch(instr),
+            Opcode::RepStoswYwAx => self.stosw_dispatch(instr),
+            Opcode::RepStosdYdEax => self.stosd_dispatch(instr),
+            Opcode::RepLodsbAlxb => self.lodsb_dispatch(instr),
+            Opcode::RepLodswAxxw => self.lodsw_dispatch(instr),
+            Opcode::RepLodsdEaxxd => self.lodsd_dispatch(instr),
+            Opcode::RepScasbAlyb => self.scasb_dispatch(instr),
+            Opcode::RepScaswAxyw => self.scasw_dispatch(instr),
+            Opcode::RepScasdEaxyd => self.scasd_dispatch(instr),
+            Opcode::RepCmpsbXbYb => self.cmpsb_dispatch(instr),
+            Opcode::RepCmpswXwYw => self.cmpsw_dispatch(instr),
+            Opcode::RepCmpsdXdYd => self.cmpsd_dispatch(instr),
+
+            // =========================================================================
+            // Software interrupts
+            // =========================================================================
+            Opcode::IntIb => self.int_ib(instr),
+            Opcode::INT3 => self.int3(instr),
+            Opcode::INT1 => self.int1(instr),
+            Opcode::IretOp16 => {
+                self.iret16(instr)?;
+                Ok(())
+            }
+            Opcode::IretOp32 => {
+                self.iret32(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // BOUND - Check Array Index Against Bounds
+            // =========================================================================
+            Opcode::BoundGwMa => {
+                self.bound_gw_ma(instr)?;
+                Ok(())
+            }
+            Opcode::BoundGdMa => {
+                self.bound_gd_ma(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // 64-bit arithmetic instructions (arith64.rs)
+            // =========================================================================
+            Opcode::AddEqGq => self.add_eq_gq(instr),
+            Opcode::AddGqEq => self.add_gq_eq(instr),
+            Opcode::AddEqId => self.add_eq_id(instr),
+            Opcode::AddEqsIb => self.add_eqs_ib(instr),
+            Opcode::AddRaxid => {
+                self.add_rax_id(instr);
+                Ok(())
+            }
+            Opcode::AdcEqGq => self.adc_eq_gq(instr),
+            Opcode::AdcGqEq => self.adc_gq_eq(instr),
+            Opcode::AdcEqId => self.adc_eq_id(instr),
+            Opcode::AdcEqsIb => self.adc_eqs_ib(instr),
+            Opcode::AdcRaxid => {
+                self.adc_rax_id(instr);
+                Ok(())
+            }
+            Opcode::SubEqGq => self.sub_eq_gq(instr),
+            Opcode::SubGqEq | Opcode::SubGqEqZeroIdiom => self.sub_gq_eq(instr),
+            Opcode::SubEqId => self.sub_eq_id(instr),
+            Opcode::SubEqsIb => self.sub_eqs_ib(instr),
+            Opcode::SubRaxid => {
+                self.sub_rax_id(instr);
+                Ok(())
+            }
+            Opcode::SbbEqGq => self.sbb_eq_gq(instr),
+            Opcode::SbbGqEq => self.sbb_gq_eq(instr),
+            Opcode::SbbEqId => self.sbb_eq_id(instr),
+            Opcode::SbbEqsIb => self.sbb_eqs_ib(instr),
+            Opcode::SbbRaxid => {
+                self.sbb_rax_id(instr);
+                Ok(())
+            }
+            Opcode::NegEq => self.neg_eq(instr),
+            Opcode::IncEq => self.inc_eq(instr),
+            Opcode::DecEq => self.dec_eq(instr),
+            Opcode::XaddEqGq => self.xadd_eq_gq(instr),
+            Opcode::CmpxchgEqGq => self.cmpxchg_eq_gq(instr),
+            Opcode::CMPXCHG16B => self.cmpxchg16b(instr),
+            Opcode::Cdqe => {
+                self.cdqe(instr);
+                Ok(())
+            }
+            Opcode::Cqo => {
+                self.cqo(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // 64-bit logical instructions (logical64.rs)
+            // =========================================================================
+            Opcode::XorEqGq | Opcode::XorEqGqZeroIdiom => self.xor_eq_gq(instr),
+            Opcode::XorGqEq | Opcode::XorGqEqZeroIdiom => self.xor_gq_eq(instr),
+            Opcode::XorEqId => self.xor_eq_id(instr),
+            Opcode::XorEqsIb => self.xor_eq_id(instr),
+            Opcode::XorRaxid => {
+                self.xor_rax_id(instr);
+                Ok(())
+            }
+            Opcode::OrEqGq => self.or_eq_gq(instr),
+            Opcode::OrGqEq => self.or_gq_eq(instr),
+            Opcode::OrEqId => self.or_eq_id(instr),
+            Opcode::OrEqsIb => self.or_eq_id(instr),
+            Opcode::OrRaxid => {
+                self.or_rax_id(instr);
+                Ok(())
+            }
+            Opcode::AndEqGq => self.and_eq_gq(instr),
+            Opcode::AndGqEq => self.and_gq_eq(instr),
+            Opcode::AndEqId => self.and_eq_id(instr),
+            Opcode::AndEqsIb => self.and_eq_id(instr),
+            Opcode::AndRaxid => {
+                self.and_rax_id(instr);
+                Ok(())
+            }
+            Opcode::NotEq => self.not_eq(instr),
+            Opcode::TestEqGq => self.test_eq_gq(instr),
+            Opcode::TestEqId => self.test_eq_id(instr),
+            Opcode::TestEqsIb => self.test_eq_id(instr),
+            Opcode::TestRaxid => {
+                self.test_rax_id(instr);
+                Ok(())
+            }
+            Opcode::CmpEqGq => self.cmp_eq_gq(instr),
+            Opcode::CmpGqEq => self.cmp_gq_eq(instr),
+            Opcode::CmpEqId => self.cmp_eq_id(instr),
+            Opcode::CmpEqsIb => self.cmp_eqs_ib(instr),
+            Opcode::CmpRaxid => {
+                self.cmp_rax_id(instr);
+                Ok(())
+            }
+            Opcode::SubEqGqZeroIdiom => {
+                // Zero idiom: SUB r64, r64 where dst==src — zero the register
+                self.zero_idiom_gq_r(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // 64-bit shift/rotate instructions (shift64.rs)
+            // =========================================================================
+            Opcode::ShlEqI1 => self.shl_eq_1(instr),
+            Opcode::ShlEq => self.shl_eq_cl(instr),
+            Opcode::ShlEqIb => self.shl_eq_ib(instr),
+            Opcode::ShrEqI1 => self.shr_eq_1(instr),
+            Opcode::ShrEq => self.shr_eq_cl(instr),
+            Opcode::ShrEqIb => self.shr_eq_ib(instr),
+            Opcode::SarEqI1 => self.sar_eq_1(instr),
+            Opcode::SarEq => self.sar_eq_cl(instr),
+            Opcode::SarEqIb => self.sar_eq_ib(instr),
+            Opcode::RolEqI1 => self.rol_eq_1(instr),
+            Opcode::RolEq => self.rol_eq_cl(instr),
+            Opcode::RolEqIb => self.rol_eq_ib(instr),
+            Opcode::RorEqI1 => self.ror_eq_1(instr),
+            Opcode::RorEq => self.ror_eq_cl(instr),
+            Opcode::RorEqIb => self.ror_eq_ib(instr),
+            Opcode::RclEqI1 => self.rcl_eq_1(instr),
+            Opcode::RclEq => self.rcl_eq_cl(instr),
+            Opcode::RclEqIb => self.rcl_eq_ib(instr),
+            Opcode::RcrEqI1 => self.rcr_eq_1(instr),
+            Opcode::RcrEq => self.rcr_eq_cl(instr),
+            Opcode::RcrEqIb => self.rcr_eq_ib(instr),
+            Opcode::ShldEqGqIb => self.shld_eq_gq_ib(instr),
+            Opcode::ShldEqGq => self.shld_eq_gq_cl(instr),
+            Opcode::ShrdEqGqIb => self.shrd_eq_gq_ib(instr),
+            Opcode::ShrdEqGq => self.shrd_eq_gq_cl(instr),
+
+            // =========================================================================
+            // 64-bit multiply/divide instructions (mult64.rs)
+            // =========================================================================
+            Opcode::MulRaxeq => self.mul_rax_eq(instr),
+            Opcode::ImulRaxeq => self.imul_rax_eq(instr),
+            Opcode::DivRaxeq => self.div_rax_eq(instr),
+            Opcode::IdivRaxeq => self.idiv_rax_eq(instr),
+            Opcode::ImulGqEq => self.imul_gq_eq(instr),
+            Opcode::ImulGqEqId => self.imul_gq_eq_id(instr),
+            Opcode::ImulGqEqsIb => self.imul_gq_eq_sib(instr),
+
+            // =========================================================================
+            // 64-bit data transfer (data_xfer64.rs)
+            // =========================================================================
+            Opcode::MovEqId => self.mov_eq_id(instr),
+            Opcode::XchgEqGq => self.xchg_eq_gq(instr),
+            Opcode::XchgRrxRax => {
+                self.xchg_rrx_rax(instr);
+                Ok(())
+            }
+            Opcode::MovsxGqEb => self.movsx_gq_eb(instr),
+            Opcode::MovsxGqEw => self.movsx_gq_ew(instr),
+            Opcode::MovsxdGqEd => self.movsxd_gq_ed(instr),
+            Opcode::MovzxGqEb => self.movzx_gq_eb(instr),
+            Opcode::MovzxGqEw => self.movzx_gq_ew(instr),
+            Opcode::MovRrxiq => {
+                self.mov_rrxiq(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // 64-bit stack operations (stack64.rs)
+            // =========================================================================
+            Opcode::PushEq => self.push_eq(instr),
+            Opcode::PopEq => self.pop_eq(instr),
+            Opcode::PushfFq => self.pushf_fq(instr),
+            Opcode::PopfFq => self.popf_fq(instr),
+            Opcode::PushOp64Id => self.push_iq(instr),
+            Opcode::PushOp64SIb => self.push_op64_sib(instr),
+            Opcode::PushOp64Sw => self.push_op64_sw(instr),
+            Opcode::PopOp64Sw => self.pop_op64_sw(instr),
+
+            // =========================================================================
+            // 64-bit BSWAP
+            // =========================================================================
+            Opcode::BswapRrx => {
+                self.bswap_rqx(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // 64-bit control transfer instructions
+            // =========================================================================
+            Opcode::CallJq => self.call_jq(instr),
+            Opcode::CallEq => self.call_eq(instr),
+            Opcode::CallfOp64Ep => self.call64_ep(instr),
+            Opcode::JmpJq | Opcode::JmpJbq => self.jmp_jq(instr),
+            Opcode::JmpEq => self.jmp_eq(instr),
+            Opcode::JmpfOp64Ep => self.jmp64_ep(instr),
+            Opcode::RetOp64 => self.retnear64_iw(instr), // Bochs: RetOp64 uses same handler (iw=0)
+            Opcode::RetOp64Iw => self.retnear64_iw(instr),
+            Opcode::RetfOp64 => self.retfar64(instr),
+            Opcode::RetfOp64Iw => self.retfar64_iw(instr),
+            Opcode::IretOp64 => self.iret64(instr),
+            Opcode::EnterOp64IwIb => self.enter64_iw_ib(instr),
+            Opcode::LeaveOp64 => self.leave64(instr),
+            Opcode::JrcxzJbq => self.jrcxz_jb(instr),
+            Opcode::LoopJbq => self.loop64_jb(instr),
+            Opcode::LoopeJbq => self.loope64_jb(instr),
+            Opcode::LoopneJbq => self.loopne64_jb(instr),
+
+            // =========================================================================
+            // Conditional jumps — 64-bit near (Jq) and short (Jbq) variants
+            // Jbq uses same handler as Jq: decoder pre-decodes byte displacement
+            // =========================================================================
+            Opcode::JoJq | Opcode::JoJbq => self.jo_jq(instr),
+            Opcode::JnoJq | Opcode::JnoJbq => self.jno_jq(instr),
+            Opcode::JbJq | Opcode::JbJbq => self.jb_jq(instr),
+            Opcode::JnbJq | Opcode::JnbJbq => self.jnb_jq(instr),
+            Opcode::JzJq | Opcode::JzJbq => self.jz_jq(instr),
+            Opcode::JnzJq | Opcode::JnzJbq => self.jnz_jq(instr),
+            Opcode::JbeJq | Opcode::JbeJbq => self.jbe_jq(instr),
+            Opcode::JnbeJq | Opcode::JnbeJbq => self.jnbe_jq(instr),
+            Opcode::JsJq | Opcode::JsJbq => self.js_jq(instr),
+            Opcode::JnsJq | Opcode::JnsJbq => self.jns_jq(instr),
+            Opcode::JpJq | Opcode::JpJbq => self.jp_jq(instr),
+            Opcode::JnpJq | Opcode::JnpJbq => self.jnp_jq(instr),
+            Opcode::JlJq | Opcode::JlJbq => self.jl_jq(instr),
+            Opcode::JnlJq | Opcode::JnlJbq => self.jnl_jq(instr),
+            Opcode::JleJq | Opcode::JleJbq => self.jle_jq(instr),
+            Opcode::JnleJq | Opcode::JnleJbq => self.jnle_jq(instr),
+
+            // =========================================================================
+            // System instructions
+            // =========================================================================
+            Opcode::Hlt => self.hlt(instr),
+            Opcode::Wbinvd => self.wbinvd(instr),
+            Opcode::Invd => self.invd(instr),
+            // VMX stubs — #GP(0) in VMX root, #UD outside VMX
+            Opcode::VmxonMq | Opcode::Vmxoff | Opcode::Vmlaunch | Opcode::Vmresume
+            | Opcode::VmclearMq | Opcode::VmptrldMq
+            | Opcode::VmreadEdGd | Opcode::VmwriteGdEd
+            | Opcode::VmreadEqGq | Opcode::VmwriteGqEq => {
+                // VMX not implemented — raise #UD (matches hardware behavior
+                // when CR4.VMXE is not set or LOCK prefix missing)
+                self.exception(super::cpu::Exception::Ud, 0)
+            }
+            Opcode::Invlpg => self.invlpg(instr),
+            Opcode::Invpcid => self.invpcid(instr),
+            Opcode::Clts => self.clts(instr),
+
+            // =========================================================================
+            // LES/LDS/LSS/LFS/LGS - Load Far Pointer
+            // =========================================================================
+            Opcode::LesGwMp => self.les_gw_mp(instr),
+            Opcode::LesGdMp => self.les_gd_mp(instr),
+            Opcode::LdsGwMp => self.lds_gw_mp(instr),
+            Opcode::LdsGdMp => self.lds_gd_mp(instr),
+            Opcode::LssGwMp => self.lss_gw_mp(instr),
+            Opcode::LssGdMp => self.lss_gd_mp(instr),
+            Opcode::LfsGwMp => self.lfs_gw_mp(instr),
+            Opcode::LfsGdMp => self.lfs_gd_mp(instr),
+            Opcode::LgsGwMp => self.lgs_gw_mp(instr),
+            Opcode::LgsGdMp => self.lgs_gd_mp(instr),
+            Opcode::LssGqMp => self.lss_gq_mp(instr),
+            Opcode::LfsGqMp => self.lfs_gq_mp(instr),
+            Opcode::LgsGqMp => self.lgs_gq_mp(instr),
+
+            Opcode::Cpuid => {
+                self.cpuid(instr);
+                Ok(())
+            }
+            Opcode::Rdtsc => self.rdtsc(instr),
+            Opcode::Rdmsr => self.rdmsr(instr),
+            Opcode::Wrmsr => self.wrmsr(instr),
+            Opcode::Sysenter => self.sysenter(instr),
+            Opcode::Sysexit => self.sysexit(instr),
+            Opcode::Syscall | Opcode::SyscallLegacy => self.syscall(instr),
+            Opcode::Sysret | Opcode::SysretLegacy => self.sysret(instr),
+            Opcode::Rsm => self.rsm(instr),
+            Opcode::Xgetbv => self.xgetbv(instr),
+            Opcode::Xsetbv => self.xsetbv(instr),
+            Opcode::Xsave => self.xsave(instr),
+            Opcode::Xrstor => self.xrstor(instr),
+            Opcode::Xsaveopt => self.xsaveopt(instr),
+            Opcode::Xsavec => self.xsavec(instr, false),
+            Opcode::Xsaves => self.xsavec(instr, true),
+            Opcode::Xrstors => self.xrstor_unified(instr, true),
+            Opcode::Monitor | Opcode::Monitorx => self.monitor(instr),
+            Opcode::Mwait | Opcode::Mwaitx => self.mwait(instr),
+            Opcode::Clac => self.clac(instr),
+            Opcode::Stac => self.stac(instr),
+            Opcode::Clflush | Opcode::Clflushopt | Opcode::Clwb => self.clflush(instr),
+            Opcode::Rdtscp => self.rdtscp(instr),
+            Opcode::Swapgs => self.swapgs(instr),
+
+            // FSGSBASE — Read/Write FS/GS base registers (proc_ctrl.rs)
+            Opcode::RdfsbaseEd => self.rdfsbase_ed(instr),
+            Opcode::RdfsbaseEq => self.rdfsbase_eq(instr),
+            Opcode::RdgsbaseEd => self.rdgsbase_ed(instr),
+            Opcode::RdgsbaseEq => self.rdgsbase_eq(instr),
+            Opcode::WrfsbaseEd => self.wrfsbase_ed(instr),
+            Opcode::WrfsbaseEq => self.wrfsbase_eq(instr),
+            Opcode::WrgsbaseEd => self.wrgsbase_ed(instr),
+            Opcode::WrgsbaseEq => self.wrgsbase_eq(instr),
+
+            // =========================================================================
+            // 64-bit CR/DR moves
+            // =========================================================================
+            Opcode::MovRqCr0 => self.mov_rq_cr0(instr),
+            Opcode::MovRqCr2 => self.mov_rq_cr2(instr),
+            Opcode::MovRqCr3 => self.mov_rq_cr3(instr),
+            Opcode::MovRqCr4 => self.mov_rq_cr4(instr),
+            // 64-bit MOV CRn, Rq — proper 64-bit handlers (CR2 is full 64-bit, CR0/CR4 check upper bits)
+            Opcode::MovCr0rq => { self.mov_cr0_rq(instr)?; Ok(()) },
+            Opcode::MovCr2rq => { self.mov_cr2_rq(instr)?; Ok(()) },
+            Opcode::MovCr3rq => { self.mov_cr3_rd(instr)?; Ok(()) }, // CR3 already handles 64-bit
+            Opcode::MovCr4rq => { self.mov_cr4_rq(instr)?; Ok(()) },
+            Opcode::MovRqDq => self.mov_rq_dq(instr),
+            Opcode::MovDqRq => self.mov_dq_rq(instr),
+
+            // =========================================================================
+            // 64-bit LGDT/LIDT/SGDT/SIDT
+            // =========================================================================
+            Opcode::SgdtOp64Ms => self.sgdt_op64_ms(instr),
+            Opcode::SidtOp64Ms => self.sidt_op64_ms(instr),
+            Opcode::LgdtOp64Ms => self.lgdt_op64_ms(instr),
+            Opcode::LidtOp64Ms => self.lidt_op64_ms(instr),
+
+            // =========================================================================
+            // 64-bit BT/BTS/BTR/BTC (bit test) + BSF/BSR
+            // =========================================================================
+            Opcode::BtEqGq => self.bt_eq_gq(instr),
+            Opcode::BtsEqGq => self.bts_eq_gq(instr),
+            Opcode::BtrEqGq => self.btr_eq_gq(instr),
+            Opcode::BtcEqGq => self.btc_eq_gq(instr),
+            Opcode::BtEqIb => self.bt_eq_ib(instr),
+            Opcode::BtsEqIb => self.bts_eq_ib(instr),
+            Opcode::BtrEqIb => self.btr_eq_ib(instr),
+            Opcode::BtcEqIb => self.btc_eq_ib(instr),
+            Opcode::BsfGqEq => self.bsf_gq_eq(instr),
+            Opcode::BsrGqEq => self.bsr_gq_eq(instr),
+            Opcode::PopcntGqEq => self.popcnt_gq_eq(instr),
+            Opcode::LzcntGqEq => self.lzcnt_gq_eq(instr),
+            Opcode::TzcntGqEq => self.tzcnt_gq_eq(instr),
+
+            // =========================================================================
+            // 64-bit MOV moffs
+            // =========================================================================
+            Opcode::MovAloq => self.mov_aloq(instr),
+            Opcode::MovOqAl => self.mov_oq_al(instr),
+            Opcode::MovAxoq => self.mov_ax_oq(instr),
+            Opcode::MovOqAx => self.mov_oq_ax(instr),
+            Opcode::MovEaxoq => self.mov_eax_oq(instr),
+            Opcode::MovOqEax => self.mov_oq_eax(instr),
+            Opcode::MovRaxoq => self.mov_rax_oq(instr),
+            Opcode::MovOqRax => self.mov_oq_rax(instr),
+
+            // =========================================================================
+            // 64-bit string operations
+            // =========================================================================
+            Opcode::RepMovsqYqXq => self.movsq_dispatch(instr),
+            Opcode::RepStosqYqRax => self.stosq_dispatch(instr),
+            Opcode::RepLodsqRaxxq => self.lodsq_dispatch(instr),
+            Opcode::RepCmpsqXqYq => self.cmpsq_dispatch(instr),
+            Opcode::RepScasqRaxyq => self.scasq_dispatch(instr),
+
+            // =========================================================================
+            // Shift/Rotate instructions
+            // =========================================================================
+            Opcode::ShlEbI1 => {
+                self.shl_eb_1(instr)?;
+                Ok(())
+            }
+            Opcode::ShlEb => {
+                self.shl_eb_cl(instr)?;
+                Ok(())
+            }
+            Opcode::ShlEbIb => {
+                self.shl_eb_ib(instr)?;
+                Ok(())
+            }
+            Opcode::ShlEwI1 => {
+                self.shl_ew_1(instr)?;
+                Ok(())
+            }
+            Opcode::ShlEw => {
+                self.shl_ew_cl(instr)?;
+                Ok(())
+            }
+            Opcode::ShlEwIb => {
+                self.shl_ew_ib(instr)?;
+                Ok(())
+            }
+            Opcode::ShlEdI1 => {
+                self.shl_ed_1(instr)?;
+                Ok(())
+            }
+            Opcode::ShlEd => {
+                self.shl_ed_cl(instr)?;
+                Ok(())
+            }
+            Opcode::ShlEdIb => {
+                self.shl_ed_ib(instr)?;
+                Ok(())
+            }
+            Opcode::ShldEwGwIb => {
+                self.shld_ew_gw_ib(instr)?;
+                Ok(())
+            }
+            Opcode::ShldEwGw => {
+                self.shld_ew_gw_cl(instr)?;
+                Ok(())
+            }
+            Opcode::ShrdEwGwIb => {
+                self.shrd_ew_gw_ib(instr)?;
+                Ok(())
+            }
+            Opcode::ShrdEwGw => {
+                self.shrd_ew_gw_cl(instr)?;
+                Ok(())
+            }
+            Opcode::ShldEdGdIb => {
+                self.shld_ed_gd_ib(instr)?;
+                Ok(())
+            }
+            Opcode::ShldEdGd => {
+                self.shld_ed_gd_cl(instr)?;
+                Ok(())
+            }
+            Opcode::ShrdEdGdIb => {
+                self.shrd_ed_gd_ib(instr)?;
+                Ok(())
+            }
+            Opcode::ShrdEdGd => {
+                self.shrd_ed_gd_cl(instr)?;
+                Ok(())
+            }
+            Opcode::SarEbIb => {
+                self.sar_eb_ib(instr)?;
+                Ok(())
+            }
+
+            Opcode::ShrEbI1 => {
+                self.shr_eb_1(instr)?;
+                Ok(())
+            }
+            Opcode::ShrEb => {
+                self.shr_eb_cl(instr)?;
+                Ok(())
+            }
+            Opcode::ShrEbIb => {
+                self.shr_eb_ib(instr)?;
+                Ok(())
+            }
+            Opcode::ShrEwI1 => {
+                self.shr_ew_1(instr)?;
+                Ok(())
+            }
+            Opcode::ShrEw => {
+                self.shr_ew_cl(instr)?;
+                Ok(())
+            }
+            Opcode::ShrEwIb => {
+                self.shr_ew_ib(instr)?;
+                Ok(())
+            }
+            Opcode::ShrEdI1 => {
+                self.shr_ed_1(instr)?;
+                Ok(())
+            }
+            Opcode::ShrEd => {
+                self.shr_ed_cl(instr)?;
+                Ok(())
+            }
+            Opcode::ShrEdIb => {
+                self.shr_ed_ib(instr)?;
+                Ok(())
+            }
+
+            // ROL - Rotate Left
+            Opcode::RolEbI1 => {
+                self.rol_eb_1(instr)?;
+                Ok(())
+            }
+            Opcode::RolEb => {
+                self.rol_eb_cl(instr)?;
+                Ok(())
+            }
+            Opcode::RolEbIb => {
+                self.rol_eb_ib(instr)?;
+                Ok(())
+            }
+            Opcode::RolEwI1 => {
+                self.rol_ew_1(instr)?;
+                Ok(())
+            }
+            Opcode::RolEw => {
+                self.rol_ew_cl(instr)?;
+                Ok(())
+            }
+            Opcode::RolEwIb => {
+                self.rol_ew_ib(instr)?;
+                Ok(())
+            }
+            Opcode::RolEdI1 => {
+                self.rol_ed_1(instr)?;
+                Ok(())
+            }
+            Opcode::RolEd => {
+                self.rol_ed_cl(instr)?;
+                Ok(())
+            }
+            Opcode::RolEdIb => {
+                self.rol_ed_ib(instr)?;
+                Ok(())
+            }
+            Opcode::RorEbI1 => {
+                self.ror_eb_1(instr)?;
+                Ok(())
+            }
+            Opcode::RorEb => {
+                self.ror_eb_cl(instr)?;
+                Ok(())
+            }
+            Opcode::RorEbIb => {
+                self.ror_eb_ib(instr)?;
+                Ok(())
+            }
+            Opcode::RorEwI1 => {
+                self.ror_ew_1(instr)?;
+                Ok(())
+            }
+            Opcode::RorEw => {
+                self.ror_ew_cl(instr)?;
+                Ok(())
+            }
+            Opcode::RorEwIb => {
+                self.ror_ew_ib(instr)?;
+                Ok(())
+            }
+            Opcode::RorEdI1 => {
+                self.ror_ed_1(instr)?;
+                Ok(())
+            }
+            Opcode::RorEd => {
+                self.ror_ed_cl(instr)?;
+                Ok(())
+            }
+            Opcode::RorEdIb => {
+                self.ror_ed_ib(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // RCL - Rotate through Carry Left
+            // =========================================================================
+            Opcode::RclEbI1 => self.rcl_eb_1(instr),
+            Opcode::RclEb => self.rcl_eb_cl(instr),
+            Opcode::RclEbIb => self.rcl_eb_ib(instr),
+            Opcode::RclEwI1 => self.rcl_ew_1(instr),
+            Opcode::RclEw => self.rcl_ew_cl(instr),
+            Opcode::RclEwIb => self.rcl_ew_ib(instr),
+            Opcode::RclEdI1 => self.rcl_ed_1(instr),
+            Opcode::RclEd => self.rcl_ed_cl(instr),
+            Opcode::RclEdIb => self.rcl_ed_ib(instr),
+
+            // =========================================================================
+            // RCR - Rotate through Carry Right
+            // =========================================================================
+            Opcode::RcrEbI1 => self.rcr_eb_1(instr),
+            Opcode::RcrEb => self.rcr_eb_cl(instr),
+            Opcode::RcrEbIb => self.rcr_eb_ib(instr),
+            Opcode::RcrEwI1 => self.rcr_ew_1(instr),
+            Opcode::RcrEw => self.rcr_ew_cl(instr),
+            Opcode::RcrEwIb => self.rcr_ew_ib(instr),
+            Opcode::RcrEdI1 => self.rcr_ed_1(instr),
+            Opcode::RcrEd => self.rcr_ed_cl(instr),
+            Opcode::RcrEdIb => self.rcr_ed_ib(instr),
+
+            Opcode::SarEbI1 => {
+                self.sar_eb_1(instr)?;
+                Ok(())
+            }
+            Opcode::SarEb => {
+                self.sar_eb_cl(instr)?;
+                Ok(())
+            }
+            Opcode::SarEwI1 => {
+                self.sar_ew_1(instr)?;
+                Ok(())
+            }
+            Opcode::SarEw => {
+                self.sar_ew_cl(instr)?;
+                Ok(())
+            }
+            Opcode::SarEwIb => {
+                self.sar_ew_ib(instr)?;
+                Ok(())
+            }
+            Opcode::SarEdI1 => {
+                self.sar_ed_1(instr)?;
+                Ok(())
+            }
+            Opcode::SarEd => {
+                self.sar_ed_cl(instr)?;
+                Ok(())
+            }
+            Opcode::SarEdIb => {
+                self.sar_ed_ib(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // Data transfer extensions
+            // =========================================================================
+            Opcode::LeaGwM => {
+                self.lea_gw_m(instr);
+                Ok(())
+            }
+            Opcode::LeaGdM => {
+                self.lea_gd_m(instr);
+                Ok(())
+            }
+            Opcode::XchgEbGb => self.xchg_eb_gb_dispatch(instr),
+            Opcode::XchgEwGw => self.xchg_ew_gw_dispatch(instr),
+            Opcode::XchgEdGd => self.xchg_ed_gd_dispatch(instr),
+            Opcode::XchgErxEax => {
+                self.xchg_eax_rd(instr);
+                Ok(())
+            }
+            Opcode::XchgRxax => {
+                self.xchg_ax_rw(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // CMPXCHG — Compare and Exchange
+            // =========================================================================
+            Opcode::CmpxchgEbGb => crate::cpu::arith8::CMPXCHG_EbGb(self, instr),
+            Opcode::CmpxchgEwGw => crate::cpu::arith16::CMPXCHG_EwGw(self, instr),
+            Opcode::CmpxchgEdGd => crate::cpu::arith32::CMPXCHG_EdGd(self, instr),
+            Opcode::Cmpxchg8b => crate::cpu::arith32::CMPXCHG8B(self, instr),
+
+            // =========================================================================
+            // XADD — Exchange and Add
+            // =========================================================================
+            Opcode::XaddEbGb => crate::cpu::arith8::XADD_EbGb(self, instr),
+            Opcode::XaddEwGw => crate::cpu::arith16::XADD_EwGw(self, instr),
+            Opcode::XaddEdGd => crate::cpu::arith32::XADD_EdGd(self, instr),
+
+            // =========================================================================
+            // BSWAP — Byte Swap
+            // =========================================================================
+            Opcode::BswapRx => {
+                self.bswap_rx(instr);
+                Ok(())
+            }
+            Opcode::BswapErx => {
+                self.bswap_erx(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // SETcc Eb - Set byte on condition
+            // =========================================================================
+            Opcode::SetoEb => self.seto_eb(instr),
+            Opcode::SetnoEb => self.setno_eb(instr),
+            Opcode::SetbEb => self.setb_eb(instr),
+            Opcode::SetnbEb => self.setnb_eb(instr),
+            Opcode::SetzEb => self.setz_eb(instr),
+            Opcode::SetnzEb => self.setnz_eb(instr),
+            Opcode::SetbeEb => self.setbe_eb(instr),
+            Opcode::SetnbeEb => self.setnbe_eb(instr),
+            Opcode::SetsEb => self.sets_eb(instr),
+            Opcode::SetnsEb => self.setns_eb(instr),
+            Opcode::SetpEb => self.setp_eb(instr),
+            Opcode::SetnpEb => self.setnp_eb(instr),
+            Opcode::SetlEb => self.setl_eb(instr),
+            Opcode::SetnlEb => self.setnl_eb(instr),
+            Opcode::SetleEb => self.setle_eb(instr),
+            Opcode::SetnleEb => self.setnle_eb(instr),
+
+            Opcode::Cbw => {
+                self.cbw(instr);
+                Ok(())
+            }
+            Opcode::MovsxGdEb => {
+                self.movsx_gd_eb(instr)?;
+                Ok(())
+            }
+            Opcode::MovsxGdEw => {
+                self.movsx_gd_ew(instr)?;
+                Ok(())
+            }
+            Opcode::MovzxGdEb => {
+                data_xfer32::MOVZX_GdEb_unified(self, instr)?;
+                Ok(())
+            }
+            Opcode::MovzxGdEw => {
+                data_xfer32::MOVZX_GdEw_unified(self, instr)?;
+                Ok(())
+            }
+            Opcode::MovzxGwEb => self.movzx_gw_eb(instr),
+            Opcode::MovsxGwEb => self.movsx_gw_eb(instr),
+            Opcode::Cwd => {
+                self.cwd(instr);
+                Ok(())
+            }
+            Opcode::Cwde => {
+                self.cwde(instr);
+                Ok(())
+            }
+            Opcode::Cdq => {
+                self.cdq(instr);
+                Ok(())
+            }
+            Opcode::Xlat => {
+                self.xlat(instr)
+            }
+            Opcode::Lahf | Opcode::LahfLm => {
+                self.lahf(instr);
+                Ok(())
+            }
+            Opcode::Sahf | Opcode::SahfLm => {
+                self.sahf(instr);
+                Ok(())
+            }
+            Opcode::Salc => self.salc(instr),
+
+            // =========================================================================
+            // Data transfer (64-bit) instructions
+            // =========================================================================
+            Opcode::MovOp64GdEd => {
+                if instr.mod_c0() {
+                    self.mov64_gd_ed_r(instr);
+                    Ok(())
+                } else {
+                    self.mov64_gd_ed_m(instr)
+                }
+            }
+            Opcode::MovOp64EdGd => {
+                if instr.mod_c0() {
+                    self.mov64_ed_gd_r(instr);
+                    Ok(())
+                } else {
+                    self.mov64_ed_gd_m(instr)
+                }
+            }
+            Opcode::MovEqGq => self.mov_eq_gq(instr),
+            Opcode::MovGqEq => self.mov_gq_eq(instr),
+            Opcode::LeaGqM => {
+                self.lea_gq_m(instr);
+                Ok(())
+            }
+
+            // =========================================================================
+            // CMOVcc (Conditional Move) instructions - 16-bit and 32-bit
+            // Unified wrappers handle both register and memory forms per x86 spec:
+            // memory operand is always read regardless of condition.
+            // =========================================================================
+            Opcode::CmovoGwEw => self.cmovo_gw_ew(instr),
+            Opcode::CmovnoGwEw => self.cmovno_gw_ew(instr),
+            Opcode::CmovbGwEw => self.cmovb_gw_ew(instr),
+            Opcode::CmovnbGwEw => self.cmovnb_gw_ew(instr),
+            Opcode::CmovzGwEw => self.cmovz_gw_ew(instr),
+            Opcode::CmovnzGwEw => self.cmovnz_gw_ew(instr),
+            Opcode::CmovbeGwEw => self.cmovbe_gw_ew(instr),
+            Opcode::CmovnbeGwEw => self.cmovnbe_gw_ew(instr),
+            Opcode::CmovsGwEw => self.cmovs_gw_ew(instr),
+            Opcode::CmovnsGwEw => self.cmovns_gw_ew(instr),
+            Opcode::CmovpGwEw => self.cmovp_gw_ew(instr),
+            Opcode::CmovnpGwEw => self.cmovnp_gw_ew(instr),
+            Opcode::CmovlGwEw => self.cmovl_gw_ew(instr),
+            Opcode::CmovnlGwEw => self.cmovnl_gw_ew(instr),
+            Opcode::CmovleGwEw => self.cmovle_gw_ew(instr),
+            Opcode::CmovnleGwEw => self.cmovnle_gw_ew(instr),
+            Opcode::CmovoGdEd => self.cmovo_gd_ed(instr),
+            Opcode::CmovnoGdEd => self.cmovno_gd_ed(instr),
+            Opcode::CmovbGdEd => self.cmovb_gd_ed(instr),
+            Opcode::CmovnbGdEd => self.cmovnb_gd_ed(instr),
+            Opcode::CmovzGdEd => self.cmovz_gd_ed(instr),
+            Opcode::CmovnzGdEd => self.cmovnz_gd_ed(instr),
+            Opcode::CmovbeGdEd => self.cmovbe_gd_ed(instr),
+            Opcode::CmovnbeGdEd => self.cmovnbe_gd_ed(instr),
+            Opcode::CmovsGdEd => self.cmovs_gd_ed(instr),
+            Opcode::CmovnsGdEd => self.cmovns_gd_ed(instr),
+            Opcode::CmovpGdEd => self.cmovp_gd_ed(instr),
+            Opcode::CmovnpGdEd => self.cmovnp_gd_ed(instr),
+            Opcode::CmovlGdEd => self.cmovl_gd_ed(instr),
+            Opcode::CmovnlGdEd => self.cmovnl_gd_ed(instr),
+            Opcode::CmovleGdEd => self.cmovle_gd_ed(instr),
+            Opcode::CmovnleGdEd => self.cmovnle_gd_ed(instr),
+
+            // =========================================================================
+            // CMOVcc (Conditional Move) instructions - 64-bit (unified: register + memory)
+            // =========================================================================
+            Opcode::CmovoGqEq => self.cmovo_gq_eq(instr),
+            Opcode::CmovnoGqEq => self.cmovno_gq_eq(instr),
+            Opcode::CmovbGqEq => self.cmovb_gq_eq(instr),
+            Opcode::CmovnbGqEq => self.cmovnb_gq_eq(instr),
+            Opcode::CmovzGqEq => self.cmovz_gq_eq(instr),
+            Opcode::CmovnzGqEq => self.cmovnz_gq_eq(instr),
+            Opcode::CmovbeGqEq => self.cmovbe_gq_eq(instr),
+            Opcode::CmovnbeGqEq => self.cmovnbe_gq_eq(instr),
+            Opcode::CmovsGqEq => self.cmovs_gq_eq(instr),
+            Opcode::CmovnsGqEq => self.cmovns_gq_eq(instr),
+            Opcode::CmovpGqEq => self.cmovp_gq_eq(instr),
+            Opcode::CmovnpGqEq => self.cmovnp_gq_eq(instr),
+            Opcode::CmovlGqEq => self.cmovl_gq_eq(instr),
+            Opcode::CmovnlGqEq => self.cmovnl_gq_eq(instr),
+            Opcode::CmovleGqEq => self.cmovle_gq_eq(instr),
+            Opcode::CmovnleGqEq => self.cmovnle_gq_eq(instr),
+
+            // =========================================================================
+            // BCD (Binary Coded Decimal) instructions
+            // =========================================================================
+            Opcode::Aaa => crate::cpu::bcd::AAA(self, instr),
+            Opcode::Aas => crate::cpu::bcd::AAS(self, instr),
+            Opcode::Aam => crate::cpu::bcd::AAM(self, instr),
+            Opcode::Aad => crate::cpu::bcd::AAD(self, instr),
+            Opcode::Daa => crate::cpu::bcd::DAA(self, instr),
+            Opcode::Das => crate::cpu::bcd::DAS(self, instr),
+
+            // =========================================================================
+            // x87 FPU instructions — Core (fpu.rs)
+            // =========================================================================
+            Opcode::Fninit => self.fninit(instr),
+            Opcode::Fnclex => self.fnclex(instr),
+            Opcode::Fnop => self.fnop(instr),
+            Opcode::Fplegacy => self.fplegacy(instr),
+            Opcode::Fpuesc | Opcode::Fwait => Ok(()),
+            Opcode::Fldcw => self.fldcw(instr),
+            Opcode::Fnstcw => self.fnstcw(instr),
+            Opcode::Fnstsw => self.fnstsw(instr),
+            Opcode::FnstswAx => self.fnstsw_ax(instr),
+            Opcode::Fnstenv => self.fnstenv(instr),
+            Opcode::Fldenv => self.fldenv(instr),
+            Opcode::Fnsave => self.fnsave(instr),
+            Opcode::Frstor => self.frstor(instr),
+
+            // =========================================================================
+            // x87 FPU — Load/Store (fpu_load_store.rs)
+            // =========================================================================
+            Opcode::FldSti => self.fld_sti(instr),
+            Opcode::FldSingleReal => self.fld_single_real(instr),
+            Opcode::FldDoubleReal => self.fld_double_real(instr),
+            Opcode::FldExtendedReal => self.fld_extended_real(instr),
+            Opcode::FildWordInteger => self.fild_word_integer(instr),
+            Opcode::FildDwordInteger => self.fild_dword_integer(instr),
+            Opcode::FildQwordInteger => self.fild_qword_integer(instr),
+            Opcode::FbldPackedBcd => self.fbld_packed_bcd(instr),
+            Opcode::FstSti | Opcode::FstpSti | Opcode::FstpSpecialSti => self.fst_sti(instr),
+            Opcode::FstSingleReal => self.fst_single_real(instr),
+            Opcode::FstpSingleReal => self.fstp_single_real(instr),
+            Opcode::FstDoubleReal => self.fst_double_real(instr),
+            Opcode::FstpDoubleReal => self.fstp_double_real(instr),
+            Opcode::FstpExtendedReal => self.fstp_extended_real(instr),
+            Opcode::FistWordInteger => self.fist_word_integer(instr),
+            Opcode::FistpWordInteger => self.fistp_word_integer(instr),
+            Opcode::FistDwordInteger => self.fist_dword_integer(instr),
+            Opcode::FistpDwordInteger => self.fistp_dword_integer(instr),
+            Opcode::FistpQwordInteger => self.fistp_qword_integer(instr),
+            Opcode::FbstpPackedBcd => self.fbstp_packed_bcd(instr),
+            Opcode::FisttpMw => self.fisttp16(instr),
+            Opcode::FisttpMd => self.fisttp32(instr),
+            Opcode::FisttpMq => self.fisttp64(instr),
+
+            // =========================================================================
+            // x87 FPU — Arithmetic (fpu_arith.rs)
+            // =========================================================================
+            Opcode::FaddSt0Stj => self.fadd_st0_stj(instr),
+            Opcode::FaddStiSt0 => self.fadd_sti_st0(instr),
+            Opcode::FaddpStiSt0 => self.faddp_sti_st0(instr),
+            Opcode::FaddSingleReal => self.fadd_single_real(instr),
+            Opcode::FaddDoubleReal => self.fadd_double_real(instr),
+            Opcode::FiaddWordInteger => self.fiadd_word_integer(instr),
+            Opcode::FiaddDwordInteger => self.fiadd_dword_integer(instr),
+            Opcode::FmulSt0Stj => self.fmul_st0_stj(instr),
+            Opcode::FmulStiSt0 => self.fmul_sti_st0(instr),
+            Opcode::FmulpStiSt0 => self.fmulp_sti_st0(instr),
+            Opcode::FmulSingleReal => self.fmul_single_real(instr),
+            Opcode::FmulDoubleReal => self.fmul_double_real(instr),
+            Opcode::FimulWordInteger => self.fimul_word_integer(instr),
+            Opcode::FimulDwordInteger => self.fimul_dword_integer(instr),
+            Opcode::FsubSt0Stj => self.fsub_st0_stj(instr),
+            Opcode::FsubrSt0Stj => self.fsubr_st0_stj(instr),
+            Opcode::FsubStiSt0 => self.fsub_sti_st0(instr),
+            Opcode::FsubpStiSt0 => self.fsubp_sti_st0(instr),
+            Opcode::FsubrStiSt0 => self.fsubr_sti_st0(instr),
+            Opcode::FsubrpStiSt0 => self.fsubrp_sti_st0(instr),
+            Opcode::FsubSingleReal => self.fsub_single_real(instr),
+            Opcode::FsubrSingleReal => self.fsubr_single_real(instr),
+            Opcode::FsubDoubleReal => self.fsub_double_real(instr),
+            Opcode::FsubrDoubleReal => self.fsubr_double_real(instr),
+            Opcode::FisubWordInteger => self.fisub_word_integer(instr),
+            Opcode::FisubrWordInteger => self.fisubr_word_integer(instr),
+            Opcode::FisubDwordInteger => self.fisub_dword_integer(instr),
+            Opcode::FisubrDwordInteger => self.fisubr_dword_integer(instr),
+            Opcode::FdivSt0Stj => self.fdiv_st0_stj(instr),
+            Opcode::FdivrSt0Stj => self.fdivr_st0_stj(instr),
+            Opcode::FdivStiSt0 => self.fdiv_sti_st0(instr),
+            Opcode::FdivpStiSt0 => self.fdivp_sti_st0(instr),
+            Opcode::FdivrStiSt0 => self.fdivr_sti_st0(instr),
+            Opcode::FdivrpStiSt0 => self.fdivrp_sti_st0(instr),
+            Opcode::FdivSingleReal => self.fdiv_single_real(instr),
+            Opcode::FdivrSingleReal => self.fdivr_single_real(instr),
+            Opcode::FdivDoubleReal => self.fdiv_double_real(instr),
+            Opcode::FdivrDoubleReal => self.fdivr_double_real(instr),
+            Opcode::FidivWordInteger => self.fidiv_word_integer(instr),
+            Opcode::FidivrWordInteger => self.fidivr_word_integer(instr),
+            Opcode::FidivDwordInteger => self.fidiv_dword_integer(instr),
+            Opcode::FidivrDwordInteger => self.fidivr_dword_integer(instr),
+            Opcode::Fsqrt => self.fsqrt(instr),
+            Opcode::Frndint => self.frndint(instr),
+
+            // =========================================================================
+            // x87 FPU — Compare (fpu_compare.rs)
+            // =========================================================================
+            Opcode::FcomSti => self.fcom_sti(instr),
+            Opcode::FcompSti => self.fcomp_sti(instr),
+            Opcode::FucomSti => self.fucom_sti(instr),
+            Opcode::FucompSti => self.fucomp_sti(instr),
+            Opcode::FcomSingleReal => self.fcom_single_real(instr),
+            Opcode::FcompSingleReal => self.fcomp_single_real(instr),
+            Opcode::FcomDoubleReal => self.fcom_double_real(instr),
+            Opcode::FcompDoubleReal => self.fcomp_double_real(instr),
+            Opcode::FicomWordInteger => self.ficom_word_integer(instr),
+            Opcode::FicompWordInteger => self.ficomp_word_integer(instr),
+            Opcode::FicomDwordInteger => self.ficom_dword_integer(instr),
+            Opcode::FicompDwordInteger => self.ficomp_dword_integer(instr),
+            Opcode::Fcompp | Opcode::Fucompp => self.fcompp(instr),
+            Opcode::FcomiSt0Stj => self.fcomi_st0_stj(instr),
+            Opcode::FcomipSt0Stj => self.fcomip_st0_stj(instr),
+            Opcode::FucomiSt0Stj => self.fucomi_st0_stj(instr),
+            Opcode::FucomipSt0Stj => self.fucomip_st0_stj(instr),
+            Opcode::Ftst => self.ftst(instr),
+            Opcode::Fxam => self.fxam(instr),
+
+            // =========================================================================
+            // x87 FPU — Misc (fpu_misc.rs)
+            // =========================================================================
+            Opcode::FxchSti => self.fxch_sti(instr),
+            Opcode::Fchs => self.fchs(instr),
+            Opcode::Fabs => self.fabs_(instr),
+            Opcode::Fdecstp => self.fdecstp(instr),
+            Opcode::Fincstp => self.fincstp(instr),
+            Opcode::FfreeSti => self.ffree_sti(instr),
+            Opcode::FfreepSti => self.ffreep_sti(instr),
+
+            // =========================================================================
+            // x87 FPU — Constants (fpu_const.rs)
+            // =========================================================================
+            Opcode::FLD1 => self.fld1(instr),
+            Opcode::Fldl2t => self.fldl2t(instr),
+            Opcode::Fldl2e => self.fldl2e(instr),
+            Opcode::Fldpi => self.fldpi(instr),
+            Opcode::Fldlg2 => self.fldlg2(instr),
+            Opcode::Fldln2 => self.fldln2(instr),
+            Opcode::Fldz => self.fldz(instr),
+
+            // =========================================================================
+            // x87 FPU — Conditional Move (fpu_cmov.rs)
+            // =========================================================================
+            Opcode::FcmovbSt0Stj => self.fcmovb_st0_stj(instr),
+            Opcode::FcmoveSt0Stj => self.fcmove_st0_stj(instr),
+            Opcode::FcmovbeSt0Stj => self.fcmovbe_st0_stj(instr),
+            Opcode::FcmovuSt0Stj => self.fcmovu_st0_stj(instr),
+            Opcode::FcmovnbSt0Stj => self.fcmovnb_st0_stj(instr),
+            Opcode::FcmovneSt0Stj => self.fcmovne_st0_stj(instr),
+            Opcode::FcmovnbeSt0Stj => self.fcmovnbe_st0_stj(instr),
+            Opcode::FcmovnuSt0Stj => self.fcmovnu_st0_stj(instr),
+
+            // =========================================================================
+            // x87 FPU — Transcendentals (fpu_trans.rs)
+            // =========================================================================
+            Opcode::Fscale => self.fscale(instr),
+            Opcode::Fxtract => self.fxtract(instr),
+            Opcode::Fprem => self.fprem(instr),
+            Opcode::FPREM1 => self.fprem1(instr),
+            Opcode::F2XM1 => self.f2xm1(instr),
+            Opcode::FYL2X => self.fyl2x(instr),
+            Opcode::FYL2XP1 => self.fyl2xp1(instr),
+            Opcode::Fptan => self.fptan(instr),
+            Opcode::Fpatan => self.fpatan(instr),
+            Opcode::Fsin => self.fsin(instr),
+            Opcode::Fcos => self.fcos(instr),
+            Opcode::Fsincos => self.fsincos(instr),
+
+            // =========================================================================
+            // MMX Instructions (mmx.rs)
+            // =========================================================================
+
+            // --- Core MMX (Pentium) ---
+            Opcode::PunpcklbwPqQd => self.punpcklbw_pq_qd(instr),
+            Opcode::PunpcklwdPqQd => self.punpcklwd_pq_qd(instr),
+            Opcode::PunpckldqPqQd => self.punpckldq_pq_qd(instr),
+            Opcode::PacksswbPqQq => self.packsswb_pq_qq(instr),
+            Opcode::PcmpgtbPqQq => self.pcmpgtb_pq_qq(instr),
+            Opcode::PcmpgtwPqQq => self.pcmpgtw_pq_qq(instr),
+            Opcode::PcmpgtdPqQq => self.pcmpgtd_pq_qq(instr),
+            Opcode::PackuswbPqQq => self.packuswb_pq_qq(instr),
+            Opcode::PunpckhbwPqQq => self.punpckhbw_pq_qq(instr),
+            Opcode::PunpckhwdPqQq => self.punpckhwd_pq_qq(instr),
+            Opcode::PunpckhdqPqQq => self.punpckhdq_pq_qq(instr),
+            Opcode::PackssdwPqQq => self.packssdw_pq_qq(instr),
+            // MOVD Pq, Ed — check mod_c0 for register vs memory form
+            Opcode::MovdPqEd => {
+                if instr.mod_c0() {
+                    self.movd_pq_ed_r(instr)
+                } else {
+                    self.movd_pq_ed_m(instr)
+                }
+            }
+            // MOVQ Pq, Eq (REX.W + 0F 6E) — 64-bit GPR/mem to MMX
+            Opcode::MovqPqEq => {
+                if instr.mod_c0() {
+                    self.movq_pq_eq_r(instr)
+                } else {
+                    self.movq_pq_eq_m(instr)
+                }
+            }
+            // MOVQ Pq, Qq — check mod_c0 for register vs memory form
+            Opcode::MovqPqQq => {
+                if instr.mod_c0() {
+                    self.movq_pq_qq_r(instr)
+                } else {
+                    self.movq_pq_qq_m(instr)
+                }
+            }
+            Opcode::PcmpeqbPqQq => self.pcmpeqb_pq_qq(instr),
+            Opcode::PcmpeqwPqQq => self.pcmpeqw_pq_qq(instr),
+            Opcode::PcmpeqdPqQq => self.pcmpeqd_pq_qq(instr),
+            Opcode::Emms => self.emms(instr),
+            Opcode::Vzeroupper => self.vzeroupper(instr),
+            Opcode::Vzeroall => self.vzeroall(instr),
+            // MOVD Ed, Pq — check mod_c0 for register vs memory form
+            Opcode::MovdEdPq => {
+                if instr.mod_c0() {
+                    self.movd_ed_pq_r(instr)
+                } else {
+                    self.movd_ed_pq_m(instr)
+                }
+            }
+            // MOVQ Eq, Pq (REX.W + 0F 7E) — MMX to 64-bit GPR/mem
+            Opcode::MovqEqPq => {
+                if instr.mod_c0() {
+                    self.movq_eq_pq_r(instr)
+                } else {
+                    self.movq_eq_pq_m(instr)
+                }
+            }
+            // MOVQ Qq, Pq — check mod_c0 for register vs memory form
+            Opcode::MovqQqPq => {
+                if instr.mod_c0() {
+                    self.movq_qq_pq_r(instr)
+                } else {
+                    self.movq_qq_pq_m(instr)
+                }
+            }
+            Opcode::PsrlwPqQq => self.psrlw_pq_qq(instr),
+            Opcode::PsrldPqQq => self.psrld_pq_qq(instr),
+            Opcode::PsrlqPqQq => self.psrlq_pq_qq(instr),
+            Opcode::PmullwPqQq => self.pmullw_pq_qq(instr),
+            Opcode::PsubusbPqQq => self.psubusb_pq_qq(instr),
+            Opcode::PsubuswPqQq => self.psubusw_pq_qq(instr),
+            Opcode::PandPqQq => self.pand_pq_qq(instr),
+            Opcode::PaddusbPqQq => self.paddusb_pq_qq(instr),
+            Opcode::PadduswPqQq => self.paddusw_pq_qq(instr),
+            Opcode::PandnPqQq => self.pandn_pq_qq(instr),
+            Opcode::PsrawPqQq => self.psraw_pq_qq(instr),
+            Opcode::PsradPqQq => self.psrad_pq_qq(instr),
+            Opcode::PmulhwPqQq => self.pmulhw_pq_qq(instr),
+            Opcode::PsubsbPqQq => self.psubsb_pq_qq(instr),
+            Opcode::PsubswPqQq => self.psubsw_pq_qq(instr),
+            Opcode::PorPqQq => self.por_pq_qq(instr),
+            Opcode::PaddsbPqQq => self.paddsb_pq_qq(instr),
+            Opcode::PaddswPqQq => self.paddsw_pq_qq(instr),
+            Opcode::PxorPqQq => self.pxor_pq_qq(instr),
+            Opcode::PsllwPqQq => self.psllw_pq_qq(instr),
+            Opcode::PslldPqQq => self.pslld_pq_qq(instr),
+            Opcode::PsllqPqQq => self.psllq_pq_qq(instr),
+            Opcode::PmaddwdPqQq => self.pmaddwd_pq_qq(instr),
+            Opcode::PsubbPqQq => self.psubb_pq_qq(instr),
+            Opcode::PsubwPqQq => self.psubw_pq_qq(instr),
+            Opcode::PsubdPqQq => self.psubd_pq_qq(instr),
+            Opcode::PaddbPqQq => self.paddb_pq_qq(instr),
+            Opcode::PaddwPqQq => self.paddw_pq_qq(instr),
+            Opcode::PadddPqQq => self.paddd_pq_qq(instr),
+            // Immediate shifts
+            Opcode::PsrlwNqIb => self.psrlw_nq_ib(instr),
+            Opcode::PsrawNqIb => self.psraw_nq_ib(instr),
+            Opcode::PsllwNqIb => self.psllw_nq_ib(instr),
+            Opcode::PsrldNqIb => self.psrld_nq_ib(instr),
+            Opcode::PsradNqIb => self.psrad_nq_ib(instr),
+            Opcode::PslldNqIb => self.pslld_nq_ib(instr),
+            Opcode::PsrlqNqIb => self.psrlq_nq_ib(instr),
+            Opcode::PsllqNqIb => self.psllq_nq_ib(instr),
+
+            // --- SSE-era MMX extensions ---
+            Opcode::PshufwPqQqIb => self.pshufw_pq_qq_ib(instr),
+            Opcode::PinsrwPqEwIb => self.pinsrw_pq_ew_ib(instr),
+            Opcode::PextrwGdNqIb => self.pextrw_gd_nq_ib(instr),
+            Opcode::PmovmskbGdNq => self.pmovmskb_gd_nq(instr),
+            Opcode::PminubPqQq => self.pminub_pq_qq(instr),
+            Opcode::PmaxubPqQq => self.pmaxub_pq_qq(instr),
+            Opcode::PavgbPqQq => self.pavgb_pq_qq(instr),
+            Opcode::PavgwPqQq => self.pavgw_pq_qq(instr),
+            Opcode::PmulhuwPqQq => self.pmulhuw_pq_qq(instr),
+            Opcode::MovntqMqPq => self.movntq_mq_pq(instr),
+            Opcode::PminswPqQq => self.pminsw_pq_qq(instr),
+            Opcode::PmaxswPqQq => self.pmaxsw_pq_qq(instr),
+            Opcode::PsadbwPqQq => self.psadbw_pq_qq(instr),
+            Opcode::MaskmovqPqNq => self.maskmovq_pq_nq(instr),
+
+            // --- SSE2-era MMX extensions ---
+            Opcode::PaddqPqQq => self.paddq_pq_qq(instr),
+            Opcode::PsubqPqQq => self.psubq_pq_qq(instr),
+            Opcode::PmuludqPqQq => self.pmuludq_pq_qq(instr),
+
+            // --- SSSE3 MMX extensions ---
+            Opcode::PshufbPqQq => self.pshufb_pq_qq(instr),
+            Opcode::PhaddwPqQq => self.phaddw_pq_qq(instr),
+            Opcode::PhadddPqQq => self.phaddd_pq_qq(instr),
+            Opcode::PhaddswPqQq => self.phaddsw_pq_qq(instr),
+            Opcode::PmaddubswPqQq => self.pmaddubsw_pq_qq(instr),
+            Opcode::PhsubwPqQq => self.phsubw_pq_qq(instr),
+            Opcode::PhsubdPqQq => self.phsubd_pq_qq(instr),
+            Opcode::PhsubswPqQq => self.phsubsw_pq_qq(instr),
+            Opcode::PsignbPqQq => self.psignb_pq_qq(instr),
+            Opcode::PsignwPqQq => self.psignw_pq_qq(instr),
+            Opcode::PsigndPqQq => self.psignd_pq_qq(instr),
+            Opcode::PmulhrswPqQq => self.pmulhrsw_pq_qq(instr),
+            Opcode::PabsbPqQq => self.pabsb_pq_qq(instr),
+            Opcode::PabswPqQq => self.pabsw_pq_qq(instr),
+            Opcode::PabsdPqQq => self.pabsd_pq_qq(instr),
+            Opcode::PalignrPqQqIb => self.palignr_pq_qq_ib(instr),
+
+            // =========================================================================
+            // SSE/SSE2 Infrastructure (proc_ctrl.rs, xmm.rs)
+            // =========================================================================
+            Opcode::Fxsave => self.fxsave(instr),
+            Opcode::Fxrstor => self.fxrstor(instr),
+            Opcode::Ldmxcsr => self.ldmxcsr(instr),
+            Opcode::Stmxcsr => self.stmxcsr(instr),
+
+            // Prefetch hints and memory fences — NOPs in emulation
+            Opcode::PrefetchMb
+            | Opcode::PrefetchwMb
+            | Opcode::Prefetcht0Mb
+            | Opcode::Prefetcht1Mb
+            | Opcode::Prefetcht2Mb
+            | Opcode::PrefetchntaMb
+            | Opcode::Lfence
+            | Opcode::Sfence
+            | Opcode::Mfence => Ok(()),
+
+            // =========================================================================
+            // SSE/SSE2 Data Movement (sse_move.rs)
+            // =========================================================================
+
+            // MOVUPS load — legacy SSE (preserves upper YMM)
+            Opcode::MovupsVpsWps => self.movdqu_load_sse(instr),
+            // MOVUPS store — legacy SSE
+            Opcode::MovupsWpsVps => {
+                if instr.mod_c0() {
+                    self.movdqu_load_sse(instr) // reg-to-reg
+                } else {
+                    self.vmovdqu_store(instr)
+                }
+            }
+            // MOVUPD load — legacy SSE (preserves upper YMM)
+            Opcode::MovupdVpdWpd => self.movdqu_load_sse(instr),
+            // MOVUPD store — legacy SSE
+            Opcode::MovupdWpdVpd => {
+                if instr.mod_c0() {
+                    self.movdqu_load_sse(instr) // reg-to-reg
+                } else {
+                    self.vmovdqu_store(instr)
+                }
+            }
+            // MOVAPS load — legacy SSE (preserves upper YMM)
+            Opcode::MovapsVpsWps => self.movdqa_load_sse(instr),
+            // MOVAPS store — legacy SSE
+            Opcode::MovapsWpsVps => self.movdqa_store_sse(instr),
+            // MOVAPD load — legacy SSE (preserves upper YMM)
+            Opcode::MovapdVpdWpd => self.movdqa_load_sse(instr),
+            // MOVAPD store — legacy SSE
+            Opcode::MovapdWpdVpd => self.movdqa_store_sse(instr),
+            // MOVDQA load — legacy SSE (preserves upper YMM)
+            Opcode::MovdqaVdqWdq => self.movdqa_load_sse(instr),
+            // MOVDQA store — legacy SSE
+            Opcode::MovdqaWdqVdq => self.movdqa_store_sse(instr),
+            // MOVDQU load — legacy SSE (preserves upper YMM)
+            Opcode::MovdquVdqWdq => self.movdqu_load_sse(instr),
+            // MOVDQU store — legacy SSE
+            Opcode::MovdquWdqVdq => {
+                if instr.mod_c0() {
+                    self.movdqu_load_sse(instr) // reg-to-reg same as load
+                } else {
+                    self.vmovdqu_store(instr)
+                }
+            }
+
+            // MOVSS (scalar single) — different R vs M semantics
+            Opcode::MovssVssWss => {
+                if instr.mod_c0() {
+                    self.movss_vss_wss_r(instr)
+                } else {
+                    self.movss_vss_wss_m(instr)
+                }
+            }
+            Opcode::MovssWssVss => {
+                if instr.mod_c0() {
+                    self.movss_wss_vss_r(instr)
+                } else {
+                    self.movss_wss_vss_m(instr)
+                }
+            }
+            // MOVSD (scalar double) — different R vs M semantics
+            Opcode::MovsdVsdWsd => {
+                if instr.mod_c0() {
+                    self.movsd_vsd_wsd_r(instr)
+                } else {
+                    self.movsd_vsd_wsd_m(instr)
+                }
+            }
+            Opcode::MovsdWsdVsd => {
+                if instr.mod_c0() {
+                    self.movsd_wsd_vsd_r(instr)
+                } else {
+                    self.movsd_wsd_vsd_m(instr)
+                }
+            }
+
+            // MOVLPS/MOVHLPS — 0F 12 (memory=MOVLPS, register=MOVHLPS)
+            Opcode::MovlpsVpsMq => self.movlps_vps_mq(instr),
+            Opcode::MovhlpsVpsWps => self.movhlps_vps_wps(instr),
+            Opcode::MovlpsMqVps => self.movlps_mq_vps(instr),
+            // MOVHPS/MOVLHPS — 0F 16 (memory=MOVHPS, register=MOVLHPS)
+            Opcode::MovhpsVpsMq => self.movhps_vps_mq(instr),
+            Opcode::MovlhpsVpsWps => self.movlhps_vps_wps(instr),
+            Opcode::MovhpsMqVps => self.movhps_mq_vps(instr),
+
+            // MOVLPD/MOVHPD (memory only)
+            Opcode::MovlpdVsdMq => self.movlpd_vpd_mq(instr),
+            Opcode::MovlpdMqVsd => self.movlps_mq_vps(instr),
+            Opcode::MovhpdVsdMq => self.movhpd_vpd_mq(instr),
+            Opcode::MovhpdMqVsd => self.movhps_mq_vps(instr),
+
+            // Non-temporal stores (memory only)
+            Opcode::MovntpsMpsVps => self.movntps_mps_vps(instr),
+            Opcode::MovntpdMpdVpd => self.movntpd_mpd_vpd(instr),
+            Opcode::MovntdqMdqVdq => self.movntdq_mdq_vdq(instr),
+            Opcode::MovntiOp32MdGd => self.movnti_md_gd(instr),
+            Opcode::MovntiOp64MdGd => self.movnti_op64_md_gd(instr),
+            Opcode::MovntiMqGq => self.movnti_mq_gq(instr),
+
+            // Extract sign bits to GPR (register only)
+            Opcode::MovmskpsGdUps => self.movmskps_gd_ups(instr),
+            Opcode::MovmskpdGdUpd => self.movmskpd_gd_upd(instr),
+
+            // MOVD (GPR ↔ XMM)
+            Opcode::MovdVdqEd => {
+                if instr.mod_c0() {
+                    self.movd_vdq_ed_r(instr)
+                } else {
+                    self.movd_vdq_ed_m(instr)
+                }
+            }
+            Opcode::MovdEdVd => {
+                if instr.mod_c0() {
+                    self.movd_ed_vdq_r(instr)
+                } else {
+                    self.movd_ed_vdq_m(instr)
+                }
+            }
+            // MOVQ (XMM ↔ XMM/mem)
+            Opcode::MovqVqWq => {
+                if instr.mod_c0() {
+                    self.movq_vq_wq_r(instr)
+                } else {
+                    self.movq_vq_wq_m(instr)
+                }
+            }
+            Opcode::MovqWqVq => {
+                if instr.mod_c0() {
+                    self.movq_wq_vq_r(instr)
+                } else {
+                    self.movq_wq_vq_m(instr)
+                }
+            }
+
+            // MMX ↔ SSE transfer
+            Opcode::Movdq2qPqUdq => self.movdq2q_pq_udq(instr),
+            Opcode::Movq2dqVdqQq => self.movq2dq_vdq_qq(instr),
+
+            // MOVQ xmm ↔ r/m64 (66 REX.W 0F 6E / 66 REX.W 0F 7E)
+            Opcode::MovqVdqEq => self.movq_vdq_eq(instr),
+            Opcode::MovqEqVq => self.movq_eq_vq(instr),
+
+            // SSE3 duplicate moves
+            Opcode::MovddupVpdWq => {
+                if instr.mod_c0() {
+                    self.movddup_vpd_wq_r(instr)
+                } else {
+                    self.movddup_vpd_wq_m(instr)
+                }
+            }
+            Opcode::MovsldupVpsWps => {
+                if instr.mod_c0() {
+                    self.movsldup_vps_wps_r(instr)
+                } else {
+                    self.movsldup_vps_wps_m(instr)
+                }
+            }
+            Opcode::MovshdupVpsWps => {
+                if instr.mod_c0() {
+                    self.movshdup_vps_wps_r(instr)
+                } else {
+                    self.movshdup_vps_wps_m(instr)
+                }
+            }
+
+            // =========================================================================
+            // SSE/SSE2 Floating-Point Arithmetic (sse_pfp.rs)
+            // =========================================================================
+            Opcode::AddpsVpsWps => self.addps_vps_wps(instr),
+            Opcode::AddpdVpdWpd => self.addpd_vpd_wpd(instr),
+            Opcode::AddssVssWss => self.addss_vss_wss(instr),
+            Opcode::AddsdVsdWsd => self.addsd_vsd_wsd(instr),
+            Opcode::SubpsVpsWps => self.subps_vps_wps(instr),
+            Opcode::SubpdVpdWpd => self.subpd_vpd_wpd(instr),
+            Opcode::SubssVssWss => self.subss_vss_wss(instr),
+            Opcode::SubsdVsdWsd => self.subsd_vsd_wsd(instr),
+            Opcode::MulpsVpsWps => self.mulps_vps_wps(instr),
+            Opcode::MulpdVpdWpd => self.mulpd_vpd_wpd(instr),
+            Opcode::MulssVssWss => self.mulss_vss_wss(instr),
+            Opcode::MulsdVsdWsd => self.mulsd_vsd_wsd(instr),
+            Opcode::DivpsVpsWps => self.divps_vps_wps(instr),
+            Opcode::DivpdVpdWpd => self.divpd_vpd_wpd(instr),
+            Opcode::DivssVssWss => self.divss_vss_wss(instr),
+            Opcode::DivsdVsdWsd => self.divsd_vsd_wsd(instr),
+            Opcode::SqrtpsVpsWps => self.sqrtps_vps_wps(instr),
+            Opcode::SqrtpdVpdWpd => self.sqrtpd_vpd_wpd(instr),
+            Opcode::SqrtssVssWss => self.sqrtss_vss_wss(instr),
+            Opcode::SqrtsdVsdWsd => self.sqrtsd_vsd_wsd(instr),
+            Opcode::MinpsVpsWps => self.minps_vps_wps(instr),
+            Opcode::MinpdVpdWpd => self.minpd_vpd_wpd(instr),
+            Opcode::MinssVssWss => self.minss_vss_wss(instr),
+            Opcode::MinsdVsdWsd => self.minsd_vsd_wsd(instr),
+            Opcode::MaxpsVpsWps => self.maxps_vps_wps(instr),
+            Opcode::MaxpdVpdWpd => self.maxpd_vpd_wpd(instr),
+            Opcode::MaxssVssWss => self.maxss_vss_wss(instr),
+            Opcode::MaxsdVsdWsd => self.maxsd_vsd_wsd(instr),
+
+            // SSE/SSE2 Reciprocal & Reciprocal Square Root (sse_rcp.rs)
+            Opcode::RcppsVpsWps => self.rcpps_vps_wps(instr),
+            Opcode::RcpssVssWss => self.rcpss_vss_wss(instr),
+            Opcode::RsqrtpsVpsWps => self.rsqrtps_vps_wps(instr),
+            Opcode::RsqrtssVssWss => self.rsqrtss_vss_wss(instr),
+
+            // SSE/SSE2 Floating-Point Bitwise (sse_pfp.rs)
+            Opcode::AndpsVpsWps => self.andps_vps_wps(instr),
+            Opcode::AndpdVpdWpd => self.andpd_vpd_wpd(instr),
+            Opcode::AndnpsVpsWps => self.andnps_vps_wps(instr),
+            Opcode::AndnpdVpdWpd => self.andnpd_vpd_wpd(instr),
+            Opcode::OrpsVpsWps => self.orps_vps_wps(instr),
+            Opcode::OrpdVpdWpd => self.orpd_vpd_wpd(instr),
+            Opcode::XorpsVpsWps => self.xorps_vps_wps(instr),
+            Opcode::XorpdVpdWpd => self.xorpd_vpd_wpd(instr),
+
+            // SSE/SSE2 Floating-Point Compare (sse_pfp.rs)
+            Opcode::CmppsVpsWpsIb => self.cmpps_vps_wps_ib(instr),
+            Opcode::CmppdVpdWpdIb => self.cmppd_vpd_wpd_ib(instr),
+            Opcode::CmpssVssWssIb => self.cmpss_vss_wss_ib(instr),
+            Opcode::CmpsdVsdWsdIb => self.cmpsd_vsd_wsd_ib(instr),
+            Opcode::ComissVssWss => self.comiss_vss_wss(instr),
+            Opcode::ComisdVsdWsd => self.comisd_vsd_wsd(instr),
+            Opcode::UcomissVssWss => self.ucomiss_vss_wss(instr),
+            Opcode::UcomisdVsdWsd => self.ucomisd_vsd_wsd(instr),
+
+            // SSE/SSE2 Floating-Point Conversion (sse_pfp.rs)
+            Opcode::Cvtsi2ssVssEd => self.cvtsi2ss_vss_ed(instr),
+            Opcode::Cvtsi2sdVsdEd => self.cvtsi2sd_vsd_ed(instr),
+            Opcode::Cvtss2siGdWss => self.cvtss2si_gd_wss(instr),
+            Opcode::Cvtsd2siGdWsd => self.cvtsd2si_gd_wsd(instr),
+            Opcode::Cvttss2siGdWss => self.cvttss2si_gd_wss(instr),
+            Opcode::Cvttsd2siGdWsd => self.cvttsd2si_gd_wsd(instr),
+            // 64-bit integer ↔ float conversions (REX.W forms)
+            Opcode::Cvtsi2ssVssEq => self.cvtsi2ss_vss_eq(instr),
+            Opcode::Cvtsi2sdVsdEq => self.cvtsi2sd_vsd_eq(instr),
+            Opcode::Cvttss2siGqWss => self.cvttss2si_gq_wss(instr),
+            Opcode::Cvttsd2siGqWsd => self.cvttsd2si_gq_wsd(instr),
+            Opcode::Cvtss2siGqWss => self.cvtss2si_gq_wss(instr),
+            Opcode::Cvtsd2siGqWsd => self.cvtsd2si_gq_wsd(instr),
+            Opcode::Cvtps2pdVpdWps => self.cvtps2pd_vpd_wps(instr),
+            Opcode::Cvtpd2psVpsWpd => self.cvtpd2ps_vps_wpd(instr),
+            Opcode::Cvtss2sdVsdWss => self.cvtss2sd_vsd_wss(instr),
+            Opcode::Cvtsd2ssVssWsd => self.cvtsd2ss_vss_wsd(instr),
+            Opcode::Cvtdq2psVpsWdq => self.cvtdq2ps_vps_wdq(instr),
+            Opcode::Cvtps2dqVdqWps => self.cvtps2dq_vdq_wps(instr),
+            Opcode::Cvttps2dqVdqWps => self.cvttps2dq_vdq_wps(instr),
+            Opcode::Cvtdq2pdVpdWq => self.cvtdq2pd_vpd_wq(instr),
+            Opcode::Cvtpd2dqVqWpd => self.cvtpd2dq_vq_wpd(instr),
+            Opcode::Cvttpd2dqVqWpd => self.cvttpd2dq_vq_wpd(instr),
+
+            // SSE/SSE2 Floating-Point Shuffle/Unpack (sse_pfp.rs)
+            Opcode::ShufpsVpsWpsIb => self.shufps_vps_wps_ib(instr),
+            Opcode::ShufpdVpdWpdIb => self.shufpd_vpd_wpd_ib(instr),
+            Opcode::UnpcklpsVpsWdq => self.unpcklps_vps_wps(instr),
+            Opcode::UnpckhpsVpsWdq => self.unpckhps_vps_wps(instr),
+            Opcode::UnpcklpdVpdWdq => self.unpcklpd_vpd_wpd(instr),
+            Opcode::UnpckhpdVpdWdq => self.unpckhpd_vpd_wpd(instr),
+
+            // =========================================================================
+            // SSE2 Packed Integer (sse.rs)
+            // =========================================================================
+
+            // Arithmetic
+            Opcode::PaddbVdqWdq => self.paddb_vdq_wdq(instr),
+            Opcode::PaddwVdqWdq => self.paddw_vdq_wdq(instr),
+            Opcode::PadddVdqWdq => self.paddd_vdq_wdq(instr),
+            Opcode::PaddqVdqWdq => self.paddq_vdq_wdq(instr),
+            Opcode::PsubbVdqWdq => self.psubb_vdq_wdq(instr),
+            Opcode::PsubwVdqWdq => self.psubw_vdq_wdq(instr),
+            Opcode::PsubdVdqWdq => self.psubd_vdq_wdq(instr),
+            Opcode::PsubqVdqWdq => self.psubq_vdq_wdq(instr),
+            Opcode::PaddsbVdqWdq => self.paddsb_vdq_wdq(instr),
+            Opcode::PaddswVdqWdq => self.paddsw_vdq_wdq(instr),
+            Opcode::PaddusbVdqWdq => self.paddusb_vdq_wdq(instr),
+            Opcode::PadduswVdqWdq => self.paddusw_vdq_wdq(instr),
+            Opcode::PsubsbVdqWdq => self.psubsb_vdq_wdq(instr),
+            Opcode::PsubswVdqWdq => self.psubsw_vdq_wdq(instr),
+            Opcode::PsubusbVdqWdq => self.psubusb_vdq_wdq(instr),
+            Opcode::PsubuswVdqWdq => self.psubusw_vdq_wdq(instr),
+            Opcode::PmullwVdqWdq => self.pmullw_vdq_wdq(instr),
+            Opcode::PmulhwVdqWdq => self.pmulhw_vdq_wdq(instr),
+            Opcode::PmulhuwVdqWdq => self.pmulhuw_vdq_wdq(instr),
+            Opcode::PmuludqVdqWdq => self.pmuludq_vdq_wdq(instr),
+            Opcode::PmulhrswVdqWdq => self.pmulhrsw_vdq_wdq(instr),
+            Opcode::PmaddwdVdqWdq => self.pmaddwd_vdq_wdq(instr),
+
+            // Compare
+            Opcode::PcmpeqbVdqWdq => self.pcmpeqb_vdq_wdq(instr),
+            Opcode::PcmpeqwVdqWdq => self.pcmpeqw_vdq_wdq(instr),
+            Opcode::PcmpeqdVdqWdq => self.pcmpeqd_vdq_wdq(instr),
+            Opcode::PcmpgtbVdqWdq => self.pcmpgtb_vdq_wdq(instr),
+            Opcode::PcmpgtwVdqWdq => self.pcmpgtw_vdq_wdq(instr),
+            Opcode::PcmpgtdVdqWdq => self.pcmpgtd_vdq_wdq(instr),
+
+            // Logical
+            Opcode::PandVdqWdq => self.pand_vdq_wdq(instr),
+            Opcode::PandnVdqWdq => self.pandn_vdq_wdq(instr),
+            Opcode::PorVdqWdq => self.por_vdq_wdq(instr),
+            Opcode::PxorVdqWdq => self.pxor_vdq_wdq(instr),
+
+            // Shift by XMM register
+            Opcode::PsrlwVdqWdq => self.psrlw_vdq_wdq(instr),
+            Opcode::PsrldVdqWdq => self.psrld_vdq_wdq(instr),
+            Opcode::PsrlqVdqWdq => self.psrlq_vdq_wdq(instr),
+            Opcode::PsrawVdqWdq => self.psraw_vdq_wdq(instr),
+            Opcode::PsradVdqWdq => self.psrad_vdq_wdq(instr),
+            Opcode::PsllwVdqWdq => self.psllw_vdq_wdq(instr),
+            Opcode::PslldVdqWdq => self.pslld_vdq_wdq(instr),
+            Opcode::PsllqVdqWdq => self.psllq_vdq_wdq(instr),
+
+            // Shift by immediate
+            Opcode::PsrlwUdqIb => self.psrlw_udq_ib(instr),
+            Opcode::PsrldUdqIb => self.psrld_udq_ib(instr),
+            Opcode::PsrlqUdqIb => self.psrlq_udq_ib(instr),
+            Opcode::PsrawUdqIb => self.psraw_udq_ib(instr),
+            Opcode::PsradUdqIb => self.psrad_udq_ib(instr),
+            Opcode::PsllwUdqIb => self.psllw_udq_ib(instr),
+            Opcode::PslldUdqIb => self.pslld_udq_ib(instr),
+            Opcode::PsllqUdqIb => self.psllq_udq_ib(instr),
+            Opcode::PsrldqUdqIb => self.psrldq_udq_ib(instr),
+            Opcode::PslldqUdqIb => self.pslldq_udq_ib(instr),
+
+            // Unpack/interleave
+            Opcode::PunpcklbwVdqWdq => self.punpcklbw_vdq_wdq(instr),
+            Opcode::PunpcklwdVdqWdq => self.punpcklwd_vdq_wdq(instr),
+            Opcode::PunpckldqVdqWdq => self.punpckldq_vdq_wdq(instr),
+            Opcode::PunpcklqdqVdqWdq => self.punpcklqdq_vdq_wdq(instr),
+            Opcode::PunpckhbwVdqWdq => self.punpckhbw_vdq_wdq(instr),
+            Opcode::PunpckhwdVdqWdq => self.punpckhwd_vdq_wdq(instr),
+            Opcode::PunpckhdqVdqWdq => self.punpckhdq_vdq_wdq(instr),
+            Opcode::PunpckhqdqVdqWdq => self.punpckhqdq_vdq_wdq(instr),
+
+            // Pack
+            Opcode::PacksswbVdqWdq => self.packsswb_vdq_wdq(instr),
+            Opcode::PackssdwVdqWdq => self.packssdw_vdq_wdq(instr),
+            Opcode::PackuswbVdqWdq => self.packuswb_vdq_wdq(instr),
+
+            // Shuffle
+            Opcode::PshufdVdqWdqIb => self.pshufd_vdq_wdq_ib(instr),
+            Opcode::PshufhwVdqWdqIb => self.pshufhw_vdq_wdq_ib(instr),
+            Opcode::PshuflwVdqWdqIb => self.pshuflw_vdq_wdq_ib(instr),
+
+            // Insert/extract
+            Opcode::PinsrwVdqEwIb => self.pinsrw_vdq_ew_ib(instr),
+            Opcode::PextrwGdUdqIb => self.pextrw_gd_udq_ib(instr),
+
+            // Min/max/average
+            Opcode::PminubVdqWdq => self.pminub_vdq_wdq(instr),
+            Opcode::PmaxubVdqWdq => self.pmaxub_vdq_wdq(instr),
+            Opcode::PminswVdqWdq => self.pminsw_vdq_wdq(instr),
+            Opcode::PmaxswVdqWdq => self.pmaxsw_vdq_wdq(instr),
+            Opcode::PavgbVdqWdq => self.pavgb_vdq_wdq(instr),
+            Opcode::PavgwVdqWdq => self.pavgw_vdq_wdq(instr),
+
+            // Misc integer
+            Opcode::PmovmskbGdUdq => self.pmovmskb_gd_udq(instr),
+            Opcode::PsadbwVdqWdq => self.psadbw_vdq_wdq(instr),
+            Opcode::MaskmovdquVdqUdq => self.maskmovdqu_vdq_udq(instr),
+
+            // =========================================================================
+            // SSSE3 128-bit Packed Integer (sse.rs)
+            // =========================================================================
+            Opcode::PshufbVdqWdq => self.pshufb_vdq_wdq(instr),
+            Opcode::PmaddubswVdqWdq => self.pmaddubsw_vdq_wdq(instr),
+            Opcode::PsignbVdqWdq => self.psignb_vdq_wdq(instr),
+            Opcode::PsignwVdqWdq => self.psignw_vdq_wdq(instr),
+            Opcode::PsigndVdqWdq => self.psignd_vdq_wdq(instr),
+            Opcode::PalignrVdqWdqIb => self.palignr_vdq_wdq_ib(instr),
+
+            // =========================================================================
+            // SSE4.1 128-bit Packed Integer (sse.rs)
+            // =========================================================================
+            Opcode::PblendvbVdqWdq => self.pblendvb_vdq_wdq(instr),
+            Opcode::PtestVdqWdq => self.ptest_vdq_wdq(instr),
+            Opcode::PmuldqVdqWdq => self.pmuldq_vdq_wdq(instr),
+            Opcode::PminudVdqWdq => self.pminud_vdq_wdq(instr),
+            Opcode::PmaxudVdqWdq => self.pmaxud_vdq_wdq(instr),
+            Opcode::PmulldVdqWdq => self.pmulld_vdq_wdq(instr),
+            Opcode::PblendwVdqWdqIb => self.pblendw_vdq_wdq_ib(instr),
+
+            // SSE4.1 Insert/Extract (PEXTRB/D/Q, PINSRB/D/Q)
+            Opcode::PextrbEdVdqIbR => self.pextrb_ed_vdq_ib_r(instr),
+            Opcode::PextrbMbVdqIbM => self.pextrb_mb_vdq_ib_m(instr),
+            Opcode::PextrdEdVdqIb => self.pextrd_ed_vdq_ib(instr),
+            Opcode::PextrqEqVdqIb => self.pextrq_eq_vdq_ib(instr),
+            Opcode::PinsrbVdqEbIb => self.pinsrb_vdq_eb_ib(instr),
+            Opcode::PinsrdVdqEdIb => self.pinsrd_vdq_ed_ib(instr),
+            Opcode::PinsrqVdqEqIb => self.pinsrq_vdq_eq_ib(instr),
+
+            // =========================================================================
+            // SSE4.1 Sign/Zero Extend (sse_move.rs)
+            // =========================================================================
+            Opcode::PmovsxbwVdqWq => {
+                if instr.mod_c0() {
+                    self.pmovsxbw_vdq_wq_r(instr)
+                } else {
+                    self.pmovsxbw_vdq_wq_m(instr)
+                }
+            }
+            Opcode::PmovsxbdVdqWd => {
+                if instr.mod_c0() {
+                    self.pmovsxbd_vdq_wd_r(instr)
+                } else {
+                    self.pmovsxbd_vdq_wd_m(instr)
+                }
+            }
+            Opcode::PmovsxbqVdqWw => {
+                if instr.mod_c0() {
+                    self.pmovsxbq_vdq_ww_r(instr)
+                } else {
+                    self.pmovsxbq_vdq_ww_m(instr)
+                }
+            }
+            Opcode::PmovsxwdVdqWq => {
+                if instr.mod_c0() {
+                    self.pmovsxwd_vdq_wq_r(instr)
+                } else {
+                    self.pmovsxwd_vdq_wq_m(instr)
+                }
+            }
+            Opcode::PmovsxwqVdqWd => {
+                if instr.mod_c0() {
+                    self.pmovsxwq_vdq_wd_r(instr)
+                } else {
+                    self.pmovsxwq_vdq_wd_m(instr)
+                }
+            }
+            Opcode::PmovsxdqVdqWq => {
+                if instr.mod_c0() {
+                    self.pmovsxdq_vdq_wq_r(instr)
+                } else {
+                    self.pmovsxdq_vdq_wq_m(instr)
+                }
+            }
+            Opcode::PmovzxbwVdqWq => {
+                if instr.mod_c0() {
+                    self.pmovzxbw_vdq_wq_r(instr)
+                } else {
+                    self.pmovzxbw_vdq_wq_m(instr)
+                }
+            }
+            Opcode::PmovzxbdVdqWd => {
+                if instr.mod_c0() {
+                    self.pmovzxbd_vdq_wd_r(instr)
+                } else {
+                    self.pmovzxbd_vdq_wd_m(instr)
+                }
+            }
+            Opcode::PmovzxbqVdqWw => {
+                if instr.mod_c0() {
+                    self.pmovzxbq_vdq_ww_r(instr)
+                } else {
+                    self.pmovzxbq_vdq_ww_m(instr)
+                }
+            }
+            Opcode::PmovzxwdVdqWq => {
+                if instr.mod_c0() {
+                    self.pmovzxwd_vdq_wq_r(instr)
+                } else {
+                    self.pmovzxwd_vdq_wq_m(instr)
+                }
+            }
+            Opcode::PmovzxwqVdqWd => {
+                if instr.mod_c0() {
+                    self.pmovzxwq_vdq_wd_r(instr)
+                } else {
+                    self.pmovzxwq_vdq_wd_m(instr)
+                }
+            }
+            Opcode::PmovzxdqVdqWq => {
+                if instr.mod_c0() {
+                    self.pmovzxdq_vdq_wq_r(instr)
+                } else {
+                    self.pmovzxdq_vdq_wq_m(instr)
+                }
+            }
+
+            // =========================================================================
+            // RDRAND / RDSEED (rdrand.rs — matching Bochs rdrand.cc)
+            // =========================================================================
+            Opcode::RdrandEw => self.rdrand_ew(instr),
+            Opcode::RdrandEd => self.rdrand_ed(instr),
+            Opcode::RdrandEq => self.rdrand_eq(instr),
+            Opcode::RdseedEw => self.rdseed_ew(instr),
+            Opcode::RdseedEd => self.rdseed_ed(instr),
+            Opcode::RdseedEq => self.rdseed_eq(instr),
+
+            // =========================================================================
+            // BMI1 (bmi32.rs / bmi64.rs — matching Bochs bmi32.cc / bmi64.cc)
+            // =========================================================================
+            Opcode::AndnGdBdEd => self.andn_gd_bd_ed(instr),
+            Opcode::AndnGqBqEq => self.andn_gq_bq_eq(instr),
+            Opcode::BlsiBdEd => self.blsi_bd_ed(instr),
+            Opcode::BlsiBqEq => self.blsi_bq_eq(instr),
+            Opcode::BlsmskBdEd => self.blsmsk_bd_ed(instr),
+            Opcode::BlsmskBqEq => self.blsmsk_bq_eq(instr),
+            Opcode::BlsrBdEd => self.blsr_bd_ed(instr),
+            Opcode::BlsrBqEq => self.blsr_bq_eq(instr),
+            Opcode::BextrGdEdBd => self.bextr_gd_ed_bd(instr),
+            Opcode::BextrGqEqBq => self.bextr_gq_eq_bq(instr),
+
+            // =========================================================================
+            // BMI2 (bmi32.rs / bmi64.rs — matching Bochs bmi32.cc / bmi64.cc)
+            // =========================================================================
+            Opcode::MulxGdBdEd => self.mulx_gd_bd_ed(instr),
+            Opcode::MulxGqBqEq => self.mulx_gq_bq_eq(instr),
+            Opcode::RorxGdEdIb => self.rorx_gd_ed_ib(instr),
+            Opcode::RorxGqEqIb => self.rorx_gq_eq_ib(instr),
+            Opcode::ShlxGdEdBd => self.shlx_gd_ed_bd(instr),
+            Opcode::ShlxGqEqBq => self.shlx_gq_eq_bq(instr),
+            Opcode::ShrxGdEdBd => self.shrx_gd_ed_bd(instr),
+            Opcode::ShrxGqEqBq => self.shrx_gq_eq_bq(instr),
+            Opcode::SarxGdEdBd => self.sarx_gd_ed_bd(instr),
+            Opcode::SarxGqEqBq => self.sarx_gq_eq_bq(instr),
+            Opcode::BzhiGdBdEd => self.bzhi_gd_bd_ed(instr),
+            Opcode::BzhiGqBqEq => self.bzhi_gq_bq_eq(instr),
+            Opcode::PextGdBdEd => self.pext_gd_bd_ed(instr),
+            Opcode::PextGqBqEq => self.pext_gq_bq_eq(instr),
+            Opcode::PdepGdBdEd => self.pdep_gd_bd_ed(instr),
+            Opcode::PdepGqBqEq => self.pdep_gq_bq_eq(instr),
+
+            // =========================================================================
+            // ADX (bmi32.rs / bmi64.rs — matching Bochs bmi32.cc / bmi64.cc)
+            // =========================================================================
+            Opcode::AdcxGdEd => self.adcx_gd_ed(instr),
+            Opcode::AdoxGdEd => self.adox_gd_ed(instr),
+            Opcode::AdcxGqEq => self.adcx_gq_eq(instr),
+            Opcode::AdoxGqEq => self.adox_gq_eq(instr),
+
+            // =========================================================================
+            // AES-NI + PCLMULQDQ (aes.rs — matching Bochs aes.cc)
+            // =========================================================================
+            Opcode::AesimcVdqWdq => self.aesimc_vdq_wdq(instr),
+            Opcode::AesencVdqWdq => self.aesenc_vdq_wdq(instr),
+            Opcode::AesenclastVdqWdq => self.aesenclast_vdq_wdq(instr),
+            Opcode::AesdecVdqWdq => self.aesdec_vdq_wdq(instr),
+            Opcode::AesdeclastVdqWdq => self.aesdeclast_vdq_wdq(instr),
+            Opcode::AeskeygenassistVdqWdqIb => self.aeskeygenassist_vdq_wdq_ib(instr),
+            Opcode::PclmulqdqVdqWdqIb => self.pclmulqdq_vdq_wdq_ib(instr),
+
+            // =========================================================================
+            // GFNI — GF(2) polynomial instructions (gf2.rs — matching Bochs gf2.cc)
+            // =========================================================================
+            Opcode::Gf2p8affineqbVdqWdqIb => self.gf2p8affineqb_vdq_wdq_ib(instr),
+            Opcode::Gf2p8affineinvqbVdqWdqIb => self.gf2p8affineinvqb_vdq_wdq_ib(instr),
+            Opcode::Gf2p8mulbVdqWdq => self.gf2p8mulb_vdq_wdq(instr),
+
+            // =========================================================================
+            // SHA-NI (sha.rs — matching Bochs sha.cc)
+            // =========================================================================
+            Opcode::Sha1nexteVdqWdq => self.sha1nexte_vdq_wdq(instr),
+            Opcode::Sha1msg1VdqWdq => self.sha1msg1_vdq_wdq(instr),
+            Opcode::Sha1msg2VdqWdq => self.sha1msg2_vdq_wdq(instr),
+            Opcode::Sha256rnds2VdqWdq => self.sha256rnds2_vdq_wdq(instr),
+            Opcode::Sha256msg1VdqWdq => self.sha256msg1_vdq_wdq(instr),
+            Opcode::Sha256msg2VdqWdq => self.sha256msg2_vdq_wdq(instr),
+            Opcode::Sha1rnds4VdqWdqIb => self.sha1rnds4_vdq_wdq_ib(instr),
+
+            // =========================================================================
+            // SSE4.2 String Operations (sse_string.rs — matching Bochs sse_string.cc)
+            // =========================================================================
+            Opcode::PcmpestrmVdqWdqIb => self.pcmpestrm_vdq_wdq_ib(instr),
+            Opcode::PcmpestriVdqWdqIb => self.pcmpestri_vdq_wdq_ib(instr),
+            Opcode::PcmpistrmVdqWdqIb => self.pcmpistrm_vdq_wdq_ib(instr),
+            Opcode::PcmpistriVdqWdqIb => self.pcmpistri_vdq_wdq_ib(instr),
+
+            // End-of-trace sentinel (matching C++ BxEndTrace).
+            // Sets STOP_TRACE so the inner loop breaks at the async_event check.
+            Opcode::InsertedOpcode => {
+                self.async_event |= super::cpu::BX_ASYNC_EVENT_STOP_TRACE;
+                Ok(())
+            }
+
+            // IaError — illegal/unsupported opcode, raise #UD
+            // Bochs stores IaError in the trace and executes it like any instruction.
+            // The execution raises #UD with prev_rip correctly set to the faulting address.
+            Opcode::IaError => {
+                self.bx_error(instr)?;
+                Ok(())
+            }
+
+            // =========================================================================
+            // AVX/AVX-512 specific opcodes
+            // =========================================================================
+            Opcode::EvexVpermi2dVdqHdqWdqKmask => self.vpermi2d(instr),
+            // VPRORD/VPROLD: dispatched below with other EVEX rotate handlers
+
+            // EVEX AVX-512F integer instructions (avx512.rs handlers)
+            Opcode::EvexVmovdqu32VdqWdq | Opcode::EvexVmovdqu32VdqWdqKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu32_load_r(instr) }
+                else { self.evex_vmovdqu32_load_m(instr) }
+            }
+            Opcode::EvexVmovdqu32WdqVdq | Opcode::EvexVmovdqu32WdqVdqKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu32_store_r(instr) }
+                else { self.evex_vmovdqu32_store_m(instr) }
+            }
+            Opcode::EvexVmovdqu64VdqWdq | Opcode::EvexVmovdqu64VdqWdqKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu64_load_r(instr) }
+                else { self.evex_vmovdqu64_load_m(instr) }
+            }
+            Opcode::EvexVmovdqu64WdqVdq | Opcode::EvexVmovdqu64WdqVdqKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu64_store_r(instr) }
+                else { self.evex_vmovdqu64_store_m(instr) }
+            }
+            Opcode::EvexVmovdqa32VdqWdq | Opcode::EvexVmovdqa32VdqWdqKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu32_load_r(instr) }
+                else { self.evex_vmovdqu32_load_m(instr) }
+            }
+            Opcode::EvexVmovdqa32WdqVdq | Opcode::EvexVmovdqa32WdqVdqKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu32_store_r(instr) }
+                else { self.evex_vmovdqu32_store_m(instr) }
+            }
+            Opcode::EvexVmovdqa64VdqWdq | Opcode::EvexVmovdqa64VdqWdqKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu64_load_r(instr) }
+                else { self.evex_vmovdqu64_load_m(instr) }
+            }
+            Opcode::EvexVmovdqa64WdqVdq | Opcode::EvexVmovdqa64WdqVdqKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu64_store_r(instr) }
+                else { self.evex_vmovdqu64_store_m(instr) }
+            }
+            Opcode::EvexVpadddVdqHdqWdq | Opcode::EvexVpadddVdqHdqWdqKmask => self.evex_vpaddd(instr),
+            Opcode::EvexVpaddqVdqHdqWdq | Opcode::EvexVpaddqVdqHdqWdqKmask => self.evex_vpaddq(instr),
+            Opcode::EvexVpsubdVdqHdqWdq | Opcode::EvexVpsubdVdqHdqWdqKmask => self.evex_vpsubd(instr),
+            Opcode::EvexVpsubqVdqHdqWdq | Opcode::EvexVpsubqVdqHdqWdqKmask => self.evex_vpsubq(instr),
+            Opcode::EvexVpxordVdqHdqWdq | Opcode::EvexVpxordVdqHdqWdqKmask => self.evex_vpxord(instr),
+            Opcode::EvexVpxorqVdqHdqWdq | Opcode::EvexVpxorqVdqHdqWdqKmask => self.evex_vpxorq(instr),
+            Opcode::EvexVpordVdqHdqWdq | Opcode::EvexVpordVdqHdqWdqKmask => self.evex_vpord(instr),
+            Opcode::EvexVporqVdqHdqWdq | Opcode::EvexVporqVdqHdqWdqKmask => {
+                // VPORQ uses qword masking granularity but the bitwise OR operation is identical
+                self.evex_vpord(instr)
+            }
+            Opcode::EvexVpanddVdqHdqWdq | Opcode::EvexVpanddVdqHdqWdqKmask => self.evex_vpandd(instr),
+            Opcode::EvexVpandqVdqHdqWdq | Opcode::EvexVpandqVdqHdqWdqKmask => {
+                // VPANDQ uses qword masking granularity — same bitwise AND, different mask element size
+                self.evex_vpandd(instr)
+            }
+            Opcode::EvexVpandndVdqHdqWdq | Opcode::EvexVpandndVdqHdqWdqKmask => self.evex_vpandnd(instr),
+            Opcode::EvexVpandnqVdqHdqWdq | Opcode::EvexVpandnqVdqHdqWdqKmask => {
+                // VPANDNQ uses qword masking granularity
+                self.evex_vpandnd(instr)
+            }
+            Opcode::EvexVpbroadcastdVdqWd | Opcode::EvexVpbroadcastdVdqWdKmask => self.evex_vpbroadcastd(instr),
+            Opcode::EvexVpbroadcastqVdqWq | Opcode::EvexVpbroadcastqVdqWqKmask => self.evex_vpbroadcastq(instr),
+            Opcode::EvexVpbroadcastdVdqEd | Opcode::EvexVpbroadcastdVdqEdKmask => self.evex_vpbroadcastd_gpr(instr),
+            Opcode::EvexVpbroadcastqVdqEq | Opcode::EvexVpbroadcastqVdqEqKmask => self.evex_vpbroadcastq_gpr(instr),
+
+            // AVX-512F: VPTERNLOG, VPSHUFB, VPSHUFD, shifts, insert/extract
+            Opcode::EvexVpternlogdVdqHdqWdqIb | Opcode::EvexVpternlogdVdqHdqWdqIbKmask => self.evex_vpternlogd(instr),
+            Opcode::EvexVpternlogqVdqHdqWdqIb | Opcode::EvexVpternlogqVdqHdqWdqIbKmask => self.evex_vpternlogq(instr),
+            Opcode::EvexVpshufdVdqWdqIb | Opcode::EvexVpshufdVdqWdqIbKmask => self.evex_vpshufd(instr),
+            Opcode::EvexVpshufbVdqHdqWdq | Opcode::EvexVpshufbVdqHdqWdqKmask => self.evex_vpshufb(instr),
+            Opcode::EvexVinserti32x4VdqHdqWdqIb | Opcode::EvexVinserti32x4VdqHdqWdqIbKmask => self.evex_vinserti32x4(instr),
+            Opcode::EvexVinsertf32x4VpsHpsWpsIb | Opcode::EvexVinsertf32x4VpsHpsWpsIbKmask => self.evex_vinserti32x4(instr),
+            Opcode::EvexVextracti32x4WdqVdqIb | Opcode::EvexVextracti32x4WdqVdqIbKmask => self.evex_vextracti32x4(instr),
+            Opcode::EvexVextractf32x4WpsVpsIb | Opcode::EvexVextractf32x4WpsVpsIbKmask => self.evex_vextracti32x4(instr),
+            Opcode::EvexVpslldUdqIb | Opcode::EvexVpslldUdqIbKmask => self.evex_vpslld_imm(instr),
+            Opcode::EvexVpsllqUdqIb | Opcode::EvexVpsllqUdqIbKmask => self.evex_vpsllq_imm(instr),
+            Opcode::EvexVpsrldUdqIb | Opcode::EvexVpsrldUdqIbKmask => self.evex_vpsrld_imm(instr),
+            Opcode::EvexVpsrlqUdqIb | Opcode::EvexVpsrlqUdqIbKmask => self.evex_vpsrlq_imm(instr),
+            Opcode::EvexVpsradUdqIb | Opcode::EvexVpsradUdqIbKmask => self.evex_vpsrad_imm(instr),
+            Opcode::EvexVpsraqUdqIb | Opcode::EvexVpsraqUdqIbKmask => self.evex_vpsraq_imm(instr),
+            // Shift by XMM register
+            Opcode::EvexVpslldVdqHdqWdq | Opcode::EvexVpslldVdqHdqWdqKmask => self.evex_vpslld_reg(instr),
+            Opcode::EvexVpsllqVdqHdqWdq | Opcode::EvexVpsllqVdqHdqWdqKmask => self.evex_vpsllq_reg(instr),
+            Opcode::EvexVpsrldVdqHdqWdq | Opcode::EvexVpsrldVdqHdqWdqKmask => self.evex_vpsrld_reg(instr),
+            Opcode::EvexVpsrlqVdqHdqWdq | Opcode::EvexVpsrlqVdqHdqWdqKmask => self.evex_vpsrlq_reg(instr),
+            Opcode::EvexVpsradVdqHdqWdq | Opcode::EvexVpsradVdqHdqWdqKmask => self.evex_vpsrad_reg(instr),
+            Opcode::EvexVpsraqVdqHdqWdq | Opcode::EvexVpsraqVdqHdqWdqKmask => self.evex_vpsraq_reg(instr),
+            // Packed compare → opmask
+            Opcode::EvexVpcmpdKgwHdqWdqIb => self.evex_vpcmpd(instr),
+            Opcode::EvexVpcmpudKgwHdqWdqIb => self.evex_vpcmpud(instr),
+            // Multiply / Min / Max
+            Opcode::EvexVpmulldVdqHdqWdq | Opcode::EvexVpmulldVdqHdqWdqKmask => self.evex_vpmulld(instr),
+            Opcode::EvexVpminsdVdqHdqWdq | Opcode::EvexVpminsdVdqHdqWdqKmask => self.evex_vpminsd(instr),
+            Opcode::EvexVpmaxsdVdqHdqWdq | Opcode::EvexVpmaxsdVdqHdqWdqKmask => self.evex_vpmaxsd(instr),
+            // Rotate by immediate
+            Opcode::EvexVproldUdqIb | Opcode::EvexVproldUdqIbKmask => self.evex_vprold_imm(instr),
+            Opcode::EvexVprordUdqIb | Opcode::EvexVprordUdqIbKmask => self.evex_vprord_imm(instr),
+            Opcode::EvexVprolqUdqIb | Opcode::EvexVprolqUdqIbKmask => self.evex_vprolq_imm(instr),
+            Opcode::EvexVprorqUdqIb | Opcode::EvexVprorqUdqIbKmask => self.evex_vprorq_imm(instr),
+            // Permute
+            Opcode::EvexVpermdVdqHdqWdqKmask => self.evex_vpermd(instr),
+            Opcode::EvexVpermqVdqHdqWdqKmask => self.evex_vpermq_reg(instr),
+            Opcode::EvexVpermqVdqWdqIbKmask => self.evex_vpermq_imm(instr),
+            // Unpack
+            Opcode::EvexVpunpckldqVdqHdqWdq | Opcode::EvexVpunpckldqVdqHdqWdqKmask => self.evex_vpunpckldq(instr),
+            Opcode::EvexVpunpckhdqVdqHdqWdq | Opcode::EvexVpunpckhdqVdqHdqWdqKmask => self.evex_vpunpckhdq(instr),
+            Opcode::EvexVpunpcklqdqVdqHdqWdq | Opcode::EvexVpunpcklqdqVdqHdqWdqKmask => self.evex_vpunpcklqdq(instr),
+            Opcode::EvexVpunpckhqdqVdqHdqWdq | Opcode::EvexVpunpckhqdqVdqHdqWdqKmask => self.evex_vpunpckhqdq(instr),
+            Opcode::EvexVpblendmdVdqHdqWdq => self.evex_vpblendmd(instr),
+            Opcode::EvexVpblendmqVdqHdqWdq => self.evex_vpblendmq(instr),
+            Opcode::EvexVpabsdVdqWdq | Opcode::EvexVpabsdVdqWdqKmask => self.evex_vpabsd(instr),
+            Opcode::EvexVpabsqVdqWdq | Opcode::EvexVpabsqVdqWdqKmask => self.evex_vpabsq(instr),
+            Opcode::EvexVpslldqUdqIb => self.evex_vpslldq(instr),
+            Opcode::EvexVpsrldqUdqIb => self.evex_vpsrldq(instr),
+            // Variable shifts
+            Opcode::EvexVpsllvdVdqHdqWdq | Opcode::EvexVpsllvdVdqHdqWdqKmask => self.evex_vpsllvd(instr),
+            Opcode::EvexVpsllvqVdqHdqWdq | Opcode::EvexVpsllvqVdqHdqWdqKmask => self.evex_vpsllvq(instr),
+            Opcode::EvexVpsrlvdVdqHdqWdq | Opcode::EvexVpsrlvdVdqHdqWdqKmask => self.evex_vpsrlvd(instr),
+            Opcode::EvexVpsrlvqVdqHdqWdq | Opcode::EvexVpsrlvqVdqHdqWdqKmask => self.evex_vpsrlvq(instr),
+            Opcode::EvexVpsravdVdqHdqWdq | Opcode::EvexVpsravdVdqHdqWdqKmask => self.evex_vpsravd(instr),
+            Opcode::EvexVpsravqVdqHdqWdq | Opcode::EvexVpsravqVdqHdqWdqKmask => self.evex_vpsravq(instr),
+            // Variable rotates
+            Opcode::EvexVprolvdVdqHdqWdq | Opcode::EvexVprolvdVdqHdqWdqKmask => self.evex_vprolvd(instr),
+            Opcode::EvexVprolvqVdqHdqWdq | Opcode::EvexVprolvqVdqHdqWdqKmask => self.evex_vprolvq(instr),
+            Opcode::EvexVprorvdVdqHdqWdq | Opcode::EvexVprorvdVdqHdqWdqKmask => self.evex_vprorvd(instr),
+            Opcode::EvexVprorvqVdqHdqWdq | Opcode::EvexVprorvqVdqHdqWdqKmask => self.evex_vprorvq(instr),
+            // VPMULUDQ
+            Opcode::EvexVpmuludqVdqHdqWdq | Opcode::EvexVpmuludqVdqHdqWdqKmask => self.evex_vpmuludq(instr),
+            // Compare → opmask
+            Opcode::EvexVpcmpeqdKgwHdqWdq => self.evex_vpcmpeqd(instr),
+            Opcode::EvexVpcmpgtdKgwHdqWdq => self.evex_vpcmpgtd(instr),
+            Opcode::EvexVpcmpeqqKgbHdqWdq => self.evex_vpcmpeqq(instr),
+            Opcode::EvexVpcmpgtqKgbHdqWdq => self.evex_vpcmpgtq(instr),
+            // Sign/zero extend
+            Opcode::EvexVpmovsxdqVdqWdq | Opcode::EvexVpmovsxdqVdqWdqKmask => self.evex_vpmovsxdq(instr),
+            Opcode::EvexVpmovzxdqVdqWdq | Opcode::EvexVpmovzxdqVdqWdqKmask => self.evex_vpmovzxdq(instr),
+            // VPALIGNR EVEX
+            Opcode::EvexVpalignrVdqHdqWdqIb | Opcode::EvexVpalignrVdqHdqWdqIbKmask => self.evex_vpalignr(instr),
+            // VMOVUPS/VMOVUPD/VMOVAPS/VMOVAPD (EVEX) — all reuse VMOVDQU32 handlers
+            Opcode::EvexVmovupsVpsWps | Opcode::EvexVmovupsVpsWpsKmask
+            | Opcode::EvexVmovapsVpsWps | Opcode::EvexVmovapsVpsWpsKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu32_load_r(instr) }
+                else { self.evex_vmovdqu32_load_m(instr) }
+            }
+            Opcode::EvexVmovupsWpsVps | Opcode::EvexVmovupsWpsVpsKmask
+            | Opcode::EvexVmovapsWpsVps | Opcode::EvexVmovapsWpsVpsKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu32_store_r(instr) }
+                else { self.evex_vmovdqu32_store_m(instr) }
+            }
+            Opcode::EvexVmovupdVpdWpd | Opcode::EvexVmovupdVpdWpdKmask
+            | Opcode::EvexVmovapdVpdWpd | Opcode::EvexVmovapdVpdWpdKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu64_load_r(instr) }
+                else { self.evex_vmovdqu64_load_m(instr) }
+            }
+            Opcode::EvexVmovupdWpdVpd | Opcode::EvexVmovupdWpdVpdKmask
+            | Opcode::EvexVmovapdWpdVpd | Opcode::EvexVmovapdWpdVpdKmask => {
+                if instr.mod_c0() { self.evex_vmovdqu64_store_r(instr) }
+                else { self.evex_vmovdqu64_store_m(instr) }
+            }
+
+            // --- EVEX FP scalar (avx512_scalar.rs) ---
+            Opcode::EvexVaddssVssHpsWss | Opcode::EvexVaddssVssHpsWssKmask => self.evex_vaddss(instr),
+            Opcode::EvexVaddsdVsdHpdWsd | Opcode::EvexVaddsdVsdHpdWsdKmask => self.evex_vaddsd(instr),
+            Opcode::EvexVsubssVssHpsWss | Opcode::EvexVsubssVssHpsWssKmask => self.evex_vsubss(instr),
+            Opcode::EvexVsubsdVsdHpdWsd | Opcode::EvexVsubsdVsdHpdWsdKmask => self.evex_vsubsd(instr),
+            Opcode::EvexVmulssVssHpsWss | Opcode::EvexVmulssVssHpsWssKmask => self.evex_vmulss(instr),
+            Opcode::EvexVmulsdVsdHpdWsd | Opcode::EvexVmulsdVsdHpdWsdKmask => self.evex_vmulsd(instr),
+            Opcode::EvexVdivssVssHpsWss | Opcode::EvexVdivssVssHpsWssKmask => self.evex_vdivss(instr),
+            Opcode::EvexVdivsdVsdHpdWsd | Opcode::EvexVdivsdVsdHpdWsdKmask => self.evex_vdivsd(instr),
+            Opcode::EvexVminssVssHpsWss | Opcode::EvexVminssVssHpsWssKmask => self.evex_vminss(instr),
+            Opcode::EvexVminsdVsdHpdWsd | Opcode::EvexVminsdVsdHpdWsdKmask => self.evex_vminsd(instr),
+            Opcode::EvexVmaxssVssHpsWss | Opcode::EvexVmaxssVssHpsWssKmask => self.evex_vmaxss(instr),
+            Opcode::EvexVmaxsdVsdHpdWsd | Opcode::EvexVmaxsdVsdHpdWsdKmask => self.evex_vmaxsd(instr),
+            Opcode::EvexVsqrtssVssHpsWss | Opcode::EvexVsqrtssVssHpsWssKmask => self.evex_vsqrtss(instr),
+            Opcode::EvexVsqrtsdVsdHpdWsd | Opcode::EvexVsqrtsdVsdHpdWsdKmask => self.evex_vsqrtsd(instr),
+            // VMOVSS/VMOVSD load/store
+            Opcode::EvexVmovssVssWss | Opcode::EvexVmovssVssWssKmask
+            | Opcode::EvexVmovssVssHpsWss | Opcode::EvexVmovssVssHpsWssKmask => self.evex_vmovss_load(instr),
+            Opcode::EvexVmovssWssVss | Opcode::EvexVmovssWssVssKmask
+            | Opcode::EvexVmovssWssHpsVss | Opcode::EvexVmovssWssHpsVssKmask => self.evex_vmovss_store(instr),
+            Opcode::EvexVmovsdVsdWsd | Opcode::EvexVmovsdVsdWsdKmask
+            | Opcode::EvexVmovsdVsdHpdWsd | Opcode::EvexVmovsdVsdHpdWsdKmask => self.evex_vmovsd_load(instr),
+            Opcode::EvexVmovsdWsdVsd | Opcode::EvexVmovsdWsdVsdKmask
+            | Opcode::EvexVmovsdWsdHpdVsd | Opcode::EvexVmovsdWsdHpdVsdKmask => self.evex_vmovsd_store(instr),
+
+            // Packed FP arithmetic (EVEX)
+            Opcode::EvexVaddpsVpsHpsWps | Opcode::EvexVaddpsVpsHpsWpsKmask => self.evex_vaddps(instr),
+            Opcode::EvexVaddpdVpdHpdWpd | Opcode::EvexVaddpdVpdHpdWpdKmask => self.evex_vaddpd(instr),
+            Opcode::EvexVsubpsVpsHpsWps | Opcode::EvexVsubpsVpsHpsWpsKmask => self.evex_vsubps(instr),
+            Opcode::EvexVsubpdVpdHpdWpd | Opcode::EvexVsubpdVpdHpdWpdKmask => self.evex_vsubpd(instr),
+            Opcode::EvexVmulpsVpsHpsWps | Opcode::EvexVmulpsVpsHpsWpsKmask => self.evex_vmulps(instr),
+            Opcode::EvexVmulpdVpdHpdWpd | Opcode::EvexVmulpdVpdHpdWpdKmask => self.evex_vmulpd(instr),
+            Opcode::EvexVdivpsVpsHpsWps | Opcode::EvexVdivpsVpsHpsWpsKmask => self.evex_vdivps(instr),
+            Opcode::EvexVdivpdVpdHpdWpd | Opcode::EvexVdivpdVpdHpdWpdKmask => self.evex_vdivpd(instr),
+            Opcode::EvexVmaxpsVpsHpsWps | Opcode::EvexVmaxpsVpsHpsWpsKmask => self.evex_vmaxps(instr),
+            Opcode::EvexVmaxpdVpdHpdWpd | Opcode::EvexVmaxpdVpdHpdWpdKmask => self.evex_vmaxpd(instr),
+            Opcode::EvexVminpsVpsHpsWps | Opcode::EvexVminpsVpsHpsWpsKmask => self.evex_vminps(instr),
+            Opcode::EvexVminpdVpdHpdWpd | Opcode::EvexVminpdVpdHpdWpdKmask => self.evex_vminpd(instr),
+            Opcode::EvexVsqrtpsVpsWps | Opcode::EvexVsqrtpsVpsWpsKmask => self.evex_vsqrtps(instr),
+            Opcode::EvexVsqrtpdVpdWpd | Opcode::EvexVsqrtpdVpdWpdKmask => self.evex_vsqrtpd(instr),
+            // Scalar FP: already wired above (lines ~3068-3081)
+
+            // --- EVEX FP conversions (avx512_cvt.rs) ---
+            Opcode::EvexVcvtdq2psVpsWdq | Opcode::EvexVcvtdq2psVpsWdqKmask => self.evex_vcvtdq2ps(instr),
+            Opcode::EvexVcvtps2dqVdqWps | Opcode::EvexVcvtps2dqVdqWpsKmask => self.evex_vcvtps2dq(instr),
+            Opcode::EvexVcvttps2dqVdqWps | Opcode::EvexVcvttps2dqVdqWpsKmask => self.evex_vcvttps2dq(instr),
+            Opcode::EvexVcvtdq2pdVpdWdq | Opcode::EvexVcvtdq2pdVpdWdqKmask => self.evex_vcvtdq2pd(instr),
+            Opcode::EvexVcvtpd2dqVdqWpd | Opcode::EvexVcvtpd2dqVdqWpdKmask => self.evex_vcvtpd2dq(instr),
+            Opcode::EvexVcvttpd2dqVdqWpd | Opcode::EvexVcvttpd2dqVdqWpdKmask => self.evex_vcvttpd2dq(instr),
+            Opcode::EvexVcvtps2pdVpdWps | Opcode::EvexVcvtps2pdVpdWpsKmask => self.evex_vcvtps2pd(instr),
+            Opcode::EvexVcvtpd2psVpsWpd | Opcode::EvexVcvtpd2psVpsWpdKmask => self.evex_vcvtpd2ps(instr),
+            Opcode::EvexVcvtudq2psVpsWdq | Opcode::EvexVcvtudq2psVpsWdqKmask => self.evex_vcvtudq2ps(instr),
+            Opcode::EvexVcvtps2udqVdqWps | Opcode::EvexVcvtps2udqVdqWpsKmask => self.evex_vcvtps2udq(instr),
+            Opcode::EvexVcvttps2udqVdqWps | Opcode::EvexVcvttps2udqVdqWpsKmask => self.evex_vcvttps2udq(instr),
+
+            // --- EVEX FMA (avx512_fma.rs) ---
+            Opcode::EvexVfmadd132psVpsHpsWps | Opcode::EvexVfmadd132psVpsHpsWpsKmask => self.evex_vfmadd132ps(instr),
+            Opcode::EvexVfmadd132pdVpdHpdWpd | Opcode::EvexVfmadd132pdVpdHpdWpdKmask => self.evex_vfmadd132pd(instr),
+            Opcode::EvexVfmadd213psVpsHpsWps | Opcode::EvexVfmadd213psVpsHpsWpsKmask => self.evex_vfmadd213ps(instr),
+            Opcode::EvexVfmadd213pdVpdHpdWpd | Opcode::EvexVfmadd213pdVpdHpdWpdKmask => self.evex_vfmadd213pd(instr),
+            Opcode::EvexVfmadd231psVpsHpsWps | Opcode::EvexVfmadd231psVpsHpsWpsKmask => self.evex_vfmadd231ps(instr),
+            Opcode::EvexVfmadd231pdVpdHpdWpd | Opcode::EvexVfmadd231pdVpdHpdWpdKmask => self.evex_vfmadd231pd(instr),
+            Opcode::EvexVfmsub132psVpsHpsWps | Opcode::EvexVfmsub132psVpsHpsWpsKmask => self.evex_vfmsub132ps(instr),
+            Opcode::EvexVfmsub132pdVpdHpdWpd | Opcode::EvexVfmsub132pdVpdHpdWpdKmask => self.evex_vfmsub132pd(instr),
+            Opcode::EvexVfmsub213psVpsHpsWps | Opcode::EvexVfmsub213psVpsHpsWpsKmask => self.evex_vfmsub213ps(instr),
+            Opcode::EvexVfmsub213pdVpdHpdWpd | Opcode::EvexVfmsub213pdVpdHpdWpdKmask => self.evex_vfmsub213pd(instr),
+            Opcode::EvexVfmsub231psVpsHpsWps | Opcode::EvexVfmsub231psVpsHpsWpsKmask => self.evex_vfmsub231ps(instr),
+            Opcode::EvexVfmsub231pdVpdHpdWpd | Opcode::EvexVfmsub231pdVpdHpdWpdKmask => self.evex_vfmsub231pd(instr),
+            Opcode::EvexVfnmadd132psVpsHpsWps | Opcode::EvexVfnmadd132psVpsHpsWpsKmask => self.evex_vfnmadd132ps(instr),
+            Opcode::EvexVfnmadd132pdVpdHpdWpd | Opcode::EvexVfnmadd132pdVpdHpdWpdKmask => self.evex_vfnmadd132pd(instr),
+            Opcode::EvexVfnmadd213psVpsHpsWps | Opcode::EvexVfnmadd213psVpsHpsWpsKmask => self.evex_vfnmadd213ps(instr),
+            Opcode::EvexVfnmadd213pdVpdHpdWpd | Opcode::EvexVfnmadd213pdVpdHpdWpdKmask => self.evex_vfnmadd213pd(instr),
+            Opcode::EvexVfnmadd231psVpsHpsWps | Opcode::EvexVfnmadd231psVpsHpsWpsKmask => self.evex_vfnmadd231ps(instr),
+            Opcode::EvexVfnmadd231pdVpdHpdWpd | Opcode::EvexVfnmadd231pdVpdHpdWpdKmask => self.evex_vfnmadd231pd(instr),
+            Opcode::EvexVfnmsub132psVpsHpsWps | Opcode::EvexVfnmsub132psVpsHpsWpsKmask => self.evex_vfnmsub132ps(instr),
+            Opcode::EvexVfnmsub132pdVpdHpdWpd | Opcode::EvexVfnmsub132pdVpdHpdWpdKmask => self.evex_vfnmsub132pd(instr),
+            Opcode::EvexVfnmsub213psVpsHpsWps | Opcode::EvexVfnmsub213psVpsHpsWpsKmask => self.evex_vfnmsub213ps(instr),
+            Opcode::EvexVfnmsub213pdVpdHpdWpd | Opcode::EvexVfnmsub213pdVpdHpdWpdKmask => self.evex_vfnmsub213pd(instr),
+            Opcode::EvexVfnmsub231psVpsHpsWps | Opcode::EvexVfnmsub231psVpsHpsWpsKmask => self.evex_vfnmsub231ps(instr),
+            Opcode::EvexVfnmsub231pdVpdHpdWpd | Opcode::EvexVfnmsub231pdVpdHpdWpdKmask => self.evex_vfnmsub231pd(instr),
+
+            // --- EVEX FP compare (avx512_cmp.rs) ---
+            Opcode::EvexVcmppsKgwHpsWpsIb => {
+                if instr.mod_c0() { self.evex_vcmpps_r(instr) }
+                else { self.evex_vcmpps_m(instr) }
+            }
+            Opcode::EvexVcmppdKgbHpdWpdIb => {
+                if instr.mod_c0() { self.evex_vcmppd_r(instr) }
+                else { self.evex_vcmppd_m(instr) }
+            }
+            Opcode::EvexVptestmdKgwHdqWdq => {
+                if instr.mod_c0() { self.evex_vptestmd_r(instr) }
+                else { self.evex_vptestmd_m(instr) }
+            }
+            Opcode::EvexVptestmqKgbHdqWdq => {
+                if instr.mod_c0() { self.evex_vptestmq_r(instr) }
+                else { self.evex_vptestmq_m(instr) }
+            }
+            Opcode::EvexVptestnmdKgwHdqWdq => {
+                if instr.mod_c0() { self.evex_vptestnmd_r(instr) }
+                else { self.evex_vptestnmd_m(instr) }
+            }
+            Opcode::EvexVptestnmqKgbHdqWdq => {
+                if instr.mod_c0() { self.evex_vptestnmq_r(instr) }
+                else { self.evex_vptestnmq_m(instr) }
+            }
+            Opcode::EvexVpmovm2dVdqKew => self.evex_vpmovm2d(instr),
+            Opcode::EvexVpmovm2qVdqKeb => self.evex_vpmovm2q(instr),
+            Opcode::EvexVpmovd2mKgwWdq => self.evex_vpmovd2m(instr),
+            Opcode::EvexVpmovq2mKgbWdq => self.evex_vpmovq2m(instr),
+
+            // --- EVEX BW byte/word ops (avx512_bw.rs) ---
+            Opcode::EvexVpaddbVdqHdqWdq | Opcode::EvexVpaddbVdqHdqWdqKmask => self.evex_vpaddb(instr),
+            Opcode::EvexVpaddwVdqHdqWdq | Opcode::EvexVpaddwVdqHdqWdqKmask => self.evex_vpaddw(instr),
+            Opcode::EvexVpsubbVdqHdqWdq | Opcode::EvexVpsubbVdqHdqWdqKmask => self.evex_vpsubb(instr),
+            Opcode::EvexVpsubwVdqHdqWdq | Opcode::EvexVpsubwVdqHdqWdqKmask => self.evex_vpsubw(instr),
+            Opcode::EvexVpmullwVdqHdqWdq | Opcode::EvexVpmullwVdqHdqWdqKmask => self.evex_vpmullw(instr),
+            Opcode::EvexVpavgbVdqHdqWdq | Opcode::EvexVpavgbVdqHdqWdqKmask => self.evex_vpavgb(instr),
+            Opcode::EvexVpavgwVdqHdqWdq | Opcode::EvexVpavgwVdqHdqWdqKmask => self.evex_vpavgw(instr),
+            Opcode::EvexVpmaxubVdqHdqWdq | Opcode::EvexVpmaxubVdqHdqWdqKmask => self.evex_vpmaxub(instr),
+            Opcode::EvexVpminubVdqHdqWdq | Opcode::EvexVpminubVdqHdqWdqKmask => self.evex_vpminub(instr),
+            Opcode::EvexVpmaxswVdqHdqWdq | Opcode::EvexVpmaxswVdqHdqWdqKmask => self.evex_vpmaxsw(instr),
+            Opcode::EvexVpminswVdqHdqWdq | Opcode::EvexVpminswVdqHdqWdqKmask => self.evex_vpminsw(instr),
+            Opcode::EvexVpackssdwVdqHdqWdq | Opcode::EvexVpackssdwVdqHdqWdqKmask => self.evex_vpackssdw(instr),
+            Opcode::EvexVpackusdwVdqHdqWdq | Opcode::EvexVpackusdwVdqHdqWdqKmask => self.evex_vpackusdw(instr),
+            Opcode::EvexVpunpcklbwVdqHdqWdq | Opcode::EvexVpunpcklbwVdqHdqWdqKmask => self.evex_vpunpcklbw(instr),
+            Opcode::EvexVpunpckhbwVdqHdqWdq | Opcode::EvexVpunpckhbwVdqHdqWdqKmask => self.evex_vpunpckhbw(instr),
+            Opcode::EvexVpunpcklwdVdqHdqWdq | Opcode::EvexVpunpcklwdVdqHdqWdqKmask => self.evex_vpunpcklwd(instr),
+            Opcode::EvexVpunpckhwdVdqHdqWdq | Opcode::EvexVpunpckhwdVdqHdqWdqKmask => self.evex_vpunpckhwd(instr),
+
+            // --- EVEX integer (avx512_int.rs) ---
+            Opcode::EvexVpmuldqVdqHdqWdq | Opcode::EvexVpmuldqVdqHdqWdqKmask => self.evex_vpmuldq(instr),
+            Opcode::EvexVpmulhuwVdqHdqWdq | Opcode::EvexVpmulhuwVdqHdqWdqKmask => self.evex_vpmulhuw(instr),
+            Opcode::EvexVpmulhwVdqHdqWdq | Opcode::EvexVpmulhwVdqHdqWdqKmask => self.evex_vpmulhw(instr),
+            Opcode::EvexVpmaddwdVdqHdqWdq | Opcode::EvexVpmaddwdVdqHdqWdqKmask => self.evex_vpmaddwd(instr),
+            Opcode::EvexVpmaddubswVdqHdqWdq | Opcode::EvexVpmaddubswVdqHdqWdqKmask => self.evex_vpmaddubsw(instr),
+            Opcode::EvexVpsadbwVdqHdqWdq => self.evex_vpsadbw(instr),
+            Opcode::EvexVpminudVdqHdqWdq | Opcode::EvexVpminudVdqHdqWdqKmask => self.evex_vpminud(instr),
+            Opcode::EvexVpmaxudVdqHdqWdq | Opcode::EvexVpmaxudVdqHdqWdqKmask => self.evex_vpmaxud(instr),
+            Opcode::EvexVpminuqVdqHdqWdq | Opcode::EvexVpminuqVdqHdqWdqKmask => self.evex_vpminuq(instr),
+            Opcode::EvexVpmaxuqVdqHdqWdq | Opcode::EvexVpmaxuqVdqHdqWdqKmask => self.evex_vpmaxuq(instr),
+            Opcode::EvexVpminsqVdqHdqWdq | Opcode::EvexVpminsqVdqHdqWdqKmask => self.evex_vpminsq(instr),
+            Opcode::EvexVpmaxsqVdqHdqWdq | Opcode::EvexVpmaxsqVdqHdqWdqKmask => self.evex_vpmaxsq(instr),
+
+            // --- EVEX rounding/scale/getexp/getmant (avx512_round.rs) ---
+            Opcode::EvexVrndscalepsVpsWpsIbKmask => self.evex_vrndscaleps(instr),
+            Opcode::EvexVrndscalepdVpdWpdIbKmask => self.evex_vrndscalepd(instr),
+            Opcode::EvexVrndscalessVssHpsWssIbKmask => self.evex_vrndscaless(instr),
+            Opcode::EvexVrndscalesdVsdHpdWsdIbKmask => self.evex_vrndscalesd(instr),
+            Opcode::EvexVscalefpsVpsHpsWps | Opcode::EvexVscalefpsVpsHpsWpsKmask => self.evex_vscalefps(instr),
+            Opcode::EvexVscalefpdVpdHpdWpd | Opcode::EvexVscalefpdVpdHpdWpdKmask => self.evex_vscalefpd(instr),
+            Opcode::EvexVgetexppsVpsWps | Opcode::EvexVgetexppsVpsWpsKmask => self.evex_vgetexpps(instr),
+            Opcode::EvexVgetexppdVpdWpd | Opcode::EvexVgetexppdVpdWpdKmask => self.evex_vgetexppd(instr),
+            Opcode::EvexVgetmantpsVpsWpsIbKmask => self.evex_vgetmantps(instr),
+            Opcode::EvexVgetmantpdVpdWpdIbKmask => self.evex_vgetmantpd(instr),
+
+            // --- EVEX shuffle/permute (avx512_perm.rs) ---
+            Opcode::EvexVshuff32x4VpsHpsWpsIbKmask => self.evex_vshuff32x4(instr),
+            Opcode::EvexVshuff64x2VpdHpdWpdIbKmask => self.evex_vshuff64x2(instr),
+            Opcode::EvexVshufi32x4VdqHdqWdqIbKmask => self.evex_vshuff32x4(instr),
+            Opcode::EvexVshufi64x2VdqHdqWdqIbKmask => self.evex_vshuff64x2(instr),
+            Opcode::EvexVpermilpsVpsWpsIb | Opcode::EvexVpermilpsVpsWpsIbKmask => self.evex_vpermilps_imm(instr),
+            Opcode::EvexVpermilpdVpdWpdIb | Opcode::EvexVpermilpdVpdWpdIbKmask => self.evex_vpermilpd_imm(instr),
+            Opcode::EvexVpermilpsVpsHpsWps | Opcode::EvexVpermilpsVpsHpsWpsKmask => self.evex_vpermilps_reg(instr),
+            Opcode::EvexVpermpdVpdWpdIbKmask => self.evex_vpermpd_imm(instr),
+            Opcode::EvexVpermpsVpsHpsWpsKmask => self.evex_vpermps(instr),
+            Opcode::EvexVshufpsVpsHpsWpsIb | Opcode::EvexVshufpsVpsHpsWpsIbKmask => self.evex_vshufps(instr),
+            Opcode::EvexVshufpdVpdHpdWpdIb | Opcode::EvexVshufpdVpdHpdWpdIbKmask => self.evex_vshufpd(instr),
+            Opcode::EvexVunpcklpsVpsHpsWps | Opcode::EvexVunpcklpsVpsHpsWpsKmask => self.evex_vunpcklps(instr),
+            Opcode::EvexVunpckhpsVpsHpsWps | Opcode::EvexVunpckhpsVpsHpsWpsKmask => self.evex_vunpckhps(instr),
+            Opcode::EvexVunpcklpdVpdHpdWpd | Opcode::EvexVunpcklpdVpdHpdWpdKmask => self.evex_vunpcklpd(instr),
+            Opcode::EvexVunpckhpdVpdHpdWpd | Opcode::EvexVunpckhpdVpdHpdWpdKmask => self.evex_vunpckhpd(instr),
+
+            // --- EVEX insert/extract (avx512_insert.rs) ---
+            Opcode::EvexVinserti64x2VdqHdqWdqIb | Opcode::EvexVinserti64x2VdqHdqWdqIbKmask => self.evex_vinserti64x2(instr),
+            Opcode::EvexVinsertf64x2VpdHpdWpdIb | Opcode::EvexVinsertf64x2VpdHpdWpdIbKmask => self.evex_vinsertf64x2(instr),
+            Opcode::EvexVinserti32x8VdqHdqWdqIb | Opcode::EvexVinserti32x8VdqHdqWdqIbKmask => self.evex_vinserti32x8(instr),
+            Opcode::EvexVinsertf32x8VpsHpsWpsIb | Opcode::EvexVinsertf32x8VpsHpsWpsIbKmask => self.evex_vinsertf32x8(instr),
+            Opcode::EvexVinserti64x4VdqHdqWdqIb | Opcode::EvexVinserti64x4VdqHdqWdqIbKmask => self.evex_vinserti64x4(instr),
+            Opcode::EvexVinsertf64x4VpdHpdWpdIb | Opcode::EvexVinsertf64x4VpdHpdWpdIbKmask => self.evex_vinsertf64x4(instr),
+            Opcode::EvexVextracti64x2WdqVdqIb | Opcode::EvexVextracti64x2WdqVdqIbKmask => self.evex_vextracti64x2(instr),
+            Opcode::EvexVextractf64x2WpdVpdIb | Opcode::EvexVextractf64x2WpdVpdIbKmask => self.evex_vextractf64x2(instr),
+            Opcode::EvexVextracti32x8WdqVdqIb | Opcode::EvexVextracti32x8WdqVdqIbKmask => self.evex_vextracti32x8(instr),
+            Opcode::EvexVextractf32x8WpsVpsIb | Opcode::EvexVextractf32x8WpsVpsIbKmask => self.evex_vextractf32x8(instr),
+            Opcode::EvexVextracti64x4WdqVdqIb | Opcode::EvexVextracti64x4WdqVdqIbKmask => self.evex_vextracti64x4(instr),
+            Opcode::EvexVextractf64x4WpdVpdIb | Opcode::EvexVextractf64x4WpdVpdIbKmask => self.evex_vextractf64x4(instr),
+            Opcode::EvexVextractpsEdVpsIb => self.evex_vextractps(instr),
+
+            // --- EVEX broadcast (avx512_bcast.rs) ---
+            Opcode::EvexVbroadcastssVpsWss | Opcode::EvexVbroadcastssVpsWssKmask => self.evex_vbroadcastss(instr),
+            Opcode::EvexVbroadcastsdVpdWsd | Opcode::EvexVbroadcastsdVpdWsdKmask => self.evex_vbroadcastsd(instr),
+            Opcode::EvexVbroadcasti32x4VdqWdq | Opcode::EvexVbroadcasti32x4VdqWdqKmask => self.evex_vbroadcasti32x4(instr),
+            Opcode::EvexVbroadcastf32x4VpsWps | Opcode::EvexVbroadcastf32x4VpsWpsKmask => self.evex_vbroadcastf32x4(instr),
+            Opcode::EvexVbroadcasti64x2VdqWdq | Opcode::EvexVbroadcasti64x2VdqWdqKmask => self.evex_vbroadcasti64x2(instr),
+            Opcode::EvexVbroadcastf64x2VpdWpd | Opcode::EvexVbroadcastf64x2VpdWpdKmask => self.evex_vbroadcastf64x2(instr),
+            Opcode::EvexVbroadcasti32x8VdqWdq | Opcode::EvexVbroadcasti32x8VdqWdqKmask => self.evex_vbroadcasti32x8(instr),
+            Opcode::EvexVbroadcastf32x8VpsWps | Opcode::EvexVbroadcastf32x8VpsWpsKmask => self.evex_vbroadcastf32x8(instr),
+            Opcode::EvexVbroadcasti64x4VdqWdq | Opcode::EvexVbroadcasti64x4VdqWdqKmask => self.evex_vbroadcasti64x4(instr),
+            Opcode::EvexVbroadcastf64x4VpdWpd | Opcode::EvexVbroadcastf64x4VpdWpdKmask => self.evex_vbroadcastf64x4(instr),
+            Opcode::EvexVpbroadcastbVdqWb | Opcode::EvexVpbroadcastbVdqWbKmask => self.evex_vpbroadcastb(instr),
+            Opcode::EvexVpbroadcastwVdqWw | Opcode::EvexVpbroadcastwVdqWwKmask => self.evex_vpbroadcastw(instr),
+
+            // --- EVEX misc (avx512_misc.rs) ---
+            Opcode::EvexVpcompressdWdqVdq | Opcode::EvexVpcompressdWdqVdqKmask => self.evex_vpcompressd(instr),
+            Opcode::EvexVpcompressqWdqVdq | Opcode::EvexVpcompressqWdqVdqKmask => self.evex_vpcompressq(instr),
+            Opcode::EvexVpexpanddVdqWdq | Opcode::EvexVpexpanddVdqWdqKmask => self.evex_vpexpandd(instr),
+            Opcode::EvexVpexpandqVdqWdq | Opcode::EvexVpexpandqVdqWdqKmask => self.evex_vpexpandq(instr),
+            Opcode::EvexVpmovdbWdqVdq | Opcode::EvexVpmovdbWdqVdqKmask => self.evex_vpmovdb_r(instr),
+            Opcode::EvexVpmovdwWdqVdq | Opcode::EvexVpmovdwWdqVdqKmask => self.evex_vpmovdw_r(instr),
+            Opcode::EvexVpmovqdWdqVdq | Opcode::EvexVpmovqdWdqVdqKmask => self.evex_vpmovqd_r(instr),
+            Opcode::EvexVpconflictdVdqWdqKmask => self.evex_vpconflictd(instr),
+            Opcode::EvexVplzcntdVdqWdqKmask => self.evex_vplzcntd(instr),
+            Opcode::EvexVplzcntqVdqWdqKmask => self.evex_vplzcntq(instr),
+
+            // --- EVEX gather (avx512_gather.rs) ---
+            Opcode::EvexVgatherddVdqVsib => self.evex_vpgatherdd(instr),
+            Opcode::EvexVgatherdqVdqVsib => self.evex_vpgatherdq(instr),
+            Opcode::EvexVgatherqdVdqVsib => self.evex_vpgatherqd(instr),
+            Opcode::EvexVgatherqqVdqVsib => self.evex_vpgatherqq(instr),
+
+            // --- EVEX FP logical (reuse integer bitwise handlers) ---
+            Opcode::EvexVandpsVpsHpsWps | Opcode::EvexVandpsVpsHpsWpsKmask => self.evex_vpandd(instr),
+            Opcode::EvexVandpdVpdHpdWpd | Opcode::EvexVandpdVpdHpdWpdKmask => self.evex_vpandd(instr),
+            Opcode::EvexVandnpsVpsHpsWps | Opcode::EvexVandnpsVpsHpsWpsKmask => self.evex_vpandnd(instr),
+            Opcode::EvexVandnpdVpdHpdWpd | Opcode::EvexVandnpdVpdHpdWpdKmask => self.evex_vpandnd(instr),
+            Opcode::EvexVorpsVpsHpsWps | Opcode::EvexVorpsVpsHpsWpsKmask => self.evex_vpord(instr),
+            Opcode::EvexVorpdVpdHpdWpd | Opcode::EvexVorpdVpdHpdWpdKmask => self.evex_vpord(instr),
+            Opcode::EvexVxorpsVpsHpsWps | Opcode::EvexVxorpsVpsHpsWpsKmask => self.evex_vpxord(instr),
+            Opcode::EvexVxorpdVpdHpdWpd | Opcode::EvexVxorpdVpdHpdWpdKmask => self.evex_vpxord(instr),
+
+            Opcode::V256Vinsertf128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
+            Opcode::V256Vinserti128VdqHdqWdqIb => self.vinsert_f128_i128(instr),
+            Opcode::V256Vextracti128WdqVdqIb => self.vextracti128(instr),
+            Opcode::V256Vperm2i128VdqHdqWdqIb => self.vperm2i128(instr),
+
+            // AVX1/AVX2 VBROADCAST (F128/I128 share handler, SS reuses D, SD reuses Q)
+            Opcode::V256Vbroadcastf128VdqMdq | Opcode::V256Vbroadcasti128VdqMdq => self.vbroadcast_f128_i128(instr),
+            Opcode::VbroadcastssVpsMss | Opcode::VbroadcastssVpsWss => self.vpbroadcastd(instr),
+            Opcode::V256VbroadcastsdVpdMsd | Opcode::V256VbroadcastsdVpdWsd => self.vpbroadcastq(instr),
+            // AVX2 VPBROADCAST
+            Opcode::VpbroadcastbVdqWb => self.vpbroadcastb(instr),
+            Opcode::VpbroadcastwVdqWw => self.vpbroadcastw(instr),
+            Opcode::VpbroadcastdVdqWd => self.vpbroadcastd(instr),
+            Opcode::VpbroadcastqVdqWq => self.vpbroadcastq(instr),
+            // AVX2 VPERMD
+            Opcode::V256VpermdVdqHdqWdq => self.vpermd(instr),
+
+            // =====================================================================
+            // VEX-encoded (V128/V256) integer arithmetic
+            // =====================================================================
+            Opcode::V128VpadddVdqHdqWdq | Opcode::V256VpadddVdqHdqWdq => self.vpaddd(instr),
+            Opcode::V128VpaddqVdqHdqWdq | Opcode::V256VpaddqVdqHdqWdq => self.vpaddq(instr),
+            Opcode::V128VpaddwVdqHdqWdq | Opcode::V256VpaddwVdqHdqWdq => self.vpaddw(instr),
+            Opcode::V128VpaddbVdqHdqWdq | Opcode::V256VpaddbVdqHdqWdq => self.vpaddb(instr),
+            Opcode::V128VpsubdVdqHdqWdq | Opcode::V256VpsubdVdqHdqWdq => self.vpsubd(instr),
+            Opcode::V128VpsubqVdqHdqWdq | Opcode::V256VpsubqVdqHdqWdq => self.vpsubq(instr),
+            Opcode::V128VpsubwVdqHdqWdq | Opcode::V256VpsubwVdqHdqWdq => self.vpsubw(instr),
+            Opcode::V128VpsubbVdqHdqWdq | Opcode::V256VpsubbVdqHdqWdq => self.vpsubb(instr),
+
+            // VEX-encoded saturating add/sub
+            Opcode::V128VpaddsbVdqHdqWdq | Opcode::V256VpaddsbVdqHdqWdq => self.vpaddsb(instr),
+            Opcode::V128VpaddswVdqHdqWdq | Opcode::V256VpaddswVdqHdqWdq => self.vpaddsw(instr),
+            Opcode::V128VpsubsbVdqHdqWdq | Opcode::V256VpsubsbVdqHdqWdq => self.vpsubsb(instr),
+            Opcode::V128VpsubswVdqHdqWdq | Opcode::V256VpsubswVdqHdqWdq => self.vpsubsw(instr),
+            Opcode::V128VpsubusbVdqHdqWdq | Opcode::V256VpsubusbVdqHdqWdq => self.vpsubusb(instr),
+            Opcode::V128VpsubuswVdqHdqWdq | Opcode::V256VpsubuswVdqHdqWdq => self.vpsubusw(instr),
+            Opcode::V128VpaddusbVdqHdqWdq | Opcode::V256VpaddusbVdqHdqWdq => self.vpaddusb(instr),
+            Opcode::V128VpadduswVdqHdqWdq | Opcode::V256VpadduswVdqHdqWdq => self.vpaddusw(instr),
+
+            // =====================================================================
+            // VEX-encoded integer logical
+            // =====================================================================
+            Opcode::V128VpxorVdqHdqWdq | Opcode::V256VpxorVdqHdqWdq => self.vpxor(instr),
+            Opcode::V128VpandVdqHdqWdq | Opcode::V256VpandVdqHdqWdq => self.vpand(instr),
+            Opcode::V128VporVdqHdqWdq | Opcode::V256VporVdqHdqWdq => self.vpor(instr),
+            Opcode::V128VpandnVdqHdqWdq | Opcode::V256VpandnVdqHdqWdq => self.vpandn(instr),
+
+            // =====================================================================
+            // VEX-encoded integer multiply
+            // =====================================================================
+            Opcode::V128VpmuludqVdqHdqWdq | Opcode::V256VpmuludqVdqHdqWdq => self.vpmuludq(instr),
+            Opcode::V128VpmuldqVdqHdqWdq | Opcode::V256VpmuldqVdqHdqWdq => self.vpmuldq(instr),
+            Opcode::V128VpmulldVdqHdqWdq | Opcode::V256VpmulldVdqHdqWdq => self.vpmulld(instr),
+            Opcode::V128VpmullwVdqHdqWdq | Opcode::V256VpmullwVdqHdqWdq => self.vpmullw(instr),
+            Opcode::V128VpmulhwVdqHdqWdq | Opcode::V256VpmulhwVdqHdqWdq => self.vpmulhw(instr),
+            Opcode::V128VpmulhuwVdqHdqWdq | Opcode::V256VpmulhuwVdqHdqWdq => self.vpmulhuw(instr),
+            Opcode::V128VpmulhrswVdqHdqWdq | Opcode::V256VpmulhrswVdqHdqWdq => self.vpmulhrsw(instr),
+
+            // =====================================================================
+            // VEX-encoded integer compare
+            // =====================================================================
+            Opcode::V128VpcmpeqbVdqHdqWdq | Opcode::V256VpcmpeqbVdqHdqWdq => self.vpcmpeqb(instr),
+            Opcode::V128VpcmpeqwVdqHdqWdq | Opcode::V256VpcmpeqwVdqHdqWdq => self.vpcmpeqw(instr),
+            Opcode::V128VpcmpeqdVdqHdqWdq | Opcode::V256VpcmpeqdVdqHdqWdq => self.vpcmpeqd(instr),
+            Opcode::V128VpcmpeqqVdqHdqWdq | Opcode::V256VpcmpeqqVdqHdqWdq => self.vpcmpeqq(instr),
+            Opcode::V128VpcmpgtbVdqHdqWdq | Opcode::V256VpcmpgtbVdqHdqWdq => self.vpcmpgtb(instr),
+            Opcode::V128VpcmpgtwVdqHdqWdq | Opcode::V256VpcmpgtwVdqHdqWdq => self.vpcmpgtw(instr),
+            Opcode::V128VpcmpgtdVdqHdqWdq | Opcode::V256VpcmpgtdVdqHdqWdq => self.vpcmpgtd(instr),
+            Opcode::V128VpcmpgtqVdqHdqWdq | Opcode::V256VpcmpgtqVdqHdqWdq => self.vpcmpgtq(instr),
+
+            // =====================================================================
+            // VEX-encoded integer shift by register
+            // =====================================================================
+            Opcode::V128VpsrlwVdqHdqWdq | Opcode::V256VpsrlwVdqHdqWdq => self.vpsrlw_reg(instr),
+            Opcode::V128VpsrldVdqHdqWdq | Opcode::V256VpsrldVdqHdqWdq => self.vpsrld_reg(instr),
+            Opcode::V128VpsrlqVdqHdqWdq | Opcode::V256VpsrlqVdqHdqWdq => self.vpsrlq_reg(instr),
+            Opcode::V128VpsrawVdqHdqWdq | Opcode::V256VpsrawVdqHdqWdq => self.vpsraw_reg(instr),
+            Opcode::V128VpsradVdqHdqWdq | Opcode::V256VpsradVdqHdqWdq => self.vpsrad_reg(instr),
+            Opcode::V128VpsllwVdqHdqWdq | Opcode::V256VpsllwVdqHdqWdq => self.vpsllw_reg(instr),
+            Opcode::V128VpslldVdqHdqWdq | Opcode::V256VpslldVdqHdqWdq => self.vpslld_reg(instr),
+            Opcode::V128VpsllqVdqHdqWdq | Opcode::V256VpsllqVdqHdqWdq => self.vpsllq_reg(instr),
+
+            // VEX-encoded integer shift by immediate
+            Opcode::V128VpsrlwUdqIb | Opcode::V256VpsrlwUdqIb => self.vpsrlw_imm(instr),
+            Opcode::V128VpsrldUdqIb | Opcode::V256VpsrldUdqIb => self.vpsrld_imm(instr),
+            Opcode::V128VpsrlqUdqIb | Opcode::V256VpsrlqUdqIb => self.vpsrlq_imm(instr),
+            Opcode::V128VpsrawUdqIb | Opcode::V256VpsrawUdqIb => self.vpsraw_imm(instr),
+            Opcode::V128VpsradUdqIb | Opcode::V256VpsradUdqIb => self.vpsrad_imm(instr),
+            Opcode::V128VpsllwUdqIb | Opcode::V256VpsllwUdqIb => self.vpsllw_imm(instr),
+            Opcode::V128VpslldUdqIb | Opcode::V256VpslldUdqIb => self.vpslld_imm(instr),
+            Opcode::V128VpsllqUdqIb | Opcode::V256VpsllqUdqIb => self.vpsllq_imm(instr),
+            Opcode::V128VpsrldqUdqIb | Opcode::V256VpsrldqUdqIb => self.vpsrldq_imm(instr),
+            Opcode::V128VpslldqUdqIb | Opcode::V256VpslldqUdqIb => self.vpslldq_imm(instr),
+
+            // =====================================================================
+            // VEX-encoded shuffle/unpack
+            // =====================================================================
+            Opcode::V128VpshufdVdqWdqIb | Opcode::V256VpshufdVdqWdqIb => self.vpshufd(instr),
+            Opcode::V128VpshufhwVdqWdqIb | Opcode::V256VpshufhwVdqWdqIb => self.vpshufhw(instr),
+            Opcode::V128VpshuflwVdqWdqIb | Opcode::V256VpshuflwVdqWdqIb => self.vpshuflw(instr),
+            Opcode::V128VpshufbVdqHdqWdq | Opcode::V256VpshufbVdqHdqWdq => self.vpshufb(instr),
+            Opcode::V128VpalignrVdqHdqWdqIb | Opcode::V256VpalignrVdqHdqWdqIb => self.vpalignr(instr),
+            Opcode::VpblenddVdqHdqWdqIb => self.vpblendd(instr),
+            Opcode::V128VpunpckldqVdqHdqWdq | Opcode::V256VpunpckldqVdqHdqWdq => self.vpunpckldq(instr),
+            Opcode::V128VpunpckhdqVdqHdqWdq | Opcode::V256VpunpckhdqVdqHdqWdq => self.vpunpckhdq(instr),
+            Opcode::V128VpunpcklbwVdqHdqWdq | Opcode::V256VpunpcklbwVdqHdqWdq => self.vpunpcklbw(instr),
+            Opcode::V128VpunpckhbwVdqHdqWdq | Opcode::V256VpunpckhbwVdqHdqWdq => self.vpunpckhbw(instr),
+            Opcode::V128VpunpcklwdVdqHdqWdq | Opcode::V256VpunpcklwdVdqHdqWdq => self.vpunpcklwd(instr),
+            Opcode::V128VpunpckhwdVdqHdqWdq | Opcode::V256VpunpckhwdVdqHdqWdq => self.vpunpckhwd(instr),
+            Opcode::V128VpunpcklqdqVdqHdqWdq | Opcode::V256VpunpcklqdqVdqHdqWdq => self.vpunpcklqdq(instr),
+            Opcode::V128VpunpckhqdqVdqHdqWdq | Opcode::V256VpunpckhqdqVdqHdqWdq => self.vpunpckhqdq(instr),
+
+            // =====================================================================
+            // VEX-encoded move/store
+            // =====================================================================
+            // VEX-encoded stores (V128/V256 forms exist in opcode enum)
+            Opcode::V128VmovdquWdqVdq | Opcode::V256VmovdquWdqVdq => self.vmovdqu_store(instr),
+            Opcode::V128VmovdqaWdqVdq | Opcode::V256VmovdqaWdqVdq => self.vmovdqa_store(instr),
+            Opcode::V128VmovupsWpsVps | Opcode::V256VmovupsWpsVps => self.vmovups_store(instr),
+            Opcode::V128VmovapsWpsVps | Opcode::V256VmovapsWpsVps => self.vmovups_store(instr),
+            Opcode::V128VmovapdWpdVpd | Opcode::V256VmovapdWpdVpd => self.vmovups_store(instr),
+            Opcode::V128VmovupdWpdVpd | Opcode::V256VmovupdWpdVpd => self.vmovups_store(instr),
+            Opcode::V128VmovntpsMpsVps | Opcode::V256VmovntpsMpsVps => self.vmovups_store(instr),
+            Opcode::V128VmovntpdMpdVpd | Opcode::V256VmovntpdMpdVpd => self.vmovups_store(instr),
+            Opcode::V128VmovntdqMdqVdq | Opcode::V256VmovntdqMdqVdq => self.vmovups_store(instr),
+            // VEX-encoded loads (unprefixed opcode names — shared for V128/V256)
+            Opcode::VmovdquVdqWdq => self.vmovdqu_load(instr),
+            Opcode::VmovdqaVdqWdq => self.vmovdqa_load(instr),
+            Opcode::VmovupsVpsWps => self.vmovups_load(instr),
+            Opcode::VmovapsVpsWps => self.vmovups_load(instr),
+            Opcode::VmovapdVpdWpd => self.vmovups_load(instr),
+            Opcode::VmovupdVpdWpd => self.vmovups_load(instr),
+            Opcode::V128VmovntdqaVdqMdq | Opcode::V256VmovntdqaVdqMdq => self.vmovdqa_load(instr),
+
+            // VEX-encoded byte mask
+            Opcode::V128VpmovmskbGdUdq | Opcode::V256VpmovmskbGdUdq => self.vpmovmskb(instr),
+
+            // VEX-encoded zero/sign extend
+            Opcode::V128VpmovzxbdVdqWd | Opcode::V256VpmovzxbdVdqWq => self.vpmovzxbd(instr),
+
+            // =========================================================================
+            // AVX-512 Opmask (k-register) instructions (avx512_mask.rs)
+            // =========================================================================
+
+            // KMOV load (K←K register form, K←M memory form)
+            Opcode::KmovwKgwKew => {
+                if instr.mod_c0() { self.kmovw_kgw_kew_r(instr) } else { self.kmovw_kgw_kew_m(instr) }
+            }
+            Opcode::KmovqKgqKeq => {
+                if instr.mod_c0() { self.kmovq_kgq_keq_r(instr) } else { self.kmovq_kgq_keq_m(instr) }
+            }
+            Opcode::KmovbKgbKeb => {
+                if instr.mod_c0() { self.kmovb_kgb_keb_r(instr) } else { self.kmovb_kgb_keb_m(instr) }
+            }
+            Opcode::KmovdKgdKed => {
+                if instr.mod_c0() { self.kmovd_kgd_ked_r(instr) } else { self.kmovd_kgd_ked_m(instr) }
+            }
+
+            // KMOV store (M←K)
+            Opcode::KmovwKewKgw => self.kmovw_kew_kgw_m(instr),
+            Opcode::KmovqKeqKgq => self.kmovq_keq_kgq_m(instr),
+            Opcode::KmovbKebKgb => self.kmovb_keb_kgb_m(instr),
+            Opcode::KmovdKedKgd => self.kmovd_ked_kgd_m(instr),
+
+            // KMOV GPR→K
+            Opcode::KmovwKgwEw => self.kmovw_kgw_ew_r(instr),
+            Opcode::KmovbKgbEb => self.kmovb_kgb_eb_r(instr),
+            Opcode::KmovdKgdEd => self.kmovd_kgd_ed_r(instr),
+            Opcode::KmovqKgqEq => self.kmovq_kgq_eq_r(instr),
+
+            // KMOV K→GPR
+            Opcode::KmovwGdKew => self.kmovw_gd_kew_r(instr),
+            Opcode::KmovbGdKeb => self.kmovb_gd_keb_r(instr),
+            Opcode::KmovdGdKed => self.kmovd_gd_ked_r(instr),
+            Opcode::KmovqGqKeq => self.kmovq_gq_keq_r(instr),
+
+            // KAND
+            Opcode::KandwKgwKhwKew => self.kandw_kgw_khw_kew_r(instr),
+            Opcode::KandqKgqKhqKeq => self.kandq_kgq_khq_keq_r(instr),
+            Opcode::KandbKgbKhbKeb => self.kandb_kgb_khb_keb_r(instr),
+            Opcode::KanddKgdKhdKed => self.kandd_kgd_khd_ked_r(instr),
+
+            // KANDN
+            Opcode::KandnwKgwKhwKew => self.kandnw_kgw_khw_kew_r(instr),
+            Opcode::KandnqKgqKhqKeq => self.kandnq_kgq_khq_keq_r(instr),
+            Opcode::KandnbKgbKhbKeb => self.kandnb_kgb_khb_keb_r(instr),
+            Opcode::KandndKgdKhdKed => self.kandnd_kgd_khd_ked_r(instr),
+
+            // KOR
+            Opcode::KorwKgwKhwKew => self.korw_kgw_khw_kew_r(instr),
+            Opcode::KorqKgqKhqKeq => self.korq_kgq_khq_keq_r(instr),
+            Opcode::KorbKgbKhbKeb => self.korb_kgb_khb_keb_r(instr),
+            Opcode::KordKgdKhdKed => self.kord_kgd_khd_ked_r(instr),
+
+            // KXOR
+            Opcode::KxorwKgwKhwKew => self.kxorw_kgw_khw_kew_r(instr),
+            Opcode::KxorqKgqKhqKeq => self.kxorq_kgq_khq_keq_r(instr),
+            Opcode::KxorbKgbKhbKeb => self.kxorb_kgb_khb_keb_r(instr),
+            Opcode::KxordKgdKhdKed => self.kxord_kgd_khd_ked_r(instr),
+
+            // KXNOR
+            Opcode::KxnorwKgwKhwKew => self.kxnorw_kgw_khw_kew_r(instr),
+            Opcode::KxnorqKgqKhqKeq => self.kxnorq_kgq_khq_keq_r(instr),
+            Opcode::KxnorbKgbKhbKeb => self.kxnorb_kgb_khb_keb_r(instr),
+            Opcode::KxnordKgdKhdKed => self.kxnord_kgd_khd_ked_r(instr),
+
+            // KNOT
+            Opcode::KnotwKgwKew => self.knotw_kgw_kew_r(instr),
+            Opcode::KnotqKgqKeq => self.knotq_kgq_keq_r(instr),
+            Opcode::KnotbKgbKeb => self.knotb_kgb_keb_r(instr),
+            Opcode::KnotdKgdKed => self.knotd_kgd_ked_r(instr),
+
+            // KADD
+            Opcode::KaddwKgwKhwKew => self.kaddw_kgw_khw_kew_r(instr),
+            Opcode::KaddqKgqKhqKeq => self.kaddq_kgq_khq_keq_r(instr),
+            Opcode::KaddbKgbKhbKeb => self.kaddb_kgb_khb_keb_r(instr),
+            Opcode::KadddKgdKhdKed => self.kaddd_kgd_khd_ked_r(instr),
+
+            // KUNPCK
+            Opcode::KunpckbwKgwKhbKeb => self.kunpckbw_kgw_khb_keb_r(instr),
+            Opcode::KunpckwdKgdKhwKew => self.kunpckwd_kgd_khw_kew_r(instr),
+            Opcode::KunpckdqKgqKhdKed => self.kunpckdq_kgq_khd_ked_r(instr),
+
+            // KORTEST
+            Opcode::KortestwKgwKew => self.kortestw_kgw_kew_r(instr),
+            Opcode::KortestqKgqKeq => self.kortestq_kgq_keq_r(instr),
+            Opcode::KortestbKgbKeb => self.kortestb_kgb_keb_r(instr),
+            Opcode::KortestdKgdKed => self.kortestd_kgd_ked_r(instr),
+
+            // KTEST
+            Opcode::KtestwKgwKew => self.ktestw_kgw_kew_r(instr),
+            Opcode::KtestqKgqKeq => self.ktestq_kgq_keq_r(instr),
+            Opcode::KtestbKgbKeb => self.ktestb_kgb_keb_r(instr),
+            Opcode::KtestdKgdKed => self.ktestd_kgd_ked_r(instr),
+
+            // KSHIFT left
+            Opcode::KshiftlbKgbKebIb => self.kshiftlb_kgb_keb_ib_r(instr),
+            Opcode::KshiftlwKgwKewIb => self.kshiftlw_kgw_kew_ib_r(instr),
+            Opcode::KshiftldKgdKedIb => self.kshiftld_kgd_ked_ib_r(instr),
+            Opcode::KshiftlqKgqKeqIb => self.kshiftlq_kgq_keq_ib_r(instr),
+
+            // KSHIFT right
+            Opcode::KshiftrbKgbKebIb => self.kshiftrb_kgb_keb_ib_r(instr),
+            Opcode::KshiftrwKgwKewIb => self.kshiftrw_kgw_kew_ib_r(instr),
+            Opcode::KshiftrdKgdKedIb => self.kshiftrd_kgd_ked_ib_r(instr),
+            Opcode::KshiftrqKgqKeqIb => self.kshiftrq_kgq_keq_ib_r(instr),
+
+            // UD0/UD1/UD2 — intentional #UD exceptions (Linux uses UD2 for BUG()/WARN())
+            Opcode::Ud0 | Opcode::Ud1 | Opcode::Ud2 => {
+                self.exception(super::cpu::Exception::Ud, 0)?;
+                Err(crate::cpu::CpuError::CpuLoopRestart)
+            }
+
+            _ => {
+                #[cfg(debug_assertions)] {
+                    self.diag_ia_error_count += 1;
+                    self.diag_ia_error_last_rip = self.prev_rip;
+                }
+                tracing::error!("Unimplemented opcode: {:?} at RIP={:#x}", instr.get_ia_opcode(), self.prev_rip);
+                Err(crate::cpu::CpuError::UnimplementedOpcode {
+                    opcode: alloc::format!("{:?}", instr.get_ia_opcode()),
+                })
+            }
+        }
+    }
+}
