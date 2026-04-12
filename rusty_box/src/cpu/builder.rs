@@ -173,8 +173,6 @@ impl<I: BxCpuIdTrait> BxCpuBuilder<I> {
             mem_bus: None,
             io_bus: None,
             pc_system_ptr: None,
-            pic_ptr: None,
-            dma_ptr: None,
             boot_debug_flags: 0,
             #[cfg(debug_assertions)]
             diag_hae_intr_delivered: 0,

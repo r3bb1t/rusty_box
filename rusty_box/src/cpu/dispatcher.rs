@@ -21,8 +21,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         use crate::cpu::data_xfer16;
         use crate::cpu::data_xfer32;
         use crate::cpu::data_xfer8;
-        #[allow(unused_imports)]
-        use crate::cpu::data_xfer_ext;
 
         match instr.get_ia_opcode() {
             // =========================================================================

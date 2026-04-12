@@ -76,7 +76,7 @@ fn sse_compare_f32(op1: f32, op2: f32, predicate: u8) -> bool {
         5 => !(op1 < op2),                               // NLT (not less than)
         6 => !(op1 <= op2),                              // NLE (not less than or equal)
         7 => !op1.is_nan() && !op2.is_nan(),             // ORD
-        _ => unreachable!(),
+        _ => unreachable!("SSE compare predicate & 7 cannot exceed 7"),
     }
 }
 
@@ -94,7 +94,7 @@ fn sse_compare_f64(op1: f64, op2: f64, predicate: u8) -> bool {
         5 => !(op1 < op2),                               // NLT
         6 => !(op1 <= op2),                              // NLE
         7 => !op1.is_nan() && !op2.is_nan(),             // ORD
-        _ => unreachable!(),
+        _ => unreachable!("SSE compare predicate & 7 cannot exceed 7"),
     }
 }
 

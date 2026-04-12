@@ -40,33 +40,6 @@ struct Taskgate {
     tss_selector: u16, /* TSS segment selector */
 }
 
-//#[derive(Debug)]
-//pub enum Descriptor {
-//    Segment {
-//        /// base address: 286=24bits, 386=32bits, long=64
-//        base: BxAddress,
-//        /// for efficiency, this contrived field is set to
-//        ///  limit for byte granular, and
-//        ///  `(limit << 12) | 0xfff` for page granular seg's
-//        limit_scaled: u32,
-//        /// granularity: 0=byte, 1=4K (page)
-//        g: bool,
-//        /// default size: 0=16bit, 1=32bit
-//        d_b: bool,
-//        /// long mode: 0=compat, 1=64 bit
-//        l: bool,
-//        ///  available for use by system
-//        avl: bool, // available for use by system
-//    },
-//    Gate {
-//        param_count: u8, // 5 bits (0..31) #words/dword to copy
-//        dest_selector: u16,
-//        dest_offset: u32,
-//    },
-//    TaskGate {
-//        tss_selector: u16, // TSS segment selector
-//    },
-//}
 
 #[derive(Clone, Copy)]
 pub(crate) enum Descriptor {

@@ -297,13 +297,13 @@ fn u16_at(d: &[u8], off: &mut usize) -> u16 {
 }
 
 fn u32_at(d: &[u8], off: &mut usize) -> u32 {
-    let v = u32::from_le_bytes(d[*off..*off + 4].try_into().unwrap());
+    let v = u32::from_le_bytes(d[*off..*off + 4].try_into().expect("4-byte slice converts to [u8; 4]"));
     *off += 4;
     v
 }
 
 fn u64_at(d: &[u8], off: &mut usize) -> u64 {
-    let v = u64::from_le_bytes(d[*off..*off + 8].try_into().unwrap());
+    let v = u64::from_le_bytes(d[*off..*off + 8].try_into().expect("8-byte slice converts to [u8; 8]"));
     *off += 8;
     v
 }

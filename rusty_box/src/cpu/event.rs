@@ -3,13 +3,17 @@ use super::{cpu::CpuActivityState, cpuid::BxCpuIdTrait, eflags::EFlags, BxCpuC};
 impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Handle async events - matches Bochs  handleAsyncEvent()
     /// Returns true if should return from cpu_loop
-    pub(super) fn handle_async_event(&mut self) -> bool {
+    pub(super) fn handle_async_event(
+        &mut self,
+        pic: Option<&mut crate::iodev::pic::BxPicC>,
+        mut dma: Option<&mut crate::iodev::dma::BxDmaC>,
+    ) -> bool {
         // Check if CPU is in non-active state (HLT, MWAIT, etc.)
         // Matches Bochs 
         if !matches!(self.activity_state, CpuActivityState::Active) {
             // For one processor, pass the time as quickly as possible until
             // an interrupt wakes up the CPU.
-            if self.handle_wait_for_event() {
+            if self.handle_wait_for_event(dma.as_deref_mut()) {
                 return true; // Return to caller of cpu_loop
             }
         }
@@ -152,7 +156,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
             // Then check PIC (legacy 8259 path) — only if LAPIC didn't deliver
             if !delivered {
-              if let Some(pic) = self.pic_mut() {
+              if let Some(pic) = pic {
                 if pic.has_interrupt() {
                     let vector = pic.iac();
                     tracing::debug!("HAE: delivering PIC vector={:#04x} at RIP={:#x} CS={:#06x} mode={:?} IF={}",
@@ -194,7 +198,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // NOTE: similar code in handleWaitForEvent ()
         // Assert Hold Acknowledge (HLDA) and perform DMA transfer
         if self.get_hrq() {
-            if let Some(dma) = self.dma_mut() {
+            if let Some(dma) = dma {
                 dma.raise_hlda();
             }
         }
@@ -220,7 +224,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Handle wait for event - matches Bochs event.cc:handleWaitForEvent()
     /// Called when CPU is halted (HLT) or waiting (MWAIT)
     /// Returns true if should return from cpu_loop
-    fn handle_wait_for_event(&mut self) -> bool {
+    fn handle_wait_for_event(&mut self, dma: Option<&mut crate::iodev::dma::BxDmaC>) -> bool {
         // For WAIT_FOR_SIPI, just return (matches Bochs )
         if matches!(self.activity_state, CpuActivityState::WaitForSipi) {
             tracing::debug!("CPU in WAIT_FOR_SIPI state, returning from cpu_loop");
@@ -229,7 +233,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Handle DMA also when CPU is halted (Bochs )
         if self.get_hrq() {
-            if let Some(dma) = self.dma_mut() {
+            if let Some(dma) = dma {
                 dma.raise_hlda();
             }
         }

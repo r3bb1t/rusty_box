@@ -214,8 +214,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn write_rmw_linear_byte(&mut self, val: u8) {
         if self.address_xlation.pages > 2 {
             // Host pointer cached from TLB hit — direct write (fastest path)
-            // SAFETY: pointer was valid during read phase and hasn't been invalidated
-            unsafe { *(self.address_xlation.pages as *mut u8) = val };
+            self.address_xlation.write_pages_u8(val);
         } else {
             // pages == 1: single-page physical write
             self.mem_write_byte(self.address_xlation.paddress1, val);

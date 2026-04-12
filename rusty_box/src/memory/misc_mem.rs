@@ -508,7 +508,7 @@ impl BxMemC<'_> {
                         } else if let Some(ioapic) = handler.device_id.ioapic_mut() {
                             ioapic.mem_write(a20_addr, len as u32, &data[..len])
                         } else {
-                            unreachable!()
+                            unreachable!("unknown MMIO handler device")
                         };
                         if handled {
                             return Ok(());
@@ -692,7 +692,7 @@ impl BxMemC<'_> {
                         } else if let Some(ioapic) = handler.device_id.ioapic_mut() {
                             ioapic.mem_read(a20_addr, len as u32, data)
                         } else {
-                            unreachable!()
+                            unreachable!("unknown MMIO handler device")
                         };
                         if handled {
                             #[cfg(feature = "bx_support_pci")]

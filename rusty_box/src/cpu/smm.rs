@@ -672,12 +672,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ========================================================================
 
     fn smram_read_physical_dword(&mut self, paddr: u64) -> u32 {
-        if let Some(mem_bus) = self.mem_bus {
-            // SAFETY: mem_bus valid for duration of cpu_loop; single-threaded access
-            let mem = unsafe { &mut *mem_bus.as_ptr() };
-            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-            // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
-            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+        if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
             let mut data = [0u8; 4];
             if mem
                 .read_physical_page(&[cpu_ref], paddr as _, 4, &mut data)
@@ -690,12 +685,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     fn smram_write_physical_dword(&mut self, paddr: u64, value: u32) {
-        if let Some(mem_bus) = self.mem_bus {
-            // SAFETY: mem_bus valid for duration of cpu_loop; single-threaded access
-            let mem = unsafe { &mut *mem_bus.as_ptr() };
-            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-            // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
-            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+        if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
             let mut data = value.to_le_bytes();
             // Use a dummy stamp table for SMRAM writes (no SMC detection needed)
             let mut dummy_mapping: [u32; 0] = [];

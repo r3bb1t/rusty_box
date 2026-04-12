@@ -96,7 +96,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             0x7 => SystemAndGateDescriptorEnum::Bx286TrapGate,
             0xE => SystemAndGateDescriptorEnum::Bx386InterruptGate,
             0xF => SystemAndGateDescriptorEnum::Bx386TrapGate,
-            _ => unreachable!(),
+            _ => unreachable!("unexpected gate type {:#x} after pre-validation", gate_type),
         };
 
         match gate_type_enum {

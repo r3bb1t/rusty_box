@@ -123,6 +123,57 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         core::mem::transmute::<&mut BxMemC<'a>, &'a mut BxMemC<'a>>(&mut self.memory)
     }
 
+    /// Transmute a `NonNull<BxMemC<'a>>` to `NonNull<BxMemC<'static>>` for wiring
+    /// into BxDevicesC during a CPU batch. The pointer remains valid for the
+    /// duration of the batch because memory is owned by Emulator.
+    ///
+    /// # Safety
+    /// Caller must ensure the returned pointer is not used after the batch completes.
+    #[inline]
+    unsafe fn mem_nonnull_static(&mut self) -> core::ptr::NonNull<BxMemC<'static>> {
+        core::mem::transmute(core::ptr::NonNull::from(&mut self.memory))
+    }
+
+    /// Run a CPU batch with full I/O wiring.
+    ///
+    /// Sets up all the NonNull pointers that `cpu_loop_n_with_io` needs,
+    /// executes `batch_size` instructions, then tears down the wiring.
+    ///
+    /// # Safety
+    /// Same invariants as `borrow_memory_for_cpu`: caller must hold `&mut self`
+    /// and no other code path may access memory/devices during the batch.
+    unsafe fn run_cpu_batch(&mut self, batch_size: u64) -> crate::cpu::Result<u64> {
+        let mem_extended = self.borrow_memory_for_cpu();
+        let io_ptr = core::ptr::NonNull::from(&mut self.devices);
+        let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
+        let dm_ptr = core::ptr::NonNull::from(&mut self.device_manager);
+        io_ptr.as_ptr().as_mut().unwrap_unchecked().set_device_manager(dm_ptr);
+        let mem_static = self.mem_nonnull_static();
+        io_ptr.as_ptr().as_mut().unwrap_unchecked().set_mem_ptr(mem_static);
+        let pic_ref: *mut _ = &mut self.device_manager.pic;
+        let dma_ref: *mut _ = &mut self.device_manager.dma;
+        let r = self.cpu
+            .cpu_loop_n_with_io(mem_extended, &[], batch_size, io_ptr, ps_ptr, Some(&mut *pic_ref), Some(&mut *dma_ref));
+        self.devices.clear_device_manager();
+        self.devices.clear_mem_ptr();
+        r
+    }
+
+    /// Inject an external interrupt with temporary memory bus wiring.
+    ///
+    /// Wires the memory bus so the interrupt path can read IVT/IDT and push
+    /// stack frames, then clears it after injection.
+    ///
+    /// # Safety
+    /// Same invariants as `borrow_memory_for_cpu`.
+    unsafe fn inject_interrupt(&mut self, vector: u8) -> crate::cpu::Result<()> {
+        let mem_extended = self.borrow_memory_for_cpu();
+        self.cpu.set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_extended));
+        let r = self.cpu.inject_external_interrupt(vector);
+        self.cpu.clear_mem_bus();
+        r
+    }
+
     /// Create a new emulator instance with the given configuration
     ///
     /// This creates all components but does not initialize them.
@@ -1604,27 +1655,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
             // 2. Execute CPU instructions in batches
             let batch_size = (max_instructions - instructions_executed).min(INSTRUCTION_BATCH_SIZE);
-            // SAFETY: see borrow_memory_for_cpu
-            let result = unsafe {
-                let mem_extended = self.borrow_memory_for_cpu();
-                let io_ptr = core::ptr::NonNull::from(&mut self.devices);
-                let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
-                // Wire DeviceManager into BxDevicesC for enum-based I/O dispatch
-                let dm_ptr = core::ptr::NonNull::from(&mut self.device_manager);
-                io_ptr.as_ptr().as_mut().unwrap_unchecked().set_device_manager(dm_ptr);
-                // Wire BxMemC into BxDevicesC for immediate PAM updates during PCI writes
-                let mem_nn = core::ptr::NonNull::from(&mut self.memory);
-                // SAFETY: transmute lifetime for NonNull — mem is owned by Emulator, valid for call
-                let mem_static: core::ptr::NonNull<crate::memory::BxMemC<'static>> = core::mem::transmute(mem_nn);
-                io_ptr.as_ptr().as_mut().unwrap_unchecked().set_mem_ptr(mem_static);
-                let pic_ptr = core::ptr::NonNull::from(&mut self.device_manager.pic);
-                let dma_ptr = core::ptr::NonNull::from(&mut self.device_manager.dma);
-                let r = self.cpu
-                    .cpu_loop_n_with_io(mem_extended, &[], batch_size, io_ptr, ps_ptr, Some(pic_ptr), Some(dma_ptr));
-                self.devices.clear_device_manager();
-                self.devices.clear_mem_ptr();
-                r
-            };
+            // SAFETY: see borrow_memory_for_cpu / run_cpu_batch
+            let result = unsafe { self.run_cpu_batch(batch_size) };
 
             // Apply PAM register changes immediately (BIOS needs this before next batch)
             #[cfg(feature = "bx_support_pci")]
@@ -1683,14 +1715,17 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     }
 
                     // If CPU triple-faulted into shutdown, stop emulation loop
-                    // Write reset diagnostics to file (always visible, survives terminal scroll)
+                    // Write reset diagnostics to file in debug builds; warn-log in release
                     #[cfg(feature = "std")]
                     fn log_reset(msg: &str) {
-                        use std::io::Write;
-                        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("reset_log.txt") {
-                            let _ = writeln!(f, "{}", msg);
+                        #[cfg(debug_assertions)]
+                        {
+                            use std::io::Write;
+                            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open("reset_log.txt") {
+                                let _ = writeln!(f, "{}", msg);
+                            }
                         }
-                        eprintln!("{}", msg);
+                        tracing::warn!("{}", msg);
                     }
 
                     if self.cpu.is_in_shutdown() {
@@ -1959,13 +1994,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                     && !self.cpu.interrupts_inhibited(0x01)
                                 {
                                     let vec = self.iac();
-                                    // SAFETY: see borrow_memory_for_cpu
-                                    unsafe {
-                                        let mem_ext = self.borrow_memory_for_cpu();
-                                        self.cpu.set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_ext));
-                                        let _ = self.cpu.inject_external_interrupt(vec);
-                                        self.cpu.clear_mem_bus();
-                                    };
+                                    // SAFETY: see borrow_memory_for_cpu / inject_interrupt
+                                    unsafe { let _ = self.inject_interrupt(vec); };
                                 }
                                 // Run CPU batch — handle_async_event inside cpu_loop_n
                                 // will process LAPIC events and wake from MWAIT.
@@ -1974,23 +2004,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                                 // until handle_async_event runs inside the CPU loop.
                                 let batch2 = (max_instructions.saturating_sub(instructions_executed)).min(INSTRUCTION_BATCH_SIZE);
                                 if batch2 == 0 { break; }
-                                // SAFETY: see borrow_memory_for_cpu
-                                let r2 = unsafe {
-                                    let mem_ext = self.borrow_memory_for_cpu();
-                                    let io2 = core::ptr::NonNull::from(&mut self.devices);
-                                    let ps2 = core::ptr::NonNull::from(&mut self.pc_system);
-                                    let dm2 = core::ptr::NonNull::from(&mut self.device_manager);
-                                    io2.as_ptr().as_mut().unwrap_unchecked().set_device_manager(dm2);
-                                    let mem_nn2 = core::ptr::NonNull::from(&mut self.memory);
-                                    let mem_static2: core::ptr::NonNull<crate::memory::BxMemC<'static>> = core::mem::transmute(mem_nn2);
-                                    io2.as_ptr().as_mut().unwrap_unchecked().set_mem_ptr(mem_static2);
-                                    let pic2 = core::ptr::NonNull::from(&mut self.device_manager.pic);
-                                    let dma2 = core::ptr::NonNull::from(&mut self.device_manager.dma);
-                                    let r = self.cpu.cpu_loop_n_with_io(mem_ext, &[], batch2, io2, ps2, Some(pic2), Some(dma2));
-                                    self.devices.clear_device_manager();
-                                    self.devices.clear_mem_ptr();
-                                    r
-                                };
+                                // SAFETY: see borrow_memory_for_cpu / run_cpu_batch
+                                let r2 = unsafe { self.run_cpu_batch(batch2) };
                                 if let Ok(ex2) = r2 {
                                     instructions_executed += ex2;
                                     let u2 = if self.config.ips != 0 { (ex2 * 1_000_000 / (self.config.ips as u64)).max(10) } else { 10 };
@@ -2234,15 +2249,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
                         // Temporarily wire the memory bus so the interrupt path can
                         // read IVT/IDT and push stack frames correctly.
-                        // SAFETY: see borrow_memory_for_cpu
-                        let inject_result = unsafe {
-                            let mem_extended = self.borrow_memory_for_cpu();
-                            self.cpu
-                                .set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_extended));
-                            let r = self.cpu.inject_external_interrupt(vector);
-                            self.cpu.clear_mem_bus();
-                            r
-                        };
+                        // SAFETY: see borrow_memory_for_cpu / inject_interrupt
+                        let inject_result = unsafe { self.inject_interrupt(vector) };
 
                         match &inject_result {
                             Ok(()) => {
@@ -2419,24 +2427,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
         'batch: loop {
             // --- Run CPU batch ---
-            // SAFETY: see borrow_memory_for_cpu
-            let result = unsafe {
-                let mem_extended = self.borrow_memory_for_cpu();
-                let io_ptr = core::ptr::NonNull::from(&mut self.devices);
-                let ps_ptr = core::ptr::NonNull::from(&mut self.pc_system);
-                let dm_ptr = core::ptr::NonNull::from(&mut self.device_manager);
-                io_ptr.as_ptr().as_mut().unwrap_unchecked().set_device_manager(dm_ptr);
-                let mem_nn = core::ptr::NonNull::from(&mut self.memory);
-                let mem_static: core::ptr::NonNull<crate::memory::BxMemC<'static>> = core::mem::transmute(mem_nn);
-                io_ptr.as_ptr().as_mut().unwrap_unchecked().set_mem_ptr(mem_static);
-                let pic_ptr = core::ptr::NonNull::from(&mut self.device_manager.pic);
-                let dma_ptr = core::ptr::NonNull::from(&mut self.device_manager.dma);
-                let r = self.cpu
-                    .cpu_loop_n_with_io(mem_extended, &[], max_instructions, io_ptr, ps_ptr, Some(pic_ptr), Some(dma_ptr));
-                self.devices.clear_device_manager();
-                self.devices.clear_mem_ptr();
-                r
-            };
+            // SAFETY: see borrow_memory_for_cpu / run_cpu_batch
+            let result = unsafe { self.run_cpu_batch(max_instructions) };
 
             let executed = match result {
                 Ok(n) => n,
@@ -2573,14 +2565,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 && !self.cpu.interrupts_inhibited(0x01)
             {
                 let vector = self.iac();
-                // SAFETY: see borrow_memory_for_cpu
-                unsafe {
-                    let mem_extended = self.borrow_memory_for_cpu();
-                    self.cpu
-                        .set_mem_bus_ptr(core::ptr::NonNull::from(&mut *mem_extended));
-                    let _ = self.cpu.inject_external_interrupt(vector);
-                    self.cpu.clear_mem_bus();
-                };
+                // SAFETY: see borrow_memory_for_cpu / inject_interrupt
+                unsafe { let _ = self.inject_interrupt(vector); };
             }
 
             // --- Tight loop: if CPU was woken from MWAIT and wall budget remains,
@@ -2648,18 +2634,15 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     /// Ideal for WASM where the emulator and display are owned by the same
     /// event loop.
     pub fn update_display(&mut self, display: &mut crate::gui::shared_display::SharedDisplay) {
-        // Debug: log VGA state periodically
-        static mut DBG_CTR: u32 = 0;
-        // SAFETY: debug counter; single-threaded access
-        unsafe {
-            DBG_CTR += 1;
-        }
-        // SAFETY: debug counter; single-threaded access
-        let dbg = unsafe { DBG_CTR };
+        #[cfg(debug_assertions)]
+        let dbg = {
+            static DBG_CTR: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            DBG_CTR.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+        };
 
         if let Some(update_result) = self.device_manager.vga.update() {
+            #[cfg(debug_assertions)]
             if dbg % 300 == 1 {
-                // Check if text_buffer has any non-zero bytes
                 let non_zero = update_result
                     .text_buffer
                     .iter()
@@ -2713,17 +2696,6 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 update_result.tm_info.start_address as u32,
                 update_result.tm_info.line_offset as u32,
                 &update_result.tm_info.actl_palette,
-            );
-        } else if dbg % 300 == 1 {
-            // VGA returned None — not in text mode or not initialized
-            let gr6 = self.device_manager.vga.graphics_regs[6];
-            let ga = (gr6 & 0x01) != 0;
-            let mm = (gr6 >> 2) & 0x03;
-            tracing::debug!(
-                "VGA update returned None: graphics_alpha={}, memory_mapping={}, gr6=0x{:02x}",
-                ga,
-                mm,
-                gr6,
             );
         }
     }
@@ -2890,7 +2862,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     /// Get DTLB entry info for a given linear address.
     /// Returns (lpf, ppf, access_bits, host_page_addr) for the TLB slot
     /// that would be used for a dword read at `laddr`.
-    pub fn get_dtlb_info(&self, laddr: u64) -> (u64, u64, u32, u64) {
+    pub fn get_dtlb_info(&self, laddr: u64) -> (u64, u64, u32, crate::config::BxPtrEquiv) {
         let idx = self.cpu.dtlb.get_index_of(laddr, 3);
         let entry = &self.cpu.dtlb.entries[idx];
         (entry.lpf, entry.ppf, entry.access_bits, entry.host_page_addr)
@@ -3048,7 +3020,7 @@ impl<I: BxCpuIdTrait> Emulator<'_, I> {
                 let safe_read = |phys: u64| -> u64 {
                     let off = phys as usize;
                     if off + 8 > ram_len { return 0; }
-                    u64::from_le_bytes(ram[off..off + 8].try_into().unwrap())
+                    u64::from_le_bytes(ram[off..off + 8].try_into().expect("8-byte slice converts to [u8; 8]"))
                 };
                 let pml4e = safe_read(cr3 + pml4_idx * 8);
                 if pml4e & 1 == 0 { return 0; }
@@ -3078,7 +3050,7 @@ impl<I: BxCpuIdTrait> Emulator<'_, I> {
             let read_u64 = |paddr: u64| -> u64 {
                 let p = paddr as usize;
                 if p + 8 <= ram.len() {
-                    u64::from_le_bytes(ram[p..p+8].try_into().unwrap())
+                    u64::from_le_bytes(ram[p..p+8].try_into().expect("8-byte slice converts to [u8; 8]"))
                 } else { 0 }
             };
             let pml4_idx = (rip >> 39) & 0x1FF;

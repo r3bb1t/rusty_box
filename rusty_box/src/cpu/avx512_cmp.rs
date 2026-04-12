@@ -187,7 +187,7 @@ fn fp_compare_f32(a: f32, b: f32, imm: u8) -> bool {
         13 | 29 => !unordered && a >= b,          // GE_OS / GE_OQ
         14 | 30 => !unordered && a > b,           // GT_OS / GT_OQ
         15 | 31 => true,                          // TRUE_UQ / TRUE_US
-        _ => unreachable!(),
+        _ => unreachable!("AVX compare predicate imm & 0x1F cannot exceed 31"),
     }
 }
 
@@ -211,7 +211,7 @@ fn fp_compare_f64(a: f64, b: f64, imm: u8) -> bool {
         13 | 29 => !unordered && a >= b,
         14 | 30 => !unordered && a > b,
         15 | 31 => true,
-        _ => unreachable!(),
+        _ => unreachable!("AVX compare predicate imm & 0x1F cannot exceed 31"),
     }
 }
 

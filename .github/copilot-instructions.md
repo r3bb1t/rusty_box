@@ -138,7 +138,7 @@ See [src/cpu/cpu_getters_and_setters.rs](src/cpu/cpu_getters_and_setters.rs) for
 - `#[cfg(feature = "std")]`: OnceLock, wall-clock throttling, env vars
 - `#[cfg(not(feature = "std"))]`: `spin::once::Once`, no throttling
 - `#[cfg(debug_assertions)]`: Diagnostic fields on CPU, detailed logging in emulator loop
-- Watch endianness: `#[cfg(feature = "bx_little_endian")]` affects register layout
+- Watch endianness: `#[cfg(target_endian = "little")]` affects register layout
 
 ## Common Modification Points
 

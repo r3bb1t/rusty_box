@@ -133,7 +133,7 @@ impl ApicMode {
             1 => ApicMode::StateInvalid,
             2 => ApicMode::XapicMode,
             3 => ApicMode::X2apicMode,
-            _ => unreachable!(),
+            _ => unreachable!("APIC mode value & 3 cannot exceed 3"),
         }
     }
 

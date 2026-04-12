@@ -191,7 +191,7 @@ impl VgaMemoryMapping {
             1 => Self::Vga64k,
             2 => Self::MonoText32k,
             3 => Self::ColorText32k,
-            _ => unreachable!(),
+            _ => unreachable!("VGA memory mapping val & 0x03 cannot exceed 3"),
         }
     }
 

@@ -146,19 +146,13 @@ impl RustyBoxApp {
         // Pad or truncate if framebuffer size doesn't match exactly
         let expected = w * h;
         let image = if pixels.len() == expected {
-            egui::ColorImage {
-                size: [w, h],
-                pixels,
-            }
+            egui::ColorImage::new([w, h], pixels)
         } else {
             // Safety fallback: create correct-sized image
             let mut padded = vec![egui::Color32::BLACK; expected];
             let copy_len = pixels.len().min(expected);
             padded[..copy_len].copy_from_slice(&pixels[..copy_len]);
-            egui::ColorImage {
-                size: [w, h],
-                pixels: padded,
-            }
+            egui::ColorImage::new([w, h], padded)
         };
 
         display.fb_dirty = false;
@@ -192,7 +186,8 @@ impl RustyBoxApp {
 }
 
 impl eframe::App for RustyBoxApp {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        let ctx = ui.ctx().clone();
         // Apply dark theme
         let mut visuals = egui::Visuals::dark();
         visuals.panel_fill = egui::Color32::from_rgb(0x1A, 0x1A, 0x2E);
@@ -201,8 +196,8 @@ impl eframe::App for RustyBoxApp {
         visuals.widgets.noninteractive.bg_fill = egui::Color32::from_rgb(0x16, 0x16, 0x2B);
         ctx.set_visuals(visuals);
 
-        self.process_input(ctx);
-        self.update_texture(ctx);
+        self.process_input(&ctx);
+        self.update_texture(&ctx);
 
         // Status bar at the bottom — modern dark theme
         let bar_bg = egui::Color32::from_rgb(0x12, 0x12, 0x24);
@@ -211,14 +206,14 @@ impl eframe::App for RustyBoxApp {
         let accent_blue = egui::Color32::from_rgb(0x56, 0x9C, 0xD6);
         let accent_yellow = egui::Color32::from_rgb(0xDC, 0xDC, 0xAA);
 
-        egui::TopBottomPanel::bottom("status_bar")
-            .exact_height(26.0)
+        egui::Panel::bottom("status_bar")
+            .exact_size(26.0)
             .frame(
                 egui::Frame::NONE
                     .fill(bar_bg)
                     .inner_margin(egui::Margin::symmetric(12, 4)),
             )
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 20.0;
 
@@ -295,17 +290,17 @@ impl eframe::App for RustyBoxApp {
         if !self.cached_serial_log.is_empty() {
             let console_bg = egui::Color32::from_rgb(0x0A, 0x0A, 0x14);
             let console_text = egui::Color32::from_rgb(0x00, 0xCC, 0x66);
-            egui::TopBottomPanel::bottom("serial_console")
+            egui::Panel::bottom("serial_console")
                 .resizable(true)
-                .min_height(60.0)
-                .default_height(160.0)
-                .max_height(400.0)
+                .min_size(60.0)
+                .default_size(160.0)
+                .max_size(400.0)
                 .frame(
                     egui::Frame::NONE
                         .fill(console_bg)
                         .inner_margin(egui::Margin::same(6)),
                 )
-                .show(ctx, |ui| {
+                .show_inside(ui, |ui| {
                     ui.label(
                         egui::RichText::new("Serial Console (ttyS0)")
                             .monospace()
@@ -330,7 +325,7 @@ impl eframe::App for RustyBoxApp {
         // Main display area — deep dark background
         egui::CentralPanel::default()
             .frame(egui::Frame::NONE.fill(egui::Color32::from_rgb(0x0D, 0x0D, 0x1A)))
-            .show(ctx, |ui| {
+            .show_inside(ui, |ui| {
                 if let Some(ref tex) = self.texture {
                     let available = ui.available_size();
                     let tex_w = self.last_width as f32;

@@ -208,7 +208,7 @@ impl BxMemoryStubC {
 
                     let (buffer_offset, buffer_end) = {
                         let Block::Block { offset } = buffer else {
-                            unreachable!()
+                            unreachable!("expected Block::Block variant for allocated memory")
                         };
                         (offset, offset + self.block_size)
                     };
@@ -438,7 +438,7 @@ impl BxMemoryStubC {
             }
             // len == other, just fall thru to special cases handling
 
-            let mut data_ptr_offset = if cfg!(feature = "bx_little_endian") {
+            let mut data_ptr_offset = if cfg!(target_endian = "little") {
                 0
             } else {
                 len - 1
@@ -454,7 +454,7 @@ impl BxMemoryStubC {
                     len -= 8;
                     a20_addr += 8;
 
-                    if cfg!(feature = "bx_little_endian") {
+                    if cfg!(target_endian = "little") {
                         data_ptr_offset += 8;
                     } else {
                         data_ptr_offset -= 8
@@ -521,7 +521,7 @@ impl BxMemoryStubC {
             // Handle non-standard lengths by copying byte-by-byte or in chunks
             let mem_vector = self.get_vector(a20_addr, cpus)?;
 
-            #[cfg(feature = "bx_little_endian")]
+            #[cfg(target_endian = "little")]
             {
                 // For little endian, copy directly
                 let mut remaining = len;
@@ -545,7 +545,7 @@ impl BxMemoryStubC {
                 }
             }
 
-            #[cfg(not(feature = "bx_little_endian"))]
+            #[cfg(target_endian = "big")]
             {
                 // For big endian, copy in reverse order
                 let mut remaining = len;

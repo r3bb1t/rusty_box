@@ -179,10 +179,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         _instr: &crate::cpu::decoder::Instruction,
     ) -> Result<()> {
         if !self.long64_mode() {
-            // SAFETY: segment cache populated during segment load; union read matches descriptor type
-            let cpl = unsafe {
-                self.sregs[BxSegregs::Cs as usize].selector.rpl
-            };
+            let cpl = self.cs_rpl();
             self.reset_endbranch_tracker(cpl, false);
         }
         // In 64-bit mode: NOP (BX_NEXT_TRACE)
@@ -198,10 +195,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         _instr: &crate::cpu::decoder::Instruction,
     ) -> Result<()> {
         if self.long64_mode() {
-            // SAFETY: segment cache populated during segment load; union read matches descriptor type
-            let cpl = unsafe {
-                self.sregs[BxSegregs::Cs as usize].selector.rpl
-            };
+            let cpl = self.cs_rpl();
             self.reset_endbranch_tracker(cpl, false);
         }
         // In non-64-bit mode: NOP (BX_NEXT_TRACE)

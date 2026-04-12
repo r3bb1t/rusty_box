@@ -62,7 +62,7 @@ fn compare_strings(
                                 if a >= b { 1 } else { 0 }
                             }
                         }
-                        _ => unreachable!(),
+                        _ => unreachable!("aggregation_operation & 3 cannot exceed 3"),
                     };
                 }
             }
@@ -84,7 +84,7 @@ fn compare_strings(
                                 if a >= b { 1 } else { 0 }
                             }
                         }
-                        _ => unreachable!(),
+                        _ => unreachable!("aggregation_operation & 3 cannot exceed 3"),
                     };
                 }
             }
@@ -106,7 +106,7 @@ fn compare_strings(
                                 if a >= b { 1 } else { 0 }
                             }
                         }
-                        _ => unreachable!(),
+                        _ => unreachable!("aggregation_operation & 3 cannot exceed 3"),
                     };
                 }
             }
@@ -128,12 +128,12 @@ fn compare_strings(
                                 if a >= b { 1 } else { 0 }
                             }
                         }
-                        _ => unreachable!(),
+                        _ => unreachable!("aggregation_operation & 3 cannot exceed 3"),
                     };
                 }
             }
         }
-        _ => unreachable!(),
+        _ => unreachable!("imm8 & 3 cannot exceed 3"),
     }
 }
 
@@ -245,7 +245,7 @@ fn override_if_data_invalid(val: bool, i_valid: bool, j_valid: bool, imm: u8) ->
                 return false;
             }
         }
-        _ => unreachable!(),
+        _ => unreachable!("aggregation_operation & 3 cannot exceed 3"),
     }
 
     val
@@ -356,7 +356,7 @@ fn aggregate(bool_res: &[[u8; 16]; 16], len1: usize, len2: usize, imm: u8) -> u1
                 }
             }
         }
-        _ => unreachable!(),
+        _ => unreachable!("aggregation_operation & 3 cannot exceed 3"),
     }
 
     // Apply polarity
@@ -374,7 +374,7 @@ fn aggregate(bool_res: &[[u8; 16]; 16], len1: usize, len2: usize, imm: u8) -> u1
                 }
             }
         }
-        _ => unreachable!(),
+        _ => unreachable!("polarity & 3 cannot exceed 3"),
     }
 
     result

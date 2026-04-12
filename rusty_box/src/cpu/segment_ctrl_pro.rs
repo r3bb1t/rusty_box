@@ -273,7 +273,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             tracing::debug!("get_rsp_from_tss: TSSstackaddr > TSS.LIMIT");
             let err_code = self.tr.selector.value & 0xfffc;
             self.exception(Exception::Ts, err_code)?;
-            unreachable!();
+            unreachable!("exception() always returns Err");
         }
 
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
@@ -284,7 +284,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             tracing::error!("get_rsp_from_tss: canonical address failure {:#018x}", rsp);
             let err_code = self.sregs[BxSegregs::Ss as usize].selector.value & 0xfffc;
             self.exception(Exception::Ss, err_code)?;
-            unreachable!();
+            unreachable!("exception() always returns Err");
         }
 
         Ok(rsp)

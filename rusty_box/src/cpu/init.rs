@@ -44,7 +44,6 @@ pub(super) fn cpuid_factory() -> impl BxCpuIdTrait {
 pub enum ResetReason {
     Software = 10,
     Hardware = 11,
-    // Other(u8),
 }
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
@@ -418,28 +417,8 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.nmi_unblocking_iret = false;
 
-        // #[cfg(not(feature = "bx_support_smp"))]
-        // {
-        //     // notice if I'm the bootstrap processor.  If not, do the equivalent of
-        //     // a HALT instruction.
-        //     let apid_id = self.lapic.get_id();
-        //     // TODO: implement this
-        //
-        //     // if (BX_BOOTSTRAP_PROCESSOR == apic_id) {}
-        //     //     // boot normally
-        //     //     BX_CPU_THIS_PTR msr.apicbase |=  0x100; /* set bit 8 BSP */
-        //     //     BX_INFO(("CPU[%d] is the bootstrap processor", apic_id));
-        //     //   } else {}
-        //     //     // it's an application processor, halt until IPI is heard.
-        //     //     BX_CPU_THIS_PTR msr.apicbase &= ~0x100; /* clear bit 8 BSP */
-        //     //     BX_INFO(("CPU[%d] is an application processor. Halting until SIPI.", apic_id));
-        //     //     enter_sleep_state(BX_ACTIVITY_STATE_WAIT_FOR_SIPI);
-        //     //   }
-        // }
         self.handle_cpu_context_change();
 
-        // self.cpuid.dump_cpuid();
-        // self.cpuid.dump_features();
     }
 
     fn write_32bit_regz(&mut self, index: usize, val: u64) {

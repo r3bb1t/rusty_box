@@ -487,8 +487,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub fn write_rmw_linear_dword(&mut self, val: u32) {
         if self.address_xlation.pages > 2 {
             // Host pointer cached from TLB hit — direct write
-            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            unsafe { (self.address_xlation.pages as *mut u32).write_unaligned(val) };
+            self.address_xlation.write_pages_u32(val);
         } else if self.address_xlation.pages == 1 {
             // Single-page physical write
             self.mem_write_dword(self.address_xlation.paddress1, val);

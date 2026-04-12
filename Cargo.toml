@@ -16,3 +16,5 @@ spin = { version = "0.10", default-features = false, features = ["once"] }
 bitflags = "2"
 paste = "1.0"
 tracing-subscriber = { version = "0.3" }
+egui = "0.34"
+eframe = { version = "0.34", default-features = false }

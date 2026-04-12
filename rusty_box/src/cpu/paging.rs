@@ -205,8 +205,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Create a temporary immutable reference - safe because we're only reading
         let mut data = [0u8; 4];
         let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-        // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
-        let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+        // SAFETY: cpu_ptr derived from valid &self; single-threaded, no aliasing during reads
+        let as_cpu_ref = || -> &BxCpuC<I> { unsafe { &*cpu_ptr } };
+        let cpu_ref = as_cpu_ref();
         // read_physical_page returns crate::memory::Result which is Result<T, crate::error::Error>
         // We need to convert it to Result<T, CpuError>
         match mem.read_physical_page(&[cpu_ref], paddr, 4, &mut data) {
@@ -233,8 +234,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // We need to pass &[&BxCpuC] but we have &mut self
         // Create a temporary immutable reference - safe because write_physical_page doesn't mutate CPU
         let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-        // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
-        let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+        // SAFETY: cpu_ptr derived from valid &self; single-threaded, no aliasing during reads
+        let as_cpu_ref = || -> &BxCpuC<I> { unsafe { &*cpu_ptr } };
+        let cpu_ref = as_cpu_ref();
         // write_physical_page returns crate::memory::Result which is Result<T, crate::error::Error>
         // We need to convert it to Result<T, CpuError>
         let result =
@@ -506,6 +508,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     ) -> Result<BxPhyAddress> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
+        let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+        // SAFETY: cpu_ptr derived from valid &self; single-threaded, no aliasing during reads
+        let as_cpu_ref = || -> &BxCpuC<I> { unsafe { &*cpu_ptr } };
 
         let mut reserved = PAGING_LEGACY_PAE_RESERVED_BITS;
         if !self.efer.nxe() {
@@ -529,9 +534,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         entry_addr[BX_LEVEL_PDE] = ppf + (((laddr >> 21) & 0x1FF) << 3);
         let pde_bytes = {
             let mut buf = [0u8; 8];
-            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-            // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
-            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            let cpu_ref = as_cpu_ref();
             match mem.read_physical_page(&[cpu_ref], entry_addr[BX_LEVEL_PDE], 8, &mut buf) {
                 Ok(()) => u64::from_le_bytes(buf),
                 Err(_) => {
@@ -598,9 +601,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if !entry[BX_LEVEL_PDE].contains(needed) {
                 entry[BX_LEVEL_PDE].insert(needed);
                 let data = entry[BX_LEVEL_PDE].bits().to_le_bytes();
-                let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-                // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
-                let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+                let cpu_ref = as_cpu_ref();
                 // A/D bit update on page table entry
                 if let Err(e) = mem.write_physical_page(
                     &[cpu_ref],
@@ -621,9 +622,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         entry_addr[BX_LEVEL_PTE] = ppf + (((laddr >> 12) & 0x1FF) << 3);
         let pte_bytes = {
             let mut buf = [0u8; 8];
-            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-            // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
-            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            let cpu_ref = as_cpu_ref();
             match mem.read_physical_page(&[cpu_ref], entry_addr[BX_LEVEL_PTE], 8, &mut buf) {
                 Ok(()) => u64::from_le_bytes(buf),
                 Err(_) => {
@@ -678,9 +677,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !entry[BX_LEVEL_PDE].contains(PteBits::ACCESSED) {
             entry[BX_LEVEL_PDE].insert(PteBits::ACCESSED);
             let data = entry[BX_LEVEL_PDE].bits().to_le_bytes();
-            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-            // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
-            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            let cpu_ref = as_cpu_ref();
             if let Err(e) = mem.write_physical_page(
                 &[cpu_ref],
                 _page_write_stamp_table,
@@ -695,9 +692,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !entry[BX_LEVEL_PTE].contains(pte_needed) {
             entry[BX_LEVEL_PTE].insert(pte_needed);
             let data = entry[BX_LEVEL_PTE].bits().to_le_bytes();
-            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-            // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
-            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            let cpu_ref = as_cpu_ref();
             if let Err(e) = mem.write_physical_page(
                 &[cpu_ref],
                 _page_write_stamp_table,
@@ -725,6 +720,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     ) -> Result<BxPhyAddress> {
         let mut combined_access = CombinedAccess::WRITE.bits() | CombinedAccess::USER.bits();
         let mut nx_page = false;
+        let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
+        // SAFETY: cpu_ptr derived from valid &self; single-threaded, no aliasing during reads
+        let as_cpu_ref = || -> &BxCpuC<I> { unsafe { &*cpu_ptr } };
 
         let mut reserved = PAGING_PAE_PHY_RESERVED_BITS;
         if !self.efer.nxe() {
@@ -751,9 +749,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             let entry_val = {
                 let mut buf = [0u8; 8];
-                let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-                // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
-                let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+                let cpu_ref = as_cpu_ref();
                 match mem.read_physical_page(&[cpu_ref], entry_addr[leaf], 8, &mut buf) {
                     Ok(()) => u64::from_le_bytes(buf),
                     Err(_) => {
@@ -852,9 +848,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if !entry[level].contains(PteBits::ACCESSED) {
                 entry[level].insert(PteBits::ACCESSED);
                 let data = entry[level].bits().to_le_bytes();
-                let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-                // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
-                let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+                let cpu_ref = as_cpu_ref();
                 // A/D bit update on page table entry
                 if let Err(e) = mem.write_physical_page(
                     &[cpu_ref],
@@ -871,9 +865,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !entry[leaf].contains(leaf_needed) {
             entry[leaf].insert(leaf_needed);
             let data = entry[leaf].bits().to_le_bytes();
-            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-            // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
-            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+            let cpu_ref = as_cpu_ref();
             if let Err(e) = mem.write_physical_page(
                 &[cpu_ref],
                 _page_write_stamp_table,
@@ -1389,8 +1381,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             if !host_base.is_null()
                 && (a20_ppf < 0xA0000 || (a20_ppf >= 0x100000 && a20_ppf < host_len))
             {
-                // SAFETY: host pointer validated during TLB fill; offset within page bounds
-                (unsafe { host_base.add(a20_ppf) }) as BxHostpageaddr
+                super::access::host_offset(host_base, a20_ppf) as BxHostpageaddr
             } else {
                 0
             }
@@ -1427,8 +1418,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let a20_addr = (paddr & self.a20_mask) as usize;
         let host_base = self.mem_host_base;
         if !host_base.is_null() && a20_addr + 4 <= self.mem_host_len {
-            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            return unsafe { (host_base.add(a20_addr) as *const u32).read_unaligned() };
+            return super::access::read_unaligned_u32(super::access::host_offset(host_base, a20_addr));
         }
         // Fallback for addresses outside RAM (shouldn't happen for page tables)
         self.mem_read_dword(paddr)
@@ -1440,8 +1430,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let a20_addr = (paddr & self.a20_mask) as usize;
         let host_base = self.mem_host_base;
         if !host_base.is_null() && a20_addr + 4 <= self.mem_host_len {
-            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            unsafe { (host_base.add(a20_addr) as *mut u32).write_unaligned(val) };
+            super::access::write_unaligned_u32(super::access::host_offset_mut(host_base, a20_addr), val);
             return;
         }
         self.mem_write_dword(paddr, val);
@@ -1453,8 +1442,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let a20_addr = (paddr & self.a20_mask) as usize;
         let host_base = self.mem_host_base;
         if !host_base.is_null() && a20_addr + 8 <= self.mem_host_len {
-            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            return unsafe { (host_base.add(a20_addr) as *const u64).read_unaligned() };
+            return super::access::read_unaligned_u64(super::access::host_offset(host_base, a20_addr));
         }
         // Fallback
         self.mem_read_qword(paddr)
@@ -1465,8 +1453,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let a20_addr = (paddr & self.a20_mask) as usize;
         let host_base = self.mem_host_base;
         if !host_base.is_null() && a20_addr + 8 <= self.mem_host_len {
-            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            unsafe { (host_base.add(a20_addr) as *mut u64).write_unaligned(val) };
+            super::access::write_unaligned_u64(super::access::host_offset_mut(host_base, a20_addr), val);
             return;
         }
         self.mem_write_qword(paddr, val);

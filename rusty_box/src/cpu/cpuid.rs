@@ -163,10 +163,3 @@ bitflags! {
         const Cmet = 1 << 17;
     }
 }
-//
-//impl<I: BxCpuIdTrait> BxCpuIdTrait<'_, I> {
-//    pub(super) fn sanity_checks(&mut self) -> Result<()> {
-//        // TODO: Implement this in future
-//        Ok(())
-//    }
-//}

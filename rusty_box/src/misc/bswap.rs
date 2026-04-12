@@ -1,7 +1,7 @@
 use byteorder::{ByteOrder, LittleEndian};
 
-#[cfg(target_os = "android")]
-compile_error! { "Android is not supported yet. Particularly writing to memory is not implemented" }
+// Android/ARM unaligned access: handled by Rust's read_unaligned/write_unaligned
+// and byteorder crate. No platform-specific code needed (unlike Bochs C++).
 
 #[inline]
 pub fn write_host_word_to_little_endian(host_ptr: &mut [u8], native_var16: u16) {

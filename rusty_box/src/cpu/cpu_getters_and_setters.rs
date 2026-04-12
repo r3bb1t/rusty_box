@@ -861,4 +861,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.sregs[seg].selector.value
     }
 
+    // CS selector RPL (current privilege level)
+    #[inline(always)]
+    pub(crate) fn cs_rpl(&self) -> u8 {
+        self.sregs[BxSegregs::Cs as usize].selector.rpl
+    }
+
 }

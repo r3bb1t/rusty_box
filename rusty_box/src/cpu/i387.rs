@@ -207,7 +207,7 @@ impl BxPackedRegister {
 
     #[inline(always)] pub fn U32(&self, i: usize) -> u32 {
         let s = i * 4;
-        u32::from_le_bytes(self.bytes[s..s+4].try_into().unwrap())
+        u32::from_le_bytes(self.bytes[s..s+4].try_into().expect("4-byte slice converts to [u8; 4]"))
     }
     #[inline(always)] pub fn set_U32(&mut self, i: usize, v: u32) {
         let s = i * 4;
@@ -216,7 +216,7 @@ impl BxPackedRegister {
 
     #[inline(always)] pub fn U16(&self, i: usize) -> u16 {
         let s = i * 2;
-        u16::from_le_bytes(self.bytes[s..s+2].try_into().unwrap())
+        u16::from_le_bytes(self.bytes[s..s+2].try_into().expect("2-byte slice converts to [u8; 2]"))
     }
     #[inline(always)] pub fn set_U16(&mut self, i: usize, v: u16) {
         let s = i * 2;

@@ -154,6 +154,12 @@ pub struct BxDevicesC {
     /// Pointer to BxMemC for immediate PAM updates during PCI writes.
     /// Set by the emulator before CPU execution; single-threaded.
     mem_ptr: Option<core::ptr::NonNull<crate::memory::BxMemC<'static>>>,
+    /// Set by I/O dispatch when PIC raises an interrupt.
+    /// CPU reads and clears this in sync_pic_flags after every I/O op.
+    pub(crate) pic_irq_pending: bool,
+    /// Set by I/O dispatch when PIC clears an interrupt.
+    /// CPU reads and clears this in sync_pic_flags after every I/O op.
+    pub(crate) pic_irq_cleared: bool,
 }
 
 impl Default for BxDevicesC {
@@ -188,6 +194,8 @@ impl BxDevicesC {
             diag_io_writes: 0,
             device_manager: None,
             mem_ptr: None,
+            pic_irq_pending: false,
+            pic_irq_cleared: false,
         }
     }
 
@@ -257,6 +265,8 @@ impl BxDevicesC {
         let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
         let has_handler = device_id != DeviceId::None && (entry.mask & len_mask) != 0;
 
+        let mut pic_pending = false;
+        let mut pic_cleared = false;
         let value = if has_handler {
             if let Some(dm) = self.device_manager_mut() {
                 let result = Self::dispatch_read(dm, device_id, port, io_len, icount);
@@ -274,6 +284,9 @@ impl BxDevicesC {
                         );
                     }
                 }
+                // Consume PIC interrupt flags; propagated to io_bus below
+                if dm.pic.irq_pending { dm.pic.irq_pending = false; pic_pending = true; }
+                if dm.pic.irq_cleared { dm.pic.irq_cleared = false; pic_cleared = true; }
                 result
             } else {
                 self.default_read_handler(port, io_len)
@@ -281,6 +294,8 @@ impl BxDevicesC {
         } else {
             self.default_read_handler(port, io_len)
         };
+        if pic_pending { self.pic_irq_pending = true; }
+        if pic_cleared { self.pic_irq_cleared = true; }
 
         self.last_io_read_port = port;
         self.last_io_read_value = value;
@@ -296,6 +311,8 @@ impl BxDevicesC {
         let len_mask = 1u8 << (io_len.trailing_zeros() as u8);
         let has_handler = device_id != DeviceId::None && (entry.mask & len_mask) != 0;
 
+        let mut pic_pending = false;
+        let mut pic_cleared = false;
         if has_handler {
             let dispatched = if let Some(dm) = self.device_manager_mut() {
                 Self::dispatch_write(dm, device_id, port, value, io_len);
@@ -313,10 +330,15 @@ impl BxDevicesC {
                         );
                     }
                 }
+                // Consume PIC interrupt flags; propagated to io_bus below
+                if dm.pic.irq_pending { dm.pic.irq_pending = false; pic_pending = true; }
+                if dm.pic.irq_cleared { dm.pic.irq_cleared = false; pic_cleared = true; }
                 true
             } else {
                 false
             };
+            if pic_pending { self.pic_irq_pending = true; }
+            if pic_cleared { self.pic_irq_cleared = true; }
             // dm borrow dropped; apply PAM update with fresh borrows
             if dispatched {
                 #[cfg(feature = "bx_support_pci")]

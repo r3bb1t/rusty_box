@@ -9,6 +9,11 @@
 //! with paging).
 
 use super::{
+    access::{
+        forward_byte_copy, host_fill_bytes, host_offset, host_offset_mut, read_host_byte,
+        read_unaligned_u16, read_unaligned_u32, write_host_byte, write_unaligned_u16,
+        write_unaligned_u32,
+    },
     cpu::BxCpuC,
     cpuid::BxCpuIdTrait,
     decoder::{BxSegregs, Instruction},
@@ -973,12 +978,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     // Bochs  — forward byte-by-byte loop.
                     // Must NOT use memcpy: overlapping regions (LZ decompression)
                     // rely on reading already-written bytes during forward copy.
-                    // SAFETY: host pointer validated during TLB fill; offset within page bounds
-                    unsafe {
-                        for j in 0..count {
-                            *dst_ptr.add(j) = *src_ptr.add(j);
-                        }
-                    }
+                    forward_byte_copy(src_ptr, dst_ptr, count);
                     self.set_rsi(esi.wrapping_add(count as u32) as u64);
                     self.set_rdi(edi.wrapping_add(count as u32) as u64);
                     self.icount += count as u64 - 1;
@@ -1035,13 +1035,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     .min(self.ticks_left_next_event() as usize) & !1;
                 let count_words = count_bytes / 2;
                 if count_words > 0 {
-                    // SAFETY: host pointer validated during TLB fill; offset within page bounds
-                    unsafe {
-                        // Forward byte-by-byte (Bochs )
-                        for j in 0..count_bytes {
-                            *dst_ptr.add(j) = *src_ptr.add(j);
-                        }
-                    }
+                    forward_byte_copy(src_ptr, dst_ptr, count_bytes);
                     self.set_rsi(esi.wrapping_add(count_bytes as u32) as u64);
                     self.set_rdi(edi.wrapping_add(count_bytes as u32) as u64);
                     self.icount += count_words as u64 - 1;
@@ -1098,13 +1092,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     .min(self.ticks_left_next_event() as usize) & !3;
                 let count_dwords = count_bytes / 4;
                 if count_dwords > 0 {
-                    // SAFETY: host pointer validated during TLB fill; offset within page bounds
-                    unsafe {
-                        // Forward byte-by-byte (Bochs )
-                        for j in 0..count_bytes {
-                            *dst_ptr.add(j) = *src_ptr.add(j);
-                        }
-                    }
+                    forward_byte_copy(src_ptr, dst_ptr, count_bytes);
                     self.set_rsi(esi.wrapping_add(count_bytes as u32) as u64);
                     self.set_rdi(edi.wrapping_add(count_bytes as u32) as u64);
                     self.icount += count_dwords as u64 - 1;
@@ -1155,10 +1143,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let count = (ecx as usize).min(dst_rem)
                     .min(self.ticks_left_next_event() as usize);
                 if count > 0 {
-                    // SAFETY: host pointer validated during TLB fill; offset within page bounds
-                    unsafe {
-                        core::ptr::write_bytes(dst_ptr, al, count);
-                    }
+                    host_fill_bytes(dst_ptr, al, count);
                     self.set_rdi(edi.wrapping_add(count as u32) as u64);
                     self.icount += count as u64 - 1;
                     self.tickn_fastrep(count);
@@ -1210,10 +1195,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let count_words = (count_bytes / 2)
                     .min(self.ticks_left_next_event() as usize);
                 if count_words > 0 {
-                    // SAFETY: pointer and length validated by caller; memory region is valid
-                    let dst_slice = unsafe {
-                        core::slice::from_raw_parts_mut(dst_ptr as *mut u16, count_words)
-                    };
+                    let dst_slice = unsafe { super::access::host_slice_mut_u16(dst_ptr, count_words) };
                     for w in dst_slice.iter_mut() {
                         *w = ax;
                     }
@@ -1268,10 +1250,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let count_dwords = (count_bytes / 4)
                     .min(self.ticks_left_next_event() as usize);
                 if count_dwords > 0 {
-                    // SAFETY: pointer and length validated by caller; memory region is valid
-                    let dst_slice = unsafe {
-                        core::slice::from_raw_parts_mut(dst_ptr as *mut u32, count_dwords)
-                    };
+                    let dst_slice = unsafe { super::access::host_slice_mut_u32(dst_ptr, count_dwords) };
                     for d in dst_slice.iter_mut() {
                         *d = eax;
                     }
@@ -1613,8 +1592,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !host_base.is_null()
             && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr < self.mem_host_len))
         {
-            // SAFETY: host pointer validated during TLB fill; offset within page bounds
-            return unsafe { *host_base.add(a20_addr) };
+            return read_host_byte(host_base, a20_addr);
         }
 
         self.mem_read_byte_slow(addr)
@@ -1637,12 +1615,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return (dword >> (byte_offset * 8)) as u8;
             }
         }
-        if let Some(mem_bus) = self.mem_bus {
-            // SAFETY: mem_bus valid for duration of cpu_loop; single-threaded access
-            let mem = unsafe { &mut *mem_bus.as_ptr() };
-            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-            // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
-            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+        if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
             let paddr: BxPhyAddress = addr as BxPhyAddress;
 
             if let Ok(Some(slice)) =
@@ -1667,8 +1640,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if let Some(ptr) = self.mem_ptr {
             let addr = addr as usize;
             if addr < self.mem_len {
-                // SAFETY: host pointer validated during TLB fill; offset within page bounds
-                return unsafe { *ptr.add(addr) };
+                return read_host_byte(ptr, addr);
             }
         }
 
@@ -1683,8 +1655,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !host_base.is_null()
             && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr < self.mem_host_len))
         {
-            // SAFETY: host pointer validated during TLB fill; offset within page bounds
-            unsafe { *host_base.add(a20_addr) = value };
+            write_host_byte(host_base, a20_addr, value);
             self.i_cache.smc_write_check(a20_addr as BxPhyAddress, 1);
             return;
         }
@@ -1713,12 +1684,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return;
             }
         }
-        if let Some(mem_bus) = self.mem_bus {
-            // SAFETY: mem_bus valid for duration of cpu_loop; single-threaded access
-            let mem = unsafe { &mut *mem_bus.as_ptr() };
-            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-            // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
-            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+        if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
             let paddr: BxPhyAddress = addr as BxPhyAddress;
 
             if let Ok(Some(slice)) =
@@ -1746,10 +1712,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if let Some(ptr) = self.mem_ptr {
             let addr_usize = addr as usize;
             if addr_usize < self.mem_len {
-                // SAFETY: host pointer validated during TLB fill; offset within page bounds
-                unsafe {
-                    *ptr.add(addr_usize) = value;
-                }
+                write_host_byte(ptr, addr_usize, value);
                 self.i_cache.smc_write_check(addr as BxPhyAddress, 1);
             }
         }
@@ -1763,8 +1726,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !host_base.is_null()
             && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr + 1 < self.mem_host_len))
         {
-            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            return unsafe { (host_base.add(a20_addr) as *const u16).read_unaligned() };
+            return read_unaligned_u16(host_offset(host_base, a20_addr));
         }
         // Slow path: per-byte reads (handles MMIO/VGA/ROM)
         let lo = self.mem_read_byte(addr) as u16;
@@ -1780,8 +1742,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !host_base.is_null()
             && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr + 1 < self.mem_host_len))
         {
-            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            unsafe { (host_base.add(a20_addr) as *mut u16).write_unaligned(value) };
+            write_unaligned_u16(host_offset_mut(host_base, a20_addr), value);
             self.i_cache.smc_write_check(a20_addr as BxPhyAddress, 2);
             return;
         }
@@ -1798,8 +1759,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !host_base.is_null()
             && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr + 3 < self.mem_host_len))
         {
-            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            return unsafe { (host_base.add(a20_addr) as *const u32).read_unaligned() };
+            return read_unaligned_u32(host_offset(host_base, a20_addr));
         }
         // LAPIC MMIO intercept: 32-bit aligned register access
         // Bochs apic.cc read() — LAPIC registers are always dword-accessed.
@@ -1809,12 +1769,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         // Slow path: route through read_physical_page to hit registered MMIO handlers
         // (IOAPIC, VGA, etc.) with proper dword access width.
-        if let Some(mem_bus) = self.mem_bus {
-            // SAFETY: mem_bus valid for duration of cpu_loop; single-threaded access
-            let mem = unsafe { &mut *mem_bus.as_ptr() };
-            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-            // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
-            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+        if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
             let paddr: BxPhyAddress = addr as BxPhyAddress;
             let mut data = [0u8; 4];
             if mem.read_physical_page(&[cpu_ref], paddr, 4, &mut data).is_ok() {
@@ -1834,8 +1789,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !host_base.is_null()
             && (a20_addr < 0xA0000 || (a20_addr >= 0x100000 && a20_addr + 3 < self.mem_host_len))
         {
-            // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            unsafe { (host_base.add(a20_addr) as *mut u32).write_unaligned(value) };
+            write_unaligned_u32(host_offset_mut(host_base, a20_addr), value);
             self.i_cache.smc_write_check(a20_addr as BxPhyAddress, 4);
             return;
         }
@@ -1848,12 +1802,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
         // Slow path: route through write_physical_page to hit registered MMIO handlers
         // (IOAPIC, VGA, etc.) with proper dword access width.
-        if let Some(mem_bus) = self.mem_bus {
-            // SAFETY: mem_bus valid for duration of cpu_loop; single-threaded access
-            let mem = unsafe { &mut *mem_bus.as_ptr() };
-            let cpu_ptr: *const BxCpuC<I> = self as *const BxCpuC<I>;
-            // SAFETY: cpu_ptr derived from valid &self; no aliasing during this call
-            let cpu_ref: &BxCpuC<I> = unsafe { &*cpu_ptr };
+        if let Some((mem, cpu_ref)) = self.mem_bus_and_cpu() {
             let paddr: BxPhyAddress = addr as BxPhyAddress;
             let mut dummy_mapping: [u32; 0] = [];
             let mut stamp = BxPageWriteStampTable::new(&mut dummy_mapping);
@@ -2158,12 +2107,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     // Bochs  — forward byte-by-byte loop.
                     // Must NOT use memcpy: overlapping regions (LZ decompression)
                     // rely on reading already-written bytes during forward copy.
-                    // SAFETY: host pointer validated during TLB fill; offset within page bounds
-                    unsafe {
-                        for j in 0..count {
-                            *dst_ptr.add(j) = *src_ptr.add(j);
-                        }
-                    }
+                    forward_byte_copy(src_ptr, dst_ptr, count);
                     self.set_rsi(rsi.wrapping_add(count as u64));
                     self.set_rdi(rdi.wrapping_add(count as u64));
                     self.icount += count as u64 - 1;
@@ -2229,13 +2173,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     .min(self.ticks_left_next_event() as usize) & !1;
                 let count_words = count_bytes / 2;
                 if count_words > 0 {
-                    // SAFETY: host pointer validated during TLB fill; offset within page bounds
-                    unsafe {
-                        // Forward byte-by-byte (Bochs )
-                        for j in 0..count_bytes {
-                            *dst_ptr.add(j) = *src_ptr.add(j);
-                        }
-                    }
+                    forward_byte_copy(src_ptr, dst_ptr, count_bytes);
                     self.set_rsi(rsi.wrapping_add(count_bytes as u64));
                     self.set_rdi(rdi.wrapping_add(count_bytes as u64));
                     self.icount += count_words as u64 - 1;
@@ -2301,13 +2239,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     .min(self.ticks_left_next_event() as usize) & !3; // align to 4
                 let count_dwords = count_bytes / 4;
                 if count_dwords > 0 {
-                    // SAFETY: host pointer validated during TLB fill; offset within page bounds
-                    unsafe {
-                        // Forward byte-by-byte (Bochs )
-                        for j in 0..count_bytes {
-                            *dst_ptr.add(j) = *src_ptr.add(j);
-                        }
-                    }
+                    forward_byte_copy(src_ptr, dst_ptr, count_bytes);
                     self.set_rsi(rsi.wrapping_add(count_bytes as u64));
                     self.set_rdi(rdi.wrapping_add(count_bytes as u64));
                     self.icount += count_dwords as u64 - 1;
@@ -2367,10 +2299,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let count = (rcx as usize).min(dst_rem)
                     .min(self.ticks_left_next_event() as usize);
                 if count > 0 {
-                    // SAFETY: host pointer validated during TLB fill; offset within page bounds
-                    unsafe {
-                        core::ptr::write_bytes(dst_ptr, al, count);
-                    }
+                    host_fill_bytes(dst_ptr, al, count);
                     self.set_rdi(rdi.wrapping_add(count as u64));
                     self.icount += count as u64 - 1;
                     self.tickn_fastrep(count);
@@ -2429,10 +2358,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let count_words = (count_bytes / 2)
                     .min(self.ticks_left_next_event() as usize);
                 if count_words > 0 {
-                    // SAFETY: pointer and length validated by caller; memory region is valid
-                    let dst_slice = unsafe {
-                        core::slice::from_raw_parts_mut(dst_ptr as *mut u16, count_words)
-                    };
+                    let dst_slice = unsafe { super::access::host_slice_mut_u16(dst_ptr, count_words) };
                     for w in dst_slice.iter_mut() {
                         *w = ax;
                     }
@@ -2494,10 +2420,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let count_dwords = (count_bytes / 4)
                     .min(self.ticks_left_next_event() as usize);
                 if count_dwords > 0 {
-                    // SAFETY: pointer and length validated by caller; memory region is valid
-                    let dst_slice = unsafe {
-                        core::slice::from_raw_parts_mut(dst_ptr as *mut u32, count_dwords)
-                    };
+                    let dst_slice = unsafe { super::access::host_slice_mut_u32(dst_ptr, count_dwords) };
                     for d in dst_slice.iter_mut() {
                         *d = eax;
                     }
@@ -2944,13 +2867,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     .min(self.ticks_left_next_event() as usize) & !7;
                 let count_qwords = count_bytes / 8;
                 if count_qwords > 0 {
-                    // SAFETY: host pointer validated during TLB fill; offset within page bounds
-                    unsafe {
-                        // Forward byte-by-byte (Bochs )
-                        for j in 0..count_bytes {
-                            *dst_ptr.add(j) = *src_ptr.add(j);
-                        }
-                    }
+                    forward_byte_copy(src_ptr, dst_ptr, count_bytes);
                     self.set_rsi(rsi.wrapping_add(count_bytes as u64));
                     self.set_rdi(rdi.wrapping_add(count_bytes as u64));
                     self.icount += count_qwords as u64 - 1;
@@ -3011,10 +2928,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let count_qwords = (count_bytes / 8)
                     .min(self.ticks_left_next_event() as usize);
                 if count_qwords > 0 {
-                    // SAFETY: pointer and length validated by caller; memory region is valid
-                    let dst_slice = unsafe {
-                        core::slice::from_raw_parts_mut(dst_ptr as *mut u64, count_qwords)
-                    };
+                    let dst_slice = unsafe { super::access::host_slice_mut_u64(dst_ptr, count_qwords) };
                     for q in dst_slice.iter_mut() {
                         *q = rax;
                     }

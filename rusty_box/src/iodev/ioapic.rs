@@ -128,7 +128,7 @@ impl IoApicDeliveryMode {
             5 => Self::Init,
             6 => Self::Reserved6,
             7 => Self::ExtInt,
-            _ => unreachable!(),
+            _ => unreachable!("delivery mode 3-bit field cannot exceed 7"),
         }
     }
 }

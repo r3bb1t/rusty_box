@@ -421,13 +421,10 @@ fn run_alpine() -> Result<()> {
         let mut run_result: Result<u64> = Ok(0);
         let mut logged_in = false;
         let mut enter_injected = false;
-        let mut mkdir_test_injected = false;
-        let mut mkdir_test_icount: u64 = 0;
 
         const PHASE_SIZE: u64 = 100_000;
         let mut last_rip: u64 = 0;
         let mut same_rip_count: u32 = 0;
-        let mut bda_dumped = false;
         let mut phase_num: u64 = 0;
 
         // Set address hit watches for __intcall debugging
@@ -501,230 +498,209 @@ fn run_alpine() -> Result<()> {
                 emu.cpu.eax(), emu.cpu.ecx()
             );
 
-            // One-time dump: BDA and IVT at ~2M (before SYSLINUX init)
-            if total_executed >= 2_800_000 && !bda_dumped {
-                bda_dumped = true;
-                let (rp, rl) = emu.memory.get_ram_base_ptr();
-                let rd16 = |addr: usize| -> u16 {
-                    if addr + 1 < rl { unsafe { (rp.add(addr) as *const u16).read_unaligned() } } else { 0xDEAD }
-                };
-                let rd32 = |addr: usize| -> u32 {
-                    if addr + 3 < rl { unsafe { (rp.add(addr) as *const u32).read_unaligned() } } else { 0xDEAD }
-                };
-                println!("\n===== BDA / IVT CHECK =====");
-                println!("  BDA[0x0413] conv_mem_kb = {} (0x{:04x})", rd16(0x0413), rd16(0x0413));
-                println!("  BDA[0x0415] ext_mem_kb  = {} (0x{:04x})", rd16(0x0415), rd16(0x0415));
-                println!("  IVT[0x12]  = {:04x}:{:04x}", rd16(0x004A), rd16(0x0048));
-                println!("  IVT[0x13]  = {:04x}:{:04x}", rd16(0x004E), rd16(0x004C));
-                println!("  IVT[0x10]  = {:04x}:{:04x}", rd16(0x0042), rd16(0x0040));
-                println!("  IVT[0x15]  = {:04x}:{:04x}", rd16(0x0056), rd16(0x0054));
-                println!("  IVT[0x16]  = {:04x}:{:04x}", rd16(0x005A), rd16(0x0058));
-                // Check SYSLINUX memory at key addresses
-                println!("  [0x100135] code = {:08x} {:08x}", rd32(0x100135), rd32(0x100139));
-                // Check what's at EBDA
-                let ebda_seg = rd16(0x040E);
-                println!("  BDA[0x040E] EBDA seg = {:04x} (phys {:05x})", ebda_seg, (ebda_seg as u32) << 4);
-                println!();
-            }
-
-            // One-time dump at ~3M instructions
-            if total_executed >= 3_000_000 && total_executed < 3_100_000 {
-                let (rp, rl) = emu.memory.get_ram_base_ptr();
-                let rd = |addr: usize| -> u32 {
-                    if addr + 3 < rl { unsafe { (rp.add(addr) as *const u32).read_unaligned() } } else { 0xDEAD }
-                };
-
-                // Dump boot info table from isolinux.bin stub at 0x7C00
-                println!("\n===== BOOT INFO TABLE (isolinux.bin @ 0x7C00) =====");
-                println!("  bi_pvd    @ 0x7C08 = {:08x} (should be 0x10 = sector 16)", rd(0x7C08));
-                println!("  bi_file   @ 0x7C0C = {:08x} (boot file LBA)", rd(0x7C0C));
-                println!("  bi_length @ 0x7C10 = {:08x} (boot file length)", rd(0x7C10));
-                println!("  bi_csum   @ 0x7C14 = {:08x} (checksum)", rd(0x7C14));
-                // Also dump raw bytes 0x7C00-0x7C20
-                print!("  0x7C00:");
-                for j in 0..32usize { print!(" {:02x}", unsafe { *rp.add(0x7C00 + j) }); }
-                println!();
-                // Also check what the STUB stores in its data area (0x3000+)
-                println!("  BootInfoTable ptr (from stub data):");
-                println!("  [0x3004] = {:08x}", rd(0x3004));
-                println!("  [0x3008] = {:08x}", rd(0x3008));
-                println!("  [0x300C] = {:08x}", rd(0x300C));
-                println!("  [0x3010] = {:08x}", rd(0x3010));
-
-                // Dump init_func table at 0x110DC0 (first 10 entries, stride 0x38)
-                println!("\n===== INIT FUNC TABLE @ 0x110DC0 (stride=0x38) =====");
-                for i in 0..10u32 {
-                    let base = 0x110DC0 + (i * 0x38) as usize;
-                    let dw0 = rd(base);
-                    let dw1 = rd(base + 4);
-                    let dw2 = rd(base + 8);
-                    let dw3 = rd(base + 12);
-                    if dw0 != 0 || dw1 != 0 || i < 3 {
-                        println!("  [{:2}] @{:#08x}: {:08x} {:08x} {:08x} {:08x}", i, base, dw0, dw1, dw2, dw3);
-                    }
-                }
-
-                // Search for constructor-like arrays in 0x100000-0x10A800
-                // These would be arrays of 4-byte pointers in 0x100000-0x110000 range
-                println!("\n===== SEARCHING FOR CONSTRUCTOR ARRAYS =====");
-                let mut found = 0;
-                for addr in (0x100000..0x10A800).step_by(4) {
-                    let val = rd(addr);
-                    // Look for sequences of 3+ consecutive function pointers
-                    if val >= 0x100000 && val < 0x112000 {
-                        let v1 = rd(addr + 4);
-                        let v2 = rd(addr + 8);
-                        if v1 >= 0x100000 && v1 < 0x112000 && v2 >= 0x100000 && v2 < 0x112000 {
-                            if found < 10 {
-                                println!("  Candidate @{:#08x}: {:08x} {:08x} {:08x} {:08x}",
-                                    addr, val, v1, v2, rd(addr + 12));
-                            }
-                            found += 1;
-                        }
-                    }
-                }
-                println!("  Total candidate sequences: {}", found);
-
-                // Dump malloc/allocator state at 0x10ECF0 (base address from trace)
-                println!("\n===== MALLOC ALLOCATOR STATE =====");
-                println!("  Allocator base area (0x10ECF0-0x10ED3F):");
-                for row in 0..5usize {
-                    let base = 0x10ECF0 + row * 16;
-                    print!("  {:#08x}:", base);
-                    for j in 0..4usize { print!(" {:08x}", rd(base + j * 4)); }
-                    println!();
-                }
-                println!("  Free list area (0x10F2C0-0x10F31F):");
-                for row in 0..4usize {
-                    let base = 0x10F2C0 + row * 16;
-                    print!("  {:#08x}:", base);
-                    for j in 0..4usize { print!(" {:08x}", rd(base + j * 4)); }
-                    println!();
-                }
-                // Dump __com32 structure (at known SYSLINUX addresses)
-                println!("  __com32 struct candidate at 0x10F180:");
-                for row in 0..4usize {
-                    let base = 0x10F180 + row * 16;
-                    print!("  {:#08x}:", base);
-                    for j in 0..4usize { print!(" {:08x}", rd(base + j * 4)); }
+            // Verbose diagnostic dumps gated behind debug builds + env var
+            #[cfg(debug_assertions)]
+            if std::env::var("RUSTY_BOX_DEBUG").is_ok() {
+                // One-time dump: BDA and IVT at ~2.8M (before SYSLINUX init)
+                if total_executed >= 2_800_000 && total_executed < 2_900_000 {
+                    let (rp, rl) = emu.memory.get_ram_base_ptr();
+                    let rd16 = |addr: usize| -> u16 {
+                        if addr + 1 < rl { unsafe { (rp.add(addr) as *const u16).read_unaligned() } } else { 0xDEAD }
+                    };
+                    let rd32 = |addr: usize| -> u32 {
+                        if addr + 3 < rl { unsafe { (rp.add(addr) as *const u32).read_unaligned() } } else { 0xDEAD }
+                    };
+                    println!("\n===== BDA / IVT CHECK =====");
+                    println!("  BDA[0x0413] conv_mem_kb = {} (0x{:04x})", rd16(0x0413), rd16(0x0413));
+                    println!("  BDA[0x0415] ext_mem_kb  = {} (0x{:04x})", rd16(0x0415), rd16(0x0415));
+                    println!("  IVT[0x12]  = {:04x}:{:04x}", rd16(0x004A), rd16(0x0048));
+                    println!("  IVT[0x13]  = {:04x}:{:04x}", rd16(0x004E), rd16(0x004C));
+                    println!("  IVT[0x10]  = {:04x}:{:04x}", rd16(0x0042), rd16(0x0040));
+                    println!("  IVT[0x15]  = {:04x}:{:04x}", rd16(0x0056), rd16(0x0054));
+                    println!("  IVT[0x16]  = {:04x}:{:04x}", rd16(0x005A), rd16(0x0058));
+                    println!("  [0x100135] code = {:08x} {:08x}", rd32(0x100135), rd32(0x100139));
+                    let ebda_seg = rd16(0x040E);
+                    println!("  BDA[0x040E] EBDA seg = {:04x} (phys {:05x})", ebda_seg, (ebda_seg as u32) << 4);
                     println!();
                 }
 
-                // Dump the linked list node at 0x22060 (from init_func entry[1])
-                println!("\n===== INIT_FUNC LIST NODE @ 0x22060 =====");
-                for row in 0..4usize {
-                    let base = 0x22060 + row * 16;
-                    if base + 15 < rl {
-                        print!("  {:#08x}:", base);
-                        for j in 0..4usize {
-                            let val = rd(base + j * 4);
-                            print!(" {:08x}", val);
-                        }
-                        println!();
-                    }
-                }
+                // One-time dump at ~3M instructions
+                if total_executed >= 3_000_000 && total_executed < 3_100_000 {
+                    let (rp, rl) = emu.memory.get_ram_base_ptr();
+                    let rd = |addr: usize| -> u32 {
+                        if addr + 3 < rl { unsafe { (rp.add(addr) as *const u32).read_unaligned() } } else { 0xDEAD }
+                    };
 
-                // Dump idle loop code at key addresses
-                println!("\n===== IDLE LOOP CODE =====");
-                for &(name, addr) in &[
-                    ("0x100c40 timer_read", 0x100c40usize),
-                    ("0x10418b cond_check", 0x10418busize),
-                    ("0x104171 timer_thresh", 0x104171usize),
-                    ("0x100065 poll_start", 0x100065usize),
-                    ("0x100080 poll_mid", 0x100080usize),
-                ] {
-                    print!("  {} {:#08x}:", name, addr);
-                    for j in 0..24usize {
-                        if addr + j < rl {
-                            print!(" {:02x}", unsafe { *rp.add(addr + j) });
-                        }
-                    }
+                    println!("\n===== BOOT INFO TABLE (isolinux.bin @ 0x7C00) =====");
+                    println!("  bi_pvd    @ 0x7C08 = {:08x} (should be 0x10 = sector 16)", rd(0x7C08));
+                    println!("  bi_file   @ 0x7C0C = {:08x} (boot file LBA)", rd(0x7C0C));
+                    println!("  bi_length @ 0x7C10 = {:08x} (boot file length)", rd(0x7C10));
+                    println!("  bi_csum   @ 0x7C14 = {:08x} (checksum)", rd(0x7C14));
+                    print!("  0x7C00:");
+                    for j in 0..32usize { print!(" {:02x}", unsafe { *rp.add(0x7C00 + j) }); }
                     println!();
-                }
+                    println!("  BootInfoTable ptr (from stub data):");
+                    println!("  [0x3004] = {:08x}", rd(0x3004));
+                    println!("  [0x3008] = {:08x}", rd(0x3008));
+                    println!("  [0x300C] = {:08x}", rd(0x300C));
+                    println!("  [0x3010] = {:08x}", rd(0x3010));
 
-                // Dump pending_flag and nearby state
-                println!("\n===== KEY STATE VARS =====");
-                println!("  pending_flag  @ 0x10F774 = {:08x}", rd(0x10F774));
-                println!("  timer_start   @ 0x10F778 = {:08x}", rd(0x10F778));
-                println!("  callback_ptr  @ 0x8E84   = {:08x}", rd(0x8E84));
-                println!("  poll_flag     @ 0x110D94 = {:08x}", rd(0x110D94));
-                println!("  callback_ptr2 @ 0x111064 = {:08x}", rd(0x111064));
-
-                // Dump init_func iterator code bytes
-                println!("\n===== INIT_FUNC CODE @ 0x104340-0x104360 =====");
-                for row in 0..2usize {
-                    let base = 0x104340 + row * 16;
-                    if base + 15 < rl {
-                        print!("  {:#08x}:", base);
-                        for j in 0..16usize {
-                            print!(" {:02x}", unsafe { *rp.add(base + j) });
+                    println!("\n===== INIT FUNC TABLE @ 0x110DC0 (stride=0x38) =====");
+                    for i in 0..10u32 {
+                        let base = 0x110DC0 + (i * 0x38) as usize;
+                        let dw0 = rd(base);
+                        let dw1 = rd(base + 4);
+                        let dw2 = rd(base + 8);
+                        let dw3 = rd(base + 12);
+                        if dw0 != 0 || dw1 != 0 || i < 3 {
+                            println!("  [{:2}] @{:#08x}: {:08x} {:08x} {:08x} {:08x}", i, base, dw0, dw1, dw2, dw3);
                         }
-                        println!();
                     }
-                }
 
-                // Dump the constructor candidate array at 0x108CE0
-                println!("\n===== CONSTRUCTOR TABLE @ 0x108CE0 =====");
-                for row in 0..8usize {
-                    let base = 0x108CE0 + row * 16;
-                    if base + 15 < rl {
-                        print!("  {:#08x}:", base);
-                        for j in 0..4usize {
-                            let val = rd(base + j * 4);
-                            print!(" {:08x}", val);
-                        }
-                        println!();
-                    }
-                }
-
-                // Search for references to constructor table in code
-                // The constructor table starts at ~0x108CE4 with the first function pointer
-                // But the count/header might be at 0x108CE0 (value 0x44=68)
-                // A constructor-calling loop would have MOV/LEA reg, 0x108CE4 or 0x108CE0
-                println!("\n===== SEARCHING FOR CTOR TABLE REFS IN CODE =====");
-                let ctor_addr_bytes: [u8; 4] = (0x108CE4u32).to_le_bytes();
-                let ctor_hdr_bytes: [u8; 4] = (0x108CE0u32).to_le_bytes();
-                // Also search for the end-of-array marker: after last ptr 0x1054C0,
-                // the array terminator pattern (0x00008EBC at 0x108D14)
-                let ctor_end_bytes: [u8; 4] = (0x108D14u32).to_le_bytes();
-                for (name, target_bytes) in &[
-                    ("0x108CE4 (first ctor)", &ctor_addr_bytes),
-                    ("0x108CE0 (ctor header)", &ctor_hdr_bytes),
-                    ("0x108D14 (ctor end)", &ctor_end_bytes),
-                ] {
+                    println!("\n===== SEARCHING FOR CONSTRUCTOR ARRAYS =====");
                     let mut found = 0;
-                    for addr in 0x100000..0x10A800usize {
-                        if addr + 3 < rl {
-                            let b = unsafe { core::slice::from_raw_parts(rp.add(addr), 4) };
-                            if b == *target_bytes {
-                                if found < 5 {
-                                    // Show context: 8 bytes before and after
-                                    print!("  {} ref at {:#08x}: ", name, addr);
-                                    let start = if addr >= 8 { addr - 8 } else { 0 };
-                                    for j in start..addr+8 {
-                                        if j < rl { print!("{:02x}", unsafe { *rp.add(j) }); }
-                                        if j == addr - 1 { print!("["); }
-                                        if j == addr + 3 { print!("]"); }
-                                    }
-                                    println!();
+                    for addr in (0x100000..0x10A800).step_by(4) {
+                        let val = rd(addr);
+                        if val >= 0x100000 && val < 0x112000 {
+                            let v1 = rd(addr + 4);
+                            let v2 = rd(addr + 8);
+                            if v1 >= 0x100000 && v1 < 0x112000 && v2 >= 0x100000 && v2 < 0x112000 {
+                                if found < 10 {
+                                    println!("  Candidate @{:#08x}: {:08x} {:08x} {:08x} {:08x}",
+                                        addr, val, v1, v2, rd(addr + 12));
                                 }
                                 found += 1;
                             }
                         }
                     }
-                    println!("  {} total refs: {}", name, found);
-                }
+                    println!("  Total candidate sequences: {}", found);
 
-                // Also dump memory around the init_func table base to see what's there
-                println!("\n===== MEMORY 0x110D80-0x110E40 =====");
-                for row in 0..12usize {
-                    let base = 0x110D80 + row * 16;
-                    if base + 15 < rl {
+                    println!("\n===== MALLOC ALLOCATOR STATE =====");
+                    println!("  Allocator base area (0x10ECF0-0x10ED3F):");
+                    for row in 0..5usize {
+                        let base = 0x10ECF0 + row * 16;
                         print!("  {:#08x}:", base);
-                        for j in 0..4usize {
-                            print!(" {:08x}", rd(base + j * 4));
+                        for j in 0..4usize { print!(" {:08x}", rd(base + j * 4)); }
+                        println!();
+                    }
+                    println!("  Free list area (0x10F2C0-0x10F31F):");
+                    for row in 0..4usize {
+                        let base = 0x10F2C0 + row * 16;
+                        print!("  {:#08x}:", base);
+                        for j in 0..4usize { print!(" {:08x}", rd(base + j * 4)); }
+                        println!();
+                    }
+                    println!("  __com32 struct candidate at 0x10F180:");
+                    for row in 0..4usize {
+                        let base = 0x10F180 + row * 16;
+                        print!("  {:#08x}:", base);
+                        for j in 0..4usize { print!(" {:08x}", rd(base + j * 4)); }
+                        println!();
+                    }
+
+                    println!("\n===== INIT_FUNC LIST NODE @ 0x22060 =====");
+                    for row in 0..4usize {
+                        let base = 0x22060 + row * 16;
+                        if base + 15 < rl {
+                            print!("  {:#08x}:", base);
+                            for j in 0..4usize {
+                                let val = rd(base + j * 4);
+                                print!(" {:08x}", val);
+                            }
+                            println!();
+                        }
+                    }
+
+                    println!("\n===== IDLE LOOP CODE =====");
+                    for &(name, addr) in &[
+                        ("0x100c40 timer_read", 0x100c40usize),
+                        ("0x10418b cond_check", 0x10418busize),
+                        ("0x104171 timer_thresh", 0x104171usize),
+                        ("0x100065 poll_start", 0x100065usize),
+                        ("0x100080 poll_mid", 0x100080usize),
+                    ] {
+                        print!("  {} {:#08x}:", name, addr);
+                        for j in 0..24usize {
+                            if addr + j < rl {
+                                print!(" {:02x}", unsafe { *rp.add(addr + j) });
+                            }
                         }
                         println!();
+                    }
+
+                    println!("\n===== KEY STATE VARS =====");
+                    println!("  pending_flag  @ 0x10F774 = {:08x}", rd(0x10F774));
+                    println!("  timer_start   @ 0x10F778 = {:08x}", rd(0x10F778));
+                    println!("  callback_ptr  @ 0x8E84   = {:08x}", rd(0x8E84));
+                    println!("  poll_flag     @ 0x110D94 = {:08x}", rd(0x110D94));
+                    println!("  callback_ptr2 @ 0x111064 = {:08x}", rd(0x111064));
+
+                    println!("\n===== INIT_FUNC CODE @ 0x104340-0x104360 =====");
+                    for row in 0..2usize {
+                        let base = 0x104340 + row * 16;
+                        if base + 15 < rl {
+                            print!("  {:#08x}:", base);
+                            for j in 0..16usize {
+                                print!(" {:02x}", unsafe { *rp.add(base + j) });
+                            }
+                            println!();
+                        }
+                    }
+
+                    println!("\n===== CONSTRUCTOR TABLE @ 0x108CE0 =====");
+                    for row in 0..8usize {
+                        let base = 0x108CE0 + row * 16;
+                        if base + 15 < rl {
+                            print!("  {:#08x}:", base);
+                            for j in 0..4usize {
+                                let val = rd(base + j * 4);
+                                print!(" {:08x}", val);
+                            }
+                            println!();
+                        }
+                    }
+
+                    println!("\n===== SEARCHING FOR CTOR TABLE REFS IN CODE =====");
+                    let ctor_addr_bytes: [u8; 4] = (0x108CE4u32).to_le_bytes();
+                    let ctor_hdr_bytes: [u8; 4] = (0x108CE0u32).to_le_bytes();
+                    let ctor_end_bytes: [u8; 4] = (0x108D14u32).to_le_bytes();
+                    for (name, target_bytes) in &[
+                        ("0x108CE4 (first ctor)", &ctor_addr_bytes),
+                        ("0x108CE0 (ctor header)", &ctor_hdr_bytes),
+                        ("0x108D14 (ctor end)", &ctor_end_bytes),
+                    ] {
+                        let mut found = 0;
+                        for addr in 0x100000..0x10A800usize {
+                            if addr + 3 < rl {
+                                let b = unsafe { core::slice::from_raw_parts(rp.add(addr), 4) };
+                                if b == *target_bytes {
+                                    if found < 5 {
+                                        print!("  {} ref at {:#08x}: ", name, addr);
+                                        let start = if addr >= 8 { addr - 8 } else { 0 };
+                                        for j in start..addr+8 {
+                                            if j < rl { print!("{:02x}", unsafe { *rp.add(j) }); }
+                                            if j == addr - 1 { print!("["); }
+                                            if j == addr + 3 { print!("]"); }
+                                        }
+                                        println!();
+                                    }
+                                    found += 1;
+                                }
+                            }
+                        }
+                        println!("  {} total refs: {}", name, found);
+                    }
+
+                    println!("\n===== MEMORY 0x110D80-0x110E40 =====");
+                    for row in 0..12usize {
+                        let base = 0x110D80 + row * 16;
+                        if base + 15 < rl {
+                            print!("  {:#08x}:", base);
+                            for j in 0..4usize {
+                                print!(" {:08x}", rd(base + j * 4));
+                            }
+                            println!();
+                        }
                     }
                 }
             }
@@ -810,19 +786,6 @@ fn run_alpine() -> Result<()> {
                         emu.send_scancode(sc);
                     }
                     logged_in = true;
-                    mkdir_test_icount = total_executed;
-                } else if logged_in && !mkdir_test_injected && total_executed > mkdir_test_icount + 50_000_000 {
-                    // Phase 1: mkdir + create a file
-                    eprintln!("[TEST] Phase 1: mkdir testdir && echo hello > testdir/file at {}M instr", total_executed / 1_000_000);
-                    emu.send_string("mkdir testdir && echo hello > testdir/file\n");
-                    mkdir_test_injected = true;
-                    mkdir_test_icount = total_executed; // reuse for phase 2 timing
-                } else if mkdir_test_injected && total_executed > mkdir_test_icount + 30_000_000 {
-                    // Phase 2: cat the file then try tab completion
-                    eprintln!("[TEST] Phase 2: 'cat testdir/file' at {}M instr", total_executed / 1_000_000);
-                    emu.send_string("cat testdir/file\n");
-                    mkdir_test_injected = false;
-                    mkdir_test_icount = u64::MAX;
                 } else {
                     for &sc in KEEP_ALIVE_SCANCODE {
                         emu.send_scancode(sc);

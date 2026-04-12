@@ -498,8 +498,6 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     /// 0 if current CS:EIP caused exception */
     pub(super) ext: bool,
 
-    // Todo: Maybe enum?
-    // pub(super) activity_state: u32,
     pub(crate) activity_state: CpuActivityState,
 
     pub(crate) pending_event: u32,
@@ -745,17 +743,6 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
     /// Wired by the emulator during execution, cleared afterwards.
     pub(super) pc_system_ptr: Option<NonNull<crate::pc_system::BxPcSystemC>>,
 
-    /// Optional PIC pointer for interrupt delivery inside handle_async_event().
-    ///
-    /// Matches Bochs' `DEV_pic_iac()` call in `HandleExtInterrupt()`.
-    /// Set for the duration of a CPU execution call via cpu_loop_n_with_io and cleared afterwards.
-    pub(super) pic_ptr: Option<NonNull<crate::iodev::pic::BxPicC>>,
-
-    /// Optional DMA controller pointer for raise_HLDA inside handle_async_event().
-    ///
-    /// Matches Bochs' `DEV_dma_raise_hlda()` call in ,390,505.
-    /// Set for the duration of a CPU execution call via cpu_loop_n_with_io and cleared afterwards.
-    pub(super) dma_ptr: Option<NonNull<crate::iodev::dma::BxDmaC>>,
 
     /// Debug flags for one-time boot diagnostics (no globals).
     ///
@@ -914,6 +901,30 @@ pub(crate) struct AddressXlation {
     pub(crate) memtype2: BxMemType,
 }
 
+impl AddressXlation {
+    /// Write a `u8` directly via the cached host pointer in `pages`.
+    ///
+    /// # Safety contract (encapsulated)
+    /// Caller guarantees `self.pages > 2`, meaning it holds a valid host pointer
+    /// set during the read phase of a read-modify-write TLB hit.
+    #[inline(always)]
+    pub(super) fn write_pages_u8(&mut self, val: u8) {
+        unsafe { *(self.pages as *mut u8) = val };
+    }
+
+    /// Write a `u16` (unaligned) directly via the cached host pointer in `pages`.
+    #[inline(always)]
+    pub(super) fn write_pages_u16(&mut self, val: u16) {
+        unsafe { (self.pages as *mut u16).write_unaligned(val) };
+    }
+
+    /// Write a `u32` (unaligned) directly via the cached host pointer in `pages`.
+    #[inline(always)]
+    pub(super) fn write_pages_u32(&mut self, val: u32) {
+        unsafe { (self.pages as *mut u32).write_unaligned(val) };
+    }
+}
+
 #[derive(Debug, Default)]
 pub(super) struct PdptrCache {
     pub(crate) entry: [u64; 4],
@@ -976,12 +987,6 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.cpu_mode == CpuMode::Ia32V8086
     }
 
-    //    fn BX_WRITE_8BIT_REGx(index, extended, val) {\
-    //  if (((index) & 4) == 0 || (extended)) \
-    //    BX_CPU_THIS_PTR gen_reg[index].word.byte.rl = val; \
-    //  else \
-    //    BX_CPU_THIS_PTR gen_reg[(index)-4].word.byte.rh = val; \
-    //}
 
     fn bx_write_32bit_regz(&mut self, index: usize, val: u32) {
         self.gen_reg[index].set_rrx(val as _);
@@ -1253,29 +1258,41 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         self.mem_bus.map(|mut p| unsafe { p.as_mut() })
     }
 
+    /// Returns `(&mut BxMemC, &BxCpuC)` from `&mut self` — the split-borrow
+    /// pattern needed by physical memory operations that pass `&[cpu_ref]`.
+    ///
+    /// SAFETY (internal): Two raw-pointer derefs under the single-threaded
+    /// emulator invariant — `NonNull<BxMemC>` is valid for the cpu_loop
+    /// lifetime, and the `*const BxCpuC` re-borrow is non-aliasing because
+    /// nothing writes through it while `mem` is live.
     #[inline(always)]
-    pub(super) fn pic_mut(&mut self) -> Option<&mut crate::iodev::pic::BxPicC> {
-        self.pic_ptr.map(|mut p| unsafe { p.as_mut() })
+    pub(super) fn mem_bus_and_cpu(&self) -> Option<(&mut crate::memory::BxMemC<'c>, &BxCpuC<'c, I>)> {
+        let mem_bus = self.mem_bus?;
+        // SAFETY: mem_bus valid for duration of cpu_loop; single-threaded access
+        let mem = unsafe { &mut *mem_bus.as_ptr() };
+        // SAFETY: cpu_ptr derived from valid &mut self; no aliasing during this call
+        let cpu_ref: &BxCpuC<'c, I> = unsafe { &*(self as *const BxCpuC<'c, I>) };
+        Some((mem, cpu_ref))
     }
 
-    #[inline(always)]
-    pub(super) fn dma_mut(&mut self) -> Option<&mut crate::iodev::dma::BxDmaC> {
-        self.dma_ptr.map(|mut p| unsafe { p.as_mut() })
-    }
 
     /// Propagate PIC interrupt flags to CPU event state.
     ///
     /// Called after every I/O port access so the CPU sees PIC-raised
     /// interrupts within the current instruction batch rather than
     /// waiting for the next `sync_event_flags()` between batches.
+    ///
+    /// Reads `pic_irq_pending` / `pic_irq_cleared` flags set by I/O
+    /// dispatch (which consumes the PIC's own flags after each handler
+    /// call) rather than dereferencing the PIC pointer directly.
     #[inline]
     pub(super) fn sync_pic_flags(&mut self) {
-        if let Some(pic) = self.pic_mut() {
-            let pending = pic.irq_pending;
-            let cleared = pic.irq_cleared;
-            if pending { pic.irq_pending = false; }
-            if cleared { pic.irq_cleared = false; }
-            // pic borrow ends here (NLL); safe to mutate self fields
+        if let Some(io) = self.io_bus_mut() {
+            let pending = io.pic_irq_pending;
+            let cleared = io.pic_irq_cleared;
+            if pending { io.pic_irq_pending = false; }
+            if cleared { io.pic_irq_cleared = false; }
+            // io borrow ends here (NLL); safe to mutate self fields
             if pending {
                 self.pending_event |= Self::BX_EVENT_PENDING_INTR;
                 self.async_event = 1;
@@ -1448,18 +1465,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         max_instructions: u64,
         io: NonNull<crate::iodev::BxDevicesC>,
         pc_system: NonNull<crate::pc_system::BxPcSystemC>,
-        pic: Option<NonNull<crate::iodev::pic::BxPicC>>,
-        dma: Option<NonNull<crate::iodev::dma::BxDmaC>>,
+        pic: Option<&mut crate::iodev::pic::BxPicC>,
+        dma: Option<&mut crate::iodev::dma::BxDmaC>,
     ) -> super::Result<u64> {
         self.set_io_bus_ptr(io);
         self.set_pc_system_ptr(pc_system);
-        self.pic_ptr = pic;
-        self.dma_ptr = dma;
-        let result = self.cpu_loop_n(mem, cpus, max_instructions);
+        let result = self.cpu_loop_n(mem, cpus, max_instructions, pic, dma);
         self.clear_io_bus();
         self.clear_pc_system();
-        self.pic_ptr = None;
-        self.dma_ptr = None;
         result
     }
 
@@ -1493,7 +1506,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // SAFETY: We cast mem to a shorter-lived reference for each loop iteration.
         // Each call to get_icache_entry is independent and completes before the next iteration.
 
-        self.cpu_loop_n(mem, cpus, 1_000_000)?;
+        self.cpu_loop_n(mem, cpus, 1_000_000, None, None)?;
         Ok(())
     }
 
@@ -1505,6 +1518,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         mem: &'c mut BxMemC<'c>,
         cpus: &[&Self],
         max_instructions: u64,
+        mut pic: Option<&mut crate::iodev::pic::BxPicC>,
+        mut dma: Option<&mut crate::iodev::dma::BxDmaC>,
     ) -> super::Result<u64> {
         // Wire the memory system pointer for the duration of this execution call.
         // This enables Bochs-style "host-pointer-or-fallback" access in mem_read/mem_write.
@@ -1605,7 +1620,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     && matches!(self.activity_state, CpuActivityState::Active)
                 {
                     self.async_event = 0;
-                } else if self.handle_async_event() {
+                } else if self.handle_async_event(pic.as_deref_mut(), dma.as_deref_mut()) {
                     // Slow path: real async event (interrupt, HLT, shutdown, etc.)
                     break Ok(iteration);
                 }
@@ -1651,17 +1666,20 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // and memory). serve_icache_miss is only called from get_icache_entry, not during
                 // instruction execution. So the mpool slot is stable for the duration of this call.
                 let i_ptr: *const Instruction = &raw const self.i_cache.mpool[instr_idx];
+                // SAFETY: i_ptr points into self.i_cache.mpool which is stable for this
+                // iteration — execute_instruction never writes to mpool, and serve_icache_miss
+                // is only called from get_icache_entry, not during execution.
+                let instr_ref = || -> &Instruction { unsafe { &*i_ptr } };
 
                 // Bochs  sets prev_rip AFTER execution (not before ilen).
                 // prev_rip is set below, after execute_instruction returns Ok(()).
 
                 // Advance RIP before execution (handlers may read RIP and expect it advanced)
                 // SAFETY: gen_reg is initialized during CPU init; BX_64BIT_REG_RIP is always valid.
-                let ilen_val = unsafe { (*i_ptr).ilen() };
+                let ilen_val = instr_ref().ilen();
                 // ilen=0 is valid ONLY for InsertedOpcode (trace boundary marker)
                 if ilen_val == 0 || ilen_val > 15 {
-                    // SAFETY: i_ptr is valid for the lifetime of this loop iteration
-                    let oc = unsafe { (*i_ptr).get_ia_opcode() };
+                    let oc = instr_ref().get_ia_opcode();
                     assert!(ilen_val == 0 && oc == super::decoder::Opcode::InsertedOpcode,
                         "Invalid ilen={} opcode={:?} at RIP={:#x}", ilen_val, oc, self.gen_reg[BX_64BIT_REG_RIP].rrx());
                 }
@@ -1671,8 +1689,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 }
 
                 // Execute instruction (matching C++ BX_CPU_CALL_METHOD)
-                // SAFETY: i_ptr is valid for the lifetime of this loop iteration (see above).
-                let opcode = unsafe { (*i_ptr).get_ia_opcode() };
+                let opcode = instr_ref().get_ia_opcode();
                 #[cfg(debug_assertions)] { self.diag_current_opcode = opcode as u16; }
 
                 // Bochs BX_INSTR_BEFORE_EXECUTION(cpu_id, i)
@@ -1696,8 +1713,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     }
                 }
 
-                // SAFETY: i_ptr is valid for the lifetime of this loop iteration
-                match self.execute_instruction(unsafe { &*i_ptr }) {
+                match self.execute_instruction(instr_ref()) {
                     Ok(()) => {}
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
                         // Exception delivery during execution: restart decode (Bochs longjmp).
@@ -1717,8 +1733,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     }
                     Err(e) => {
                         // Cold path: handle fatal/unimplemented errors
-                        // SAFETY: i_ptr is valid for the lifetime of this loop iteration
-                        self.handle_execution_error(e, unsafe { &*i_ptr })?;
+                        self.handle_execution_error(e, instr_ref())?;
                         break 'cpu_loop Err(crate::cpu::CpuError::CpuNotInitialized);
                     }
                 }
@@ -2282,7 +2297,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     //  * ROM boundary:             2k (dont care since we are only reading)
     //  * segment boundary:         any
     pub(super) fn prefetch(&mut self, mem: &'c mut BxMemC<'c>, _cpus: &[&Self]) -> Result<()> {
-        // let cpus = [&self];
         let laddr: BxAddress;
         let page_offset;
 
@@ -2472,10 +2486,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         };
 
         if let Some(fetch_ptr) = fetch_ptr_option {
-            // let fetch_ptr_as_ptr = fetch_ptr as *mut u8;
             let fetch_ptr_as_ptr =
                 // SAFETY: pointer and length validated by caller; memory region is valid
-                unsafe { core::slice::from_raw_parts(fetch_ptr as *mut u8, 4096) };
+                unsafe { super::access::host_slice_u8(fetch_ptr as *const u8, 4096) };
             self.eip_fetch_ptr = Some(fetch_ptr_as_ptr);
         } else {
             let mem_len = mem.get_memory_len();
@@ -2515,7 +2528,6 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     tlb_entry.host_page_addr = host_page_ptr;
                 }
             }
-            // self.eip_fetch_ptr = eip_fetch_ptr.as_deref();
             let p_addr: BxPhyAddress = self.p_addr_fetch_page + u64::from(page_offset);
             if self.eip_fetch_ptr.is_none() && p_addr >= mem_len.try_into()? {
                 // Address is beyond available memory - set to no direct access

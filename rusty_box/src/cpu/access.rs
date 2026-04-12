@@ -24,6 +24,178 @@ use crate::config::{BxAddress, BxPhyAddress, BxPtrEquiv};
 /// segment limit checks.  Matches the largest scalar access (qword=8).
 const BX_MAX_MEM_ACCESS_LENGTH: u32 = 8;
 
+/// Compute a pointer into a host-mapped page at the given linear address's page offset.
+#[inline(always)]
+pub(super) fn host_at_page_offset(host: *const u8, laddr: u64) -> *const u8 {
+    // SAFETY: host points to a valid page (validated during TLB fill),
+    // offset is within page (masked to 12 bits)
+    unsafe { host.add((laddr & 0xFFF) as usize) }
+}
+
+/// Mutable variant of [`host_at_page_offset`].
+#[inline(always)]
+pub(super) fn host_at_page_offset_mut(host: *mut u8, laddr: u64) -> *mut u8 {
+    // SAFETY: host points to a valid page (validated during TLB fill),
+    // offset is within page (masked to 12 bits)
+    unsafe { host.add((laddr & 0xFFF) as usize) }
+}
+
+// --- Safe wrappers for unaligned memory access (ptr-based) ---
+
+/// Read a `u16` from an unaligned `*const u8` pointer.
+#[inline(always)]
+pub(super) fn read_unaligned_u16(ptr: *const u8) -> u16 {
+    unsafe { (ptr as *const u16).read_unaligned() }
+}
+
+/// Read a `u32` from an unaligned `*const u8` pointer.
+#[inline(always)]
+pub(super) fn read_unaligned_u32(ptr: *const u8) -> u32 {
+    unsafe { (ptr as *const u32).read_unaligned() }
+}
+
+/// Read a `u64` from an unaligned `*const u8` pointer.
+#[inline(always)]
+pub(super) fn read_unaligned_u64(ptr: *const u8) -> u64 {
+    unsafe { (ptr as *const u64).read_unaligned() }
+}
+
+/// Write a `u16` to an unaligned `*mut u8` pointer.
+#[inline(always)]
+pub(super) fn write_unaligned_u16(ptr: *mut u8, val: u16) {
+    unsafe { (ptr as *mut u16).write_unaligned(val) }
+}
+
+/// Write a `u32` to an unaligned `*mut u8` pointer.
+#[inline(always)]
+pub(super) fn write_unaligned_u32(ptr: *mut u8, val: u32) {
+    unsafe { (ptr as *mut u32).write_unaligned(val) }
+}
+
+/// Write a `u64` to an unaligned `*mut u8` pointer.
+#[inline(always)]
+pub(super) fn write_unaligned_u64(ptr: *mut u8, val: u64) {
+    unsafe { (ptr as *mut u64).write_unaligned(val) }
+}
+
+// --- Safe wrappers for host pointer arithmetic ---
+
+/// Offset a host pointer by `offset` bytes (const variant).
+#[inline(always)]
+pub(super) fn host_offset(base: *const u8, offset: usize) -> *const u8 {
+    // SAFETY: caller guarantees base + offset is within a valid allocation
+    unsafe { base.add(offset) }
+}
+
+/// Offset a host pointer by `offset` bytes (mut variant).
+#[inline(always)]
+pub(super) fn host_offset_mut(base: *mut u8, offset: usize) -> *mut u8 {
+    // SAFETY: caller guarantees base + offset is within a valid allocation
+    unsafe { base.add(offset) }
+}
+
+/// Read a single byte at `base + offset`.
+#[inline(always)]
+pub(super) fn read_host_byte(base: *const u8, offset: usize) -> u8 {
+    // SAFETY: caller guarantees base + offset is valid and readable
+    unsafe { *base.add(offset) }
+}
+
+/// Write a single byte at `base + offset`.
+#[inline(always)]
+pub(super) fn write_host_byte(base: *mut u8, offset: usize, val: u8) {
+    // SAFETY: caller guarantees base + offset is valid and writable
+    unsafe { *base.add(offset) = val }
+}
+
+/// Forward byte-by-byte copy from `src` to `dst` for `count` bytes.
+/// Must NOT use memcpy: overlapping regions (LZ decompression) rely on
+/// reading already-written bytes during forward copy.
+#[inline(always)]
+pub(super) fn forward_byte_copy(src: *const u8, dst: *mut u8, count: usize) {
+    // SAFETY: caller guarantees both pointers are valid for `count` bytes
+    unsafe {
+        for j in 0..count {
+            *dst.add(j) = *src.add(j);
+        }
+    }
+}
+
+/// Fill `count` bytes at `dst` with `val` (memset).
+#[inline(always)]
+pub(super) fn host_fill_bytes(dst: *mut u8, val: u8, count: usize) {
+    // SAFETY: caller guarantees dst is valid for `count` bytes
+    unsafe { core::ptr::write_bytes(dst, val, count) }
+}
+
+/// Create a mutable `&[u16]` slice from a raw `*mut u8` pointer.
+///
+/// # Safety
+/// `ptr` must be valid for `count * 2` bytes. No aliasing references may exist.
+#[inline(always)]
+pub(super) unsafe fn host_slice_mut_u16<'a>(ptr: *mut u8, count: usize) -> &'a mut [u16] {
+    core::slice::from_raw_parts_mut(ptr as *mut u16, count)
+}
+
+/// Create a mutable `&[u32]` slice from a raw `*mut u8` pointer.
+///
+/// # Safety
+/// `ptr` must be valid for `count * 4` bytes. No aliasing references may exist.
+#[inline(always)]
+pub(super) unsafe fn host_slice_mut_u32<'a>(ptr: *mut u8, count: usize) -> &'a mut [u32] {
+    core::slice::from_raw_parts_mut(ptr as *mut u32, count)
+}
+
+/// Create a mutable `&[u64]` slice from a raw `*mut u8` pointer.
+///
+/// # Safety
+/// `ptr` must be valid for `count * 8` bytes. No aliasing references may exist.
+#[inline(always)]
+pub(super) unsafe fn host_slice_mut_u64<'a>(ptr: *mut u8, count: usize) -> &'a mut [u64] {
+    core::slice::from_raw_parts_mut(ptr as *mut u64, count)
+}
+
+/// Create an immutable `&[u8]` slice from a raw pointer.
+///
+/// # Safety
+/// `ptr` must be valid for `len` bytes. No mutable aliasing references may exist.
+#[inline(always)]
+pub(super) unsafe fn host_slice_u8<'a>(ptr: *const u8, len: usize) -> &'a [u8] {
+    core::slice::from_raw_parts(ptr, len)
+}
+
+// --- Safe wrappers for unaligned memory access (address-based) ---
+
+/// Read a `u8` from a host address stored as `BxPtrEquiv`.
+#[inline(always)]
+fn addr_read_u8(addr: BxPtrEquiv) -> u8 {
+    unsafe { *(addr as *const u8) }
+}
+
+/// Read a `u16` (unaligned) from a host address stored as `BxPtrEquiv`.
+#[inline(always)]
+fn addr_read_u16(addr: BxPtrEquiv) -> u16 {
+    unsafe { (addr as *const u16).read_unaligned() }
+}
+
+/// Read a `u32` (unaligned) from a host address stored as `BxPtrEquiv`.
+#[inline(always)]
+fn addr_read_u32(addr: BxPtrEquiv) -> u32 {
+    unsafe { (addr as *const u32).read_unaligned() }
+}
+
+/// Read a `u64` (unaligned) from a host address stored as `BxPtrEquiv`.
+#[inline(always)]
+fn addr_read_u64(addr: BxPtrEquiv) -> u64 {
+    unsafe { (addr as *const u64).read_unaligned() }
+}
+
+/// Write a `u64` (unaligned) to a host address stored as `BxPtrEquiv`.
+#[inline(always)]
+fn addr_write_u64(addr: BxPtrEquiv, val: u64) {
+    unsafe { (addr as *mut u64).write_unaligned(val) }
+}
+
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ===== Canonical address check (Bochs access.cc IsCanonicalAccess) =====
 
@@ -744,7 +916,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if pages > 2 {
             // Host pointer cached from TLB hit — direct write (fastest path)
             // SAFETY: address_xlation.pages set during address translation; pointer valid for write
-            unsafe { (pages as *mut u64).write_unaligned(val) };
+            addr_write_u64(pages, val);
         } else if pages == 1 {
             let paddr = self.address_xlation.paddress1;
             self.mem_write_qword(paddr, val);
@@ -874,8 +1046,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let tlb = self.dtlb.get_entry_of(laddr, 0);
         if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
             let host = tlb.host_page_addr as *const u8;
-            // SAFETY: host pointer validated during TLB fill; offset within page bounds
-            return Ok(unsafe { *host.add((laddr & 0xFFF) as usize) });
+            return Ok(unsafe { *host_at_page_offset(host, laddr) });
         }
         let paddr = self.translate_data_read(laddr)?;
         Ok(self.mem_read_byte(paddr))
@@ -889,10 +1060,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let tlb = self.dtlb.get_entry_of(laddr, 1);
         if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
             let host = tlb.host_page_addr as *const u8;
-            // SAFETY: host pointer validated during TLB fill; offset within page bounds
-            let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            let ptr = host_at_page_offset(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            return Ok(unsafe { (ptr as *const u16).read_unaligned() });
+            return Ok(read_unaligned_u16(ptr));
         }
         let page_offset = laddr & 0xFFF;
         if page_offset + 2 <= 0x1000 {
@@ -915,10 +1085,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let tlb = self.dtlb.get_entry_of(laddr, 3);
         if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
             let host = tlb.host_page_addr as *const u8;
-            // SAFETY: host pointer validated during TLB fill; offset within page bounds
-            let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            let ptr = host_at_page_offset(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            return Ok(unsafe { (ptr as *const u32).read_unaligned() });
+            return Ok(read_unaligned_u32(ptr));
         }
         let page_offset = laddr & 0xFFF;
         if page_offset + 4 <= 0x1000 {
@@ -942,10 +1111,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let tlb = self.dtlb.get_entry_of(laddr, 7);
         if tlb.lpf == lpf && (tlb.access_bits & needed_bit) != 0 && tlb.host_page_addr != 0 {
             let host = tlb.host_page_addr as *const u8;
-            // SAFETY: host pointer validated during TLB fill; offset within page bounds
-            let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            let ptr = host_at_page_offset(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            return Ok(unsafe { (ptr as *const u64).read_unaligned() });
+            return Ok(read_unaligned_u64(ptr));
         }
         let page_offset = laddr & 0xFFF;
         if page_offset + 8 <= 0x1000 {
@@ -971,8 +1139,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 1);
             let host = tlb.host_page_addr as *mut u8;
-            // SAFETY: host pointer validated during TLB fill; offset within page bounds
-            unsafe { *host.add((laddr & 0xFFF) as usize) = val };
+            unsafe { *host_at_page_offset_mut(host, laddr) = val };
             return Ok(());
         }
         let paddr = self.translate_data_write(laddr)?;
@@ -991,10 +1158,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 2);
             let host = tlb.host_page_addr as *mut u8;
-            // SAFETY: host pointer validated during TLB fill; offset within page bounds
-            let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            unsafe { (ptr as *mut u16).write_unaligned(val) };
+            write_unaligned_u16(ptr, val);
             return Ok(());
         }
         let page_offset = laddr & 0xFFF;
@@ -1030,10 +1196,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 4);
             let host = tlb.host_page_addr as *mut u8;
-            // SAFETY: host pointer validated during TLB fill; offset within page bounds
-            let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            unsafe { (ptr as *mut u32).write_unaligned(val) };
+            write_unaligned_u32(ptr, val);
             return Ok(());
         }
         let page_offset = laddr & 0xFFF;
@@ -1064,10 +1229,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 8);
             let host = tlb.host_page_addr as *mut u8;
-            // SAFETY: host pointer validated during TLB fill; offset within page bounds
-            let ptr = unsafe { host.add((laddr & 0xFFF) as usize) };
+            let ptr = host_at_page_offset_mut(host, laddr);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            unsafe { (ptr as *mut u64).write_unaligned(val) };
+            write_unaligned_u64(ptr, val);
             return Ok(());
         }
         let page_offset = laddr & 0xFFF;
@@ -1100,7 +1264,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 8);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            let data = unsafe { (host_addr as *const u64).read_unaligned() };
+            let data = addr_read_u64(host_addr);
             self.address_xlation.pages = host_addr;
             self.address_xlation.paddress1 = paddr;
             return Ok((data, laddr));
@@ -1149,7 +1313,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 1);
             // SAFETY: host pointer validated during TLB fill; offset within page bounds
-            let data = unsafe { *(host_addr as *const u8) };
+            let data = addr_read_u8(host_addr);
             self.address_xlation.pages = host_addr;
             self.address_xlation.paddress1 = paddr;
             return Ok(data);
@@ -1176,7 +1340,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 2);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            let data = unsafe { (host_addr as *const u16).read_unaligned() };
+            let data = addr_read_u16(host_addr);
             self.address_xlation.pages = host_addr;
             self.address_xlation.paddress1 = paddr;
             return Ok(data);
@@ -1218,7 +1382,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             let paddr = tlb.ppf | (laddr & 0xFFF) as BxPhyAddress;
             self.i_cache.smc_write_check(paddr, 4);
             // SAFETY: pointer valid from TLB/address translation; unaligned access intentional
-            let data = unsafe { (host_addr as *const u32).read_unaligned() };
+            let data = addr_read_u32(host_addr);
             self.address_xlation.pages = host_addr;
             self.address_xlation.paddress1 = paddr;
             return Ok(data);
@@ -1261,7 +1425,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if pages > 2 {
             // Host pointer cached from TLB hit — direct write (fastest path)
             // SAFETY: address_xlation.pages set during address translation; pointer valid for write
-            unsafe { (pages as *mut u64).write_unaligned(val) };
+            addr_write_u64(pages, val);
         } else if pages == 1 {
             let paddr = self.address_xlation.paddress1;
             self.mem_write_qword(paddr, val);
