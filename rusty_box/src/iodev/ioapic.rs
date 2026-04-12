@@ -884,42 +884,6 @@ impl BxIoApic {
 // APIC Bus Delivery Stub
 // ---------------------------------------------------------------------------
 
-/// Deliver an interrupt via the APIC bus to the target Local APIC(s).
-///
-/// Bochs: `apic_bus_deliver_interrupt(vector, dest, delivery_mode, logical_dest, level, trig_mode)`
-/// (declared in ioapic.h:31, implemented in cpu/apic.cc:30-120)
-///
-/// This is the fallback path used when `bx_support_apic` is disabled or when
-/// no LAPIC reference is provided. The primary code path (when APIC is enabled)
-/// delivers directly to the LAPIC via the `lapic` parameter passed to
-/// `service_ioapic()`. For a single-CPU emulator, that direct path handles all
-/// destination modes — physical dest=0 or logical with flat model always matches
-/// the single LAPIC.
-///
-/// Returns `true` if the interrupt was accepted by at least one LAPIC.
-fn apic_bus_deliver_interrupt(
-    vector: u8,
-    dest: u8,
-    delivery_mode: u8,
-    dest_mode: u8,
-    _pin_polarity: u8,
-    trigger_mode: u8,
-) -> bool {
-    let mode = IoApicDeliveryMode::from_raw(delivery_mode);
-    tracing::debug!(
-        "APIC bus fallback: deliver vector={:#04x} dest={:#04x} mode={:?} dest_mode={} trigger={}",
-        vector,
-        dest,
-        mode,
-        dest_mode,
-        trigger_mode,
-    );
-
-    // In single-CPU mode without LAPIC pointer, accept all interrupts so the
-    // IOAPIC doesn't stall. The PIC path handles the actual CPU delivery.
-    true
-}
-
 // ---------------------------------------------------------------------------
 // MMIO Handler Functions
 // ---------------------------------------------------------------------------

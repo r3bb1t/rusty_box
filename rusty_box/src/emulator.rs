@@ -1615,7 +1615,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 // Wire BxMemC into BxDevicesC for immediate PAM updates during PCI writes
                 let mem_nn = core::ptr::NonNull::from(&mut self.memory);
                 // SAFETY: transmute lifetime for NonNull — mem is owned by Emulator, valid for call
-                let mem_static: core::ptr::NonNull<crate::memory::BxMemC<'static>> = unsafe { core::mem::transmute(mem_nn) };
+                let mem_static: core::ptr::NonNull<crate::memory::BxMemC<'static>> = core::mem::transmute(mem_nn);
                 io_ptr.as_ptr().as_mut().unwrap_unchecked().set_mem_ptr(mem_static);
                 let pic_ptr = core::ptr::NonNull::from(&mut self.device_manager.pic);
                 let dma_ptr = core::ptr::NonNull::from(&mut self.device_manager.dma);

@@ -614,7 +614,7 @@ impl DeviceManager {
                     level,
                     None,
                     #[cfg(feature = "bx_support_apic")]
-                    lapic.as_mut().map(|l| &mut **l),
+                    lapic.as_deref_mut(),
                 );
             }
         }
