@@ -73,7 +73,6 @@ rusty_box/
 |   +-- examples/           # Desktop examples (DLX, Alpine, egui GUI)
 +-- rusty_box_decoder/      # x86 instruction decoder (separate crate)
 +-- examples/rusty_box_web/ # WASM web frontend
-+-- cpp_orig/bochs/         # Original C++ Bochs source (reference)
 ```
 
 ## Web Demo
