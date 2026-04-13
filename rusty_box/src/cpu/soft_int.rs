@@ -20,7 +20,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Unified interrupt dispatch based on CPU mode.
     ///
-    /// Mirrors Bochs `BX_CPU_C::interrupt()` in .
+    /// Mirrors Bochs `BX_CPU_C::interrupt()` in exception.cc.
     /// Dispatches to real_mode_int or protected_mode_int based on current CPU mode.
     /// After delivery, invalidates prefetch and returns CpuLoopRestart to
     /// restart the trace (matching Bochs BX_NEXT_TRACE).
@@ -113,7 +113,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// INT imm8 - Software interrupt with immediate vector
-    /// Based on Bochs INT_Ib in 
+    /// Based on Bochs INT_Ib in soft_int.cc
     pub fn int_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let vector = instr.ib();
         tracing::trace!("INT {:#04x}", vector);
@@ -122,7 +122,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// INT3 - Breakpoint interrupt (vector 3)
-    /// Based on Bochs INT3 in 
+    /// Based on Bochs INT3 in soft_int.cc
     pub fn int3(&mut self, _instr: &Instruction) -> super::Result<()> {
         tracing::debug!("INT3 (breakpoint)");
         // BX_SOFTWARE_EXCEPTION → soft_int=true, no error code
@@ -130,7 +130,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// INTO - Interrupt on overflow (vector 4, only if OF=1)
-    /// Based on Bochs INTO in 
+    /// Based on Bochs INTO in soft_int.cc
     pub fn into(&mut self, _instr: &Instruction) -> super::Result<()> {
         if self.get_of() {
             tracing::debug!("INTO: overflow detected, calling INT 4");
@@ -141,7 +141,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// INT1 (ICEBP) - In-circuit emulator breakpoint (vector 1)
-    /// Based on Bochs INT1 in 
+    /// Based on Bochs INT1 in soft_int.cc
     pub fn int1(&mut self, _instr: &Instruction) -> super::Result<()> {
         tracing::debug!(
             "INT1 (ICEBP) at RIP={:#x} CS={:#x}",
@@ -250,17 +250,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// IRET - Return from interrupt (16-bit operand size)
     /// Based on Bochs ctrl_xfer16.cc IRET16 (lines 520-590)
     pub fn iret16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        // Invalidate prefetch queue at entry (Bochs )
+        // Invalidate prefetch queue at entry (Bochs ctrl_xfer16.cc)
         self.invalidate_prefetch_q();
 
-        // Unmask NMI on every IRET (Bochs )
+        // Unmask NMI on every IRET (Bochs ctrl_xfer16.cc)
         self.unmask_event(Self::BX_EVENT_NMI);
 
-        // RSP_SPECULATIVE before all mode branches (Bochs )
+        // RSP_SPECULATIVE before all mode branches (Bochs ctrl_xfer16.cc)
         self.speculative_rsp = true;
         self.prev_rsp = self.rsp(); // Bochs: prev_rsp = RSP (full 64-bit)
 
-        // Protected mode dispatch (Bochs )
+        // Protected mode dispatch (Bochs ctrl_xfer16.cc)
         // Bochs checks protected_mode() first, which includes protected+long modes
         // but NOT V8086. V8086 is handled inside iret_protected via
         // iret16_stack_return_from_v86.
@@ -268,7 +268,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.iret_protected_16();
         }
 
-        // V8086 mode IRET (Bochs )
+        // V8086 mode IRET (Bochs ctrl_xfer16.cc)
         if self.v8086_mode() {
             return self.iret16_stack_return_from_v86();
         }
@@ -291,7 +291,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        // CS limit check (Bochs )
+        // CS limit check (Bochs ctrl_xfer16.cc)
         let limit = self.get_segment_limit(BxSegregs::Cs);
         if (new_ip as u32) > limit {
             tracing::error!(
@@ -302,13 +302,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
-        // Load CS with load_seg_reg (Bochs )
+        // Load CS with load_seg_reg (Bochs ctrl_xfer16.cc)
         self.load_seg_reg_real_mode(BxSegregs::Cs, new_cs);
 
-        // Set IP (Bochs )
+        // Set IP (Bochs ctrl_xfer16.cc)
         self.set_eip(new_ip as u32);
 
-        // write_flags with change_IOPL=true, change_IF=true (Bochs )
+        // write_flags with change_IOPL=true, change_IF=true (Bochs ctrl_xfer16.cc)
         self.write_flags(new_flags, true, true);
 
         // RSP_COMMIT
@@ -326,22 +326,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// IRET - Return from interrupt (32-bit operand size)
     /// Based on Bochs ctrl_xfer32.cc IRET32 (lines 540-612)
     pub fn iret32(&mut self, _instr: &Instruction) -> super::Result<()> {
-        // Invalidate prefetch queue at entry (Bochs )
+        // Invalidate prefetch queue at entry (Bochs ctrl_xfer32.cc)
         self.invalidate_prefetch_q();
 
-        // Unmask NMI on every IRET (Bochs )
+        // Unmask NMI on every IRET (Bochs ctrl_xfer32.cc)
         self.unmask_event(Self::BX_EVENT_NMI);
 
-        // RSP_SPECULATIVE before all mode branches (Bochs )
+        // RSP_SPECULATIVE before all mode branches (Bochs ctrl_xfer32.cc)
         self.speculative_rsp = true;
         self.prev_rsp = self.rsp(); // Bochs: prev_rsp = RSP (full 64-bit)
 
-        // Protected mode dispatch (Bochs )
+        // Protected mode dispatch (Bochs ctrl_xfer32.cc)
         if self.protected_mode() {
             return self.iret_protected();
         }
 
-        // V8086 mode IRET (Bochs )
+        // V8086 mode IRET (Bochs ctrl_xfer32.cc)
         if self.v8086_mode() {
             return self.iret32_stack_return_from_v86();
         }
@@ -351,7 +351,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let new_cs = self.pop_32()? as u16;
         let new_eflags = self.pop_32()?;
 
-        // CS limit check (Bochs )
+        // CS limit check (Bochs ctrl_xfer32.cc)
         let limit = self.get_segment_limit(BxSegregs::Cs);
         if new_eip > limit {
             tracing::error!(
@@ -362,13 +362,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
-        // Load CS with load_seg_reg (Bochs )
+        // Load CS with load_seg_reg (Bochs ctrl_xfer32.cc)
         self.load_seg_reg_real_mode(BxSegregs::Cs, new_cs);
 
-        // Set EIP (Bochs )
+        // Set EIP (Bochs ctrl_xfer32.cc)
         self.set_eip(new_eip);
 
-        // writeEFlags with VIF, VIP, VM unchanged (Bochs )
+        // writeEFlags with VIF, VIP, VM unchanged (Bochs ctrl_xfer32.cc)
         self.write_eflags(new_eflags, EFlags::IRET32_REAL_CHANGE.bits());
 
         // RSP_COMMIT
@@ -392,7 +392,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         use super::cpu::Exception;
 
         // Nested Task (NT) — task-switch IRET
-        // Based on Bochs 
+        // Based on Bochs iret.cc
         if self.eflags.contains(EFlags::NT) {
             tracing::debug!("IRET: nested task return (NT=1)");
 
@@ -449,7 +449,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             );
         }
 
-        // RSP_SPECULATIVE (Bochs )
+        // RSP_SPECULATIVE (Bochs iret.cc)
         self.speculative_rsp = true;
         self.prev_rsp = self.rsp(); // Bochs: prev_rsp = RSP (full 64-bit)
 
@@ -465,7 +465,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let new_eflags = self.stack_read_dword(temp_esp + 8)?;
 
         // If VM bit is set in the saved EFLAGS and CPL==0, stack-return to V86 mode.
-        // Bochs 
+        // Bochs iret.cc
         if (new_eflags & EFlags::VM.bits()) != 0 {
             let current_cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
             if current_cpl == 0 {
@@ -517,7 +517,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.check_cs(&cs_descriptor, raw_cs_raw, 0, cs_selector.rpl)?;
 
         // Compute EFLAGS changeMask based on OLD CPL (before loading new CS)
-        // Based on Bochs 
+        // Based on Bochs iret.cc
         let iopl = self.eflags.iopl();
         let mut change_mask = EFlags::OSZAPC
             .union(EFlags::TF)
@@ -555,7 +555,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 new_cpl,
             )?;
 
-            // Restore EFLAGS with proper side effects (Bochs )
+            // Restore EFLAGS with proper side effects (Bochs iret.cc)
             self.write_eflags(new_eflags, change_mask);
 
             // Advance ESP by 12 (EIP + CS-dword + EFLAGS = 3 × 4 bytes)
@@ -628,7 +628,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 new_cpl,
             )?;
 
-            // Restore EFLAGS with proper side effects (Bochs )
+            // Restore EFLAGS with proper side effects (Bochs iret.cc)
             self.write_eflags(new_eflags, change_mask);
 
             // Load SS and restore ESP
@@ -748,7 +748,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             // Same privilege — 16-bit
             self.branch_far(&mut cs_selector, &mut cs_descriptor, new_ip as u64, new_cpl)?;
 
-            // write_flags for 16-bit (Bochs )
+            // write_flags for 16-bit (Bochs iret.cc)
             self.write_flags(new_flags as u16, cpl == 0, cpl <= iopl);
 
             // Advance ESP by 6 (IP + CS + FLAGS = 3 × 2 bytes)
@@ -811,7 +811,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             self.branch_far(&mut cs_selector, &mut cs_descriptor, new_ip as u64, new_cpl)?;
 
-            // write_flags for 16-bit (Bochs )
+            // write_flags for 16-bit (Bochs iret.cc)
             self.write_flags(new_flags as u16, cpl == 0, cpl <= iopl);
 
             self.load_ss(&mut ss_selector, &mut ss_descriptor, new_cpl)?;
@@ -830,16 +830,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// Handle interrupt in real mode using IVT
-    /// Based on Bochs  real_mode_int()
+    /// Based on Bochs exception.cc real_mode_int()
     pub(super) fn interrupt_real_mode(&mut self, vector: u8) -> super::Result<()> {
-        // Bochs : IDTR limit check
+        // Bochs exception.cc: IDTR limit check
         if (vector as u32 * 4 + 3) > self.idtr.limit as u32 {
             tracing::error!("interrupt(real mode) vector > idtr.limit");
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
         // Save current FLAGS, CS, IP on stack
-        // Bochs : push FLAGS, CS, IP
+        // Bochs exception.cc: push FLAGS, CS, IP
         let flags = (self.eflags.bits() & 0xFFFF) as u16;
         let cs = self.sregs[BxSegregs::Cs as usize].selector.value;
         let ip = self.get_ip();
@@ -848,11 +848,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.push_16(cs)?;
         self.push_16(ip)?;
 
-        // Bochs : read new IP from IVT using system_read_word (paging-aware)
+        // Bochs exception.cc: read new IP from IVT using system_read_word (paging-aware)
         let ivt_addr = self.idtr.base + (vector as u64) * 4;
         let new_ip = self.system_read_word(ivt_addr)?;
 
-        // Bochs : CS limit check on loaded IP
+        // Bochs exception.cc: CS limit check on loaded IP
         let cs_limit = self.get_segment_limit(BxSegregs::Cs);
         if (new_ip as u32) > cs_limit {
             tracing::error!(
@@ -861,7 +861,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
-        // Bochs : read new CS from IVT
+        // Bochs exception.cc: read new CS from IVT
         let new_cs = self.system_read_word(ivt_addr + 2)?;
 
         // Boot diagnostic: if we ever vector to 0000:0000 in real mode, BIOS likely
@@ -871,13 +871,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.debug_puts(b"[IVT->0000:0000]\n");
         }
 
-        // Bochs : load CS:IP from IVT
+        // Bochs exception.cc: load CS:IP from IVT
         let cs_index = BxSegregs::Cs as usize;
         parse_selector(new_cs, &mut self.sregs[cs_index].selector);
             self.sregs[cs_index].cache.u.set_segment_base((new_cs as u64) << 4);
         self.set_ip(new_ip);
 
-        // Bochs : clear IF, TF, AC, RF
+        // Bochs exception.cc: clear IF, TF, AC, RF
         self.eflags
             .remove(EFlags::IF_ | EFlags::TF | EFlags::AC | EFlags::RF);
         self.handle_interrupt_mask_change();
@@ -910,7 +910,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// HLT - Halt CPU until interrupt
-    /// Based on Bochs 
+    /// Based on Bochs proc_ctrl.cc
     pub fn hlt(&mut self, _instr: &Instruction) -> super::Result<()> {
         // CPL is always 0 in real mode
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
@@ -919,7 +919,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
-        // Check if interrupts are disabled (IF=0) - matches Bochs 
+        // Check if interrupts are disabled (IF=0) - matches Bochs proc_ctrl.cc
         if !self.eflags.contains(EFlags::IF_) {
             tracing::debug!("HLT: CPU halted with IF=0 (interrupts disabled) - CPU will be stuck!");
         }
@@ -949,7 +949,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Set activity state to halted (matches Bochs enter_sleep_state)
         self.activity_state = CpuActivityState::Hlt;
 
-        // Bochs  enter_sleep_state: sets `async_event = 1` (not |= STOP_TRACE).
+        // Bochs proc_ctrl.cc enter_sleep_state: sets `async_event = 1` (not |= STOP_TRACE).
         // The value 1 (BX_ASYNC_EVENT_SLEEP bit) survives the `&= ~STOP_TRACE` clearing
         // at line 226 of Bochs cpu.cc, ensuring the outer cpu_loop calls handle_async_event
         // on the next iteration to wait for a wake event (interrupt/NMI/SIPI).
@@ -959,7 +959,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// XSAVE state component sizes and offsets (Bochs )
+    /// XSAVE state component sizes and offsets (Bochs crregs.h)
     /// Index: XCR0 bit number. (len, offset) for each component.
     const XSAVE_COMPONENTS: [(u32, u32); 10] = [
         (160, 0),      // 0: FPU (x87)
@@ -975,7 +975,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     ];
 
     /// Compute max XSAVE area size for given feature bitmap (standard layout).
-    /// Bochs  xsave_max_size_required_by_features()
+    /// Bochs cpuid.cc xsave_max_size_required_by_features()
     fn xsave_max_size_for_features(&self, features: u32) -> u32 {
         // Legacy area (x87 + SSE header) is always 576 bytes minimum
         let mut max_size: u32 = 576;
@@ -994,7 +994,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Compute XSAVE area size for compacted (XSAVEC/XSAVES) layout.
-    /// Bochs  xsave_max_size_required_by_xsaves_features()
+    /// Bochs cpuid.cc xsave_max_size_required_by_xsaves_features()
     fn xsave_compacted_size_for_features(&self, features: u32) -> u32 {
         // Legacy area + XSAVE header = 576
         let mut max_size: u32 = 576;
@@ -1008,7 +1008,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CPUID - CPU Identification
-    /// Original: bochs/cpu/
+    /// Original: bochs/cpu/proc_ctrl.cc
     /// Returns CPU identification and feature information in EAX, EBX, ECX, EDX
     /// Input: EAX = function number, ECX = sub-function (for some functions)
     pub fn cpuid(&mut self, _instr: &Instruction) {
@@ -1023,13 +1023,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         match function {
             0x00000001 => {
                 // ECX bit 27 (OSXSAVE): set only when CR4.OSXSAVE is enabled
-                // Bochs  — base value does NOT include this bit
+                // Bochs cpuid.cc — base value does NOT include this bit
                 if self.cr4.osxsave() {
                     ecx |= 1 << 27; // set OSXSAVE
                 }
 
                 // EDX bit 9 (APIC): cleared when APIC is globally disabled
-                // Bochs 
+                // Bochs cpuid.cc
                 if self.lapic.get_mode() == super::apic::ApicMode::GloballyDisabled {
                     edx &= !(1 << 9); // clear APIC feature bit
                 }
@@ -1040,22 +1040,22 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 if sub_function == 0 {
                     // Subleaf 0: EAX = xcr0_suppmask, ECX = max size for all features
                     // EBX = max size for currently enabled features (current xcr0)
-                    // Bochs 
+                    // Bochs cpuid.cc
                     eax = self.xcr0_suppmask;
                     ebx = self.xsave_max_size_for_features(self.xcr0.get32());
                     ecx = self.xsave_max_size_for_features(self.xcr0_suppmask);
                 } else if sub_function == 1 {
-                    // Subleaf 1 EAX: XSAVE feature flags (Bochs )
+                    // Subleaf 1 EAX: XSAVE feature flags (Bochs cpuid.cc)
                     // Bit 0: XSAVEOPT, Bit 1: XSAVEC, Bit 2: XGETBV_ECX1, Bit 3: XSAVES
                     eax = 0x0000000F; // Skylake-X supports all four
                     // Subleaf 1 EBX: size for XSAVES (XCR0 | IA32_XSS)
-                    // Bochs 
+                    // Bochs cpuid.cc
                     ebx = self.xsave_compacted_size_for_features(
                         self.xcr0.get32() | (self.msr.ia32_xss as u32),
                     );
                     ecx = self.ia32_xss_suppmask;
                 } else if sub_function >= 2 && sub_function < Self::XSAVE_COMPONENTS.len() as u32 {
-                    // Per-component sub-leaves (Bochs ):
+                    // Per-component sub-leaves (Bochs cpuid.cc):
                     // EAX = size, EBX = offset, ECX = flags, EDX = 0
                     let support_mask = self.xcr0_suppmask | self.ia32_xss_suppmask;
                     if support_mask & (1 << sub_function) == 0 {
@@ -1068,7 +1068,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         eax = size;
                         ebx = offset;
                         // ECX bit 0: managed via IA32_XSS (not XCR0)
-                        // Bochs : ecx = (ia32_xss_suppmask & (1 << subfunction)) != 0
+                        // Bochs cpuid.cc: ecx = (ia32_xss_suppmask & (1 << subfunction)) != 0
                         ecx = u32::from(self.ia32_xss_suppmask & (1 << sub_function) != 0);
                         edx = 0;
                     }
@@ -1081,14 +1081,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
             0x80000001
                 // EDX bit 11 (SYSCALL/SYSRET): only in long mode
-                // Bochs 
+                // Bochs cpuid.cc
                 if self.long64_mode() => {
                     edx |= 1 << 11; // BX_CPUID_EXT1_EDX_SYSCALL_SYSRET
                 }
             _ => {}
         }
 
-        // Bochs : RAX = leaf.eax (writes 64-bit, zero-extending)
+        // Bochs proc_ctrl.cc: RAX = leaf.eax (writes 64-bit, zero-extending)
         self.set_rax(eax as u64);
         self.set_rbx(ebx as u64);
         self.set_rcx(ecx as u64);

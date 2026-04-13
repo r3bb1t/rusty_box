@@ -235,7 +235,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let count = (cl & 0x07) as u32;
         if count == 0 {
             // count & 0x07 == 0: no rotation. If count & 0x18 != 0 (cl=8,16,24), update flags.
-            // Bochs 
+            // Bochs shift8.cc
             if cl & 0x18 != 0 {
                 let (op1, _) = self.shift_read8(instr)?;
                 let bit0 = (op1 & 0x01) != 0;
@@ -261,7 +261,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let imm = instr.ib();
         let count = (imm & 0x07) as u32;
         if count == 0 {
-            // If bit 3 or 4 set (imm=8,16,24), update flags. Bochs 
+            // If bit 3 or 4 set (imm=8,16,24), update flags. Bochs shift8.cc
             if imm & 0x18 != 0 {
                 let (op1, _) = self.shift_read8(instr)?;
                 let bit0 = (op1 & 0x01) != 0;
@@ -304,7 +304,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let count = (cl & 0x07) as u32;
         if count == 0 {
             // If count & 0x18 != 0 (cl=8,16,24), update CF/OF without rotating.
-            // Bochs : CF=bit7, OF=bit6^bit7
+            // Bochs shift8.cc: CF=bit7, OF=bit6^bit7
             if cl & 0x18 != 0 {
                 let (op1, _) = self.shift_read8(instr)?;
                 let bit6 = ((op1 >> 6) & 1) != 0;
@@ -331,7 +331,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let count = (imm & 0x07) as u32;
         if count == 0 {
             // If imm & 0x18 != 0 (imm=8,16,24), update CF/OF without rotating.
-            // Bochs : CF=bit7, OF=bit6^bit7
+            // Bochs shift8.cc: CF=bit7, OF=bit6^bit7
             if imm & 0x18 != 0 {
                 let (op1, _) = self.shift_read8(instr)?;
                 let bit6 = ((op1 >> 6) & 1) != 0;

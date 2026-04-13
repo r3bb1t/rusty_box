@@ -257,7 +257,7 @@ impl Pic8259State {
     /// Returns an action indicating what external side effect is needed.
     /// The PIC's internal state (int_pin, irq) is updated before returning.
     ///
-    /// Algorithm from Bochs ``:
+    /// Algorithm from Bochs `pic.cc`:
     /// 1. Compute `max_irq` — the boundary beyond which ISR blocks preemption
     /// 2. Scan from highest_priority to max_irq for unmasked, un-in-service requests
     /// 3. If found and INT not already asserted, assert INT and signal
@@ -478,14 +478,14 @@ impl BxPicC {
     /// Read from PIC I/O port (Bochs `bx_pic_c::read`)
     ///
     /// Takes `&mut self` because poll mode read triggers an interrupt acknowledge
-    /// which modifies PIC state (Bochs ).
+    /// which modifies PIC state (Bochs pic.cc).
     pub fn read(&mut self, port: u16, io_len: u8) -> u32 {
-        // Poll mode: read triggers interrupt acknowledge (Bochs )
+        // Poll mode: read triggers interrupt acknowledge (Bochs pic.cc)
         if (port == PIC_MASTER_CMD || port == PIC_MASTER_DATA) && self.master.polled {
             self.master.clear_highest_interrupt();
             self.master.polled = false;
             self.service_pic_dispatch(true);
-            // Bochs : io_len==1 returns irq, io_len==2 returns (irq<<8)|irq
+            // Bochs pic.cc: io_len==1 returns irq, io_len==2 returns (irq<<8)|irq
             let irq = self.master.irq as u32;
             return if io_len == 1 { irq } else { (irq << 8) | irq };
         }
@@ -493,7 +493,7 @@ impl BxPicC {
             self.slave.clear_highest_interrupt();
             self.slave.polled = false;
             self.service_pic_dispatch(false);
-            // Bochs : io_len==1 returns irq, io_len==2 returns (irq<<8)|irq
+            // Bochs pic.cc: io_len==1 returns irq, io_len==2 returns (irq<<8)|irq
             let irq = self.slave.irq as u32;
             return if io_len == 1 { irq } else { (irq << 8) | irq };
         }
@@ -552,7 +552,7 @@ impl BxPicC {
         }
     }
 
-    /// Handle command port write — ICW1, OCW2, or OCW3 (Bochs ).
+    /// Handle command port write — ICW1, OCW2, or OCW3 (Bochs pic.cc).
     ///
     /// The command port multiplexes three different operations based on bit patterns:
     /// - **Bit 4 = 1**: ICW1 — starts a new initialization sequence
@@ -572,7 +572,7 @@ impl BxPicC {
     /// ```
     fn write_cmd(&mut self, value: u8, is_master: bool) {
         if (value & 0x10) != 0 {
-            // ICW1 — Initialization Command Word 1 (Bochs )
+            // ICW1 — Initialization Command Word 1 (Bochs pic.cc)
             tracing::debug!(
                 "PIC: ICW1 = {:#04x} ({})",
                 value,
@@ -595,17 +595,17 @@ impl BxPicC {
                 pic.rotate_on_autoeoi = false;
                 pic.int_pin = false; // Reprogramming clears previous INTR
             }
-            // Deassert: slave clears cascade line on master (Bochs )
+            // Deassert: slave clears cascade line on master (Bochs pic.cc)
             if !is_master {
                 self.master.irq_in[2] = 0;
             }
         } else if (value & 0x18) == 0x08 {
-            // OCW3 — Operation Command Word 3 (Bochs )
+            // OCW3 — Operation Command Word 3 (Bochs pic.cc)
             let special_mask = (value & 0x60) >> 5;
             let poll = (value & 0x04) >> 2;
             let read_op = value & 0x03;
 
-            // Poll command: set polled flag and return early (Bochs )
+            // Poll command: set polled flag and return early (Bochs pic.cc)
             if poll != 0 {
                 let pic = if is_master {
                     &mut self.master
@@ -639,12 +639,12 @@ impl BxPicC {
                 self.service_pic_dispatch(is_master);
             }
         } else {
-            // OCW2 — EOI and priority commands (Bochs )
+            // OCW2 — EOI and priority commands (Bochs pic.cc)
             self.write_ocw2(value, is_master);
         }
     }
 
-    /// Handle OCW2 commands — EOI and priority rotation (Bochs )
+    /// Handle OCW2 commands — EOI and priority rotation (Bochs pic.cc)
     ///
     /// Uses full-value matching like Bochs, not bit-field extraction.
     fn write_ocw2(&mut self, value: u8, is_master: bool) {
@@ -660,7 +660,7 @@ impl BxPicC {
             }
 
             // Non-specific EOI (0x20) or Rotate on non-specific EOI (0xA0)
-            // Bochs 
+            // Bochs pic.cc
             0x20 | 0xA0 => {
                 {
                     let pic = if is_master {
@@ -683,7 +683,7 @@ impl BxPicC {
             // No-op: Intel spec (0x40) and 386BSD compatibility (0x02)
             0x40 | 0x02 => {}
 
-            // Specific EOI for IRQ 0-7 (Bochs )
+            // Specific EOI for IRQ 0-7 (Bochs pic.cc)
             0x60..=0x67 => {
                 {
                     let pic = if is_master {
@@ -696,7 +696,7 @@ impl BxPicC {
                 self.service_pic_dispatch(is_master);
             }
 
-            // Set lowest priority (IRQ priority rotation) (Bochs )
+            // Set lowest priority (IRQ priority rotation) (Bochs pic.cc)
             0xC0..=0xC7 => {
                 let pic = if is_master {
                     &mut self.master
@@ -706,7 +706,7 @@ impl BxPicC {
                 pic.lowest_priority = value - 0xC0;
             }
 
-            // Specific EOI + rotate priority (Bochs )
+            // Specific EOI + rotate priority (Bochs pic.cc)
             0xE0..=0xE7 => {
                 {
                     let pic = if is_master {
@@ -726,7 +726,7 @@ impl BxPicC {
         }
     }
 
-    /// Handle data port write — ICW sequence or IMR (Bochs ).
+    /// Handle data port write — ICW sequence or IMR (Bochs pic.cc).
     ///
     /// The data port is context-sensitive:
     /// - **During initialization** (`init.in_init == true`): receives ICW2, ICW3,
@@ -758,7 +758,7 @@ impl BxPicC {
         }
     }
 
-    /// Handle ICW2/3/4 during initialization sequence (Bochs )
+    /// Handle ICW2/3/4 during initialization sequence (Bochs pic.cc)
     fn write_icw(&mut self, value: u8, is_master: bool) {
         let pic = if is_master {
             &mut self.master
@@ -808,17 +808,17 @@ impl BxPicC {
     /// call `lower_irq` first to create a new edge.
     ///
     /// Returns `Some((irq_no, true))` when the caller should forward to IOAPIC
-    /// (Bochs  synchronous forwarding). The caller is responsible
+    /// (Bochs pic.cc synchronous forwarding). The caller is responsible
     /// for calling `ioapic.set_irq_level(irq, level)` with the returned values.
     #[inline]
     pub fn raise_irq(&mut self, irq_no: u8) -> Option<(u8, bool)> {
         if irq_no < 8 {
-            // Master PIC — Bochs 
+            // Master PIC — Bochs pic.cc
             self.master.irq_in[irq_no as usize] = 1;
             if (self.master.irr & (1 << irq_no)) == 0 {
                 self.master.irr |= 1 << irq_no;
                 self.service_pic_dispatch(true);
-                // Bochs : forward to IOAPIC on LOW→HIGH edge
+                // Bochs pic.cc: forward to IOAPIC on LOW→HIGH edge
                 if irq_no != 2 {
                     self.enqueue_ioapic_forward(irq_no, true);
                     return Some((irq_no, true));
@@ -831,7 +831,7 @@ impl BxPicC {
             if (self.slave.irr & (1 << slave_irq)) == 0 {
                 self.slave.irr |= 1 << slave_irq;
                 self.service_pic_dispatch(false);
-                // Bochs : forward to IOAPIC
+                // Bochs pic.cc: forward to IOAPIC
                 self.enqueue_ioapic_forward(irq_no, true);
                 return Some((irq_no, true));
             } else if irq_no == 15 {
@@ -851,7 +851,7 @@ impl BxPicC {
             if self.master.irq_in[irq_no as usize] != 0 {
                 self.master.irq_in[irq_no as usize] = 0;
                 self.master.irr &= !(1 << irq_no);
-                // Bochs : forward to IOAPIC
+                // Bochs pic.cc: forward to IOAPIC
                 if irq_no != 2 {
                     self.enqueue_ioapic_forward(irq_no, false);
                     return Some((irq_no, false));
@@ -862,7 +862,7 @@ impl BxPicC {
             if self.slave.irq_in[slave_irq as usize] != 0 {
                 self.slave.irq_in[slave_irq as usize] = 0;
                 self.slave.irr &= !(1 << slave_irq);
-                // Bochs : forward to IOAPIC
+                // Bochs pic.cc: forward to IOAPIC
                 self.enqueue_ioapic_forward(irq_no, false);
                 return Some((irq_no, false));
             }
@@ -910,24 +910,24 @@ impl BxPicC {
     /// - Slave cascade via IRQ2
     /// - Re-service after acknowledge
     pub fn iac(&mut self) -> u8 {
-        // Bochs : BX_CLEAR_INTR(); master_pic.INT = 0;
+        // Bochs pic.cc: BX_CLEAR_INTR(); master_pic.INT = 0;
         self.clear_intr(); // Signal CPU to clear pending interrupt event
         self.master.int_pin = false;
 
         // Spurious interrupt check: if no unmasked requests, return spurious vector
-        // (Bochs )
+        // (Bochs pic.cc)
         if (self.master.irr & !self.master.imr) == 0 {
             return self.master.interrupt_offset + 7;
         }
 
         // Edge-triggered: clear IRR bit. Level-triggered: keep it.
-        // (Bochs ) — Bochs does NOT clear irq_in here.
+        // (Bochs pic.cc) — Bochs does NOT clear irq_in here.
         if (self.master.edge_level & (1 << self.master.irq)) == 0 {
             self.master.irr &= !(1 << self.master.irq);
         }
 
         // Auto-EOI: don't set ISR. Manual EOI: set ISR bit.
-        // (Bochs )
+        // (Bochs pic.cc)
         if !self.master.auto_eoi {
             self.master.isr |= 1 << self.master.irq;
         } else if self.master.rotate_on_autoeoi {
@@ -941,13 +941,13 @@ impl BxPicC {
             vector = self.master.irq + self.master.interrupt_offset;
         } else {
             // IRQ2 = slave cascade (IRQ8-15)
-            // (Bochs )
+            // (Bochs pic.cc)
             self.slave.int_pin = false;
-            // Bochs : IRQ_in[2] &= ~BX_IRQ_TYPE_ISA
+            // Bochs pic.cc: IRQ_in[2] &= ~BX_IRQ_TYPE_ISA
             // Clear cascade assertion (single-type model: set to 0)
             self.master.irq_in[2] = 0;
 
-            // Slave spurious interrupt check (Bochs )
+            // Slave spurious interrupt check (Bochs pic.cc)
             if (self.slave.irr & !self.slave.imr) == 0 {
                 return self.slave.interrupt_offset + 7;
             }
@@ -955,7 +955,7 @@ impl BxPicC {
             vector = self.slave.irq + self.slave.interrupt_offset;
 
             // Edge-triggered: clear slave IRR bit. Level: keep it.
-            // (Bochs ) — Bochs does NOT clear irq_in here.
+            // (Bochs pic.cc) — Bochs does NOT clear irq_in here.
             if (self.slave.edge_level & (1 << self.slave.irq)) == 0 {
                 self.slave.irr &= !(1 << self.slave.irq);
             }
@@ -967,11 +967,11 @@ impl BxPicC {
                 self.slave.lowest_priority = self.slave.irq;
             }
 
-            // Re-service slave after acknowledge (Bochs )
+            // Re-service slave after acknowledge (Bochs pic.cc)
             self.service_pic_dispatch(false);
         }
 
-        // Re-service master after acknowledge (Bochs )
+        // Re-service master after acknowledge (Bochs pic.cc)
         self.service_pic_dispatch(true);
 
         vector

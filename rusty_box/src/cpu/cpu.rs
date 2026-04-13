@@ -754,7 +754,7 @@ pub struct BxCpuC<'c, I: BxCpuIdTrait> {
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) const BX_ASYNC_EVENT_STOP_TRACE: u32 = 1 << 31;
     /// Persistent sleep sentinel set by enter_sleep_state (HLT/MWAIT).
-    /// Matches Bochs  `async_event = 1` — survives the
+    /// Matches Bochs proc_ctrl.cc `async_event = 1` — survives the
     /// `&= ~STOP_TRACE` clearing so handle_async_event is called next
     /// outer-loop iteration to check for wake conditions.
     pub(super) const BX_ASYNC_EVENT_SLEEP: u32 = 1;
@@ -763,23 +763,23 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Bochs uses bit 10; we use bit 0 for internal consistency.
     pub(crate) const BX_EVENT_PENDING_INTR: u32 = 1 << 0;
 
-    /// Event bit: NMI pending/masked. Bochs  uses bit 0,
+    /// Event bit: NMI pending/masked. Bochs cpu.h uses bit 0,
     /// but we use bit 1 to avoid conflict with PENDING_INTR.
     /// Masked on NMI delivery, unmasked on IRET.
     pub(super) const BX_EVENT_NMI: u32 = 1 << 1;
 
     /// Event bit: LAPIC interrupt pending.
-    /// Bochs  uses bit 11; we use bit 2.
+    /// Bochs cpu.h uses bit 11; we use bit 2.
     pub(crate) const BX_EVENT_PENDING_LAPIC_INTR: u32 = 1 << 2;
 
     /// Event bit: System Management Interrupt pending.
-    /// Bochs  uses bit 1; we use bit 6 (bits 0-2 already taken).
+    /// Bochs cpu.h uses bit 1; we use bit 6 (bits 0-2 already taken).
     /// SMI enters System Management Mode — not implemented for single-CPU Alpine/DLX.
     #[allow(dead_code)]
     pub(super) const BX_EVENT_SMI: u32 = 1 << 6;
 
     /// Event bit: INIT signal pending (CPU reset).
-    /// Bochs  uses bit 2; we use bit 7 (bits 0-2 already taken).
+    /// Bochs cpu.h uses bit 2; we use bit 7 (bits 0-2 already taken).
     /// INIT is used by multiprocessor startup (INIT-SIPI-SIPI) — not implemented.
     #[allow(dead_code)]
     pub(super) const BX_EVENT_INIT: u32 = 1 << 7;
@@ -840,7 +840,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // ── Debug trap bits (DR6 bits set by CPU) ──
-    // Bochs 
+    // Bochs cpu.h
     pub(super) const BX_DEBUG_SINGLE_STEP_BIT: u32 = 1 << 14; // BS flag in DR6 (bit 14)
     pub(super) const BX_DEBUG_TRAP_TASK_SWITCH_BIT: u32 = 0x8000; // BT flag in DR6
 
@@ -849,13 +849,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) const DR7_LOCAL_ENABLE_MASK: u32 = 0x0000_0155;
 
     // ── Interrupt inhibition (MOV SS / POP SS) ──
-    // Bochs 
+    // Bochs cpu.h
     pub(super) const BX_INHIBIT_INTERRUPTS: u32 = 0x01;
     pub(super) const BX_INHIBIT_DEBUG: u32 = 0x02;
     pub(super) const BX_INHIBIT_INTERRUPTS_BY_MOVSS: u32 = 0x01 | 0x02;
 
     /// Set interrupt inhibition mask for the next instruction boundary.
-    /// Bochs : prevents double MOV SS from extending the window.
+    /// Bochs event.cc: prevents double MOV SS from extending the window.
     pub(super) fn inhibit_interrupts(&mut self, mask: u32) {
         // Bochs guard: if mask is MOVSS and we're already inhibiting by MOVSS,
         // don't reset the window. A second MOV SS doesn't extend inhibition.
@@ -868,7 +868,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Check if interrupts of the given type are currently inhibited.
-    /// Bochs : `(inhibit_mask & mask) == mask` — ALL bits must match.
+    /// Bochs event.cc: `(inhibit_mask & mask) == mask` — ALL bits must match.
     pub(crate) fn interrupts_inhibited(&self, mask: u32) -> bool {
         self.icount <= self.inhibit_icount && (self.inhibit_mask & mask) == mask
     }
@@ -1004,7 +1004,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         (self.sregs[seg].cache.u.segment_base() + u64::from(offset)) as u32
     }
 
-    /// Get linear address in 64-bit mode (matching Bochs get_laddr64 — )
+    /// Get linear address in 64-bit mode (matching Bochs get_laddr64 — cpu.h)
     /// In 64-bit mode, ES/CS/SS/DS bases are forced to 0 per Intel SDM.
     /// Only FS and GS may have non-zero bases (loaded via MSR).
     #[inline]
@@ -1163,7 +1163,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     pub(crate) fn signal_event(&mut self, event: u32) {
         // Bochs cpu.h: pending_event |= event (event IS the bitmask, not a bit index)
         self.pending_event |= event;
-        // Bochs : if (! is_masked_event(event)) async_event = 1;
+        // Bochs cpu.h: if (! is_masked_event(event)) async_event = 1;
         // is_masked_event returns (event & event_mask) != 0
         // So only set async_event when event is NOT masked
         if (event & self.event_mask) == 0 {
@@ -1182,7 +1182,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Bochs `mask_event()`: add event bits to event_mask so they won't fire.
     /// Used by handleInterruptMaskChange when IF is cleared — external
     /// interrupts stay pending but are blocked until IF is re-enabled.
-    /// Matches Bochs 
+    /// Matches Bochs cpu.h
     #[inline]
     pub(crate) fn mask_event(&mut self, event_bits: u32) {
         self.event_mask |= event_bits;
@@ -1191,7 +1191,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Bochs `unmask_event()`: remove event bits from event_mask.
     /// When IF is set, PENDING_INTR is unmasked. If a pending event
     /// exists, async_event is set to trigger delivery at next boundary.
-    /// Matches Bochs 
+    /// Matches Bochs cpu.h
     #[inline]
     pub(crate) fn unmask_event(&mut self, event_bits: u32) {
         self.event_mask &= !event_bits;
@@ -1202,7 +1202,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     /// Bochs `is_unmasked_event_pending()`: check if event is both pending
-    /// and not masked. Matches Bochs 
+    /// and not masked. Matches Bochs cpu.h
     #[inline]
     pub(crate) fn is_unmasked_event_pending(&self, event_bits: u32) -> bool {
         (self.pending_event & !self.event_mask & event_bits) != 0
@@ -1304,7 +1304,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     /// Check HRQ (DMA Hold Request) state from pc_system.
-    /// Matches Bochs `BX_HRQ` macro () which reads
+    /// Matches Bochs `BX_HRQ` macro (pc_system.h) which reads
     /// `bx_pc_system.HRQ`. Returns false if pc_system is not wired.
     #[inline]
     pub(super) fn get_hrq(&self) -> bool {
@@ -1414,7 +1414,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
         // Mark as external interrupt (EXT=1) — affects error codes pushed
         // during any exception that occurs during interrupt delivery.
-        // Based on Bochs 
+        // Based on Bochs event.cc
         self.ext = true;
 
         // Use unified interrupt() dispatch which handles:
@@ -1425,7 +1425,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // soft_int=false, no error code for external IRQs
         let result = self.interrupt(vector, false, false, 0);
 
-        // Commit prev_rip after successful delivery (Bochs )
+        // Commit prev_rip after successful delivery (Bochs event.cc)
         if result.is_ok() {
             self.prev_rip = self.rip();
         }
@@ -1604,14 +1604,14 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // last instruction in this batch, the next batch sees SLEEP set, calls
                 // handle_async_event → handle_wait_for_event, and correctly returns Ok(0)
                 // while waiting for an interrupt. This matches Bochs enter_sleep_state
-                // behavior (: async_event = 1).
+                // behavior (proc_ctrl.cc: async_event = 1).
                 self.async_event &= !BX_ASYNC_EVENT_STOP_TRACE;
                 break Ok(iteration);
             }
 
             // check on events which occurred for previous instructions (traps)
             // and ones which are asynchronous to the CPU (hardware interrupts)
-            // Matches Bochs 
+            // Matches Bochs cpu.cc
             if self.async_event != 0 {
                 // Fast path: if only STOP_TRACE is set and CPU is still active,
                 // just clear it without calling handle_async_event(). This is the
@@ -1640,7 +1640,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 match self.get_icache_entry(mem_extended, cpus) {
                     Ok((start, tlen)) => (start, start + tlen),
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
-                        // Bochs setjmp handler (): icount++, then
+                        // Bochs setjmp handler (cpu.cc): icount++, then
                         // line 154: prev_rip = RIP; speculative_rsp = false;
                         self.icount += 1;
                         iteration += 1;
@@ -1671,7 +1671,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 // is only called from get_icache_entry, not during execution.
                 let instr_ref = || -> &Instruction { unsafe { &*i_ptr } };
 
-                // Bochs  sets prev_rip AFTER execution (not before ilen).
+                // Bochs cpu.cc sets prev_rip AFTER execution (not before ilen).
                 // prev_rip is set below, after execute_instruction returns Ok(()).
 
                 // Advance RIP before execution (handlers may read RIP and expect it advanced)
@@ -1717,7 +1717,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     Ok(()) => {}
                     Err(crate::cpu::CpuError::CpuLoopRestart) => {
                         // Exception delivery during execution: restart decode (Bochs longjmp).
-                        // Bochs setjmp handler (): icount++, prev_rip = RIP,
+                        // Bochs setjmp handler (cpu.cc): icount++, prev_rip = RIP,
                         // speculative_rsp = false, then continue outer loop.
                         self.icount += 1;
                         iteration += 1;
@@ -1738,9 +1738,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     }
                 }
 
-                // Bochs  — prev_rip = RIP AFTER execution ("commit new RIP")
+                // Bochs cpu.cc — prev_rip = RIP AFTER execution ("commit new RIP")
                 self.prev_rip = self.gen_reg[BX_64BIT_REG_RIP].rrx();
-                // Bochs  — icount++
+                // Bochs cpu.cc — icount++
                 self.icount += 1;
                 self.perf_instructions += 1;
 
@@ -2336,7 +2336,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 eip_raw
             };
 
-            // If EIP was masked, update it (matching C++ : EIP = new_eip & 0xffff)
+            // If EIP was masked, update it (matching C++ vm8086.cc: EIP = new_eip & 0xffff)
             if self.real_mode() && eip != eip_raw {
                 self.set_eip(eip);
             }
@@ -2359,7 +2359,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                 .u
                 .segment_limit_scaled();
             if eip > limit {
-                // Matching C++  - raise exception (does not return normally)
+                // Matching C++ cpu.cc - raise exception (does not return normally)
                 tracing::error!("prefetch: EIP [{eip:#x}] > CS.limit [{limit:#x}]",);
                 // In C++, exception() uses setjmp/longjmp and doesn't return here
                 // In Rust, exception() returns Ok(()), but control was transferred to handler
@@ -2390,7 +2390,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
 
             // Check if segment limit constrains the fetch window to less than 4096 bytes.
             // Use u64 to avoid u32 overflow when limit is 0xFFFFFFFF (flat 4GB segment).
-            // Matches Bochs  — but Bochs relies on C unsigned wrapping which
+            // Matches Bochs cpu.cc — but Bochs relies on C unsigned wrapping which
             // coincidentally produces the right behavior in most cases because the resulting
             // large eipPageWindowSize still allows eip_biased (a page offset) through.
             // We must be precise here because Rust bounds-checks the fetch buffer.
@@ -2558,7 +2558,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     // =========================================================================
 
     /// BxError - Invalid instruction handler
-    /// Matches BX_CPU_C::BxError from 
+    /// Matches BX_CPU_C::BxError from proc_ctrl.cc
     /// Raises #UD (Undefined Instruction) exception
     pub(super) fn bx_error(&mut self, instr: &Instruction) -> Result<()> {
         let opcode = instr.get_ia_opcode();
@@ -2581,7 +2581,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     /// BxNoFPU - FPU not available handler
-    /// Matches BX_CPU_C::BxNoFPU from 
+    /// Matches BX_CPU_C::BxNoFPU from proc_ctrl.cc
     /// Raises #NM (Device Not Available) if CR0.EM or CR0.TS is set
     pub(super) fn bx_no_fpu(&mut self, _instr: &Instruction) -> Result<()> {
         let cr0 = self.cr0.get32();
@@ -2598,7 +2598,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     /// BxNoMMX - MMX not available handler
-    /// Matches BX_CPU_C::BxNoMMX from 
+    /// Matches BX_CPU_C::BxNoMMX from proc_ctrl.cc
     /// Raises #UD if CR0.EM is set, #NM if CR0.TS is set
     pub(super) fn bx_no_mmx(&mut self, _instr: &Instruction) -> Result<()> {
         let cr0 = self.cr0.get32();
@@ -2619,7 +2619,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     /// BxNoSSE - SSE not available handler
-    /// Matches BX_CPU_C::BxNoSSE from 
+    /// Matches BX_CPU_C::BxNoSSE from proc_ctrl.cc
     /// Only available if CPU_LEVEL >= 6
     /// Raises #UD if CR0.EM is set or CR4.OSFXSR is clear, #NM if CR0.TS is set
     #[cfg(feature = "bx_support_sse")]
@@ -2644,7 +2644,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     /// BxNoAVX - AVX not available handler
-    /// Matches BX_CPU_C::BxNoAVX from 
+    /// Matches BX_CPU_C::BxNoAVX from proc_ctrl.cc
     /// Only available if BX_SUPPORT_AVX
     /// Raises #UD if not in protected mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
     /// Raises #NM if CR0.TS is set
@@ -2686,7 +2686,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     /// BxNoOpMask - Opmask not available handler
-    /// Matches BX_CPU_C::BxNoOpMask from 
+    /// Matches BX_CPU_C::BxNoOpMask from proc_ctrl.cc
     /// Only available if BX_SUPPORT_EVEX
     /// Raises #UD if not in protected mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
     /// Raises #NM if CR0.TS is set
@@ -2731,7 +2731,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     /// BxNoEVEX - EVEX not available handler
-    /// Matches BX_CPU_C::BxNoEVEX from 
+    /// Matches BX_CPU_C::BxNoEVEX from proc_ctrl.cc
     /// Only available if BX_SUPPORT_EVEX
     /// Raises #UD if not in protected mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
     /// Raises #NM if CR0.TS is set
@@ -2787,7 +2787,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     }
 
     /// BxNoAMX - AMX not available handler
-    /// Matches BX_CPU_C::BxNoAMX from 
+    /// Matches BX_CPU_C::BxNoAMX from proc_ctrl.cc
     /// Only available if BX_SUPPORT_AMX
     /// Raises #UD if not in long64 mode, CR4.OSXSAVE is clear, or XCR0 doesn't have required bits
     #[cfg(feature = "bx_support_amx")]
@@ -2834,7 +2834,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// - Feature availability (FPU, MMX, SSE, AVX, EVEX, OPMASK, AMX)
     /// - EVEX-specific rules (broadcast, SAE)
     ///
-    /// Matching C++ `BX_CPU_C::assignHandler` in 
+    /// Matching C++ `BX_CPU_C::assignHandler` in fetchdecode32.cc
     ///
     /// # Parameters
     /// - `instr`: The instruction to assign a handler for

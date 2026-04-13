@@ -992,7 +992,7 @@ pub fn CMP_EwIw<'c, I: BxCpuIdTrait>(
 // =========================================================================
 
 /// CMPXCHG r/m16, r16 — register form
-/// Bochs  (CMPXCHG_EwGwR)
+/// Bochs arith16.cc (CMPXCHG_EwGwR)
 pub fn CMPXCHG_EwGw_R<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
     let ax = cpu.ax();
@@ -1007,7 +1007,7 @@ pub fn CMPXCHG_EwGw_R<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Inst
 }
 
 /// CMPXCHG r/m16, r16 — memory form
-/// Bochs  (CMPXCHG_EwGwM)
+/// Bochs arith16.cc (CMPXCHG_EwGwM)
 pub fn CMPXCHG_EwGw_M<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
@@ -1034,7 +1034,7 @@ pub fn CMPXCHG_EwGw_M<'c, I: BxCpuIdTrait>(
 // =========================================================================
 
 /// XADD r/m16, r16 — register form
-/// Bochs 
+/// Bochs arith16.cc
 pub fn XADD_EwGw_R<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) {
     let op1_16 = cpu.get_gpr16(instr.dst() as usize);
     let op2_16 = cpu.get_gpr16(instr.src() as usize);
@@ -1047,7 +1047,7 @@ pub fn XADD_EwGw_R<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruc
 }
 
 /// XADD r/m16, r16 — memory form
-/// Bochs 
+/// Bochs arith16.cc
 pub fn XADD_EwGw_M<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,

@@ -60,12 +60,12 @@ const BX_MAX_TIMER_ID_LEN: usize = 32;
 const BX_MAX_TIMERS: usize = 64;
 
 /// Default null timer interval (in ticks).
-/// Bochs  — `const Bit64u NullTimerInterval = 0xffffffff;`
+/// Bochs pc_system.cc — `const Bit64u NullTimerInterval = 0xffffffff;`
 /// This ensures the countdown always fits in a u32 (Bochs uses Bit32u for countdown).
 const NULL_TIMER_INTERVAL: u64 = 0xFFFF_FFFF;
 
 /// Minimum allowable timer period in ticks.
-/// Bochs  — prevents ridiculously low timer frequencies
+/// Bochs pc_system.cc — prevents ridiculously low timer frequencies
 /// when IPS is set too low.
 const MIN_ALLOWABLE_TIMER_PERIOD: u64 = 1;
 
@@ -140,7 +140,7 @@ pub struct BxPcSystemC {
     /// Hardware Request (DMA)
     hrq: bool,
     /// HRQ pending flag — set by set_hrq(true), checked by emulator loop.
-    /// Bochs : set_HRQ sets HRQ and signals async_event.
+    /// Bochs pc_system.cc: set_HRQ sets HRQ and signals async_event.
     pub(crate) hrq_pending: bool,
     /// Flag: set_hrq(true) wants async_event=1 on the CPU.
     /// The emulator reads and clears this.
@@ -209,7 +209,7 @@ impl BxPcSystemC {
     /// Initialize the PC system with the given instructions-per-second value
     ///
     /// This sets up timer infrastructure and IPS-based timing.
-    /// Corresponds to `bx_pc_system_c::initialize()` in Bochs ().
+    /// Corresponds to `bx_pc_system_c::initialize()` in Bochs (pc_system.cc).
     pub fn initialize(&mut self, ips: u32) {
         self.ticks_total = 0;
         self.timers[0].time_to_fire = NULL_TIMER_INTERVAL;
@@ -229,11 +229,11 @@ impl BxPcSystemC {
     }
 
     // ========================================================================
-    // Timer tick mechanism — matches Bochs 
+    // Timer tick mechanism — matches Bochs pc_system.h
     // ========================================================================
 
     /// Advance virtual time by `n` ticks, firing any expired timers.
-    /// This is the core timing primitive — matches Bochs .
+    /// This is the core timing primitive — matches Bochs pc_system.h.
     ///
     /// Replaces the old `tick()` + `check_timers()` pair with exact Bochs logic:
     /// decrements `curr_countdown`, triggers `countdown_event()` at 0.
@@ -251,7 +251,7 @@ impl BxPcSystemC {
     }
 
     /// Advance by exactly 1 tick (hot path optimization).
-    /// Matches Bochs .
+    /// Matches Bochs pc_system.h.
     #[inline]
     pub fn tick1(&mut self) {
         self.curr_countdown -= 1;
@@ -262,7 +262,7 @@ impl BxPcSystemC {
 
     /// Handle countdown reaching zero. Checks all timers, fires expired ones,
     /// and recalculates next countdown period.
-    /// Matches Bochs  exactly.
+    /// Matches Bochs pc_system.cc exactly.
     #[inline]
     fn countdown_event(&mut self) {
         let mut first = self.num_timers;
@@ -271,11 +271,11 @@ impl BxPcSystemC {
         let mut triggered = [false; BX_MAX_TIMERS];
 
         // Step 1: Advance total ticks by the countdown period
-        // Bochs 
+        // Bochs pc_system.cc
         self.ticks_total += self.curr_countdown_period as u64;
 
         // Step 2: Scan all timers for fires and find next event
-        // Bochs  uses `==` (ticksTotal == timeToFire).
+        // Bochs pc_system.cc uses `==` (ticksTotal == timeToFire).
         // We use `>=` to catch overdue timers when countdown period overshoots
         // the timer period. This was the root cause of LAPIC timer interrupts
         // never firing during HLT (session 53 fix).
@@ -312,13 +312,13 @@ impl BxPcSystemC {
 
         // Step 3: Calculate next countdown period BEFORE recording fires.
         // Timer reactivation during dispatch needs the new countdown.
-        // Bochs 
+        // Bochs pc_system.cc
         let next_period = (min_time_to_fire - self.ticks_total) as u32;
         self.curr_countdown = next_period;
         self.curr_countdown_period = next_period;
 
         // Step 4: Record all triggered timers for dispatch by the emulator.
-        // Bochs  called handlers here; we defer to the
+        // Bochs pc_system.cc called handlers here; we defer to the
         // emulator so pc_system doesn't need device pointers.
         if first <= last {
             for (offset, &triggered_flag) in triggered[first..=last].iter().enumerate() {
@@ -386,11 +386,11 @@ impl BxPcSystemC {
     }
 
     // ========================================================================
-    // Time queries — matches Bochs  and 
+    // Time queries — matches Bochs pc_system.h and pc_system.cc
     // ========================================================================
 
     /// Get precise current time in ticks, including partial countdown.
-    /// Matches Bochs :
+    /// Matches Bochs pc_system.h:
     /// `ticksTotal + (currCountdownPeriod - currCountdown)`
     #[inline]
     pub fn time_ticks(&self) -> u64 {
@@ -398,13 +398,13 @@ impl BxPcSystemC {
     }
 
     /// Convert ticks to microseconds using IPS setting.
-    /// Matches Bochs .
+    /// Matches Bochs pc_system.cc.
     pub fn time_usec(&self) -> u64 {
         ((self.time_ticks() as f64) / self.m_ips) as u64
     }
 
     /// Convert ticks to nanoseconds using IPS setting.
-    /// Matches Bochs .
+    /// Matches Bochs pc_system.cc.
     pub fn time_nsec(&self) -> u64 {
         ((self.time_ticks() as f64) / self.m_ips * 1000.0) as u64
     }
@@ -414,12 +414,12 @@ impl BxPcSystemC {
     // ========================================================================
 
     /// Set the Hardware Request (DMA) line.
-    /// Matches Bochs : sets HRQ flag and signals async_event.
+    /// Matches Bochs pc_system.cc: sets HRQ flag and signals async_event.
     pub fn set_hrq(&mut self, value: bool) {
         self.hrq = value;
         if value {
             self.hrq_pending = true;
-            // Bochs : BX_CPU(0)->async_event = 1
+            // Bochs pc_system.cc: BX_CPU(0)->async_event = 1
             self.async_event_pending = true;
         }
     }
@@ -430,7 +430,7 @@ impl BxPcSystemC {
         self.hrq
     }
 
-    /// Signal external interrupt to bootstrap CPU (Bochs ).
+    /// Signal external interrupt to bootstrap CPU (Bochs pc_system.cc).
     ///
     /// Sets `intr_raised` so the emulator applies BX_EVENT_PENDING_INTR
     /// and async_event=1 to the CPU.
@@ -438,7 +438,7 @@ impl BxPcSystemC {
         self.intr_raised = true;
     }
 
-    /// Clear external interrupt signal (Bochs ).
+    /// Clear external interrupt signal (Bochs pc_system.cc).
     ///
     /// Sets `intr_cleared` so the emulator clears BX_EVENT_PENDING_INTR
     /// from the CPU.
@@ -469,7 +469,7 @@ impl BxPcSystemC {
         tracing::debug!("PC system state registered");
     }
 
-    /// Start all registered timers. No-op — matches Bochs .
+    /// Start all registered timers. No-op — matches Bochs pc_system.cc.
     /// Timer time_to_fire is set correctly during register_timer/activate_timer.
     pub fn start_timers(&mut self) {
         tracing::debug!("start_timers: no-op (timers started during registration)");
@@ -495,7 +495,7 @@ impl BxPcSystemC {
 
     /// Register a new timer with period in ticks.
     ///
-    /// Corresponds to `bx_pc_system_c::register_timer_ticks()` in Bochs ().
+    /// Corresponds to `bx_pc_system_c::register_timer_ticks()` in Bochs (pc_system.cc).
     /// Returns the timer index on success, or `PcSystemError::NoFreeTimerSlots` if full.
     pub fn register_timer(
         &mut self,
@@ -505,18 +505,18 @@ impl BxPcSystemC {
         active: bool,
         id: &str,
     ) -> Result<usize, PcSystemError> {
-        // Enforce minimum timer period (Bochs )
+        // Enforce minimum timer period (Bochs pc_system.cc)
         let period = period.max(MIN_ALLOWABLE_TIMER_PERIOD);
 
         // Search for free timer slot (i = 0 is reserved for NullTimer)
-        // Bochs 
+        // Bochs pc_system.cc
         for i in 1..BX_MAX_TIMERS {
             if !self.timers[i].flags.contains(TimerFlags::IN_USE) {
                 self.timers[i].flags = TimerFlags::IN_USE;
                 self.timers[i].flags.set(TimerFlags::ACTIVE, active);
                 self.timers[i].flags.set(TimerFlags::CONTINUOUS, continuous);
                 self.timers[i].period = period;
-                // Bochs :
+                // Bochs pc_system.cc:
                 // timeToFire = (ticksTotal + Bit64u(currCountdownPeriod-currCountdown)) + ticks
                 self.timers[i].time_to_fire = if active {
                     self.time_ticks() + period
@@ -532,7 +532,7 @@ impl BxPcSystemC {
                 self.timers[i].id[copy_len] = 0;
 
                 // Adjust countdown if this timer fires sooner than current countdown
-                // Bochs 
+                // Bochs pc_system.cc
                 if active && period < self.curr_countdown as u64 {
                     self.curr_countdown_period -= self.curr_countdown - period as u32;
                     self.curr_countdown = period as u32;
@@ -552,7 +552,7 @@ impl BxPcSystemC {
 
     /// Register a new timer with period in microseconds.
     ///
-    /// Corresponds to `bx_pc_system_c::register_timer()` in Bochs ().
+    /// Corresponds to `bx_pc_system_c::register_timer()` in Bochs (pc_system.cc).
     /// Converts microseconds to ticks using IPS setting, then delegates to register_timer.
     pub fn register_timer_usec(
         &mut self,
@@ -562,14 +562,14 @@ impl BxPcSystemC {
         active: bool,
         id: &str,
     ) -> Result<usize, PcSystemError> {
-        // Convert useconds to number of ticks (Bochs )
+        // Convert useconds to number of ticks (Bochs pc_system.cc)
         let ticks = (f64::from(useconds) * self.m_ips) as u64;
         self.register_timer(owner, ticks, continuous, active, id)
     }
 
     /// Activate a timer with period in ticks.
     ///
-    /// Corresponds to `bx_pc_system_c::activate_timer_ticks()` in Bochs ().
+    /// Corresponds to `bx_pc_system_c::activate_timer_ticks()` in Bochs (pc_system.cc).
     pub fn activate_timer(
         &mut self,
         timer_index: usize,
@@ -577,17 +577,17 @@ impl BxPcSystemC {
         continuous: bool,
     ) -> Result<(), PcSystemError> {
         self.validate_timer_index(timer_index)?;
-        // Enforce minimum timer period (Bochs )
+        // Enforce minimum timer period (Bochs pc_system.cc)
         let period = period.max(MIN_ALLOWABLE_TIMER_PERIOD);
         self.timers[timer_index].period = period;
-        // Bochs :
+        // Bochs pc_system.cc:
         // timeToFire = (ticksTotal + Bit64u(currCountdownPeriod-currCountdown)) + ticks
         self.timers[timer_index].time_to_fire = self.time_ticks() + period;
         self.timers[timer_index].flags.insert(TimerFlags::ACTIVE);
         self.timers[timer_index].flags.set(TimerFlags::CONTINUOUS, continuous);
 
         // Adjust countdown if this timer fires sooner than current countdown
-        // Bochs 
+        // Bochs pc_system.cc
         if period < self.curr_countdown as u64 {
             self.curr_countdown_period -= self.curr_countdown - period as u32;
             self.curr_countdown = period as u32;
@@ -597,7 +597,7 @@ impl BxPcSystemC {
 
     /// Activate a timer with period in microseconds.
     ///
-    /// Corresponds to `bx_pc_system_c::activate_timer()` in Bochs ().
+    /// Corresponds to `bx_pc_system_c::activate_timer()` in Bochs (pc_system.cc).
     /// If `useconds == 0`, reuses the timer's existing period.
     pub fn activate_timer_usec(
         &mut self,
@@ -609,7 +609,7 @@ impl BxPcSystemC {
         let ticks = if useconds == 0 {
             self.timers[timer_index].period
         } else {
-            // Convert useconds to ticks (Bochs )
+            // Convert useconds to ticks (Bochs pc_system.cc)
             let t = (f64::from(useconds) * self.m_ips) as u64;
             t.max(MIN_ALLOWABLE_TIMER_PERIOD)
         };
@@ -618,7 +618,7 @@ impl BxPcSystemC {
 
     /// Activate a timer with period in nanoseconds.
     ///
-    /// Corresponds to `bx_pc_system_c::activate_timer_nsec()` in Bochs ().
+    /// Corresponds to `bx_pc_system_c::activate_timer_nsec()` in Bochs (pc_system.cc).
     /// If `nseconds == 0`, reuses the timer's existing period.
     pub fn activate_timer_nsec(
         &mut self,
@@ -630,7 +630,7 @@ impl BxPcSystemC {
         let ticks = if nseconds == 0 {
             self.timers[timer_index].period
         } else {
-            // Convert nseconds to ticks (Bochs )
+            // Convert nseconds to ticks (Bochs pc_system.cc)
             let t = ((nseconds as f64) * self.m_ips / 1000.0) as u64;
             t.max(MIN_ALLOWABLE_TIMER_PERIOD)
         };
@@ -668,7 +668,7 @@ impl BxPcSystemC {
 
     /// Deactivate a timer.
     ///
-    /// Corresponds to `bx_pc_system_c::deactivate_timer()` in Bochs ().
+    /// Corresponds to `bx_pc_system_c::deactivate_timer()` in Bochs (pc_system.cc).
     pub fn deactivate_timer(&mut self, timer_index: usize) -> Result<(), PcSystemError> {
         self.validate_timer_index(timer_index)?;
         self.timers[timer_index].flags.remove(TimerFlags::ACTIVE);
@@ -677,7 +677,7 @@ impl BxPcSystemC {
 
     /// Unregister a timer, freeing its slot for reuse.
     ///
-    /// Corresponds to `bx_pc_system_c::unregisterTimer()` in Bochs ().
+    /// Corresponds to `bx_pc_system_c::unregisterTimer()` in Bochs (pc_system.cc).
     /// The timer must be deactivated first.
     pub fn unregister_timer(&mut self, timer_index: usize) -> Result<(), PcSystemError> {
         self.validate_timer_index(timer_index)?;
@@ -698,7 +698,7 @@ impl BxPcSystemC {
 
 
     /// Get the number of ticks until next timer event.
-    /// Matches Bochs  `getNumCpuTicksLeftNextEvent()`.
+    /// Matches Bochs pc_system.h `getNumCpuTicksLeftNextEvent()`.
     #[inline]
     pub fn get_num_cpu_ticks_left_next_event(&self) -> u32 {
         self.curr_countdown
@@ -768,10 +768,10 @@ impl BxPcSystemC {
         min
     }
 
-    /// Emulate ISA bus timing delay (Bochs ).
+    /// Emulate ISA bus timing delay (Bochs pc_system.cc).
     /// ISA bus runs at ~8 MHz. Each ISA cycle takes ~125ns.
     /// At typical IPS rates, this advances the tick counter to simulate bus delay.
-    /// Emulate ISA bus timing delay (Bochs ).
+    /// Emulate ISA bus timing delay (Bochs pc_system.cc).
     /// ISA bus runs at ~8 MHz. Each ISA cycle consumes CPU ticks
     /// proportional to IPS. Bochs: `tickn((Bit32u)(m_ips * 2.0))`
     pub fn isa_bus_delay(&mut self) {

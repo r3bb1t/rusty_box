@@ -234,7 +234,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // RSM — Resume from System Management Mode (opcode 0F AA)
-    // Bochs: 
+    // Bochs: smm.cc
     // ========================================================================
 
     pub(super) fn rsm(&mut self, _instr: &Instruction) -> Result<()> {
@@ -267,7 +267,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // Enter System Management Mode
-    // Bochs: 
+    // Bochs: smm.cc
     // Called when an SMI (System Management Interrupt) is delivered
     // ========================================================================
 
@@ -288,7 +288,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.smram_write_physical_dword(paddr, dword);
         }
 
-        // Initialize CPU to SMM entry state (Bochs )
+        // Initialize CPU to SMM entry state (Bochs smm.cc)
 
         // EFLAGS = 0x2 (bit 1 always set)
         self.set_eflags_internal(0x2);
@@ -367,7 +367,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // Save CPU state to SMRAM array (32-bit mode)
-    // Bochs: 
+    // Bochs: smm.cc
     // ========================================================================
 
     fn smram_save_state(&self, saved_state: &mut [u32; SMRAM_STATE_SIZE]) {
@@ -490,7 +490,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // Restore CPU state from SMRAM array
-    // Bochs:  + resume_from_system_management_mode (648-844)
+    // Bochs: smm.cc + resume_from_system_management_mode (648-844)
     // ========================================================================
 
     fn smram_restore_state(&mut self, saved_state: &[u32; SMRAM_STATE_SIZE]) {

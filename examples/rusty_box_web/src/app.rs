@@ -41,14 +41,31 @@ const ACCENT_YELLOW: egui::Color32 = egui::Color32::from_rgb(0xDC, 0xDC, 0xAA);
 const ACCENT_CYAN: egui::Color32 = egui::Color32::from_rgb(0x6A, 0xD8, 0xE8);
 const ACCENT_RED: egui::Color32 = egui::Color32::from_rgb(0xF4, 0x4D, 0x4D);
 
+#[derive(Clone, PartialEq)]
+enum BootMode {
+    /// Show launcher screen — user picks what to boot
+    Launcher,
+    /// DLX Linux from embedded disk image
+    Dlx,
+    /// Alpine Linux from user-uploaded ISO
+    Alpine,
+}
+
 /// The eframe application — owns the emulator and display directly.
 pub struct WasmEmulatorApp {
+    boot_mode: BootMode,
     emulator: Option<Box<Emulator<'static, Corei7SkylakeX>>>,
     display: SharedDisplay,
     texture: Option<egui::TextureHandle>,
     initialized: bool,
     init_error: Option<String>,
     shutdown: bool,
+
+    /// Pending Alpine ISO data from file upload
+    pending_iso: Option<Vec<u8>>,
+    /// Shared slot for file upload result (WASM)
+    #[cfg(target_arch = "wasm32")]
+    file_slot: std::rc::Rc<core::cell::RefCell<Option<Vec<u8>>>>,
 
     // Metrics
     total_instructions: u64,
@@ -61,12 +78,16 @@ pub struct WasmEmulatorApp {
 impl WasmEmulatorApp {
     pub fn new(_cc: &eframe::CreationContext<'_>) -> Self {
         Self {
+            boot_mode: BootMode::Launcher,
             emulator: None,
             display: SharedDisplay::new(),
             texture: None,
             initialized: false,
             init_error: None,
             shutdown: false,
+            pending_iso: None,
+            #[cfg(target_arch = "wasm32")]
+            file_slot: std::rc::Rc::new(core::cell::RefCell::new(None)),
             total_instructions: 0,
             last_ips_time: web_time::Instant::now(),
             last_ips_instructions: 0,
@@ -75,8 +96,8 @@ impl WasmEmulatorApp {
         }
     }
 
-    /// One-time emulator initialization with embedded assets.
-    fn initialize_emulator(&mut self) {
+    /// Initialize the emulator for DLX Linux (embedded disk).
+    fn initialize_dlx(&mut self) {
         let config = EmulatorConfig {
             guest_memory_size: 32 * 1024 * 1024,
             host_memory_size: 32 * 1024 * 1024,
@@ -88,15 +109,11 @@ impl WasmEmulatorApp {
 
         let result = (|| -> rusty_box::Result<Box<Emulator<'static, Corei7SkylakeX>>> {
             let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
-
-            // Initialize memory + PC system
             emu.init_memory_and_pc_system()?;
 
-            // Load BIOS (128 KB)
             let bios_load_addr = !(BIOS_DATA.len() as u64 - 1);
             emu.load_bios(BIOS_DATA, bios_load_addr)?;
 
-            // Load VGA BIOS at 0xC0000 (pad to 512-byte boundary)
             let mut vga_data = VGA_BIOS_DATA.to_vec();
             let remainder = vga_data.len() % 512;
             if remainder != 0 {
@@ -104,18 +121,13 @@ impl WasmEmulatorApp {
             }
             emu.load_optional_rom(&vga_data, 0xC0000)?;
 
-            // Initialize CPU + devices
             emu.init_cpu_and_devices()?;
-
-            // Configure CMOS
             emu.configure_memory_in_cmos(640, 31 * 1024);
             emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
-            emu.configure_boot_sequence(2, 0, 0);
+            emu.configure_boot_sequence(2, 0, 0); // Boot from disk
 
-            // Attach disk from embedded data (rusty_box compiled without std)
             emu.attach_disk_data(0, 0, DISK_DATA.to_vec(), DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
 
-            // Initialize (no GUI needed — we render via update_display)
             emu.init_gui(0, &[])?;
             emu.reset(ResetReason::Hardware)?;
             emu.start();
@@ -124,6 +136,57 @@ impl WasmEmulatorApp {
             Ok(emu)
         })();
 
+        self.finish_init(result);
+    }
+
+    /// Initialize the emulator for Alpine Linux (user-provided ISO).
+    fn initialize_alpine(&mut self, iso_data: Vec<u8>) {
+        let ram_size = 256 * 1024 * 1024; // 256 MB for Alpine
+        let config = EmulatorConfig {
+            guest_memory_size: ram_size,
+            host_memory_size: ram_size,
+            memory_block_size: 128 * 1024,
+            ips: 300_000_000,
+            pci_enabled: true,
+            ..Default::default()
+        };
+
+        let result = (|| -> rusty_box::Result<Box<Emulator<'static, Corei7SkylakeX>>> {
+            let mut emu = Emulator::<Corei7SkylakeX>::new(config)?;
+            emu.init_memory_and_pc_system()?;
+
+            let bios_load_addr = !(BIOS_DATA.len() as u64 - 1);
+            emu.load_bios(BIOS_DATA, bios_load_addr)?;
+
+            let mut vga_data = VGA_BIOS_DATA.to_vec();
+            let remainder = vga_data.len() % 512;
+            if remainder != 0 {
+                vga_data.resize(vga_data.len() + (512 - remainder), 0);
+            }
+            emu.load_optional_rom(&vga_data, 0xC0000)?;
+
+            emu.init_cpu_and_devices()?;
+
+            // 256 MB: 640 KB conventional + ~255 MB extended
+            let ext_kb = ((ram_size / 1024) - 1024).min(u16::MAX as usize);
+            emu.configure_memory_in_cmos(640, ext_kb as u16);
+            emu.configure_boot_sequence(3, 0, 0); // Boot from CD-ROM
+
+            // Attach CD-ROM on secondary channel (channel 1, drive 0)
+            emu.attach_cdrom_data(1, 0, iso_data);
+
+            emu.init_gui(0, &[])?;
+            emu.reset(ResetReason::Hardware)?;
+            emu.start();
+            emu.force_vga_update();
+
+            Ok(emu)
+        })();
+
+        self.finish_init(result);
+    }
+
+    fn finish_init(&mut self, result: rusty_box::Result<Box<Emulator<'static, Corei7SkylakeX>>>) {
         match result {
             Ok(emu) => {
                 self.emulator = Some(emu);
@@ -261,6 +324,121 @@ impl WasmEmulatorApp {
         });
     }
 
+    /// Trigger a file picker for Alpine ISO upload (WASM).
+    #[cfg(target_arch = "wasm32")]
+    fn open_file_picker(&mut self) {
+        use wasm_bindgen::prelude::*;
+        use wasm_bindgen::JsCast;
+
+        let document = web_sys::window().unwrap().document().unwrap();
+        let input: web_sys::HtmlInputElement = document
+            .create_element("input")
+            .unwrap()
+            .dyn_into()
+            .unwrap();
+        input.set_type("file");
+        input.set_accept(".iso,.img");
+
+        let slot = self.file_slot.clone();
+
+        let closure = Closure::once(move |event: web_sys::Event| {
+            let input: web_sys::HtmlInputElement = event.target().unwrap().dyn_into().unwrap();
+            if let Some(files) = input.files() {
+                if let Some(file) = files.get(0) {
+                    let reader = web_sys::FileReader::new().unwrap();
+                    let reader_clone = reader.clone();
+                    let slot_inner = slot.clone();
+                    let onload = Closure::once(move |_: web_sys::Event| {
+                        if let Ok(result) = reader_clone.result() {
+                            let array = js_sys::Uint8Array::new(&result);
+                            let data = array.to_vec();
+                            log::info!("FileReader onload: {} bytes", data.len());
+                            *slot_inner.borrow_mut() = Some(data);
+                        }
+                    });
+                    reader.set_onload(Some(onload.as_ref().unchecked_ref()));
+                    onload.forget();
+                    reader.read_as_array_buffer(&file).unwrap();
+                }
+            }
+        });
+
+        input.add_event_listener_with_callback("change", closure.as_ref().unchecked_ref())
+            .unwrap();
+        closure.forget();
+        input.click();
+    }
+
+    /// Trigger a file picker for Alpine ISO upload (native — stub).
+    #[cfg(not(target_arch = "wasm32"))]
+    fn open_file_picker(&mut self) {
+        log::warn!("File picker not implemented for native builds");
+    }
+
+    /// Render the launcher screen directly into ui (no CentralPanel wrapper).
+    fn render_launcher(&mut self, ui: &mut egui::Ui) {
+        ui.vertical_centered(|ui| {
+            ui.add_space(80.0);
+
+            ui.label(
+                egui::RichText::new("Rusty Box")
+                    .size(32.0)
+                    .strong()
+                    .color(TEXT_PRIMARY),
+            );
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("x86 Emulator — Rust port of Bochs")
+                    .size(14.0)
+                    .color(TEXT_DIM),
+            );
+
+            ui.add_space(48.0);
+
+            let dlx_btn = egui::Button::new(
+                egui::RichText::new("Boot DLX Linux")
+                    .size(16.0)
+                    .color(TEXT_PRIMARY),
+            )
+            .fill(BG_SURFACE)
+            .stroke(egui::Stroke::new(1.0, ACCENT_GREEN))
+            .min_size(egui::vec2(280.0, 48.0));
+
+            if ui.add(dlx_btn).clicked() {
+                self.boot_mode = BootMode::Dlx;
+            }
+
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("10 MB embedded disk image — boots instantly")
+                    .size(11.0)
+                    .color(TEXT_MUTED),
+            );
+
+            ui.add_space(24.0);
+
+            let alpine_btn = egui::Button::new(
+                egui::RichText::new("Load Alpine Linux ISO")
+                    .size(16.0)
+                    .color(TEXT_PRIMARY),
+            )
+            .fill(BG_SURFACE)
+            .stroke(egui::Stroke::new(1.0, ACCENT_BLUE))
+            .min_size(egui::vec2(280.0, 48.0));
+
+            if ui.add(alpine_btn).clicked() {
+                self.open_file_picker();
+            }
+
+            ui.add_space(4.0);
+            ui.label(
+                egui::RichText::new("Upload an Alpine Virtual x86 ISO from alpinelinux.org/downloads")
+                    .size(11.0)
+                    .color(TEXT_MUTED),
+            );
+        });
+    }
+
     /// Render the top header bar.
     fn render_header(&self, ui: &mut egui::Ui) {
         egui::Panel::top("header")
@@ -273,21 +451,25 @@ impl WasmEmulatorApp {
             )
             .show_inside(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    // App title
                     ui.label(
                         egui::RichText::new("Rusty Box")
                             .strong()
                             .size(14.0)
                             .color(TEXT_PRIMARY),
                     );
+
+                    let mode_str = match self.boot_mode {
+                        BootMode::Launcher => "Launcher",
+                        BootMode::Dlx => "DLX Linux",
+                        BootMode::Alpine => "Alpine Linux",
+                    };
                     ui.label(
-                        egui::RichText::new("x86 Emulator")
+                        egui::RichText::new(mode_str)
                             .size(11.0)
                             .color(TEXT_MUTED),
                     );
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        // Right-aligned info
                         let instr_text = if self.total_instructions > 0 {
                             if self.total_instructions >= 1_000_000 {
                                 format!("{}M instr", self.total_instructions / 1_000_000)
@@ -322,7 +504,6 @@ impl WasmEmulatorApp {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing.x = 24.0;
 
-                    // Status indicator (colored dot + text)
                     let (dot_color, status_text) = if self.init_error.is_some() {
                         (ACCENT_RED, "Error")
                     } else if !self.initialized {
@@ -333,7 +514,6 @@ impl WasmEmulatorApp {
                         (ACCENT_GREEN, "Running")
                     };
 
-                    // Colored dot
                     let (rect, _) =
                         ui.allocate_exact_size(egui::vec2(8.0, 8.0), egui::Sense::hover());
                     ui.painter().circle_filled(rect.center(), 3.5, dot_color);
@@ -345,10 +525,8 @@ impl WasmEmulatorApp {
                             .color(dot_color),
                     );
 
-                    // Separator
                     ui.label(egui::RichText::new("|").size(11.0).color(BORDER_SUBTLE));
 
-                    // IPS
                     let ips_str = Self::format_ips(self.cached_ips);
                     ui.label(
                         egui::RichText::new(format!("{} IPS", ips_str))
@@ -357,26 +535,14 @@ impl WasmEmulatorApp {
                             .color(ACCENT_CYAN),
                     );
 
-                    // Separator
                     ui.label(egui::RichText::new("|").size(11.0).color(BORDER_SUBTLE));
 
-                    // Frame counter
                     ui.label(
                         egui::RichText::new(format!("frame {}", self.frame_count))
                             .monospace()
                             .size(11.0)
                             .color(TEXT_MUTED),
                     );
-
-                    // Right-aligned: batch size info
-                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        ui.label(
-                            egui::RichText::new(format!("batch: {}K/frame", BATCH_SIZE / 1000))
-                                .monospace()
-                                .size(11.0)
-                                .color(TEXT_MUTED),
-                        );
-                    });
                 });
             });
     }
@@ -387,7 +553,6 @@ impl WasmEmulatorApp {
             .frame(egui::Frame::NONE.fill(BG_DARKEST))
             .show_inside(ui, |ui| {
                 if let Some(ref err) = self.init_error {
-                    // Error state
                     ui.centered_and_justified(|ui| {
                         ui.vertical_centered(|ui| {
                             ui.add_space(40.0);
@@ -419,13 +584,11 @@ impl WasmEmulatorApp {
                     let offset_x = (available.x - w) / 2.0;
                     let offset_y = (available.y - h) / 2.0;
 
-                    // Subtle border around the display
                     let display_rect = egui::Rect::from_min_size(
                         ui.min_rect().min + egui::vec2(offset_x, offset_y),
                         egui::vec2(w, h),
                     );
 
-                    // Outer glow / border
                     ui.painter().rect_stroke(
                         display_rect.expand(1.0),
                         0.0,
@@ -439,7 +602,6 @@ impl WasmEmulatorApp {
                         ui.image(egui::load::SizedTexture::new(tex.id(), egui::vec2(w, h)));
                     });
                 } else if !self.initialized {
-                    // Loading state
                     ui.centered_and_justified(|ui| {
                         ui.vertical_centered(|ui| {
                             ui.add_space(40.0);
@@ -471,14 +633,31 @@ impl eframe::App for WasmEmulatorApp {
         Self::apply_theme(&ctx);
         self.frame_count += 1;
 
-        // Deferred initialization (first frame)
-        if !self.initialized && self.init_error.is_none() {
-            self.initialize_emulator();
+        // Check for pending file upload result
+        #[cfg(target_arch = "wasm32")]
+        {
+            let mut slot = self.file_slot.borrow_mut();
+            if let Some(data) = slot.take() {
+                log::info!("Received ISO data: {} bytes", data.len());
+                self.pending_iso = Some(data);
+                self.boot_mode = BootMode::Alpine;
+            }
         }
 
-        // Execute multiple batches of instructions per frame.
-        // cpu_loop_n_with_io may return early (async events, trace breaks),
-        // so we loop until we hit the per-frame budget.
+        // Deferred initialization (when boot mode selected)
+        if self.boot_mode != BootMode::Launcher && !self.initialized && self.init_error.is_none() {
+            match self.boot_mode {
+                BootMode::Dlx => self.initialize_dlx(),
+                BootMode::Alpine => {
+                    if let Some(iso) = self.pending_iso.take() {
+                        self.initialize_alpine(iso);
+                    }
+                }
+                BootMode::Launcher => {}
+            }
+        }
+
+        // Execute batches
         if self.initialized && !self.shutdown {
             if let Some(ref mut emu) = self.emulator {
                 let mut frame_executed = 0u64;
@@ -488,10 +667,6 @@ impl eframe::App for WasmEmulatorApp {
                             frame_executed += executed;
                             if is_shutdown {
                                 self.shutdown = true;
-                                log::info!(
-                                    "CPU shutdown after {} instructions",
-                                    self.total_instructions + frame_executed
-                                );
                                 break;
                             }
                             if executed == 0 {
@@ -506,63 +681,7 @@ impl eframe::App for WasmEmulatorApp {
                     }
                 }
                 self.total_instructions += frame_executed;
-
-                // Render VGA text → pixel framebuffer
                 emu.update_display(&mut self.display);
-
-                // Diagnostic: log display state periodically
-                if self.frame_count % 300 == 1 {
-                    let non_zero = self
-                        .display
-                        .framebuffer
-                        .chunks(4)
-                        .filter(|px| px[0] != 0 || px[1] != 0 || px[2] != 0)
-                        .count();
-                    // Check VGA text memory directly
-                    let vga_dump = emu.vga_text_dump();
-                    let vga_trimmed = vga_dump.trim();
-                    let vga_preview: String = vga_trimmed.chars().take(80).collect();
-                    // Check VGA handler probes and memory handler count
-                    let probe = emu.vga_probe_summary();
-                    let handler_count = emu.memory_handler_count();
-                    log::info!(
-                        "Display: {}x{}, dirty={}, non_zero_px={}, vga_dump_len={}, preview=[{}]",
-                        self.display.fb_width,
-                        self.display.fb_height,
-                        self.display.fb_dirty,
-                        non_zero,
-                        vga_trimmed.len(),
-                        vga_preview
-                    );
-                    // Check raw RAM at 0xB8000 (VGA text area) and ROM at 0xC0000 (VGA BIOS)
-                    let ram_b8000 = emu.peek_ram_at(0xB8000, 32);
-                    let ram_c0000 = emu.peek_ram_at(0xC0000, 16);
-                    let ram_non_zero = ram_b8000.iter().filter(|&&b| b != 0).count();
-                    let (cs, rip) = emu.get_cs_rip();
-                    let mode = emu.get_cpu_mode_str();
-                    let cr0 = emu.get_cr0();
-                    let if_flag = emu.get_if_flag();
-                    let activity = emu.get_activity_str();
-                    // Check BIOS ROM at reset vector offset (0x3FFFF0 in 4MB ROM array)
-                    let rom_reset = emu.peek_rom(0x3FFFF0, 16);
-                    // Check BIOS ROM at 0x3E0000 (start of 128KB BIOS in ROM)
-                    let rom_start = emu.peek_rom(0x3E0000, 16);
-                    log::info!(
-                        "CPU: CS={:#06x} RIP={:#010x} mode={} CR0={:#010x} IF={} activity={} | handlers={} | RAM@B8={}",
-                        cs, rip, mode, cr0, if_flag, activity, handler_count, ram_non_zero,
-                    );
-                    // VGA BIOS at ROM offset 0x400000 (expansion ROM area)
-                    let rom_vgabios = emu.peek_rom(0x400000, 16);
-                    log::info!(
-                        "ROM@reset={:02x?} ROM@start={:02x?} ROM@vga={:02x?} RAM@C0={:02x?} GR6={:#04x} | VGA: {}",
-                        &rom_reset[..rom_reset.len().min(16)],
-                        &rom_start[..rom_start.len().min(16)],
-                        &rom_vgabios[..rom_vgabios.len().min(16)],
-                        &ram_c0000[..ram_c0000.len().min(16)],
-                        emu.peek_vga_gr6(),
-                        probe.trim(),
-                    );
-                }
             }
         }
 
@@ -575,10 +694,14 @@ impl eframe::App for WasmEmulatorApp {
         // Upload framebuffer texture
         self.upload_texture(&ctx);
 
-        // Render UI
-        self.render_header(ui);
-        self.render_status_bar(ui);
-        self.render_display(ui);
+        // Render UI — always same panel structure
+        if self.boot_mode == BootMode::Launcher {
+            self.render_launcher(ui);
+        } else {
+            self.render_header(ui);
+            self.render_status_bar(ui);
+            self.render_display(ui);
+        }
 
         // Keep repainting while running
         if !self.shutdown {

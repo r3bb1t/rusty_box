@@ -178,7 +178,7 @@ impl DeviceManager {
 
     /// Initialize all devices and register I/O handlers
     ///
-    /// Matches device loading order from cpp_orig/bochs/iodev/:
+    /// Matches device loading order from cpp_orig/bochs/iodev/devices.cc:
     /// 1. CMOS (line 250)
     /// 2. DMA (line 251)
     /// 3. PIC (line 252)
@@ -295,24 +295,24 @@ impl DeviceManager {
     fn register_cmos_handlers(&mut self, io: &mut BxDevicesC) {
         io.register_io_handler(DeviceId::Cmos, CMOS_ADDR, "CMOS Address", 0x1);
         io.register_io_handler(DeviceId::Cmos, CMOS_DATA, "CMOS Data", 0x1);
-        // Bochs  — extended CMOS RAM ports (addresses 0x80-0xFF)
+        // Bochs cmos.cc — extended CMOS RAM ports (addresses 0x80-0xFF)
         io.register_io_handler(DeviceId::Cmos, 0x0072, "Ext CMOS RAM", 0x1);
         io.register_io_handler(DeviceId::Cmos, 0x0073, "Ext CMOS RAM", 0x1);
     }
 
-    /// Register DMA I/O handlers (Bochs )
+    /// Register DMA I/O handlers (Bochs dma.cc)
     fn register_dma_handlers(&mut self, io: &mut BxDevicesC) {
-        // DMA1 ports 0x0000-0x000F (Bochs )
+        // DMA1 ports 0x0000-0x000F (Bochs dma.cc)
         for port in 0x0000..=0x000F_u16 {
             io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x1);
         }
 
-        // Page registers 0x0080-0x008F (Bochs )
+        // Page registers 0x0080-0x008F (Bochs dma.cc)
         for port in 0x0080..=0x008F_u16 {
             io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x1);
         }
 
-        // DMA2 ports 0x00C0-0x00DE, step 2 (Bochs )
+        // DMA2 ports 0x00C0-0x00DE, step 2 (Bochs dma.cc)
         let mut port = 0x00C0_u16;
         while port <= 0x00DE {
             io.register_io_handler(DeviceId::Dma, port, "DMA controller", 0x1);
@@ -355,10 +355,10 @@ impl DeviceManager {
     /// Dynamic ports (PM/SM base) are re-registered when PCI config changes.
     #[cfg(feature = "bx_support_pci")]
     fn register_acpi_handlers(&mut self, io: &mut BxDevicesC) {
-        // SMI command port (0xB2) — Bochs 
+        // SMI command port (0xB2) — Bochs acpi.cc
         io.register_io_write_handler(DeviceId::Acpi, 0x00B2, "ACPI SMI Command", 0x1);
 
-        // ACPI debug port (0xB044) — Bochs 
+        // ACPI debug port (0xB044) — Bochs acpi.cc
         io.register_io_handler(DeviceId::Acpi, 0xB044, "ACPI Debug", 0x7);
     }
 
@@ -369,7 +369,7 @@ impl DeviceManager {
         if base == 0 {
             return;
         }
-        // Register 64 ports at PM base — Bochs 
+        // Register 64 ports at PM base — Bochs acpi.cc
         for offset in 0..64u16 {
             let mask = self.acpi.pm_io_mask(offset as u8);
             if mask != 0 {
@@ -386,7 +386,7 @@ impl DeviceManager {
         if base == 0 {
             return;
         }
-        // Register 16 ports at SM base — Bochs 
+        // Register 16 ports at SM base — Bochs acpi.cc
         for offset in 0..16u16 {
             let mask = self.acpi.sm_io_mask(offset as u8);
             if mask != 0 {
@@ -399,7 +399,7 @@ impl DeviceManager {
     /// Register PCI bus I/O handlers.
     /// Ports: 0xCF8 (config address), 0xCFC-0xCFF (config data),
     /// PIIX3 I/O ports (ELCR, CPU reset), and PCI IDE BM-DMA ports.
-    /// Bochs:  (PCI bridge init order)
+    /// Bochs: devices.cc (PCI bridge init order)
     #[cfg(feature = "bx_support_pci")]
     fn register_pci_handlers(&mut self, io: &mut BxDevicesC) {
         // PCI config address register (0xCF8) — 4-byte write only
@@ -566,7 +566,7 @@ impl DeviceManager {
         }
 
         // Keyboard: process IRQ lower requests BEFORE raises (matching Bochs
-        // DEV_pic_lower_irq() calls in port 0x60 read handler, /340)
+        // DEV_pic_lower_irq() calls in port 0x60 read handler, keyboard.cc/340)
         if self.keyboard.check_irq1_lower() {
             self.pic.lower_irq(1);
         }
@@ -865,7 +865,7 @@ impl BxDevicesC {
 
     /// Reset all devices
     ///
-    /// Matches bx_devices_c::reset() from cpp_orig/bochs/iodev/
+    /// Matches bx_devices_c::reset() from cpp_orig/bochs/iodev/devices.cc
     ///
     /// # Arguments
     /// * `reset_type` - Type of reset (Hardware or Software)
@@ -925,7 +925,7 @@ impl SystemControlPort {
         let old_a20 = self.a20_gate;
 
         self.value = value;
-        // Bochs : bit 1 = A20 gate, bit 0 = fast reset
+        // Bochs devices.cc: bit 1 = A20 gate, bit 0 = fast reset
         self.a20_gate = (value & 0x02) != 0;
         self.reset_request = (value & 0x01) != 0;
 
@@ -934,7 +934,7 @@ impl SystemControlPort {
     }
 
     /// Read current port 92h value
-    /// Bochs : return(BX_GET_ENABLE_A20() << 1)
+    /// Bochs devices.cc: return(BX_GET_ENABLE_A20() << 1)
     pub fn read(&self) -> u8 {
         // Bit 1 = A20 gate state, Bit 0 = 0 (reset trigger write-only)
         if self.a20_gate {

@@ -89,7 +89,7 @@ bitflags! {
     /// These flags indicate which features are currently available/active in the CPU.
     /// They are checked against OpFlags to determine if an instruction can be executed
     /// or if an error handler should be assigned instead.
-    /// Matching C++ definitions in 
+    /// Matching C++ definitions in cpu.h
     #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
     pub(crate) struct FetchModeMask: u32 {
         /// CS.D_B — 32-bit default operand/address size
@@ -120,7 +120,7 @@ bitflags! {
 
 /// Structure for opcode table entries
 ///
-/// This matches the original C++ `bxIAOpcodeTable` structure from ``.
+/// This matches the original C++ `bxIAOpcodeTable` structure from `fetchdecode.h`.
 /// Each entry contains handler function pointers and opflags for an instruction.
 ///
 /// The table is indexed by opcode and used by `assign_handler` to select the
@@ -129,11 +129,11 @@ bitflags! {
 ///
 /// # Fields
 /// - `execute1`: Handler for memory form (when modC0 == false)
-///   Matching C++ `BxOpcodesTable[ia_opcode].execute1` in 
+///   Matching C++ `BxOpcodesTable[ia_opcode].execute1` in fetchdecode32.cc
 /// - `execute2`: Handler for register form (when modC0 == true), or None if not applicable
-///   Matching C++ `BxOpcodesTable[ia_opcode].execute2` in 
+///   Matching C++ `BxOpcodesTable[ia_opcode].execute2` in fetchdecode32.cc
 /// - `opflags`: Feature requirements and special handling flags
-///   Matching C++ `BxOpcodesTable[ia_opcode].opflags` in 
+///   Matching C++ `BxOpcodesTable[ia_opcode].opflags` in fetchdecode32.cc
 pub(super) struct BxOpcodeEntry<I: BxCpuIdTrait> {
     /// Handler function for memory form or primary handler
     /// This is a function pointer that will be called with `&mut BxCpuC<I>` and `&Instruction`
@@ -154,7 +154,7 @@ pub(super) struct BxOpcodeEntry<I: BxCpuIdTrait> {
 /// containing handler function pointers and opflags. The table maps opcodes to
 /// their execution handlers (execute1 for memory form, execute2 for register form).
 ///
-/// Matching C++ `BxOpcodesTable[ia_opcode]` access in ,2059
+/// Matching C++ `BxOpcodesTable[ia_opcode]` access in fetchdecode32.cc,2059
 ///
 /// # Parameters
 /// - `opcode`: The instruction opcode to look up

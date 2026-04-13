@@ -2026,7 +2026,7 @@ pub(super) const BxOpcodeTable0F71: [u64; 6] = [
 // Note: Bochs legacy BxOpcodeTable0F72 has 6 entries (no VPRORD/VPROLD), but
 // Bochs has a separate BxOpcodeGroup_EVEX_0F72 table. Our decoder has NO separate
 // EVEX opcode map — EVEX instructions share the same opmap tables with ATTR flags.
-// These EVEX entries MUST stay here. Flags match Bochs .
+// These EVEX entries MUST stay here. Flags match Bochs fetchdecode_opmap_evex.cc.
 pub(super) const BxOpcodeTable0F72: [u64; 8] = [
     form_opcode(
         ATTR_NNN0 | ATTR_SSE_PREFIX_66 | ATTR_VEX_W0 | ATTR_MODC0,

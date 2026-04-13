@@ -22,10 +22,10 @@ pub const APIC_LEVEL_TRIGGERED: u8 = 1;
 /// Default Local APIC base address (Bochs: BX_LAPIC_BASE_ADDR)
 pub const BX_LAPIC_BASE_ADDR: BxPhyAddress = 0xfee00000;
 
-/// First valid APIC vector (Bochs: BX_LAPIC_FIRST_VECTOR, )
+/// First valid APIC vector (Bochs: BX_LAPIC_FIRST_VECTOR, apic.cc)
 const BX_LAPIC_FIRST_VECTOR: u8 = 0x10;
 
-/// Last valid APIC vector (Bochs: BX_LAPIC_LAST_VECTOR, )
+/// Last valid APIC vector (Bochs: BX_LAPIC_LAST_VECTOR, apic.cc)
 #[allow(dead_code)]
 const BX_LAPIC_LAST_VECTOR: u8 = 0xFF;
 
@@ -41,14 +41,14 @@ const APIC_ID_MASK_XAPIC: u32 = 0xFF;
 /// APIC ID mask for legacy mode (4-bit ID)
 const APIC_ID_MASK_LEGACY: u32 = 0x0F;
 
-/// APIC error status constants (Bochs: )
+/// APIC error status constants (Bochs: apic.h)
 const APIC_ERR_ILLEGAL_ADDR: u32 = 0x80;
 const APIC_ERR_RX_ILLEGAL_VEC: u32 = 0x40;
 #[allow(dead_code)]
 const APIC_ERR_TX_ILLEGAL_VEC: u32 = 0x20;
 const APIC_ERR_TX_ACCEPT_ERR: u32 = 0x04;
 
-/// LVT write masks per entry (Bochs: )
+/// LVT write masks per entry (Bochs: apic.cc)
 /// Determines which bits are writable for each LVT entry.
 const LVT_MASKS: [u32; LVT_ENTRY_COUNT] = [
     0x000710FF, // TIMER:   vector[7:0], delivery_status[12], mask[16], timer_mode[17:18]
@@ -111,7 +111,7 @@ impl LvtBits {
 /// APIC destination identifier
 pub type ApicDest = u32;
 
-/// APIC operating mode (Bochs: )
+/// APIC operating mode (Bochs: apic.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ApicMode {
     /// APIC is globally disabled
@@ -143,7 +143,7 @@ impl ApicMode {
     }
 }
 
-/// Local APIC register offsets (Bochs: )
+/// Local APIC register offsets (Bochs: apic.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u32)]
 pub enum LapicRegister {
@@ -209,7 +209,7 @@ pub enum LapicRegister {
     Ier8 = 0x4F0,
 }
 
-/// APIC delivery mode for interrupt commands (Bochs: )
+/// APIC delivery mode for interrupt commands (Bochs: apic.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum ApicDeliveryMode {
@@ -223,7 +223,7 @@ pub enum ApicDeliveryMode {
     ExtInt = 7,
 }
 
-/// Local Vector Table (LVT) entry indices (Bochs: )
+/// Local Vector Table (LVT) entry indices (Bochs: apic.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(usize)]
 pub enum LocalVectorTableEntry {
@@ -254,7 +254,7 @@ pub struct ApicBusMessage {
 
 /// Local Advanced Programmable Interrupt Controller (LAPIC)
 ///
-/// Ported from Bochs bx_local_apic_c (, ).
+/// Ported from Bochs bx_local_apic_c (apic.h, apic.cc).
 /// Handles interrupts for a single processor core: IPIs, local interrupts,
 /// timer, priority management, and interrupt acknowledge.
 #[derive(Debug)]
@@ -353,7 +353,7 @@ pub struct BxLocalApic {
     mwaitx_timer_active: bool,
 
     /// INTR line to CPU — set by service_local_apic(), cleared by acknowledge_int()
-    /// Mirrors Bochs `bool INTR` ().
+    /// Mirrors Bochs `bool INTR` (apic.h).
     /// The CPU event handler checks this to deliver LAPIC interrupts.
     pub(crate) intr: bool,
 
@@ -451,7 +451,7 @@ impl Default for BxLocalApic {
     }
 }
 
-// ─── Static helper functions (Bochs: ) ────────────────────────
+// ─── Static helper functions (Bochs: apic.cc) ────────────────────────
 
 impl BxLocalApic {
 
@@ -469,21 +469,21 @@ impl BxLocalApic {
     }
 
     /// Check if a vector bit is set in a 256-bit register array.
-    /// Bochs: bx_local_apic_c::get_vector ()
+    /// Bochs: bx_local_apic_c::get_vector (apic.cc)
     #[inline]
     fn get_vector(reg: &[u32; 8], vector: u32) -> bool {
         (reg[(vector / 32) as usize] >> (vector % 32)) & 1 != 0
     }
 
     /// Set a vector bit in a 256-bit register array.
-    /// Bochs: bx_local_apic_c::set_vector ()
+    /// Bochs: bx_local_apic_c::set_vector (apic.cc)
     #[inline]
     fn set_vector(reg: &mut [u32; 8], vector: u32) {
         reg[(vector / 32) as usize] |= 1 << (vector % 32);
     }
 
     /// Clear a vector bit in a 256-bit register array.
-    /// Bochs: bx_local_apic_c::clear_vector ()
+    /// Bochs: bx_local_apic_c::clear_vector (apic.cc)
     #[inline]
     fn clear_vector(reg: &mut [u32; 8], vector: u32) {
         reg[(vector / 32) as usize] &= !(1 << (vector % 32));
@@ -491,7 +491,7 @@ impl BxLocalApic {
 
     /// Find the highest-priority set bit in a 256-bit register, masked by IER.
     /// Returns the vector number (0-255) or -1 if none set.
-    /// Bochs: bx_local_apic_c::highest_priority_int ()
+    /// Bochs: bx_local_apic_c::highest_priority_int (apic.cc)
     fn highest_priority_int(&self, array: &[u32; 8]) -> i32 {
         for reg in (0..8).rev() {
             // Apply IER mask: only enabled vectors participate
@@ -506,7 +506,7 @@ impl BxLocalApic {
     }
 
     /// Get the APIC ID mask based on mode (XAPIC=0xFF, legacy=0x0F).
-    /// Bochs: extern apic_id_mask ()
+    /// Bochs: extern apic_id_mask (main.cc)
     #[inline]
     pub(crate) fn apic_id_mask(&self) -> u32 {
         if self.xapic {
@@ -521,14 +521,14 @@ impl BxLocalApic {
 
 impl BxLocalApic {
     /// Get the APIC ID.
-    /// Bochs: get_id() ()
+    /// Bochs: get_id() (apic.h)
     #[inline]
     pub(crate) fn get_id(&self) -> u32 {
         self.apic_id
     }
 
     /// Check if this is an XAPIC.
-    /// Bochs: is_xapic() ()
+    /// Bochs: is_xapic() (apic.h)
     #[inline]
     pub(crate) fn is_xapic(&self) -> bool {
         self.xapic
@@ -541,14 +541,14 @@ impl BxLocalApic {
     }
 
     /// Get the base address.
-    /// Bochs: get_base() ()
+    /// Bochs: get_base() (apic.h)
     #[inline]
     pub(crate) fn get_base(&self) -> BxPhyAddress {
         self.base_addr
     }
 
     /// Check if this APIC handles the given MMIO address.
-    /// Bochs: is_selected ()
+    /// Bochs: is_selected (apic.cc)
     pub(crate) fn is_selected(&self, addr: BxPhyAddress) -> bool {
         if self.mode != ApicMode::XapicMode {
             return false;
@@ -565,44 +565,44 @@ impl BxLocalApic {
     // ─── Register read ───────────────────────────────────────────────────
 
     /// Read from a 16-byte-aligned APIC register.
-    /// Bochs: read_aligned ()
+    /// Bochs: read_aligned (apic.cc)
     pub(crate) fn read_aligned(&self, addr: BxPhyAddress, icount: u64) -> u32 {
         debug_assert!((addr & 0xF) == 0);
         let mut data: u32 = 0;
         let apic_reg = (addr & 0xFF0) as u32;
 
         match apic_reg {
-            // Local APIC ID ()
+            // Local APIC ID (apic.cc)
             0x020 => {
                 data = self.apic_id << 24;
             }
-            // Local APIC version ()
+            // Local APIC version (apic.cc)
             0x030 => {
                 data = self.apic_version_id;
             }
-            // Task priority ()
+            // Task priority (apic.cc)
             0x080 => {
                 data = self.task_priority & 0xFF;
             }
-            // Arbitration priority ()
+            // Arbitration priority (apic.cc)
             0x090 => {
                 data = self.get_apr() as u32;
             }
-            // Processor priority ()
+            // Processor priority (apic.cc)
             0x0A0 => {
                 data = self.get_ppr() as u32;
             }
-            // EOI — read returns 0 ()
+            // EOI — read returns 0 (apic.cc)
             0x0B0 => {}
-            // Logical destination ()
+            // Logical destination (apic.cc)
             0x0D0 => {
                 data = (self.ldr & self.apic_id_mask()) << 24;
             }
-            // Destination format ()
+            // Destination format (apic.cc)
             0x0E0 => {
                 data = ((self.dest_format & 0xF) << 28) | 0x0FFF_FFFF;
             }
-            // Spurious vector ()
+            // Spurious vector (apic.cc)
             0x0F0 => {
                 let mut reg = self.spurious_vector as u32;
                 if self.software_enabled {
@@ -613,47 +613,47 @@ impl BxLocalApic {
                 }
                 data = reg;
             }
-            // ISR 1-8 ()
+            // ISR 1-8 (apic.cc)
             0x100 | 0x110 | 0x120 | 0x130 | 0x140 | 0x150 | 0x160 | 0x170 => {
                 let index = ((apic_reg - 0x100) >> 4) as usize;
                 data = self.isr[index];
             }
-            // TMR 1-8 ()
+            // TMR 1-8 (apic.cc)
             0x180 | 0x190 | 0x1A0 | 0x1B0 | 0x1C0 | 0x1D0 | 0x1E0 | 0x1F0 => {
                 let index = ((apic_reg - 0x180) >> 4) as usize;
                 data = self.tmr[index];
             }
-            // IRR 1-8 ()
+            // IRR 1-8 (apic.cc)
             0x200 | 0x210 | 0x220 | 0x230 | 0x240 | 0x250 | 0x260 | 0x270 => {
                 let index = ((apic_reg - 0x200) >> 4) as usize;
                 data = self.irr[index];
             }
-            // ESR ()
+            // ESR (apic.cc)
             0x280 => {
                 data = self.error_status;
             }
-            // ICR low ()
+            // ICR low (apic.cc)
             0x300 => {
                 data = self.icr_lo;
             }
-            // ICR high ()
+            // ICR high (apic.cc)
             0x310 => {
                 data = self.icr_hi;
             }
-            // LVT Timer, Thermal, Perfmon, LINT0, LINT1, Error ()
+            // LVT Timer, Thermal, Perfmon, LINT0, LINT1, Error (apic.cc)
             0x320 | 0x330 | 0x340 | 0x350 | 0x360 | 0x370 => {
                 let index = ((apic_reg - 0x320) >> 4) as usize;
                 data = self.lvt[index].bits();
             }
-            // LVT CMCI ()
+            // LVT CMCI (apic.cc)
             0x2F0 => {
                 data = self.lvt[LocalVectorTableEntry::Cmci as usize].bits();
             }
-            // Timer initial count ()
+            // Timer initial count (apic.cc)
             0x380 => {
                 data = self.timer_initial;
             }
-            // Timer current count ()
+            // Timer current count (apic.cc)
             // Bochs calls get_current_timer_count(bx_pc_system.time_ticks()) here.
             // We use live_ticks() with the passed icount for accuracy
             // within CPU batches (critical for kernel timer calibration loops).
@@ -672,26 +672,26 @@ impl BxLocalApic {
                     data = self.timer_current;
                 }
             }
-            // Timer divide configuration ()
+            // Timer divide configuration (apic.cc)
             0x3E0 => {
                 data = self.timer_divconf;
             }
-            // Extended APIC feature register ()
+            // Extended APIC feature register (apic.cc)
             0x400 => {
                 data = BX_XAPIC_EXT_SUPPORT_IER | BX_XAPIC_EXT_SUPPORT_SEOI;
             }
-            // Extended APIC control register ()
+            // Extended APIC control register (apic.cc)
             0x410 => {
                 data = self.xapic_ext;
             }
-            // Specific EOI — read returns 0 ()
+            // Specific EOI — read returns 0 (apic.cc)
             0x420 => {}
-            // IER 1-8 ()
+            // IER 1-8 (apic.cc)
             0x480 | 0x490 | 0x4A0 | 0x4B0 | 0x4C0 | 0x4D0 | 0x4E0 | 0x4F0 => {
                 let index = ((apic_reg - 0x480) >> 4) as usize;
                 data = self.ier[index];
             }
-            // Default: illegal register ()
+            // Default: illegal register (apic.cc)
             _ => {
                 self.set_shadow_error(APIC_ERR_ILLEGAL_ADDR);
                 error!("APIC read: register {:#x} not implemented", apic_reg);
@@ -705,88 +705,88 @@ impl BxLocalApic {
     // ─── Register write ──────────────────────────────────────────────────
 
     /// Write to a 16-byte-aligned APIC register.
-    /// Bochs: write_aligned ()
+    /// Bochs: write_aligned (apic.cc)
     pub(crate) fn write_aligned(&mut self, addr: BxPhyAddress, value: u32) {
         debug_assert!((addr & 0xF) == 0);
         let apic_reg = (addr & 0xFF0) as u32;
 
         match apic_reg {
-            // TPR ()
+            // TPR (apic.cc)
             0x080 => {
                 self.set_tpr((value & 0xFF) as u8);
             }
-            // EOI ()
+            // EOI (apic.cc)
             0x0B0 => {
                 self.receive_eoi(value);
             }
-            // LDR ()
+            // LDR (apic.cc)
             0x0D0 => {
                 self.ldr = (value >> 24) & self.apic_id_mask();
                 debug!("set logical destination to {:#010x}", self.ldr);
             }
-            // DFR ()
+            // DFR (apic.cc)
             0x0E0 => {
                 self.dest_format = (value >> 28) & 0xF;
                 debug!("set destination format to {:#04x}", self.dest_format);
             }
-            // SVR ()
+            // SVR (apic.cc)
             0x0F0 => {
                 self.write_spurious_interrupt_register(value);
             }
-            // ESR ()
+            // ESR (apic.cc)
             0x280 => {
                 // Write to ESR latches shadow into visible register, clears shadow.
                 // IA-devguide-3 p.7-45: write before read to update register.
                 self.error_status = self.shadow_error_status;
                 self.shadow_error_status = 0;
             }
-            // ICR low — triggers IPI send ()
+            // ICR low — triggers IPI send (apic.cc)
             0x300 => {
                 self.icr_lo = value & !(1 << 12); // force delivery status bit = 0 (idle)
                 let dest = (self.icr_hi >> 24) & 0xFF;
                 self.send_ipi(dest, self.icr_lo);
             }
-            // ICR high ()
+            // ICR high (apic.cc)
             0x310 => {
                 self.icr_hi = value & 0xFF00_0000;
             }
-            // LVT Timer, Thermal, Perfmon, LINT0, LINT1, Error ()
+            // LVT Timer, Thermal, Perfmon, LINT0, LINT1, Error (apic.cc)
             0x320 | 0x330 | 0x340 | 0x350 | 0x360 | 0x370 => {
                 self.set_lvt_entry(apic_reg, value);
             }
-            // LVT CMCI ()
+            // LVT CMCI (apic.cc)
             0x2F0 => {
                 self.set_lvt_entry(apic_reg, value);
             }
-            // Timer initial count ()
+            // Timer initial count (apic.cc)
             0x380 => {
                 self.set_initial_timer_count(value);
             }
-            // Timer divide configuration ()
+            // Timer divide configuration (apic.cc)
             0x3E0 => {
                 // Only bits 3, 1, and 0 are writable
                 self.timer_divconf = value & 0xB;
                 self.set_divide_configuration(self.timer_divconf);
             }
-            // Read-only registers — warn on write ()
+            // Read-only registers — warn on write (apic.cc)
             0x020 | 0x030 | 0x090 | 0x0C0 | 0x0A0 | 0x100 | 0x110 | 0x120 | 0x130 | 0x140
             | 0x150 | 0x160 | 0x170 | 0x180 | 0x190 | 0x1A0 | 0x1B0 | 0x1C0 | 0x1D0 | 0x1E0
             | 0x1F0 | 0x200 | 0x210 | 0x220 | 0x230 | 0x240 | 0x250 | 0x260 | 0x270 | 0x390 => {
                 info!("warning: write to read-only APIC register {:#x}", apic_reg);
             }
-            // Extended APIC feature — read-only ()
+            // Extended APIC feature — read-only (apic.cc)
             0x400 => {
                 info!("warning: write to read-only APIC register {:#x}", apic_reg);
             }
-            // Extended APIC control ()
+            // Extended APIC control (apic.cc)
             0x410 => {
                 self.xapic_ext = value & (BX_XAPIC_EXT_SUPPORT_IER | BX_XAPIC_EXT_SUPPORT_SEOI);
             }
-            // Specific EOI ()
+            // Specific EOI (apic.cc)
             0x420 => {
                 self.receive_seoi((value & 0xFF) as u8);
             }
-            // IER 1-8 ()
+            // IER 1-8 (apic.cc)
             0x480 | 0x490 | 0x4A0 | 0x4B0 | 0x4C0 | 0x4D0 | 0x4E0 | 0x4F0 => {
                 if (self.xapic_ext & BX_XAPIC_EXT_SUPPORT_IER) == 0 {
                     error!("IER writes are currently disabled reg {:#x}", apic_reg);
@@ -795,7 +795,7 @@ impl BxLocalApic {
                     self.ier[index] = value;
                 }
             }
-            // Default: illegal register ()
+            // Default: illegal register (apic.cc)
             _ => {
                 self.set_shadow_error(APIC_ERR_ILLEGAL_ADDR);
                 error!("APIC write: register {:#x} not implemented", apic_reg);
@@ -806,7 +806,7 @@ impl BxLocalApic {
     // ─── MMIO read/write wrappers ────────────────────────────────────────
 
     /// Handle a read from the LAPIC MMIO region.
-    /// Bochs: read ()
+    /// Bochs: read (apic.cc)
     pub(crate) fn read(&self, addr: BxPhyAddress, len: u32, icount: u64) -> u32 {
         if (addr & !0x3) != ((addr + len as BxPhyAddress - 1) & !0x3) {
             error!("APIC read at address {:#x} spans 32-bit boundary!", addr);
@@ -830,7 +830,7 @@ impl BxLocalApic {
     }
 
     /// Handle a write to the LAPIC MMIO region.
-    /// Bochs: write ()
+    /// Bochs: write (apic.cc)
     pub(crate) fn write(&mut self, addr: BxPhyAddress, value: u32, len: u32) {
         if len != 4 {
             error!("APIC write with len={} (should be 4)", len);
@@ -846,7 +846,7 @@ impl BxLocalApic {
     // ─── LVT entry write ────────────────────────────────────────────────
 
     /// Write to a Local Vector Table entry with proper masking.
-    /// Bochs: set_lvt_entry ()
+    /// Bochs: set_lvt_entry (apic.cc)
     fn set_lvt_entry(&mut self, apic_reg: u32, mut value: u32) {
         let lvt_entry = if apic_reg == 0x2F0 {
             // CMCI
@@ -855,7 +855,7 @@ impl BxLocalApic {
             ((apic_reg - 0x320) >> 4) as usize
         };
 
-        // TSC-Deadline mode handling for timer LVT ()
+        // TSC-Deadline mode handling for timer LVT (apic.cc)
         if apic_reg == 0x320 {
             // Cannot enable TSC-Deadline when not supported (we don't support it)
             value &= !0x40000;
@@ -870,7 +870,7 @@ impl BxLocalApic {
         // Apply LVT mask for this entry
         self.lvt[lvt_entry] = LvtBits::from_raw(value & LVT_MASKS[lvt_entry]);
 
-        // If APIC software-disabled, force mask bit ()
+        // If APIC software-disabled, force mask bit (apic.cc)
         if !self.software_enabled {
             self.lvt[lvt_entry].insert(LvtBits::MASKED);
         }
@@ -879,7 +879,7 @@ impl BxLocalApic {
     // ─── IPI send ────────────────────────────────────────────────────────
 
     /// Send an Inter-Processor Interrupt.
-    /// Bochs: send_ipi ()
+    /// Bochs: send_ipi (apic.cc)
     fn send_ipi(&mut self, dest: ApicDest, lo_cmd: u32) {
         let dest_shorthand = (lo_cmd >> 18) & 3;
         let trig_mode = ((lo_cmd >> 15) & 1) as u8;
@@ -887,7 +887,7 @@ impl BxLocalApic {
         let delivery_mode = ((lo_cmd >> 8) & 7) as u8;
         let vector = (lo_cmd & 0xFF) as u8;
 
-        // INIT Level Deassert — special no-op mode ()
+        // INIT Level Deassert — special no-op mode (apic.cc)
         if delivery_mode == ApicDeliveryMode::Init as u8
             && level == 0 && trig_mode == 1 {
                 // "INIT Level Deassert": causes all APICs to set their
@@ -897,7 +897,7 @@ impl BxLocalApic {
             }
 
         match dest_shorthand {
-            // 0: no shorthand — use real destination value ()
+            // 0: no shorthand — use real destination value (apic.cc)
             0 => {
                 // For single-CPU: if dest matches our ID (physical) or we match
                 // logical addressing, deliver directly. Otherwise queue for
@@ -930,16 +930,16 @@ impl BxLocalApic {
                     }
                 }
             }
-            // 1: self ()
+            // 1: self (apic.cc)
             1 => {
                 self.trigger_irq(vector, trig_mode, false);
             }
-            // 2: all including self ()
+            // 2: all including self (apic.cc)
             2 => {
                 // Single CPU: just deliver to self
                 self.deliver(vector, delivery_mode, trig_mode);
             }
-            // 3: all but self ()
+            // 3: all but self (apic.cc)
             3 => {
                 // Single CPU: nothing to deliver (exclude self)
                 debug!("IPI all-but-self: no other CPUs");
@@ -953,7 +953,7 @@ impl BxLocalApic {
     // ─── Spurious interrupt vector register ──────────────────────────────
 
     /// Write to the spurious interrupt vector register.
-    /// Bochs: write_spurious_interrupt_register ()
+    /// Bochs: write_spurious_interrupt_register (apic.cc)
     fn write_spurious_interrupt_register(&mut self, value: u32) {
         debug!("write of {:#x} to spurious interrupt register", value);
 
@@ -985,7 +985,7 @@ impl BxLocalApic {
 
     /// Receive End-of-Interrupt. Clears highest-priority ISR bit.
     /// For level-triggered interrupts, broadcasts EOI to I/O APIC.
-    /// Bochs: receive_EOI ()
+    /// Bochs: receive_EOI (apic.cc)
     pub(crate) fn receive_eoi(&mut self, _value: u32) {
         let vec = self.highest_priority_int(&self.isr);
         debug!("EOI: isr_hp={}", vec);
@@ -998,7 +998,7 @@ impl BxLocalApic {
                 Self::clear_vector(&mut self.isr, vec_u32);
                 if Self::get_vector(&self.tmr, vec_u32) {
                     // Level-triggered: broadcast EOI to I/O APIC
-                    // Bochs : apic_bus_broadcast_eoi(vec)
+                    // Bochs apic.cc: apic_bus_broadcast_eoi(vec)
                     self.pending_eoi_vector = Some(vec as u8);
                     Self::clear_vector(&mut self.tmr, vec_u32);
                 }
@@ -1008,7 +1008,7 @@ impl BxLocalApic {
     }
 
     /// Receive Specific End-of-Interrupt for a given vector.
-    /// Bochs: receive_SEOI ()
+    /// Bochs: receive_SEOI (apic.cc)
     fn receive_seoi(&mut self, vec: u8) {
         if (self.xapic_ext & BX_XAPIC_EXT_SUPPORT_SEOI) == 0 {
             error!("SEOI functionality is disabled");
@@ -1021,7 +1021,7 @@ impl BxLocalApic {
             Self::clear_vector(&mut self.isr, vec_u32);
             if Self::get_vector(&self.tmr, vec_u32) {
                 // Level-triggered: broadcast EOI to I/O APIC
-                // Bochs : apic_bus_broadcast_eoi(vec)
+                // Bochs apic.cc: apic_bus_broadcast_eoi(vec)
                 self.pending_eoi_vector = Some(vec);
                 Self::clear_vector(&mut self.tmr, vec_u32);
             }
@@ -1034,7 +1034,7 @@ impl BxLocalApic {
     /// Service the local APIC: check if a pending IRR interrupt should
     /// be signaled to the CPU.
     /// Sets self.intr = true if an interrupt is deliverable.
-    /// Bochs: service_local_apic ()
+    /// Bochs: service_local_apic (apic.cc)
     /// Clear the LAPIC interrupt pending flag.
     /// The emulator will clear BX_EVENT_PENDING_LAPIC_INTR from CPU.
     /// Bochs: cpu->clear_event(BX_EVENT_PENDING_LAPIC_INTR)
@@ -1047,18 +1047,18 @@ impl BxLocalApic {
     }
 
     pub(crate) fn service_local_apic(&mut self) {
-        // If INTR already raised, nothing to do ()
+        // If INTR already raised, nothing to do (apic.cc)
         if self.intr {
             return;
         }
 
-        // Find highest priority interrupt in IRR ()
+        // Find highest priority interrupt in IRR (apic.cc)
         let first_irr = self.highest_priority_int(&self.irr);
         if first_irr < 0 {
             return; // no pending interrupts
         }
 
-        // Compare against highest priority in-service interrupt ()
+        // Compare against highest priority in-service interrupt (apic.cc)
         let first_isr = self.highest_priority_int(&self.isr);
         if first_isr >= 0 && first_irr <= first_isr {
             debug!(
@@ -1068,7 +1068,7 @@ impl BxLocalApic {
             return;
         }
 
-        // Compare against task priority ()
+        // Compare against task priority (apic.cc)
         if ((first_irr as u32) & 0xF0) <= (self.task_priority & 0xF0) {
             debug!(
                 "lapic({}): not delivering int {:#04x} because task_priority is {:#04x}",
@@ -1077,7 +1077,7 @@ impl BxLocalApic {
             return;
         }
 
-        // Signal CPU that interrupt is ready ()
+        // Signal CPU that interrupt is ready (apic.cc)
         // Bochs: cpu->signal_event(BX_EVENT_PENDING_LAPIC_INTR)
         debug!(
             "service_local_apic(): setting INTR=1 for vector {:#04x}",
@@ -1091,36 +1091,36 @@ impl BxLocalApic {
     }
 
     /// Deliver an interrupt to this LAPIC (from APIC bus or IPI).
-    /// Bochs: deliver ()
+    /// Bochs: deliver (apic.cc)
     pub(crate) fn deliver(&mut self, vector: u8, delivery_mode: u8, trig_mode: u8) -> bool {
         match delivery_mode {
-            // Fixed or LowPriority ()
+            // Fixed or LowPriority (apic.cc)
             0 | 1 => {
                 debug!("Deliver fixed/lowpri interrupt vector {:#04x}", vector);
                 self.trigger_irq(vector, trig_mode, false);
             }
-            // SMI () — not implemented
+            // SMI (apic.cc) — not implemented
             2 => {
                 info!("Deliver SMI (not implemented)");
             }
-            // NMI () — not implemented
+            // NMI (apic.cc) — not implemented
             4 => {
                 info!("Deliver NMI (not implemented)");
             }
-            // INIT () — not implemented
+            // INIT (apic.cc) — not implemented
             5 => {
                 info!("Deliver INIT IPI (not implemented)");
             }
-            // SIPI () — not implemented
+            // SIPI (apic.cc) — not implemented
             6 => {
                 info!("Deliver Start Up IPI (not implemented)");
             }
-            // ExtINT ()
+            // ExtINT (apic.cc)
             7 => {
                 debug!("Deliver EXTINT vector {:#04x}", vector);
                 self.trigger_irq(vector, trig_mode, true);
             }
-            // Reserved ()
+            // Reserved (apic.cc)
             _ => {
                 return false;
             }
@@ -1129,11 +1129,11 @@ impl BxLocalApic {
     }
 
     /// Trigger an IRQ in the LAPIC's IRR.
-    /// Bochs: trigger_irq ()
+    /// Bochs: trigger_irq (apic.cc)
     pub(crate) fn trigger_irq(&mut self, vector: u8, trigger_mode: u8, bypass_irr_isr: bool) {
         debug!("trigger interrupt vector={:#04x}", vector);
 
-        // Validate vector range ()
+        // Validate vector range (apic.cc)
         if vector < BX_LAPIC_FIRST_VECTOR {
             self.shadow_error_status |= APIC_ERR_RX_ILLEGAL_VEC;
             info!("bogus vector {:#x}, ignoring", vector);
@@ -1142,7 +1142,7 @@ impl BxLocalApic {
 
         let vec_u32 = vector as u32;
 
-        // Check if already pending in IRR (unless bypassing) ()
+        // Check if already pending in IRR (unless bypassing) (apic.cc)
         if !bypass_irr_isr && Self::get_vector(&self.irr, vec_u32) {
             debug!(
                 "triggered vector {:#04x} not accepted (already in IRR)",
@@ -1151,22 +1151,22 @@ impl BxLocalApic {
             return;
         }
 
-        // Set IRR bit ()
+        // Set IRR bit (apic.cc)
         Self::set_vector(&mut self.irr, vec_u32);
 
-        // Update TMR based on trigger mode ()
+        // Update TMR based on trigger mode (apic.cc)
         if trigger_mode != 0 {
             Self::set_vector(&mut self.tmr, vec_u32); // level triggered
         } else {
             Self::clear_vector(&mut self.tmr, vec_u32); // edge triggered
         }
 
-        // Check if interrupt can be delivered ()
+        // Check if interrupt can be delivered (apic.cc)
         self.service_local_apic();
     }
 
     /// Clear an IRQ from the LAPIC's IRR (hardware deasserted).
-    /// Bochs: untrigger_irq ()
+    /// Bochs: untrigger_irq (apic.cc)
     pub(crate) fn untrigger_irq(&mut self, vector: u8, _trigger_mode: u8) {
         debug!("untrigger interrupt vector={:#04x}", vector);
         Self::clear_vector(&mut self.irr, vector as u32);
@@ -1175,12 +1175,12 @@ impl BxLocalApic {
     /// CPU acknowledges the highest-priority interrupt.
     /// Moves the vector from IRR to ISR. Returns the vector number,
     /// or spurious_vector if no valid interrupt is pending.
-    /// Bochs: acknowledge_int ()
+    /// Bochs: acknowledge_int (apic.cc)
     pub(crate) fn acknowledge_int(&mut self) -> u8 {
         let vector = self.highest_priority_int(&self.irr);
         if vector < 0 || ((vector as u32) & 0xF0) <= (self.get_ppr() as u32) {
             // No deliverable interrupt — return spurious vector
-            // Bochs  — clear PENDING_LAPIC_INTR event
+            // Bochs apic.cc — clear PENDING_LAPIC_INTR event
             self.intr = false;
             self.clear_pending_lapic_event();
             return self.spurious_vector;
@@ -1189,11 +1189,11 @@ impl BxLocalApic {
         let vec_u32 = vector as u32;
         debug!("acknowledge_int() returning vector {:#04x}", vector);
 
-        // Move from IRR to ISR ()
+        // Move from IRR to ISR (apic.cc)
         Self::clear_vector(&mut self.irr, vec_u32);
         Self::set_vector(&mut self.isr, vec_u32);
 
-        // Clear INTR and re-check for more interrupts ()
+        // Clear INTR and re-check for more interrupts (apic.cc)
         // Bochs: cpu->clear_event(BX_EVENT_PENDING_LAPIC_INTR)
         self.intr = false;
         self.clear_pending_lapic_event();
@@ -1205,9 +1205,9 @@ impl BxLocalApic {
     // ─── Logical addressing ──────────────────────────────────────────────
 
     /// Check if this LAPIC matches the given logical destination address.
-    /// Bochs: match_logical_addr ()
+    /// Bochs: match_logical_addr (apic.cc)
     pub(crate) fn match_logical_addr(&self, address: ApicDest) -> bool {
-        // X2APIC mode: cluster model only ()
+        // X2APIC mode: cluster model only (apic.cc)
         if self.mode == ApicMode::X2apicMode {
             if address == 0xFFFF_FFFF {
                 return true; // broadcast all
@@ -1218,13 +1218,13 @@ impl BxLocalApic {
             return false;
         }
 
-        // Broadcast: all-ones destination ()
+        // Broadcast: all-ones destination (apic.cc)
         if address == 0xFF {
             return true;
         }
 
         if self.dest_format == 0xF {
-            // Flat model ()
+            // Flat model (apic.cc)
             let m = (address & self.ldr) != 0;
             debug!(
                 "comparing MDA {:#04x} to my LDR {:#04x} -> {}",
@@ -1234,7 +1234,7 @@ impl BxLocalApic {
             );
             m
         } else if self.dest_format == 0 {
-            // Cluster model ()
+            // Cluster model (apic.cc)
             if (address & 0xF0) == (self.ldr & 0xF0) {
                 (address & self.ldr & 0x0F) != 0
             } else {
@@ -1253,7 +1253,7 @@ impl BxLocalApic {
 
     /// Get the Processor Priority Register (PPR).
     /// PPR = max(TPR, highest ISR vector class).
-    /// Bochs: get_ppr ()
+    /// Bochs: get_ppr (apic.cc)
     pub(crate) fn get_ppr(&self) -> u8 {
         let mut ppr = self.highest_priority_int(&self.isr);
 
@@ -1268,7 +1268,7 @@ impl BxLocalApic {
 
     /// Set the Task Priority Register (TPR).
     /// If lowered, re-check for deliverable interrupts.
-    /// Bochs: set_tpr ()
+    /// Bochs: set_tpr (apic.cc)
     pub(crate) fn set_tpr(&mut self, priority: u8) {
         if (priority as u32) < self.task_priority {
             self.task_priority = priority as u32;
@@ -1279,14 +1279,14 @@ impl BxLocalApic {
     }
 
     /// Get the TPR value.
-    /// Bochs: get_tpr ()
+    /// Bochs: get_tpr (apic.h)
     #[inline]
     pub(crate) fn get_tpr(&self) -> u8 {
         self.task_priority as u8
     }
 
     /// Get the Arbitration Priority Register (APR).
-    /// Bochs: get_apr ()
+    /// Bochs: get_apr (apic.cc)
     pub(crate) fn get_apr(&self) -> u8 {
         let tpr = (self.task_priority >> 4) & 0xF;
         let mut first_isr = self.highest_priority_int(&self.isr);
@@ -1313,7 +1313,7 @@ impl BxLocalApic {
     }
 
     /// Check if this LAPIC is the focus processor for a given vector.
-    /// Bochs: is_focus ()
+    /// Bochs: is_focus (apic.cc)
     pub(crate) fn is_focus(&self, vector: u8) -> bool {
         if self.focus_disable {
             return false;
@@ -1327,7 +1327,7 @@ impl BxLocalApic {
     /// Timer callback — called when the LAPIC timer fires.
     /// If not masked, triggers the timer interrupt vector.
     /// In periodic mode, reloads the timer.
-    /// Bochs: periodic ()
+    /// Bochs: periodic (apic.cc)
     ///
     /// Note: In our architecture, the emulator loop calls this when
     /// timer_fired is set by the pc_system timer handler.
@@ -1339,7 +1339,7 @@ impl BxLocalApic {
 
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
 
-        // If timer is not masked, trigger interrupt ()
+        // If timer is not masked, trigger interrupt (apic.cc)
         if !timervec.contains(LvtBits::MASKED) {
             // Log first few and transition events
             let fire_num = self.diag_timer_fires; // incremented by caller after this
@@ -1357,7 +1357,7 @@ impl BxLocalApic {
                 self.diag_timer_fires, self.software_enabled);
         }
 
-        // Check timer mode ()
+        // Check timer mode (apic.cc)
         if timervec.timer_mode_field() == 1 {
             // Periodic mode — reload timer values
             self.timer_current = self.timer_initial;
@@ -1368,21 +1368,21 @@ impl BxLocalApic {
                 self.timer_current
             );
             // Request re-activation with same period
-            // Bochs : activate_timer_ticks(handle, Bit64u(initial)*Bit64u(factor), 0)
+            // Bochs apic.cc: activate_timer_ticks(handle, Bit64u(initial)*Bit64u(factor), 0)
             let period = self.timer_initial as u64 * self.timer_divide_factor as u64;
             self.timer_activate_request = Some(period);
         } else {
             // One-shot mode — timer is done
             self.timer_current = 0;
             self.timer_active = false;
-            // Bochs : deactivate_timer(timer_handle)
+            // Bochs apic.cc: deactivate_timer(timer_handle)
             self.timer_deactivate_request = true;
             debug!("local apic timer(one-shot) triggered int");
         }
     }
 
     /// Set the timer divide configuration.
-    /// Bochs: set_divide_configuration ()
+    /// Bochs: set_divide_configuration (apic.cc)
     fn set_divide_configuration(&mut self, value: u32) {
         debug_assert!(value == (value & 0x0B));
         // Move bit 3 down to bit 0: {bit3, bit1, bit0} → 3-bit value
@@ -1393,7 +1393,7 @@ impl BxLocalApic {
     }
 
     /// Write the initial timer count register. Starts or restarts the timer.
-    /// Bochs: set_initial_timer_count ()
+    /// Bochs: set_initial_timer_count (apic.cc)
     pub(crate) fn set_initial_timer_count(&mut self, value: u32) {
         self.diag_set_initial_count += 1;
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
@@ -1404,12 +1404,12 @@ impl BxLocalApic {
             mode, timervec.vector(), timervec.contains(LvtBits::MASKED),
             self.diag_set_initial_count);
 
-        // In TSC-deadline mode, writes to initial time count are ignored ()
+        // In TSC-deadline mode, writes to initial time count are ignored (apic.cc)
         if timervec.timer_mode_field() == 2 {
             return;
         }
 
-        // Deactivate current timer if active ()
+        // Deactivate current timer if active (apic.cc)
         if self.timer_active {
             self.timer_active = false;
             self.timer_deactivate_request = true;
@@ -1419,20 +1419,20 @@ impl BxLocalApic {
         self.timer_current = 0;
 
         if self.timer_initial != 0 {
-            // Start counting ()
+            // Start counting (apic.cc)
             debug!("APIC: Initial Timer Count Register = {} div_factor={} period={} mode={}",
                 value, self.timer_divide_factor,
                 value as u64 * self.timer_divide_factor as u64,
                 timervec.timer_mode_field());
             self.timer_current = self.timer_initial;
             self.timer_active = true;
-            // Bochs : ticksInitial = bx_pc_system.time_ticks()
+            // Bochs apic.cc: ticksInitial = bx_pc_system.time_ticks()
             // We use current_ticks (updated at batch boundary) as best available
             // approximation. The emulator loop will also call set_ticks_initial()
             // with the precise value when processing the activate request.
             self.ticks_initial = self.current_ticks;
             // Request timer activation: period = initial_count * divide_factor ticks
-            // Bochs : activate_timer_ticks(handle, Bit64u(value) * Bit64u(factor), 0)
+            // Bochs apic.cc: activate_timer_ticks(handle, Bit64u(value) * Bit64u(factor), 0)
             let period = value as u64 * self.timer_divide_factor as u64;
             self.timer_activate_request = Some(period);
         }
@@ -1440,11 +1440,11 @@ impl BxLocalApic {
 
     /// Get the current timer count.
     /// Computes remaining count from elapsed ticks.
-    /// Bochs: get_current_timer_count ()
+    /// Bochs: get_current_timer_count (apic.cc)
     pub(crate) fn get_current_timer_count(&mut self, current_ticks: u64) -> u32 {
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
 
-        // In TSC-deadline mode, current timer count always reads 0 ()
+        // In TSC-deadline mode, current timer count always reads 0 (apic.cc)
         if timervec.timer_mode_field() == 2 {
             return 0;
         }
@@ -1453,7 +1453,7 @@ impl BxLocalApic {
             return self.timer_current;
         }
 
-        // Compute elapsed ticks and remaining count ()
+        // Compute elapsed ticks and remaining count (apic.cc)
         let delta64 = (current_ticks - self.ticks_initial) / self.timer_divide_factor as u64;
         let delta32 = delta64 as u32;
         if delta32 > self.timer_initial {
@@ -1466,7 +1466,7 @@ impl BxLocalApic {
     }
 
     /// Set ticks_initial — called by emulator when activating the pc_system timer.
-    /// Bochs: ticksInitial = bx_pc_system.time_ticks() (,1107)
+    /// Bochs: ticksInitial = bx_pc_system.time_ticks() (apic.cc,1107)
     pub(crate) fn set_ticks_initial(&mut self, ticks: u64) {
         self.ticks_initial = ticks;
     }
@@ -1506,7 +1506,7 @@ impl BxLocalApic {
     // ─── TSC-Deadline timer ──────────────────────────────────────────────
 
     /// Set the TSC-Deadline timer value.
-    /// Bochs: set_tsc_deadline ()
+    /// Bochs: set_tsc_deadline (apic.cc)
     #[allow(dead_code)]
     pub(crate) fn set_tsc_deadline(&mut self, deadline: u64) {
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
@@ -1524,14 +1524,14 @@ impl BxLocalApic {
         if deadline != 0 {
             debug!("APIC: TSC-Deadline is set to {}", deadline);
             self.timer_active = true;
-            // Bochs : activate_timer_ticks(handle, (deadline>currtime) ? (deadline-currtime) : 1, 0)
+            // Bochs apic.cc: activate_timer_ticks(handle, (deadline>currtime) ? (deadline-currtime) : 1, 0)
             // We don't have currtime here; the emulator loop handles the actual activation
             self.timer_activate_request = Some(1); // minimal period, emulator will adjust
         }
     }
 
     /// Get the TSC-Deadline timer value.
-    /// Bochs: get_tsc_deadline ()
+    /// Bochs: get_tsc_deadline (apic.cc)
     #[allow(dead_code)]
     pub(crate) fn get_tsc_deadline(&self) -> u64 {
         let timervec = self.lvt[LocalVectorTableEntry::Timer as usize];
@@ -1544,7 +1544,7 @@ impl BxLocalApic {
     // ─── Initialization and reset ────────────────────────────────────────
 
     /// Sets the base address and mode of the Local APIC.
-    /// Bochs: set_base ()
+    /// Bochs: set_base (apic.cc)
     pub(super) fn set_base(&mut self, mut newbase: BxPhyAddress) {
         self.mode = ApicMode::from_raw((newbase >> 10) & 3);
         newbase &= !(0xFFF as BxPhyAddress);
@@ -1571,14 +1571,14 @@ impl BxLocalApic {
     }
 
     /// Enables XAPIC extensions (IER and SEOI support).
-    /// Bochs: enable_xapic_extensions ()
+    /// Bochs: enable_xapic_extensions (apic.cc)
     pub(super) fn enable_xapic_extensions(&mut self) {
         self.apic_version_id |= 0x80000000;
         self.xapic_ext = BX_XAPIC_EXT_SUPPORT_IER | BX_XAPIC_EXT_SUPPORT_SEOI;
     }
 
     /// Reset the Local APIC to its initial state.
-    /// Bochs: reset ()
+    /// Bochs: reset (apic.cc)
     pub(super) fn reset(&mut self, _reset_type: u8) {
         self.base_addr = BX_LAPIC_BASE_ADDR;
         self.error_status = 0;
@@ -1605,7 +1605,7 @@ impl BxLocalApic {
         self.timer_active = false;
         self.vmx_timer_active = false;
         self.mwaitx_timer_active = false;
-        // Request deactivation of all timers ()
+        // Request deactivation of all timers (apic.cc)
         self.timer_deactivate_request = true;
         self.timer_activate_request = None;
 

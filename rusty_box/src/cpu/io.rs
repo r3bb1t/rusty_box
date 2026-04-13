@@ -10,7 +10,7 @@ use super::{
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ========================================================================
-    // I/O Privilege Check — Bochs 
+    // I/O Privilege Check — Bochs io.cc
     // ========================================================================
 
     /// Check I/O port permission based on IOPL and TSS I/O permission bitmap.
@@ -64,7 +64,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// IN AL, imm8 - Input byte from immediate port to AL
-    /// Bochs 
+    /// Bochs io.cc
     pub fn in_al_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         if !self.allow_io(port, 1)? {
@@ -76,7 +76,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// IN AX, imm8 - Input word from immediate port to AX
-    /// Bochs 
+    /// Bochs io.cc
     pub fn in_ax_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         if !self.allow_io(port, 2)? {
@@ -88,7 +88,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// IN EAX, imm8 - Input dword from immediate port to EAX
-    /// Bochs  — writes RAX (zero-extends to 64-bit)
+    /// Bochs io.cc — writes RAX (zero-extends to 64-bit)
     pub fn in_eax_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         if !self.allow_io(port, 4)? {
@@ -100,7 +100,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// OUT imm8, AL - Output byte from AL to immediate port
-    /// Bochs 
+    /// Bochs io.cc
     pub fn out_ib_al(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         if !self.allow_io(port, 1)? {
@@ -112,7 +112,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// OUT imm8, AX - Output word from AX to immediate port
-    /// Bochs 
+    /// Bochs io.cc
     pub fn out_ib_ax(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         if !self.allow_io(port, 2)? {
@@ -124,7 +124,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// OUT imm8, EAX - Output dword from EAX to immediate port
-    /// Bochs 
+    /// Bochs io.cc
     pub fn out_ib_eax(&mut self, instr: &Instruction) -> super::Result<()> {
         let port = instr.ib() as u16;
         if !self.allow_io(port, 4)? {
@@ -136,7 +136,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// IN AL, DX - Input byte from port DX to AL
-    /// Bochs 
+    /// Bochs io.cc
     pub fn in_al_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 1)? {
@@ -148,7 +148,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// IN AX, DX - Input word from port DX to AX
-    /// Bochs 
+    /// Bochs io.cc
     pub fn in_ax_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 2)? {
@@ -160,7 +160,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// IN EAX, DX - Input dword from port DX to EAX
-    /// Bochs  — writes RAX (zero-extends to 64-bit)
+    /// Bochs io.cc — writes RAX (zero-extends to 64-bit)
     pub fn in_eax_dx(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 4)? {
@@ -172,7 +172,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// OUT DX, AL - Output byte from AL to port DX
-    /// Bochs 
+    /// Bochs io.cc
     pub fn out_dx_al(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 1)? {
@@ -184,7 +184,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// OUT DX, AX - Output word from AX to port DX
-    /// Bochs 
+    /// Bochs io.cc
     pub fn out_dx_ax(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 2)? {
@@ -196,7 +196,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// OUT DX, EAX - Output dword from EAX to port DX
-    /// Bochs 
+    /// Bochs io.cc
     pub fn out_dx_eax(&mut self, _instr: &Instruction) -> super::Result<()> {
         let port = self.dx();
         if !self.allow_io(port, 4)? {
@@ -212,7 +212,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ========================================================================
 
     // ---- INS: 16-bit address mode (DI/CX, ES segment) ----
-    // Bochs  — INS uses ES:DI, no segment override allowed
+    // Bochs io.cc — INS uses ES:DI, no segment override allowed
 
     /// INSB - Input byte from port DX to ES:DI (16-bit address mode)
     fn insb16(&mut self, _instr: &Instruction) -> super::Result<()> {
@@ -294,7 +294,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let edi = self.edi();
-        // Trigger segment/page faults before reading from IO port (Bochs )
+        // Trigger segment/page faults before reading from IO port (Bochs io.cc)
         let _old = self.read_rmw_virtual_word(BxSegregs::Es, edi)?;
         let value = self.port_in(port, 2) as u16;
         self.write_rmw_linear_word(value);
@@ -315,7 +315,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let edi = self.edi();
-        // Trigger segment/page faults before reading from IO port (Bochs )
+        // Trigger segment/page faults before reading from IO port (Bochs io.cc)
         let _old = self.read_rmw_virtual_dword(BxSegregs::Es, edi)?;
         let value = self.port_in(port, 4);
         self.write_rmw_linear_dword(value);
@@ -328,7 +328,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // ---- OUTS: 16-bit address mode (SI/CX, segment-overridable) ----
-    // Bochs  — OUTS uses seg:SI, segment override IS allowed
+    // Bochs io.cc — OUTS uses seg:SI, segment override IS allowed
 
     /// OUTSB - Output byte from seg:SI to port DX (16-bit address mode)
     fn outsb16(&mut self, instr: &Instruction) -> super::Result<()> {
@@ -499,13 +499,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let port = self.dx();
 
         // Fast path: direct host memory write, matching Bochs FastRepINSW
-        // (). DF=0 only, no pending async events.
+        // (io.cc). DF=0 only, no pending async events.
         if !self.get_df() && self.async_event == 0
             && self.allow_io(port, 2)? {
                 while ecx != 0 {
                     let edi = self.edi();
                     // Pre-fault the destination word via RMW to populate TLB
-                    // and ensure the page is writable (Bochs ).
+                    // and ensure the page is writable (Bochs io.cc).
                     let _prefault = self.read_rmw_virtual_word(BxSegregs::Es, edi)?;
 
                     let laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
@@ -546,7 +546,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         }
 
                         // Bulk returned 0 — per-word fallback within this chunk.
-                        // Matches Bochs FastRepINSW .
+                        // Matches Bochs FastRepINSW io.cc.
                         for i in 0..chunk_words {
                             let val = self.port_in(port, 2) as u16;
                             // SAFETY: host pointer validated during TLB fill; offset within page bounds
@@ -554,7 +554,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                                 let dst = host_ptr.add(i * 2) as *mut u16;
                                 dst.write_unaligned(val.to_le());
                             }
-                            // Check for async events after each word (Bochs )
+                            // Check for async events after each word (Bochs io.cc)
                             if self.async_event != 0 {
                                 let transferred = (i + 1) as u32;
                                 let new_edi = edi.wrapping_add(transferred * 2);
@@ -610,14 +610,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let port = self.dx();
 
         // Fast path for IDE data ports: direct host memory write.
-        // Matches Bochs FastRepINSW pattern () adapted for dwords.
+        // Matches Bochs FastRepINSW pattern (io.cc) adapted for dwords.
         // Only DF=0 (forward), no pending async events, I/O permission OK.
         if !self.get_df() && self.async_event == 0
             && self.allow_io(port, 4)? {
                 while ecx != 0 {
                     let edi = self.edi();
                     // Pre-fault the destination dword via RMW to populate TLB
-                    // and ensure the page is writable (Bochs ).
+                    // and ensure the page is writable (Bochs io.cc).
                     let _prefault = self.read_rmw_virtual_dword(BxSegregs::Es, edi)?;
 
                     let laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
@@ -666,7 +666,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                                 let dst = host_ptr.add(i * 4) as *mut u32;
                                 dst.write_unaligned(val.to_le());
                             }
-                            // Check for async events after each dword (Bochs )
+                            // Check for async events after each dword (Bochs io.cc)
                             if self.async_event != 0 {
                                 // Commit partial progress: i+1 dwords transferred
                                 let transferred = (i + 1) as u32;
@@ -817,7 +817,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let rdi = self.rdi();
-        // Trigger page faults before reading from IO port (Bochs )
+        // Trigger page faults before reading from IO port (Bochs io.cc)
         let _old = self.read_rmw_virtual_word_64(BxSegregs::Es, rdi)?;
         let value = self.port_in(port, 2) as u16;
         self.write_rmw_linear_word(value);
@@ -837,7 +837,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
         let rdi = self.rdi();
-        // Trigger page faults before reading from IO port (Bochs )
+        // Trigger page faults before reading from IO port (Bochs io.cc)
         let _old = self.read_rmw_virtual_dword_64(BxSegregs::Es, rdi)?;
         let value = self.port_in(port, 4);
         self.write_rmw_linear_dword(value);
@@ -928,13 +928,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let port = self.dx();
 
         // Fast path: direct host memory write, matching Bochs FastRepINSW
-        // () adapted for 64-bit address mode. DF=0 only.
+        // (io.cc) adapted for 64-bit address mode. DF=0 only.
         if !self.get_df() && self.async_event == 0
             && self.allow_io(port, 2)? {
                 while rcx != 0 {
                     let rdi = self.rdi();
                     // Pre-fault the destination word via RMW to populate TLB
-                    // and ensure the page is writable (Bochs ).
+                    // and ensure the page is writable (Bochs io.cc).
                     let _prefault = self.read_rmw_virtual_word_64(BxSegregs::Es, rdi)?;
 
                     let laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
@@ -1039,7 +1039,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 while rcx != 0 {
                     let rdi = self.rdi();
                     // Pre-fault the destination dword via RMW to populate TLB
-                    // and ensure the page is writable (Bochs ).
+                    // and ensure the page is writable (Bochs io.cc).
                     let _prefault = self.read_rmw_virtual_dword_64(BxSegregs::Es, rdi)?;
 
                     let laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);

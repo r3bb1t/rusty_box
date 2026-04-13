@@ -7,7 +7,7 @@ use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, eflags::EFla
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     // 16-bit PUSH instructions
-    // Based on Bochs 
+    // Based on Bochs stack16.cc
     // =========================================================================
 
     /// PUSH r16 - Push 16-bit register
@@ -58,7 +58,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // =========================================================================
     // 16-bit POP instructions
-    // Based on Bochs 
+    // Based on Bochs stack16.cc
     // =========================================================================
 
     /// POP r16 - Pop into 16-bit register
@@ -88,7 +88,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.load_seg_reg(seg, selector_value)?;
 
-        // SS interrupt inhibition: Bochs 
+        // SS interrupt inhibition: Bochs stack16.cc
         if seg == super::decoder::BxSegregs::Ss {
             self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
         }
@@ -98,12 +98,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // =========================================================================
     // PUSHA16/POPA16 instructions
-    // Based on Bochs 
+    // Based on Bochs stack16.cc
     // =========================================================================
 
     /// PUSHA - Push all 16-bit general registers
     /// Push order: AX, CX, DX, BX, SP (original), BP, SI, DI
-    /// Based on Bochs 
+    /// Based on Bochs stack16.cc
     pub fn pusha16(&mut self, _instr: &Instruction) -> super::Result<()> {
         // Get register values before any pushes
         let ax = self.ax();
@@ -150,7 +150,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// POPA - Pop all 16-bit general registers
     /// Pop order: DI, SI, BP, (skip SP), BX, DX, CX, AX
-    /// Based on Bochs 
+    /// Based on Bochs stack16.cc
     pub fn popa16(&mut self, _instr: &Instruction) -> super::Result<()> {
         let (di, si, bp, bx, dx, cx, ax) = if self.is_stack_32bit() {
             let temp_esp = self.esp();
@@ -204,7 +204,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// PUSHF - Push flags (16-bit)
-    /// Based on Bochs  PUSHF_Fw
+    /// Based on Bochs flag_ctrl.cc PUSHF_Fw
     pub fn pushf_fw(&mut self, _instr: &Instruction) -> super::Result<()> {
         let mut flags = (self.eflags.bits() & 0xFFFF) as u16;
 
@@ -229,7 +229,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// POPF - Pop flags (16-bit)
-    /// Based on Bochs  POPF_Fw
+    /// Based on Bochs flag_ctrl.cc POPF_Fw
     pub fn popf_fw(&mut self, _instr: &Instruction) -> super::Result<()> {
         use super::decoder::BxSegregs;
 
@@ -333,11 +333,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // =========================================================================
     // ENTER instruction (16-bit)
-    // Based on Bochs  ENTER16_IwIb
+    // Based on Bochs stack16.cc ENTER16_IwIb
     // =========================================================================
 
     /// ENTER (16-bit operand size)
-    /// Based on Bochs  ENTER16_IwIb
+    /// Based on Bochs stack16.cc ENTER16_IwIb
     pub fn enter16_iw_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let imm16 = instr.iw();
         let mut level = instr.ib2() & 0x1F;
@@ -410,9 +410,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// LEAVE - High level procedure exit (16-bit)
-    /// Bochs 
+    /// Bochs stack16.cc
     pub fn leave16(&mut self, _instr: &Instruction) -> super::Result<()> {
-        // Bochs : check SS.D/B for 32-bit vs 16-bit stack
+        // Bochs stack16.cc: check SS.D/B for 32-bit vs 16-bit stack
         let value16;
         if self.is_stack_32bit() {
             // 32-bit stack mode: use full EBP address, set full ESP

@@ -35,27 +35,27 @@ use crate::memory::BxMemC;
 // ---------------------------------------------------------------------------
 
 /// Base MMIO address for the I/O APIC (Intel 82093AA default).
-/// Bochs: `#define BX_IOAPIC_BASE_ADDR (0xfec00000)` ()
+/// Bochs: `#define BX_IOAPIC_BASE_ADDR (0xfec00000)` (ioapic.cc)
 const IOAPIC_BASE_ADDR: u32 = 0xFEC0_0000;
 
 /// Number of interrupt input pins on the 82093AA.
-/// Bochs: `#define BX_IOAPIC_NUM_PINS (0x18)` ()
+/// Bochs: `#define BX_IOAPIC_NUM_PINS (0x18)` (ioapic.h)
 pub const IOAPIC_NUM_PINS: usize = 0x18; // 24
 
 /// Version register value.
 /// Low byte = APIC version (0x11 for 82093AA).
 /// Bits [23:16] = maximum redirection entry index (NUM_PINS - 1).
 /// Bochs: `const Bit32u BX_IOAPIC_VERSION_ID = (((BX_IOAPIC_NUM_PINS - 1) << 16) | 0x11)`
-/// ()
+/// (ioapic.h)
 const IOAPIC_VERSION_ID: u32 = ((IOAPIC_NUM_PINS as u32 - 1) << 16) | 0x11;
 
 /// Default APIC ID assigned to the I/O APIC.
-/// Bochs: `#define BX_IOAPIC_DEFAULT_ID (BX_SMP_PROCESSORS)` ()
+/// Bochs: `#define BX_IOAPIC_DEFAULT_ID (BX_SMP_PROCESSORS)` (ioapic.cc)
 /// For a single-processor system, the I/O APIC gets ID 1.
 const IOAPIC_DEFAULT_ID: u32 = 1;
 
 /// APIC ID mask — determines the width of the APIC ID field.
-/// In XAPIC mode (Bochs ): `apic_id_mask = simulate_xapic ? 0xFF : 0xF`.
+/// In XAPIC mode (Bochs main.cc): `apic_id_mask = simulate_xapic ? 0xFF : 0xF`.
 /// We default to legacy (4-bit) for compatibility; XAPIC extends to 8-bit.
 const APIC_ID_MASK: u32 = 0x0F;
 
@@ -63,12 +63,12 @@ const APIC_ID_MASK: u32 = 0x0F;
 const IOAPIC_MMIO_SIZE: u32 = 0x1000;
 
 /// Redirect entry default: masked, all other bits zero.
-/// Bochs: `bx_io_redirect_entry_t(): hi(0), lo(0x10000) {}` ()
+/// Bochs: `bx_io_redirect_entry_t(): hi(0), lo(0x10000) {}` (ioapic.h)
 const REDIRECT_ENTRY_DEFAULT_LO: u32 = 0x0001_0000;
 
 /// Mask applied when writing the low 32 bits of a redirect entry.
 /// Preserves read-only bits (delivery status bit 12, remote IRR bit 14).
-/// Bochs: `lo = val_lo_part & 0xffffafff` ()
+/// Bochs: `lo = val_lo_part & 0xffffafff` (ioapic.h)
 const REDIRECT_LO_WRITE_MASK: u32 = 0xFFFF_AFFF;
 
 // ---------------------------------------------------------------------------
@@ -93,7 +93,7 @@ const IOREGSEL_REDTBL_BASE: u32 = 0x10;
 // ---------------------------------------------------------------------------
 
 /// Interrupt delivery mode from the I/O redirection table.
-/// Bochs: `entry->delivery_mode()` returns `(lo >> 8) & 7` ()
+/// Bochs: `entry->delivery_mode()` returns `(lo >> 8) & 7` (ioapic.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum IoApicDeliveryMode {
@@ -112,7 +112,7 @@ pub enum IoApicDeliveryMode {
     /// Reserved.
     Reserved6 = 6,
     /// External interrupt (PIC-compatible) — vector read from PIC via INTA cycle.
-    /// Bochs: `if (entry->delivery_mode() == 7) vector = DEV_pic_iac()` ()
+    /// Bochs: `if (entry->delivery_mode() == 7) vector = DEV_pic_iac()` (ioapic.cc)
     ExtInt = 7,
 }
 
@@ -154,7 +154,7 @@ impl IoApicDeliveryMode {
 /// ## High 32 bits (hi) layout:
 /// - Bits [31:24] — Destination APIC ID (or logical destination)
 ///
-/// Bochs: `class bx_io_redirect_entry_t` ()
+/// Bochs: `class bx_io_redirect_entry_t` (ioapic.h)
 #[derive(Debug, Clone, Copy)]
 pub struct IoRedirectEntry {
     lo: u32,
@@ -163,7 +163,7 @@ pub struct IoRedirectEntry {
 
 impl Default for IoRedirectEntry {
     /// Reset state: masked, all other fields zero.
-    /// Bochs: `bx_io_redirect_entry_t(): hi(0), lo(0x10000) {}` ()
+    /// Bochs: `bx_io_redirect_entry_t(): hi(0), lo(0x10000) {}` (ioapic.h)
     fn default() -> Self {
         Self {
             lo: REDIRECT_ENTRY_DEFAULT_LO,
@@ -173,109 +173,109 @@ impl Default for IoRedirectEntry {
 }
 
 impl IoRedirectEntry {
-    // -- Accessors matching Bochs  --
+    // -- Accessors matching Bochs ioapic.h --
 
     /// Destination APIC ID (bits [31:24] of hi word).
-    /// Bochs: `Bit8u destination() const { return (Bit8u)(hi >> 24); }` ()
+    /// Bochs: `Bit8u destination() const { return (Bit8u)(hi >> 24); }` (ioapic.h)
     pub fn destination(&self) -> u8 {
         (self.hi >> 24) as u8
     }
 
     /// Whether the entry is masked (bit 16 of lo word).
-    /// Bochs: `bool is_masked() const { return (bool)((lo >> 16) & 1); }` ()
+    /// Bochs: `bool is_masked() const { return (bool)((lo >> 16) & 1); }` (ioapic.h)
     pub fn is_masked(&self) -> bool {
         (self.lo >> 16) & 1 != 0
     }
 
     /// Trigger mode (0 = edge, 1 = level). Bit 15 of lo word.
-    /// Bochs: `Bit8u trigger_mode() const { return (Bit8u)((lo >> 15) & 1); }` ()
+    /// Bochs: `Bit8u trigger_mode() const { return (Bit8u)((lo >> 15) & 1); }` (ioapic.h)
     pub fn trigger_mode(&self) -> u8 {
         ((self.lo >> 15) & 1) as u8
     }
 
     /// Remote IRR flag (bit 14, read-only). Set when LAPIC accepts level-triggered
     /// interrupt; cleared when EOI is received.
-    /// Bochs: `bool remote_irr() const { return (bool)((lo >> 14) & 1); }` ()
+    /// Bochs: `bool remote_irr() const { return (bool)((lo >> 14) & 1); }` (ioapic.h)
     pub fn remote_irr(&self) -> bool {
         (self.lo >> 14) & 1 != 0
     }
 
     /// Pin polarity (0 = active high, 1 = active low). Bit 13.
-    /// Bochs: `Bit8u pin_polarity() const { return (Bit8u)((lo >> 13) & 1); }` ()
+    /// Bochs: `Bit8u pin_polarity() const { return (Bit8u)((lo >> 13) & 1); }` (ioapic.h)
     pub fn pin_polarity(&self) -> u8 {
         ((self.lo >> 13) & 1) as u8
     }
 
     /// Delivery status (bit 12, read-only). 1 = send pending.
-    /// Bochs: `bool delivery_status() const { return (bool)((lo >> 12) & 1); }` ()
+    /// Bochs: `bool delivery_status() const { return (bool)((lo >> 12) & 1); }` (ioapic.h)
     pub fn delivery_status(&self) -> bool {
         (self.lo >> 12) & 1 != 0
     }
 
     /// Destination mode (bit 11). 0 = physical, 1 = logical.
-    /// Bochs: `Bit8u destination_mode() const { return (Bit8u)((lo >> 11) & 1); }` ()
+    /// Bochs: `Bit8u destination_mode() const { return (Bit8u)((lo >> 11) & 1); }` (ioapic.h)
     pub fn destination_mode(&self) -> u8 {
         ((self.lo >> 11) & 1) as u8
     }
 
     /// Delivery mode (bits [10:8]).
-    /// Bochs: `Bit8u delivery_mode() const { return (Bit8u)((lo >> 8) & 7); }` ()
+    /// Bochs: `Bit8u delivery_mode() const { return (Bit8u)((lo >> 8) & 7); }` (ioapic.h)
     pub fn delivery_mode(&self) -> u8 {
         ((self.lo >> 8) & 7) as u8
     }
 
     /// Interrupt vector (bits [7:0]).
-    /// Bochs: `Bit8u vector() const { return (Bit8u)(lo & 0xff); }` ()
+    /// Bochs: `Bit8u vector() const { return (Bit8u)(lo & 0xff); }` (ioapic.h)
     pub fn vector(&self) -> u8 {
         (self.lo & 0xFF) as u8
     }
 
-    // -- Mutators matching Bochs  --
+    // -- Mutators matching Bochs ioapic.h --
 
     /// Set delivery status bit (bit 12).
-    /// Bochs: `void set_delivery_status() { lo |= (1<<12); }` ()
+    /// Bochs: `void set_delivery_status() { lo |= (1<<12); }` (ioapic.h)
     pub fn set_delivery_status(&mut self) {
         self.lo |= 1 << 12;
     }
 
     /// Clear delivery status bit (bit 12).
-    /// Bochs: `void clear_delivery_status() { lo &= ~(1<<12); }` ()
+    /// Bochs: `void clear_delivery_status() { lo &= ~(1<<12); }` (ioapic.h)
     pub fn clear_delivery_status(&mut self) {
         self.lo &= !(1 << 12);
     }
 
     /// Set remote IRR bit (bit 14).
-    /// Bochs: `void set_remote_irr() { lo |= (1<<14); }` ()
+    /// Bochs: `void set_remote_irr() { lo |= (1<<14); }` (ioapic.h)
     pub fn set_remote_irr(&mut self) {
         self.lo |= 1 << 14;
     }
 
     /// Clear remote IRR bit (bit 14).
-    /// Bochs: `void clear_remote_irr() { lo &= ~(1<<14); }` ()
+    /// Bochs: `void clear_remote_irr() { lo &= ~(1<<14); }` (ioapic.h)
     pub fn clear_remote_irr(&mut self) {
         self.lo &= !(1 << 14);
     }
 
     /// Get low 32-bit register value.
-    /// Bochs: `Bit32u get_lo_part() const { return lo; }` ()
+    /// Bochs: `Bit32u get_lo_part() const { return lo; }` (ioapic.h)
     pub fn get_lo_part(&self) -> u32 {
         self.lo
     }
 
     /// Get high 32-bit register value.
-    /// Bochs: `Bit32u get_hi_part() const { return hi; }` ()
+    /// Bochs: `Bit32u get_hi_part() const { return hi; }` (ioapic.h)
     pub fn get_hi_part(&self) -> u32 {
         self.hi
     }
 
     /// Write the low 32-bit register, masking read-only bits.
-    /// Bochs: `void set_lo_part(Bit32u val) { lo = val & 0xffffafff; }` ()
+    /// Bochs: `void set_lo_part(Bit32u val) { lo = val & 0xffffafff; }` (ioapic.h)
     pub fn set_lo_part(&mut self, value: u32) {
         self.lo = value & REDIRECT_LO_WRITE_MASK;
     }
 
     /// Write the high 32-bit register (destination field).
-    /// Bochs: `void set_hi_part(Bit32u val) { hi = val; }` ()
+    /// Bochs: `void set_hi_part(Bit32u val) { hi = val; }` (ioapic.h)
     pub fn set_hi_part(&mut self, value: u32) {
         self.hi = value;
     }
@@ -292,40 +292,40 @@ impl IoRedirectEntry {
 /// 24-entry I/O Redirection Table that programs the routing for each
 /// interrupt input pin.
 ///
-/// Bochs: `class bx_ioapic_c` ()
+/// Bochs: `class bx_ioapic_c` (ioapic.h)
 #[derive(Debug)]
 pub struct BxIoApic {
     /// Whether the I/O APIC MMIO is enabled.
-    /// Bochs: `bool enabled` ()
+    /// Bochs: `bool enabled` (ioapic.h)
     enabled: bool,
 
     /// Base MMIO address. Default 0xFEC00000.
-    /// Bochs: `bx_phy_address base_addr` ()
+    /// Bochs: `bx_phy_address base_addr` (ioapic.h)
     base_addr: u32,
 
     /// I/O APIC identification register (4-bit ID in bits [27:24] when read).
-    /// Bochs: `Bit32u id` ()
+    /// Bochs: `Bit32u id` (ioapic.h)
     id: u32,
 
     /// I/O Register Select — selects which register to access via the data window.
-    /// Bochs: `Bit32u ioregsel` ()
+    /// Bochs: `Bit32u ioregsel` (ioapic.h)
     ioregsel: u32,
 
     /// Input pin level state (1 bit per pin). Tracks the actual level of each pin.
-    /// Bochs: `Bit32u intin` ()
+    /// Bochs: `Bit32u intin` (ioapic.h)
     intin: u32,
 
     /// Interrupt Request Register. Bits are set when an interrupt is triggered
     /// on a pin, and cleared when the interrupt is delivered (edge) or EOI'd (level).
-    /// Bochs: `Bit32u irr` ()
+    /// Bochs: `Bit32u irr` (ioapic.h)
     irr: u32,
 
     /// I/O Redirection Table — 24 entries, one per interrupt input pin.
-    /// Bochs: `bx_io_redirect_entry_t ioredtbl[BX_IOAPIC_NUM_PINS]` ()
+    /// Bochs: `bx_io_redirect_entry_t ioredtbl[BX_IOAPIC_NUM_PINS]` (ioapic.h)
     ioredtbl: [IoRedirectEntry; IOAPIC_NUM_PINS],
 
     /// Stuck interrupt delivery counter for diagnostics.
-    /// Bochs: `static unsigned int stuck` () — moved to instance field.
+    /// Bochs: `static unsigned int stuck` (ioapic.cc) — moved to instance field.
     stuck_count: u32,
 
     /// Pending interrupt deliveries queued when LAPIC is not available (MMIO path).
@@ -343,7 +343,7 @@ impl Default for BxIoApic {
 impl BxIoApic {
     /// Create a new I/O APIC with default settings.
     ///
-    /// Bochs: `bx_ioapic_c::bx_ioapic_c()` ()
+    /// Bochs: `bx_ioapic_c::bx_ioapic_c()` (ioapic.cc)
     pub fn new() -> Self {
         Self {
             enabled: false,
@@ -361,13 +361,13 @@ impl BxIoApic {
 
     /// Initialize the I/O APIC and register its MMIO handlers.
     ///
-    /// Bochs: `bx_ioapic_c::init()` ()
+    /// Bochs: `bx_ioapic_c::init()` (ioapic.cc)
     ///
     /// This registers memory handlers for the MMIO range at `base_addr`.
     /// The `mem` parameter is the memory subsystem used for handler registration.
     pub fn init(&mut self, mem: &mut BxMemC) -> crate::Result<()> {
         tracing::info!("initializing I/O APIC");
-        // Bochs: set_enabled(1, 0x0000) ()
+        // Bochs: set_enabled(1, 0x0000) (ioapic.cc)
         self.set_enabled_with_mem(true, 0x0000, mem)?;
         Ok(())
     }
@@ -376,15 +376,15 @@ impl BxIoApic {
     /// Reset all I/O APIC state.
     /// All redirection entries are masked, IRR and input state are cleared.
     ///
-    /// Bochs: `bx_ioapic_c::reset(unsigned type)` ()
+    /// Bochs: `bx_ioapic_c::reset(unsigned type)` (ioapic.cc)
     pub fn reset(&mut self) {
         // All interrupts masked
-        // Bochs: for (int i=0; i<BX_IOAPIC_NUM_PINS; i++) { ... } ()
+        // Bochs: for (int i=0; i<BX_IOAPIC_NUM_PINS; i++) { ... } (ioapic.cc)
         for entry in &mut self.ioredtbl {
             entry.set_lo_part(REDIRECT_ENTRY_DEFAULT_LO);
             entry.set_hi_part(0x0000_0000);
         }
-        // Bochs: intin = 0; irr = 0; ioregsel = 0; ()
+        // Bochs: intin = 0; irr = 0; ioregsel = 0; (ioapic.cc)
         self.intin = 0;
         self.irr = 0;
         self.ioregsel = 0;
@@ -408,7 +408,7 @@ impl BxIoApic {
     /// Address is masked to 8-bit offset within the MMIO page.
     /// Offset 0x00 reads IOREGSEL; offset 0x10 reads the register selected by IOREGSEL.
     ///
-    /// Bochs: `Bit32u bx_ioapic_c::read_aligned(bx_phy_address address)` ()
+    /// Bochs: `Bit32u bx_ioapic_c::read_aligned(bx_phy_address address)` (ioapic.cc)
     pub fn read_aligned(&self, address: BxPhyAddress) -> u32 {
         let offset = (address as u32) & 0xFF;
         tracing::debug!(
@@ -419,44 +419,44 @@ impl BxIoApic {
 
         if offset == 0x00 {
             // Select register — return current IOREGSEL value
-            // Bochs: return ioregsel; ()
+            // Bochs: return ioregsel; (ioapic.cc)
             return self.ioregsel;
         }
 
         if offset != 0x10 {
-            // Bochs: BX_PANIC(("IOAPIC: read from unsupported address")); ()
+            // Bochs: BX_PANIC(("IOAPIC: read from unsupported address")); (ioapic.cc)
             tracing::error!("IOAPIC: read from unsupported MMIO offset {:#04x}", offset);
             return 0;
         }
 
         // Data register read — dispatch based on IOREGSEL
-        // Bochs: switch (ioregsel) { ... } ()
+        // Bochs: switch (ioregsel) { ... } (ioapic.cc)
         match self.ioregsel {
             IOREGSEL_ID => {
                 // APIC ID register: ID in bits [27:24]
-                // Bochs: data = ((id & apic_id_mask) << 24); ()
+                // Bochs: data = ((id & apic_id_mask) << 24); (ioapic.cc)
                 (self.id & APIC_ID_MASK) << 24
             }
             IOREGSEL_VERSION => {
                 // Version register
-                // Bochs: data = BX_IOAPIC_VERSION_ID; ()
+                // Bochs: data = BX_IOAPIC_VERSION_ID; (ioapic.cc)
                 IOAPIC_VERSION_ID
             }
             IOREGSEL_ARB_ID => {
                 // Arbitration ID — not meaningfully implemented in Bochs
-                // Bochs: BX_INFO(("IOAPIC: arbitration ID unsupported, returned 0")); ()
+                // Bochs: BX_INFO(("IOAPIC: arbitration ID unsupported, returned 0")); (ioapic.cc)
                 tracing::info!("IOAPIC: arbitration ID unsupported, returned 0");
                 0
             }
             _ => {
                 // Redirection table entry access
-                // Bochs: int index = (ioregsel - 0x10) >> 1; ()
+                // Bochs: int index = (ioregsel - 0x10) >> 1; (ioapic.cc)
                 let raw_index = self.ioregsel.wrapping_sub(IOREGSEL_REDTBL_BASE) >> 1;
                 if (raw_index as usize) < IOAPIC_NUM_PINS {
                     let entry = &self.ioredtbl[raw_index as usize];
                     // Odd IOREGSEL reads hi part, even reads lo part
                     // Bochs: data = (ioregsel&1) ? entry->get_hi_part() : entry->get_lo_part();
-                    // ()
+                    // (ioapic.cc)
                     if self.ioregsel & 1 != 0 {
                         entry.get_hi_part()
                     } else {
@@ -481,7 +481,7 @@ impl BxIoApic {
     /// check for newly unmasked interrupts.
     ///
     /// Bochs: `void bx_ioapic_c::write_aligned(bx_phy_address address, Bit32u value)`
-    /// ()
+    /// (ioapic.cc)
     pub fn write_aligned(
         &mut self,
         address: BxPhyAddress,
@@ -500,23 +500,23 @@ impl BxIoApic {
 
         if offset == 0x00 {
             // Write to IOREGSEL
-            // Bochs: ioregsel = value; return; ()
+            // Bochs: ioregsel = value; return; (ioapic.cc)
             self.ioregsel = value;
             return;
         }
 
         if offset != 0x10 {
-            // Bochs: BX_PANIC(("IOAPIC: write to unsupported address")); ()
+            // Bochs: BX_PANIC(("IOAPIC: write to unsupported address")); (ioapic.cc)
             tracing::error!("IOAPIC: write to unsupported MMIO offset {:#04x}", offset);
             return;
         }
 
         // Data register write — dispatch based on IOREGSEL
-        // Bochs: switch (ioregsel) { ... } ()
+        // Bochs: switch (ioregsel) { ... } (ioapic.cc)
         match self.ioregsel {
             IOREGSEL_ID => {
                 // Set APIC ID from bits [27:24]
-                // Bochs: Bit8u newid = (value >> 24) & apic_id_mask; ()
+                // Bochs: Bit8u newid = (value >> 24) & apic_id_mask; (ioapic.cc)
                 let new_id = (value >> 24) & APIC_ID_MASK;
                 tracing::info!("IOAPIC: setting id to {:#x}", new_id);
                 self.id = new_id;
@@ -524,7 +524,7 @@ impl BxIoApic {
             IOREGSEL_VERSION | IOREGSEL_ARB_ID => {
                 // Version and arbitration ID are read-only
                 // Bochs: BX_INFO(("IOAPIC: could not write, IOREGSEL=0x%02x", ioregsel));
-                // ()
+                // (ioapic.cc)
                 tracing::info!(
                     "IOAPIC: could not write, IOREGSEL={:#04x} (read-only)",
                     self.ioregsel
@@ -532,11 +532,11 @@ impl BxIoApic {
             }
             _ => {
                 // Redirection table entry access
-                // Bochs: int index = (ioregsel - 0x10) >> 1; ()
+                // Bochs: int index = (ioregsel - 0x10) >> 1; (ioapic.cc)
                 let raw_index = self.ioregsel.wrapping_sub(IOREGSEL_REDTBL_BASE) >> 1;
                 if (raw_index as usize) < IOAPIC_NUM_PINS {
                     let entry = &mut self.ioredtbl[raw_index as usize];
-                    // Bochs: ()
+                    // Bochs: (ioapic.cc)
                     if self.ioregsel & 1 != 0 {
                         entry.set_hi_part(value);
                     } else {
@@ -556,7 +556,7 @@ impl BxIoApic {
                         entry.delivery_mode(),
                         entry.vector(),
                     );
-                    // Bochs: service_ioapic(); ()
+                    // Bochs: service_ioapic(); (ioapic.cc)
                     self.service_ioapic(
                         pic,
                         #[cfg(feature = "bx_support_apic")]
@@ -578,7 +578,7 @@ impl BxIoApic {
     /// When disabled, MMIO handlers are unregistered.
     ///
     /// Bochs: `void bx_ioapic_c::set_enabled(bool _enabled, Bit16u base_offset)`
-    /// ()
+    /// (ioapic.cc)
     fn set_enabled_with_mem(
         &mut self,
         new_enabled: bool,
@@ -587,11 +587,11 @@ impl BxIoApic {
     ) -> crate::Result<()> {
         if new_enabled != self.enabled {
             if new_enabled {
-                // Bochs: base_addr = BX_IOAPIC_BASE_ADDR | base_offset; ()
+                // Bochs: base_addr = BX_IOAPIC_BASE_ADDR | base_offset; (ioapic.cc)
                 self.base_addr = IOAPIC_BASE_ADDR | (base_offset as u32);
                 // Register MMIO handlers
                 // Bochs: DEV_register_memory_handlers(..., base_addr, base_addr + 0xfff);
-                // ()
+                // (ioapic.cc)
                 let base = self.base_addr as BxPhyAddress;
                 let device_id = crate::memory::MemoryDeviceId::IoApic(self as *mut BxIoApic);
                 mem.register_memory_handlers(
@@ -601,11 +601,11 @@ impl BxIoApic {
                 )?;
             }
             // Note: unregister_memory_handlers not yet implemented; on disable we just
-            // mark the flag. Bochs: DEV_unregister_memory_handlers(...) ()
+            // mark the flag. Bochs: DEV_unregister_memory_handlers(...) (ioapic.cc)
             self.enabled = new_enabled;
         } else if self.enabled && (base_offset as u32 != (self.base_addr & 0xFFFF)) {
             // Base offset changed while enabled — re-register at new address
-            // Bochs: ()
+            // Bochs: (ioapic.cc)
             self.base_addr = IOAPIC_BASE_ADDR | (base_offset as u32);
             let base = self.base_addr as BxPhyAddress;
             let device_id = crate::memory::MemoryDeviceId::IoApic(self as *mut BxIoApic);
@@ -635,7 +635,7 @@ impl BxIoApic {
     /// For **edge-triggered** pins: a rising edge (0→1) sets `intin` and, if unmasked,
     /// also sets `irr` and attempts delivery. A falling edge only clears `intin`.
     ///
-    /// Bochs: `void bx_ioapic_c::set_irq_level(Bit8u int_in, bool level)` ()
+    /// Bochs: `void bx_ioapic_c::set_irq_level(Bit8u int_in, bool level)` (ioapic.cc)
     ///
     /// `pic` and `lapic` are threaded through to `service_ioapic()` for
     /// ExtINT vector lookup and LAPIC delivery respectively.
@@ -647,7 +647,7 @@ impl BxIoApic {
         #[cfg(feature = "bx_support_apic")]
         lapic: Option<&mut crate::cpu::apic::BxLocalApic>,
     ) {
-        // Bochs: if (int_in == 0) int_in = 2; // timer connected to pin #2 ()
+        // Bochs: if (int_in == 0) int_in = 2; // timer connected to pin #2 (ioapic.cc)
         if int_in == 0 {
             int_in = 2;
         }
@@ -660,7 +660,7 @@ impl BxIoApic {
         let level_bit = if level { bit } else { 0 };
 
         // Only act on a change in pin level
-        // Bochs: if (((Bit32u)level<<int_in) != (intin & bit)) { ... } ()
+        // Bochs: if (((Bit32u)level<<int_in) != (intin & bit)) { ... } (ioapic.cc)
         if level_bit != (self.intin & bit) {
             tracing::debug!(
                 "IOAPIC: set_irq_level(): INTIN{}: level={}",
@@ -671,7 +671,7 @@ impl BxIoApic {
             let entry = &self.ioredtbl[int_in as usize];
             if entry.trigger_mode() != 0 {
                 // Level triggered
-                // Bochs: ()
+                // Bochs: (ioapic.cc)
                 if level {
                     self.intin |= bit;
                     self.irr |= bit;
@@ -686,7 +686,7 @@ impl BxIoApic {
                 }
             } else {
                 // Edge triggered
-                // Bochs: ()
+                // Bochs: (ioapic.cc)
                 if level {
                     self.intin |= bit;
                     if !entry.is_masked() {
@@ -709,7 +709,7 @@ impl BxIoApic {
     /// Called by the Local APIC when it receives an EOI for a level-triggered interrupt.
     /// In Bochs, this currently only logs.
     ///
-    /// Bochs: `void bx_ioapic_c::receive_eoi(Bit8u vector)` ()
+    /// Bochs: `void bx_ioapic_c::receive_eoi(Bit8u vector)` (ioapic.cc)
     pub fn receive_eoi(&mut self, vector: u8) {
         tracing::debug!("IOAPIC: received EOI for vector {}", vector);
         // In a full implementation, we would clear the remote_irr bit for
@@ -730,7 +730,7 @@ impl BxIoApic {
     ///
     /// If delivery fails, delivery status is set and a stuck counter increments.
     ///
-    /// Bochs: `void bx_ioapic_c::service_ioapic()` ()
+    /// Bochs: `void bx_ioapic_c::service_ioapic()` (ioapic.cc)
     ///
     /// `pic` is needed for ExtINT delivery mode (calls `pic.iac()`).
     /// `lapic` is needed for direct LAPIC interrupt delivery.
@@ -757,9 +757,9 @@ impl BxIoApic {
 
             // Determine vector
             // Bochs: if (entry->delivery_mode() == 7) vector = DEV_pic_iac();
-            // else vector = entry->vector(); ()
+            // else vector = entry->vector(); (ioapic.cc)
             let vector = if entry.delivery_mode() == IoApicDeliveryMode::ExtInt as u8 {
-                // ExtINT: Bochs calls DEV_pic_iac() for the vector ().
+                // ExtINT: Bochs calls DEV_pic_iac() for the vector (ioapic.cc).
                 if let Some(pic) = pic.as_deref_mut() {
                     let v = pic.iac();
                     tracing::debug!(
@@ -801,7 +801,7 @@ impl BxIoApic {
                 true
             };
 
-            // Bochs: ()
+            // Bochs: (ioapic.cc)
             let entry = &mut self.ioredtbl[pin];
             if done {
                 // Edge-triggered: clear IRR; level-triggered: keep IRR set
@@ -894,11 +894,11 @@ impl BxIoApic {
 /// register and shifting/masking as needed.
 ///
 /// Bochs: `static bool ioapic_read(bx_phy_address a20addr, unsigned len, void *data, void *param)`
-/// ()
+/// (ioapic.cc)
 impl BxIoApic {
     pub(crate) fn mem_read(&self, addr: BxPhyAddress, len: u32, data: &mut [u8]) -> bool {
         // Check that access doesn't span a 32-bit boundary
-        // Bochs: if((a20addr & ~0x3) != ((a20addr+len-1) & ~0x3)) ()
+        // Bochs: if((a20addr & ~0x3) != ((a20addr+len-1) & ~0x3)) (ioapic.cc)
         if (addr & !0x3) != ((addr + len as u64 - 1) & !0x3) {
             tracing::error!(
                 "IOAPIC: read at address {:#x} spans 32-bit boundary (len={})",
@@ -910,7 +910,7 @@ impl BxIoApic {
 
         let value = self.read_aligned(addr & !0x3);
 
-        // Write result to caller's data buffer (Bochs )
+        // Write result to caller's data buffer (Bochs ioapic.cc)
         match len {
             4 => {
                 data[..4].copy_from_slice(&value.to_ne_bytes());
@@ -936,15 +936,15 @@ impl BxIoApic {
     /// when writing to IOREGSEL (offset 0x00).
     ///
     /// Bochs: `static bool ioapic_write(bx_phy_address a20addr, unsigned len, void *data, void *param)`
-    /// ()
+    /// (ioapic.cc)
     pub(crate) fn mem_write(&mut self, addr: BxPhyAddress, len: u32, data: &[u8]) -> bool {
-        // Bochs: if(a20addr & 0xf) { BX_PANIC(...); return 1; } ()
+        // Bochs: if(a20addr & 0xf) { BX_PANIC(...); return 1; } (ioapic.cc)
         if addr & 0xF != 0 {
             tracing::error!("IOAPIC: write at unaligned address {:#x}", addr);
             return true;
         }
 
-        // Bochs: ()
+        // Bochs: (ioapic.cc)
         if len == 4 {
             let value = u32::from_ne_bytes(
                 data[..4].try_into().expect("IOAPIC write: data too short for 4-byte access"),
@@ -997,7 +997,7 @@ impl BxIoApic {
 impl BxIoApic {
     /// Generate a diagnostic dump of all redirection table entries.
     ///
-    /// Bochs: `void bx_ioapic_c::debug_dump(int argc, char **argv)` ()
+    /// Bochs: `void bx_ioapic_c::debug_dump(int argc, char **argv)` (ioapic.cc)
     pub fn debug_dump(&self) -> alloc::string::String {
         use alloc::format;
         use alloc::string::String;

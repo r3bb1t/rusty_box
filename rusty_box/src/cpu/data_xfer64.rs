@@ -11,7 +11,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// MOV r64, imm64 (register form)
-    /// Matching C++  MOV_RRXIq
+    /// Matching C++ data_xfer64.cc MOV_RRXIq
     pub fn mov_rrxiq(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
         let imm64 = instr.iq();
@@ -20,7 +20,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r32, r/m32 (memory form, 64-bit addressing)
-    /// Matching C++  MOV64_GdEdM
+    /// Matching C++ data_xfer64.cc MOV64_GdEdM
     pub fn mov64_gd_ed_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -32,21 +32,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r32, r32 (register form, 64-bit mode)
-    /// Matching C++  MOV64_EdGdR — zero-extends to 64 bits
+    /// Matching C++ data_xfer64.cc MOV64_EdGdR — zero-extends to 64 bits
     pub fn mov64_ed_gd_r(&mut self, instr: &Instruction) {
         let val32 = self.get_gpr32(instr.src() as usize);
         self.set_gpr32(instr.dst() as usize, val32);
     }
 
     /// MOV r32, r/m32 (register form, 64-bit addressing)
-    /// Matching C++  MOV64_GdEdR — zero-extends to 64 bits
+    /// Matching C++ data_xfer64.cc MOV64_GdEdR — zero-extends to 64 bits
     pub fn mov64_gd_ed_r(&mut self, instr: &Instruction) {
         let val32 = self.get_gpr32(instr.src() as usize);
         self.set_gpr32(instr.dst() as usize, val32);
     }
 
     /// MOV r/m32, r32 (memory form, 64-bit addressing)
-    /// Matching C++  MOV64_EdGdM
+    /// Matching C++ data_xfer64.cc MOV64_EdGdM
     pub fn mov64_ed_gd_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -58,7 +58,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r/m64, r64 (memory form)
-    /// Matching C++  MOV_EqGqM
+    /// Matching C++ data_xfer64.cc MOV_EqGqM
     pub fn mov_eq_gq_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -70,7 +70,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r/m64, r64 (stack form)
-    /// Matching C++  MOV64S_EqGqM
+    /// Matching C++ data_xfer64.cc MOV64S_EqGqM
     pub fn mov64s_eq_gq_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let src_reg = instr.src() as usize;
@@ -81,7 +81,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r64, r/m64 (memory form)
-    /// Matching C++  MOV_GqEqM
+    /// Matching C++ data_xfer64.cc MOV_GqEqM
     pub fn mov_gq_eq_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -92,7 +92,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r64, r/m64 (stack form)
-    /// Matching C++  MOV64S_GqEqM
+    /// Matching C++ data_xfer64.cc MOV64S_GqEqM
     pub fn mov64s_gq_eq_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
         let val64 = self.stack_read_qword_64(eaddr)?;
@@ -103,7 +103,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r64, r64 (register form)
-    /// Matching C++  MOV_GqEqR
+    /// Matching C++ data_xfer64.cc MOV_GqEqR
     pub fn mov_gq_eq_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
         let val64 = self.get_gpr64(src_reg);
@@ -113,7 +113,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LEA r64, m - Load effective address into 64-bit register
-    /// Matching C++  LEA_GqM
+    /// Matching C++ data_xfer64.cc LEA_GqM
     pub fn lea_gq_m(&mut self, instr: &Instruction) {
         // Bochs: BX_CPU_RESOLVE_ADDR_64(i) = as64L() ? BxResolve64 : BxResolve32
         let eaddr = if instr.as64_l() != 0 {
@@ -125,7 +125,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV AL, moffs64
-    /// Matching C++  MOV_ALOq
+    /// Matching C++ data_xfer64.cc MOV_ALOq
     pub fn mov_aloq(&mut self, instr: &Instruction) -> Result<()> {
         let seg = BxSegregs::from(instr.seg());
         let val8 = self.read_virtual_byte_64(seg, instr.iq())?;
@@ -135,7 +135,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV moffs64, AL
-    /// Matching C++  MOV_OqAL
+    /// Matching C++ data_xfer64.cc MOV_OqAL
     pub fn mov_oq_al(&mut self, instr: &Instruction) -> Result<()> {
         let seg = BxSegregs::from(instr.seg());
         let val8 = self.get_gpr8(0); // AL
@@ -145,7 +145,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV AX, moffs64
-    /// Matching C++  MOV_AXOq
+    /// Matching C++ data_xfer64.cc MOV_AXOq
     pub fn mov_ax_oq(&mut self, instr: &Instruction) -> Result<()> {
         let seg = BxSegregs::from(instr.seg());
         let val16 = self.read_virtual_word_64(seg, instr.iq())?;
@@ -155,7 +155,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV moffs64, AX
-    /// Matching C++  MOV_OqAX
+    /// Matching C++ data_xfer64.cc MOV_OqAX
     pub fn mov_oq_ax(&mut self, instr: &Instruction) -> Result<()> {
         let seg = BxSegregs::from(instr.seg());
         let val16 = self.get_gpr16(0); // AX
@@ -165,7 +165,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV EAX, moffs64
-    /// Matching C++  MOV_EAXOq
+    /// Matching C++ data_xfer64.cc MOV_EAXOq
     pub fn mov_eax_oq(&mut self, instr: &Instruction) -> Result<()> {
         let seg = BxSegregs::from(instr.seg());
         let val32 = self.read_virtual_dword_64(seg, instr.iq())?;
@@ -175,7 +175,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV moffs64, EAX
-    /// Matching C++  MOV_OqEAX
+    /// Matching C++ data_xfer64.cc MOV_OqEAX
     pub fn mov_oq_eax(&mut self, instr: &Instruction) -> Result<()> {
         let seg = BxSegregs::from(instr.seg());
         let val32 = self.get_gpr32(0); // EAX
@@ -185,7 +185,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV RAX, moffs64
-    /// Matching C++  MOV_RAXOq
+    /// Matching C++ data_xfer64.cc MOV_RAXOq
     pub fn mov_rax_oq(&mut self, instr: &Instruction) -> Result<()> {
         let seg = BxSegregs::from(instr.seg());
         let val64 = self.read_virtual_qword_64(seg, instr.iq())?;
@@ -195,7 +195,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV moffs64, RAX
-    /// Matching C++  MOV_OqRAX
+    /// Matching C++ data_xfer64.cc MOV_OqRAX
     pub fn mov_oq_rax(&mut self, instr: &Instruction) -> Result<()> {
         let seg = BxSegregs::from(instr.seg());
         let val64 = self.get_gpr64(0); // RAX
@@ -205,7 +205,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r/m64, imm32 (sign-extended to 64-bit) (memory form)
-    /// Matching C++  MOV_EqIdM
+    /// Matching C++ data_xfer64.cc MOV_EqIdM
     pub fn mov_eq_id_m(&mut self, instr: &Instruction) -> Result<()> {
         let op_64 = instr.id() as i32 as u64; // sign extend imm32 to 64-bit
         let eaddr = self.resolve_addr64(instr);
@@ -216,7 +216,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r64, imm32 (sign-extended to 64-bit) (register form)
-    /// Matching C++  MOV_EqIdR
+    /// Matching C++ data_xfer64.cc MOV_EqIdR
     pub fn mov_eq_id_r(&mut self, instr: &Instruction) {
         let op_64 = instr.id() as i32 as u64; // sign extend imm32 to 64-bit
         let dst_reg = instr.dst() as usize;
@@ -229,7 +229,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// MOVZX r64, r/m8 (memory form)
-    /// Matching C++  MOVZX_GqEbM
+    /// Matching C++ data_xfer64.cc MOVZX_GqEbM
     /// Zero extend byte op2 into qword op1
     pub fn movzx_gq_eb_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
@@ -242,7 +242,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVZX r64, r8 (register form)
-    /// Matching C++  MOVZX_GqEbR
+    /// Matching C++ data_xfer64.cc MOVZX_GqEbR
     /// Zero extend byte op2 into qword op1
     pub fn movzx_gq_eb_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
@@ -254,7 +254,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVZX r64, r/m16 (memory form)
-    /// Matching C++  MOVZX_GqEwM
+    /// Matching C++ data_xfer64.cc MOVZX_GqEwM
     /// Zero extend word op2 into qword op1
     pub fn movzx_gq_ew_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
@@ -267,7 +267,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVZX r64, r16 (register form)
-    /// Matching C++  MOVZX_GqEwR
+    /// Matching C++ data_xfer64.cc MOVZX_GqEwR
     /// Zero extend word op2 into qword op1
     pub fn movzx_gq_ew_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
@@ -282,7 +282,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// MOVSX r64, r/m8 (memory form)
-    /// Matching C++  MOVSX_GqEbM
+    /// Matching C++ data_xfer64.cc MOVSX_GqEbM
     /// Sign extend byte op2 into qword op1
     pub fn movsx_gq_eb_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
@@ -296,7 +296,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSX r64, r8 (register form)
-    /// Matching C++  MOVSX_GqEbR
+    /// Matching C++ data_xfer64.cc MOVSX_GqEbR
     /// Sign extend byte op2 into qword op1
     pub fn movsx_gq_eb_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
@@ -309,7 +309,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSX r64, r/m16 (memory form)
-    /// Matching C++  MOVSX_GqEwM
+    /// Matching C++ data_xfer64.cc MOVSX_GqEwM
     /// Sign extend word op2 into qword op1
     pub fn movsx_gq_ew_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
@@ -323,7 +323,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSX r64, r16 (register form)
-    /// Matching C++  MOVSX_GqEwR
+    /// Matching C++ data_xfer64.cc MOVSX_GqEwR
     /// Sign extend word op2 into qword op1
     pub fn movsx_gq_ew_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
@@ -335,7 +335,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSX r64, r/m32 (memory form)
-    /// Matching C++  MOVSX_GqEdM
+    /// Matching C++ data_xfer64.cc MOVSX_GqEdM
     /// Sign extend dword op2 into qword op1
     pub fn movsx_gq_ed_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr64(instr);
@@ -349,7 +349,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSX r64, r32 (register form)
-    /// Matching C++  MOVSX_GqEdR
+    /// Matching C++ data_xfer64.cc MOVSX_GqEdR
     /// Sign extend dword op2 into qword op1
     pub fn movsx_gq_ed_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
@@ -365,7 +365,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// XCHG r/m64, r64 (memory form)
-    /// Matching C++  XCHG_EqGqM
+    /// Matching C++ data_xfer64.cc XCHG_EqGqM
     /// Note: always locked (read_RMW_virtual_qword)
     /// XCHG 0x87 is NOT in decoder swap list, so [0]=nnn=register, [1]=rm
     pub fn xchg_eq_gq_m(&mut self, instr: &Instruction) -> Result<()> {
@@ -381,7 +381,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// XCHG r64, r64 (register form)
-    /// Matching C++  XCHG_EqGqR
+    /// Matching C++ data_xfer64.cc XCHG_EqGqR
     pub fn xchg_eq_gq_r(&mut self, instr: &Instruction) {
         let dst_reg = instr.dst() as usize;
         let src_reg = instr.src() as usize;
@@ -408,10 +408,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Note: CMOV accesses a memory source operand (read), regardless
     //       of whether condition is true or not.  Thus, exceptions may
     //       occur even if the MOV does not take place.
-    // Matching C++ 
+    // Matching C++ data_xfer64.cc
 
     /// Conditional move if overflow (OF=1)
-    /// Matching C++  CMOVO_GqEqR
+    /// Matching C++ data_xfer64.cc CMOVO_GqEqR
     pub fn cmovo_gq_eq_r(&mut self, instr: &Instruction) {
         if self.get_of() {
             let src_reg = instr.src() as usize;
@@ -422,7 +422,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if not overflow (OF=0)
-    /// Matching C++  CMOVNO_GqEqR
+    /// Matching C++ data_xfer64.cc CMOVNO_GqEqR
     pub fn cmovno_gq_eq_r(&mut self, instr: &Instruction) {
         if !self.get_of() {
             let src_reg = instr.src() as usize;
@@ -433,7 +433,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if below/carry (CF=1)
-    /// Matching C++  CMOVB_GqEqR
+    /// Matching C++ data_xfer64.cc CMOVB_GqEqR
     pub fn cmovb_gq_eq_r(&mut self, instr: &Instruction) {
         if self.get_cf() {
             let src_reg = instr.src() as usize;
@@ -444,7 +444,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if not below/no carry (CF=0)
-    /// Matching C++  CMOVNB_GqEqR
+    /// Matching C++ data_xfer64.cc CMOVNB_GqEqR
     pub fn cmovnb_gq_eq_r(&mut self, instr: &Instruction) {
         if !self.get_cf() {
             let src_reg = instr.src() as usize;
@@ -455,7 +455,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if zero/equal (ZF=1)
-    /// Matching C++  CMOVZ_GqEqR
+    /// Matching C++ data_xfer64.cc CMOVZ_GqEqR
     pub fn cmovz_gq_eq_r(&mut self, instr: &Instruction) {
         if self.get_zf() {
             let src_reg = instr.src() as usize;
@@ -466,7 +466,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if not zero/not equal (ZF=0)
-    /// Matching C++  CMOVNZ_GqEqR
+    /// Matching C++ data_xfer64.cc CMOVNZ_GqEqR
     pub fn cmovnz_gq_eq_r(&mut self, instr: &Instruction) {
         if !self.get_zf() {
             let src_reg = instr.src() as usize;
@@ -477,7 +477,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if below or equal (CF=1 or ZF=1)
-    /// Matching C++  CMOVBE_GqEqR
+    /// Matching C++ data_xfer64.cc CMOVBE_GqEqR
     pub fn cmovbe_gq_eq_r(&mut self, instr: &Instruction) {
         if self.get_cf() || self.get_zf() {
             let src_reg = instr.src() as usize;
@@ -488,7 +488,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if not below or equal/above (CF=0 and ZF=0)
-    /// Matching C++  CMOVNBE_GqEqR
+    /// Matching C++ data_xfer64.cc CMOVNBE_GqEqR
     pub fn cmovnbe_gq_eq_r(&mut self, instr: &Instruction) {
         if !self.get_cf() && !self.get_zf() {
             let src_reg = instr.src() as usize;
@@ -499,7 +499,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if sign (SF=1)
-    /// Matching C++  CMOVS_GqEqR
+    /// Matching C++ data_xfer64.cc CMOVS_GqEqR
     pub fn cmovs_gq_eq_r(&mut self, instr: &Instruction) {
         if self.get_sf() {
             let src_reg = instr.src() as usize;
@@ -510,7 +510,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if not sign (SF=0)
-    /// Matching C++  CMOVNS_GqEqR
+    /// Matching C++ data_xfer64.cc CMOVNS_GqEqR
     pub fn cmovns_gq_eq_r(&mut self, instr: &Instruction) {
         if !self.get_sf() {
             let src_reg = instr.src() as usize;
@@ -521,7 +521,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if parity/parity even (PF=1)
-    /// Matching C++  CMOVP_GqEqR
+    /// Matching C++ data_xfer64.cc CMOVP_GqEqR
     pub fn cmovp_gq_eq_r(&mut self, instr: &Instruction) {
         if self.get_pf() {
             let src_reg = instr.src() as usize;
@@ -532,7 +532,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if no parity/parity odd (PF=0)
-    /// Matching C++  CMOVNP_GqEqR
+    /// Matching C++ data_xfer64.cc CMOVNP_GqEqR
     pub fn cmovnp_gq_eq_r(&mut self, instr: &Instruction) {
         if !self.get_pf() {
             let src_reg = instr.src() as usize;
@@ -543,7 +543,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if less (SF != OF)
-    /// Matching C++  CMOVL_GqEqR
+    /// Matching C++ data_xfer64.cc CMOVL_GqEqR
     pub fn cmovl_gq_eq_r(&mut self, instr: &Instruction) {
         if self.get_sf() != self.get_of() {
             let src_reg = instr.src() as usize;
@@ -554,7 +554,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if not less/greater or equal (SF == OF)
-    /// Matching C++  CMOVNL_GqEqR
+    /// Matching C++ data_xfer64.cc CMOVNL_GqEqR
     pub fn cmovnl_gq_eq_r(&mut self, instr: &Instruction) {
         if self.get_sf() == self.get_of() {
             let src_reg = instr.src() as usize;
@@ -565,7 +565,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if less or equal (ZF=1 or SF!=OF)
-    /// Matching C++  CMOVLE_GqEqR
+    /// Matching C++ data_xfer64.cc CMOVLE_GqEqR
     pub fn cmovle_gq_eq_r(&mut self, instr: &Instruction) {
         if self.get_zf() || (self.get_sf() != self.get_of()) {
             let src_reg = instr.src() as usize;
@@ -576,7 +576,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if not less or equal/greater (ZF=0 and SF==OF)
-    /// Matching C++  CMOVNLE_GqEqR
+    /// Matching C++ data_xfer64.cc CMOVNLE_GqEqR
     pub fn cmovnle_gq_eq_r(&mut self, instr: &Instruction) {
         if !self.get_zf() && (self.get_sf() == self.get_of()) {
             let src_reg = instr.src() as usize;

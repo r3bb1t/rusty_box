@@ -3,6 +3,12 @@ name = "rusty_box_decoder"
 version = "0.0.1"
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "x86 instruction decoder (16/32/64-bit) — part of the Rusty Box emulator"
+keywords = ["x86", "decoder", "instruction", "disassembler"]
+categories = ["emulators", "parser-implementations"]
 
 [lib]
 name = "rusty_box_decoder"

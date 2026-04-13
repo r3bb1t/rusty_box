@@ -17,7 +17,7 @@ use super::{
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Handle interrupt in protected mode via IDT
-    /// Based on BX_CPU_C::protected_mode_int in 
+    /// Based on BX_CPU_C::protected_mode_int in exception.cc
     pub(super) fn protected_mode_int(
         &mut self,
         vector: u8,
@@ -193,7 +193,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        // if interrupt gate then set IF to 0 (Bochs )
+        // if interrupt gate then set IF to 0 (Bochs exception.cc)
         // Only reached for interrupt/trap gates — task gate returns early above
         if (gate_descriptor.r#type & 1) == 0 {
             // even is int-gate
@@ -221,7 +221,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         if (gate_dest_selector & 0xfffc) == 0 {
             tracing::error!("handle_interrupt_trap_gate(): selector null");
-            // Bochs : #GP(0) for null selector
+            // Bochs exception.cc: #GP(0) for null selector
             return Err(super::error::CpuError::BadVector {
                 vector: Exception::Gp,
                 error_code: 0,
@@ -249,7 +249,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         })?;
 
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
-        // Bochs : #GP(selector+EXT)
+        // Bochs exception.cc: #GP(selector+EXT)
         if cs_descriptor.valid == 0
             || !cs_descriptor.segment
             || super::descriptor::is_data_segment(cs_descriptor.r#type)
@@ -272,7 +272,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             });
         }
 
-        // Bochs : #NP(selector+EXT)
+        // Bochs exception.cc: #NP(selector+EXT)
         if !cs_descriptor.p {
             tracing::error!("handle_interrupt_trap_gate(): segment not present");
             return Err(super::error::CpuError::BadVector {
@@ -287,15 +287,15 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let old_eip = self.eip();
         let old_cs = self.sregs[BxSegregs::Cs as usize].selector.value;
 
-        // Bochs : conforming or DPL == CPL → same privilege
-        // Bochs : non-conforming and DPL < CPL → inner privilege
+        // Bochs exception.cc: conforming or DPL == CPL → same privilege
+        // Bochs exception.cc: non-conforming and DPL < CPL → inner privilege
         if super::descriptor::is_code_segment_conforming(cs_descriptor.r#type)
             || cs_descriptor.dpl == cpl
         {
             // INTERRUPT TO SAME PRIVILEGE LEVEL
             tracing::debug!("handle_interrupt_trap_gate(): INTERRUPT TO SAME PRIVILEGE");
 
-            // v8086 mode check (Bochs ): #GP(cs_selector+EXT)
+            // v8086 mode check (Bochs exception.cc): #GP(cs_selector+EXT)
             if self.v8086_mode()
                 && (super::descriptor::is_code_segment_conforming(cs_descriptor.r#type)
                     || cs_descriptor.dpl != 0)
@@ -384,7 +384,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
 
             // Use load_cs() to properly update user_pl, touch accessed bit, and
-            // invalidate prefetch queue (matches Bochs )
+            // invalidate prefetch queue (matches Bochs exception.cc)
             let mut cs_desc_mut = cs_descriptor;
             self.load_cs(&mut new_cs_selector, &mut cs_desc_mut, cpl)?;
         } else if super::descriptor::is_code_segment_non_conforming(cs_descriptor.r#type)
@@ -422,7 +422,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Handle interrupt to inner privilege level (DPL < CPL)
-    /// Based on 
+    /// Based on exception.cc
     #[allow(clippy::too_many_arguments)]
     fn handle_interrupt_to_inner_privilege(
         &mut self,
@@ -442,7 +442,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let (ss_for_cpl_x, esp_for_cpl_x) = self.get_ss_esp_from_tss(cs_descriptor.dpl)?;
 
         let is_v8086_mode = self.v8086_mode();
-        // Bochs : #GP(new code segment selector)
+        // Bochs exception.cc: #GP(new code segment selector)
         if is_v8086_mode && cs_descriptor.dpl != 0 {
             tracing::error!(
                 "handle_interrupt_to_inner_privilege(): code segment DPL({}) != 0 in v8086 mode",
@@ -454,7 +454,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             });
         }
 
-        // Bochs : Selector must be non-null else #TS(0)
+        // Bochs exception.cc: Selector must be non-null else #TS(0)
         if (ss_for_cpl_x & 0xfffc) == 0 {
             tracing::error!("handle_interrupt_to_inner_privilege(): SS selector null");
             return Err(super::error::CpuError::BadVector {
@@ -483,7 +483,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         })?;
 
-        // Bochs : #TS(SS selector + ext)
+        // Bochs exception.cc: #TS(SS selector + ext)
         if ss_selector.rpl != cs_descriptor.dpl {
             tracing::error!("handle_interrupt_to_inner_privilege(): SS.rpl != CS.dpl");
             return Err(super::error::CpuError::BadVector {
@@ -492,7 +492,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             });
         }
 
-        // Bochs : #TS(SS selector + ext)
+        // Bochs exception.cc: #TS(SS selector + ext)
         if ss_descriptor.dpl != cs_descriptor.dpl {
             tracing::error!("handle_interrupt_to_inner_privilege(): SS.dpl != CS.dpl");
             return Err(super::error::CpuError::BadVector {
@@ -501,7 +501,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             });
         }
 
-        // Bochs : #TS(SS selector + EXT)
+        // Bochs exception.cc: #TS(SS selector + EXT)
         if ss_descriptor.valid == 0
             || !ss_descriptor.segment
             || super::descriptor::is_code_segment(ss_descriptor.r#type)
@@ -516,7 +516,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             });
         }
 
-        // Bochs : #SS(SS selector + ext)
+        // Bochs exception.cc: #SS(SS selector + ext)
         if !ss_descriptor.p {
             tracing::error!("handle_interrupt_to_inner_privilege(): SS not present");
             return Err(super::error::CpuError::BadVector {
@@ -525,7 +525,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             });
         }
 
-        // Bochs : IP must be within CS segment boundaries, else #GP(0)
+        // Bochs exception.cc: IP must be within CS segment boundaries, else #GP(0)
         // SAFETY: descriptor type verified as gate before union access
         let gate_dest_offset = gate_descriptor.u.gate_dest_offset();
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
@@ -847,7 +847,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_sp(temp_sp);
         }
 
-        // Load new CS:IP values from gate (matches Bochs )
+        // Load new CS:IP values from gate (matches Bochs exception.cc)
         // Must use load_cs() to properly update user_pl, touch accessed bit, and
         // invalidate prefetch queue. Manual CS cache assignment would leave user_pl
         // stale (e.g., still true after ring 3 → ring 0 transition), causing all
@@ -885,7 +885,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Handle interrupt in long mode via 16-byte IDT entries.
-    /// Based on BX_CPU_C::long_mode_int in 
+    /// Based on BX_CPU_C::long_mode_int in exception.cc
     pub(super) fn long_mode_int(
         &mut self,
         vector: u8,
@@ -913,7 +913,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let desctmp1 = self.system_read_qword(idt_entry_addr)?;
         let desctmp2 = self.system_read_qword(idt_entry_addr + 8)?;
 
-        // Bochs  — extended attributes DWORD4 TYPE must be 0
+        // Bochs exception.cc — extended attributes DWORD4 TYPE must be 0
         if desctmp2 & 0x00001F00_00000000u64 != 0 {
             tracing::error!("long_mode_int(): IDT entry extended attributes DWORD4 TYPE != 0");
             return Err(super::error::CpuError::BadVector {
@@ -1149,7 +1149,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Handle task gate - perform task switch
-    /// Based on 
+    /// Based on exception.cc
     fn handle_task_gate(
         &mut self,
         gate_descriptor: &BxDescriptor,

@@ -789,11 +789,11 @@ pub fn SBB_EdIb_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
 // =========================================================================
 
 /// CMPXCHG r/m32, r32 — register form
-/// Bochs 
+/// Bochs arith32.cc
 /// Compare EAX with destination; if equal, load source into dest.
 /// Otherwise, load dest into EAX. Flags set from the comparison.
 /// CMPXCHG r/m32, r32 — register form
-/// Bochs  (CMPXCHG_EdGdR)
+/// Bochs arith32.cc (CMPXCHG_EdGdR)
 pub fn CMPXCHG_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
     let op1_32 = cpu.get_gpr32(instr.dst() as usize);
     let diff_32 = cpu.eax().wrapping_sub(op1_32);
@@ -807,7 +807,7 @@ pub fn CMPXCHG_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction)
 }
 
 /// CMPXCHG r/m32, r32 — memory form
-/// Bochs  (CMPXCHG_EdGdM)
+/// Bochs arith32.cc (CMPXCHG_EdGdM)
 pub fn CMPXCHG_EdGd_M<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'_, I>,
     instr: &Instruction,
@@ -830,7 +830,7 @@ pub fn CMPXCHG_EdGd_M<I: BxCpuIdTrait>(
 }
 
 /// CMPXCHG8B m64 — Compare and Exchange 8 Bytes
-/// Bochs  (CMPXCHG8B)
+/// Bochs arith32.cc (CMPXCHG8B)
 /// Compares EDX:EAX with m64. If equal, sets ZF and stores ECX:EBX into m64.
 /// Otherwise, clears ZF and loads m64 into EDX:EAX.
 pub fn CMPXCHG8B<I: BxCpuIdTrait>(
@@ -875,7 +875,7 @@ pub fn CMPXCHG8B<I: BxCpuIdTrait>(
 // =========================================================================
 
 /// XADD r/m32, r32 — register form
-/// Bochs 
+/// Bochs arith32.cc
 pub fn XADD_EdGd_R<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
     let op1_32 = cpu.get_gpr32(instr.dst() as usize);
     let op2_32 = cpu.get_gpr32(instr.src() as usize);
@@ -923,7 +923,7 @@ pub fn XADD_EdGd<I: BxCpuIdTrait>(
 }
 
 /// XADD r/m32, r32 — memory form
-/// Bochs 
+/// Bochs arith32.cc
 pub fn XADD_EdGd_M<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'_, I>,
     instr: &Instruction,

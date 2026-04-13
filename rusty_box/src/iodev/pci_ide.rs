@@ -9,7 +9,7 @@
 //! - Two IDE channels (primary and secondary)
 //! - BM-DMA command, status, and descriptor table pointer registers
 //! - Physical Region Descriptor (PRD) table processing
-//! - Timer-driven DMA transfers (Bochs )
+//! - Timer-driven DMA transfers (Bochs pci_ide.cc)
 
 use alloc::vec;
 use alloc::vec::Vec;
@@ -18,14 +18,14 @@ use alloc::vec::Vec;
 const PCI_CONF_SIZE: usize = 256;
 
 /// BM-DMA I/O mask for the 16-port register block.
-/// Bochs: bmdma_iomask[16] ()
+/// Bochs: bmdma_iomask[16] (pci_ide.cc)
 const BMDMA_IOMASK: [u8; 16] = [1, 0, 1, 0, 4, 0, 0, 0, 1, 0, 1, 0, 4, 0, 0, 0];
 
 /// BM-DMA buffer size per channel (128 KB)
 const BMDMA_BUFFER_SIZE: usize = 0x20000;
 
 /// BM-DMA channel state.
-/// Bochs: 
+/// Bochs: pci_ide.h
 #[derive(Debug)]
 pub struct BmDmaChannel {
     /// Start/Stop Bus Master (bit 0 of command register)
@@ -46,7 +46,7 @@ pub struct BmDmaChannel {
     pub buffer_idx: usize,
     /// Data ready flag (set when disk has data for DMA transfer)
     pub data_ready: bool,
-    /// Timer handle for pc_system (Bochs )
+    /// Timer handle for pc_system (Bochs pci_ide.h)
     pub timer_index: Option<usize>,
 }
 
@@ -79,7 +79,7 @@ impl BmDmaChannel {
 }
 
 /// PIIX3 PCI IDE controller.
-/// Bochs: bx_pci_ide_c (, pci_ide.cc)
+/// Bochs: bx_pci_ide_c (pci_ide.h, pci_ide.cc)
 #[derive(Debug)]
 pub struct BxPciIde {
     /// PCI configuration space (256 bytes)
@@ -100,7 +100,7 @@ impl Default for BxPciIde {
 
 impl BxPciIde {
     /// Create a new PCI IDE controller.
-    /// Bochs: bx_pci_ide_c::init() ()
+    /// Bochs: bx_pci_ide_c::init() (pci_ide.cc)
     pub fn new() -> Self {
         let mut ide = Self {
             pci_conf: [0; PCI_CONF_SIZE],
@@ -112,7 +112,7 @@ impl BxPciIde {
     }
 
     /// Initialize PCI configuration space with PIIX3 IDE identity.
-    /// Bochs: init_pci_conf(0x8086, 0x7010, 0x00, 0x010180, 0x00, 0) ()
+    /// Bochs: init_pci_conf(0x8086, 0x7010, 0x00, 0x010180, 0x00, 0) (pci_ide.cc)
     fn init_pci_conf(&mut self) {
         // Vendor ID: Intel (0x8086)
         self.pci_conf[0x00] = 0x86;
@@ -135,12 +135,12 @@ impl BxPciIde {
     }
 
     /// Reset the PCI IDE controller.
-    /// Bochs: bx_pci_ide_c::reset() ()
+    /// Bochs: bx_pci_ide_c::reset() (pci_ide.cc)
     pub fn reset(&mut self) {
         self.pci_conf[0x04] = 0x01; // I/O space enabled (no bus master until DMA works)
         self.pci_conf[0x06] = 0x80;
         self.pci_conf[0x07] = 0x02;
-        // IDE timing registers ()
+        // IDE timing registers (pci_ide.cc)
         self.pci_conf[0x40] = 0x00;
         self.pci_conf[0x41] = 0x80; // Channel 0 enabled
         self.pci_conf[0x42] = 0x00;
@@ -159,13 +159,13 @@ impl BxPciIde {
     }
 
     /// Check if BM-DMA is present (BAR4 configured).
-    /// Bochs: bx_pci_ide_c::bmdma_present() ()
+    /// Bochs: bx_pci_ide_c::bmdma_present() (pci_ide.cc)
     pub fn bmdma_present(&self) -> bool {
         self.bmdma_base > 0
     }
 
     /// Signal that data is ready for DMA transfer on a channel.
-    /// Bochs: bx_pci_ide_c::bmdma_start_transfer() ()
+    /// Bochs: bx_pci_ide_c::bmdma_start_transfer() (pci_ide.cc)
     pub fn bmdma_start_transfer(&mut self, channel: u8) {
         if (channel as usize) < 2 {
             self.bmdma[channel as usize].data_ready = true;
@@ -173,7 +173,7 @@ impl BxPciIde {
     }
 
     /// Set IRQ pending bit in BM-DMA status register.
-    /// Bochs: bx_pci_ide_c::bmdma_set_irq() ()
+    /// Bochs: bx_pci_ide_c::bmdma_set_irq() (pci_ide.cc)
     pub fn bmdma_set_irq(&mut self, channel: u8) {
         if (channel as usize) < 2 {
             self.bmdma[channel as usize].status |= 0x04;
@@ -182,7 +182,7 @@ impl BxPciIde {
 
 
     /// BM-DMA timer function — processes PRD tables and transfers data.
-    /// Bochs: bx_pci_ide_c::timer() ()
+    /// Bochs: bx_pci_ide_c::timer() (pci_ide.cc)
     ///
     /// TEMPORARILY DISABLED: The DMA timer is not connected. When the
     /// DMA engine is fully implemented, this will process PRD tables
@@ -198,7 +198,7 @@ impl BxPciIde {
     // ─── BM-DMA I/O Read ─────────────────────────────────────────────────
 
     /// Read from BM-DMA register space.
-    /// Bochs: bx_pci_ide_c::read() ()
+    /// Bochs: bx_pci_ide_c::read() (pci_ide.cc)
     pub fn bmdma_read(&self, address: u16, _io_len: u8) -> u32 {
         if self.bmdma_base == 0 {
             return 0xFFFF_FFFF;
@@ -212,20 +212,20 @@ impl BxPciIde {
         }
 
         match reg {
-            // Command register ()
+            // Command register (pci_ide.cc)
             0x00 => {
                 let value = (self.bmdma[channel].cmd_ssbm as u32)
                     | ((self.bmdma[channel].cmd_rwcon as u32) << 3);
                 tracing::debug!("BM-DMA read command ch={}, val={:#04x}", channel, value);
                 value
             }
-            // Status register ()
+            // Status register (pci_ide.cc)
             0x02 => {
                 let value = self.bmdma[channel].status as u32;
                 tracing::debug!("BM-DMA read status ch={}, val={:#04x}", channel, value);
                 value
             }
-            // Descriptor Table Pointer ()
+            // Descriptor Table Pointer (pci_ide.cc)
             0x04 => {
                 let value = self.bmdma[channel].dtpr;
                 tracing::debug!("BM-DMA read DTPR ch={}, val={:#010x}", channel, value);
@@ -238,7 +238,7 @@ impl BxPciIde {
     // ─── BM-DMA I/O Write ────────────────────────────────────────────────
 
     /// Write to BM-DMA register space.
-    /// Bochs: bx_pci_ide_c::write() ()
+    /// Bochs: bx_pci_ide_c::write() (pci_ide.cc)
     pub fn bmdma_write(&mut self, address: u16, value: u32, _io_len: u8) {
         if self.bmdma_base == 0 {
             return;
@@ -252,12 +252,12 @@ impl BxPciIde {
         }
 
         match reg {
-            // Command register ()
+            // Command register (pci_ide.cc)
             0x00 => {
                 tracing::debug!("BM-DMA write command ch={}, val={:#04x}", channel, value);
                 self.bmdma[channel].cmd_rwcon = (value >> 3) & 1 != 0;
                 if (value & 0x01 != 0) && !self.bmdma[channel].cmd_ssbm {
-                    // Start DMA — Bochs 
+                    // Start DMA — Bochs pci_ide.cc
                     self.bmdma[channel].cmd_ssbm = true;
                     self.bmdma[channel].status |= 0x01;
                     self.bmdma[channel].prd_current = self.bmdma[channel].dtpr;
@@ -270,16 +270,16 @@ impl BxPciIde {
                         if self.bmdma[channel].cmd_rwcon { "read" } else { "write" },
                     );
                     // TODO: activate DMA timer when DMA engine is connected.
-                    // Bochs : bx_pc_system.activate_timer(period=1)
+                    // Bochs pci_ide.cc: bx_pc_system.activate_timer(period=1)
                 } else if (value & 0x01 == 0) && self.bmdma[channel].cmd_ssbm {
-                    // Stop DMA — Bochs 
+                    // Stop DMA — Bochs pci_ide.cc
                     self.bmdma[channel].cmd_ssbm = false;
                     self.bmdma[channel].status &= !0x01;
                     self.bmdma[channel].data_ready = false;
                     tracing::info!("BM-DMA stop ch={}", channel);
                 }
             }
-            // Status register — write ()
+            // Status register — write (pci_ide.cc)
             0x02 => {
                 tracing::debug!("BM-DMA write status ch={}, val={:#04x}", channel, value);
                 // Bits 5-6 (simplex): writable
@@ -289,7 +289,7 @@ impl BxPciIde {
                     | (self.bmdma[channel].status & 0x01)
                     | (self.bmdma[channel].status & (!(value as u8) & 0x06));
             }
-            // Descriptor Table Pointer ()
+            // Descriptor Table Pointer (pci_ide.cc)
             0x04 => {
                 self.bmdma[channel].dtpr = value & 0xFFFF_FFFC; // aligned to 4 bytes
                 tracing::debug!(
@@ -314,12 +314,12 @@ impl BxPciIde {
     // ─── PCI Configuration Space ─────────────────────────────────────────
 
     /// Write to PCI configuration space.
-    /// Bochs: bx_pci_ide_c::pci_write_handler() ()
+    /// Bochs: bx_pci_ide_c::pci_write_handler() (pci_ide.cc)
     #[inline(never)]
     pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> bool {
         let bar4_changed = false;
 
-        // BAR0-BAR3 and some reserved ranges are read-only ()
+        // BAR0-BAR3 and some reserved ranges are read-only (pci_ide.cc)
         if (0x10..0x20).contains(&address) || (address > 0x23 && address < 0x40) {
             return false;
         }
@@ -333,9 +333,9 @@ impl BxPciIde {
             let oldval = self.pci_conf[addr];
 
             match addr {
-                // Status registers — read-only ()
+                // Status registers — read-only (pci_ide.cc)
                 0x05 | 0x06 => {}
-                // Command register ()
+                // Command register (pci_ide.cc)
                 0x04 => {
                     self.pci_conf[addr] = value8 & 0x05;
                 }
@@ -350,7 +350,7 @@ impl BxPciIde {
                 0x20..=0x23 => {
                     // BAR4 writes ignored — hardwired to 0
                 }
-                // Default: store ()
+                // Default: store (pci_ide.cc)
                 _ => {
                     self.pci_conf[addr] = value8;
                 }
@@ -361,7 +361,7 @@ impl BxPciIde {
         if bar4_changed {
             // Enforce BAR4 low nibble: bit 0 = 1 (I/O), bits 1-3 = 0 (size mask)
             // This makes sizing probe return 0xFFFFFFF1 for 16-port BAR.
-            // Bochs: pci_write_handler_common ()
+            // Bochs: pci_write_handler_common (devices.cc)
             self.pci_conf[0x20] = (self.pci_conf[0x20] & 0xF0) | 0x01;
             let new_base = u32::from_le_bytes([
                 self.pci_conf[0x20],

@@ -88,19 +88,19 @@ const DS: u8 = BxSegregs::Ds as u8;
 const SS: u8 = BxSegregs::Ss as u8;
 
 // Default segment for 16-bit addressing, mod=00
-// Matching Bochs sreg_mod00_rm16 in 
+// Matching Bochs sreg_mod00_rm16 in fetchdecode32.cc
 const SREG_MOD00_RM16: [u8; 8] = [DS, DS, SS, SS, DS, DS, DS, DS];
 
 // Default segment for 16-bit addressing, mod=01 or mod=10
-// Matching Bochs sreg_mod01or10_rm16 in 
+// Matching Bochs sreg_mod01or10_rm16 in fetchdecode32.cc
 const SREG_MOD01OR10_RM16: [u8; 8] = [DS, DS, SS, SS, DS, DS, SS, DS];
 
 // Default segment for 32-bit addressing, mod=00
-// Matching Bochs sreg_mod0_base32 in 
+// Matching Bochs sreg_mod0_base32 in fetchdecode32.cc
 const SREG_MOD0_BASE32: [u8; 8] = [DS, DS, DS, DS, SS, DS, DS, DS];
 
 // Default segment for 32-bit addressing, mod=01 or mod=10
-// Matching Bochs sreg_mod1or2_base32 in 
+// Matching Bochs sreg_mod1or2_base32 in fetchdecode32.cc
 const SREG_MOD1OR2_BASE32: [u8; 8] = [DS, DS, DS, DS, SS, SS, DS, DS];
 
 /// In-place 32-bit/16-bit decoder — fills an existing [`Instruction`] slot.
@@ -727,7 +727,7 @@ pub const fn fetch_decode32_inplace(
         return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
     }
 
-    // Post-decode LOCK validation (Bochs )
+    // Post-decode LOCK validation (Bochs fetchdecode32.cc)
     // LOCK prefix on register operand (modC0) is always invalid → #UD
     let has_lock = (metainfo1_bits >> 6) & 0x3 == 1;
     let mod_c0 = (metainfo1_bits & MetaInfoFlags::ModC0.bits()) != 0;
@@ -902,7 +902,7 @@ const fn get_opcode_table_32(b1: u8) -> &'static [u64] {
         0x7F => &BxOpcodeTable7F_32,
         0x80 => &BxOpcodeTable80,
         0x81 => &BxOpcodeTable81,
-        0x82 => &BxOpcodeTable80, // opcode 0x82 is copy of 0x80 (Bochs )
+        0x82 => &BxOpcodeTable80, // opcode 0x82 is copy of 0x80 (Bochs fetchdecode32.cc)
         0x83 => &BxOpcodeTable83,
         0x84 => &BxOpcodeTable84,
         0x85 => &BxOpcodeTable85,
@@ -1317,7 +1317,7 @@ const fn get_immediate_size_32(b1: u32, map: u8, os_32: bool, as_32: bool, nnn: 
             | 0xC6 => 1,
 
             // Group 3a (F6): TEST (nnn=0,1) has Ib, others have no immediate
-            // Based on Bochs cpu/decoder/ (fetchImmediate)
+            // Based on Bochs cpu/decoder/fetchdecode32.cc (fetchImmediate)
             // and opcodes table entries for Group 3a
             0xF6
                 if (nnn == 0 || nnn == 1) => {

@@ -25,11 +25,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // =========================================================================
     // 16-bit push/pop primitives
-    // Based on Bochs 
+    // Based on Bochs stack.h
     // =========================================================================
 
     /// Push a 16-bit value onto the stack.
-    /// Bochs  — three paths: long64 (RSP), d_b=1 (ESP), d_b=0 (SP)
+    /// Bochs stack.h — three paths: long64 (RSP), d_b=1 (ESP), d_b=0 (SP)
     pub fn push_16(&mut self, value: u16) -> super::Result<()> {
         if self.long64_mode() {
             let rsp = self.rsp();
@@ -51,7 +51,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Pop a 16-bit value from the stack.
-    /// Bochs  — three paths: long64 (RSP), d_b=1 (ESP), d_b=0 (SP)
+    /// Bochs stack.h — three paths: long64 (RSP), d_b=1 (ESP), d_b=0 (SP)
     pub fn pop_16(&mut self) -> super::Result<u16> {
         if self.long64_mode() {
             let rsp = self.rsp();
@@ -76,7 +76,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// Push a 32-bit value onto the stack.
-    /// Bochs  — three paths: long64 (RSP), d_b=1 (ESP), d_b=0 (SP)
+    /// Bochs stack.h — three paths: long64 (RSP), d_b=1 (ESP), d_b=0 (SP)
     pub fn push_32(&mut self, value: u32) -> super::Result<()> {
         if self.long64_mode() {
             let rsp = self.rsp();
@@ -98,7 +98,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Pop a 32-bit value from the stack.
-    /// Bochs  — three paths: long64 (RSP), d_b=1 (ESP), d_b=0 (SP)
+    /// Bochs stack.h — three paths: long64 (RSP), d_b=1 (ESP), d_b=0 (SP)
     pub fn pop_32(&mut self) -> super::Result<u32> {
         if self.long64_mode() {
             let rsp = self.rsp();

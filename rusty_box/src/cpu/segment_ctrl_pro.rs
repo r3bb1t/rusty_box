@@ -21,7 +21,7 @@ pub fn parse_selector(raw_selector: u16, selector: &mut BxSelector) {
 
 impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     /// Fetch raw descriptor from GDT or LDT
-    /// Based on BX_CPU_C::fetch_raw_descriptor in 
+    /// Based on BX_CPU_C::fetch_raw_descriptor in segment_ctrl_pro.cc
     pub(super) fn fetch_raw_descriptor(&mut self, selector: &BxSelector) -> Result<(u32, u32)> {
         let index = selector.index as u32;
         let offset: BxAddress = if selector.ti == 0 {
@@ -78,7 +78,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     }
 
     /// Parse descriptor from two dwords
-    /// Based on parse_descriptor in 
+    /// Based on parse_descriptor in segment_ctrl_pro.cc
     pub(super) fn parse_descriptor(&self, dword1: u32, dword2: u32) -> Result<BxDescriptor> {
         let ar_byte = (dword2 >> 8) & 0xFF;
 
@@ -198,7 +198,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     // system_read_byte/word/dword/qword are defined in access.rs
 
     /// Get SS and ESP from TSS for given privilege level
-    /// Based on BX_CPU_C::get_SS_ESP_from_TSS in 
+    /// Based on BX_CPU_C::get_SS_ESP_from_TSS in tasking.cc
     pub(super) fn get_ss_esp_from_tss(&mut self, pl: u8) -> Result<(u16, u32)> {
         // Check if TR is valid
         if self.tr.cache.valid == 0 {
@@ -255,7 +255,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     }
 
     /// Get RSP from TSS for a given privilege level (64-bit long mode).
-    /// Based on BX_CPU_C::get_RSP_from_TSS in 
+    /// Based on BX_CPU_C::get_RSP_from_TSS in tasking.cc
     pub(super) fn get_rsp_from_tss(&mut self, pl: u8) -> Result<u64> {
         if self.tr.cache.valid == 0 {
             tracing::error!("get_rsp_from_tss: TR.cache invalid");
@@ -292,7 +292,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
     /// Fetch 16-byte (128-bit) raw descriptor from GDT/LDT for 64-bit system descriptors.
     /// Returns (dword1, dword2, dword3) where dword3 is the upper 32 bits of the 64-bit base.
-    /// Based on BX_CPU_C::fetch_raw_descriptor_64 in 
+    /// Based on BX_CPU_C::fetch_raw_descriptor_64 in segment_ctrl_pro.cc
     pub(super) fn fetch_raw_descriptor_64(&mut self, selector: &BxSelector) -> Result<(u32, u32, u32)> {
         let index = selector.index as u32;
         let offset: u64 = if selector.ti == 0 {
@@ -409,7 +409,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     }
 
     /// Load SS segment register
-    /// Based on BX_CPU_C::load_ss in 
+    /// Based on BX_CPU_C::load_ss in segment_ctrl_pro.cc
     pub(super) fn load_ss(
         &mut self,
         selector: &mut BxSelector,
@@ -437,7 +437,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     }
 
     /// Touch segment - set accessed bit in descriptor
-    /// Based on BX_CPU_C::touch_segment in 
+    /// Based on BX_CPU_C::touch_segment in segment_ctrl_pro.cc
     pub(super) fn touch_segment(
         &mut self,
         selector: &BxSelector,
@@ -474,7 +474,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     // system_write_byte/word/dword are defined in access.rs
 
     /// Check code segment descriptor validity
-    /// Based on BX_CPU_C::check_cs in 
+    /// Based on BX_CPU_C::check_cs in ctrl_xfer_pro.cc
     pub(super) fn check_cs(
         &mut self,
         descriptor: &BxDescriptor,
@@ -483,7 +483,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         check_cpl: u8,
     ) -> Result<()> {
         use super::descriptor::{is_code_segment_non_conforming, is_data_segment};
-        // Mirrors Bochs  — calls exception() directly with cs_raw & 0xfffc
+        // Mirrors Bochs ctrl_xfer_pro.cc — calls exception() directly with cs_raw & 0xfffc
 
         // Descriptor must be valid and a code segment
         if descriptor.valid == 0 || !descriptor.segment || is_data_segment(descriptor.r#type) {
@@ -491,7 +491,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             return self.exception(Exception::Gp, cs_raw & 0xfffc);
         }
 
-        // Bochs  — L+D_B both set is invalid in long mode
+        // Bochs ctrl_xfer_pro.cc — L+D_B both set is invalid in long mode
         if self.long_mode()
             && descriptor.u.segment_l() && descriptor.u.segment_d_b() {
                 tracing::error!(
@@ -544,7 +544,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     }
 
     /// Load CS segment register
-    /// Based on BX_CPU_C::load_cs in 
+    /// Based on BX_CPU_C::load_cs in ctrl_xfer_pro.cc
     pub(super) fn load_cs(
         &mut self,
         selector: &mut BxSelector,
@@ -572,17 +572,17 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             self.sregs[BxSegregs::Cs as usize].selector.rpl
         );
 
-        // Bochs  — handleCpuModeChange() in long mode
+        // Bochs ctrl_xfer_pro.cc — handleCpuModeChange() in long mode
         // Updates cpu_mode (Long64 vs LongCompat) based on CS.L bit
         if self.long_mode() {
             self.handle_cpu_mode_change();
         }
 
-        // Bochs  — updateFetchModeMask() after CS load.
+        // Bochs ctrl_xfer_pro.cc — updateFetchModeMask() after CS load.
         // Updates icache hash (d_b, long64) and user_pl.
         self.update_fetch_mode_mask();
 
-        // Bochs  — handleAlignmentCheck() after CS load.
+        // Bochs ctrl_xfer_pro.cc — handleAlignmentCheck() after CS load.
         self.handle_alignment_check();
 
         // Invalidate prefetch queue
@@ -593,7 +593,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     }
 
     /// Branch to far code segment
-    /// Based on BX_CPU_C::branch_far in 
+    /// Based on BX_CPU_C::branch_far in ctrl_xfer_pro.cc
     pub(super) fn branch_far(
         &mut self,
         selector: &mut BxSelector,
@@ -601,7 +601,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         rip: u64,
         cpl: u8,
     ) -> Result<()> {
-        // Bochs 
+        // Bochs ctrl_xfer_pro.cc
         // In long mode with a 64-bit code segment, do canonical check instead of limit check
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
         if self.long_mode() && descriptor.u.segment_l() {
@@ -640,7 +640,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     }
 
     /// Jump to protected mode code segment
-    /// Based on BX_CPU_C::jump_protected in 
+    /// Based on BX_CPU_C::jump_protected in jmp_far.cc
     pub(super) fn jump_protected(&mut self, cs_raw: u16, disp: u64) -> Result<()> {
 
 
@@ -684,7 +684,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             self.branch_far(&mut selector, &mut descriptor, disp, cpl)?;
             Ok(())
         } else {
-            // System descriptor — Based on Bochs 
+            // System descriptor — Based on Bochs jmp_far.cc
             let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
 
             // DPL checks for gates
@@ -698,7 +698,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             }
 
             // In long mode, only 386 call gates (type 0xC) are allowed
-            // Bochs 
+            // Bochs jmp_far.cc
             if self.long_mode() {
                 if descriptor.r#type != 0xC {
                     tracing::error!(
@@ -765,9 +765,9 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     }
 
     /// Load segment register (handles both real and protected mode)
-    /// Based on BX_CPU_C::load_seg_reg in 
+    /// Based on BX_CPU_C::load_seg_reg in segment_ctrl_pro.cc
     pub(super) fn load_seg_reg(&mut self, seg: BxSegregs, new_value: u16) -> Result<()> {
-        // V8086 mode: use real-mode style loading (Bochs )
+        // V8086 mode: use real-mode style loading (Bochs segment_ctrl_pro.cc)
         if self.v8086_mode() {
             self.load_seg_reg_real_mode(seg, new_value);
             return Ok(());
@@ -782,7 +782,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
                 let err_code = new_value & 0xFFFC;
 
-                // Null selector check — Bochs 
+                // Null selector check — Bochs segment_ctrl_pro.cc
                 if (new_value & 0xfffc) == 0 {
                     // Bochs: long64 mode allows null SS when CPL != 3 and RPL == CPL
                     if self.long64_mode() {
@@ -971,7 +971,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     }
 
     /// Load null selector for data segments (DS, ES, FS, GS)
-    /// Based on BX_CPU_C::load_null_selector in 
+    /// Based on BX_CPU_C::load_null_selector in segment_ctrl_pro.cc
     pub(super) fn load_null_selector(&mut self, seg: BxSegregs, value: u16) {
         let seg_idx = seg as usize;
 
@@ -981,14 +981,14 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         self.sregs[seg_idx].selector.ti = 0;
         self.sregs[seg_idx].selector.rpl = (value & 3) as u8;
 
-        // Clear cache - Bochs 
+        // Clear cache - Bochs segment_ctrl_pro.cc
         self.sregs[seg_idx].cache.valid = 0; // Invalidate null selector
         self.sregs[seg_idx].cache.p = false;
         self.sregs[seg_idx].cache.dpl = 0;
         self.sregs[seg_idx].cache.segment = true; // Data/code segment
         self.sregs[seg_idx].cache.r#type = 0;
 
-        // Zero segment descriptor fields — Bochs 
+        // Zero segment descriptor fields — Bochs segment_ctrl_pro.cc
         self.sregs[seg_idx].cache.u.set_segment_base(0);
         self.sregs[seg_idx].cache.u.set_segment_limit_scaled(0);
         self.sregs[seg_idx].cache.u.set_segment_g(false);
@@ -996,7 +996,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         self.sregs[seg_idx].cache.u.set_segment_l(false);
         self.sregs[seg_idx].cache.u.set_segment_avl(false);
 
-        // Bochs  — invalidate stack cache after null SS load
+        // Bochs segment_ctrl_pro.cc — invalidate stack cache after null SS load
         if seg == BxSegregs::Ss {
             self.invalidate_stack_cache();
         }
@@ -1009,10 +1009,10 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     }
 
     /// LLDT - Load Local Descriptor Table Register
-    /// Based on Bochs 
+    /// Based on Bochs protect_ctrl.cc
     pub(super) fn lldt_ew(&mut self, instr: &super::decoder::Instruction) -> Result<()> {
         // Must be in protected mode (catches both real mode and v8086)
-        // Based on Bochs 
+        // Based on Bochs protect_ctrl.cc
         if !self.protected_mode() {
             tracing::debug!("LLDT: not recognized outside protected mode");
             self.exception(Exception::Ud, 0)?;
@@ -1057,7 +1057,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         // Fetch descriptor from GDT
-        // In long mode, system descriptors are 16 bytes (Bochs )
+        // In long mode, system descriptors are 16 bytes (Bochs protect_ctrl.cc)
         let mut dword3 = 0u32;
         let (dword1, dword2) = if self.long64_mode() {
             let (d1, d2, d3) = self.fetch_raw_descriptor_64(&selector)?;
@@ -1088,7 +1088,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         // In long mode, extend base to 64 bits and check canonical
-        // Bochs 
+        // Bochs protect_ctrl.cc
         if self.long64_mode() {
             descriptor.u.set_segment_base(descriptor.u.segment_base() | (dword3 as u64) << 32);
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
@@ -1109,10 +1109,10 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     }
 
     /// LTR - Load Task Register
-    /// Based on Bochs 
+    /// Based on Bochs protect_ctrl.cc
     pub(super) fn ltr_ew(&mut self, instr: &super::decoder::Instruction) -> Result<()> {
         // Must be in protected mode (catches both real mode and v8086)
-        // Based on Bochs 
+        // Based on Bochs protect_ctrl.cc
         if !self.protected_mode() {
             tracing::debug!("LTR: not recognized outside protected mode");
             self.exception(Exception::Ud, 0)?;
@@ -1156,7 +1156,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         // Fetch descriptor from GDT
-        // In long mode, system descriptors are 16 bytes (Bochs )
+        // In long mode, system descriptors are 16 bytes (Bochs protect_ctrl.cc)
         let mut dword3 = 0u32;
         let (dword1, dword2) = if self.long64_mode() {
             let (d1, d2, d3) = self.fetch_raw_descriptor_64(&selector)?;
@@ -1184,7 +1184,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             return Ok(());
         }
 
-        // In long mode, must be 386 TSS (Bochs )
+        // In long mode, must be 386 TSS (Bochs protect_ctrl.cc)
         if self.long_mode()
             && tss_type != SystemAndGateDescriptorEnum::BxSysSegmentAvail386Tss as u8
         {
@@ -1201,7 +1201,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         // In long mode, extend base to 64 bits and check canonical
-        // Bochs 
+        // Bochs protect_ctrl.cc
         if self.long64_mode() {
             descriptor.u.set_segment_base(descriptor.u.segment_base() | (dword3 as u64) << 32);
             // SAFETY: segment cache populated during segment load; union read matches descriptor type
@@ -1224,7 +1224,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         self.tr.cache.valid = SEG_VALID_CACHE;
 
         // Also mark as busy in GDT (write back dword2 with busy bit)
-        // Based on Bochs  — uses system_write
+        // Based on Bochs protect_ctrl.cc — uses system_write
         let gdt_offset = self.gdtr.base + (selector_index as u64 * 8) + 4;
         let new_dword2 = dword2 | 0x0200; // Set busy bit in access byte
         let phys_addr = self.translate_linear_system_write(gdt_offset)?;
@@ -1236,7 +1236,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
     // =========================================================================
     // validate_seg_regs — invalidate DS/ES/FS/GS on privilege change
-    // Based on Bochs 
+    // Based on Bochs segment_ctrl_pro.cc
     // =========================================================================
 
     /// Invalidate a single segment register if DPL < CPL and type is data or non-conforming code
@@ -1256,7 +1256,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     }
 
     /// Validate ES/DS/FS/GS after privilege level change
-    /// Based on Bochs 
+    /// Based on Bochs segment_ctrl_pro.cc
     pub(super) fn validate_seg_regs(&mut self) {
         self.validate_seg_reg(BxSegregs::Es as usize);
         self.validate_seg_reg(BxSegregs::Ds as usize);
@@ -1266,7 +1266,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
     // =========================================================================
     // call_protected — protected mode far CALL
-    // Based on Bochs 
+    // Based on Bochs call_far.cc
     // =========================================================================
 
     /// Protected mode far CALL
@@ -1762,7 +1762,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
     // =========================================================================
     // return_protected — protected mode far RET
-    // Based on Bochs 
+    // Based on Bochs ret_far.cc
     // =========================================================================
 
     /// Protected mode far RET
@@ -1933,7 +1933,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
     // =========================================================================
     // JMP call gate — JMP through a call gate (no stack frame push)
-    // Based on Bochs  jmp_call_gate()
+    // Based on Bochs jmp_far.cc jmp_call_gate()
     // =========================================================================
 
     fn jmp_call_gate(
@@ -1978,7 +1978,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
     // =========================================================================
     // JMP call gate 64-bit — JMP through a 64-bit call gate (long mode)
-    // Based on Bochs  jmp_call_gate64()
+    // Based on Bochs jmp_far.cc jmp_call_gate64()
     // =========================================================================
 
     fn jmp_call_gate64(&mut self, gate_selector: &BxSelector) -> Result<()> {
@@ -2039,7 +2039,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
     // =========================================================================
     // Task gate for JMP — JMP through a task gate
-    // Based on Bochs  task_gate()
+    // Based on Bochs jmp_far.cc task_gate()
     // =========================================================================
 
     fn task_gate_jmp(
@@ -2096,7 +2096,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
     // =========================================================================
     // 64-bit long mode: call_protected_64
-    // Based on Bochs  (the long_mode path)
+    // Based on Bochs call_far.cc (the long_mode path)
     // =========================================================================
 
     /// Protected mode far call for 64-bit mode.
@@ -2265,12 +2265,12 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             return self.exception(Exception::Np, cs_raw & 0xfffc);
         }
 
-        // call_gate64 implementation (inline from Bochs )
+        // call_gate64 implementation (inline from Bochs call_far.cc)
         self.call_gate64(&gate_selector)
     }
 
     /// 64-bit call gate implementation.
-    /// Based on Bochs  call_gate64()
+    /// Based on Bochs call_far.cc call_gate64()
     fn call_gate64(&mut self, gate_selector: &BxSelector) -> Result<()> {
         use super::descriptor::{is_code_segment_non_conforming, is_data_segment};
 
@@ -2386,7 +2386,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
     // =========================================================================
     // 64-bit long mode: return_protected_64
-    // Based on Bochs  return_protected() with long mode paths
+    // Based on Bochs ret_far.cc return_protected() with long mode paths
     // =========================================================================
 
     /// Protected mode far return for 64-bit mode.
@@ -2411,7 +2411,7 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 let rip = self.stack_read_qword(temp_rsp)?;
                 (cs, rip, 16)
             } else if instr.os32_l() != 0 {
-                // Bochs : CS at temp_RSP+4, RIP at temp_RSP+0
+                // Bochs ret_far.cc: CS at temp_RSP+4, RIP at temp_RSP+0
                 let cs = self.stack_read_dword((temp_rsp as u32).wrapping_add(4))? as u16;
                 let rip = self.stack_read_dword(temp_rsp as u32)? as u64;
                 (cs, rip, 8)
@@ -2586,11 +2586,11 @@ impl<I: super::cpuid::BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
 
     // =========================================================================
     // 64-bit long mode: long_iret
-    // Based on Bochs  long_iret()
+    // Based on Bochs iret.cc long_iret()
     // =========================================================================
 
     /// Long mode IRET implementation.
-    /// Based on Bochs  long_iret()
+    /// Based on Bochs iret.cc long_iret()
     pub(super) fn long_iret(&mut self, instr: &super::decoder::Instruction) -> Result<()> {
         use super::eflags::EFlags;
 

@@ -769,7 +769,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let pg = new_cr0.contains(BxCr0::PG);
 
-        // Bochs  — Long mode activation/deactivation
+        // Bochs crregs.cc — Long mode activation/deactivation
         // When enabling paging (PG: 0→1) with EFER.LME=1: activate long mode
         if !self.cr0.pg() && pg {
             if self.efer.lme() {
@@ -795,7 +795,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     );
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
-                // Bochs  — set EFER.LMA=1
+                // Bochs crregs.cc — set EFER.LMA=1
                 self.efer.set_lma(1);
                 tracing::debug!("MOV CR0: Long mode activated (EFER.LMA=1)");
             }
@@ -806,7 +806,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
             if self.efer.lma() {
-                // Bochs  — clear EFER.LMA
+                // Bochs crregs.cc — clear EFER.LMA
                 self.efer.set_lma(0);
                 tracing::debug!("MOV CR0: Long mode deactivated (EFER.LMA=0)");
             }
@@ -817,7 +817,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             | BxCr0::NE | BxCr0::ET | BxCr0::TS | BxCr0::EM | BxCr0::MP | BxCr0::PE;
         let val_32 = val_32 & cr0_allowed.bits();
 
-        // Bochs  — PDPTR check when enabling paging with PAE
+        // Bochs crregs.cc — PDPTR check when enabling paging with PAE
         if pg && self.cr4.pae() && !self.long_mode() {
             self.load_pdptrs();
         }
@@ -835,7 +835,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.cr0.set32(val_32);
 
-        // Bochs  — mode change handlers (BEFORE TLB flush)
+        // Bochs crregs.cc — mode change handlers (BEFORE TLB flush)
         // Note: Bochs calls handleCpuModeChange here, but our code has historically
         // only called update_fetch_mode_mask. Adding the full handler set caused
         // Alpine to break (cpu_mode transitions to LongCompat too early before
@@ -847,12 +847,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.handle_sse_mode_change();
         self.handle_avx_mode_change();
 
-        // Bochs  — TLB flush only if PG, WP, or PE changed
+        // Bochs crregs.cc — TLB flush only if PG, WP, or PE changed
         if (old_cr0 & 0x80010001) != (val_32 & 0x80010001) {
             self.tlb_flush();
         }
 
-        // Bochs 
+        // Bochs crregs.cc
         self.linaddr_width = if self.cr4.la57() { 57 } else { 48 };
 
         tracing::debug!(
@@ -877,7 +877,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     pub fn mov_cr3_rd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
-        // Bochs  — invalidate prefetch queue before CR3 change
+        // Bochs crregs.cc — invalidate prefetch queue before CR3 change
         self.invalidate_prefetch_q();
         let src = instr.src1() as usize;
 
@@ -888,7 +888,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.get_gpr32(src) as u64
         };
 
-        // Bochs  — allow NOFLUSH hint (bit 63) when PCIDE is set,
+        // Bochs crregs.cc — allow NOFLUSH hint (bit 63) when PCIDE is set,
         // but ignore the hint: always clear it before storing to CR3
         if self.cr4.pcide() {
             val &= !(1u64 << 63);
@@ -924,7 +924,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let val_32 = self.get_gpr32(src);
 
         // Bochs check_CR4(): reject unsupported bits using cr4_suppmask
-        // computed at reset from CPUID features (matches )
+        // computed at reset from CPUID features (matches crregs.cc)
         if (val_32 & !self.cr4_suppmask) != 0 {
             tracing::debug!(
                 "MOV CR4: unsupported bits set {:#010x} (mask={:#010x}), #GP(0)",
@@ -936,7 +936,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         let new_cr4 = BxCr4::from_bits_retain(val_32);
 
-        // Bochs  — long-mode checks
+        // Bochs crregs.cc — long-mode checks
         // (1) Cannot clear CR4.PAE when EFER.LMA=1
         if self.efer.lma() && !new_cr4.contains(BxCr4::PAE) {
             tracing::debug!("MOV CR4: attempt to clear PAE while EFER.LMA=1, #GP(0)");
@@ -970,7 +970,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.tlb_flush();
         }
 
-        // Bochs  — mode change handlers after CR4 write
+        // Bochs crregs.cc — mode change handlers after CR4 write
         self.handle_fpu_mmx_mode_change();
         self.handle_sse_mode_change();
         self.handle_avx_mode_change();
@@ -983,7 +983,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ----- 64-bit MOV CRn, Rq (writes in long mode) -----
 
-    /// MOV CR0, Rq — Bochs 
+    /// MOV CR0, Rq — Bochs crregs.cc
     /// Reads full 64-bit register; upper 32 bits must be zero (#GP if not).
     pub fn mov_cr0_rq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
@@ -1021,7 +1021,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.mov_cr0_rd(instr)
     }
 
-    /// MOV CR2, Rq — Bochs 
+    /// MOV CR2, Rq — Bochs crregs.cc
     /// Full 64-bit store (CR2 holds the faulting linear address in long mode).
     pub fn mov_cr2_rq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
@@ -1032,7 +1032,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// MOV CR4, Rq — Bochs 
+    /// MOV CR4, Rq — Bochs crregs.cc
     /// Reads full 64-bit register; upper 32 bits must be zero (#GP if not).
     pub fn mov_cr4_rq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.check_cpl0_for_cr_dr()?;
@@ -1055,10 +1055,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ----- LMSW -----
 
     /// LMSW - Load Machine Status Word
-    /// Based on Bochs 
+    /// Based on Bochs crregs.cc
     pub fn lmsw_ew(&mut self, instr: &Instruction) -> super::Result<()> {
         // CPL must be 0 (CPL is always 0 in real mode)
-        // Based on Bochs 
+        // Based on Bochs crregs.cc
         let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .rpl;
@@ -1078,28 +1078,28 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.v_read_word(seg, eaddr)?
         };
 
-        // LMSW cannot clear PE (Bochs )
+        // LMSW cannot clear PE (Bochs crregs.cc)
         if self.cr0.pe() {
             msw |= 1;
         }
 
-        // LMSW only affects last 4 bits (Bochs )
+        // LMSW only affects last 4 bits (Bochs crregs.cc)
         msw &= 0xF;
 
         let old_cr0 = self.cr0.get32();
         let cr0_val = (old_cr0 & 0xFFFFFFF0) | msw as u32;
 
         // Use same path as MOV CR0 — SetCR0 equivalent
-        // (Bochs  calls SetCR0)
+        // (Bochs crregs.cc calls SetCR0)
         self.cr0.set32(cr0_val);
 
-        // TLB flush if PG, PE, or WP changed (Bochs )
+        // TLB flush if PG, PE, or WP changed (Bochs crregs.cc)
         let tlb_relevant = BxCr0::PG | BxCr0::WP | BxCr0::PE;
         if (old_cr0 & tlb_relevant.bits()) != (cr0_val & tlb_relevant.bits()) {
             self.tlb_flush();
         }
 
-        // handleAlignmentCheck + handleCpuModeChange (Bochs )
+        // handleAlignmentCheck + handleCpuModeChange (Bochs crregs.cc)
         self.handle_cpu_context_change();
 
         tracing::debug!(
@@ -1113,11 +1113,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // =========================================================================
     // Allow-mask computation functions
-    // Matching Bochs 
+    // Matching Bochs crregs.cc
     // =========================================================================
 
     /// Compute CR4 supported bits mask from CPUID features.
-    /// Matches Bochs  get_cr4_allow_mask()
+    /// Matches Bochs crregs.cc get_cr4_allow_mask()
     pub(super) fn get_cr4_allow_mask(&self) -> u32 {
         use super::decoder::features::X86Feature;
 
@@ -1143,13 +1143,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if self.bx_cpuid_support_isa_extension(X86Feature::IsaPae) {
             allow |= BxCr4::PAE.bits();
         }
-        // MCE always allowed (Bochs )
+        // MCE always allowed (Bochs crregs.cc)
         allow |= BxCr4::MCE.bits();
         // PGE → CR4.PGE
         if self.bx_cpuid_support_isa_extension(X86Feature::IsaPge) {
             allow |= BxCr4::PGE.bits();
         }
-        // PCE always allowed for CPU level >= 6 (Bochs )
+        // PCE always allowed for CPU level >= 6 (Bochs crregs.cc)
         allow |= BxCr4::PCE.bits();
         // SSE → CR4.OSFXSR + CR4.OSXMMEXCPT
         if self.bx_cpuid_support_isa_extension(X86Feature::IsaSse) {
@@ -1216,7 +1216,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Compute EFER supported bits mask from CPUID features.
-    /// Matches Bochs  get_efer_allow_mask()
+    /// Matches Bochs crregs.cc get_efer_allow_mask()
     pub(super) fn get_efer_allow_mask(&self) -> u32 {
         use super::decoder::features::X86Feature;
 
@@ -1251,7 +1251,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Compute XCR0 supported bits mask from CPUID features.
-    /// Matches Bochs  get_xcr0_allow_mask()
+    /// Matches Bochs crregs.cc get_xcr0_allow_mask()
     pub(super) fn get_xcr0_allow_mask(&self) -> u32 {
         use super::decoder::features::X86Feature;
 
@@ -1279,7 +1279,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Compute IA32_XSS supported bits mask from CPUID features.
-    /// Matches Bochs  get_ia32_xss_allow_mask()
+    /// Matches Bochs crregs.cc get_ia32_xss_allow_mask()
     pub(super) fn get_ia32_xss_allow_mask(&self) -> u32 {
         use super::decoder::features::X86Feature;
 

@@ -29,7 +29,7 @@ pub const USEC_PER_SECOND: u32 = 1_000_000;
 /// Number of PIT counters
 const PIT_NUM_COUNTERS: usize = 3;
 
-// ---- Read/write state machine (Bochs ) ----
+// ---- Read/write state machine (Bochs pit82c54.h) ----
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum RWState {
     LsByte = 0,
@@ -41,7 +41,7 @@ enum RWState {
 /// State for a single PIT counter — matches Bochs pit82c54.h counter_type
 #[derive(Debug, Clone)]
 pub struct PitCounter {
-    // ---- Bochs counter_type fields () ----
+    // ---- Bochs counter_type fields (pit82c54.h) ----
     /// Operating mode (0-5, with 6→2, 7→3 aliasing)
     pub(crate) mode: u8,
     /// Input latch (pending count value written by CPU, loaded into count on clock)
@@ -90,7 +90,7 @@ pub struct PitCounter {
 }
 
 impl Default for PitCounter {
-    /// Default matching Bochs pit82c54::init() ().
+    /// Default matching Bochs pit82c54::init() (pit82c54.cc).
     fn default() -> Self {
         Self {
             mode: 4, // Bochs: mode=4 (SoftwareStrobe)
@@ -125,19 +125,19 @@ impl PitCounter {
         Self::default()
     }
 
-    /// Bochs  set_OUT — only calls handler on transition
+    /// Bochs pit82c54.cc set_OUT — only calls handler on transition
     fn set_out(&mut self, data: bool) {
         self.output = data;
         // Note: Bochs calls out_handler callback here; we detect transitions in tick()
     }
 
-    /// Bochs  set_count
+    /// Bochs pit82c54.cc set_count
     fn set_count(&mut self, data: u16) {
         self.count = data;
         self.set_binary_to_count();
     }
 
-    /// Bochs  set_binary_to_count (count → count_binary)
+    /// Bochs pit82c54.cc set_binary_to_count (count → count_binary)
     fn set_binary_to_count(&mut self) {
         if self.bcd_mode {
             self.count_binary = (self.count & 0xF)
@@ -149,7 +149,7 @@ impl PitCounter {
         }
     }
 
-    /// Bochs  set_count_to_binary (count_binary → count)
+    /// Bochs pit82c54.cc set_count_to_binary (count_binary → count)
     fn set_count_to_binary(&mut self) {
         if self.bcd_mode {
             self.count = (self.count_binary % 10)
@@ -161,7 +161,7 @@ impl PitCounter {
         }
     }
 
-    /// Bochs  decrement
+    /// Bochs pit82c54.cc decrement
     fn decrement(&mut self) {
         if self.count == 0 {
             if self.bcd_mode {
@@ -178,7 +178,7 @@ impl PitCounter {
     }
 
     /// Fast-path: advance counter by N ticks without calling clock() for each.
-    /// Bochs  clock_multiple().
+    /// Bochs pit82c54.cc clock_multiple().
     /// Returns true if counter 0 output transitioned (IRQ0 should fire).
     /// When next_change_time >= ticks, we can just decrement count_binary by ticks.
     fn clock_multiple(&mut self, ticks: u32) -> bool {
@@ -206,7 +206,7 @@ impl PitCounter {
         false
     }
 
-    /// Latch the current count value — Bochs 
+    /// Latch the current count value — Bochs pit82c54.cc
     pub fn latch_count(&mut self) {
         if self.count_lsb_latched || self.count_msb_latched {
             // Previous latch not yet read — do nothing
@@ -236,7 +236,7 @@ impl PitCounter {
         }
     }
 
-    /// Latch the status register — Bochs 
+    /// Latch the status register — Bochs pit82c54.cc
     pub fn latch_status(&mut self) {
         if !self.status_latched {
             self.latched_status = ((self.output as u8) << 7)
@@ -248,7 +248,7 @@ impl PitCounter {
         }
     }
 
-    /// Read counter — Bochs 
+    /// Read counter — Bochs pit82c54.cc
     pub fn read(&mut self) -> u8 {
         if self.status_latched {
             self.status_latched = false;
@@ -282,7 +282,7 @@ impl PitCounter {
         }
     }
 
-    /// Write counter — Bochs 
+    /// Write counter — Bochs pit82c54.cc
     pub fn write(&mut self, data: u8) {
         match self.write_state {
             RWState::LsByteMultiple => {
@@ -305,13 +305,13 @@ impl PitCounter {
             }
         }
 
-        // Bochs 
+        // Bochs pit82c54.cc
         if self.count_written {
             self.null_count = true;
             self.set_count(self.inlatch);
         }
 
-        // Mode-specific actions after count write (Bochs )
+        // Mode-specific actions after count write (Bochs pit82c54.cc)
         match self.mode {
             0 => {
                 if self.count_written {
@@ -340,13 +340,13 @@ impl PitCounter {
         }
     }
 
-    /// Clock the counter by one tick — Bochs 
+    /// Clock the counter by one tick — Bochs pit82c54.cc
     /// Returns true if output transitioned LOW→HIGH (for IRQ generation)
     pub fn clock(&mut self) -> bool {
         let old_output = self.output;
 
         match self.mode {
-            // ---- Mode 0: Interrupt on Terminal Count (Bochs ) ----
+            // ---- Mode 0: Interrupt on Terminal Count (Bochs pit82c54.cc) ----
             0 => {
                 if self.count_written {
                     if self.null_count {
@@ -385,7 +385,7 @@ impl PitCounter {
                 self.trigger_gate = false;
             }
 
-            // ---- Mode 1: Hardware Retriggerable One-Shot (Bochs ) ----
+            // ---- Mode 1: Hardware Retriggerable One-Shot (Bochs pit82c54.cc) ----
             1 => {
                 if self.count_written {
                     if self.trigger_gate {
@@ -418,7 +418,7 @@ impl PitCounter {
                 self.trigger_gate = false;
             }
 
-            // ---- Mode 2: Rate Generator (Bochs ) ----
+            // ---- Mode 2: Rate Generator (Bochs pit82c54.cc) ----
             2 | 6 => {
                 if self.count_written {
                     if self.trigger_gate || self.first_pass {
@@ -452,7 +452,7 @@ impl PitCounter {
                 self.trigger_gate = false;
             }
 
-            // ---- Mode 3: Square Wave Generator (Bochs ) ----
+            // ---- Mode 3: Square Wave Generator (Bochs pit82c54.cc) ----
             3 | 7 => {
                 if self.count_written {
                     if (self.trigger_gate || self.first_pass || self.state_bit_2) && self.gate {
@@ -509,7 +509,7 @@ impl PitCounter {
                 self.trigger_gate = false;
             }
 
-            // ---- Mode 4: Software Triggered Strobe (Bochs ) ----
+            // ---- Mode 4: Software Triggered Strobe (Bochs pit82c54.cc) ----
             4 => {
                 if self.count_written {
                     if !self.output {
@@ -551,7 +551,7 @@ impl PitCounter {
                 self.trigger_gate = false;
             }
 
-            // ---- Mode 5: Hardware Triggered Strobe (Bochs ) ----
+            // ---- Mode 5: Hardware Triggered Strobe (Bochs pit82c54.cc) ----
             5 => {
                 if self.count_written {
                     if !self.output {
@@ -594,7 +594,7 @@ impl PitCounter {
         !old_output && self.output
     }
 
-    /// Set GATE input — Bochs 
+    /// Set GATE input — Bochs pit82c54.cc
     /// Detects rising edge and sets triggerGATE; mode-specific behavior
     pub fn set_gate(&mut self, data: bool) {
         let old_gate = self.gate;
@@ -759,7 +759,7 @@ impl BxPitC {
                 self.pit_tick_accumulator %= self.ips as u128;
 
                 // Fast path: skip ticks in bulk when no state change is imminent
-                // (Bochs  clock_multiple). Then per-tick for remainder.
+                // (Bochs pit82c54.cc clock_multiple). Then per-tick for remainder.
                 // With clock_multiple bulk skip, we can process more ticks safely.
                 // 5M PIT ticks ≈ 4.2 seconds at 1.193182 MHz.
                 let mut remaining = pit_ticks.min(5_000_000) as u32;
@@ -825,7 +825,7 @@ impl BxPitC {
         }
     }
 
-    /// Write to the control register — Bochs 
+    /// Write to the control register — Bochs pit82c54.cc
     fn write_control(&mut self, value: u8) {
         let sc = (value >> 6) & 0x03;
 
@@ -843,7 +843,7 @@ impl BxPitC {
             return;
         }
 
-        // Counter Program Command — Bochs 
+        // Counter Program Command — Bochs pit82c54.cc
         let m = (value >> 1) & 0x07;
         let bcd = (value & 0x01) != 0;
 
@@ -858,7 +858,7 @@ impl BxPitC {
         ctr.rw_mode = rw;
         ctr.bcd_mode = bcd;
         ctr.mode = m;
-        // Mode aliasing: 6→2, 7→3 (Bochs )
+        // Mode aliasing: 6→2, 7→3 (Bochs pit82c54.cc)
         if ctr.mode > 5 {
             ctr.mode &= 0x3;
         }
@@ -896,7 +896,7 @@ impl BxPitC {
         );
     }
 
-    /// Handle read-back command — Bochs 
+    /// Handle read-back command — Bochs pit82c54.cc
     fn read_back(&mut self, value: u8) {
         let latch_count = (value & 0x20) == 0; // Bit 5: 0 = latch count
         let latch_status = (value & 0x10) == 0; // Bit 4: 0 = latch status

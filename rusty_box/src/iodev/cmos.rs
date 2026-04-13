@@ -233,7 +233,7 @@ impl BxCmosC {
     // Timer handlers (matching Bochs cmos.cc)
     // =========================================================================
 
-    /// Recalculate periodic interval from REG_STAT_A (Bochs  CRA_change)
+    /// Recalculate periodic interval from REG_STAT_A (Bochs cmos.cc CRA_change)
     fn cra_change(&mut self) {
         let nibble = self.ram[REG_STAT_A as usize] & 0x0F;
         let dcc = (self.ram[REG_STAT_A as usize] >> 4) & 0x07;
@@ -260,7 +260,7 @@ impl BxCmosC {
         }
     }
 
-    /// Periodic timer handler (Bochs  periodic_timer)
+    /// Periodic timer handler (Bochs cmos.cc periodic_timer)
     fn periodic_timer(&mut self) {
         // If periodic interrupts are enabled, trip IRQ8 and update status C
         if self.ram[REG_STAT_B as usize] & 0x40 != 0 {
@@ -271,7 +271,7 @@ impl BxCmosC {
         }
     }
 
-    /// One-second timer handler (Bochs  one_second_timer)
+    /// One-second timer handler (Bochs cmos.cc one_second_timer)
     fn one_second_timer(&mut self) {
         // Divider chain reset — RTC stopped
         if (self.ram[REG_STAT_A as usize] & 0x60) == 0x60 {
@@ -293,7 +293,7 @@ impl BxCmosC {
         self.uip_timer_remaining = 244;
     }
 
-    /// UIP timer handler (Bochs  uip_timer)
+    /// UIP timer handler (Bochs cmos.cc uip_timer)
     fn uip_timer(&mut self) {
         // Clear UIP bit
         self.ram[REG_STAT_A as usize] &= !0x80;
@@ -316,7 +316,7 @@ impl BxCmosC {
         self.check_alarm();
     }
 
-    /// Check if current time matches alarm registers (Bochs )
+    /// Check if current time matches alarm registers (Bochs cmos.cc)
     fn check_alarm(&mut self) {
         let _is_binary = (self.ram[REG_STAT_B as usize] & 0x04) != 0;
 
@@ -343,7 +343,7 @@ impl BxCmosC {
     }
 
     /// Update CMOS date/time registers from internal timeval
-    /// (Bochs  update_clock)
+    /// (Bochs cmos.cc update_clock)
     fn update_clock(&mut self) {
         let is_binary = (self.ram[REG_STAT_B as usize] & 0x04) != 0;
         let is_24hour = (self.ram[REG_STAT_B as usize] & 0x02) != 0;
@@ -433,7 +433,7 @@ impl BxCmosC {
     }
 
     /// Convert CMOS date/time registers back to timeval
-    /// Called when exiting SET mode (Bochs  update_timeval)
+    /// Called when exiting SET mode (Bochs cmos.cc update_timeval)
     fn update_timeval(&mut self) {
         let is_binary = (self.ram[REG_STAT_B as usize] & 0x04) != 0;
         let is_24hour = (self.ram[REG_STAT_B as usize] & 0x02) != 0;
@@ -504,15 +504,15 @@ impl BxCmosC {
         self.ram[REG_CSUM_LOW as usize] = (sum & 0xFF) as u8;
     }
 
-    /// Read from CMOS I/O port (Bochs )
+    /// Read from CMOS I/O port (Bochs cmos.cc)
     pub fn read(&mut self, port: u16, _io_len: u8) -> u32 {
         match port {
             CMOS_ADDR | 0x0072 => {
-                // Port 0x70/0x72 is write-only on most machines (Bochs )
+                // Port 0x70/0x72 is write-only on most machines (Bochs cmos.cc)
                 0xFF
             }
             0x0073 => {
-                // Bochs  — extended CMOS data port
+                // Bochs cmos.cc — extended CMOS data port
                 self.ram[self.cmos_ext_mem_addr as usize] as u32
             }
             CMOS_DATA => {
@@ -524,7 +524,7 @@ impl BxCmosC {
                     }
                     REG_STAT_C => {
                         // Reading Status C clears all interrupt flags and lowers IRQ8
-                        // (Bochs )
+                        // (Bochs cmos.cc)
                         let val = self.ram[addr];
                         self.ram[addr] = 0x00;
                         if self.irq_enabled {
@@ -554,21 +554,21 @@ impl BxCmosC {
         }
     }
 
-    /// Write to CMOS I/O port (Bochs )
+    /// Write to CMOS I/O port (Bochs cmos.cc)
     pub fn write(&mut self, port: u16, value: u32, _io_len: u8) {
         let value = value as u8;
         match port {
             CMOS_ADDR => {
-                // Bochs  — standard CMOS address port
+                // Bochs cmos.cc — standard CMOS address port
                 self.nmi_mask = (value & 0x80) != 0;
                 self.address = value & 0x7F;
             }
             0x0072 => {
-                // Bochs  — extended CMOS address port
+                // Bochs cmos.cc — extended CMOS address port
                 self.cmos_ext_mem_addr = value | 0x80;
             }
             0x0073 => {
-                // Bochs  — extended CMOS data port
+                // Bochs cmos.cc — extended CMOS data port
                 self.ram[self.cmos_ext_mem_addr as usize] = value;
             }
             CMOS_DATA => {
@@ -588,11 +588,11 @@ impl BxCmosC {
                     REG_STAT_B => {
                         let old_val = self.ram[addr];
 
-                        // Bochs : bit 3 always forced to 0
+                        // Bochs cmos.cc: bit 3 always forced to 0
                         // (square wave output not supported)
                         let new_val = value & !0x08;
 
-                        // Bochs : setting bit 7 clears bit 4
+                        // Bochs cmos.cc: setting bit 7 clears bit 4
                         // (entering SET mode clears update-ended interrupt)
                         let new_val = if new_val & 0x80 != 0 {
                             new_val & !0x10
@@ -602,13 +602,13 @@ impl BxCmosC {
 
                         self.ram[addr] = new_val;
 
-                        // Bochs : If 12/24-hour or binary/BCD mode changed,
+                        // Bochs cmos.cc: If 12/24-hour or binary/BCD mode changed,
                         // update clock registers
                         if (old_val ^ new_val) & 0x06 != 0 {
                             self.update_clock();
                         }
 
-                        // Bochs : Periodic Interrupt Enable (bit 6) changes
+                        // Bochs cmos.cc: Periodic Interrupt Enable (bit 6) changes
                         if (old_val ^ new_val) & 0x40 != 0 {
                             if new_val & 0x40 != 0 {
                                 // PIE set — activate periodic timer
@@ -621,7 +621,7 @@ impl BxCmosC {
                             }
                         }
 
-                        // Bochs : Exiting SET mode (bit 7: 1→0)
+                        // Bochs cmos.cc: Exiting SET mode (bit 7: 1→0)
                         if (old_val & 0x80) != 0 && (new_val & 0x80) == 0
                             && self.timeval_change {
                                 self.update_timeval();
@@ -749,7 +749,7 @@ impl BxCmosC {
     // =========================================================================
 
     /// Configure memory size in CMOS from total RAM bytes.
-    /// Matches Bochs  exactly.
+    /// Matches Bochs devices.cc exactly.
     ///
     /// Sets CMOS registers:
     /// - 0x15-0x16: Base memory (640 KB)
@@ -763,7 +763,7 @@ impl BxCmosC {
         self.ram[0x16] = ((BASE_MEMORY_IN_K >> 8) & 0xFF) as u8;
 
         // Extended memory above 1MB (in KB), capped at 0xFC00 (63 MB)
-        // Bochs 
+        // Bochs devices.cc
         let memory_in_k = total_bytes / 1024;
         let extended_memory_in_k = if memory_in_k > 1024 {
             (memory_in_k - 1024).min(0xFC00)
@@ -776,7 +776,7 @@ impl BxCmosC {
         self.ram[0x31] = ((extended_memory_in_k >> 8) & 0xFF) as u8;
 
         // Extended memory above 16MB (in 64KB blocks), capped at 0xBF00
-        // Bochs 
+        // Bochs devices.cc
         let extended_memory_in_64k = if memory_in_k > 16384 {
             ((memory_in_k - 16384) / 64).min(0xBF00)
         } else {
@@ -812,7 +812,7 @@ impl BxCmosC {
         self.update_checksum();
     }
 
-    /// Configure full hard drive geometry in CMOS (matching Bochs )
+    /// Configure full hard drive geometry in CMOS (matching Bochs harddrv.cc)
     ///
     /// Sets drive type byte (0x12) plus extended geometry registers:
     /// - Drive 0: registers 0x19, 0x1B-0x23
@@ -855,7 +855,7 @@ impl BxCmosC {
         self.update_checksum();
     }
 
-    /// Configure floppy drive types in CMOS (matching Bochs  / cmos.cc init)
+    /// Configure floppy drive types in CMOS (matching Bochs floppy.cc / cmos.cc init)
     ///
     /// drive_type: 0=none, 1=360K, 2=1.2M, 3=720K, 4=1.44M, 5=2.88M
     /// Sets CMOS 0x10 (floppy types) and updates equipment byte (0x14).

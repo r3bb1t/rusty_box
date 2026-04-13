@@ -48,7 +48,7 @@
 rusty_box_web/dist/
 
 # Claude Code worktrees
-.claude/worktrees/
+.claude/
 
 # Rust analyzer artifacts
 **/target/rust-analyzer/

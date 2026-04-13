@@ -191,7 +191,7 @@ impl BxMemC<'_> {
 
     /// Disable SMRAM (System Management RAM)
     ///
-    /// Matches BX_MEM_C::disable_smram() from cpp_orig/bochs/memory/
+    /// Matches BX_MEM_C::disable_smram() from cpp_orig/bochs/memory/misc_mem.cc
     pub fn disable_smram(&mut self) {
         self.smram_available = false;
         self.smram_enable = false;
@@ -316,7 +316,7 @@ impl<'m> BxMemC<'m> {
     }
 
     /// Set memory type for a specific area (PAM register support).
-    /// Bochs: BX_MEM_C::set_memory_type() ()
+    /// Bochs: BX_MEM_C::set_memory_type() (misc_mem.cc)
     ///
     /// `area` is one of the 13 memory areas (C0000..F0000, 16KB each).
     /// `rw`: 0 = read path, 1 = write path.

@@ -248,7 +248,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let count = (cl & 0x0F) as u32;
         if count == 0 {
             // count & 0x0F == 0: no rotation. But if bit 4 is set (cl=16), still update CF/OF.
-            // Bochs 
+            // Bochs shift16.cc
             if cl & 0x10 != 0 {
                 let (op1, _) = self.shift_read16(instr)?;
                 let bit0 = (op1 & 0x0001) != 0;
@@ -274,7 +274,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let imm = instr.ib() & 0x1F;
         let count = (imm & 0x0F) as u32;
         if count == 0 {
-            // If bit 4 is set, update CF/OF without rotating. Bochs 
+            // If bit 4 is set, update CF/OF without rotating. Bochs shift16.cc
             if imm & 0x10 != 0 {
                 let (op1, _) = self.shift_read16(instr)?;
                 let bit0 = (op1 & 0x0001) != 0;
@@ -316,7 +316,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cl = self.cl() & 0x1F;
         let count = (cl & 0x0F) as u32;
         if count == 0 {
-            // If bit 4 is set (cl=16), update CF/OF without rotating. Bochs 
+            // If bit 4 is set (cl=16), update CF/OF without rotating. Bochs shift16.cc
             if cl & 0x10 != 0 {
                 let (op1, _) = self.shift_read16(instr)?;
                 let bit15 = (op1 >> 15) != 0;
@@ -342,7 +342,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let imm = instr.ib() & 0x1F;
         let count = (imm & 0x0F) as u32;
         if count == 0 {
-            // If bit 4 is set, update CF/OF without rotating. Bochs 
+            // If bit 4 is set, update CF/OF without rotating. Bochs shift16.cc
             if imm & 0x10 != 0 {
                 let (op1, _) = self.shift_read16(instr)?;
                 let bit15 = (op1 >> 15) != 0;
@@ -486,7 +486,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // =========================================================================
     // SHLD - Double Precision Shift Left (16-bit)
-    // Based on Bochs 
+    // Based on Bochs shift16.cc
     // =========================================================================
 
     /// SHLD r/m16, r16, imm8
@@ -557,7 +557,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // =========================================================================
     // SHRD - Double Precision Shift Right (16-bit)
-    // Based on Bochs 
+    // Based on Bochs shift16.cc
     // =========================================================================
 
     /// SHRD r/m16, r16, imm8

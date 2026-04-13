@@ -115,7 +115,7 @@ pub(super) const BxOpcodeTable0F3A46: [u64; 1] =
     [last_opcode(ATTR_SSE_PREFIX_66, Opcode::V256Vperm2i128VdqHdqWdqIb)];
 
 // RORX (VEX.LZ.F2.0F3A.W0/W1 F0 /r ib) — BMI2 rotate right extract
-// Bochs 
+// Bochs fetchdecode_opmap_avx.cc
 pub(super) const BxOpcodeTable0F3AF0: [u64; 2] = [
     form_opcode(ATTR_SSE_PREFIX_F2 | ATTR_VL128 | ATTR_VEX_W0, Opcode::RorxGdEdIb),
     last_opcode(ATTR_SSE_PREFIX_F2 | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::RorxGqEqIb),

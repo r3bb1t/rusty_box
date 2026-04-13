@@ -16,9 +16,9 @@ use super::{
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// LGDT - Load Global Descriptor Table Register
-    /// Based on Bochs 
+    /// Based on Bochs protect_ctrl.cc
     pub fn lgdt_ms(&mut self, instr: &Instruction) -> Result<()> {
-        // CPL must be 0 (Bochs )
+        // CPL must be 0 (Bochs protect_ctrl.cc)
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         if cpl != 0 {
             tracing::debug!("LGDT: CPL={} != 0, #GP(0)", cpl);
@@ -39,7 +39,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut base = self.v_read_dword(seg, eaddr.wrapping_add(2) & asize_mask)? as u64;
 
         // In 16-bit operand size mode, mask base to 24 bits (80286 compatibility)
-        // Based on Bochs 
+        // Based on Bochs protect_ctrl.cc
         if instr.os32_l() == 0 {
             base &= 0x00FFFFFF;
         }
@@ -50,9 +50,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SGDT - Store Global Descriptor Table Register
-    /// Based on Bochs 
+    /// Based on Bochs protect_ctrl.cc
     pub fn sgdt_ms(&mut self, instr: &Instruction) -> Result<()> {
-        // UMIP check (Bochs ) — CR4.UMIP and CPL!=0 → #GP(0)
+        // UMIP check (Bochs protect_ctrl.cc) — CR4.UMIP and CPL!=0 → #GP(0)
         if self.cr4.umip() {
             let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
             if cpl != 0 {
@@ -79,9 +79,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LIDT - Load Interrupt Descriptor Table Register
-    /// Based on Bochs 
+    /// Based on Bochs protect_ctrl.cc
     pub fn lidt_ms(&mut self, instr: &Instruction) -> Result<()> {
-        // CPL must be 0 (Bochs )
+        // CPL must be 0 (Bochs protect_ctrl.cc)
         let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         if cpl != 0 {
             tracing::debug!("LIDT: CPL={} != 0, #GP(0)", cpl);
@@ -101,7 +101,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let mut base = self.v_read_dword(seg, eaddr.wrapping_add(2) & asize_mask)? as u64;
 
         // In 16-bit operand size mode, mask base to 24 bits
-        // Based on Bochs 
+        // Based on Bochs protect_ctrl.cc
         if instr.os32_l() == 0 {
             base &= 0x00FFFFFF;
         }
@@ -112,9 +112,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SIDT - Store Interrupt Descriptor Table Register
-    /// Based on Bochs 
+    /// Based on Bochs protect_ctrl.cc
     pub fn sidt_ms(&mut self, instr: &Instruction) -> Result<()> {
-        // UMIP check (Bochs ) — CR4.UMIP and CPL!=0 → #GP(0)
+        // UMIP check (Bochs protect_ctrl.cc) — CR4.UMIP and CPL!=0 → #GP(0)
         if self.cr4.umip() {
             let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
             if cpl != 0 {
@@ -141,12 +141,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SLDT - Store Local Descriptor Table Register
-    /// Based on Bochs 
+    /// Based on Bochs protect_ctrl.cc
     pub fn sldt_ew(&mut self, instr: &Instruction) -> Result<()> {
         if !self.protected_mode() {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
-        // UMIP check (Bochs ) — CR4.UMIP and CPL!=0 → #GP(0)
+        // UMIP check (Bochs protect_ctrl.cc) — CR4.UMIP and CPL!=0 → #GP(0)
         if self.cr4.umip() {
             let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
             if cpl != 0 {
@@ -171,9 +171,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SMSW — Store Machine Status Word
-    /// Based on Bochs 
+    /// Based on Bochs crregs.cc
     pub fn smsw_ew(&mut self, instr: &Instruction) -> Result<()> {
-        // UMIP check (Bochs ) — CR4.UMIP and CPL!=0 → #GP(0)
+        // UMIP check (Bochs crregs.cc) — CR4.UMIP and CPL!=0 → #GP(0)
         if self.cr4.umip() {
             let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
             if cpl != 0 {
@@ -184,7 +184,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let msw = self.cr0.get32();
 
         if instr.mod_c0() {
-            // Register form: writes 32-bit value (Bochs )
+            // Register form: writes 32-bit value (Bochs crregs.cc)
             // For Group 7 (0F 01): b1=0x101, (b1 & 0x0F)==0x01 → Ed,Gd branch: DST=rm, SRC1=nnn
             // So dst() = rm = actual register. Matches Bochs: BX_WRITE_32BIT_REGZ(i->dst(), val)
             if instr.os32_l() != 0 {
@@ -193,7 +193,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.set_gpr16(instr.dst() as usize, msw as u16);
             }
         } else {
-            // Memory form: always writes 16-bit (Bochs )
+            // Memory form: always writes 16-bit (Bochs crregs.cc)
             let seg = BxSegregs::from(instr.seg());
             let eaddr = self.resolve_addr(instr);
             self.v_write_word(seg, eaddr, msw as u16)?;
@@ -202,12 +202,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// STR - Store Task Register
-    /// Based on Bochs 
+    /// Based on Bochs protect_ctrl.cc
     pub fn str_ew(&mut self, instr: &Instruction) -> Result<()> {
         if !self.protected_mode() {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
-        // UMIP check (Bochs ) — CR4.UMIP and CPL!=0 → #GP(0)
+        // UMIP check (Bochs protect_ctrl.cc) — CR4.UMIP and CPL!=0 → #GP(0)
         if self.cr4.umip() {
             let cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
             if cpl != 0 {
@@ -232,7 +232,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ARPL — Adjust Requested Privilege Level
-    /// Based on Bochs 
+    /// Based on Bochs protect_ctrl.cc
     pub(super) fn arpl_ew_gw(&mut self, instr: &Instruction) -> Result<()> {
         if !self.protected_mode() {
             return self.exception(super::cpu::Exception::Ud, 0);
@@ -271,7 +271,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Non-throwing fetch_raw_descriptor2 — returns None on failure
-    /// Based on BX_CPU_C::fetch_raw_descriptor2 in 
+    /// Based on BX_CPU_C::fetch_raw_descriptor2 in segment_ctrl_pro.cc
     fn fetch_raw_descriptor2_nt(
         &mut self,
         selector: &super::descriptor::BxSelector,
@@ -309,7 +309,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LAR — Load Access Rights
-    /// Based on Bochs 
+    /// Based on Bochs protect_ctrl.cc
     pub(super) fn lar_gv_ew(&mut self, instr: &Instruction) -> Result<()> {
         if !self.protected_mode() {
             return self.exception(super::cpu::Exception::Ud, 0);
@@ -369,7 +369,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
         } else {
             // System/gate segment — only certain types accepted
-            // Based on Bochs 
+            // Based on Bochs protect_ctrl.cc
             match descriptor.r#type {
                 // 286/386 TSS, LDT, call gate, task gate — accepted
                 0x1 | 0x3 | 0x4 | 0x5 => {
@@ -393,7 +393,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // All checks passed — set ZF and write access rights to dst
         self.eflags.insert(EFlags::ZF);
         if instr.os32_l() != 0 {
-            // 32-bit: masked by 00FFFF00 (Bochs )
+            // 32-bit: masked by 00FFFF00 (Bochs protect_ctrl.cc)
             self.set_gpr32(instr.dst() as usize, dword2 & 0x00ffff00);
         } else {
             // 16-bit: lower byte of access rights
@@ -403,7 +403,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LSL — Load Segment Limit
-    /// Based on Bochs 
+    /// Based on Bochs protect_ctrl.cc
     pub(super) fn lsl_gv_ew(&mut self, instr: &Instruction) -> Result<()> {
         if !self.protected_mode() {
             return self.exception(super::cpu::Exception::Ud, 0);
@@ -492,7 +492,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// VERR — Verify Segment for Reading
-    /// Based on Bochs 
+    /// Based on Bochs protect_ctrl.cc
     pub(super) fn verr_ew(&mut self, instr: &Instruction) -> Result<()> {
         if !self.protected_mode() {
             return self.exception(super::cpu::Exception::Ud, 0);
@@ -584,7 +584,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// VERW — Verify Segment for Writing
-    /// Based on Bochs 
+    /// Based on Bochs protect_ctrl.cc
     pub(super) fn verw_ew(&mut self, instr: &Instruction) -> Result<()> {
         if !self.protected_mode() {
             return self.exception(super::cpu::Exception::Ud, 0);

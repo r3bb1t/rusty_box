@@ -86,14 +86,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// BSWAP r16 — undefined behavior, zeroes register
-    /// Bochs  (BSWAP_RX)
+    /// Bochs bit.cc (BSWAP_RX)
     pub fn bswap_rx(&mut self, instr: &Instruction) {
         tracing::debug!("BSWAP with 16-bit opsize: undefined behavior!");
         self.set_gpr16(instr.dst() as usize, 0);
     }
 
     /// BSWAP r32 — reverse byte order of 32-bit register
-    /// Bochs  (BSWAP_ERX)
+    /// Bochs bit.cc (BSWAP_ERX)
     pub fn bswap_erx(&mut self, instr: &Instruction) {
         let val32 = self.get_gpr32(instr.dst() as usize);
         self.set_gpr32(instr.dst() as usize, val32.swap_bytes());

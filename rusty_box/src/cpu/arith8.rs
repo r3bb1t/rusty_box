@@ -927,7 +927,7 @@ pub fn SUB_AL_Ib<'c, I: BxCpuIdTrait>(
 // =========================================================================
 
 /// CMPXCHG r/m8, r8 — register form
-/// Bochs  (CMPXCHG_EbGbR)
+/// Bochs arith8.cc (CMPXCHG_EbGbR)
 pub fn CMPXCHG_EbGb_R<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) {
     let ext = instr.extend8bit_l();
     let op1_8 = cpu.read_8bit_regx(instr.dst() as usize, ext) as u32;
@@ -944,7 +944,7 @@ pub fn CMPXCHG_EbGb_R<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Inst
 }
 
 /// CMPXCHG r/m8, r8 — memory form
-/// Bochs  (CMPXCHG_EbGbM)
+/// Bochs arith8.cc (CMPXCHG_EbGbM)
 pub fn CMPXCHG_EbGb_M<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,
@@ -972,7 +972,7 @@ pub fn CMPXCHG_EbGb_M<'c, I: BxCpuIdTrait>(
 // =========================================================================
 
 /// XADD r/m8, r8 — register form
-/// Bochs 
+/// Bochs arith8.cc
 pub fn XADD_EbGb_R<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruction) {
     let ext = instr.extend8bit_l();
     let op1 = cpu.read_8bit_regx(instr.dst() as usize, ext) as u32;
@@ -986,7 +986,7 @@ pub fn XADD_EbGb_R<'c, I: BxCpuIdTrait>(cpu: &mut BxCpuC<'c, I>, instr: &Instruc
 }
 
 /// XADD r/m8, r8 — memory form
-/// Bochs 
+/// Bochs arith8.cc
 pub fn XADD_EbGb_M<'c, I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<'c, I>,
     instr: &Instruction,

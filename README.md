@@ -1,111 +1,96 @@
 # Rusty Box
 
-A Rust port of the Bochs x86 emulator — a complete CPU/system emulator targeting 32/64-bit x86 architecture with virtualization support (VMX/SVM).
+A Rust port of the [Bochs](https://bochs.sourceforge.io/) x86 emulator — a complete CPU/system emulator targeting 32/64-bit x86 architecture with virtualization support.
 
-## Project Status
+## Status
 
-**Current State:** Linux 1.3.89 boots to driver initialization
-
-- **Mode:** Protected mode with paging (CR0=0x80000013, kernel 3G/1G split)
-- **Instructions Executed:** 1B+ clean (no crashes, no errors)
-- **Boot Stage:** Kernel stalls after "loop: registered device at major 7" — waiting for ATA disk I/O
-- **Performance:** 14–29 MIPS active execution (windowed, by phase):
-  - BIOS real-mode: ~22 MIPS
-  - Kernel decompressor: ~29 MIPS *(exceeds Bochs target of ~14.7 MIPS)*
-  - Kernel init: ~14 MIPS
-  - Idle (HLT): ~0 MIPS (waiting for IRQ14)
-
-See [docs/DLXLINUX_BOOT_SUMMARY.md](docs/DLXLINUX_BOOT_SUMMARY.md) for the full boot timeline.
-
-## Documentation
-
-- **[CLAUDE.md](CLAUDE.md)** — Build commands, architecture, known issues, and development guidance. Start here.
-- **[docs/DLXLINUX_BOOT_SUMMARY.md](docs/DLXLINUX_BOOT_SUMMARY.md)** — Full boot sequence timeline, critical bug fixes, and remaining issues.
+- **DLX Linux** boots to an interactive bash shell (BIOS POST, LILO, kernel, init, login)
+- **Alpine Linux** fully boots through OpenRC with all packages installed
+- Full x87 FPU with Berkeley SoftFloat 3e (80-bit extended precision)
+- AVX-512 Foundation (320 handlers), AVX2, SSE4.2, AES-NI, SHA, BMI1/BMI2
+- Bus Master DMA, ATAPI CD-ROM, PCI IDE
+- Runs in the browser via WASM (egui frontend)
 
 ## Quick Start
 
 ```bash
-# Build with optimizations (required for performance)
+# Build with optimizations (required for acceptable performance)
 cargo build --release --features std
 
-# Run headless (fast)
+# DLX Linux — headless (boots to login prompt)
 RUSTY_BOX_HEADLESS=1 cargo run --release --example dlxlinux --features std
 
-# Run with egui GUI
-cargo run --release --example dlxlinux_egui --features "std,gui-egui"
+# DLX Linux — with GUI
+cargo run --release --example rusty_box_egui --features "std,gui-egui"
+
+# Alpine Linux — headless BIOS boot
+RUSTY_BOX_HEADLESS=1 MAX_INSTRUCTIONS=3500000000 cargo run --release --example alpine_direct --features std
 
 # Run tests
 cargo test
+
+# WASM build
+cd examples/rusty_box_web && trunk serve
 ```
+
+## Getting Alpine Linux ISO
+
+To run Alpine Linux in the emulator:
+
+1. Visit [alpinelinux.org/downloads](https://alpinelinux.org/downloads/)
+2. Download the **Virtual** x86 ISO (e.g., `alpine-virt-3.21.3-x86.iso`)
+3. Place it in the project root or set `ALPINE_ISO=/path/to/alpine.iso`
+
+The web version supports uploading the ISO directly from the browser.
 
 ## Architecture
 
 ```
 Emulator<'a, I: BxCpuIdTrait>
-├── BxCpuC<I>       CPU (generic over CPUID model)
-├── BxMemC          Memory subsystem (block-based, >4GB support)
-├── BxDevicesC      I/O port dispatch
-├── DeviceManager   Hardware (PIC, PIT, CMOS, DMA, VGA, Keyboard, IDE)
-├── BxPcSystemC     Timers and A20 line
-└── GUI             Display (NoGui, TermGui, or EguiGui)
++-- BxCpuC<I>         CPU (generic over CPUID model like Corei7SkylakeX)
++-- BxMemC            Memory subsystem (block-based, supports >4GB)
++-- BxDevicesC        I/O port handler manager
++-- DeviceManager     Hardware (PIC, PIT, CMOS, DMA, VGA, Keyboard, IDE)
++-- BxPcSystemC       Timers and A20 line control
++-- GUI               Display (NoGui, TermGui, or EguiGui)
 ```
 
 ### Key Design Principles
 
 - **No global state** — each `Emulator<I>` is fully self-contained; multiple instances can run concurrently
-- **Bochs parity** — all logic must match Bochs C++ source exactly; deviations are bugs
+- **Bochs parity** — all logic matches the Bochs C++ source; deviations are bugs
 - **no_std compatible** — core library works without std; `std` feature enables file I/O and terminal GUI
-- **Type-safe CPU models** — `BxCpuIdTrait` makes CPU model a compile-time type (Corei7SkylakeX, etc.)
-
-## Performance Optimizations (2026-03-02)
-
-| Optimization | Impact |
-|---|---|
-| `fetch_decode32_inplace` — decoder writes directly into icache mpool | Eliminates 24-byte copy per instruction |
-| Raw pointer execute loop | Eliminates bounds-check overhead per dispatch |
-| Trace allocation guard | `format!` / `collect::<String>()` gated on `tracing::enabled!(TRACE)` |
-| **Result** | **14–29 MIPS active** (up from ~3–4 MIPS full-run average) |
-
-## What Works
-
-- Full BIOS POST: rombios32_init, VGA BIOS, ATA detection, LILO boot
-- LILO boot loader: reads map file, loads linux image via INT 13h
-- Linux 1.3.89 kernel: decompresses, enables paging, initializes all drivers listed below:
-  ```
-  Linux version 1.3.89 (root@merlin) (gcc version 2.7.2)
-  Console: colour VGA+ 80x25, 1 virtual console (max 63)
-  Calibrating delay loop.. ok - 9.98 BogoMIPS
-  Memory: 31140k/32768k available
-  NET3.034, TCP/IP, ICMP/UDP/TCP
-  Checking 386/387 coupling... Ok, fpu using old IRQ13 error reporting
-  Checking 'hlt' instruction... Ok.
-  Serial driver version 4.11a
-  PS/2 auxiliary pointing device detected -- driver installed.
-  loop: registered device at major 7
-  ```
-- Complete x86 instruction set coverage (all instruction categories audited against Bochs)
-- Full x87 FPU with Berkeley SoftFloat 3e (80-bit extended precision, Float128 transcendentals)
-- VGA text mode output (egui and headless terminal)
-- Comprehensive Bochs parity audit complete across all CPU, device, and memory files
-
-## What's Next
-
-1. **ATA disk read for rootfs** — kernel stalls waiting for disk I/O after driver init
-2. **Init process startup** — `/sbin/init` needs to run after rootfs mounts
-3. **DLX login prompt** — full boot goal: `dlx login:`
+- **Type-safe CPU models** — `BxCpuIdTrait` makes CPU model a compile-time type parameter
 
 ## Project Structure
 
 ```
 rusty_box/
-├── rusty_box/              # Main emulator library
-│   ├── src/cpu/            # CPU implementation (by instruction category, mirrors Bochs)
-│   ├── src/memory/         # Memory subsystem
-│   ├── src/iodev/          # I/O devices (PIC, PIT, CMOS, VGA, IDE, etc.)
-│   └── examples/           # Runnable examples
-├── rusty_box_decoder/      # x86 instruction decoder (separate crate, fuzzing-friendly)
-└── cpp_orig/bochs/         # Original C++ Bochs source (reference for parity audit)
++-- rusty_box/              # Main emulator library
+|   +-- src/cpu/            # CPU (instruction handlers, mirrors Bochs cpu/)
+|   +-- src/memory/         # Memory subsystem
+|   +-- src/iodev/          # I/O devices (PIC, PIT, CMOS, VGA, IDE, etc.)
+|   +-- examples/           # Desktop examples (DLX, Alpine, egui GUI)
++-- rusty_box_decoder/      # x86 instruction decoder (separate crate)
++-- examples/rusty_box_web/ # WASM web frontend
++-- cpp_orig/bochs/         # Original C++ Bochs source (reference)
 ```
+
+## Web Demo
+
+The WASM frontend provides a browser-based emulator with two boot options:
+
+- **DLX Linux** — embedded 10 MB disk image, boots instantly
+- **Alpine Linux** — upload your own ISO via file picker
+
+Build and run locally:
+
+```bash
+cd examples/rusty_box_web
+trunk serve
+```
+
+Then open `http://localhost:8080` in your browser.
 
 ## Testing
 
@@ -115,23 +100,28 @@ cargo test
 
 # Fuzz the decoder
 cd rusty_box_decoder && cargo +nightly fuzz run fuzz_target_1
-
-# WASM build
-cd examples/rusty_box_web && cargo build --target wasm32-unknown-unknown
 ```
+
+## Performance
+
+Release build on modern hardware: ~22-40 MIPS depending on workload phase.
+
+| Phase | MIPS |
+|-------|------|
+| BIOS real-mode | ~22 |
+| Kernel decompressor | ~25-50 |
+| Kernel init | ~22-27 |
+| Alpine steady-state | ~40 |
 
 ## References
 
-- Original Bochs: [bochs.sourceforge.io](http://bochs.sourceforge.io/)
-- Intel Manual: Volume 2 (Instruction Set Reference)
-- x86 Opcode Map: sandpile.org
+- [Bochs x86 Emulator](https://bochs.sourceforge.io/)
+- [Intel Software Developer Manual, Volume 2](https://www.intel.com/content/www/us/en/developer/articles/technical/intel-sdm.html) (Instruction Set Reference)
+- [Sandpile.org](https://www.sandpile.org/) (x86 opcode maps)
 
 ## License
 
-See original Bochs licensing in `cpp_orig/bochs/`. This Rust port follows the same terms.
+This project is a derivative work of the [Bochs](https://bochs.sourceforge.io/) x86 emulator
+and is licensed under the [GNU Lesser General Public License v2.1](LICENSE) (LGPL-2.1-or-later).
 
----
-
-**Last Updated:** 2026-03-02
-**Current Focus:** ATA disk I/O to unblock kernel rootfs mount
-**Status:** 🟢 Active Development — Linux kernel boots to driver init
+See [THIRD-PARTY-LICENSES](THIRD-PARTY-LICENSES) for bundled third-party code (Berkeley SoftFloat 3e, Hauser FPU transcendentals).

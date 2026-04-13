@@ -17,23 +17,23 @@
 /// PCI configuration space size
 const PCI_CONF_SIZE: usize = 256;
 
-/// APM command port (Bochs )
+/// APM command port (Bochs pci2isa.cc)
 pub const APM_CMD_PORT: u16 = 0x00B2;
-/// APM status port (Bochs )
+/// APM status port (Bochs pci2isa.cc)
 pub const APM_STS_PORT: u16 = 0x00B3;
-/// ELCR1 — Edge/Level Control Register for master PIC (Bochs )
+/// ELCR1 — Edge/Level Control Register for master PIC (Bochs pci2isa.cc)
 pub const ELCR1_PORT: u16 = 0x04D0;
-/// ELCR2 — Edge/Level Control Register for slave PIC (Bochs )
+/// ELCR2 — Edge/Level Control Register for slave PIC (Bochs pci2isa.cc)
 pub const ELCR2_PORT: u16 = 0x04D1;
-/// CPU reset register (Bochs )
+/// CPU reset register (Bochs pci2isa.cc)
 pub const PCI_RESET_PORT: u16 = 0x0CF9;
 
-/// Valid IRQ mask for PCI routing (Bochs )
+/// Valid IRQ mask for PCI routing (Bochs pci2isa.cc)
 /// Bits set for IRQs that can be used: 3,4,5,6,7,9,10,11,12,14,15
 const VALID_PCI_IRQ_MASK: u16 = 0xDEF8;
 
 /// PIIX3 PCI-to-ISA bridge state.
-/// Bochs: bx_piix3_c ()
+/// Bochs: bx_piix3_c (pci2isa.h)
 #[derive(Debug)]
 pub struct BxPiix3 {
     /// PCI device/function number (PIIX3: bus 0, dev 1, func 0 = 0x08)
@@ -43,23 +43,23 @@ pub struct BxPiix3 {
     pub pci_conf: [u8; PCI_CONF_SIZE],
 
     /// Edge/Level Control Register 1 (master PIC IRQs 0-7)
-    /// Bochs: s.elcr1 ()
+    /// Bochs: s.elcr1 (pci2isa.h)
     pub elcr1: u8,
     /// Edge/Level Control Register 2 (slave PIC IRQs 8-15)
-    /// Bochs: s.elcr2 ()
+    /// Bochs: s.elcr2 (pci2isa.h)
     pub elcr2: u8,
 
-    /// APM command register (Bochs: s.apmc, )
+    /// APM command register (Bochs: s.apmc, pci2isa.h)
     pub apmc: u8,
-    /// APM status register (Bochs: s.apms, )
+    /// APM status register (Bochs: s.apms, pci2isa.h)
     pub apms: u8,
 
     /// PCI IRQ level tracking: [pirq_line][irq_number]
-    /// Bochs: s.irq_level[4][16] ()
+    /// Bochs: s.irq_level[4][16] (pci2isa.h)
     /// Each entry is a bitmask of which devices are asserting that IRQ through that PIRQ
     pub irq_level: [[u32; 16]; 4],
 
-    /// CPU reset register (Bochs: s.pci_reset, )
+    /// CPU reset register (Bochs: s.pci_reset, pci2isa.h)
     pub pci_reset: u8,
 
     /// Flag: ELCR1 changed — emulator should call pic.set_mode()
@@ -78,7 +78,7 @@ impl Default for BxPiix3 {
 
 impl BxPiix3 {
     /// Create a new PIIX3 bridge.
-    /// Bochs: bx_piix3_c::init() ()
+    /// Bochs: bx_piix3_c::init() (pci2isa.cc)
     pub fn new() -> Self {
         let mut bridge = Self {
             devfunc: super::pci::pci_device(1, 0), // 0x08
@@ -98,7 +98,7 @@ impl BxPiix3 {
     }
 
     /// Initialize PCI configuration space with PIIX3 identity.
-    /// Bochs: init_pci_conf(0x8086, 0x7000, 0x00, 0x060100, 0x80, 0) ()
+    /// Bochs: init_pci_conf(0x8086, 0x7000, 0x00, 0x060100, 0x80, 0) (pci2isa.cc)
     fn init_pci_conf(&mut self) {
         // Vendor ID: Intel (0x8086)
         self.pci_conf[0x00] = 0x86;
@@ -124,7 +124,7 @@ impl BxPiix3 {
     }
 
     /// Reset the PIIX3 bridge.
-    /// Bochs: bx_piix3_c::reset() ()
+    /// Bochs: bx_piix3_c::reset() (pci2isa.cc)
     pub fn reset(&mut self) {
         self.pci_conf[0x05] = 0x00;
         self.pci_conf[0x06] = 0x00;
@@ -153,7 +153,7 @@ impl BxPiix3 {
         self.pci_conf[0xAC] = 0x00;
         self.pci_conf[0xAE] = 0x00;
 
-        // Reset PIRQ routing to disabled ()
+        // Reset PIRQ routing to disabled (pci2isa.cc)
         for i in 0..4 {
             self.pci_conf[0x60 + i] = 0x80;
         }
@@ -174,7 +174,7 @@ impl BxPiix3 {
     // ─── I/O Port Read Handler ───────────────────────────────────────────
 
     /// Read from PCI-to-ISA bridge I/O ports.
-    /// Bochs: bx_piix3_c::read() ()
+    /// Bochs: bx_piix3_c::read() (pci2isa.cc)
     pub fn read(&self, address: u16) -> u32 {
         match address {
             0x00B2 => self.apmc as u32,
@@ -187,10 +187,10 @@ impl BxPiix3 {
     }
 
     /// Write to PCI-to-ISA bridge I/O ports.
-    /// Bochs: bx_piix3_c::write() ()
+    /// Bochs: bx_piix3_c::write() (pci2isa.cc)
     pub fn write(&mut self, address: u16, value: u32, io_len: u8) {
         match address {
-            // APM command port ()
+            // APM command port (pci2isa.cc)
             0x00B2 => {
                 // Note: In Bochs this forwards to ACPI generate_smi()
                 // In our architecture, the ACPI device also listens on 0xB2
@@ -199,11 +199,11 @@ impl BxPiix3 {
                     self.apms = (value >> 8) as u8;
                 }
             }
-            // APM status port ()
+            // APM status port (pci2isa.cc)
             0x00B3 => {
                 self.apms = value as u8;
             }
-            // ELCR1 — master PIC edge/level ()
+            // ELCR1 — master PIC edge/level (pci2isa.cc)
             0x04D0 => {
                 let v = (value as u8) & 0xF8; // bits 0-2 always edge
                 if v != self.elcr1 {
@@ -212,7 +212,7 @@ impl BxPiix3 {
                     tracing::info!("ELCR1 = {:#04x}", self.elcr1);
                 }
             }
-            // ELCR2 — slave PIC edge/level ()
+            // ELCR2 — slave PIC edge/level (pci2isa.cc)
             0x04D1 => {
                 let v = (value as u8) & 0xDE; // bits 0 and 5 always edge
                 if v != self.elcr2 {
@@ -221,7 +221,7 @@ impl BxPiix3 {
                     tracing::info!("ELCR2 = {:#04x}", self.elcr2);
                 }
             }
-            // CPU reset register ()
+            // CPU reset register (pci2isa.cc)
             0x0CF9 => {
                 tracing::info!("CPU reset register write: {:#04x}", value);
                 self.pci_reset = (value as u8) & 0x02;
@@ -240,7 +240,7 @@ impl BxPiix3 {
     // ─── PCI Configuration Space ─────────────────────────────────────────
 
     /// Write to PCI configuration space.
-    /// Bochs: bx_piix3_c::pci_write_handler() ()
+    /// Bochs: bx_piix3_c::pci_write_handler() (pci2isa.cc)
     pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) {
         // BARs are read-only
         if (0x10..0x34).contains(&address) {
@@ -256,36 +256,36 @@ impl BxPiix3 {
             let oldval = self.pci_conf[addr];
 
             match addr {
-                // Command register ()
+                // Command register (pci2isa.cc)
                 0x04 => {
                     self.pci_conf[addr] = (value8 & 0x08) | 0x07;
                 }
-                // Command high byte () — i440FX
+                // Command high byte (pci2isa.cc) — i440FX
                 0x05 => {
                     self.pci_conf[addr] = value8 & 0x01;
                 }
-                // Status lo — read-only ()
+                // Status lo — read-only (pci2isa.cc)
                 0x06 => {}
-                // Status hi — write-1-to-clear () — i440FX
+                // Status hi — write-1-to-clear (pci2isa.cc) — i440FX
                 0x07 => {
                     let clear_bits = value8 & 0x78;
                     self.pci_conf[addr] = (oldval & !clear_bits) | 0x02;
                 }
-                // XBCS register () — BIOS write enable
+                // XBCS register (pci2isa.cc) — BIOS write enable
                 0x4E => {
                     if (value8 & 0x04) != (oldval & 0x04) {
                         tracing::debug!("BIOS write support set to {}", (value8 & 0x04) != 0);
                     }
                     self.pci_conf[addr] = value8;
                 }
-                // APIC enable / BIOS extended access ()
+                // APIC enable / BIOS extended access (pci2isa.cc)
                 0x4F => {
                     self.pci_conf[addr] = value8 & 0x01;
                     // bit 0: I/O APIC enable
                     // In Bochs, this calls DEV_ioapic_set_enabled()
                     tracing::debug!("PIIX3: APIC enable = {}", value8 & 0x01);
                 }
-                // PIRQ routing registers ()
+                // PIRQ routing registers (pci2isa.cc)
                 0x60..=0x63 => {
                     let v = value8 & 0x8F; // bits 4-6 reserved
                     if v != oldval {
@@ -297,11 +297,11 @@ impl BxPiix3 {
                         );
                     }
                 }
-                // USB function enable ()
+                // USB function enable (pci2isa.cc)
                 0x6A => {
                     self.pci_conf[addr] = value8 & 0xD7;
                 }
-                // APIC base address ()
+                // APIC base address (pci2isa.cc)
                 0x80 => {
                     self.pci_conf[addr] = value8 & 0x7F;
                 }
@@ -328,14 +328,14 @@ impl BxPiix3 {
     // ─── PCI IRQ Routing ─────────────────────────────────────────────────
 
     /// Route a PCI interrupt to an ISA IRQ.
-    /// Bochs: bx_piix3_c::pci_set_irq() ()
+    /// Bochs: bx_piix3_c::pci_set_irq() (pci2isa.cc)
     ///
     /// Returns Some(irq, level) if the PIC IRQ line should change, None otherwise.
     pub fn pci_set_irq(&mut self, devfunc: u8, line: u8, level: bool) -> Option<(u8, bool)> {
         let device = devfunc >> 3;
 
         // Compute PIRQ index from device slot and interrupt line
-        // Bochs  (i440FX path)
+        // Bochs pci2isa.cc (i440FX path)
         let pirq = if device == 1 {
             (line - 1) & 3
         } else if device < 7 {

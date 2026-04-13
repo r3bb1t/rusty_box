@@ -101,8 +101,8 @@ pub const BX_MSR_MTRRCAP_DEFAULT: u64 = 0x0508;
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Initialize MSR infrastructure before reset.
-    /// Bochs : zeros configurable MSR array.
-    /// Actual MSR default values are set in reset() matching Bochs .
+    /// Bochs init.cc: zeros configurable MSR array.
+    /// Actual MSR default values are set in reset() matching Bochs init.cc.
     pub(super) fn init_msrs(&mut self) {
         // Bochs zeroes the configurable MSR array here (BX_MSR_MAX_INDEX entries).
         // Our MSR struct fields are initialized via Default, so no additional work needed.

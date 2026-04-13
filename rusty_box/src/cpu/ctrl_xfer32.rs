@@ -16,10 +16,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// Branch to a near 32-bit address
-    /// Matching C++  branch_near32
+    /// Matching C++ ctrl_xfer32.cc branch_near32
     pub(super) fn branch_near32(&mut self, new_eip: u32) -> Result<()> {
         // Check CS limit (matching C++ line 33-37)
-        // Original: Bochs cpu/
+        // Original: Bochs cpu/ctrl_xfer32.cc
         let limit = self.get_segment_limit(BxSegregs::Cs);
         if new_eip > limit {
             tracing::error!(
@@ -413,7 +413,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// LOOP32 rel8 - Decrement ECX, jump if not zero (32-bit mode)
-    /// LOOP32 rel8 — Bochs 
+    /// LOOP32 rel8 — Bochs ctrl_xfer32.cc
     /// Decrements ECX or CX (based on as32L), jumps if nonzero.
     pub fn loop32_jb(&mut self, instr: &Instruction) -> Result<()> {
         if instr.as32_l() != 0 {
@@ -434,7 +434,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// LOOPE32/LOOPZ32 rel8 — Bochs 
+    /// LOOPE32/LOOPZ32 rel8 — Bochs ctrl_xfer32.cc
     pub fn loope32_jb(&mut self, instr: &Instruction) -> Result<()> {
         if instr.as32_l() != 0 {
             let count = self.ecx().wrapping_sub(1);
@@ -454,7 +454,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         Ok(())
     }
 
-    /// LOOPNE32/LOOPNZ32 rel8 — Bochs 
+    /// LOOPNE32/LOOPNZ32 rel8 — Bochs ctrl_xfer32.cc
     pub fn loopne32_jb(&mut self, instr: &Instruction) -> Result<()> {
         if instr.as32_l() != 0 {
             let count = self.ecx().wrapping_sub(1);
@@ -479,7 +479,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// Load segment register in real mode
-    /// Based on Bochs  load_seg_reg() real/v8086 path
+    /// Based on Bochs segment_ctrl_pro.cc load_seg_reg() real/v8086 path
     pub(super) fn load_seg_reg_real_mode(&mut self, seg: BxSegregs, selector: u16) {
         let seg_idx = seg as usize;
 
@@ -495,7 +495,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // "Support for big real mode"
         // Only set these fields in v8086 mode
         if !self.real_mode() {
-            // v8086 mode — Bochs 
+            // v8086 mode — Bochs segment_ctrl_pro.cc
             self.sregs[seg_idx].cache.r#type = 3; // DATA_READ_WRITE_ACCESSED
             self.sregs[seg_idx].cache.dpl = 3;
             self.sregs[seg_idx].cache.u.set_segment_limit_scaled(0xFFFF);
@@ -604,7 +604,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// CALL32_Ap - Far call with absolute pointer (32-bit)
-    /// Matching C++ 
+    /// Matching C++ ctrl_xfer32.cc
     pub fn call32_ap(&mut self, instr: &Instruction) -> Result<()> {
         let cs_raw = instr.iw2();
         let disp32 = instr.id();
@@ -709,7 +709,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// RETfar32_Iw - Far return with immediate (32-bit)
-    /// Matching C++ 
+    /// Matching C++ ctrl_xfer32.cc
     pub fn retfar32_iw(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;

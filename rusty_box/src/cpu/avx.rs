@@ -848,7 +848,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// VINSERTF128 / VINSERTI128 — Insert 128-bit value into 256-bit register
     /// VEX.256.66.0F3A.W0 18 /r ib (VINSERTF128)
     /// VEX.256.66.0F3A.W0 38 /r ib (VINSERTI128)
-    /// Matches Bochs VINSERTF128_VdqHdqWdqIbR ()
+    /// Matches Bochs VINSERTF128_VdqHdqWdqIbR (avx.cc)
     /// Both instructions perform the identical operation — integer vs float is
     /// only a naming distinction.
     /// dst = src1 (VEX.vvvv) with 128-bit lane[imm8[0]] replaced by src2 (rm)
@@ -910,7 +910,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VPERM2I128 — Permute 128-bit integer values from two 256-bit sources
     /// VEX.256.66.0F3A.W0 46 /r ib
-    /// Matches Bochs VPERM2F128_VdqHdqWdqIbR ()
+    /// Matches Bochs VPERM2F128_VdqHdqWdqIbR (avx.cc)
     /// For each 128-bit half (n=0,1): select from imm8 bits [n*4+3:n*4]
     ///   bit 3: zero that half
     ///   bit 1: select op2 (else op1)
@@ -950,7 +950,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// VPSHUFB — Packed Shuffle Bytes (VEX.L aware, 3-operand VEX encoding)
     /// VEX.128/256.66.0F38 00 /r
-    /// Matches Bochs VPSHUFB () — per-lane byte shuffle
+    /// Matches Bochs VPSHUFB (avx512.cc) — per-lane byte shuffle
     /// dst[i] = (mask[i] & 0x80) ? 0 : data[mask[i] & 0xF]  (within each 128-bit lane)
     pub(super) fn vpshufb(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
@@ -2086,7 +2086,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// VPMULHRSW — Packed Multiply High with Round and Scale (VEX.L aware)
-    /// Bochs : result[i] = (((src1[i] * src2[i]) >> 14) + 1) >> 1
+    /// Bochs simd_int.h: result[i] = (((src1[i] * src2[i]) >> 14) + 1) >> 1
     pub(super) fn vpmulhrsw(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let dst_idx = instr.dst();

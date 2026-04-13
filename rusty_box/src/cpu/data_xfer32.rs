@@ -190,7 +190,7 @@ pub fn MOV_EAX_Id<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
 
 /// MOVZX_GdEb: MOVZX r32, r/m8
 /// Opcode: 0x0F 0xB6, ModRM: r32, r/m8
-/// Original: bochs/cpu/ MOVZX_GdEbM/MOVZX_GdEbR
+/// Original: bochs/cpu/data_xfer32.cc MOVZX_GdEbM/MOVZX_GdEbR
 /// Zero extend byte operand into dword destination
 pub fn MOVZX_GdEb<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
     let dst_reg = instr.dst() as usize;
@@ -205,7 +205,7 @@ pub fn MOVZX_GdEb<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
 
 /// MOVZX_GdEw: MOVZX r32, r/m16
 /// Opcode: 0x0F 0xB7, ModRM: r32, r/m16
-/// Original: bochs/cpu/ MOVZX_GdEwM/MOVZX_GdEwR
+/// Original: bochs/cpu/data_xfer32.cc MOVZX_GdEwM/MOVZX_GdEwR
 /// Zero extend word operand into dword destination
 pub fn MOVZX_GdEw<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
     let dst_reg = instr.dst() as usize;
@@ -220,7 +220,7 @@ pub fn MOVZX_GdEw<I: BxCpuIdTrait>(cpu: &mut BxCpuC<I>, instr: &Instruction) {
 
 /// MOV_EAXOd: MOV EAX, moffs32
 /// Opcode: 0xA1
-/// Original: bochs/cpu/ MOV_EAXOd
+/// Original: bochs/cpu/data_xfer32.cc MOV_EAXOd
 /// Load EAX from memory at direct address (seg:offset)
 pub fn MOV_EAXOd<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
@@ -235,7 +235,7 @@ pub fn MOV_EAXOd<I: BxCpuIdTrait>(
 
 /// MOV_OdEAX: MOV moffs32, EAX
 /// Opcode: 0xA3
-/// Original: bochs/cpu/ MOV_OdEAX
+/// Original: bochs/cpu/data_xfer32.cc MOV_OdEAX
 /// Store EAX to memory at direct address (seg:offset)
 pub fn MOV_OdEAX<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,

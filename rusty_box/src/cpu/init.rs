@@ -57,10 +57,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             .filter(|feature| config.cpu_exclude_features.contains(feature))
             .collect();
 
-        // Populate ISA extensions bitmask from CPUID model — matches Bochs 
+        // Populate ISA extensions bitmask from CPUID model — matches Bochs init.cc
         self.ia_extensions_bitmask = self.cpuid.get_isa_extensions_bitmask();
 
-        // Populate VMX/SVM bitmasks — matches Bochs 
+        // Populate VMX/SVM bitmasks — matches Bochs init.cc
         self.vmx_extensions_bitmask = self.cpuid.get_vmx_extensions_bitmask();
         self.svm_extensions_bitmask = self.cpuid.get_svm_extensions_bitmask();
 
@@ -110,7 +110,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.gen_reg[BX_NIL_REGISTER].set_rrx(0);
 
-        // Bochs : all general registers reset to 0
+        // Bochs init.cc: all general registers reset to 0
         // (includes ESP — BIOS sets SS:SP before any stack operations)
 
         self.eflags = EFlags::from_bits_retain(0x2); // Bit1 is always set
@@ -321,7 +321,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // MTRR/PAT registers must NOT change on INIT (software reset).
-        // Bochs : all MTRR init is inside if (source == BX_RESET_HARDWARE).
+        // Bochs init.cc: all MTRR init is inside if (source == BX_RESET_HARDWARE).
         if source == ResetReason::Hardware {
             self.msr.mtrrphys = [0; 16];
 
@@ -435,7 +435,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.invalidate_stack_cache();
         self.dtlb.flush();
         self.itlb.flush();
-        // Bochs  — iCache.breakLinks()
+        // Bochs paging.cc — iCache.breakLinks()
         // Invalidates page-split icache entries and increments trace link timestamp.
         // Without this, page-boundary instructions survive TLB flush and serve
         // stale bytes from old physical pages after page remapping.
@@ -450,7 +450,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.invalidate_stack_cache();
         self.dtlb.flush_non_global();
         self.itlb.flush_non_global();
-        // Bochs  — iCache.breakLinks()
+        // Bochs paging.cc — iCache.breakLinks()
         self.i_cache.break_links();
     }
 
@@ -467,7 +467,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     pub(super) fn handle_interrupt_mask_change(&mut self) {
-        // Based on Bochs  handleInterruptMaskChange
+        // Based on Bochs flag_ctrl_pro.cc handleInterruptMaskChange
         //
         // Bochs uses event_mask to gate interrupt delivery: when IF=0,
         // BX_EVENT_PENDING_INTR is added to event_mask (masked), so the
@@ -476,13 +476,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // pending, async_event is set to trigger delivery at next boundary.
         if self.eflags.contains(super::eflags::EFlags::IF_) {
             // EFLAGS.IF was set — unmask external interrupt events
-            // Bochs : unmask both PIC and LAPIC events
+            // Bochs flag_ctrl_pro.cc: unmask both PIC and LAPIC events
             self.unmask_event(
                 Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR,
             );
         } else {
             // EFLAGS.IF was cleared — mask external interrupt events
-            // Bochs : mask both PIC and LAPIC events
+            // Bochs flag_ctrl_pro.cc: mask both PIC and LAPIC events
             self.mask_event(
                 Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR,
             );

@@ -33,12 +33,12 @@ const DMA_MODE_SINGLE: u8 = 1;
 const DMA_MODE_BLOCK: u8 = 2;
 const DMA_MODE_CASCADE: u8 = 3;
 
-/// Index to find channel from page register number (Bochs )
+/// Index to find channel from page register number (Bochs dma.cc)
 /// channelindex[address - 0x81] maps page register port to channel number.
 /// Only indices [0],[1],[2],[6] are used (ports 0x81,0x82,0x83,0x87).
 const CHANNEL_INDEX: [u8; 7] = [2, 3, 1, 0, 0, 0, 0];
 
-/// DMA channel mode fields (Bochs )
+/// DMA channel mode fields (Bochs dma.h)
 #[derive(Debug, Clone, Default)]
 pub struct DmaChannelMode {
     /// Transfer mode type: 0=demand, 1=single, 2=block, 3=cascade
@@ -51,43 +51,43 @@ pub struct DmaChannelMode {
     pub(crate) transfer_type: u8,
 }
 
-/// State for a single DMA channel (Bochs )
+/// State for a single DMA channel (Bochs dma.h)
 #[derive(Debug, Clone, Default)]
 pub struct DmaChannel {
-    /// Channel mode fields (Bochs )
+    /// Channel mode fields (Bochs dma.h)
     pub(crate) mode: DmaChannelMode,
-    /// Base address register (Bochs )
+    /// Base address register (Bochs dma.h)
     pub(crate) base_address: u16,
-    /// Current address register (Bochs )
+    /// Current address register (Bochs dma.h)
     pub(crate) current_address: u16,
-    /// Base count register (Bochs )
+    /// Base count register (Bochs dma.h)
     pub(crate) base_count: u16,
-    /// Current count register (Bochs )
+    /// Current count register (Bochs dma.h)
     pub(crate) current_count: u16,
-    /// Page register (bits 16-23 of physical address, Bochs )
+    /// Page register (bits 16-23 of physical address, Bochs dma.h)
     pub(crate) page_reg: u8,
-    /// Channel in use by a device (Bochs )
+    /// Channel in use by a device (Bochs dma.h)
     pub(crate) used: bool,
 }
 
-/// 8237 DMA Controller state (one chip, Bochs )
+/// 8237 DMA Controller state (one chip, Bochs dma.h)
 #[derive(Debug, Clone)]
 pub struct Dma8237 {
-    /// DMA Request lines (Bochs )
+    /// DMA Request lines (Bochs dma.h)
     pub(crate) drq: [bool; 4],
-    /// DMA Acknowledge lines (Bochs )
+    /// DMA Acknowledge lines (Bochs dma.h)
     pub(crate) dack: [bool; 4],
-    /// Mask bits per channel (Bochs )
+    /// Mask bits per channel (Bochs dma.h)
     pub(crate) mask: [bool; 4],
-    /// Flip-flop for address/count byte access (Bochs )
+    /// Flip-flop for address/count byte access (Bochs dma.h)
     pub(crate) flip_flop: bool,
-    /// Status register (Bochs )
+    /// Status register (Bochs dma.h)
     pub(crate) status_reg: u8,
-    /// Command register (Bochs )
+    /// Command register (Bochs dma.h)
     pub(crate) command_reg: u8,
-    /// Controller disabled (command register bit 2, Bochs )
+    /// Controller disabled (command register bit 2, Bochs dma.h)
     pub(crate) ctrl_disabled: bool,
-    /// Channel state (Bochs )
+    /// Channel state (Bochs dma.h)
     pub(crate) chan: [DmaChannel; 4],
 }
 
@@ -110,7 +110,7 @@ impl Dma8237 {
         }
     }
 
-    /// Reset controller (Bochs  reset_controller)
+    /// Reset controller (Bochs dma.cc reset_controller)
     fn reset(&mut self) {
         self.mask = [true, true, true, true];
         self.ctrl_disabled = false;
@@ -120,7 +120,7 @@ impl Dma8237 {
     }
 }
 
-/// DMA 8-bit channel handler function pointer types (Bochs )
+/// DMA 8-bit channel handler function pointer types (Bochs dma.h)
 ///
 /// dmaRead8: called during DMA read (memory-to-I/O). Device reads from buffer.
 ///   `data_byte`: buffer containing data read from memory
@@ -134,11 +134,11 @@ impl Dma8237 {
 pub type DmaRead8Handler = fn(data_byte: &[u8], maxlen: u16) -> u16;
 pub type DmaWrite8Handler = fn(data_byte: &mut [u8], maxlen: u16) -> u16;
 
-/// DMA 16-bit channel handler function pointer types (Bochs )
+/// DMA 16-bit channel handler function pointer types (Bochs dma.h)
 pub type DmaRead16Handler = fn(data_word: &[u16], maxlen: u16) -> u16;
 pub type DmaWrite16Handler = fn(data_word: &mut [u16], maxlen: u16) -> u16;
 
-/// Per-channel DMA handler registrations (Bochs )
+/// Per-channel DMA handler registrations (Bochs dma.h)
 #[derive(Debug, Default)]
 struct DmaHandlers {
     dma_read8: Option<DmaRead8Handler>,
@@ -147,18 +147,18 @@ struct DmaHandlers {
     dma_write16: Option<DmaWrite16Handler>,
 }
 
-/// Dual DMA Controller System (Bochs )
+/// Dual DMA Controller System (Bochs dma.h)
 #[derive(Debug)]
 pub struct BxDmaC {
-    /// Controller state: s[0] = DMA1, s[1] = DMA2 (Bochs )
+    /// Controller state: s[0] = DMA1, s[1] = DMA2 (Bochs dma.h)
     pub(crate) s: [Dma8237; 2],
-    /// Hold Acknowledge (Bochs )
+    /// Hold Acknowledge (Bochs dma.h)
     hlda: bool,
-    /// Terminal Count (Bochs )
+    /// Terminal Count (Bochs dma.h)
     tc: bool,
-    /// Extra page registers (Bochs )
+    /// Extra page registers (Bochs dma.h)
     pub(crate) ext_page_reg: [u8; 16],
-    /// Per-channel DMA handlers (Bochs , h[4])
+    /// Per-channel DMA handlers (Bochs dma.h, h[4])
     handlers: [DmaHandlers; 4],
     /// Pointer to emulator RAM for DMA physical read/write.
     /// Matches Bochs DEV_MEM_READ_PHYSICAL_DMA / DEV_MEM_WRITE_PHYSICAL_DMA.
@@ -192,7 +192,7 @@ impl BxDmaC {
         }
     }
 
-    /// Initialize the DMA controllers (Bochs )
+    /// Initialize the DMA controllers (Bochs dma.cc)
     pub fn init(&mut self) {
         tracing::info!("DMA: Initializing 8237 DMA Controllers");
 
@@ -205,7 +205,7 @@ impl BxDmaC {
         self.hlda = false;
         self.tc = false;
 
-        // Init all channel state (Bochs )
+        // Init all channel state (Bochs dma.cc)
         for i in 0..2 {
             for c in 0..4 {
                 self.s[i].chan[c].mode.mode_type = 0;
@@ -222,7 +222,7 @@ impl BxDmaC {
         }
         self.ext_page_reg = [0; 16];
 
-        // Channel 4 is cascade (Bochs )
+        // Channel 4 is cascade (Bochs dma.cc)
         self.s[1].chan[0].used = true;
         tracing::info!("DMA: channel 4 used by cascade");
     }
@@ -239,13 +239,13 @@ impl BxDmaC {
         self.memory_len = mem_len;
     }
 
-    /// Reset the DMA controllers (Bochs )
+    /// Reset the DMA controllers (Bochs dma.cc)
     pub fn reset(&mut self) {
         self.reset_controller(0);
         self.reset_controller(1);
     }
 
-    /// Reset a single controller (Bochs )
+    /// Reset a single controller (Bochs dma.cc)
     fn reset_controller(&mut self, num: usize) {
         self.s[num].mask = [true, true, true, true];
         self.s[num].ctrl_disabled = false;
@@ -255,10 +255,10 @@ impl BxDmaC {
     }
 
     // -----------------------------------------------------------------------
-    // DMA handler registration (Bochs )
+    // DMA handler registration (Bochs dma.cc)
     // -----------------------------------------------------------------------
 
-    /// Register an 8-bit DMA channel handler (Bochs )
+    /// Register an 8-bit DMA channel handler (Bochs dma.cc)
     pub fn register_dma8_channel(
         &mut self,
         channel: usize,
@@ -281,7 +281,7 @@ impl BxDmaC {
         true
     }
 
-    /// Register a 16-bit DMA channel handler (Bochs )
+    /// Register a 16-bit DMA channel handler (Bochs dma.cc)
     pub fn register_dma16_channel(
         &mut self,
         channel: usize,
@@ -308,7 +308,7 @@ impl BxDmaC {
         true
     }
 
-    /// Unregister a DMA channel (Bochs )
+    /// Unregister a DMA channel (Bochs dma.cc)
     pub fn unregister_dma_channel(&mut self, channel: usize) -> bool {
         let ma_sl = if channel > 3 { 1 } else { 0 };
         let ch = channel & 0x03;
@@ -317,16 +317,16 @@ impl BxDmaC {
         true
     }
 
-    /// Get Terminal Count state (Bochs )
+    /// Get Terminal Count state (Bochs dma.cc)
     pub fn get_tc(&self) -> bool {
         self.tc
     }
 
     // -----------------------------------------------------------------------
-    // DMA control logic (Bochs )
+    // DMA control logic (Bochs dma.cc)
     // -----------------------------------------------------------------------
 
-    /// Set DRQ line for a channel (Bochs )
+    /// Set DRQ line for a channel (Bochs dma.cc)
     pub fn set_drq(&mut self, channel: usize, val: bool) {
         if channel > 7 {
             tracing::error!("set_DRQ() channel > 7");
@@ -342,16 +342,16 @@ impl BxDmaC {
         }
 
         if !val {
-            // Clear request bit in status reg (Bochs )
+            // Clear request bit in status reg (Bochs dma.cc)
             self.s[ma_sl].status_reg &= !(1 << (ch + 4));
             self.control_hrq(ma_sl);
             return;
         }
 
-        // Set request bit in status reg (Bochs )
+        // Set request bit in status reg (Bochs dma.cc)
         self.s[ma_sl].status_reg |= 1 << (ch + 4);
 
-        // Validate mode type (Bochs )
+        // Validate mode type (Bochs dma.cc)
         let mode_type = self.s[ma_sl].chan[ch].mode.mode_type;
         if mode_type != DMA_MODE_SINGLE
             && mode_type != DMA_MODE_DEMAND
@@ -360,7 +360,7 @@ impl BxDmaC {
             tracing::error!("set_DRQ: mode_type({:#04x}) not handled", mode_type);
         }
 
-        // Boundary check (Bochs )
+        // Boundary check (Bochs dma.cc)
         let dma_base = ((self.s[ma_sl].chan[ch].page_reg as u32) << 16)
             | ((self.s[ma_sl].chan[ch].base_address as u32) << ma_sl);
         let dma_roof = if !self.s[ma_sl].chan[ch].mode.address_decrement {
@@ -382,14 +382,14 @@ impl BxDmaC {
         self.control_hrq(ma_sl);
     }
 
-    /// Check DRQ lines and assert/deassert HRQ to CPU (Bochs )
+    /// Check DRQ lines and assert/deassert HRQ to CPU (Bochs dma.cc)
     fn control_hrq(&mut self, ma_sl: usize) {
-        // Do nothing if controller is disabled (Bochs )
+        // Do nothing if controller is disabled (Bochs dma.cc)
         if self.s[ma_sl].ctrl_disabled {
             return;
         }
 
-        // Deassert HRQ if no DRQ is pending (Bochs )
+        // Deassert HRQ if no DRQ is pending (Bochs dma.cc)
         if (self.s[ma_sl].status_reg & 0xF0) == 0 {
             if ma_sl != 0 {
                 // DMA2: deassert HRQ to CPU.
@@ -404,7 +404,7 @@ impl BxDmaC {
             return;
         }
 
-        // Find highest priority channel with active unmasked DRQ (Bochs )
+        // Find highest priority channel with active unmasked DRQ (Bochs dma.cc)
         for ch in 0..4 {
             if (self.s[ma_sl].status_reg & (1 << (ch + 4))) != 0 && !self.s[ma_sl].mask[ch] {
                 if ma_sl != 0 {
@@ -419,7 +419,7 @@ impl BxDmaC {
         }
     }
 
-    /// Raise HLDA — perform the actual DMA transfer (Bochs )
+    /// Raise HLDA — perform the actual DMA transfer (Bochs dma.cc)
     ///
     /// Called by the CPU at instruction boundary when HRQ is asserted.
     /// Finds the highest-priority channel with active DRQ, performs data transfer
@@ -433,7 +433,7 @@ impl BxDmaC {
 
         self.hlda = true;
 
-        // Find highest priority channel on DMA2 first (Bochs )
+        // Find highest priority channel on DMA2 first (Bochs dma.cc)
         let mut channel: usize = 4; // sentinel: no channel found
         for ch in 0..4 {
             if (self.s[1].status_reg & (1 << (ch + 4))) != 0 && !self.s[1].mask[ch] {
@@ -443,7 +443,7 @@ impl BxDmaC {
             }
         }
 
-        // If channel 0 on DMA2 (cascade), look at DMA1 (Bochs )
+        // If channel 0 on DMA2 (cascade), look at DMA1 (Bochs dma.cc)
         if channel == 0 {
             self.s[1].dack[0] = true;
             channel = 4; // reset sentinel
@@ -456,16 +456,16 @@ impl BxDmaC {
             }
         }
 
-        // No channel found — wait till unmasked (Bochs )
+        // No channel found — wait till unmasked (Bochs dma.cc)
         if channel >= 4 {
             return;
         }
 
-        // Compute physical address (Bochs )
+        // Compute physical address (Bochs dma.cc)
         let phy_addr: u32 = ((self.s[ma_sl].chan[channel].page_reg as u32) << 16)
             | ((self.s[ma_sl].chan[channel].current_address as u32) << (ma_sl as u32));
 
-        // Compute maxlen and TC (Bochs )
+        // Compute maxlen and TC (Bochs dma.cc)
         let mut maxlen: u16;
         if !self.s[ma_sl].chan[channel].mode.address_decrement {
             maxlen = (self.s[ma_sl].chan[channel].current_count + 1) << (ma_sl as u16);
@@ -486,7 +486,7 @@ impl BxDmaC {
         match transfer_type {
             1 => {
                 // Write: DMA controlled transfer of bytes from I/O to Memory
-                // (Bochs )
+                // (Bochs dma.cc)
                 if ma_sl == 0 {
                     if let Some(handler) = self.handlers[channel].dma_write8 {
                         len = handler(&mut buffer, maxlen);
@@ -509,7 +509,7 @@ impl BxDmaC {
             }
             2 => {
                 // Read: DMA controlled transfer of bytes from Memory to I/O
-                // (Bochs )
+                // (Bochs dma.cc)
 
                 // Read from physical memory into buffer
                 self.mem_read_physical_dma(phy_addr, maxlen as u32, &mut buffer);
@@ -530,7 +530,7 @@ impl BxDmaC {
                 }
             }
             0 => {
-                // Verify transfer (Bochs )
+                // Verify transfer (Bochs dma.cc)
                 if ma_sl == 0 {
                     if let Some(handler) = self.handlers[channel].dma_write8 {
                         len = handler(&mut buffer, 1);
@@ -549,16 +549,16 @@ impl BxDmaC {
                 }
             }
             _ => {
-                // transfer_type 3 is undefined (Bochs )
+                // transfer_type 3 is undefined (Bochs dma.cc)
                 tracing::error!("DMA: hlda: transfer_type 3 is undefined");
                 return;
             }
         }
 
-        // Set DACK (Bochs )
+        // Set DACK (Bochs dma.cc)
         self.s[ma_sl].dack[channel] = true;
 
-        // Update address and count (Bochs )
+        // Update address and count (Bochs dma.cc)
         if !self.s[ma_sl].chan[channel].mode.address_decrement {
             self.s[ma_sl].chan[channel].current_address =
                 self.s[ma_sl].chan[channel].current_address.wrapping_add(len);
@@ -569,24 +569,24 @@ impl BxDmaC {
         self.s[ma_sl].chan[channel].current_count =
             self.s[ma_sl].chan[channel].current_count.wrapping_sub(len);
 
-        // Check for count expiration (0xFFFF means underflow, Bochs )
+        // Check for count expiration (0xFFFF means underflow, Bochs dma.cc)
         if self.s[ma_sl].chan[channel].current_count == 0xFFFF {
             // Count expired — done with transfer
             // Assert TC, deassert HRQ & DACK
             self.s[ma_sl].status_reg |= 1 << channel; // Hold TC in status reg
 
             if !self.s[ma_sl].chan[channel].mode.autoinit_enable {
-                // Set mask bit if not in autoinit mode (Bochs )
+                // Set mask bit if not in autoinit mode (Bochs dma.cc)
                 self.s[ma_sl].mask[channel] = true;
             } else {
-                // Autoinit: reload count and base address (Bochs )
+                // Autoinit: reload count and base address (Bochs dma.cc)
                 self.s[ma_sl].chan[channel].current_address =
                     self.s[ma_sl].chan[channel].base_address;
                 self.s[ma_sl].chan[channel].current_count =
                     self.s[ma_sl].chan[channel].base_count;
             }
 
-            // Clear TC, HLDA, HRQ, DACK (Bochs )
+            // Clear TC, HLDA, HRQ, DACK (Bochs dma.cc)
             self.tc = false;
             self.hlda = false;
             // NOTE: pc_system not wired here; HRQ deassert is a no-op.
@@ -594,7 +594,7 @@ impl BxDmaC {
             // &mut BxPcSystemC to call set_hrq(false).
             self.s[ma_sl].dack[channel] = false;
             if ma_sl == 0 {
-                // Clear cascade (Bochs )
+                // Clear cascade (Bochs dma.cc)
                 self.set_drq(4, false);
                 self.s[1].dack[0] = false;
             }
@@ -680,15 +680,15 @@ impl BxDmaC {
     }
 
     // -----------------------------------------------------------------------
-    // I/O port read handler (Bochs )
+    // I/O port read handler (Bochs dma.cc)
     // -----------------------------------------------------------------------
 
-    /// Read from DMA I/O port (Bochs )
+    /// Read from DMA I/O port (Bochs dma.cc)
     pub fn read(&mut self, address: u16, _io_len: u8) -> u32 {
         let ma_sl: usize = if address >= 0xC0 { 1 } else { 0 };
 
         match address {
-            // Current address registers (Bochs )
+            // Current address registers (Bochs dma.cc)
             0x00 | 0x02 | 0x04 | 0x06 | 0xC0 | 0xC4 | 0xC8 | 0xCC => {
                 let channel =
                     ((address >> (1 + ma_sl as u16)) & 0x03) as usize;
@@ -701,7 +701,7 @@ impl BxDmaC {
                 }
             }
 
-            // Current count registers (Bochs )
+            // Current count registers (Bochs dma.cc)
             0x01 | 0x03 | 0x05 | 0x07 | 0xC2 | 0xC6 | 0xCA | 0xCE => {
                 let channel =
                     ((address >> (1 + ma_sl as u16)) & 0x03) as usize;
@@ -714,14 +714,14 @@ impl BxDmaC {
                 }
             }
 
-            // Status register (Bochs )
+            // Status register (Bochs dma.cc)
             0x08 | 0xD0 => {
                 let retval = self.s[ma_sl].status_reg;
                 self.s[ma_sl].status_reg &= 0xF0; // Clear TC bits on read
                 retval as u32
             }
 
-            // Temporary register (Bochs )
+            // Temporary register (Bochs dma.cc)
             0x0D | 0xDA => {
                 tracing::debug!(
                     "DMA-{}: read of temporary register always returns 0",
@@ -730,19 +730,19 @@ impl BxDmaC {
                 0
             }
 
-            // DMA1 page registers (Bochs )
+            // DMA1 page registers (Bochs dma.cc)
             0x0081 | 0x0082 | 0x0083 | 0x0087 => {
                 let channel = CHANNEL_INDEX[(address - 0x81) as usize] as usize;
                 self.s[0].chan[channel].page_reg as u32
             }
 
-            // DMA2 page registers (Bochs )
+            // DMA2 page registers (Bochs dma.cc)
             0x0089 | 0x008A | 0x008B | 0x008F => {
                 let channel = CHANNEL_INDEX[(address - 0x89) as usize] as usize;
                 self.s[1].chan[channel].page_reg as u32
             }
 
-            // Extra page registers (Bochs )
+            // Extra page registers (Bochs dma.cc)
             0x0080 | 0x0084 | 0x0085 | 0x0086 | 0x0088 | 0x008C | 0x008D | 0x008E => {
                 tracing::debug!(
                     "DMA: read extra page register {:#06x} (unused)",
@@ -751,7 +751,7 @@ impl BxDmaC {
                 self.ext_page_reg[(address & 0x0F) as usize] as u32
             }
 
-            // Read all mask bits (undocumented, Bochs )
+            // Read all mask bits (undocumented, Bochs dma.cc)
             0x0F | 0xDE => {
                 let retval = (self.s[ma_sl].mask[0] as u8)
                     | ((self.s[ma_sl].mask[1] as u8) << 1)
@@ -768,12 +768,12 @@ impl BxDmaC {
     }
 
     // -----------------------------------------------------------------------
-    // I/O port write handler (Bochs )
+    // I/O port write handler (Bochs dma.cc)
     // -----------------------------------------------------------------------
 
-    /// Write to DMA I/O port (Bochs )
+    /// Write to DMA I/O port (Bochs dma.cc)
     pub fn write(&mut self, address: u16, value: u32, io_len: u8) {
-        // Handle word write to mode register (Bochs )
+        // Handle word write to mode register (Bochs dma.cc)
         if io_len > 1 {
             if io_len == 2 && address == 0x0B {
                 self.write(address, value & 0xFF, 1);
@@ -792,7 +792,7 @@ impl BxDmaC {
         let ma_sl: usize = if address >= 0xC0 { 1 } else { 0 };
 
         match address {
-            // Address registers (Bochs )
+            // Address registers (Bochs dma.cc)
             0x00 | 0x02 | 0x04 | 0x06 | 0xC0 | 0xC4 | 0xC8 | 0xCC => {
                 let channel =
                     ((address >> (1 + ma_sl as u16)) & 0x03) as usize;
@@ -808,7 +808,7 @@ impl BxDmaC {
                 self.s[ma_sl].flip_flop = !self.s[ma_sl].flip_flop;
             }
 
-            // Count registers (Bochs )
+            // Count registers (Bochs dma.cc)
             0x01 | 0x03 | 0x05 | 0x07 | 0xC2 | 0xC6 | 0xCA | 0xCE => {
                 let channel =
                     ((address >> (1 + ma_sl as u16)) & 0x03) as usize;
@@ -824,7 +824,7 @@ impl BxDmaC {
                 self.s[ma_sl].flip_flop = !self.s[ma_sl].flip_flop;
             }
 
-            // Command register (Bochs )
+            // Command register (Bochs dma.cc)
             0x08 | 0xD0 => {
                 if (value & 0xFB) != 0x00 {
                     tracing::debug!(
@@ -837,7 +837,7 @@ impl BxDmaC {
                 self.control_hrq(ma_sl);
             }
 
-            // Request register (Bochs )
+            // Request register (Bochs dma.cc)
             0x09 | 0xD2 => {
                 let channel = (value & 0x03) as usize;
                 if value & 0x04 != 0 {
@@ -860,7 +860,7 @@ impl BxDmaC {
                 self.control_hrq(ma_sl);
             }
 
-            // Single mask register (Bochs )
+            // Single mask register (Bochs dma.cc)
             0x0A | 0xD4 => {
                 let channel = (value & 0x03) as usize;
                 self.s[ma_sl].mask[channel] = (value & 0x04) != 0;
@@ -874,7 +874,7 @@ impl BxDmaC {
                 self.control_hrq(ma_sl);
             }
 
-            // Mode register (Bochs )
+            // Mode register (Bochs dma.cc)
             0x0B | 0xD6 => {
                 let channel = (value & 0x03) as usize;
                 self.s[ma_sl].chan[channel].mode.mode_type = (value >> 6) & 0x03;
@@ -889,26 +889,26 @@ impl BxDmaC {
                 );
             }
 
-            // Clear byte flip/flop (Bochs )
+            // Clear byte flip/flop (Bochs dma.cc)
             0x0C | 0xD8 => {
                 tracing::debug!("DMA-{}: clear flip/flop", ma_sl + 1);
                 self.s[ma_sl].flip_flop = false;
             }
 
-            // Master clear (Bochs )
+            // Master clear (Bochs dma.cc)
             0x0D | 0xDA => {
                 tracing::debug!("DMA-{}: master clear", ma_sl + 1);
                 self.reset_controller(ma_sl);
             }
 
-            // Clear mask register (Bochs )
+            // Clear mask register (Bochs dma.cc)
             0x0E | 0xDC => {
                 tracing::debug!("DMA-{}: clear mask register", ma_sl + 1);
                 self.s[ma_sl].mask = [false, false, false, false];
                 self.control_hrq(ma_sl);
             }
 
-            // Write all mask bits (Bochs )
+            // Write all mask bits (Bochs dma.cc)
             0x0F | 0xDE => {
                 tracing::debug!("DMA-{}: write all mask bits", ma_sl + 1);
                 let mut v = value;
@@ -922,21 +922,21 @@ impl BxDmaC {
                 self.control_hrq(ma_sl);
             }
 
-            // DMA1 page registers (Bochs )
+            // DMA1 page registers (Bochs dma.cc)
             0x81 | 0x82 | 0x83 | 0x87 => {
                 let channel = CHANNEL_INDEX[(address - 0x81) as usize] as usize;
                 self.s[0].chan[channel].page_reg = value;
                 tracing::debug!("DMA-1: page register {} = {:#04x}", channel, value);
             }
 
-            // DMA2 page registers (Bochs )
+            // DMA2 page registers (Bochs dma.cc)
             0x89 | 0x8A | 0x8B | 0x8F => {
                 let channel = CHANNEL_INDEX[(address - 0x89) as usize] as usize;
                 self.s[1].chan[channel].page_reg = value;
                 tracing::debug!("DMA-2: page register {} = {:#04x}", channel + 4, value);
             }
 
-            // Extra page registers (Bochs )
+            // Extra page registers (Bochs dma.cc)
             0x0080 | 0x0084 | 0x0085 | 0x0086 | 0x0088 | 0x008C | 0x008D | 0x008E => {
                 tracing::debug!("DMA: write extra page register {:#06x} (unused)", address);
                 self.ext_page_reg[(address & 0x0F) as usize] = value;

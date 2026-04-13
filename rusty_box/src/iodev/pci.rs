@@ -22,12 +22,12 @@ pub const PCI_CONFIG_ADDR: u16 = 0x0CF8;
 pub const PCI_CONFIG_DATA: u16 = 0x0CFC;
 
 /// Encode a PCI device/function number: (device << 3) | function
-/// Bochs: BX_PCI_DEVICE(device, function) macro ()
+/// Bochs: BX_PCI_DEVICE(device, function) macro (pci.h)
 pub const fn pci_device(device: u8, function: u8) -> u8 {
     (device << 3) | (function & 7)
 }
 
-/// PCI interrupt pin constants (Bochs )
+/// PCI interrupt pin constants (Bochs pci.h)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(u8)]
 pub enum PciIntPin {
@@ -41,16 +41,16 @@ pub enum PciIntPin {
 
 /// i440FX PMC (PCI/Memory Controller Hub).
 /// Bus 0, Device 0, Function 0.
-/// Bochs: bx_pci_bridge_c (, pci.cc)
+/// Bochs: bx_pci_bridge_c (pci.h, pci.cc)
 #[derive(Debug)]
 pub struct BxPciBridge {
     /// PCI configuration space (256 bytes)
     pub pci_conf: [u8; PCI_CONF_SIZE],
     /// DRAM Row Boundary Array (8 entries)
-    /// Bochs: DRBA[8] ()
+    /// Bochs: DRBA[8] (pci.h)
     drba: [u8; 8],
     /// DRAM detection state (bitmask of changed DRBA registers)
-    /// Bochs: dram_detect ()
+    /// Bochs: dram_detect (pci.h)
     dram_detect: u8,
 }
 
@@ -62,7 +62,7 @@ impl Default for BxPciBridge {
 
 impl BxPciBridge {
     /// Create a new i440FX host bridge.
-    /// Bochs: bx_pci_bridge_c::bx_pci_bridge_c() + init() ()
+    /// Bochs: bx_pci_bridge_c::bx_pci_bridge_c() + init() (pci.cc)
     pub fn new() -> Self {
         let mut bridge = Self {
             pci_conf: [0; PCI_CONF_SIZE],
@@ -74,7 +74,7 @@ impl BxPciBridge {
     }
 
     /// Initialize PCI configuration space with i440FX identity.
-    /// Bochs: init_pci_conf(0x8086, 0x1237, 0x00, 0x060000, 0x00, 0) ()
+    /// Bochs: init_pci_conf(0x8086, 0x1237, 0x00, 0x060000, 0x00, 0) (pci.cc)
     fn init_pci_conf(&mut self) {
         // Vendor ID: Intel (0x8086)
         self.pci_conf[0x00] = 0x86;
@@ -93,7 +93,7 @@ impl BxPciBridge {
     }
 
     /// Initialize DRAM row boundary registers based on RAM size.
-    /// Bochs:  (i440FX path)
+    /// Bochs: pci.cc (i440FX path)
     pub fn init_dram(&mut self, ramsize_mb: u32) {
         let mut ramsize = ramsize_mb;
         let module_types: [u8; 3] = [128, 32, 8];
@@ -134,34 +134,34 @@ impl BxPciBridge {
     }
 
     /// Reset the host bridge.
-    /// Bochs: bx_pci_bridge_c::reset() () — i440FX path
+    /// Bochs: bx_pci_bridge_c::reset() (pci.cc) — i440FX path
     pub fn reset(&mut self) {
-        // Command register ()
+        // Command register (pci.cc)
         self.pci_conf[0x04] = 0x06;
         self.pci_conf[0x05] = 0x00;
-        // Status register ()
+        // Status register (pci.cc)
         self.pci_conf[0x06] = 0x80;
         self.pci_conf[0x07] = 0x02;
         // Latency timer and header type
         self.pci_conf[0x0D] = 0x00;
         self.pci_conf[0x0F] = 0x00;
-        // Host bridge control ()
+        // Host bridge control (pci.cc)
         self.pci_conf[0x50] = 0x00;
-        self.pci_conf[0x51] = 0x01; // i440FX: 
+        self.pci_conf[0x51] = 0x01; // i440FX: pci.cc
         self.pci_conf[0x52] = 0x00;
         self.pci_conf[0x53] = 0x80;
         self.pci_conf[0x54] = 0x00;
         self.pci_conf[0x55] = 0x00;
         self.pci_conf[0x56] = 0x00;
         self.pci_conf[0x57] = 0x01;
-        self.pci_conf[0x58] = 0x10; // i440FX: 
-                                    // PAM registers 0x59-0x5F: all zeros ()
+        self.pci_conf[0x58] = 0x10; // i440FX: pci.cc
+                                    // PAM registers 0x59-0x5F: all zeros (pci.cc)
         for i in 0x59..0x60 {
             self.pci_conf[i] = 0x00;
         }
-        // SMRAM control ()
+        // SMRAM control (pci.cc)
         self.pci_conf[0x72] = 0x02;
-        // ERRCMD/ERRSTS ()
+        // ERRCMD/ERRSTS (pci.cc)
         self.pci_conf[0xB4] = 0x00;
         self.pci_conf[0xB9] = 0x00;
         self.pci_conf[0xBA] = 0x00;
@@ -171,11 +171,11 @@ impl BxPciBridge {
     }
 
     /// Write to PCI configuration space.
-    /// Bochs: bx_pci_bridge_c::pci_write_handler() () — i440FX path
+    /// Bochs: bx_pci_bridge_c::pci_write_handler() (pci.cc) — i440FX path
     /// Returns `true` if PAM registers were modified (caller must update memory types).
     pub fn pci_write(&mut self, address: u8, value: u32, io_len: u8) -> bool {
         let mut pam_changed = false;
-        // BARs are read-only ()
+        // BARs are read-only (pci.cc)
         if (0x10..0x34).contains(&address) {
             return false;
         }
@@ -189,34 +189,34 @@ impl BxPciBridge {
             let oldval = self.pci_conf[addr];
 
             match addr {
-                // Command register () — i440FX
+                // Command register (pci.cc) — i440FX
                 0x04 => {
                     self.pci_conf[addr] = (value8 & 0x40) | 0x06;
                 }
-                // Command high byte ()
+                // Command high byte (pci.cc)
                 0x05 => {
                     self.pci_conf[addr] = value8 & 0x01;
                 }
-                // Status lo — read-only ()
+                // Status lo — read-only (pci.cc)
                 0x06 | 0x0C | 0x0F => {}
-                // Status hi — write-1-to-clear ()
+                // Status hi — write-1-to-clear (pci.cc)
                 0x07 => {
                     let clear_bits = (self.pci_conf[0x07] & !value8) | 0x02;
                     self.pci_conf[addr] = clear_bits;
                 }
-                // Latency timer ()
+                // Latency timer (pci.cc)
                 0x0D => {
                     self.pci_conf[addr] = value8 & 0xF8;
                 }
-                // NBXCFG () — i440FX
+                // NBXCFG (pci.cc) — i440FX
                 0x50 => {
                     self.pci_conf[addr] = value8 & 0x70;
                 }
-                // NBXCFG+1 () — i440FX
+                // NBXCFG+1 (pci.cc) — i440FX
                 0x51 => {
                     self.pci_conf[addr] = (value8 & 0x80) | 0x01;
                 }
-                // PAM registers ()
+                // PAM registers (pci.cc)
                 0x59..=0x5F => {
                     if value8 != oldval {
                         self.pci_conf[addr] = value8;
@@ -228,7 +228,7 @@ impl BxPciBridge {
                         );
                     }
                 }
-                // DRBA registers ()
+                // DRBA registers (pci.cc)
                 0x60..=0x67 => {
                     self.pci_conf[addr] = value8;
                     let drba_reg = addr & 0x07;
@@ -239,17 +239,17 @@ impl BxPciBridge {
                         self.dram_detect &= !(1 << drba_reg);
                     }
                 }
-                // SMRAM control ()
+                // SMRAM control (pci.cc)
                 0x72 => {
                     self.smram_control(value8);
                 }
-                // ERRCMD () — preserve bits 1,3 from old, write bits 0,2,4-7 from new
+                // ERRCMD (pci.cc) — preserve bits 1,3 from old, write bits 0,2,4-7 from new
                 0x7A => {
                     self.pci_conf[addr] = (value8 & 0xF5) | (self.pci_conf[addr] & 0x0A);
                 }
-                // ERRSTS () — read-only in i440FX
+                // ERRSTS (pci.cc) — read-only in i440FX
                 0xB8 => {}
-                // Default: store value ()
+                // Default: store value (pci.cc)
                 _ => {
                     self.pci_conf[addr] = value8;
                 }
@@ -301,7 +301,7 @@ impl BxPciBridge {
     }
 
     /// SMRAM control register handler.
-    /// Bochs: bx_pci_bridge_c::smram_control() ()
+    /// Bochs: bx_pci_bridge_c::smram_control() (pci.cc)
     fn smram_control(&mut self, value8: u8) {
         let mut v = (value8 & 0x78) | 0x02; // ignore reserved bits
 

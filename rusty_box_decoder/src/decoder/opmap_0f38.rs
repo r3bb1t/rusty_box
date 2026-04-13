@@ -181,14 +181,14 @@ pub const BxOpcodeTable0F38CD: [u64; 1] =
 pub const BxOpcodeTable0F38CF: [u64; 1] =
     [last_opcode(ATTR_SSE_PREFIX_66, Opcode::Gf2p8mulbVdqWdq)];
 // BMI1: ANDN (VEX.NDS.LZ.0F38.W0/W1 F2 /r)
-// Bochs 
+// Bochs fetchdecode_opmap_avx.cc
 pub const BxOpcodeTable0F38F2_BMI: [u64; 2] = [
     form_opcode(ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W0,             Opcode::AndnGdBdEd),
     last_opcode(ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::AndnGqBqEq),
 ];
 
 // BMI1: BLSR/BLSMSK/BLSI group (VEX.NDD.LZ.0F38.W0/W1 F3 /1,/2,/3)
-// Bochs 
+// Bochs fetchdecode_opmap_avx.cc
 pub const BxOpcodeTable0F38F3_BMI: [u64; 6] = [
     form_opcode(ATTR_NNN1 | ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W0,             Opcode::BlsrBdEd),
     form_opcode(ATTR_NNN1 | ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::BlsrBqEq),
@@ -199,7 +199,7 @@ pub const BxOpcodeTable0F38F3_BMI: [u64; 6] = [
 ];
 
 // BMI1/BMI2: BEXTR/SHLX/SARX/SHRX (VEX.NDS.LZ.0F38.W0/W1 F7 /r)
-// Bochs 
+// Bochs fetchdecode_opmap_avx.cc
 pub const BxOpcodeTable0F38F7_BMI: [u64; 8] = [
     form_opcode(ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W0,             Opcode::BextrGdEdBd),
     form_opcode(ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W1 | ATTR_IS64, Opcode::BextrGqEqBq),
@@ -262,7 +262,7 @@ pub const BxOpcodeTable0F38F1: [u64; 6] = [
 
 // opcode 0F 38 F5
 // Legacy: WRUSS (66 prefix); BMI2: BZHI (no prefix), PEXT (F3), PDEP (F2)
-// Bochs 
+// Bochs fetchdecode_opmap_avx.cc
 pub const BxOpcodeTable0F38F5: [u64; 8] = [
     // BMI2: BZHI (VEX.NDS.LZ.0F38.W0/W1 F5 /r, no prefix)
     form_opcode(ATTR_SSE_NO_PREFIX | ATTR_VL128 | ATTR_VEX_W0,             Opcode::BzhiGdBdEd),
@@ -286,7 +286,7 @@ pub const BxOpcodeTable0F38F5: [u64; 8] = [
 
 // opcode 0F 38 F6
 // Legacy: WRSS (no prefix), ADCX (66), ADOX (F3); BMI2: MULX (F2)
-// Bochs 
+// Bochs fetchdecode_opmap_avx.cc
 pub const BxOpcodeTable0F38F6: [u64; 8] = [
     // BMI2: MULX (VEX.NDD.LZ.F2.0F38.W0/W1 F6 /r)
     form_opcode(ATTR_SSE_PREFIX_F2 | ATTR_VL128 | ATTR_VEX_W0,             Opcode::MulxGdBdEd),

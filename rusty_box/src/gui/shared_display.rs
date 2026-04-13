@@ -94,7 +94,7 @@ impl SharedDisplay {
 
     /// Render VGA text buffer (char+attr pairs) into the RGBA framebuffer.
     ///
-    /// Algorithm matches Bochs `draw_char_common()` from .
+    /// Algorithm matches Bochs `draw_char_common()` from gui.cc.
     ///
     /// # Parameters
     /// - `text`: VGA text buffer — 2 bytes per cell (char, attr), row-major
@@ -126,7 +126,7 @@ impl SharedDisplay {
         // Helper closure: render a single character cell into framebuffer slice
         let render_cell =
             |fb: &mut [u8], row: u32, col: u32, ch: usize, attr: u8, is_cursor: bool| {
-                // ACTL palette indirection (Bochs )
+                // ACTL palette indirection (Bochs gui.cc)
                 let fg_idx = actl_palette[(attr & 0x0F) as usize] as usize;
                 let bg_idx = actl_palette[((attr >> 4) & 0x07) as usize] as usize;
                 let fg = if fg_idx < 16 {
@@ -156,7 +156,7 @@ impl SharedDisplay {
 
                     for bit in 0..8u32 {
                         // Font data (VGA_FONT_8X16 from Bochs bx_vgafont) is LSB-first:
-                        // bit 0 = leftmost pixel. Matches Bochs DrawBitmap ().
+                        // bit 0 = leftmost pixel. Matches Bochs DrawBitmap (rfb.cc).
                         let pixel_on = (font_byte >> bit) & 1 != 0;
                         let color = if cursor_invert {
                             if pixel_on {
@@ -219,7 +219,7 @@ impl SharedDisplay {
             let text_len = text.len();
             for row in 0..rows {
                 for col in 0..cols {
-                    // Use CRTC start_address and line_offset, matching Bochs 
+                    // Use CRTC start_address and line_offset, matching Bochs gui.cc
                     // Wrap within text buffer (VGA text memory is 32KB, kernel scrolls by
                     // advancing start_address and wraps around)
                     let text_idx = ((start_address + row * line_offset + col * 2) as usize) % text_len;

@@ -242,7 +242,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Check canonical address for 64-bit data access.
     /// Raises #GP(0) for non-stack segments, #SS(0) for SS.
-    /// Bochs: access_read_linear () / access_write_linear ()
+    /// Bochs: access_read_linear (access.cc) / access_write_linear (access.cc)
     #[inline]
     fn check_canonical_data(&mut self, seg: BxSegregs, laddr: u64, rw: MemoryAccessType) -> Result<()> {
         if self.long64_mode() {
@@ -359,7 +359,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Normal (expand-up) data or readable code segment
-        // Bochs : read checks only set ROK flags, NOT WOK
+        // Bochs access.cc: read checks only set ROK flags, NOT WOK
         if limit_scaled == 0xFFFFFFFF && base == 0 {
             self.sregs[seg_idx].cache.valid |= SEG_ACCESS_ROK | SEG_ACCESS_ROK4_G;
             return true;
@@ -446,7 +446,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // mem_read_byte() (which goes through get_host_mem_addr()) on TLB hits.
 
     /// Read a byte from virtual memory.
-    /// Bochs: read_virtual_byte_32 () — thin wrapper
+    /// Bochs: read_virtual_byte_32 (access.h) — thin wrapper
     #[inline]
     pub fn read_virtual_byte(&mut self, seg: BxSegregs, offset: u32) -> Result<u8> {
         let laddr = self.agen_read32(seg, offset, 1)? as u64;
@@ -454,7 +454,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Read a word from virtual memory.
-    /// Bochs: read_virtual_word_32 () — thin wrapper
+    /// Bochs: read_virtual_word_32 (access.h) — thin wrapper
     #[inline]
     pub fn read_virtual_word(&mut self, seg: BxSegregs, offset: u32) -> Result<u16> {
         let laddr = self.agen_read32(seg, offset, 2)? as u64;
@@ -462,7 +462,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Read a dword from virtual memory.
-    /// Bochs: read_virtual_dword_32 () — thin wrapper
+    /// Bochs: read_virtual_dword_32 (access.h) — thin wrapper
     #[inline]
     pub fn read_virtual_dword(&mut self, seg: BxSegregs, offset: u32) -> Result<u32> {
         let laddr = self.agen_read32(seg, offset, 4)? as u64;
@@ -470,7 +470,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Read a qword from virtual memory.
-    /// Bochs: read_virtual_qword_32 () — thin wrapper
+    /// Bochs: read_virtual_qword_32 (access.h) — thin wrapper
     #[inline]
     pub(crate) fn read_virtual_qword(&mut self, seg: BxSegregs, offset: u32) -> Result<u64> {
         let laddr = self.agen_read32(seg, offset, 8)? as u64;
@@ -487,7 +487,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ===== Virtual write functions (Bochs access.h + access2.cc) =====
 
     /// Write a byte to virtual memory.
-    /// Bochs: write_virtual_byte_32 () — thin wrapper
+    /// Bochs: write_virtual_byte_32 (access.h) — thin wrapper
     #[inline]
     pub fn write_virtual_byte(&mut self, seg: BxSegregs, offset: u32, val: u8) -> Result<()> {
         let laddr = self.agen_write32(seg, offset, 1)? as u64;
@@ -495,7 +495,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Write a word to virtual memory.
-    /// Bochs: write_virtual_word_32 () — thin wrapper
+    /// Bochs: write_virtual_word_32 (access.h) — thin wrapper
     #[inline]
     pub(super) fn write_virtual_word(
         &mut self,
@@ -508,7 +508,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Write a dword to virtual memory.
-    /// Bochs: write_virtual_dword_32 () — thin wrapper
+    /// Bochs: write_virtual_dword_32 (access.h) — thin wrapper
     #[inline]
     pub(super) fn write_virtual_dword(
         &mut self,
@@ -521,7 +521,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Write a qword to virtual memory.
-    /// Bochs: write_virtual_qword_32 () — thin wrapper
+    /// Bochs: write_virtual_qword_32 (access.h) — thin wrapper
     #[inline]
     pub(crate) fn write_virtual_qword(
         &mut self,
@@ -607,7 +607,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     //   pages == 2 →  cross-page: paddress1/paddress2 + len1/len2
 
     /// Read phase of a read-modify-write byte access.
-    /// Bochs: read_RMW_virtual_byte_32 () — thin wrapper
+    /// Bochs: read_RMW_virtual_byte_32 (access.h) — thin wrapper
     #[inline]
     pub fn read_rmw_virtual_byte(&mut self, seg: BxSegregs, offset: u32) -> Result<u8> {
         let laddr = self.agen_write32(seg, offset, 1)? as u64;
@@ -615,7 +615,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Read phase of a read-modify-write word access.
-    /// Bochs: read_RMW_virtual_word_32 () — thin wrapper
+    /// Bochs: read_RMW_virtual_word_32 (access.h) — thin wrapper
     #[inline]
     pub fn read_rmw_virtual_word(&mut self, seg: BxSegregs, offset: u32) -> Result<u16> {
         let laddr = self.agen_write32(seg, offset, 2)? as u64;
@@ -623,7 +623,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Read phase of a read-modify-write dword access.
-    /// Bochs: read_RMW_virtual_dword_32 () — thin wrapper
+    /// Bochs: read_RMW_virtual_dword_32 (access.h) — thin wrapper
     #[inline]
     pub fn read_rmw_virtual_dword(&mut self, seg: BxSegregs, offset: u32) -> Result<u32> {
         let laddr = self.agen_write32(seg, offset, 4)? as u64;
@@ -631,7 +631,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// RMW read qword in 32-bit mode.
-    /// Bochs: read_RMW_virtual_qword_32 () — thin wrapper
+    /// Bochs: read_RMW_virtual_qword_32 (access.h) — thin wrapper
     pub fn read_rmw_virtual_qword(&mut self, seg: BxSegregs, offset: u32) -> Result<u64> {
         let laddr = self.agen_write32(seg, offset, 8)? as u64;
         let (data, _) = self.read_rmw_linear_qword(seg, laddr)?;
@@ -902,7 +902,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ===== 64-bit Read-Modify-Write functions =====
 
     /// Read phase of a RMW qword access in 64-bit mode.
-    /// Bochs: read_RMW_virtual_qword () — thin wrapper
+    /// Bochs: read_RMW_virtual_qword (access.h) — thin wrapper
     pub(crate) fn read_rmw_virtual_qword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u64> {
         let laddr = self.get_laddr64(seg as usize, offset);
         self.check_canonical_data(seg, laddr, MemoryAccessType::Write)?;
@@ -1039,7 +1039,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // write_linear_byte/word/dword/qword functions in access2.cc.
 
     /// Read a byte given a pre-computed linear address.
-    /// Bochs: read_linear_byte ()
+    /// Bochs: read_linear_byte (access2.cc)
     pub(crate) fn read_linear_byte(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u8> {
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (self.user_pl as u32);
@@ -1053,7 +1053,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Read a word given a pre-computed linear address with cross-page handling.
-    /// Bochs: read_linear_word ()
+    /// Bochs: read_linear_word (access2.cc)
     pub(crate) fn read_linear_word(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u16> {
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (self.user_pl as u32);
@@ -1078,7 +1078,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Read a dword given a pre-computed linear address with cross-page handling.
-    /// Bochs: read_linear_dword ()
+    /// Bochs: read_linear_dword (access2.cc)
     pub(crate) fn read_linear_dword(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u32> {
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (self.user_pl as u32);
@@ -1104,7 +1104,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Read a qword given a pre-computed linear address with cross-page handling.
-    /// Bochs: read_linear_qword ()
+    /// Bochs: read_linear_qword (access2.cc)
     pub(crate) fn read_linear_qword(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u64> {
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (self.user_pl as u32);
@@ -1130,7 +1130,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Write a byte given a pre-computed linear address.
-    /// Bochs: write_linear_byte ()
+    /// Bochs: write_linear_byte (access2.cc)
     pub(crate) fn write_linear_byte(&mut self, _seg: BxSegregs, laddr: u64, val: u8) -> Result<()> {
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
@@ -1149,7 +1149,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Write a word given a pre-computed linear address with cross-page handling.
-    /// Bochs: write_linear_word ()
+    /// Bochs: write_linear_word (access2.cc)
     pub(crate) fn write_linear_word(&mut self, _seg: BxSegregs, laddr: u64, val: u16) -> Result<()> {
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
@@ -1181,7 +1181,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Write a dword given a pre-computed linear address with cross-page handling.
-    /// Bochs: write_linear_dword ()
+    /// Bochs: write_linear_dword (access2.cc)
     fn check_gdt_watchpoint(&mut self, _laddr: u64, _val: u64, _size: u32) {
         // Disabled — the GDT 'corruption' was caused by our own diagnostic code
         // (v_read_byte in SYSCALL handler triggering page walks that set A/D bits)
@@ -1218,7 +1218,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Write a qword given a pre-computed linear address with cross-page handling.
-    /// Bochs: write_linear_qword ()
+    /// Bochs: write_linear_qword (access2.cc)
     pub(crate) fn write_linear_qword(&mut self, _seg: BxSegregs, laddr: u64, val: u64) -> Result<()> {
         self.check_gdt_watchpoint(laddr, val, 8);
         let lpf = laddr & super::tlb::LPF_MASK;
@@ -1251,10 +1251,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Read phase of a RMW qword given a pre-computed linear address.
-    /// Bochs: read_RMW_linear_qword ()
+    /// Bochs: read_RMW_linear_qword (access2.cc)
     /// Returns (value, laddr). Caches translation in address_xlation.
     pub(crate) fn read_rmw_linear_qword(&mut self, _seg: BxSegregs, laddr: u64) -> Result<(u64, u64)> {
-        // ---- Inline TLB fast path (Bochs ) ----
+        // ---- Inline TLB fast path (Bochs access2.cc) ----
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 7);
@@ -1301,9 +1301,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Read phase of a RMW byte given a pre-computed linear address.
-    /// Bochs: read_RMW_linear_byte ()
+    /// Bochs: read_RMW_linear_byte (access2.cc)
     pub(crate) fn read_rmw_linear_byte(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u8> {
-        // ---- Inline TLB fast path (Bochs ) ----
+        // ---- Inline TLB fast path (Bochs access2.cc) ----
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 0);
@@ -1328,9 +1328,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Read phase of a RMW word given a pre-computed linear address.
-    /// Bochs: read_RMW_linear_word ()
+    /// Bochs: read_RMW_linear_word (access2.cc)
     pub(crate) fn read_rmw_linear_word(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u16> {
-        // ---- Inline TLB fast path (Bochs ) ----
+        // ---- Inline TLB fast path (Bochs access2.cc) ----
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 1);
@@ -1370,9 +1370,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Read phase of a RMW dword given a pre-computed linear address.
-    /// Bochs: read_RMW_linear_dword ()
+    /// Bochs: read_RMW_linear_dword (access2.cc)
     pub(crate) fn read_rmw_linear_dword(&mut self, _seg: BxSegregs, laddr: u64) -> Result<u32> {
-        // ---- Inline TLB fast path (Bochs ) ----
+        // ---- Inline TLB fast path (Bochs access2.cc) ----
         let lpf = laddr & super::tlb::LPF_MASK;
         let needed_bit = 1u32 << (2 + self.user_pl as u32);
         let tlb = self.dtlb.get_entry_of(laddr, 3);
@@ -1770,7 +1770,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Mirrors read_rmw_virtual_qword_64 pattern but for smaller data sizes.
 
     /// RMW read byte in 64-bit mode.
-    /// Bochs: read_RMW_virtual_byte () — thin wrapper
+    /// Bochs: read_RMW_virtual_byte (access.h) — thin wrapper
     #[inline]
     pub(crate) fn read_rmw_virtual_byte_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u8> {
         let laddr = self.get_laddr64(seg as usize, offset);
@@ -1779,7 +1779,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// RMW read word in 64-bit mode.
-    /// Bochs: read_RMW_virtual_word () — thin wrapper
+    /// Bochs: read_RMW_virtual_word (access.h) — thin wrapper
     #[inline]
     pub(crate) fn read_rmw_virtual_word_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u16> {
         let laddr = self.get_laddr64(seg as usize, offset);
@@ -1788,7 +1788,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// RMW read dword in 64-bit mode.
-    /// Bochs: read_RMW_virtual_dword () — thin wrapper
+    /// Bochs: read_RMW_virtual_dword (access.h) — thin wrapper
     #[inline]
     pub(crate) fn read_rmw_virtual_dword_64(&mut self, seg: BxSegregs, offset: u64) -> Result<u32> {
         let laddr = self.get_laddr64(seg as usize, offset);

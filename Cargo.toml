@@ -6,7 +6,10 @@ resolver = "2"
 [workspace.package]
 version = "0.0.1"
 edition = "2021"
-license = "Apache-2.0"
+license = "LGPL-2.1-or-later"
+authors = ["Aslan Gurtsiev", "The Bochs Project (original C++ implementation)"]
+repository = "https://github.com/r3bb1t/rusty_box"
+homepage = "https://github.com/r3bb1t/rusty_box"
 
 [workspace.dependencies]
 tracing = { version = "0.1", default-features = false, features = ["max_level_trace", "release_max_level_info"] }

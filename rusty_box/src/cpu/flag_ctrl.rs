@@ -22,7 +22,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CLI - Clear Interrupt Flag
-    /// Based on Bochs 
+    /// Based on Bochs flag_ctrl.cc
     pub(super) fn cli(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         let iopl = self.eflags.iopl() as u32;
 
@@ -55,13 +55,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
 
         self.eflags.remove(EFlags::IF_);
-        // Bochs : handleInterruptMaskChange() after clearing IF
+        // Bochs flag_ctrl.cc: handleInterruptMaskChange() after clearing IF
         self.handle_interrupt_mask_change();
         Ok(())
     }
 
     /// STI - Set Interrupt Flag
-    /// Based on Bochs 
+    /// Based on Bochs flag_ctrl.cc
     pub(super) fn sti(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         let iopl = self.eflags.iopl() as u32;
 
@@ -100,7 +100,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         if !self.eflags.contains(EFlags::IF_) {
             self.eflags.insert(EFlags::IF_);
             self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS);
-            // Bochs : handleInterruptMaskChange() after setting IF
+            // Bochs flag_ctrl.cc: handleInterruptMaskChange() after setting IF
             self.handle_interrupt_mask_change();
         }
 
@@ -118,7 +118,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SALC - Set AL from Carry (undocumented, opcode 0xD6)
-    /// Based on Bochs 
+    /// Based on Bochs flag_ctrl.cc
     pub(super) fn salc(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         if self.eflags.contains(EFlags::CF) {
             self.set_al(0xFF);

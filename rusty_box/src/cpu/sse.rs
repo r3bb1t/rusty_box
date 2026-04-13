@@ -367,7 +367,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PMULHRSW VdqWdq — packed multiply high with rounding and scale (SSSE3)
-    /// Bochs : ((a * b >> 14) + 1) >> 1
+    /// Bochs simd_int.h: ((a * b >> 14) + 1) >> 1
     pub(super) fn pmulhrsw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
@@ -639,7 +639,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let op2 = self.sse_read_op2_xmm(instr)?;
 
         let count = op2.xmm64u(0);
-        // Bochs  uses `> 64` (note: count=64 is technically UB in C,
+        // Bochs simd_int.h uses `> 64` (note: count=64 is technically UB in C,
         // but we match Bochs behavior exactly here)
         if count > 64 {
             op1 = BxPackedXmmRegister::default();
@@ -1465,7 +1465,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// MASKMOVDQU VdqUdq — masked store bytes using DS:EDI
     /// For each byte where mask bit 7 is set, store the corresponding byte
     /// from the source XMM register to memory at [DS:(E/R)DI].
-    /// Bochs:  MASKMOVDQU_VdqUdq
+    /// Bochs: sse_move.cc MASKMOVDQU_VdqUdq
     pub(super) fn maskmovdqu_vdq_udq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
 
@@ -1486,12 +1486,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
 
         // Bochs reads the full 16 bytes BEFORE checking the mask to ensure
-        // page fault even if mask is all zeros ()
+        // page fault even if mask is all zeros (sse_move.cc)
         let mut temp = super::xmm::BxPackedXmmRegister::default();
             temp.set_xmm64u(0, self.v_read_qword(seg, rdi)?);
             temp.set_xmm64u(1, self.v_read_qword(seg, (rdi.wrapping_add(8)) & ASIZE_MASK[asize])?);
 
-        // No data will be written to memory if mask is all 0s (Bochs )
+        // No data will be written to memory if mask is all 0s (Bochs sse_move.cc)
         let any_set = (mask.xmm64u(0) | mask.xmm64u(1)) & 0x8080808080808080 != 0;
         if !any_set {
             return Ok(());
@@ -1504,7 +1504,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
         }
 
-        // Write result back to memory (Bochs )
+        // Write result back to memory (Bochs sse_move.cc)
             self.v_write_qword(seg, (rdi.wrapping_add(8)) & ASIZE_MASK[asize], temp.xmm64u(1))?;
             self.v_write_qword(seg, rdi, temp.xmm64u(0))?;
         Ok(())
@@ -1515,7 +1515,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ========================================================================
 
     /// PSHUFB VdqWdq (66 0F 38 00) - Packed Shuffle Bytes (128-bit)
-    /// Bochs: PSHUFB_VdqWdqR / xmm_pshufb ()
+    /// Bochs: PSHUFB_VdqWdqR / xmm_pshufb (simd_int.h)
     pub(super) fn pshufb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
@@ -1535,7 +1535,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PMADDUBSW VdqWdq (66 0F 38 04) - Multiply Unsigned/Signed Bytes, Add Pairs (128-bit)
-    /// Bochs: HANDLE_SSE_2OP<xmm_pmaddubsw> / 
+    /// Bochs: HANDLE_SSE_2OP<xmm_pmaddubsw> / simd_int.h
     pub(super) fn pmaddubsw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
@@ -1552,7 +1552,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PSIGNB VdqWdq (66 0F 38 08) - Negate/Zero/Keep Bytes Based on Sign (128-bit)
-    /// Bochs: HANDLE_SSE_2OP<xmm_psignb> / 
+    /// Bochs: HANDLE_SSE_2OP<xmm_psignb> / simd_int.h
     pub(super) fn psignb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
@@ -1568,7 +1568,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PSIGNW VdqWdq (66 0F 38 09) - Negate/Zero/Keep Words Based on Sign (128-bit)
-    /// Bochs: HANDLE_SSE_2OP<xmm_psignw> / 
+    /// Bochs: HANDLE_SSE_2OP<xmm_psignw> / simd_int.h
     pub(super) fn psignw_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
@@ -1584,7 +1584,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PSIGND VdqWdq (66 0F 38 0A) - Negate/Zero/Keep Dwords Based on Sign (128-bit)
-    /// Bochs: HANDLE_SSE_2OP<xmm_psignd> / 
+    /// Bochs: HANDLE_SSE_2OP<xmm_psignd> / simd_int.h
     pub(super) fn psignd_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
@@ -1600,7 +1600,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PALIGNR VdqWdqIb (66 0F 3A 0F) - Packed Align Right (128-bit)
-    /// Bochs: PALIGNR_VdqWdqIbR / xmm_palignr ()
+    /// Bochs: PALIGNR_VdqWdqIbR / xmm_palignr (simd_int.h)
     pub(super) fn palignr_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
@@ -1656,7 +1656,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ========================================================================
 
     /// PBLENDVB VdqWdq (66 0F 38 10) - Variable Blend Packed Bytes
-    /// Bochs: PBLENDVB_VdqWdqR / xmm_pblendvb ()
+    /// Bochs: PBLENDVB_VdqWdqR / xmm_pblendvb (simd_int.h)
     /// Implicit mask register: XMM0
     pub(super) fn pblendvb_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
@@ -1674,7 +1674,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PTEST VdqWdq (66 0F 38 17) - Logical Compare
-    /// Bochs: PTEST_VdqWdqR ()
+    /// Bochs: PTEST_VdqWdqR (sse.cc)
     /// Sets ZF if (op2 AND op1) == 0, CF if (op2 AND NOT op1) == 0
     pub(super) fn ptest_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
@@ -1700,7 +1700,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PMULDQ VdqWdq (66 0F 38 28) - Multiply Packed Signed Dword to Qword
-    /// Bochs: HANDLE_SSE_2OP<xmm_pmuldq> / 
+    /// Bochs: HANDLE_SSE_2OP<xmm_pmuldq> / simd_int.h
     pub(super) fn pmuldq_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let op1 = self.read_xmm_reg(instr.dst());
@@ -1714,7 +1714,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PMINUD VdqWdq (66 0F 38 3B) - Minimum of Packed Unsigned Dwords
-    /// Bochs: HANDLE_SSE_2OP<xmm_pminud> / 
+    /// Bochs: HANDLE_SSE_2OP<xmm_pminud> / simd_int.h
     pub(super) fn pminud_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
@@ -1730,7 +1730,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PMAXUD VdqWdq (66 0F 38 3F) - Maximum of Packed Unsigned Dwords
-    /// Bochs: HANDLE_SSE_2OP<xmm_pmaxud> / 
+    /// Bochs: HANDLE_SSE_2OP<xmm_pmaxud> / simd_int.h
     pub(super) fn pmaxud_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
@@ -1746,7 +1746,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PMULLD VdqWdq (66 0F 38 40) - Multiply Packed Signed Dword, Low Result
-    /// Bochs: HANDLE_SSE_2OP<xmm_pmulld> / 
+    /// Bochs: HANDLE_SSE_2OP<xmm_pmulld> / simd_int.h
     pub(super) fn pmulld_vdq_wdq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());
@@ -1760,7 +1760,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PBLENDW VdqWdqIb (66 0F 3A 0E) - Blend Packed Words
-    /// Bochs: PBLENDW_VdqWdqIbR / xmm_pblendw ()
+    /// Bochs: PBLENDW_VdqWdqIbR / xmm_pblendw (simd_int.h)
     pub(super) fn pblendw_vdq_wdq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.prepare_sse()?;
         let mut op1 = self.read_xmm_reg(instr.dst());

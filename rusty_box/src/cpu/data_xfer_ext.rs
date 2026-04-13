@@ -147,7 +147,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         if instr.mod_c0() {
             // Register form: MOV r16/r32, sreg
-            // Bochs : os32L → 32-bit zero-extended write
+            // Bochs data_xfer16.cc: os32L → 32-bit zero-extended write
             let dst = instr.dst() as usize;
             if instr.os32_l() != 0 {
                 self.set_gpr32(dst, seg_val as u32);
@@ -200,7 +200,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.load_seg_reg(seg, new_sel)?;
 
         // MOV SS inhibits interrupts until next instruction boundary
-        // (same as POP SS - Bochs )
+        // (same as POP SS - Bochs data_xfer16.cc)
         if dst_seg == BxSegregs::Ss as usize {
             self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
         }
@@ -343,7 +343,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// MOV r/m8, imm8 (memory form)
-    /// Matching C++  MOV_EbIbM
+    /// Matching C++ data_xfer8.cc MOV_EbIbM
     pub fn mov_eb_ib_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -353,7 +353,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r/m8, r8 (memory form)
-    /// Matching C++  MOV_EbGbM
+    /// Matching C++ data_xfer8.cc MOV_EbGbM
     /// 8-bit: no decoder swap, operands.dst=nnn=source register, dst()=operands.dst
     pub fn mov_eb_gb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
@@ -367,7 +367,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r8, r/m8 (memory form)
-    /// Matching C++  MOV_GbEbM
+    /// Matching C++ data_xfer8.cc MOV_GbEbM
     pub fn mov_gb_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -380,7 +380,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// XCHG r/m8, r8 (memory form)
-    /// Matching C++  XCHG_EbGbM
+    /// Matching C++ data_xfer8.cc XCHG_EbGbM
     /// Note: always locked (read_RMW_virtual_byte)
     pub fn xchg_eb_gb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
@@ -459,7 +459,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// MOV r/m16, imm16 (memory form)
-    /// Matching C++  MOV_EwIwM
+    /// Matching C++ data_xfer16.cc MOV_EwIwM
     pub fn mov_ew_iw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -469,7 +469,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r16, imm16 (register form)
-    /// Matching C++  MOV_EwIwR
+    /// Matching C++ data_xfer16.cc MOV_EwIwR
     pub fn mov_ew_iw_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
 
@@ -477,7 +477,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r/m16, r16 (memory form)
-    /// Matching C++  MOV_EwGwM
+    /// Matching C++ data_xfer16.cc MOV_EwGwM
     /// Decoder swaps for 16/32-bit store: src() = operands.src1 = nnn = SOURCE register
     pub fn mov_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
@@ -490,9 +490,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r16, r/m16 (memory form)
-    /// Matching C++  MOV_GwEwM
+    /// Matching C++ data_xfer16.cc MOV_GwEwM
     /// MOV r16, r/m16 (memory form)
-    /// Matching C++  MOV_GwEwM
+    /// Matching C++ data_xfer16.cc MOV_GwEwM
     pub fn mov_gw_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -503,7 +503,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// XCHG r/m16, r16 (memory form)
-    /// Matching C++  XCHG_EwGwM
+    /// Matching C++ data_xfer16.cc XCHG_EwGwM
     /// Note: always locked (read_RMW_virtual_word)
     /// reg field (dst()) = register operand for XCHG memory form
     pub fn xchg_ew_gw_m(&mut self, instr: &Instruction) -> super::Result<()> {
@@ -519,7 +519,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVZX r16, r/m8 (memory form)
-    /// Matching C++  MOVZX_GwEbM
+    /// Matching C++ data_xfer16.cc MOVZX_GwEbM
     /// Zero extend byte op2 into word op1
     pub fn movzx_gw_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
@@ -532,7 +532,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVZX r16, r8 (register form)
-    /// Matching C++  MOVZX_GwEbR
+    /// Matching C++ data_xfer16.cc MOVZX_GwEbR
     /// Zero extend byte op2 into word op1
     pub fn movzx_gw_eb_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
@@ -544,7 +544,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSX r16, r/m8 (memory form)
-    /// Matching C++  MOVSX_GwEbM
+    /// Matching C++ data_xfer16.cc MOVSX_GwEbM
     /// Sign extend byte op2 into word op1
     pub fn movsx_gw_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
@@ -558,7 +558,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSX r16, r8 (register form)
-    /// Matching C++  MOVSX_GwEbR
+    /// Matching C++ data_xfer16.cc MOVSX_GwEbR
     /// Sign extend byte op2 into word op1
     pub fn movsx_gw_eb_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
@@ -576,10 +576,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Note: CMOV accesses a memory source operand (read), regardless
     //       of whether condition is true or not.  Thus, exceptions may
     //       occur even if the MOV does not take place.
-    // Matching C++ 
+    // Matching C++ data_xfer16.cc
 
     /// Conditional move if overflow (OF=1)
-    /// Matching C++  CMOVO_GwEwR
+    /// Matching C++ data_xfer16.cc CMOVO_GwEwR
     pub fn cmovo_gw_ew_r(&mut self, instr: &Instruction) {
         if self.get_of() {
             let src_reg = instr.src() as usize;
@@ -756,7 +756,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// MOV r/m32, imm32 (memory form)
-    /// Matching C++  MOV_EdIdM
+    /// Matching C++ data_xfer32.cc MOV_EdIdM
     pub fn mov_ed_id_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -766,7 +766,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r32, imm32 (register form)
-    /// Matching C++  MOV_EdIdR
+    /// Matching C++ data_xfer32.cc MOV_EdIdR
     /// Note: BX_CLEAR_64BIT_HIGH is handled in set_gpr32
     pub fn mov_ed_id_r(&mut self, instr: &Instruction) {
         let dst = instr.dst() as usize;
@@ -779,7 +779,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Writes a 32-bit value from the source register to memory.
     /// The memory address is computed from the ModRM byte and segment register.
     ///
-    /// Matching C++  BX_CPU_C::MOV32_EdGdM
+    /// Matching C++ data_xfer32.cc BX_CPU_C::MOV32_EdGdM
     pub fn mov32_ed_gd_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
         let seg = BxSegregs::from(instr.seg());
@@ -791,7 +791,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r32, r/m32 (memory form)
-    /// Matching C++  MOV32_GdEdM
+    /// Matching C++ data_xfer32.cc MOV32_GdEdM
     /// Note: BX_CLEAR_64BIT_HIGH is handled in set_gpr32
     pub fn mov32_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
@@ -804,7 +804,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOV r32, r/m32 (memory form with SS segment override)
-    /// Matching C++  MOV32S_GdEdM
+    /// Matching C++ data_xfer32.cc MOV32S_GdEdM
     /// Uses stack_read_dword instead of read_virtual_dword
     pub fn mov32s_gd_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
@@ -821,7 +821,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// It uses stack_write_dword instead of write_virtual_dword to write memory through
     /// the SS segment, which is important for stack operations.
     ///
-    /// Matching C++  BX_CPU_C::MOV32S_EdGdM
+    /// Matching C++ data_xfer32.cc BX_CPU_C::MOV32S_EdGdM
     ///
     /// # Operation
     /// Writes a 32-bit value from the source register to SS:offset.
@@ -835,7 +835,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// XCHG r/m32, r32 (memory form)
-    /// Matching C++  XCHG_EdGdM
+    /// Matching C++ data_xfer32.cc XCHG_EdGdM
     /// Note: always locked (read_RMW_virtual_dword)
     /// XCHG 0x87 is NOT in decoder swap list, so [0]=nnn=register, [1]=rm
     pub fn xchg_ed_gd_m(&mut self, instr: &Instruction) -> super::Result<()> {
@@ -851,7 +851,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVZX r32, r/m8 (memory form)
-    /// Matching C++  MOVZX_GdEbM
+    /// Matching C++ data_xfer32.cc MOVZX_GdEbM
     /// Zero extend byte op2 into dword op1
     pub fn movzx_gd_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
@@ -864,7 +864,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVZX r32, r8 (register form)
-    /// Matching C++  MOVZX_GdEbR
+    /// Matching C++ data_xfer32.cc MOVZX_GdEbR
     /// Zero extend byte op2 into dword op1
     pub fn movzx_gd_eb_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
@@ -876,7 +876,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVZX r32, r/m16 (memory form)
-    /// Matching C++  MOVZX_GdEwM
+    /// Matching C++ data_xfer32.cc MOVZX_GdEwM
     /// Zero extend word op2 into dword op1
     pub fn movzx_gd_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
@@ -889,7 +889,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVZX r32, r16 (register form)
-    /// Matching C++  MOVZX_GdEwR
+    /// Matching C++ data_xfer32.cc MOVZX_GdEwR
     /// Zero extend word op2 into dword op1
     pub fn movzx_gd_ew_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
@@ -900,7 +900,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSX r32, r/m8 (memory form)
-    /// Matching C++  MOVSX_GdEbM
+    /// Matching C++ data_xfer32.cc MOVSX_GdEbM
     /// Sign extend byte op2 into dword op1
     pub fn movsx_gd_eb_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
@@ -914,7 +914,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSX r32, r8 (register form)
-    /// Matching C++  MOVSX_GdEbR
+    /// Matching C++ data_xfer32.cc MOVSX_GdEbR
     /// Sign extend byte op2 into dword op1
     pub fn movsx_gd_eb_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
@@ -927,7 +927,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSX r32, r/m16 (memory form)
-    /// Matching C++  MOVSX_GdEwM
+    /// Matching C++ data_xfer32.cc MOVSX_GdEwM
     /// Sign extend word op2 into dword op1
     pub fn movsx_gd_ew_m(&mut self, instr: &Instruction) -> super::Result<()> {
         let eaddr = self.resolve_addr(instr);
@@ -941,7 +941,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVSX r32, r16 (register form)
-    /// Matching C++  MOVSX_GdEwR
+    /// Matching C++ data_xfer32.cc MOVSX_GdEwR
     /// Sign extend word op2 into dword op1
     pub fn movsx_gd_ew_r(&mut self, instr: &Instruction) {
         let src_reg = instr.src() as usize;
@@ -958,10 +958,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // Note: CMOV accesses a memory source operand (read), regardless
     //       of whether condition is true or not.  Thus, exceptions may
     //       occur even if the MOV does not take place.
-    // Matching C++ 
+    // Matching C++ data_xfer32.cc
 
     /// Conditional move if overflow (OF=1)
-    /// Matching C++  CMOVO_GdEdR
+    /// Matching C++ data_xfer32.cc CMOVO_GdEdR
     /// Always clear upper part of the register (BX_CLEAR_64BIT_HIGH)
     pub fn cmovo_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_of() {
@@ -975,7 +975,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if not overflow (OF=0)
-    /// Matching C++  CMOVNO_GdEdR
+    /// Matching C++ data_xfer32.cc CMOVNO_GdEdR
     /// Always clear upper part of the register
     pub fn cmovno_gd_ed_r(&mut self, instr: &Instruction) {
         if !self.get_of() {
@@ -988,7 +988,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if below/carry (CF=1)
-    /// Matching C++  CMOVB_GdEdR
+    /// Matching C++ data_xfer32.cc CMOVB_GdEdR
     /// Always clear upper part of the register
     pub fn cmovb_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_cf() {
@@ -1001,7 +1001,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if not below/no carry (CF=0)
-    /// Matching C++  CMOVNB_GdEdR
+    /// Matching C++ data_xfer32.cc CMOVNB_GdEdR
     /// Always clear upper part of the register
     pub fn cmovnb_gd_ed_r(&mut self, instr: &Instruction) {
         if !self.get_cf() {
@@ -1014,7 +1014,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if zero/equal (ZF=1)
-    /// Matching C++  CMOVZ_GdEdR
+    /// Matching C++ data_xfer32.cc CMOVZ_GdEdR
     /// Always clear upper part of the register
     pub fn cmovz_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_zf() {
@@ -1027,7 +1027,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if not zero/not equal (ZF=0)
-    /// Matching C++  CMOVNZ_GdEdR
+    /// Matching C++ data_xfer32.cc CMOVNZ_GdEdR
     /// Always clear upper part of the register
     pub fn cmovnz_gd_ed_r(&mut self, instr: &Instruction) {
         if !self.get_zf() {
@@ -1040,7 +1040,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if below or equal (CF=1 or ZF=1)
-    /// Matching C++  CMOVBE_GdEdR
+    /// Matching C++ data_xfer32.cc CMOVBE_GdEdR
     /// Always clear upper part of the register
     pub fn cmovbe_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_cf() || self.get_zf() {
@@ -1053,7 +1053,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if not below or equal/above (CF=0 and ZF=0)
-    /// Matching C++  CMOVNBE_GdEdR
+    /// Matching C++ data_xfer32.cc CMOVNBE_GdEdR
     /// Always clear upper part of the register
     pub fn cmovnbe_gd_ed_r(&mut self, instr: &Instruction) {
         if !self.get_cf() && !self.get_zf() {
@@ -1066,7 +1066,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if sign (SF=1)
-    /// Matching C++  CMOVS_GdEdR
+    /// Matching C++ data_xfer32.cc CMOVS_GdEdR
     /// Always clear upper part of the register
     pub fn cmovs_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_sf() {
@@ -1079,7 +1079,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if not sign (SF=0)
-    /// Matching C++  CMOVNS_GdEdR
+    /// Matching C++ data_xfer32.cc CMOVNS_GdEdR
     /// Always clear upper part of the register
     pub fn cmovns_gd_ed_r(&mut self, instr: &Instruction) {
         if !self.get_sf() {
@@ -1092,7 +1092,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if parity/parity even (PF=1)
-    /// Matching C++  CMOVP_GdEdR
+    /// Matching C++ data_xfer32.cc CMOVP_GdEdR
     /// Always clear upper part of the register
     pub fn cmovp_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_pf() {
@@ -1105,7 +1105,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if no parity/parity odd (PF=0)
-    /// Matching C++  CMOVNP_GdEdR
+    /// Matching C++ data_xfer32.cc CMOVNP_GdEdR
     /// Always clear upper part of the register
     pub fn cmovnp_gd_ed_r(&mut self, instr: &Instruction) {
         if !self.get_pf() {
@@ -1118,7 +1118,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if less (SF != OF)
-    /// Matching C++  CMOVL_GdEdR
+    /// Matching C++ data_xfer32.cc CMOVL_GdEdR
     /// Always clear upper part of the register
     pub fn cmovl_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_sf() != self.get_of() {
@@ -1131,7 +1131,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if not less/greater or equal (SF == OF)
-    /// Matching C++  CMOVNL_GdEdR
+    /// Matching C++ data_xfer32.cc CMOVNL_GdEdR
     /// Always clear upper part of the register
     pub fn cmovnl_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_sf() == self.get_of() {
@@ -1144,7 +1144,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if less or equal (ZF=1 or SF!=OF)
-    /// Matching C++  CMOVLE_GdEdR
+    /// Matching C++ data_xfer32.cc CMOVLE_GdEdR
     /// Always clear upper part of the register
     pub fn cmovle_gd_ed_r(&mut self, instr: &Instruction) {
         if self.get_zf() || (self.get_sf() != self.get_of()) {
@@ -1157,7 +1157,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Conditional move if not less or equal/greater (ZF=0 and SF==OF)
-    /// Matching C++  CMOVNLE_GdEdR
+    /// Matching C++ data_xfer32.cc CMOVNLE_GdEdR
     /// Always clear upper part of the register
     pub fn cmovnle_gd_ed_r(&mut self, instr: &Instruction) {
         if !self.get_zf() && (self.get_sf() == self.get_of()) {

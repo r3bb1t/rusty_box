@@ -2,6 +2,9 @@
 name = "rusty_box_web"
 version = "0.0.1"
 edition = "2021"
+license = "LGPL-2.1-or-later"
+authors = ["Aslan Gurtsiev"]
+repository = "https://github.com/r3bb1t/rusty_box"
 description = "Rusty Box x86 emulator — web frontend"
 
 [dependencies]
@@ -17,4 +20,5 @@ env_logger = "0.11"
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 wasm-bindgen = "0.2"
 wasm-bindgen-futures = "0.4"
-web-sys = { version = "0.3", features = ["Document", "Window", "HtmlCanvasElement", "Element"] }
+web-sys = { version = "0.3", features = ["Document", "Window", "HtmlCanvasElement", "HtmlInputElement", "Element", "Event", "FileReader", "FileList", "File", "Blob"] }
+js-sys = "0.3"

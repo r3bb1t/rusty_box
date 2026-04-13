@@ -3,7 +3,7 @@
 Issues discovered in Bochs source code (`cpp_orig/bochs/`) during the
 line-by-line comparison of Rusty Box AVX-512 handlers against Bochs.
 
-## 1. VPCONFLICTD/Q Off-by-One ()
+## 1. VPCONFLICTD/Q Off-by-One (simd_int.h)
 
 **Severity**: Correctness bug — produces wrong results.
 
@@ -11,7 +11,7 @@ line-by-line comparison of Rusty Box AVX-512 handlers against Bochs.
 
 **Bug**: The inner loop uses `i < index-1` instead of `i < index`:
 ```cpp
-// 
+// simd_int.h
 for (int i=0; i < index-1; i++) {
     if (op->vmm32u(index) == op->vmm32u(i)) result |= (1 << i);
 }
@@ -31,7 +31,7 @@ Same bug exists in `simd_pconflictq` at line 1151.
 
 ---
 
-## 2. KSHIFTLW/KSHIFTRW Threshold ()
+## 2. KSHIFTLW/KSHIFTRW Threshold (avx512_mask16.cc)
 
 **Severity**: Minor — affects only count=15 edge case.
 
@@ -39,7 +39,7 @@ Same bug exists in `simd_pconflictq` at line 1151.
 
 **Bug**: Uses `count < 15` threshold instead of `count < 16`:
 ```cpp
-// 
+// avx512_mask16.cc
 if (count < 15)
     opmask = BX_READ_16BIT_OPMASK(i->src()) << count;
 ```
@@ -55,7 +55,7 @@ shift bit 0 to position 15. All other widths use the correct threshold:
 
 ---
 
-## 3. VPSRLQ Shift-by-64 UB ()
+## 3. VPSRLQ Shift-by-64 UB (simd_int.h)
 
 **Severity**: Undefined behavior — compiler-dependent result.
 
@@ -63,7 +63,7 @@ shift bit 0 to position 15. All other widths use the correct threshold:
 
 **Bug**: Uses `shift_64 > 64` threshold (not `> 63`):
 ```cpp
-// 
+// simd_int.h
 if(shift_64 > 64) { op->xmm64u(n) = 0; continue; }
 op->xmm64u(n) >>= shift_64;
 ```
@@ -75,15 +75,15 @@ this happens to produce 0, but it's not guaranteed.
 The equivalent dword function `xmm_psrld` correctly uses `> 31` (= `>= 32`).
 
 **Our code**: Uses `count >= 64` which correctly zeros. Same pattern
-for VPSRAVQ at  (`> 64` instead of `> 63`).
+for VPSRAVQ at simd_int.h (`> 64` instead of `> 63`).
 
 ---
 
 ## 4. VPSRLQ/VPSRAVQ Shift-by-Register Count==64 (same root cause)
 
 Same issue manifests in the variable shift path:
-- `xmm_psrlvq` (): `shift > 63` — correct
-- `xmm_psravq` (): `shift > 64` — UB at shift==64
+- `xmm_psrlvq` (simd_int.h): `shift > 63` — correct
+- `xmm_psravq` (simd_int.h): `shift > 64` — UB at shift==64
 
 **Our code**: Both use `>= 64` which is correct.
 

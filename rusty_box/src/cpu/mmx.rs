@@ -121,11 +121,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // SSSE3 MMX-register forms (0F 38 xx / 0F 3A xx)
-    // Bochs 
+    // Bochs mmx.cc
     // ========================================================================
 
     /// PSHUFB PqQq (0F 38 00) - Packed Shuffle Bytes
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pshufb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -146,7 +146,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PHADDW PqQq (0F 38 01) - Packed Horizontal Add Words
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn phaddw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -163,7 +163,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PHADDD PqQq (0F 38 02) - Packed Horizontal Add Dwords
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn phaddd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -178,7 +178,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PHADDSW PqQq (0F 38 03) - Packed Horizontal Add Saturate Words
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn phaddsw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -195,7 +195,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PMADDUBSW PqQq (0F 38 04) - Multiply Unsigned/Signed Bytes, Add Pairs
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pmaddubsw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -213,7 +213,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PHSUBW PqQq (0F 38 05) - Packed Horizontal Subtract Words
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn phsubw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -230,7 +230,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PHSUBD PqQq (0F 38 06) - Packed Horizontal Subtract Dwords
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn phsubd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -245,7 +245,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PHSUBSW PqQq (0F 38 07) - Packed Horizontal Subtract Saturate Words
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn phsubsw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -262,7 +262,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PSIGNB PqQq (0F 38 08) - Negate/Zero/Keep Bytes Based on Sign
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn psignb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -282,7 +282,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PSIGNW PqQq (0F 38 09)
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn psignw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -302,7 +302,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PSIGND PqQq (0F 38 0A)
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn psignd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -322,7 +322,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PMULHRSW PqQq (0F 38 0B)
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pmulhrsw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -339,7 +339,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PABSB PqQq (0F 38 1C) - Packed Absolute Value Bytes
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pabsb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op2 = self.mmx_read_op2_qq(instr)?;
@@ -358,7 +358,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PABSW PqQq (0F 38 1D)
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pabsw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op2 = self.mmx_read_op2_qq(instr)?;
@@ -377,7 +377,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PABSD PqQq (0F 38 1E)
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pabsd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op2 = self.mmx_read_op2_qq(instr)?;
@@ -396,7 +396,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PALIGNR PqQqIb (0F 3A 0F) - Byte-align concatenated qwords
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn palignr_pq_qq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -420,11 +420,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // ========================================================================
-    // MMX unpack low (0F 60-62) — Bochs 
+    // MMX unpack low (0F 60-62) — Bochs mmx.cc
     // ========================================================================
 
     /// PUNPCKLBW PqQd (0F 60) — Unpack Low Bytes
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn punpcklbw_pq_qd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -445,7 +445,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PUNPCKLWD PqQd (0F 61) — Unpack Low Words
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn punpcklwd_pq_qd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -462,7 +462,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PUNPCKLDQ PqQd (0F 62) — Unpack Low Dwords
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn punpckldq_pq_qd(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -477,11 +477,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // ========================================================================
-    // Pack and Compare (0F 63-6B) — Bochs 
+    // Pack and Compare (0F 63-6B) — Bochs mmx.cc
     // ========================================================================
 
     /// PACKSSWB PqQq (0F 63) — Pack Signed Words to Signed Bytes
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn packsswb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -502,7 +502,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PCMPGTB PqQq (0F 64) — Compare Greater Than Bytes
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pcmpgtb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -518,7 +518,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PCMPGTW PqQq (0F 65)
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pcmpgtw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -534,7 +534,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PCMPGTD PqQq (0F 66)
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pcmpgtd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -554,7 +554,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PACKUSWB PqQq (0F 67) — Pack Signed Words to Unsigned Bytes
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn packuswb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -575,7 +575,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PUNPCKHBW PqQq (0F 68) — Unpack High Bytes
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn punpckhbw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -596,7 +596,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PUNPCKHWD PqQq (0F 69) — Unpack High Words
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn punpckhwd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -613,7 +613,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PUNPCKHDQ PqQq (0F 6A) — Unpack High Dwords
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn punpckhdq_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -628,7 +628,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PACKSSDW PqQq (0F 6B) — Pack Signed Dwords to Signed Words
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn packssdw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -646,11 +646,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // MOVD/MOVQ — Data transfer (0F 6E, 0F 6F, 0F 7E, 0F 7F)
-    // Bochs 
+    // Bochs mmx.cc
     // ========================================================================
 
     /// MOVD PqEd (0F 6E) — register form: move 32-bit GPR to MMX
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn movd_pq_ed_r(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         self.prepare_fpu2mmx();
@@ -660,7 +660,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVD PqEd (0F 6E) — memory form
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn movd_pq_ed_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let seg = BxSegregs::from(instr.seg());
@@ -672,7 +672,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVQ PqEq (REX.W + 0F 6E) — register form: move 64-bit GPR to MMX
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn movq_pq_eq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         self.prepare_fpu2mmx();
@@ -682,7 +682,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVQ PqEq (REX.W + 0F 6E) — memory form: load qword from memory to MMX
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn movq_pq_eq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let seg = BxSegregs::from(instr.seg());
@@ -694,7 +694,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVQ PqQq (0F 6F) — register form: MMX to MMX
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn movq_pq_qq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         self.prepare_fpu2mmx();
@@ -704,7 +704,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVQ PqQq (0F 6F) — memory form
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn movq_pq_qq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let seg = BxSegregs::from(instr.seg());
@@ -716,7 +716,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PSHUFW PqQqIb (0F 70) — Shuffle Words
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pshufw_pq_qq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op = self.mmx_read_op2_qq(instr)?;
@@ -733,7 +733,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PCMPEQB PqQq (0F 74)
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pcmpeqb_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -753,7 +753,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PCMPEQW PqQq (0F 75)
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pcmpeqw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -769,7 +769,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PCMPEQD PqQq (0F 76)
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pcmpeqd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -789,7 +789,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// EMMS (0F 77) — Empty MMX State
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn emms(&mut self, _instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         self.the_i387.twd = 0xFFFF; // all tags = empty
@@ -798,7 +798,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVD EdPq (0F 7E) — register form: MMX low dword to 32-bit GPR
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn movd_ed_pq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         self.prepare_fpu2mmx();
@@ -809,7 +809,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVD EdPq (0F 7E) — memory form
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn movd_ed_pq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op = self.read_mmx_reg(instr.src1());
@@ -822,7 +822,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVQ EqPq (REX.W + 0F 7E) — register form: store MMX to 64-bit GPR
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn movq_eq_pq_r(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         self.prepare_fpu2mmx();
@@ -832,7 +832,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVQ EqPq (REX.W + 0F 7E) — memory form: store MMX qword to memory
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn movq_eq_pq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let val = self.read_mmx_reg(instr.src1()).U64();
@@ -844,7 +844,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MOVQ QqPq (0F 7F) / MOVNTQ MqPq (0F E7) — store MMX to memory
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn movq_qq_pq_m(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let val = self.read_mmx_reg(instr.src1()).U64();
@@ -856,11 +856,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // ========================================================================
-    // Insert/Extract word (0F C4, 0F C5) — Bochs 
+    // Insert/Extract word (0F C4, 0F C5) — Bochs mmx.cc
     // ========================================================================
 
     /// PINSRW PqEwIb (0F C4) — Insert Word
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pinsrw_pq_ew_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let mut op1 = self.read_mmx_reg(instr.dst());
@@ -878,7 +878,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PEXTRW GdNqIb (0F C5) — Extract Word
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pextrw_gd_nq_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         self.prepare_fpu2mmx();
@@ -893,7 +893,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ========================================================================
 
     /// PSRLW PqQq (0F D1)
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn psrlw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let mut op1 = self.read_mmx_reg(instr.dst());
@@ -915,7 +915,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PSRLD PqQq (0F D2)
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn psrld_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let mut op1 = self.read_mmx_reg(instr.dst());
@@ -935,7 +935,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PSRLQ PqQq (0F D3)
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn psrlq_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let mut op1 = self.read_mmx_reg(instr.dst());
@@ -953,7 +953,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PADDQ PqQq (0F D4) — Add Packed Qword
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn paddq_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -965,7 +965,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PMULLW PqQq (0F D5) — Multiply Low Words
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pmullw_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -981,7 +981,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PMOVMSKB GdNq (0F D7) — Move Byte Mask
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn pmovmskb_gd_nq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         self.prepare_fpu2mmx();
@@ -1393,7 +1393,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PMADDWD PqQq (0F F5) — Multiply and Add Packed Words
-    /// Bochs  — with 0x80008000 overflow guard
+    /// Bochs mmx.cc — with 0x80008000 overflow guard
     pub(super) fn pmaddwd_pq_qq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op1 = self.read_mmx_reg(instr.dst());
@@ -1433,7 +1433,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MASKMOVQ PqNq (0F F7) — Masked Store Bytes
-    /// Bochs 
+    /// Bochs mmx.cc
     pub(super) fn maskmovq_pq_nq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         self.prepare_fpu2mmx();
@@ -1446,7 +1446,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return Ok(());
         }
 
-        // Bochs : bx_address rdi = RDI & i->asize_mask();
+        // Bochs mmx.cc: bx_address rdi = RDI & i->asize_mask();
         let asize_mask: u64 = if instr.as64_l() != 0 {
             0xFFFF_FFFF_FFFF_FFFF
         } else if instr.as32_l() == 0 {
@@ -1569,7 +1569,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // Immediate-form shift instructions (0F 71-73 GrpA)
-    // Bochs 
+    // Bochs mmx.cc
     // ========================================================================
 
     /// PSRLW NqIb (0F 71 /2) — Shift Right Logical Words by Immediate
@@ -1729,7 +1729,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// MOVNTQ: non-temporal store of MMX register to memory
     /// Non-temporal hint is ignored in emulation — same as MOVQ store
-    /// Bochs : "do not cause FPU2MMX transition if memory write faults"
+    /// Bochs mmx.cc: "do not cause FPU2MMX transition if memory write faults"
     pub(super) fn movntq_mq_pq(&mut self, instr: &Instruction) -> super::Result<()> {
         self.fpu_check_pending_exceptions()?;
         let op = self.read_mmx_reg(instr.src1());
@@ -1737,7 +1737,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let seg = BxSegregs::from(instr.seg());
             self.v_write_qword(seg, eaddr, op.U64())?;
         // prepare_fpu2mmx after write succeeds — if the write faults,
-        // FPU state must not be corrupted (matches Bochs )
+        // FPU state must not be corrupted (matches Bochs mmx.cc)
         self.prepare_fpu2mmx();
         Ok(())
     }

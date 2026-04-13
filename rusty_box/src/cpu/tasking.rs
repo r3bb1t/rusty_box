@@ -23,7 +23,7 @@ pub(super) const BX_TASK_FROM_IRET: u32 = 0x3;
 
 impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     /// Perform task switch
-    /// Based on BX_CPU_C::task_switch in 
+    /// Based on BX_CPU_C::task_switch in tasking.cc
     #[allow(clippy::too_many_arguments)]
     pub(super) fn task_switch(
         &mut self,
@@ -42,7 +42,7 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         self.eip_page_window_size = 0;
 
         // Discard any traps and inhibits for new context; traps will
-        // resume upon return. (Bochs )
+        // resume upon return. (Bochs tasking.cc)
         self.debug_trap &= !Self::BX_DEBUG_SINGLE_STEP_BIT;
         self.inhibit_mask = 0;
 
@@ -91,10 +91,10 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             });
         }
 
-        // Capture old EFLAGS before modification (Bochs )
+        // Capture old EFLAGS before modification (Bochs tasking.cc)
         let mut old_eflags = self.eflags.bits();
 
-        // If moving to busy task, clear NT bit (Bochs )
+        // If moving to busy task, clear NT bit (Bochs tasking.cc)
         if tss_descriptor.r#type == 0x3 || tss_descriptor.r#type == 0xB {
             old_eflags &= !super::eflags::EFlags::NT.bits(); // Clear NT
         }
@@ -250,7 +250,7 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             let raw_fs = self.system_read_word((nbase32 + 0x58) as u64)?;
             let raw_gs = self.system_read_word((nbase32 + 0x5c) as u64)?;
             let raw_ldt = self.system_read_word((nbase32 + 0x60) as u64)?;
-            // Read trap word from TSS offset 0x64 (Bochs )
+            // Read trap word from TSS offset 0x64 (Bochs tasking.cc)
             let trap_word = self.system_read_word((nbase32 + 0x64) as u64)?;
             (
                 new_cr3, trap_word, new_eip, new_eflags, new_eax, new_ecx, new_edx, new_ebx,
@@ -260,7 +260,7 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         };
 
         // Step 7: If CALL, interrupt, or JMP, set busy flag in new task's TSS descriptor
-        // Re-read dword2 from GDT for atomicity (Bochs )
+        // Re-read dword2 from GDT for atomicity (Bochs tasking.cc)
         if source != BX_TASK_FROM_IRET {
             let laddr = (self.gdtr.base + (tss_selector.index as u64 * 8) + 4) as u32;
             let mut new_dword2 = self.system_read_dword(laddr as u64)?;
@@ -276,11 +276,11 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         // Step 9: Set TS flag in CR0 (matches line 472)
         self.cr0.set32(self.cr0.get32() | (1 << 3));
 
-        // Task switch clears LE/L3/L2/L1/L0 in DR7 (Bochs )
+        // Task switch clears LE/L3/L2/L1/L0 in DR7 (Bochs tasking.cc)
         self.dr7
             .set32(self.dr7.get32() & !Self::DR7_LOCAL_ENABLE_MASK);
 
-        // CR3 change — after commit point (Bochs )
+        // CR3 change — after commit point (Bochs tasking.cc)
         if tss_descriptor.r#type >= 9 && self.cr0.pg()
             && new_cr3 != 0 && (new_cr3 as u64) != self.cr3 {
                 tracing::debug!("task_switch(): changing CR3 to {:#x}", new_cr3);
@@ -299,9 +299,9 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
 
         // Step 11: Load the new task (dynamic) state from new TSS (matches lines 486-503)
-        self.prev_rip = new_eip as u64; // Bochs 
+        self.prev_rip = new_eip as u64; // Bochs tasking.cc
         self.set_eip(new_eip);
-        // Use write_eflags for proper side effects (TF, IF, VM, AC) — Bochs 
+        // Use write_eflags for proper side effects (TF, IF, VM, AC) — Bochs tasking.cc
         self.write_eflags(final_eflags, super::eflags::EFlags::VALID_MASK.bits());
         // Load all GPRs from new TSS
         self.set_gpr32(0, new_eax); // EAX
@@ -358,14 +358,14 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         self.sregs[BxSegregs::Fs as usize].cache.valid = 0;
         self.sregs[BxSegregs::Gs as usize].cache.valid = 0;
 
-        // ─── Segment descriptor validation (Bochs ) ───
+        // ─── Segment descriptor validation (Bochs tasking.cc) ───
 
         // Temporarily set CPL to 3 so that privilege level change and stack switch
-        // happen if SS is not properly loaded (Bochs )
+        // happen if SS is not properly loaded (Bochs tasking.cc)
         let save_cpl = self.sregs[BxSegregs::Cs as usize].selector.rpl;
         self.sregs[BxSegregs::Cs as usize].selector.rpl = 3;
 
-        // LDTR validation (Bochs )
+        // LDTR validation (Bochs tasking.cc)
         if ldt_selector.ti != 0 {
             tracing::error!("task_switch: bad LDT selector TI=1");
             return self.exception(Exception::Ts, raw_ldt_selector & 0xfffc);
@@ -396,7 +396,7 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         }
         // else: NULL LDT selector is OK, leave cache invalid
 
-        // Check if V8086 mode (Bochs )
+        // Check if V8086 mode (Bochs tasking.cc)
         if (final_eflags & super::eflags::EFlags::VM.bits()) != 0 {
             // V8086 mode — load seg regs as real-mode
             self.load_seg_reg_real_mode(BxSegregs::Ss, raw_ss_selector);
@@ -408,7 +408,7 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
         } else {
             // Protected mode segment validation
 
-            // SS validation (Bochs )
+            // SS validation (Bochs tasking.cc)
             if (raw_ss_selector & 0xfffc) != 0 {
                 match self.fetch_raw_descriptor(&ss_selector) {
                     Ok((dword1, dword2)) => {
@@ -447,10 +447,10 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 return self.exception(Exception::Ts, raw_ss_selector & 0xfffc);
             }
 
-            // Restore CPL (Bochs )
+            // Restore CPL (Bochs tasking.cc)
             self.sregs[BxSegregs::Cs as usize].selector.rpl = save_cpl;
 
-            // DS/ES/FS/GS validation via task_switch_load_selector (Bochs )
+            // DS/ES/FS/GS validation via task_switch_load_selector (Bochs tasking.cc)
             self.task_switch_load_selector(
                 BxSegregs::Ds,
                 &ds_selector,
@@ -476,7 +476,7 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 cs_selector.rpl,
             )?;
 
-            // CS validation (Bochs )
+            // CS validation (Bochs tasking.cc)
             if (raw_cs_selector & 0xfffc) != 0 {
                 match self.fetch_raw_descriptor(&cs_selector) {
                     Ok((dword1, dword2)) => {
@@ -517,18 +517,18 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
                 return self.exception(Exception::Ts, raw_cs_selector & 0xfffc);
             }
 
-            // Bochs  — updateFetchModeMask() after CS reload
+            // Bochs tasking.cc — updateFetchModeMask() after CS reload
             self.update_fetch_mode_mask();
             self.invalidate_prefetch_q();
-            // Alignment check depends on new CPL (Bochs )
+            // Alignment check depends on new CPL (Bochs tasking.cc)
             self.handle_alignment_check();
         }
 
-        // Set speculative RSP before error-code push (Bochs )
+        // Set speculative RSP before error-code push (Bochs tasking.cc)
         self.speculative_rsp = true;
         self.prev_rsp = self.esp() as u64;
 
-        // Push error code if needed (Bochs )
+        // Push error code if needed (Bochs tasking.cc)
         if push_error {
             if tss_descriptor.r#type >= 9 {
                 // 386 TSS
@@ -539,14 +539,14 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             }
         }
 
-        // Check TSS T (debug trap) bit — 386 TSS only (Bochs )
+        // Check TSS T (debug trap) bit — 386 TSS only (Bochs tasking.cc)
         if tss_descriptor.r#type >= 9 && (trap_word & 0x1) != 0 {
             self.debug_trap |= Self::BX_DEBUG_TRAP_TASK_SWITCH_BIT;
             self.async_event = 1;
             tracing::info!("task_switch: T bit set in new TSS");
         }
 
-        // Instruction pointer must be in CS limit, else #GP(0) (Bochs )
+        // Instruction pointer must be in CS limit, else #GP(0) (Bochs tasking.cc)
         let cs_limit = self.sregs[BxSegregs::Cs as usize]
             .cache
             .u
@@ -561,7 +561,7 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
             return self.exception(Exception::Gp, 0);
         }
 
-        // RSP commit (Bochs )
+        // RSP commit (Bochs tasking.cc)
         self.speculative_rsp = false;
 
         tracing::debug!(
@@ -576,7 +576,7 @@ impl<I: BxCpuIdTrait> super::cpu::BxCpuC<'_, I> {
     }
 
     /// Load a data segment selector during task switch
-    /// Based on BX_CPU_C::task_switch_load_selector in 
+    /// Based on BX_CPU_C::task_switch_load_selector in tasking.cc
     fn task_switch_load_selector(
         &mut self,
         seg: BxSegregs,

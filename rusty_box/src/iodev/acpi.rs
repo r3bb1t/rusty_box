@@ -22,19 +22,19 @@ use bitflags::bitflags;
 /// PM timer frequency: 3.579545 MHz (ACPI spec, section 4.7.3.3)
 const PM_FREQ: u64 = 3_579_545;
 
-/// Debug I/O port address (Bochs )
+/// Debug I/O port address (Bochs acpi.cc)
 const ACPI_DBG_IO_ADDR: u16 = 0xB044;
 
 /// SMI command port (ACPI spec — FADT SmiCmd field)
 /// The BIOS writes ACPI_ENABLE/ACPI_DISABLE here.
 const SMI_CMD_PORT: u16 = 0x00B2;
 
-/// ACPI enable command value (Bochs )
+/// ACPI enable command value (Bochs acpi.cc)
 const ACPI_ENABLE: u8 = 0xF1;
-/// ACPI disable command value (Bochs )
+/// ACPI disable command value (Bochs acpi.cc)
 const ACPI_DISABLE: u8 = 0xF0;
 
-// ─── PM Status Register bits (Bochs ) ──────────────────────────
+// ─── PM Status Register bits (Bochs acpi.cc) ──────────────────────────
 
 bitflags! {
     /// PM1 Status Register bits (offset 0x00 from PM base)
@@ -89,19 +89,19 @@ bitflags! {
 
 /// I/O access mask for PM register space (64 ports).
 /// Each entry is a bitmask: bit 0 = byte, bit 1 = word, bit 2 = dword.
-/// Bochs 
+/// Bochs acpi.cc
 const ACPI_PM_IOMASK: [u8; 64] = [
     3, 0, 3, 0, 3, 0, 0, 0, 4, 0, 0, 0, 3, 1, 3, 1, 7, 1, 3, 1, 1, 1, 0, 0, 3, 1, 0, 0, 7, 1, 3, 1,
     3, 1, 0, 0, 0, 0, 0, 0, 7, 1, 3, 1, 7, 1, 3, 1, 1, 1, 1, 0, 1, 1, 1, 1, 0, 0, 0, 0, 0, 0, 0, 0,
 ];
 
 /// I/O access mask for SMBus register space (16 ports).
-/// Bochs 
+/// Bochs acpi.cc
 const ACPI_SM_IOMASK: [u8; 16] = [1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 2, 0, 2, 0, 0, 0];
 
 // ─── SMBus state ─────────────────────────────────────────────────────────────
 
-/// SMBus host controller state (Bochs )
+/// SMBus host controller state (Bochs acpi.h)
 #[derive(Debug, Clone)]
 #[derive(Default)]
 pub struct SmBusState {
@@ -124,7 +124,7 @@ const PCI_CONF_SIZE: usize = 256;
 // ─── ACPI Controller ─────────────────────────────────────────────────────────
 
 /// PIIX4 ACPI Power Management controller.
-/// Bochs: bx_acpi_ctrl_c (, acpi.cc)
+/// Bochs: bx_acpi_ctrl_c (acpi.h, acpi.cc)
 #[derive(Debug)]
 pub struct BxAcpiCtrl {
     /// PCI device/function number (PIIX4: bus 0, dev 1, func 3 = 0x0B)
@@ -175,7 +175,7 @@ impl Default for BxAcpiCtrl {
 
 impl BxAcpiCtrl {
     /// Create a new ACPI controller instance.
-    /// Bochs: bx_acpi_ctrl_c::bx_acpi_ctrl_c() ()
+    /// Bochs: bx_acpi_ctrl_c::bx_acpi_ctrl_c() (acpi.cc)
     pub fn new() -> Self {
         let mut ctrl = Self {
             devfunc: 0x0B, // BX_PCI_DEVICE(1, 3) = (1 << 3) | 3 = 0x0B
@@ -184,7 +184,7 @@ impl BxAcpiCtrl {
             pmsts: 0,
             pmen: 0,
             pmcntrl: 0,
-            tmr_overflow_time: 0xFF_FFFF, // 24-bit max (Bochs )
+            tmr_overflow_time: 0xFF_FFFF, // 24-bit max (Bochs acpi.cc)
             pmreg: [0; 0x38],
             smbus: SmBusState::default(),
             pci_conf: [0; PCI_CONF_SIZE],
@@ -198,7 +198,7 @@ impl BxAcpiCtrl {
     }
 
     /// Initialize PCI configuration space with PIIX4 PM identity.
-    /// Bochs: init_pci_conf(0x8086, 0x7113, 0x03, 0x068000, 0x00, 0) ()
+    /// Bochs: init_pci_conf(0x8086, 0x7113, 0x03, 0x068000, 0x00, 0) (acpi.cc)
     fn init_pci_conf(&mut self) {
         // Vendor ID: Intel (0x8086)
         self.pci_conf[0x00] = 0x86;
@@ -215,46 +215,46 @@ impl BxAcpiCtrl {
     }
 
     /// Reset the ACPI controller.
-    /// Bochs: bx_acpi_ctrl_c::reset() ()
+    /// Bochs: bx_acpi_ctrl_c::reset() (acpi.cc)
     pub fn reset(&mut self) {
-        // PCI command/status ()
+        // PCI command/status (acpi.cc)
         self.pci_conf[0x04] = 0x00;
         self.pci_conf[0x05] = 0x00;
         self.pci_conf[0x06] = 0x80; // status_devsel_medium
         self.pci_conf[0x07] = 0x02;
         self.pci_conf[0x3C] = 0x00; // IRQ
 
-        // PM base 0x40-0x43 ()
+        // PM base 0x40-0x43 (acpi.cc)
         self.pci_conf[0x40] = 0x01;
         self.pci_conf[0x41] = 0x00;
         self.pci_conf[0x42] = 0x00;
         self.pci_conf[0x43] = 0x00;
 
-        // Clear DEVACTB ()
+        // Clear DEVACTB (acpi.cc)
         self.pci_conf[0x58] = 0x00;
         self.pci_conf[0x59] = 0x00;
 
-        // Device resources ()
+        // Device resources (acpi.cc)
         self.pci_conf[0x5A] = 0x00;
         self.pci_conf[0x5B] = 0x00;
         self.pci_conf[0x5F] = 0x90;
         self.pci_conf[0x63] = 0x60;
         self.pci_conf[0x67] = 0x98;
 
-        // SM base 0x90-0x93 ()
+        // SM base 0x90-0x93 (acpi.cc)
         self.pci_conf[0x90] = 0x01;
         self.pci_conf[0x91] = 0x00;
         self.pci_conf[0x92] = 0x00;
         self.pci_conf[0x93] = 0x00;
 
-        // Clear PM state ()
+        // Clear PM state (acpi.cc)
         self.pmsts = 0;
         self.pmen = 0;
         self.pmcntrl = 0;
         self.tmr_overflow_time = 0xFF_FFFF;
         self.pmreg = [0; 0x38];
 
-        // Clear SMBus state ()
+        // Clear SMBus state (acpi.cc)
         self.smbus = SmBusState::default();
 
         self.irq9_level = false;
@@ -270,14 +270,14 @@ impl BxAcpiCtrl {
     // ─── PM Timer ────────────────────────────────────────────────────────
 
     /// Get the 24-bit PM timer value.
-    /// Bochs: get_pmtmr() ()
+    /// Bochs: get_pmtmr() (acpi.cc)
     fn get_pmtmr(&self) -> u32 {
         let value = muldiv64(self.time_usec, PM_FREQ as u32, 1_000_000);
         (value & 0xFF_FFFF) as u32
     }
 
     /// Get PM status with timer overflow check.
-    /// Bochs: get_pmsts() ()
+    /// Bochs: get_pmsts() (acpi.cc)
     fn get_pmsts(&mut self) -> u16 {
         let value = muldiv64(self.time_usec, PM_FREQ as u32, 1_000_000);
         if value >= self.tmr_overflow_time {
@@ -287,11 +287,11 @@ impl BxAcpiCtrl {
     }
 
     /// Update SCI interrupt level based on current status and enable.
-    /// Bochs: pm_update_sci() ()
+    /// Bochs: pm_update_sci() (acpi.cc)
     fn pm_update_sci(&mut self) {
         let pmsts = self.get_pmsts();
         // SCI fires if any enabled status bit is set
-        // Bochs : (pmsts & pmen) & (RTC_EN | PWRBTN_EN | GBL_EN | TMROF_EN)
+        // Bochs acpi.cc: (pmsts & pmen) & (RTC_EN | PWRBTN_EN | GBL_EN | TMROF_EN)
         let sci_mask = PmEnable::RTC_EN.bits()
             | PmEnable::PWRBTN_EN.bits()
             | PmEnable::GBL_EN.bits()
@@ -305,13 +305,13 @@ impl BxAcpiCtrl {
     }
 
     /// Set IRQ 9 level (ACPI SCI).
-    /// Bochs: set_irq_level() ()
+    /// Bochs: set_irq_level() (acpi.cc)
     fn set_irq_level(&mut self, level: bool) {
         self.irq9_level = level;
     }
 
     /// Handle SMI command (ACPI enable/disable).
-    /// Bochs: generate_smi() ()
+    /// Bochs: generate_smi() (acpi.cc)
     pub fn generate_smi(&mut self, value: u8) {
         if value == ACPI_ENABLE {
             self.pmcntrl |= PmControl::SCI_EN.bits();
@@ -319,41 +319,41 @@ impl BxAcpiCtrl {
             self.pmcntrl &= !PmControl::SCI_EN.bits();
         }
         // SMI delivery via APIC bus not implemented (requires APIC bus infrastructure)
-        // Bochs : if (pci_conf[0x5b] & 0x02) apic_bus_deliver_smi()
+        // Bochs acpi.cc: if (pci_conf[0x5b] & 0x02) apic_bus_deliver_smi()
     }
 
     // ─── I/O Port Handlers ───────────────────────────────────────────────
 
     /// Read from PM or SMBus register space.
-    /// Bochs: read_handler() / read() ()
+    /// Bochs: read_handler() / read() (acpi.cc)
     pub fn read(&mut self, address: u16, io_len: u8) -> u32 {
         let mut value: u32 = 0xFFFF_FFFF;
 
         if self.pm_base != 0 && (address as u32 & 0xFFC0) == self.pm_base {
             // PM register space — check if PM decode is enabled (PCI config 0x80 bit 0)
-            // Bochs 
+            // Bochs acpi.cc
             if (self.pci_conf[0x80] & 0x01) == 0 {
                 return value;
             }
             let reg = (address as u32 & 0x3F) as u8;
             match reg {
-                // PM1 Status ()
+                // PM1 Status (acpi.cc)
                 0x00 => {
                     value = self.get_pmsts() as u32;
                 }
-                // PM1 Enable ()
+                // PM1 Enable (acpi.cc)
                 0x02 => {
                     value = self.pmen as u32;
                 }
-                // PM1 Control ()
+                // PM1 Control (acpi.cc)
                 0x04 => {
                     value = self.pmcntrl as u32;
                 }
-                // PM Timer ()
+                // PM Timer (acpi.cc)
                 0x08 => {
                     value = self.get_pmtmr();
                 }
-                // Generic PM registers ()
+                // Generic PM registers (acpi.cc)
                 _ => {
                     if (reg as usize) < self.pmreg.len() {
                         value = self.pmreg[reg as usize] as u32;
@@ -379,28 +379,28 @@ impl BxAcpiCtrl {
             );
         } else if self.sm_base != 0 && (address as u32 & 0xFFF0) == self.sm_base {
             // SMBus register space — check decode enable
-            // Bochs 
+            // Bochs acpi.cc
             if (self.pci_conf[0x04] & 0x01) == 0 && (self.pci_conf[0xD2] & 0x01) == 0 {
                 return value;
             }
             let reg = (address as u32 & 0x0F) as u8;
             match reg {
-                // SMBus status ()
+                // SMBus status (acpi.cc)
                 0x00 => value = self.smbus.stat as u32,
-                // SMBus control () — reading resets block index
+                // SMBus control (acpi.cc) — reading resets block index
                 0x02 => {
                     self.smbus.index = 0;
                     value = (self.smbus.ctl & 0x1F) as u32;
                 }
-                // SMBus command ()
+                // SMBus command (acpi.cc)
                 0x03 => value = self.smbus.cmd as u32,
-                // SMBus address ()
+                // SMBus address (acpi.cc)
                 0x04 => value = self.smbus.addr as u32,
-                // SMBus data0 ()
+                // SMBus data0 (acpi.cc)
                 0x05 => value = self.smbus.data0 as u32,
-                // SMBus data1 ()
+                // SMBus data1 (acpi.cc)
                 0x06 => value = self.smbus.data1 as u32,
-                // SMBus block data ()
+                // SMBus block data (acpi.cc)
                 0x07 => {
                     let idx = self.smbus.index as usize;
                     value = self.smbus.data[idx] as u32;
@@ -422,7 +422,7 @@ impl BxAcpiCtrl {
     }
 
     /// Write to PM or SMBus register space.
-    /// Bochs: write_handler() / write() ()
+    /// Bochs: write_handler() / write() (acpi.cc)
     pub fn write(&mut self, address: u16, value: u32, io_len: u8) {
         if self.pm_base != 0 && (address as u32 & 0xFFC0) == self.pm_base {
             // PM register space
@@ -437,7 +437,7 @@ impl BxAcpiCtrl {
                 io_len
             );
             match reg {
-                // PM1 Status — write-1-to-clear ()
+                // PM1 Status — write-1-to-clear (acpi.cc)
                 0x00 => {
                     let pmsts = self.get_pmsts();
                     // If clearing TMROF_STS, recompute next overflow time
@@ -448,23 +448,23 @@ impl BxAcpiCtrl {
                     self.pmsts &= !(value as u16);
                     self.pm_update_sci();
                 }
-                // PM1 Enable ()
+                // PM1 Enable (acpi.cc)
                 0x02 => {
                     self.pmen = value as u16;
                     self.pm_update_sci();
                 }
-                // PM1 Control ()
+                // PM1 Control (acpi.cc)
                 0x04 => {
                     self.pmcntrl = (value as u16) & !PmControl::SUS_EN.bits();
                     if (value as u16) & PmControl::SUS_EN.bits() != 0 {
                         let sus_typ = (value >> 10) & 7;
                         match sus_typ {
                             0 => {
-                                // Soft power off ()
+                                // Soft power off (acpi.cc)
                                 tracing::info!("ACPI: soft power off requested");
                             }
                             1 => {
-                                // Suspend to RAM ()
+                                // Suspend to RAM (acpi.cc)
                                 tracing::info!("ACPI: suspend to RAM requested");
                                 self.pmsts |=
                                     PmStatus::RSM_STS.bits() | PmStatus::PWRBTN_STS.bits();
@@ -473,10 +473,10 @@ impl BxAcpiCtrl {
                         }
                     }
                 }
-                // Write-ignored registers ()
+                // Write-ignored registers (acpi.cc)
                 0x0C | 0x0D | 0x14 | 0x15 | 0x18 | 0x19 | 0x1C | 0x1D | 0x1E | 0x1F | 0x30
                 | 0x31 | 0x32 => {}
-                // Generic PM registers ()
+                // Generic PM registers (acpi.cc)
                 _ => {
                     if (reg as usize) < self.pmreg.len() {
                         self.pmreg[reg as usize] = value as u8;
@@ -502,26 +502,26 @@ impl BxAcpiCtrl {
             let reg = (address as u32 & 0x0F) as u8;
             tracing::debug!("ACPI SMBus write reg={:#04x} value={:#04x}", reg, value);
             match reg {
-                // SMBus status — clear on write ()
+                // SMBus status — clear on write (acpi.cc)
                 0x00 => {
                     self.smbus.stat = 0;
                     self.smbus.index = 0;
                 }
-                // SMBus control ()
+                // SMBus control (acpi.cc)
                 0x02 => {
                     self.smbus.ctl = 0;
-                    // Bochs  also has "TODO: execute SMBus command" —
+                    // Bochs acpi.cc also has "TODO: execute SMBus command" —
                     // SMBus transaction execution is unimplemented in Bochs itself.
                 }
-                // SMBus command ()
+                // SMBus command (acpi.cc)
                 0x03 => self.smbus.cmd = 0,
-                // SMBus address ()
+                // SMBus address (acpi.cc)
                 0x04 => self.smbus.addr = 0,
-                // SMBus data0 ()
+                // SMBus data0 (acpi.cc)
                 0x05 => self.smbus.data0 = 0,
-                // SMBus data1 ()
+                // SMBus data1 (acpi.cc)
                 0x06 => self.smbus.data1 = 0,
-                // SMBus block data ()
+                // SMBus block data (acpi.cc)
                 0x07 => {
                     let idx = self.smbus.index as usize;
                     self.smbus.data[idx] = value as u8;
@@ -536,7 +536,7 @@ impl BxAcpiCtrl {
                 }
             }
         } else {
-            // Debug port (0xB044) — Bochs 
+            // Debug port (0xB044) — Bochs acpi.cc
             tracing::debug!("ACPI DBG: {:#010x}", value);
         }
     }
@@ -544,7 +544,7 @@ impl BxAcpiCtrl {
     // ─── PCI Configuration Space ─────────────────────────────────────────
 
     /// Write to PCI configuration space.
-    /// Bochs: pci_write_handler() ()
+    /// Bochs: pci_write_handler() (acpi.cc)
     ///
     /// Returns (pm_base_changed, sm_base_changed) to signal that the emulator
     /// should re-register I/O ports.
@@ -552,7 +552,7 @@ impl BxAcpiCtrl {
         let mut pm_base_change = false;
         let mut sm_base_change = false;
 
-        // Addresses 0x10-0x33 are ignored (BAR region) — 
+        // Addresses 0x10-0x33 are ignored (BAR region) — acpi.cc
         if (0x10..0x34).contains(&address) {
             return (false, false);
         }
@@ -566,42 +566,42 @@ impl BxAcpiCtrl {
             let oldval = self.pci_conf[addr];
 
             match addr {
-                // Command register ()
+                // Command register (acpi.cc)
                 0x04 => {
                     self.pci_conf[addr] = (value8 & 0xFE) | (value8 & 0x01);
                 }
-                // Status lo-byte — write disallowed ()
+                // Status lo-byte — write disallowed (acpi.cc)
                 0x06 => {}
-                // PM base 0x40 ()
+                // PM base 0x40 (acpi.cc)
                 0x40 => {
                     let v = (value8 & 0xC0) | 0x01;
                     pm_base_change |= v != oldval;
                     self.pci_conf[addr] = v;
                 }
-                // PM base 0x41-0x43 ()
+                // PM base 0x41-0x43 (acpi.cc)
                 0x41..=0x43 => {
                     pm_base_change |= value8 != oldval;
                     self.pci_conf[addr] = value8;
                 }
-                // SM base 0x90 ()
+                // SM base 0x90 (acpi.cc)
                 0x90 => {
                     let v = (value8 & 0xF0) | 0x01;
                     sm_base_change |= v != oldval;
                     self.pci_conf[addr] = v;
                 }
-                // SM base 0x91-0x93 (, fall-through to default)
+                // SM base 0x91-0x93 (acpi.cc, fall-through to default)
                 0x91..=0x93 => {
                     sm_base_change |= value8 != oldval;
                     self.pci_conf[addr] = value8;
                 }
-                // Default: store value ()
+                // Default: store value (acpi.cc)
                 _ => {
                     self.pci_conf[addr] = value8;
                 }
             }
         }
 
-        // Update base addresses if changed ()
+        // Update base addresses if changed (acpi.cc)
         if pm_base_change {
             let new_base = u32::from_le_bytes([
                 self.pci_conf[0x40],
@@ -671,7 +671,7 @@ impl BxAcpiCtrl {
 // ─── Utility: 96-bit intermediate multiply-divide ────────────────────────────
 
 /// Compute (a * b) / c using a 96-bit intermediate to avoid overflow.
-/// Ported from QEMU/Bochs: muldiv64() ()
+/// Ported from QEMU/Bochs: muldiv64() (acpi.cc)
 fn muldiv64(a: u64, b: u32, c: u32) -> u64 {
     let a_lo = a as u32 as u64;
     let a_hi = a >> 32;

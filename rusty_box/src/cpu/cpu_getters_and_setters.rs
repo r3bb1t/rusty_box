@@ -260,11 +260,11 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     #[inline]
     pub fn set_eip(&mut self, val: u32) {
         // EIP and RIP are the same register (index 16), just different views of a union
-        // Matching C++ : #define EIP (BX_CPU_THIS_PTR gen_reg[BX_32BIT_REG_EIP].dword.erx)
+        // Matching C++ cpu.h: #define EIP (BX_CPU_THIS_PTR gen_reg[BX_32BIT_REG_EIP].dword.erx)
         // In C++, when you do "EIP = new_IP;", it directly assigns to dword.erx
         // The union ensures rrx low 32 bits are also updated, but high bits are NOT cleared here
         // High bits are cleared later in prefetch() via BX_CLEAR_64BIT_HIGH(BX_64BIT_REG_RIP)
-        // See cpp_orig/bochs/cpu/ and 
+        // See cpp_orig/bochs/cpu/cpu.cc and ctrl_xfer16.cc
 
         self.gen_reg[BX_32BIT_REG_EIP].set_erx(val);
         // Note: We do NOT clear high bits here to match C++ behavior

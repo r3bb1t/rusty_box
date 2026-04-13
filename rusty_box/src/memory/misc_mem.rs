@@ -44,9 +44,9 @@ impl BxMemC<'_> {
             memory_handlers,
 
             pci_enabled,
-            // Bochs defaults bios_write_enabled to false (), then the
+            // Bochs defaults bios_write_enabled to false (misc_mem.cc), then the
             // PCI2ISA bridge sets it via DEV_mem_set_bios_write() when register 0x4E
-            // bit 2 is written (). Our PCI2ISA handler at 0x4E logs the
+            // bit 2 is written (pci2isa.cc). Our PCI2ISA handler at 0x4E logs the
             // change but does not propagate it to memory, so we keep true here to
             // ensure BIOS ROM writes (shadow RAM, flash) work during early POST.
             bios_write_enabled: true,
@@ -79,7 +79,7 @@ impl<'c> BxMemC<'c> {
 
         // Match Bochs: 0xE0000-0xFFFFF is ALWAYS BIOS ROM, plus addresses >= bios_rom_addr
         // This is critical for rombios32 which is linked to run at 0xE0000!
-        // From cpp_orig/bochs/memory/ and memory-
+        // From cpp_orig/bochs/memory/misc_mem.cc and memory-bochs.h
         let is_bios =
             (0xE0000..0x100000).contains(&a20_addr) || a20_addr >= self.bios_rom_addr.into();
 
@@ -134,7 +134,7 @@ impl<'c> BxMemC<'c> {
                 && (0x000c0000..0x00100000).contains(&a20_addr)
             {
                 // PCI path for C0000-FFFFF: check memory_type to decide ROM vs ShadowRAM.
-                // Bochs:  — this check MUST come before the unconditional
+                // Bochs: misc_mem.cc — this check MUST come before the unconditional
                 // E0000 ROM return, because PAM registers can redirect reads to shadow DRAM.
                 let mut area: usize = ((a20_addr as u32 >> 14) & 0x0f).try_into()?;
                 if area > MemoryAreaT::F0000 as _ {
@@ -161,7 +161,7 @@ impl<'c> BxMemC<'c> {
                     Ok(Some(self.get_vector(cpus, a20_addr)?))
                 }
                 // must be in C0000 - FFFFF range (non-PCI path)
-                // Bochs: 
+                // Bochs: misc_mem.cc
                 else if (a20_addr & 0xfffe0000) == 0x000e0000 {
                     // last 128K of BIOS ROM mapped to 0xE0000-0xFFFFF
                     let mapped = bios_map_last128k(a20_addr.try_into()?);
@@ -205,7 +205,7 @@ impl<'c> BxMemC<'c> {
             }
             if (a20_addr >= self.inherited_memory_stub.len.try_into()?) || is_bios {
                 // Error, requested addr is out of bounds or writing to BIOS ROM
-                // From cpp_orig/bochs/memory/
+                // From cpp_orig/bochs/memory/misc_mem.cc
                 Ok(None)
             } else if (0x000a0000..0x000c0000).contains(&a20_addr) {
                 Ok(None) // Vetoed!  Mem mapped IO (VGA)
@@ -441,7 +441,7 @@ impl BxMemC<'_> {
     }
 
     /// Write physical page with memory handler support
-    /// Based on BX_MEM_C::writePhysicalPage in 
+    /// Based on BX_MEM_C::writePhysicalPage in memory.cc
     pub fn write_physical_page<I: BxCpuIdTrait>(
         &mut self,
         cpus: &[&BxCpuC<I>],
@@ -519,7 +519,7 @@ impl BxMemC<'_> {
             }
         }
 
-        // mem_write: (from )
+        // mem_write: (from memory.cc)
 
         // All memory access fits in single 4K page.
         // Note: Bochs does NOT check is_bios here — addresses in E0000-FFFFF
@@ -609,7 +609,7 @@ impl BxMemC<'_> {
 
             Ok(())
         } else if self.bios_write_enabled && is_bios {
-            // Volatile BIOS write support (from )
+            // Volatile BIOS write support (from memory.cc)
             for &data_byte in &data[..len] {
                 let rom_offset = bios_map_last128k(a20_addr as usize);
                 if rom_offset < BIOSROMSZ {
@@ -622,13 +622,13 @@ impl BxMemC<'_> {
             }
             Ok(())
         } else {
-            // Access outside limits of physical memory, ignore (from )
+            // Access outside limits of physical memory, ignore (from memory.cc)
             Ok(())
         }
     }
 
     /// Read physical page with memory handler support
-    /// Based on BX_MEM_C::readPhysicalPage in 
+    /// Based on BX_MEM_C::readPhysicalPage in memory.cc
     pub fn read_physical_page<I: BxCpuIdTrait>(
         &mut self,
         cpus: &[&BxCpuC<I>],
@@ -924,25 +924,25 @@ impl BxMemC<'_> {
     }
 
     // ========================================================================
-    // Flash ROM state machine (Bochs )
+    // Flash ROM state machine (Bochs misc_mem.cc)
     // ========================================================================
 
     /// Flash ROM read — returns value based on current flash state machine state.
     ///
     /// `addr` is a ROM array offset (already mapped via `bios_map_last128k` or
-    /// `& BIOS_MASK` by the caller), matching Bochs .
+    /// `& BIOS_MASK` by the caller), matching Bochs misc_mem.cc.
     ///
     /// Not yet wired into the read path — stub for future integration when
     /// `flash_type > 0` is configured.
     pub(crate) fn flash_read(&mut self, addr: u32) -> u8 {
         match self.flash_wsm_state {
             FLASH_READ_ARRAY => {
-                // Normal read — return ROM data (Bochs )
+                // Normal read — return ROM data (Bochs misc_mem.cc)
                 let rom = self.inherited_memory_stub.rom();
                 rom.get(addr as usize).copied().unwrap_or(0xFF)
             }
             FLASH_INT_ID => {
-                // Manufacturer/device ID (Bochs )
+                // Manufacturer/device ID (Bochs misc_mem.cc)
                 if (addr & 1) != 0 {
                     if self.flash_type == 2 { 0x7c } else { 0x94 }
                 } else {
@@ -951,7 +951,7 @@ impl BxMemC<'_> {
             }
             _ => {
                 // FLASH_READ_STATUS and all other states return flash_status
-                // (Bochs )
+                // (Bochs misc_mem.cc)
                 if self.flash_wsm_state == FLASH_ERASE {
                     self.flash_status |= 0x80;
                 }
@@ -963,7 +963,7 @@ impl BxMemC<'_> {
     /// Flash ROM write — processes command bytes for the flash state machine.
     ///
     /// `addr` is a ROM array offset (already mapped by the caller), matching
-    /// Bochs .
+    /// Bochs misc_mem.cc.
     ///
     /// Not yet wired into the write path — stub for future integration when
     /// `flash_type > 0` is configured.
@@ -975,7 +975,7 @@ impl BxMemC<'_> {
         };
 
         if self.flash_wsm_state == FLASH_PROG_SETUP {
-            // Actual byte program — AND data into ROM (Bochs )
+            // Actual byte program — AND data into ROM (Bochs misc_mem.cc)
             let rom = self.inherited_memory_stub.rom();
             if let Some(byte) = rom.get_mut(addr as usize) {
                 *byte &= data;
@@ -983,7 +983,7 @@ impl BxMemC<'_> {
             self.flash_wsm_state = FLASH_READ_STATUS;
             self.flash_modified = true;
         } else {
-            // Command byte processing (Bochs )
+            // Command byte processing (Bochs misc_mem.cc)
             match data {
                 FLASH_INT_ID | FLASH_READ_ARRAY | FLASH_ERASE_SETUP
                 | FLASH_ERASE_SUSP | FLASH_PROG_SETUP => {
@@ -995,12 +995,12 @@ impl BxMemC<'_> {
                     }
                 }
                 FLASH_CLR_STATUS => {
-                    // Clear status register error bits (Bochs )
+                    // Clear status register error bits (Bochs misc_mem.cc)
                     self.flash_status &= !0x38;
                     self.flash_wsm_state = FLASH_READ_ARRAY;
                 }
                 FLASH_ERASE => {
-                    // Erase confirm / erase resume (Bochs )
+                    // Erase confirm / erase resume (Bochs misc_mem.cc)
                     if self.flash_wsm_state == FLASH_ERASE_SETUP {
                         self.flash_status &= !0xc0;
                         self.flash_wsm_state = FLASH_ERASE;
@@ -1026,7 +1026,7 @@ impl BxMemC<'_> {
                             self.flash_modified = true;
                         }
                     } else if self.flash_wsm_state == FLASH_ERASE_SUSP {
-                        // Erase resume (Bochs )
+                        // Erase resume (Bochs misc_mem.cc)
                         self.flash_status &= !0x40;
                         self.flash_wsm_state = FLASH_ERASE;
                     } else {

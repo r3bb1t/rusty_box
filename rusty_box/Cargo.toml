@@ -3,6 +3,12 @@ name = "rusty_box"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+description = "A Rust port of the Bochs x86 emulator — boots DLX and Alpine Linux"
+keywords = ["x86", "emulator", "bochs", "cpu", "virtualization"]
+categories = ["emulators", "simulation"]
 
 [lib]
 name = "rusty_box"

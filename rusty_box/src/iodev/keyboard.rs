@@ -179,7 +179,7 @@ const BX_MOUSE_TYPE_PS2: u8 = 2;
 const BX_MOUSE_TYPE_IMPS2: u8 = 3;
 
 // ---- 8042 Controller Commands (written to port 0x64) ----
-// Reference: 
+// Reference: keyboard.cc
 const CTRL_CMD_GET_CCB: u8 = 0x20;
 const CTRL_CMD_WRITE_CCB: u8 = 0x60;
 const CTRL_CMD_BIOS_NAME: u8 = 0xA0;
@@ -205,7 +205,7 @@ const CTRL_CMD_ENABLE_A20: u8 = 0xDF;
 const CTRL_CMD_SYSTEM_RESET: u8 = 0xFE;
 
 // ---- Keyboard Commands (written to port 0x60 directly) ----
-// Reference: 
+// Reference: keyboard.cc
 const KBD_CMD_SET_LEDS: u8 = 0xED;
 const KBD_CMD_ECHO: u8 = 0xEE;
 const KBD_CMD_SELECT_SCAN_SET: u8 = 0xF0;
@@ -218,7 +218,7 @@ const KBD_CMD_RESEND: u8 = 0xFE;
 const KBD_CMD_RESET: u8 = 0xFF;
 
 // ---- Mouse Commands (via 0xD4 controller command) ----
-// Reference: 
+// Reference: keyboard.cc
 const MOUSE_CMD_READ_SECONDARY_ID: u8 = 0xE1;
 const MOUSE_CMD_SET_SCALING_1_1: u8 = 0xE6;
 const MOUSE_CMD_SET_SCALING_2_1: u8 = 0xE7;
@@ -266,7 +266,7 @@ const TYPEMATIC_DELAY_MASK: u8 = 0x03;
 const TYPEMATIC_RATE_MASK: u8 = 0x1F;
 
 /// 8042 scancode set 2 → set 1 translation table.
-/// Bochs  — `translation8042[256]`.
+/// Bochs scancodes.cc — `translation8042[256]`.
 /// Used when `scancodes_translate` is true (CCB bit 6 = 1).
 /// The 0xF0 prefix byte (set 2 break) is consumed and ORed as 0x80 onto the
 /// next translated byte, producing the set 1 break code convention.
@@ -557,7 +557,7 @@ pub struct BxKeyboardC {
     /// 0xF0 prefix (set 2 break) is received via `send_scancode`, this flag is
     /// set to `true`. The next non-0xF0 byte is then translated AND ORed with
     /// 0x80 to produce the set 1 break code. Matches Bochs gen_scancode() logic
-    /// ().
+    /// (keyboard.cc).
     scancode_escaped: bool,
     /// System reset requested via controller command 0xFE.
     /// Checked by emulator loop to trigger hardware reset.
@@ -661,7 +661,7 @@ impl BxKeyboardC {
         self.kbd_internal_buffer.led_status = 0;
     }
 
-    /// Flush internal buffer and reset keyboard settings ()
+    /// Flush internal buffer and reset keyboard settings (keyboard.cc)
     fn resetinternals(&mut self, powerup: bool) {
         self.kbd_internal_buffer.num_elements = 0;
         self.kbd_internal_buffer.buffer = [0; BX_KBD_ELEMENTS];
@@ -681,7 +681,7 @@ impl BxKeyboardC {
     }
 
     // =========================================================================
-    // Port read handler (Bochs `bx_keyb_c::read`, )
+    // Port read handler (Bochs `bx_keyb_c::read`, keyboard.cc)
     // =========================================================================
 
     /// Read from keyboard controller I/O port.
@@ -726,7 +726,7 @@ impl BxKeyboardC {
         }
     }
 
-    /// Port 0x60 read — 
+    /// Port 0x60 read — keyboard.cc
     fn read_port_60(&mut self) -> u32 {
         self.diag_port60_read_count += 1;
         if self.kbd_controller.auxb {
@@ -750,7 +750,7 @@ impl BxKeyboardC {
                 self.controller_q_size -= 1;
             }
 
-            // Bochs : DEV_pic_lower_irq(12)
+            // Bochs keyboard.cc: DEV_pic_lower_irq(12)
             self.irq12_lower_pending = true;
             self.activate_timer();
             tracing::debug!("Keyboard: Read port 0x60 [mouse] = {:#04x}", val);
@@ -777,7 +777,7 @@ impl BxKeyboardC {
                 self.controller_q_size -= 1;
             }
 
-            // Bochs : DEV_pic_lower_irq(1)
+            // Bochs keyboard.cc: DEV_pic_lower_irq(1)
             self.irq1_lower_pending = true;
             self.activate_timer();
             self.diag_port60_last_value = val;
@@ -795,7 +795,7 @@ impl BxKeyboardC {
         }
     }
 
-    /// Port 0x64 read — assemble status byte from individual booleans ()
+    /// Port 0x64 read — assemble status byte from individual booleans (keyboard.cc)
     fn read_port_64(&mut self) -> u32 {
         let val = ((self.kbd_controller.pare as u8) << 7)
             | ((self.kbd_controller.tim as u8) << 6)
@@ -810,7 +810,7 @@ impl BxKeyboardC {
     }
 
     // =========================================================================
-    // Port write handler (Bochs `bx_keyb_c::write`, )
+    // Port write handler (Bochs `bx_keyb_c::write`, keyboard.cc)
     // =========================================================================
 
     /// Write to keyboard controller I/O port.
@@ -851,12 +851,12 @@ impl BxKeyboardC {
         }
     }
 
-    /// Port 0x60 write — 
+    /// Port 0x60 write — keyboard.cc
     fn write_port_60(&mut self, value: u8) {
         tracing::debug!("Keyboard: Write port 0x60 = {:#04x}", value);
 
         if self.kbd_controller.expecting_port60h != 0 {
-            // Bochs  — warn if input buffer still full
+            // Bochs keyboard.cc — warn if input buffer still full
             if self.kbd_controller.inpb {
                 tracing::warn!("Keyboard: port 0x60 write while inpb set");
             }
@@ -866,7 +866,7 @@ impl BxKeyboardC {
 
             match self.kbd_controller.last_comm {
                 CTRL_CMD_WRITE_CCB => {
-                    // Write command byte (CCB) — 
+                    // Write command byte (CCB) — keyboard.cc
                     let scan_convert = (value >> 6) & 0x01 != 0;
                     let disable_aux = (value >> 5) & 0x01 != 0;
                     let disable_keyboard = (value >> 4) & 0x01 != 0;
@@ -896,7 +896,7 @@ impl BxKeyboardC {
                     tracing::debug!("Keyboard: Write controller mode {:#04x}", value);
                 }
                 CTRL_CMD_WRITE_OUTPUT_PORT => {
-                    // Write output port — 
+                    // Write output port — keyboard.cc
                     tracing::debug!("Keyboard: Write output port {:#04x}", value);
                     let new_a20 = (value & OUT_PORT_A20_GATE) != 0;
                     if self.a20_enabled != new_a20 {
@@ -909,15 +909,15 @@ impl BxKeyboardC {
                     }
                 }
                 CTRL_CMD_WRITE_TO_MOUSE => {
-                    // Write to mouse — 
+                    // Write to mouse — keyboard.cc
                     self.kbd_ctrl_to_mouse(value);
                 }
                 CTRL_CMD_WRITE_MOUSE_OUTBUF => {
-                    // Write mouse output buffer — 
+                    // Write mouse output buffer — keyboard.cc
                     self.controller_enq(value, 1);
                 }
                 CTRL_CMD_WRITE_KBD_OUTBUF => {
-                    // Write keyboard output buffer — 
+                    // Write keyboard output buffer — keyboard.cc
                     self.controller_enq(value, 0);
                 }
                 _ => {
@@ -929,7 +929,7 @@ impl BxKeyboardC {
                 }
             }
         } else {
-            // Data byte to keyboard — 
+            // Data byte to keyboard — keyboard.cc
             self.kbd_controller.c_d = false;
             self.kbd_controller.expecting_port60h = 0;
             if !self.kbd_controller.kbd_clock_enabled {
@@ -939,7 +939,7 @@ impl BxKeyboardC {
         }
     }
 
-    /// Port 0x64 write — 
+    /// Port 0x64 write — keyboard.cc
     fn write_port_64(&mut self, value: u8) {
         tracing::debug!("Keyboard: Write command 0x64 = {:#04x}", value);
 
@@ -951,7 +951,7 @@ impl BxKeyboardC {
 
         match value {
             CTRL_CMD_GET_CCB => {
-                // Get keyboard command byte (CCB) — 
+                // Get keyboard command byte (CCB) — keyboard.cc
                 if self.kbd_controller.outb {
                     tracing::warn!("Keyboard: OUTB set for GET_CCB cmd");
                     return;
@@ -972,17 +972,17 @@ impl BxKeyboardC {
                 // BIOS name / version — not supported
             }
             CTRL_CMD_DISABLE_AUX => {
-                // Disable aux device — 
+                // Disable aux device — keyboard.cc
                 self.set_aux_clock_enable(false);
                 tracing::debug!("Keyboard: Aux device disabled");
             }
             CTRL_CMD_ENABLE_AUX => {
-                // Enable aux device — 
+                // Enable aux device — keyboard.cc
                 self.set_aux_clock_enable(true);
                 tracing::debug!("Keyboard: Aux device enabled");
             }
             CTRL_CMD_TEST_MOUSE_PORT => {
-                // Test mouse port — 
+                // Test mouse port — keyboard.cc
                 if self.kbd_controller.outb {
                     tracing::warn!("Keyboard: OUTB set for TEST_MOUSE_PORT cmd");
                     return;
@@ -990,7 +990,7 @@ impl BxKeyboardC {
                 self.controller_enq(KBD_RESP_TEST_OK, 0);
             }
             CTRL_CMD_SELF_TEST => {
-                // Motherboard controller self test — 
+                // Motherboard controller self test — keyboard.cc
                 if !self.kbd_initialized {
                     self.controller_q_size = 0;
                     self.kbd_controller.outb = false;
@@ -1005,7 +1005,7 @@ impl BxKeyboardC {
                 tracing::debug!("Keyboard: Self-test passed");
             }
             CTRL_CMD_INTERFACE_TEST => {
-                // Interface test — 
+                // Interface test — keyboard.cc
                 if self.kbd_controller.outb {
                     tracing::warn!("Keyboard: OUTB set for INTERFACE_TEST cmd");
                     return;
@@ -1013,12 +1013,12 @@ impl BxKeyboardC {
                 self.controller_enq(KBD_RESP_TEST_OK, 0);
             }
             CTRL_CMD_DISABLE_KBD => {
-                // Disable keyboard — 
+                // Disable keyboard — keyboard.cc
                 self.set_kbd_clock_enable(false);
                 tracing::debug!("Keyboard: Keyboard disabled");
             }
             CTRL_CMD_ENABLE_KBD => {
-                // Enable keyboard — 
+                // Enable keyboard — keyboard.cc
                 self.set_kbd_clock_enable(true);
                 tracing::debug!("Keyboard: Keyboard enabled");
             }
@@ -1026,7 +1026,7 @@ impl BxKeyboardC {
                 // Get controller version — not supported
             }
             CTRL_CMD_READ_INPUT_PORT => {
-                // Read input port — 
+                // Read input port — keyboard.cc
                 if self.kbd_controller.outb {
                     tracing::warn!("Keyboard: OUTB set for READ_INPUT_PORT cmd");
                     return;
@@ -1042,7 +1042,7 @@ impl BxKeyboardC {
                 self.kbd_controller.expecting_port60h = 1;
             }
             CTRL_CMD_READ_OUTPUT_PORT => {
-                // Read output port — 
+                // Read output port — keyboard.cc
                 if self.kbd_controller.outb {
                     tracing::warn!("Keyboard: OUTB set for READ_OUTPUT_PORT cmd");
                     return;
@@ -1058,31 +1058,31 @@ impl BxKeyboardC {
                 self.kbd_controller.expecting_port60h = 1;
             }
             CTRL_CMD_WRITE_KBD_OUTBUF => {
-                // Write keyboard output buffer — 
+                // Write keyboard output buffer — keyboard.cc
                 self.kbd_controller.expecting_port60h = 1;
             }
             CTRL_CMD_WRITE_MOUSE_OUTBUF => {
-                // Write mouse output buffer — 
+                // Write mouse output buffer — keyboard.cc
                 self.kbd_controller.expecting_port60h = 1;
             }
             CTRL_CMD_WRITE_TO_MOUSE => {
-                // Write to mouse — 
+                // Write to mouse — keyboard.cc
                 self.kbd_controller.expecting_port60h = 1;
             }
             CTRL_CMD_DISABLE_A20 => {
-                // Disable A20 Address Line — 
+                // Disable A20 Address Line — keyboard.cc
                 self.a20_enabled = false;
                 self.a20_change_pending = true;
                 tracing::debug!("Keyboard: A20 disabled via 0xDD");
             }
             CTRL_CMD_ENABLE_A20 => {
-                // Enable A20 Address Line — 
+                // Enable A20 Address Line — keyboard.cc
                 self.a20_enabled = true;
                 self.a20_change_pending = true;
                 tracing::debug!("Keyboard: A20 enabled via 0xDF");
             }
             CTRL_CMD_SYSTEM_RESET => {
-                // System reset — 
+                // System reset — keyboard.cc
                 tracing::warn!("Keyboard: System reset via 0xFE");
                 self.reset_requested = true;
             }
@@ -1100,7 +1100,7 @@ impl BxKeyboardC {
     // Controller queue and buffer management
     // =========================================================================
 
-    /// Queue data from controller to output buffer (Bochs `controller_enQ`, ).
+    /// Queue data from controller to output buffer (Bochs `controller_enQ`, keyboard.cc).
     ///
     /// `source`: 0 = keyboard, 1 = mouse.
     ///
@@ -1154,11 +1154,11 @@ impl BxKeyboardC {
         }
     }
 
-    /// Immediate enqueue to keyboard output buffer ()
+    /// Immediate enqueue to keyboard output buffer (keyboard.cc)
     ///
     /// Bypasses internal buffer — used for LED-write ACK (0xFA).
     fn kbd_enq_imm(&mut self, val: u8) {
-        // Bochs  — check buffer capacity before writing
+        // Bochs keyboard.cc — check buffer capacity before writing
         if self.kbd_internal_buffer.num_elements >= BX_KBD_ELEMENTS {
             tracing::warn!("Keyboard: kbd_enq_imm buffer full, ignoring {:#04x}", val);
             return;
@@ -1170,7 +1170,7 @@ impl BxKeyboardC {
         }
     }
 
-    /// Queue scancode in internal keyboard ring buffer ()
+    /// Queue scancode in internal keyboard ring buffer (keyboard.cc)
     ///
     /// The byte is NOT immediately visible in the output buffer. It must be
     /// transferred by `periodic()` (called from the device tick path).
@@ -1190,7 +1190,7 @@ impl BxKeyboardC {
         }
     }
 
-    /// Queue byte in internal mouse ring buffer ()
+    /// Queue byte in internal mouse ring buffer (keyboard.cc)
     #[allow(dead_code)]
     fn mouse_enq(&mut self, data: u8) {
         if self.mouse_internal_buffer.num_elements >= BX_MOUSE_BUFF_SIZE {
@@ -1208,7 +1208,7 @@ impl BxKeyboardC {
         }
     }
 
-    /// Set timer_pending flag ()
+    /// Set timer_pending flag (keyboard.cc)
     fn activate_timer(&mut self) {
         if self.kbd_controller.timer_pending == 0 {
             self.kbd_controller.timer_pending = 1;
@@ -1216,7 +1216,7 @@ impl BxKeyboardC {
     }
 
     // =========================================================================
-    // Keyboard command handler (Bochs `kbd_ctrl_to_kbd`, )
+    // Keyboard command handler (Bochs `kbd_ctrl_to_kbd`, keyboard.cc)
     // =========================================================================
 
     /// Process a command byte sent to the keyboard device.
@@ -1304,7 +1304,7 @@ impl BxKeyboardC {
                 self.kbd_enq(KBD_RESP_ACK);
             }
             KBD_CMD_IDENTIFY => {
-                // Identify keyboard — 
+                // Identify keyboard — keyboard.cc
                 if self.kbd_controller.kbd_type != BX_KBD_XT_TYPE {
                     self.kbd_enq(KBD_RESP_ACK);
                     if self.kbd_controller.kbd_type == BX_KBD_MF_TYPE {
@@ -1344,7 +1344,7 @@ impl BxKeyboardC {
                 tracing::warn!("Keyboard: Resend command (0xFE) received");
             }
             KBD_CMD_RESET => {
-                // Reset keyboard + BAT — 
+                // Reset keyboard + BAT — keyboard.cc
                 tracing::debug!("Keyboard: Reset command received");
                 self.resetinternals(true);
                 self.kbd_enq(KBD_RESP_ACK);
@@ -1366,7 +1366,7 @@ impl BxKeyboardC {
     }
 
     // =========================================================================
-    // Mouse command handler (Bochs `kbd_ctrl_to_mouse`, )
+    // Mouse command handler (Bochs `kbd_ctrl_to_mouse`, keyboard.cc)
     // =========================================================================
 
     /// Process a command byte sent to the PS/2 mouse device.
@@ -1613,7 +1613,7 @@ impl BxKeyboardC {
     }
 
     // =========================================================================
-    // Clock enable (Bochs )
+    // Clock enable (Bochs keyboard.cc)
     //
     // The keyboard and mouse have serial clock lines controlled by the 8042.
     // When the clock is disabled (held low), the device cannot send data.
@@ -1647,7 +1647,7 @@ impl BxKeyboardC {
     }
 
     // =========================================================================
-    // Periodic timer (Bochs `bx_keyb_c::periodic`, )
+    // Periodic timer (Bochs `bx_keyb_c::periodic`, keyboard.cc)
     // =========================================================================
 
     /// Timer-driven transfer from internal device buffers to the output buffer.
@@ -1657,7 +1657,7 @@ impl BxKeyboardC {
     ///
     /// Returns an IRQ bitmask: bit 0 = raise IRQ1 (keyboard), bit 1 = raise IRQ12 (mouse).
     ///
-    /// ## Algorithm (matching Bochs )
+    /// ## Algorithm (matching Bochs keyboard.cc)
     ///
     /// 1. Collect any pending IRQ requests and clear them
     /// 2. If `timer_pending == 0`, return immediately (nothing to transfer)
@@ -1745,14 +1745,14 @@ impl BxKeyboardC {
     /// being enqueued. The 0xF0 prefix (Set 2 break) is consumed and ORed as
     /// 0x80 onto the next translated byte.
     ///
-    /// Matches Bochs gen_scancode() translation logic ().
+    /// Matches Bochs gen_scancode() translation logic (keyboard.cc).
     pub fn send_scancode(&mut self, scancode: u8) {
         if !self.kbd_controller.kbd_clock_enabled || !self.kbd_internal_buffer.scanning_enabled {
             return;
         }
 
         if self.kbd_controller.scancodes_translate {
-            // Set 2 → Set 1 translation (Bochs )
+            // Set 2 → Set 1 translation (Bochs keyboard.cc)
             if scancode == 0xF0 {
                 // 0xF0 = Set 2 break prefix: set escaped flag, don't enqueue
                 self.scancode_escaped = true;

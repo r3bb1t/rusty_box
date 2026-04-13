@@ -1,7 +1,7 @@
 use super::{cpu::CpuActivityState, cpuid::BxCpuIdTrait, eflags::EFlags, BxCpuC};
 
 impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
-    /// Handle async events - matches Bochs  handleAsyncEvent()
+    /// Handle async events - matches Bochs event.cc handleAsyncEvent()
     /// Returns true if should return from cpu_loop
     pub(super) fn handle_async_event(
         &mut self,
@@ -9,7 +9,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         mut dma: Option<&mut crate::iodev::dma::BxDmaC>,
     ) -> bool {
         // Check if CPU is in non-active state (HLT, MWAIT, etc.)
-        // Matches Bochs 
+        // Matches Bochs event.cc
         if !matches!(self.activity_state, CpuActivityState::Active) {
             // For one processor, pass the time as quickly as possible until
             // an interrupt wakes up the CPU.
@@ -19,7 +19,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
 
         // Priority 2: Trap on Task Switch (T flag in TSS)
-        // Bochs  — deliver #DB BEFORE clearing the bit
+        // Bochs event.cc — deliver #DB BEFORE clearing the bit
         // so that DR6 still has BT set when the handler reads it
         if self.debug_trap & Self::BX_DEBUG_TRAP_TASK_SWITCH_BIT != 0 {
             // Bochs: exception() calls longjmp, never returns.
@@ -34,10 +34,10 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             self.debug_trap &= !Self::BX_DEBUG_TRAP_TASK_SWITCH_BIT;
         }
 
-        // Priority 3: External Hardware Interventions (Bochs )
+        // Priority 3: External Hardware Interventions (Bochs event.cc)
         //   FLUSH, STOPCLK, SMI, INIT
 
-        // SMI (Bochs ): enter System Management Mode.
+        // SMI (Bochs event.cc): enter System Management Mode.
         // Not implemented — single-CPU DLX/Alpine don't trigger SMI.
         // Bochs: clear_event(BX_EVENT_SMI); enter_system_management_mode();
         if self.is_unmasked_event_pending(Self::BX_EVENT_SMI) {
@@ -45,7 +45,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             tracing::debug!("SMI event cleared (SMM not implemented)");
         }
 
-        // INIT (Bochs ): reset CPU via reset(BX_RESET_SOFTWARE).
+        // INIT (Bochs event.cc): reset CPU via reset(BX_RESET_SOFTWARE).
         // Used by multiprocessor startup (INIT-SIPI-SIPI sequence).
         // Not implemented — single-CPU emulation only.
         // Bochs: clear_event(BX_EVENT_INIT); reset(BX_RESET_SOFTWARE);
@@ -55,9 +55,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
 
         // Priority 4: Debug trap exceptions (TF single-step, data/I/O breakpoints)
-        // Bochs  — check inhibition FIRST, then debug_trap
+        // Bochs event.cc — check inhibition FIRST, then debug_trap
         if !self.interrupts_inhibited(Self::BX_INHIBIT_DEBUG) {
-            // Bochs : OR code breakpoint matches into debug_trap
+            // Bochs event.cc: OR code breakpoint matches into debug_trap
             self.debug_trap |= self.code_breakpoint_match(self.prev_rip);
             if self.debug_trap & 0xF000 != 0 {
                 // BX_DEBUG_SINGLE_STEP_BIT or BX_DEBUG_DR_ACCESS_BIT set
@@ -72,7 +72,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             }
         }
 
-        // Priority 5: External interrupts (Bochs )
+        // Priority 5: External interrupts (Bochs event.cc)
         //
         // Bochs structure:
         //   1. if interrupts_inhibited(BX_INHIBIT_INTERRUPTS) → skip all
@@ -92,9 +92,9 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // IF=0, the interrupt would be permanently lost.
         if self.interrupts_inhibited(Self::BX_INHIBIT_INTERRUPTS) {
             // STI/MOV SS shadow — skip all external interrupts this boundary
-            // (Bochs )
+            // (Bochs event.cc)
         } else if self.is_unmasked_event_pending(Self::BX_EVENT_NMI) {
-            // NMI delivery (Bochs )
+            // NMI delivery (Bochs event.cc)
             self.clear_event(Self::BX_EVENT_NMI);
             self.mask_event(Self::BX_EVENT_NMI); // Block further NMIs until IRET
             self.activity_state = CpuActivityState::Active;
@@ -116,7 +116,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         } else if self.is_unmasked_event_pending(
             Self::BX_EVENT_PENDING_INTR | Self::BX_EVENT_PENDING_LAPIC_INTR,
         ) {
-            // HandleExtInterrupt (Bochs )
+            // HandleExtInterrupt (Bochs event.cc)
             // Deliver exactly ONE interrupt: LAPIC first, then PIC.
             let mut delivered = false;
 
@@ -138,12 +138,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     delivered = true;
                     match result {
                         Ok(()) => {
-                            // Bochs  — update prev_rip after delivery
+                            // Bochs event.cc — update prev_rip after delivery
                             self.prev_rip = self.rip();
                         }
                         Err(super::error::CpuError::CpuLoopRestart) => {
                             // interrupt() delivered via exception path (CpuLoopRestart).
-                            // Bochs : prev_rip = RIP after successful delivery.
+                            // Bochs event.cc: prev_rip = RIP after successful delivery.
                             self.prev_rip = self.rip();
                             return false;
                         }
@@ -166,7 +166,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                     self.activity_state = CpuActivityState::Active;
                     // Mark as external interrupt (EXT=1)
                     self.ext = true;
-                    // Deliver interrupt (matches Bochs interrupt() call in )
+                    // Deliver interrupt (matches Bochs interrupt() call in event.cc)
                     let result = self.interrupt(vector, false, false, 0);
                     self.ext = false;
                     match result {
@@ -194,8 +194,8 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
             #[cfg(debug_assertions)] { self.diag_hae_intr_if_blocked += 1; }
         }
 
-        // DMA HRQ handling (Bochs )
-        // NOTE: similar code in handleWaitForEvent ()
+        // DMA HRQ handling (Bochs event.cc)
+        // NOTE: similar code in handleWaitForEvent (event.cc)
         // Assert Hold Acknowledge (HLDA) and perform DMA transfer
         if self.get_hrq() {
             if let Some(dma) = dma {
@@ -204,13 +204,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
 
         // End of handleAsyncEvent: schedule TF->debug_trap for next boundary
-        // Bochs 
+        // Bochs event.cc
         if self.eflags.contains(EFlags::TF) {
             self.debug_trap |= Self::BX_DEBUG_SINGLE_STEP_BIT;
             self.async_event = 1;
         }
 
-        // Bochs : Conditionally clear async_event
+        // Bochs event.cc: Conditionally clear async_event
         // Only clear when no events remain pending (debug_trap, pending events, HRQ)
         let has_unmasked_events = (self.pending_event & !self.event_mask) != 0;
         let hrq_active = self.get_hrq();
@@ -225,13 +225,13 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
     /// Called when CPU is halted (HLT) or waiting (MWAIT)
     /// Returns true if should return from cpu_loop
     fn handle_wait_for_event(&mut self, dma: Option<&mut crate::iodev::dma::BxDmaC>) -> bool {
-        // For WAIT_FOR_SIPI, just return (matches Bochs )
+        // For WAIT_FOR_SIPI, just return (matches Bochs event.cc)
         if matches!(self.activity_state, CpuActivityState::WaitForSipi) {
             tracing::debug!("CPU in WAIT_FOR_SIPI state, returning from cpu_loop");
             return true;
         }
 
-        // Handle DMA also when CPU is halted (Bochs )
+        // Handle DMA also when CPU is halted (Bochs event.cc)
         if self.get_hrq() {
             if let Some(dma) = dma {
                 dma.raise_hlda();
@@ -239,16 +239,16 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         }
 
         // For single processor, check if an external interrupt can wake us.
-        // Matches Bochs 
+        // Matches Bochs event.cc
         //
         // MWAIT_IF (ECX[0]=1 at MWAIT): wake on interrupt even when IF=0
-        // (Bochs )
+        // (Bochs event.cc)
         let mwait_if = matches!(self.activity_state, CpuActivityState::MwaitIf);
         let in_mwait = matches!(self.activity_state, CpuActivityState::Mwait | CpuActivityState::MwaitIf);
 
-        // NMI can always wake from HLT (Bochs )
+        // NMI can always wake from HLT (Bochs event.cc)
         if self.pending_event & Self::BX_EVENT_NMI != 0 {
-            // Bochs : reset monitor when waking from MWAIT
+            // Bochs event.cc: reset monitor when waking from MWAIT
             #[cfg(feature = "bx_support_monitor_mwait")]
             if in_mwait {
                 self.monitor.reset_monitor();
@@ -261,7 +261,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // PIC interrupt can wake from HLT/MWAIT if IF=1
         if self.pending_event & Self::BX_EVENT_PENDING_INTR != 0
             && (self.eflags.contains(EFlags::IF_) || mwait_if) {
-                // Bochs : reset monitor when waking from MWAIT
+                // Bochs event.cc: reset monitor when waking from MWAIT
                 #[cfg(feature = "bx_support_monitor_mwait")]
                 if in_mwait {
                     self.monitor.reset_monitor();
@@ -274,7 +274,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // LAPIC interrupt can also wake from HLT/MWAIT if IF=1
         if (self.pending_event & Self::BX_EVENT_PENDING_LAPIC_INTR != 0 || self.lapic.intr)
             && (self.eflags.contains(EFlags::IF_) || mwait_if) {
-                // Bochs : reset monitor when waking from MWAIT
+                // Bochs event.cc: reset monitor when waking from MWAIT
                 #[cfg(feature = "bx_support_monitor_mwait")]
                 if in_mwait {
                     self.monitor.reset_monitor();
@@ -295,12 +295,12 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // In Bochs, BX_TICKN(10) advances time, then loops again
         // For our emulator, we return to allow GUI updates and device processing
 
-        // Bochs : clear inhibit_mask when waking from HLT
+        // Bochs event.cc: clear inhibit_mask when waking from HLT
         self.inhibit_mask = 0;
         true
     }
 
-    /// Check code breakpoints at the given linear address (Bochs ).
+    /// Check code breakpoints at the given linear address (Bochs event.cc).
     /// Returns bitmap of matching breakpoints to OR into debug_trap.
     /// In Bochs, this checks DR0-DR3 against laddr when DR7 L/G bits enable
     /// execution breakpoints (R/W field = 0b00). Each match sets the

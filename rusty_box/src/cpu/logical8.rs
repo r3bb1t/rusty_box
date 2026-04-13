@@ -209,7 +209,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Write-back phase of a read-modify-write byte access.
     /// Uses address_xlation populated by read_rmw_virtual_byte.
-    /// Bochs: write_RMW_linear_byte ()
+    /// Bochs: write_RMW_linear_byte (access2.cc)
     #[inline]
     pub fn write_rmw_linear_byte(&mut self, val: u8) {
         if self.address_xlation.pages > 2 {

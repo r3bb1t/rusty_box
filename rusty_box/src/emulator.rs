@@ -222,7 +222,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
     /// Initialize the emulator
     ///
-    /// This runs the full initialization sequence from Bochs  (bx_init_hardware):
+    /// This runs the full initialization sequence from Bochs main.cc (bx_init_hardware):
     /// 1. PC system initialization (timers, IPS) - line 1201
     /// 2. Memory initialization - line 1312
     /// 3. BIOS load - line 1315-1316 (done via load_bios() after this call)
@@ -242,7 +242,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     ///
     /// **IMPORTANT**: For correct BIOS initialization sequence matching original Bochs,
     /// use `init_memory()` + `load_bios()` + `init_cpu_and_devices()` instead of this method.
-    /// See  for the correct sequence.
+    /// See main.cc for the correct sequence.
     pub fn initialize(&mut self) -> Result<()> {
         if self.initialized {
             tracing::debug!("Emulator already initialized");
@@ -311,7 +311,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         );
 
 
-        // Register PCI IDE BM-DMA timers (Bochs )
+        // Register PCI IDE BM-DMA timers (Bochs pci_ide.cc)
         {
             // Channel 0 timer
             match self.pc_system.register_timer(
@@ -355,7 +355,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // as parameters to service_ioapic/set_irq_level/write_aligned.
         // The MMIO callback path uses fallback stubs (no PIC/LAPIC available).
 
-        // Register LAPIC timer with pc_system (matches Bochs )
+        // Register LAPIC timer with pc_system (matches Bochs apic.cc)
         // Timer is registered inactive; activated when LAPIC timer ICR is written.
         #[cfg(feature = "bx_support_apic")]
         {
@@ -488,7 +488,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         );
 
 
-        // Register PCI IDE BM-DMA timers (Bochs )
+        // Register PCI IDE BM-DMA timers (Bochs pci_ide.cc)
         {
             // Channel 0 timer
             match self.pc_system.register_timer(
@@ -527,7 +527,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         // PIC→IOAPIC, IOAPIC→PIC, IOAPIC→LAPIC: pointer wiring removed.
         // Forwarding is now done via parameters at call sites.
 
-        // Register LAPIC timer with pc_system (matches Bochs )
+        // Register LAPIC timer with pc_system (matches Bochs apic.cc)
         // Timer is registered inactive; activated when LAPIC timer ICR is written.
         #[cfg(feature = "bx_support_apic")]
         {
@@ -575,7 +575,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
     /// Set the GUI instance
     ///
-    /// Based on load_and_init_display_lib() in 
+    /// Based on load_and_init_display_lib() in main.cc
     pub fn set_gui<G: BxGui + 'static>(&mut self, gui: G) {
         self.gui = Some(Box::new(gui));
         tracing::info!("GUI set");
@@ -583,7 +583,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
     /// Initialize the GUI
     ///
-    /// Based on bx_init_hardware() GUI initialization in 
+    /// Based on bx_init_hardware() GUI initialization in main.cc
     /// This calls specific_init() to set up the GUI, but signal handlers are
     /// initialized separately via init_gui_signal_handlers() after reset.
     pub fn init_gui(&mut self, argc: i32, argv: &[String]) -> Result<()> {
@@ -624,11 +624,11 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
     /// Update GUI with VGA text mode changes
     ///
-    /// Call this periodically to refresh the display (matching )
+    /// Call this periodically to refresh the display (matching vgacore.cc)
     /// Uses VGA update() function to process text mode and get update data
     pub fn update_gui(&mut self) {
         if let Some(ref mut gui) = self.gui {
-            // Call VGA update() to process text mode (matching )
+            // Call VGA update() to process text mode (matching vgacore.cc)
             if let Some(update_result) = self.device_manager.vga.update() {
                 // Calculate cursor position from cursor address
                 let cursor_x = if update_result.cursor_address < 0x7fff {
@@ -651,7 +651,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     0xffff
                 };
 
-                // Notify GUI of dimension changes (matching )
+                // Notify GUI of dimension changes (matching vgacore.cc)
                 if update_result.dimension_changed {
                     gui.dimension_update(
                         update_result.iwidth,
@@ -662,7 +662,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                     );
                 }
 
-                // Call GUI text_update with old snapshot and new buffer (matching )
+                // Call GUI text_update with old snapshot and new buffer (matching vgacore.cc)
                 gui.text_update(
                     &update_result.text_snapshot,
                     &update_result.text_buffer,
@@ -672,7 +672,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                 );
             }
 
-            // Flush display (matching )
+            // Flush display (matching vgacore.cc)
             gui.flush();
         }
     }
@@ -739,8 +739,8 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
         self.cpu.reset(reset_type);
 
         // Reset devices (only on hardware reset)
-        // Matches original: DEV_reset_devices(type) at 
-        // which calls bx_devices_c::reset() at 
+        // Matches original: DEV_reset_devices(type) at pc_system.cc
+        // which calls bx_devices_c::reset() at devices.cc
         if matches!(reset_type, ResetReason::Hardware) {
             // Original bx_devices_c::reset() does (in order):
             // 1. Clear PCI confAddr if PCI enabled (line 402) - done in devices.reset()
@@ -1086,7 +1086,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
     }
 
     /// Configure CMOS memory size from total RAM bytes.
-    /// This is the preferred method — it matches Bochs .
+    /// This is the preferred method — it matches Bochs devices.cc.
     pub fn configure_memory_in_cmos_from_config(&mut self) {
         self.device_manager
             .cmos
@@ -1107,7 +1107,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
             .set_hard_drive(drive_num, drive_type);
     }
 
-    /// Configure full CMOS hard drive geometry (matching Bochs )
+    /// Configure full CMOS hard drive geometry (matching Bochs harddrv.cc)
     pub fn configure_disk_geometry_in_cmos(
         &mut self,
         drive: u8,
@@ -1898,7 +1898,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
                             //
                             // Without a GUI (headless): spin at full speed; the caller injects
                             // periodic keystrokes to keep the screen alive.
-                            // Bochs handleWaitForEvent (): while(1) + BX_TICKN(10).
+                            // Bochs handleWaitForEvent (event.cc): while(1) + BX_TICKN(10).
                             // Advances pc_system time (NOT icount) until interrupt fires.
                             // TSC reads pc_system.time_ticks(), so TSC advances during HLT
                             // without inflating icount.
@@ -2317,7 +2317,7 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
             // Update IPS: show_ips() every 1 real second (keeps egui status bar responsive).
             // Uses icount delta (Bochs-compatible: counts REP iterations as separate ticks).
-            // Bochs  — ips_count = bx_pc_system.time_ticks() delta
+            // Bochs main.cc — ips_count = bx_pc_system.time_ticks() delta
             let ips_elapsed = last_ips_update.elapsed();
             if ips_elapsed >= IPS_SHOW_INTERVAL {
                 let current_icount = self.cpu.icount;
@@ -2605,6 +2605,19 @@ impl<'a, I: BxCpuIdTrait> Emulator<'a, I> {
 
         let shutdown = self.cpu.is_in_shutdown();
         Ok((total_executed, shutdown))
+    }
+
+    /// Attach a CD-ROM ISO from in-memory data (for no_std / WASM environments).
+    #[cfg(not(feature = "std"))]
+    pub fn attach_cdrom_data(
+        &mut self,
+        channel: usize,
+        drive: usize,
+        data: alloc::vec::Vec<u8>,
+    ) {
+        self.device_manager
+            .harddrv
+            .attach_cdrom_data(channel, drive, data);
     }
 
     /// Attach a hard disk from in-memory data (for no_std / WASM environments).

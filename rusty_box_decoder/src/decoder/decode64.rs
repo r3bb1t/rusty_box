@@ -220,7 +220,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
 
     if b1 == 0xC4 || b1 == 0xC5 {
         // VEX prefix — in 64-bit mode, C4/C5 are always VEX (never LES/LDS)
-        // Bochs decoder_vex64 ()
+        // Bochs decoder_vex64 (fetchdecode64.cc)
         if sse_prefix != SsePrefix::PrefixNone as u8 || rex_prefix != 0 {
             return Err(DecodeError::Decoder(BxDecodeError::BxIllegalVexXopWithRexPrefix));
         }
@@ -399,7 +399,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
             }
         }
 
-        // Validate z + k0: zeroing-masking with k0 is invalid (#UD) (Bochs )
+        // Validate z + k0: zeroing-masking with k0 is invalid (#UD) (Bochs fetchdecode64.cc)
         if evex_z != 0 && evex_aaa == 0 {
             return Err(DecodeError::Decoder(BxDecodeError::BxEvexReservedBitsSet));
         }
@@ -939,7 +939,7 @@ pub const fn fetch_decode64(bytes: &[u8]) -> DecodeResult<Instruction> {
         return Err(DecodeError::Decoder(BxDecodeError::BxIllegalOpcode));
     }
 
-    // Post-decode LOCK validation (Bochs )
+    // Post-decode LOCK validation (Bochs fetchdecode64.cc)
     // LOCK prefix on register operand (modC0) is always invalid → #UD
     let has_lock = (metainfo1_bits >> 6) & 0x3 == 1;
     if has_lock && mod_c0 {

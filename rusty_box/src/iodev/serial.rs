@@ -184,16 +184,16 @@ struct SerialPort {
     divisor_lsb: u8,
     divisor_msb: u8,
 
-    // Baud rate and character timing (Bochs )
+    // Baud rate and character timing (Bochs serial.h)
     baudrate: u32,
     /// Microseconds per data byte, computed from baudrate and word length.
-    /// Formula (Bochs ):
+    /// Formula (Bochs serial.cc):
     ///   databyte_usec = (1000000 / baudrate) * (wordlen_sel + 7)
     /// where wordlen_sel + 7 = total bits (start + data + stop).
-    /// Default: 87 usec at 115200 baud, 8-bit word (Bochs ).
+    /// Default: 87 usec at 115200 baud, 8-bit word (Bochs serial.cc).
     databyte_usec: u32,
 
-    // Timer handles for Bochs-compatible timer integration (Bochs ).
+    // Timer handles for Bochs-compatible timer integration (Bochs serial.h).
     // Bochs registers tx/rx/fifo timers via bx_pc_system.register_timer().
     // Our TX is immediate (no timer pacing). Timer integration deferred.
     tx_timer_handle: Option<usize>,
@@ -243,7 +243,7 @@ impl SerialPort {
             divisor_lsb: 1, // Default divisor=1 → 115200 baud
             divisor_msb: 0,
 
-            // Bochs : default 115200 baud, 87 usec/byte
+            // Bochs serial.cc: default 115200 baud, 87 usec/byte
             baudrate: 115200,
             databyte_usec: 87,
 
@@ -294,7 +294,7 @@ impl SerialPort {
         self.baudrate = 115200;
         self.databyte_usec = 87;
         // Timer handles are not reset — they persist across soft resets
-        // (Bochs  only registers timers if handle == BX_NULL_TIMER_HANDLE)
+        // (Bochs serial.cc only registers timers if handle == BX_NULL_TIMER_HANDLE)
         self.fifo_timeout_ticks = 0;
 
         // Simulate connected device
@@ -445,7 +445,7 @@ impl BxSerialC {
                 }
             }
             IntSource::ModStat => {
-                // Bochs : only promote to interrupt when
+                // Bochs serial.cc: only promote to interrupt when
                 // ms_ipending is already set AND modstat_enable is on
                 if s.ms_ipending && s.int_enable.modstat_enable {
                     s.ms_interrupt = true;
@@ -956,7 +956,7 @@ impl BxSerialC {
                 s.line_cntl.break_cntl = (val & 0x40) != 0;
                 s.line_cntl.dlab = (val & 0x80) != 0;
 
-                // Bochs : break in loopback mode
+                // Bochs serial.cc: break in loopback mode
                 let need_break_enq = s.modem_cntl.local_loopback && s.line_cntl.break_cntl;
                 let check_dlab = prev_dlab && !s.line_cntl.dlab;
                 let divisor = ((s.divisor_msb as u16) << 8) | (s.divisor_lsb as u16);
@@ -967,7 +967,7 @@ impl BxSerialC {
                 }
 
                 // When DLAB transitions from 1→0, recalculate baud rate and
-                // databyte_usec (Bochs )
+                // databyte_usec (Bochs serial.cc)
                 if check_dlab {
                     if divisor > 0 {
                         let new_baudrate = (UART_CLOCK_XTL / (16.0 * divisor as f64)) as u32;
@@ -981,7 +981,7 @@ impl BxSerialC {
                                 divisor
                             );
                         }
-                        // Bochs :
+                        // Bochs serial.cc:
                         //   databyte_usec = (1000000.0 / baudrate) * (wordlen_sel + 7)
                         // wordlen_sel + 7 gives total bits per character frame
                         // (start bit + data bits + stop bit)
@@ -1012,14 +1012,14 @@ impl BxSerialC {
                 s.modem_cntl.out2 = (val & 0x08) != 0;
                 s.modem_cntl.local_loopback = (val & 0x10) != 0;
 
-                // Bochs : detect loopback transition
+                // Bochs serial.cc: detect loopback transition
                 let need_break_enq_mcr = !prev_loopback
                     && s.modem_cntl.local_loopback
                     && s.line_cntl.break_cntl;
                 let is_loopback = s.modem_cntl.local_loopback;
                 if need_break_enq_mcr {
                     // Transition to loopback mode with break_cntl active
-                    // Bochs 
+                    // Bochs serial.cc
                     s.line_status.break_int = true;
                     s.line_status.framing_error = true;
                     self.rx_fifo_enq(port_idx, 0x00);
@@ -1027,7 +1027,7 @@ impl BxSerialC {
 
                 if is_loopback {
                     let s = &mut self.ports[port_idx];
-                    // Bochs : Loopback MCR→MSR reflection
+                    // Bochs serial.cc: Loopback MCR→MSR reflection
                     // Save previous MSR state before updating
                     let prev_cts = s.modem_status.cts;
                     let prev_dsr = s.modem_status.dsr;

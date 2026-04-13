@@ -10,7 +10,7 @@ use crate::cpu::{BxCpuC, BxCpuIdTrait};
 use super::decoder::BxSegregs;
 use super::Result;
 
-// CET control MSR bit constants — matches Bochs 
+// CET control MSR bit constants — matches Bochs cet.cc
 pub(super) const CET_SHADOW_STACK_ENABLED: u64 = 1 << 0;
 pub(super) const CET_SHADOW_STACK_WRITE_ENABLED: u64 = 1 << 1;
 pub(super) const CET_ENDBRANCH_ENABLED: u64 = 1 << 2;
@@ -25,7 +25,7 @@ pub(super) const CET_WAIT_FOR_ENBRANCH: u64 = 1 << 11;
 const CET_RESERVED_BITS: u64 = 0x3c0;
 
 /// Check if a CET control value has invalid bit combinations.
-/// Matches Bochs  is_invalid_cet_control()
+/// Matches Bochs cet.cc is_invalid_cet_control()
 pub(super) fn is_invalid_cet_control(val: u64) -> bool {
     // SUPPRESS and WAIT_FOR_ENBRANCH cannot both be set
     if (val & (CET_SUPPRESS_INDIRECT_BRANCH_TRACKING | CET_WAIT_FOR_ENBRANCH))
@@ -42,11 +42,11 @@ pub(super) fn is_invalid_cet_control(val: u64) -> bool {
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
-    // CET query helpers — Bochs 
+    // CET query helpers — Bochs cet.cc
     // =========================================================================
 
     /// Check if shadow stack is enabled for the given privilege level.
-    /// Bochs  ShadowStackEnabled()
+    /// Bochs cet.cc ShadowStackEnabled()
     pub(super) fn shadow_stack_enabled(&self, cpl: u8) -> bool {
         self.cr4.cet()
             && self.protected_mode()
@@ -56,7 +56,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Check if shadow stack writes are enabled for the given privilege level.
-    /// Bochs  ShadowStackWriteEnabled()
+    /// Bochs cet.cc ShadowStackWriteEnabled()
     pub(super) fn shadow_stack_write_enabled(&self, cpl: u8) -> bool {
         self.cr4.cet()
             && self.protected_mode()
@@ -66,7 +66,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Check if indirect branch tracking (ENDBRANCH enforcement) is enabled.
-    /// Bochs  EndbranchEnabled()
+    /// Bochs cet.cc EndbranchEnabled()
     pub(super) fn endbranch_enabled(&self, cpl: u8) -> bool {
         self.cr4.cet()
             && self.protected_mode()
@@ -76,7 +76,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Check if endbranch is enabled and NOT suppressed.
-    /// Bochs  EndbranchEnabledAndNotSuppressed()
+    /// Bochs cet.cc EndbranchEnabledAndNotSuppressed()
     pub(super) fn endbranch_enabled_and_not_suppressed(&self, cpl: u8) -> bool {
         self.cr4.cet()
             && self.protected_mode()
@@ -86,7 +86,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Check if we are waiting for an ENDBRANCH instruction after an indirect branch.
-    /// Bochs  WaitingForEndbranch()
+    /// Bochs cet.cc WaitingForEndbranch()
     pub(super) fn waiting_for_endbranch(&self, cpl: u8) -> bool {
         self.cr4.cet()
             && self.protected_mode()
@@ -96,11 +96,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
-    // CET tracking helpers — Bochs 
+    // CET tracking helpers — Bochs cet.cc
     // =========================================================================
 
     /// Set WAIT_FOR_ENBRANCH flag after an indirect branch.
-    /// Bochs  track_indirect()
+    /// Bochs cet.cc track_indirect()
     pub(super) fn track_indirect(&mut self, cpl: u8) {
         if self.endbranch_enabled(cpl) {
             let idx = usize::from(cpl == 3);
@@ -110,7 +110,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Track indirect branch if not suppressed (with DS-prefix no-track check).
-    /// Bochs  track_indirect_if_not_suppressed()
+    /// Bochs cet.cc track_indirect_if_not_suppressed()
     pub(super) fn track_indirect_if_not_suppressed(
         &mut self,
         seg_override_cet: u8,
@@ -130,7 +130,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Reset the ENDBRANCH tracker after executing a valid ENDBRANCH.
-    /// Bochs  reset_endbranch_tracker()
+    /// Bochs cet.cc reset_endbranch_tracker()
     pub(super) fn reset_endbranch_tracker(&mut self, cpl: u8, suppress: bool) {
         let idx = usize::from(cpl == 3);
         self.msr.ia32_cet_control[idx] &=
@@ -145,7 +145,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Check legacy endbranch treatment bitmap.
     /// Returns true if the instruction should still raise #CP (legacy check failed).
     /// Returns false if the legacy bitmap indicates this is OK (tracker reset).
-    /// Bochs  LegacyEndbranchTreatment()
+    /// Bochs cet.cc LegacyEndbranchTreatment()
     pub(super) fn legacy_endbranch_treatment(&mut self, cpl: u8) -> Result<bool> {
         let idx = usize::from(cpl == 3);
         if self.msr.ia32_cet_control[idx] & CET_LEGACY_INDIRECT_BRANCH_TREATMENT != 0 {
@@ -167,13 +167,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
-    // ENDBR32 / ENDBR64 instruction handlers — Bochs 
+    // ENDBR32 / ENDBR64 instruction handlers — Bochs cet.cc
     // =========================================================================
 
     /// ENDBRANCH32 handler.
     /// In non-64-bit mode: resets the endbranch tracker.
     /// In 64-bit mode: acts as NOP (wrong-mode ENDBRANCH is a NOP).
-    /// Bochs 
+    /// Bochs cet.cc
     pub(super) fn endbranch32(
         &mut self,
         _instr: &crate::cpu::decoder::Instruction,
@@ -189,7 +189,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// ENDBRANCH64 handler.
     /// In 64-bit mode: resets the endbranch tracker.
     /// In non-64-bit mode: acts as NOP (wrong-mode ENDBRANCH is a NOP).
-    /// Bochs 
+    /// Bochs cet.cc
     pub(super) fn endbranch64(
         &mut self,
         _instr: &crate::cpu::decoder::Instruction,
@@ -203,21 +203,21 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     // =========================================================================
-    // PAUSE instruction handler — Bochs 
+    // PAUSE instruction handler — Bochs proc_ctrl.cc
     // =========================================================================
 
     /// PAUSE handler. Checks VMX/SVM intercepts before executing as no-op hint.
-    /// Bochs 
+    /// Bochs proc_ctrl.cc
     pub(super) fn pause(
         &mut self,
         _instr: &crate::cpu::decoder::Instruction,
     ) -> Result<()> {
-        // Bochs  — VMX PAUSE exit
+        // Bochs proc_ctrl.cc — VMX PAUSE exit
         if self.in_vmx_guest {
             self.vmexit_pause()?;
         }
 
-        // Bochs  — SVM PAUSE intercept
+        // Bochs proc_ctrl.cc — SVM PAUSE intercept
         if self.in_svm_guest {
             self.svm_intercept_pause()?;
         }
@@ -227,7 +227,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// VMX PAUSE exit handler.
-    /// Bochs  VMexit_PAUSE()
+    /// Bochs vmexit.cc VMexit_PAUSE()
     /// Checks PAUSE Exiting and PAUSE Loop Exiting (PLE) controls.
     fn vmexit_pause(&mut self) -> Result<()> {
         // TODO: Implement full VMexit_PAUSE when VMX exit machinery is ported.
@@ -240,7 +240,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// SVM PAUSE intercept handler.
-    /// Bochs  SvmInterceptPAUSE()
+    /// Bochs svm.cc SvmInterceptPAUSE()
     /// Checks SVM_INTERCEPT0_PAUSE and pause filter counter.
     fn svm_intercept_pause(&mut self) -> Result<()> {
         // TODO: Implement full SvmInterceptPAUSE when SVM exit machinery is ported.

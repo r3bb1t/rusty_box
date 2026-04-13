@@ -1203,7 +1203,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // VPROLD/VPRORD — Rotate left/right packed dwords by immediate
-    // AVX-512F specific — no VEX equivalent (Bochs )
+    // AVX-512F specific — no VEX equivalent (Bochs avx512.cc)
     // ========================================================================
 
     /// VPROLD Vdq{k}, Hdq, Ib — EVEX.66.0F.W0 72 /1

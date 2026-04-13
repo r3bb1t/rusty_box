@@ -52,7 +52,7 @@ Each entry:
 
 ### ~~pc_system.rs — A20 TLB flush~~ — FIXED (session 56: emulator.rs sync_a20_state + keyboard A20 handler)
 
-### ~~ioapic.rs — ExtINT delivery mode~~ — FIXED (session 57: pic_ptr added, service_ioapic calls pic.iac() matching Bochs )
+### ~~ioapic.rs — ExtINT delivery mode~~ — FIXED (session 57: pic_ptr added, service_ioapic calls pic.iac() matching Bochs ioapic.cc)
 - **Bochs ref**: ioapic.cc
 
 ### ~~harddrv.rs — SET FEATURES (0xEF) transfer mode~~ — FIXED (session 56: mdma/udma/packet_dma wired up)
@@ -116,12 +116,12 @@ Each entry:
 
 ### ~~crregs.rs — MOV DRn~~ — FALSE POSITIVE (implemented at proc_ctrl.rs:726,760)
 
-### ~~event.rs — SMI/INIT event priority handling~~ — FIXED (session 57: stub handlers clear events with debug log, matching Bochs  priority 3 placement)
+### ~~event.rs — SMI/INIT event priority handling~~ — FIXED (session 57: stub handlers clear events with debug log, matching Bochs event.cc priority 3 placement)
 - **Bochs ref**: event.cc
 
 ### ~~event.rs — Code breakpoint matching~~ — FIXED (session 56: stub returning 0, no DR0-3 configured)
 
-### ~~event.rs — HRQ/DMA handling in async event loop~~ — VERIFIED ALREADY IMPLEMENTED (get_hrq() + dma.raise_hlda() at correct position matching Bochs )
+### ~~event.rs — HRQ/DMA handling in async event loop~~ — VERIFIED ALREADY IMPLEMENTED (get_hrq() + dma.raise_hlda() at correct position matching Bochs event.cc)
 - **Bochs ref**: event.cc
 
 ### ~~dispatcher.rs — mod_c0 `?` propagation~~ — FALSE POSITIVE

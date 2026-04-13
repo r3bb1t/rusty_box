@@ -398,7 +398,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             Opcode::Cld => self.cld(instr),
             Opcode::Std => self.std_(instr),
-            Opcode::Nop => Ok(()), // NOP is architecturally defined as no-op (Bochs )
+            Opcode::Nop => Ok(()), // NOP is architecturally defined as no-op (Bochs proc_ctrl.cc)
             Opcode::Pause => self.pause(instr),
             Opcode::Endbranch32 => self.endbranch32(instr),
             Opcode::Endbranch64 => self.endbranch64(instr),

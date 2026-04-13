@@ -37,7 +37,7 @@ pub fn MOV_OdAL<I: BxCpuIdTrait>(
 
 /// MOV_GbEbM: MOV r8, r/m8 - Load register from memory
 /// Opcode: 0x8A (memory form)
-/// Mirrors Bochs cpp/cpu/ MOV_GbEbM
+/// Mirrors Bochs cpp/cpu/data_xfer8.cc MOV_GbEbM
 pub fn MOV_GbEbM<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
     instr: &Instruction,
@@ -58,7 +58,7 @@ pub fn MOV_GbEbM<I: BxCpuIdTrait>(
 }
 
 /// MOV_GbEbR: MOV r8, r8 - Register to register (opcode 0x8A, register form)
-/// Mirrors Bochs cpp/cpu/ MOV_GbEbR
+/// Mirrors Bochs cpp/cpu/data_xfer8.cc MOV_GbEbR
 pub fn MOV_GbEbR<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
     instr: &Instruction,
@@ -70,7 +70,7 @@ pub fn MOV_GbEbR<I: BxCpuIdTrait>(
 
 /// MOV_EbGbM: MOV r/m8, r8 - Store register to memory
 /// Opcode: 0x88 (memory form)
-/// Mirrors Bochs cpp/cpu/ (MOV_EbGbM)
+/// Mirrors Bochs cpp/cpu/data_xfer8.cc (MOV_EbGbM)
 pub fn MOV_EbGbM<I: BxCpuIdTrait>(
     cpu: &mut BxCpuC<I>,
     instr: &Instruction,
@@ -93,7 +93,7 @@ pub fn MOV_EbGbM<I: BxCpuIdTrait>(
 }
 
 /// MOV_EbGbR: MOV r/m8, r8 - Register to register (opcode 0x88, register form)
-/// Mirrors Bochs cpp/cpu/ MOV_EbGbR
+/// Mirrors Bochs cpp/cpu/data_xfer8.cc MOV_EbGbR
 /// Note: decoder always stores reg->operands.dst(dst), rm->operands.src1(src).
 /// For opcode 0x88, reg=source and rm=destination, so we swap access.
 pub fn MOV_EbGbR<I: BxCpuIdTrait>(

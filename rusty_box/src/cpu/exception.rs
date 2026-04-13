@@ -28,7 +28,7 @@ enum ExceptionType {
     DoubleFault = 10,
 }
 
-// Match Bochs `is_exception_OK[3][3]` (cpu/..855).
+// Match Bochs `is_exception_OK[3][3]` (cpu/exception.cc..855).
 // Indexes are {Benign, Contributory, PageFault}.
 const IS_EXCEPTION_OK: [[bool; 3]; 3] = [
     [true, true, true],   // 1st exception is BENIGN
@@ -293,7 +293,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             error_code = 0;
         }
 
-        // Mirror Bochs cpu/..1052.
+        // Mirror Bochs cpu/exception.cc..1052.
         let info = &EXCEPTIONS_INFO[vector as usize];
         let exception_type = info.exception_type as u32;
         let exception_class = info.exception_class;
@@ -328,7 +328,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        // Bochs  — commit debug_trap into DR6 on #DB
+        // Bochs exception.cc — commit debug_trap into DR6 on #DB
         if vector == Exception::Db {
             self.dr6 = super::crregs::BxDr6::from_bits_retain(
                 (self.dr6.bits() & 0xFFFF6FF0) | (self.debug_trap & 0x0000E00F),
@@ -378,7 +378,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Call interrupt handler based on CPU mode
         let vector_u8 = vector as u8;
 
-        // Bochs interrupt() wrapper ():
+        // Bochs interrupt() wrapper (exception.cc):
         // Clear debug trap and interrupt inhibition before delivery.
         self.debug_trap = 0;
         self.inhibit_mask = 0;
@@ -441,7 +441,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        // Bochs interrupt() wrapper (): clear EXT after delivery
+        // Bochs interrupt() wrapper (exception.cc): clear EXT after delivery
         self.ext = false;
 
         // error resolved

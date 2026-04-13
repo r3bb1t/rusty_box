@@ -12,3 +12,7 @@ MAX_INSTRUCTIONS="20000000000"
 # ALPINE_ISO="alpine-virt-3.23.3-x86_64.iso"
 # ALPINE_RAM_MB="128"
 # CMDLINE="console=ttyS0,115200 earlyprintk=serial,ttyS0,115200 nomodeset"
+
+
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "link-args=-z stack-size=8388608"]

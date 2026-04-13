@@ -383,7 +383,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Write-back phase of a read-modify-write word access.
     /// Uses address_xlation populated by read_rmw_virtual_word.
-    /// Bochs: write_RMW_linear_word ()
+    /// Bochs: write_RMW_linear_word (access2.cc)
     #[inline]
     pub fn write_rmw_linear_word(&mut self, val: u16) {
         if self.address_xlation.pages > 2 {

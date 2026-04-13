@@ -15,7 +15,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// Branch to a near 16-bit address
-    /// Matching C++  branch_near16
+    /// Matching C++ ctrl_xfer16.cc branch_near16
     fn branch_near16(&mut self, new_ip: u16) -> super::Result<()> {
         // Check CS limit (matching C++ line 32-36)
         // Bochs: exception(BX_GP_EXCEPTION, 0) which longjmps
@@ -541,7 +541,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// LOOP rel8 - Decrement CX/ECX, jump if not zero
-    /// Bochs : counter must NOT be written back before
+    /// Bochs ctrl_xfer16.cc: counter must NOT be written back before
     /// branch_near16 is known to succeed (exception safety).
     pub fn loop16_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         let as32l = instr.as32_l() != 0;
@@ -653,7 +653,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JECXZ rel8 - Jump if ECX is zero (32-bit operand-size form)
-    /// Matching C++  JECXZ_Jb
+    /// Matching C++ ctrl_xfer32.cc JECXZ_Jb
     /// NOTE: counter is ECX (as32L check per Bochs), target is 32-bit EIP
     pub fn jecxz_jb(&mut self, instr: &Instruction) -> super::Result<()> {
         // Bochs: if (i->as32L()) use ECX else use CX
@@ -766,7 +766,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// CALL16_Ap - Far call with absolute pointer (16-bit)
-    /// Matching C++ 
+    /// Matching C++ ctrl_xfer16.cc
     pub fn call16_ap(&mut self, instr: &Instruction) -> Result<()> {
         let disp16 = instr.iw();
         let cs_raw = instr.iw2();
@@ -774,7 +774,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// CALL16_Ep - Far call indirect (16-bit)
-    /// Matching C++ 
+    /// Matching C++ ctrl_xfer16.cc
     pub fn call16_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Resolve effective address
         let eaddr = self.resolve_addr(instr);
@@ -805,7 +805,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// JMP16_Ep - Far jump indirect (16-bit)
-    /// Matching C++ 
+    /// Matching C++ ctrl_xfer16.cc
     pub fn jmp16_ep(&mut self, instr: &Instruction) -> Result<()> {
         // Resolve effective address
         let eaddr = self.resolve_addr(instr);
@@ -863,7 +863,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// RETfar16_Iw - Far return with immediate (16-bit)
-    /// Matching C++ 
+    /// Matching C++ ctrl_xfer16.cc
     pub fn retfar16_iw(&mut self, instr: &Instruction) -> Result<()> {
         // Invalidate prefetch queue
         self.eip_fetch_ptr = None;

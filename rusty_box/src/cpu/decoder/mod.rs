@@ -14,7 +14,7 @@ use crate::cpu::{BxCpuC, BxCpuIdTrait};
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Validate CPU feature bitmask and configure decode tables.
     ///
-    /// Bochs : loops all opcodes and disables those
+    /// Bochs fetchdecode32.cc: loops all opcodes and disables those
     /// whose ISA feature isn't in ia_extensions_bitmask. Also handles special
     /// cases like LZCNT→BSR and TZCNT→BSF fallback.
     ///
@@ -22,7 +22,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Instead, unsupported opcodes hit the dispatcher catch-all which raises #UD.
     /// This function validates the bitmask is populated and logs the configuration.
     pub(in crate::cpu) fn init_fetch_decode_tables(&mut self) -> crate::cpu::Result<()> {
-        // Bochs panics if bitmask is empty ()
+        // Bochs panics if bitmask is empty (fetchdecode32.cc)
         if self.ia_extensions_bitmask[0] == 0 {
             return Err(crate::cpu::CpuError::UnimplementedInstruction);
         }
@@ -43,7 +43,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             has_sse, has_sse2, has_avx, has_avx2, has_bmi1, has_bmi2, has_aes, has_long_mode, has_lzcnt
         );
 
-        // LZCNT/TZCNT fallback (Bochs ):
+        // LZCNT/TZCNT fallback (Bochs fetchdecode32.cc):
         // When LZCNT not supported, F3 0F BD decodes as BSR (REP prefix ignored).
         // When BMI1 (TZCNT) not supported, F3 0F BC decodes as BSF.
         // Our CPUID reports both as supported for Skylake-X, so no fallback needed.

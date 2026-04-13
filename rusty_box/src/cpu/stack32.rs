@@ -7,7 +7,7 @@ use super::{cpu::BxCpuC, cpuid::BxCpuIdTrait, decoder::Instruction, eflags::EFla
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
     // 32-bit PUSH instructions
-    // Based on Bochs 
+    // Based on Bochs stack32.cc
     // =========================================================================
 
     /// PUSH r32 - Push 32-bit register
@@ -39,7 +39,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // =========================================================================
     // 32-bit POP instructions
-    // Based on Bochs 
+    // Based on Bochs stack32.cc
     // =========================================================================
 
     /// POP r32 - Pop into 32-bit register
@@ -62,7 +62,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// POP segment register (32-bit mode)
-    /// Based on Bochs  POP32_Sw
+    /// Based on Bochs stack32.cc POP32_Sw
     /// Pops a 16-bit selector from stack (advancing ESP by 4) and loads it into segment register
     pub fn pop32_sw(&mut self, instr: &Instruction) -> Result<(), super::error::CpuError> {
         use crate::cpu::decoder::BxSegregs;
@@ -75,7 +75,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.load_seg_reg(seg, selector_value)?;
 
         // POP SS inhibits interrupts until next instruction boundary
-        // (Bochs )
+        // (Bochs stack32.cc)
         if seg == BxSegregs::Ss {
             self.inhibit_interrupts(Self::BX_INHIBIT_INTERRUPTS_BY_MOVSS);
         }
@@ -107,12 +107,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // =========================================================================
     // PUSHAD/POPAD instructions
-    // Based on Bochs 
+    // Based on Bochs stack32.cc
     // =========================================================================
 
     /// PUSHAD - Push all 32-bit general registers
     /// Push order: EAX, ECX, EDX, EBX, ESP (original), EBP, ESI, EDI
-    /// Based on Bochs 
+    /// Based on Bochs stack32.cc
     pub fn pusha32(&mut self, _instr: &Instruction) -> super::Result<()> {
         // Get register values before any pushes
         let eax = self.eax();
@@ -159,7 +159,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// POPAD - Pop all 32-bit general registers
     /// Pop order: EDI, ESI, EBP, (skip ESP), EBX, EDX, ECX, EAX
-    /// Based on Bochs 
+    /// Based on Bochs stack32.cc
     pub fn popa32(&mut self, _instr: &Instruction) -> super::Result<()> {
         let (edi, esi, ebp, ebx, edx, ecx, eax) = if self.is_stack_32bit() {
             let temp_esp = self.esp();
@@ -213,7 +213,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// PUSHFD - Push flags (32-bit)
-    /// Based on Bochs  PUSHF_Fd
+    /// Based on Bochs flag_ctrl.cc PUSHF_Fd
     pub fn pushf_fd(&mut self, _instr: &Instruction) -> super::Result<()> {
         if self.v8086_mode() && self.eflags.iopl() < 3 {
             tracing::debug!("PUSHFD: #GP(0) in v8086 mode");
@@ -227,7 +227,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// POPFD - Pop flags (32-bit)
-    /// Based on Bochs  POPF_Fd
+    /// Based on Bochs flag_ctrl.cc POPF_Fd
     pub fn popf_fd(&mut self, _instr: &Instruction) -> super::Result<()> {
         use super::decoder::BxSegregs;
 
@@ -271,7 +271,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PUSH segment register (32-bit mode)
-    /// Based on Bochs  PUSH32_Sw
+    /// Based on Bochs stack32.cc PUSH32_Sw
     /// Pushes 4 bytes (only lower 16 bits are meaningful)
     pub fn push_op32_sw(&mut self, instr: &Instruction) -> super::Result<()> {
         let seg_idx = instr.src() as usize; // Bochs: i->src() for PUSH Sw
@@ -295,7 +295,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// ENTER (32-bit operand size)
-    /// Based on Bochs  ENTER32_IwIb
+    /// Based on Bochs stack32.cc ENTER32_IwIb
     pub fn enter32_iw_ib(&mut self, instr: &Instruction) -> super::Result<()> {
         let imm16 = instr.iw() as u32;
         let mut level = instr.ib2() & 0x1F;
@@ -362,7 +362,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// LEAVE (32-bit operand size)
-    /// Based on Bochs 
+    /// Based on Bochs stack32.cc
     pub fn leave_op32(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
         let ss_d_b = self.sregs[super::decoder::BxSegregs::Ss as usize]

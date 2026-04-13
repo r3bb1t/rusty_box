@@ -242,7 +242,7 @@ fn run_dlxlinux() -> Result<()> {
     // =========================================================================
     // Initialize hardware - Part 1: Memory and PC system
     // =========================================================================
-    // Following original Bochs sequence from :
+    // Following original Bochs sequence from main.cc:
     // 1. Memory init (line 1312)
     // 2. Load BIOS (line 1315)
     // 3. CPU init (line 1337)
@@ -260,7 +260,7 @@ fn run_dlxlinux() -> Result<()> {
     // instruction fetch from 0xFFFFFFF0 to access the same ROM data
     let bios_size = bios_data.len() as u64;
     // Calculate BIOS load address following original Bochs logic:
-    // romaddress = ~(size - 1) for reset vector support ()
+    // romaddress = ~(size - 1) for reset vector support (misc_mem.cc)
     // 64KB BIOS:  ~0xFFFF = 0xFFFF0000 (ends at 4GB, wraps in u32)
     // 128KB BIOS: ~0x1FFFF = 0xFFFE0000
     // Validation: (romaddress + size) should wrap to 0 OR equal 0x100000
@@ -292,11 +292,11 @@ fn run_dlxlinux() -> Result<()> {
     // Uses guest_memory_size from config (32 MB) — avoids double-counting base_kb
     emu.configure_memory_in_cmos_from_config();
 
-    // Configure hard drive geometry in CMOS (matching Bochs )
+    // Configure hard drive geometry in CMOS (matching Bochs harddrv.cc)
     // Sets type=0xF (extended) + registers 0x19, 0x1B-0x23 for drive 0
     emu.configure_disk_geometry_in_cmos(0, DLX_CYLINDERS, DLX_HEADS, DLX_SPT);
 
-    // Configure boot sequence: boot from hard disk first (matching Bochs )
+    // Configure boot sequence: boot from hard disk first (matching Bochs floppy.cc)
     // ELTORITO boot device codes: 0=none, 1=floppy, 2=hard disk, 3=cdrom
     emu.configure_boot_sequence(2, 0, 0);
 

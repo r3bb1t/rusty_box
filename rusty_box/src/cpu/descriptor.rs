@@ -319,7 +319,7 @@ impl BxDescriptor {
     }
 
     /// Get Access Rights byte from descriptor
-    /// Based on get_ar_byte in 
+    /// Based on get_ar_byte in segment_ctrl_pro.cc
     pub(super) fn get_ar_byte(&self) -> u8 {
         let mut ar = AccessRights::empty();
         if self.p { ar |= AccessRights::PRESENT; }
@@ -329,7 +329,7 @@ impl BxDescriptor {
     }
 
     /// Set Access Rights byte in descriptor
-    /// Based on set_ar_byte in 
+    /// Based on set_ar_byte in segment_ctrl_pro.cc
     pub(super) fn set_ar_byte(&mut self, ar_byte: u8) {
         let ar = AccessRights::from_bits_retain(ar_byte);
         self.p = ar.contains(AccessRights::PRESENT);

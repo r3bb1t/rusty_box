@@ -962,7 +962,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let df = self.get_df();
         let seg = BxSegregs::from(instr.seg());
 
-        // FastRep: try bulk memcpy when DF=0 (Bochs )
+        // FastRep: try bulk memcpy when DF=0 (Bochs faststring.cc)
         while ecx != 0 && !df && self.async_event == 0 {
             let esi = self.esi();
             let edi = self.edi();
@@ -975,7 +975,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let count = (ecx as usize).min(src_rem).min(dst_rem)
                     .min(self.ticks_left_next_event() as usize);
                 if count > 0 {
-                    // Bochs  — forward byte-by-byte loop.
+                    // Bochs faststring.cc — forward byte-by-byte loop.
                     // Must NOT use memcpy: overlapping regions (LZ decompression)
                     // rely on reading already-written bytes during forward copy.
                     forward_byte_copy(src_ptr, dst_ptr, count);
@@ -1077,7 +1077,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let df = self.get_df();
         let seg = BxSegregs::from(instr.seg());
 
-        // FastRep: try bulk memcpy when DF=0 (Bochs  granularity=4)
+        // FastRep: try bulk memcpy when DF=0 (Bochs faststring.cc granularity=4)
         while ecx != 0 && !df && self.async_event == 0 {
             let esi = self.esi();
             let edi = self.edi();
@@ -1134,7 +1134,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let df = self.get_df();
         let al = self.al();
 
-        // FastRep: try bulk memset when DF=0 (Bochs )
+        // FastRep: try bulk memset when DF=0 (Bochs faststring.cc)
         while ecx != 0 && !df && self.async_event == 0 {
             let edi = self.edi();
             let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
@@ -1184,7 +1184,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let df = self.get_df();
         let ax = self.ax();
 
-        // FastRep: try bulk word fill when DF=0 (Bochs )
+        // FastRep: try bulk word fill when DF=0 (Bochs faststring.cc)
         while ecx != 0 && !df && self.async_event == 0 {
             let edi = self.edi();
             let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
@@ -1239,7 +1239,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let df = self.get_df();
         let eax = self.eax();
 
-        // FastRep: try bulk dword fill when DF=0 (Bochs )
+        // FastRep: try bulk dword fill when DF=0 (Bochs faststring.cc)
         while ecx != 0 && !df && self.async_event == 0 {
             let edi = self.edi();
             let dst_laddr = self.get_laddr32(BxSegregs::Es as usize, edi) as u64;
@@ -2091,7 +2091,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let df = self.get_df();
         let seg = BxSegregs::from(instr.seg());
 
-        // FastRep: try bulk memcpy when DF=0 (Bochs )
+        // FastRep: try bulk memcpy when DF=0 (Bochs faststring.cc)
         while rcx != 0 && !df && self.async_event == 0 {
             let rsi = self.rsi();
             let rdi = self.rdi();
@@ -2104,7 +2104,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let count = (rcx as usize).min(src_rem).min(dst_rem)
                     .min(self.ticks_left_next_event() as usize);
                 if count > 0 {
-                    // Bochs  — forward byte-by-byte loop.
+                    // Bochs faststring.cc — forward byte-by-byte loop.
                     // Must NOT use memcpy: overlapping regions (LZ decompression)
                     // rely on reading already-written bytes during forward copy.
                     forward_byte_copy(src_ptr, dst_ptr, count);
@@ -2158,7 +2158,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let df = self.get_df();
         let seg = BxSegregs::from(instr.seg());
 
-        // FastRep: try bulk memcpy when DF=0 (Bochs  granularity=2)
+        // FastRep: try bulk memcpy when DF=0 (Bochs faststring.cc granularity=2)
         while rcx != 0 && !df && self.async_event == 0 {
             let rsi = self.rsi();
             let rdi = self.rdi();
@@ -2224,7 +2224,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let df = self.get_df();
         let seg = BxSegregs::from(instr.seg());
 
-        // FastRep: try bulk memcpy when DF=0 (Bochs  granularity=4)
+        // FastRep: try bulk memcpy when DF=0 (Bochs faststring.cc granularity=4)
         while rcx != 0 && !df && self.async_event == 0 {
             let rsi = self.rsi();
             let rdi = self.rdi();
@@ -2290,7 +2290,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let df = self.get_df();
         let al = self.al();
 
-        // FastRep: try bulk memset when DF=0 (Bochs )
+        // FastRep: try bulk memset when DF=0 (Bochs faststring.cc)
         while rcx != 0 && !df && self.async_event == 0 {
             let rdi = self.rdi();
             let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
@@ -2347,7 +2347,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let df = self.get_df();
         let ax = self.ax();
 
-        // FastRep: try bulk word fill when DF=0 (Bochs )
+        // FastRep: try bulk word fill when DF=0 (Bochs faststring.cc)
         while rcx != 0 && !df && self.async_event == 0 {
             let rdi = self.rdi();
             let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
@@ -2409,7 +2409,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let df = self.get_df();
         let eax = self.eax();
 
-        // FastRep: try bulk dword fill when DF=0 (Bochs )
+        // FastRep: try bulk dword fill when DF=0 (Bochs faststring.cc)
         while rcx != 0 && !df && self.async_event == 0 {
             let rdi = self.rdi();
             let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);
@@ -2852,7 +2852,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let df = self.get_df();
         let seg = BxSegregs::from(instr.seg());
 
-        // FastRep: try bulk memcpy when DF=0 (Bochs  granularity=8)
+        // FastRep: try bulk memcpy when DF=0 (Bochs faststring.cc granularity=8)
         while rcx != 0 && !df && self.async_event == 0 {
             let rsi = self.rsi();
             let rdi = self.rdi();
@@ -2917,7 +2917,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let df = self.get_df();
         let rax = self.rax();
 
-        // FastRep: try bulk qword fill when DF=0 (Bochs  granularity=8)
+        // FastRep: try bulk qword fill when DF=0 (Bochs faststring.cc granularity=8)
         while rcx != 0 && !df && self.async_event == 0 {
             let rdi = self.rdi();
             let dst_laddr = self.get_laddr64(BxSegregs::Es as usize, rdi);

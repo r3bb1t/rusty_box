@@ -16,7 +16,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// MUL r/m8 - Unsigned multiply AL by r/m8, result in AX
-    /// Matching C++  MUL_ALEbR
+    /// Matching C++ mult8.cc MUL_ALEbR
     pub fn mul_al_eb_r(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.get_gpr8(0); // AL
         let src_reg = instr.dst() as usize;
@@ -41,7 +41,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// MUL r/m8 (memory form)
-    /// Matching C++  MUL_ALEbM
+    /// Matching C++ mult8.cc MUL_ALEbM
     pub fn mul_al_eb_m(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.get_gpr8(0); // AL
         let eaddr = self.resolve_addr(instr);
@@ -66,7 +66,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// IMUL r/m8 - Signed multiply AL by r/m8, result in AX
-    /// Matching C++  IMUL_ALEbR
+    /// Matching C++ mult8.cc IMUL_ALEbR
     pub fn imul_al_eb_r(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.get_gpr8(0) as i8; // AL
         let src_reg = instr.dst() as usize;
@@ -92,7 +92,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// IMUL r/m8 (memory form)
-    /// Matching C++  IMUL_ALEbM
+    /// Matching C++ mult8.cc IMUL_ALEbM
     pub fn imul_al_eb_m(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.get_gpr8(0) as i8; // AL
         let eaddr = self.resolve_addr(instr);
@@ -118,7 +118,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// DIV r/m8 - Unsigned divide AX by r/m8, quotient in AL, remainder in AH
-    /// Matching C++  DIV_ALEbR
+    /// Matching C++ mult8.cc DIV_ALEbR
     pub fn div_al_eb_r(&mut self, instr: &Instruction) -> Result<()> {
         let src_reg = instr.dst() as usize;
         let extend8bit_l = instr.extend8bit_l();
@@ -145,7 +145,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// DIV r/m8 (memory form)
-    /// Matching C++  DIV_ALEbM
+    /// Matching C++ mult8.cc DIV_ALEbM
     pub fn div_al_eb_m(&mut self, instr: &Instruction) -> Result<()> {
         let eaddr = self.resolve_addr(instr);
         let seg = super::decoder::BxSegregs::from(instr.seg());
@@ -172,7 +172,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// IDIV r/m8 - Signed divide AX by r/m8, quotient in AL, remainder in AH
-    /// Matching C++  IDIV_ALEbR
+    /// Matching C++ mult8.cc IDIV_ALEbR
     pub fn idiv_al_eb_r(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.get_gpr16(0) as i16; // AX
 
@@ -205,7 +205,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// IDIV r/m8 (memory form)
-    /// Matching C++  IDIV_ALEbM
+    /// Matching C++ mult8.cc IDIV_ALEbM
     pub fn idiv_al_eb_m(&mut self, instr: &Instruction) -> Result<()> {
         let op1 = self.get_gpr16(0) as i16; // AX
 

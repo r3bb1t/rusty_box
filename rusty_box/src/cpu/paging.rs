@@ -98,7 +98,7 @@ mod pte_bits32 {
     pub const PS: u32       = PteBits::PS.bits() as u32;
 }
 
-// Paging level constants (matching Bochs )
+// Paging level constants (matching Bochs paging.cc)
 const BX_LEVEL_PTE: usize = 0;
 const BX_LEVEL_PDE: usize = 1;
 const BX_LEVEL_PDPTE: usize = 2;
@@ -251,7 +251,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Translate linear address using legacy 32-bit paging (4KB pages)
-    /// Based on BX_CPU_C::translate_linear_legacy in 
+    /// Based on BX_CPU_C::translate_linear_legacy in paging.cc
     fn translate_linear_legacy(
         &mut self,
         laddr: BxAddress,
@@ -424,7 +424,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// Translate a linear address to a physical address
-    /// Based on BX_CPU_C::translate_linear in 
+    /// Based on BX_CPU_C::translate_linear in paging.cc
     /// Returns Ok(paddr) on success, or Err with page fault info that caller should handle
     #[allow(clippy::too_many_arguments)]
     pub(super) fn translate_linear(
@@ -451,7 +451,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Paging is enabled — dispatch to the appropriate paging mode.
-        // Bochs 
+        // Bochs paging.cc
         let result = if self.long_mode() {
             self.translate_linear_long_mode_slow(laddr, user, rw, mem, page_write_stamp_table)
         } else if self.cr4.pae() {
@@ -469,7 +469,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
             Err(e) => {
                 // Handle page fault - set CR2 and raise exception
-                // Based on BX_CPU_C::page_fault in 
+                // Based on BX_CPU_C::page_fault in paging.cc
                 self.cr2 = laddr;
                 let is_write = matches!(rw, MemoryAccessType::Write);
                 let is_execute = matches!(rw, MemoryAccessType::Execute);
@@ -487,7 +487,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     error_code |= PageFaultError::CODE_ACCESS.bits();
                 }
 
-                // Raise page fault exception (based on page_fault function in )
+                // Raise page fault exception (based on page_fault function in paging.cc)
                 self.exception(super::cpu::Exception::Pf, error_code as u16)?;
                 Err(e)
             }
@@ -497,7 +497,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
 impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     /// PAE paging translation (slow path, used by translate_linear for prefetch).
-    /// Based on Bochs translate_linear_PAE in .
+    /// Based on Bochs translate_linear_PAE in paging.cc.
     fn translate_linear_pae_slow(
         &mut self,
         laddr: BxAddress,
@@ -585,7 +585,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 ));
             }
 
-            // SMEP check for 2MB page (Bochs )
+            // SMEP check for 2MB page (Bochs paging.cc)
             if is_execute
                 && self.cr4.smep()
                 && !user
@@ -662,7 +662,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             ));
         }
 
-        // SMEP check: supervisor cannot execute from user page (Bochs )
+        // SMEP check: supervisor cannot execute from user page (Bochs paging.cc)
         if is_execute
             && self.cr4.smep()
             && !user
@@ -709,7 +709,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Long mode paging translation (slow path, used by translate_linear for prefetch).
-    /// Based on Bochs translate_linear_long_mode in .
+    /// Based on Bochs translate_linear_long_mode in paging.cc.
     fn translate_linear_long_mode_slow(
         &mut self,
         laddr: BxAddress,
@@ -820,7 +820,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             ));
         }
 
-        // SMEP check: supervisor cannot execute from user page (Bochs )
+        // SMEP check: supervisor cannot execute from user page (Bochs paging.cc)
         if is_execute
             && self.cr4.smep()
             && !user
@@ -831,7 +831,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             ));
         }
 
-        // SMAP check: supervisor data access to user page when AC=0 (Bochs )
+        // SMAP check: supervisor data access to user page when AC=0 (Bochs paging.cc)
         if !is_execute
             && self.cr4.smap()
             && !user
@@ -1466,7 +1466,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Load PDPTE entries from physical memory into the PDPTR cache.
     /// Called when CR3 is written in PAE mode (not long mode).
-    /// Based on Bochs CheckPDPTR ().
+    /// Based on Bochs CheckPDPTR (paging.cc).
     pub(super) fn load_pdptrs(&mut self) {
         let cr3_val = self.cr3 & 0xFFFF_FFE0; // bits 31:5 of CR3
         for n in 0..4usize {
@@ -1602,7 +1602,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// PAE paging page walk for DTLB (3-level: PDPTE -> PDE -> PTE, 64-bit entries).
-    /// Based on Bochs translate_linear_PAE in .
+    /// Based on Bochs translate_linear_PAE in paging.cc.
     fn page_walk_for_dtlb_pae(
         &mut self,
         laddr: u64,
@@ -1776,7 +1776,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Long mode paging page walk for DTLB (4-level: PML4 -> PDPTE -> PDE -> PTE, 64-bit entries).
-    /// Based on Bochs translate_linear_long_mode in .
+    /// Based on Bochs translate_linear_long_mode in paging.cc.
     fn page_walk_for_dtlb_long_mode(
         &mut self,
         laddr: u64,
@@ -1882,7 +1882,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // SMEP check: not applicable for data access (handled by translate_linear for execute)
 
         // SMAP check: supervisor data access to user page when AC=0
-        // Bochs 
+        // Bochs paging.cc
         if self.cr4.smap() && !user && (combined_access & CombinedAccess::USER.bits()) != 0
             && self.get_ac() == 0 {
                 self.page_fault(PageFaultError::PROTECTION.bits(), laddr, user, is_write)?;

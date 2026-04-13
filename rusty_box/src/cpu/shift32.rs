@@ -465,7 +465,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // =========================================================================
     // SHLD - Double Precision Shift Left
-    // Based on Bochs 
+    // Based on Bochs shift32.cc
     // =========================================================================
 
     /// SHLD r/m32, r32, imm8
@@ -514,7 +514,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // =========================================================================
     // SHRD - Double Precision Shift Right
-    // Based on Bochs 
+    // Based on Bochs shift32.cc
     // =========================================================================
 
     /// SHRD r/m32, r32, imm8

@@ -261,7 +261,7 @@ impl BxICache {
     }
 
     pub(super) fn hash(p_addr: BxPhyAddress, fetch_mode_mask: u64) -> u32 {
-        // Bochs  — (pAddr & (BxICacheEntries-1)) ^ fetchModeMask
+        // Bochs icache.h — (pAddr & (BxICacheEntries-1)) ^ fetchModeMask
         let hash = (p_addr as u32) ^ (fetch_mode_mask as u32);
         hash & ((BX_ICACHE_ENTRIES - 1) as u32)
     }
@@ -333,7 +333,7 @@ impl BxICache {
         }
     }
 
-    /// Bochs  — breakLinks()
+    /// Bochs icache.h — breakLinks()
     /// Called on every TLB flush (CR3 write, INVLPG, CR0/CR4 write).
     /// Invalidates page-split icache entries so page-boundary instructions
     /// don't serve stale bytes from old physical pages after remapping.
@@ -626,7 +626,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
         // Get entry index first to avoid borrow conflicts
         let entry_idx = BxICache::hash(p_addr, self.fetch_mode_mask.bits().into()) as usize;
 
-        // Matching C++  - use eip_biased directly
+        // Matching C++ icache.cc - use eip_biased directly
         // Safety check: ensure eip_biased is within bounds (defensive programming)
         if eip_biased >= self.eip_page_window_size {
             tracing::error!(
@@ -868,7 +868,7 @@ impl<'c, I: BxCpuIdTrait> BxCpuC<'c, I> {
                         );
 
                         // Check if this is an illegal opcode - if so, generate #UD exception
-                        // Based on Bochs  and  (Exception::Ud = 6)
+                        // Based on Bochs exception.cc and cpu.h (Exception::Ud = 6)
                         use crate::cpu::decoder::DecodeError;
                         use rusty_box_decoder::decoder::tables::BxDecodeError;
                         match &decode_err {

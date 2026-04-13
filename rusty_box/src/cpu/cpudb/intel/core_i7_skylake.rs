@@ -25,7 +25,7 @@ fn no_avx_mode() -> bool {
     false
 }
 
-// ─── CPUID Leaf 1 ECX feature flags (Bochs ) ────────────────
+// ─── CPUID Leaf 1 ECX feature flags (Bochs cpuid.h) ────────────────
 
 bitflags! {
     /// CPUID Leaf 1 ECX — Extended Feature Flags
@@ -66,7 +66,7 @@ bitflags! {
     }
 }
 
-// ─── CPUID Leaf 1 EDX feature flags (Bochs ) ────────────────
+// ─── CPUID Leaf 1 EDX feature flags (Bochs cpuid.h) ────────────────
 
 bitflags! {
     /// CPUID Leaf 1 EDX — Standard Feature Flags
@@ -107,7 +107,7 @@ bitflags! {
     }
 }
 
-// ─── CPUID Leaf 7, Subleaf 0 EBX feature flags (Bochs ) ─────
+// ─── CPUID Leaf 7, Subleaf 0 EBX feature flags (Bochs cpuid.h) ─────
 
 bitflags! {
     /// CPUID Leaf 7 Subleaf 0 EBX — Structured Extended Feature Flags
@@ -148,7 +148,7 @@ bitflags! {
     }
 }
 
-// ─── CPUID Extended Leaf 0x80000001 ECX (Bochs ) ────────────
+// ─── CPUID Extended Leaf 0x80000001 ECX (Bochs cpuid.h) ────────────
 
 bitflags! {
     /// CPUID Leaf 0x80000001 ECX — Extended Feature Flags
@@ -166,7 +166,7 @@ bitflags! {
     }
 }
 
-// ─── CPUID Extended Leaf 0x80000001 EDX (Bochs ) ────────────
+// ─── CPUID Extended Leaf 0x80000001 EDX (Bochs cpuid.h) ────────────
 
 bitflags! {
     /// CPUID Leaf 0x80000001 EDX — Extended Feature Flags
@@ -353,7 +353,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
         let mut b = [0u32; BX_ISA_EXTENSIONS_ARRAY_SIZE];
         // Bochs base class: BX_ISA_386 always enabled
         enable_extension(&mut b, X86Feature::Isa386);
-        // corei7_skylake-
+        // corei7_skylake-x.cc
         enable_extension(&mut b, X86Feature::IsaX87);
         enable_extension(&mut b, X86Feature::Isa486);
         enable_extension(&mut b, X86Feature::IsaPentium);
@@ -460,7 +460,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             ),
 
             // ── Leaf 1: Version / Feature Flags ─────────────────────────
-            // Bochs corei7_skylake-
+            // Bochs corei7_skylake-x.cc
             0x00000001 => {
                 let mut ecx = LEAF1_ECX_BASE;
                 if no_avx_mode() {
@@ -478,14 +478,14 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             },
 
             // ── Leaf 2: Cache/TLB descriptors ───────────────────────────
-            // Bochs corei7_skylake-
+            // Bochs corei7_skylake-x.cc
             0x00000002 => (0x76036301, 0x00F0B5FF, 0x00000000, 0x00C30000),
 
             // ── Leaf 3: Processor Serial Number (not supported) ─────────
             0x00000003 => (0, 0, 0, 0),
 
             // ── Leaf 4: Deterministic Cache Parameters ──────────────────
-            // Bochs corei7_skylake-
+            // Bochs corei7_skylake-x.cc
             0x00000004 => {
                 match ecx {
                     0 => (0x1C004121, 0x01C0003F, 0x0000003F, 0x00000000), // L1D 32KB
@@ -497,7 +497,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             }
 
             // ── Leaf 5: MONITOR/MWAIT ───────────────────────────────────
-            // Bochs corei7_skylake-
+            // Bochs corei7_skylake-x.cc
             0x00000005 => (
                 64,         // EAX: smallest monitor-line size
                 64,         // EBX: largest monitor-line size
@@ -509,7 +509,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             0x00000006 => (0x00000075, 0x00000002, 0x00000009, 0x00000000),
 
             // ── Leaf 7: Structured Extended Features ────────────────────
-            // Bochs corei7_skylake-
+            // Bochs corei7_skylake-x.cc
             0x00000007 => {
                 match ecx {
                     0 => {
@@ -537,11 +537,11 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             0x00000008 | 0x00000009 => (0, 0, 0, 0),
 
             // ── Leaf A: Performance Monitoring ──────────────────────────
-            // Bochs corei7_skylake-
+            // Bochs corei7_skylake-x.cc
             0x0000000A => (0x07300404, 0x00000000, 0x00000000, 0x00000603),
 
             // ── Leaf B: Extended Topology ───────────────────────────────
-            // Bochs corei7_skylake-
+            // Bochs corei7_skylake-x.cc
             0x0000000B => {
                 match ecx {
                     0 => (
@@ -564,7 +564,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             0x0000000C => (0, 0, 0, 0),
 
             // ── Leaf D: XSAVE state ─────────────────────────────────────
-            // Bochs  — dynamically patched in cpuid() handler
+            // Bochs cpuid.cc — dynamically patched in cpuid() handler
             0x0000000D => {
                 match ecx {
                     0 => (
@@ -593,7 +593,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             0x0000000E..=0x00000014 => (0, 0, 0, 0),
 
             // ── Leaf 15: TSC/Crystal Clock Ratio ────────────────────────
-            // Bochs corei7_skylake-
+            // Bochs corei7_skylake-x.cc
             // EAX=2, EBX=0x124 (292), ECX=0 (crystal freq unknown)
             // TSC_freq = crystal_freq * (EBX/EAX).
             // ECX=0 means kernel cannot compute TSC freq from this leaf.
@@ -605,7 +605,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             ),
 
             // ── Leaf 16: Processor Frequency ────────────────────────────
-            // Bochs corei7_skylake- (also the default case)
+            // Bochs corei7_skylake-x.cc (also the default case)
             0x00000016 => (
                 0x00000DAC, // EAX: base freq = 3500 MHz
                 0x00000FA0, // EBX: max freq = 4000 MHz
@@ -621,7 +621,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             ),
 
             // Leaf 0x80000001: Extended Feature Flags
-            // Bochs  — SYSCALL patched dynamically
+            // Bochs cpuid.cc — SYSCALL patched dynamically
             0x80000001 => (
                 0x00000000,
                 0x00000000,
@@ -653,7 +653,7 @@ impl BxCpuIdTrait for Corei7SkylakeX {
             ),
 
             // ── Default: beyond max leaf → return leaf 0x16 data ────────
-            // Bochs corei7_skylake-
+            // Bochs corei7_skylake-x.cc
             _ => {
                 if eax > 0x80000008 {
                     (0, 0, 0, 0) // beyond max extended leaf

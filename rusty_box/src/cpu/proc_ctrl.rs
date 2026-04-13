@@ -28,18 +28,18 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// Update cpu_mode based on CR0.PE, EFLAGS.VM, EFER.LMA, CS.L
-    /// Based on Bochs  handleCpuModeChange()
+    /// Based on Bochs proc_ctrl.cc handleCpuModeChange()
     pub(super) fn handle_cpu_mode_change(&mut self) {
         use super::cpu::CpuMode;
         use super::eflags::EFlags;
 
-        // Bochs  — check EFER.LMA first (long mode active)
+        // Bochs proc_ctrl.cc — check EFER.LMA first (long mode active)
         if self.efer.lma() {
             if !self.cr0.pe() {
                 // EFER.LMA set when CR0.PE=0 should not happen
                 tracing::error!("handle_cpu_mode_change: EFER.LMA is set when CR0.PE=0!");
             }
-            // Bochs  — check CS.L bit for 64-bit vs compat mode
+            // Bochs proc_ctrl.cc — check CS.L bit for 64-bit vs compat mode
         // SAFETY: segment cache populated during segment load; union read matches descriptor type
         let cs_l = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .cache
@@ -49,14 +49,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.cpu_mode = CpuMode::Long64;
             } else {
                 self.cpu_mode = CpuMode::LongCompat;
-                // Bochs  — clear upper 32 bits of RIP/RSP
+                // Bochs proc_ctrl.cc — clear upper 32 bits of RIP/RSP
                 // when leaving 64-bit mode to compatibility mode
                 let rip = self.rip() & 0xFFFF_FFFF;
                 self.set_rip(rip);
                 let rsp = self.rsp() & 0xFFFF_FFFF;
                 self.set_rsp(rsp);
             }
-            // Bochs  — invalidate stack cache on mode switch
+            // Bochs proc_ctrl.cc — invalidate stack cache on mode switch
             self.invalidate_stack_cache();
         } else {
             if self.cr0.pe() {
@@ -71,7 +71,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 }
             } else {
                 self.cpu_mode = CpuMode::Ia32Real;
-                // Bochs  — CS segment in real mode allows full access
+                // Bochs proc_ctrl.cc — CS segment in real mode allows full access
                 // SAFETY: descriptor cache fields set atomically; union write matches descriptor type
                 unsafe {
                     let seg = &mut self.sregs[super::decoder::BxSegregs::Cs as usize];
@@ -86,14 +86,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        // Bochs  — updateFetchModeMask() after every mode change
+        // Bochs proc_ctrl.cc — updateFetchModeMask() after every mode change
         self.update_fetch_mode_mask();
 
-        // Bochs  — handleAvxModeChange() after mode change
+        // Bochs proc_ctrl.cc — handleAvxModeChange() after mode change
         self.handle_avx_mode_change();
     }
 
-    // Bochs  — update FPU/MMX permission based on CR0.EM, CR0.TS
+    // Bochs proc_ctrl.cc — update FPU/MMX permission based on CR0.EM, CR0.TS
     pub(super) fn handle_fpu_mmx_mode_change(&mut self) {
         use super::opcodes_table::FetchModeMask;
         if self.cr0.em() || self.cr0.ts() {
@@ -103,7 +103,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
-    // Bochs  — update SSE permission based on CR0.TS, CR0.EM, CR4.OSFXSR
+    // Bochs proc_ctrl.cc — update SSE permission based on CR0.TS, CR0.EM, CR4.OSFXSR
     pub(super) fn handle_sse_mode_change(&mut self) {
         use super::opcodes_table::FetchModeMask;
         if self.cr0.ts() || self.cr0.em() || !self.cr4.osfxsr() {
@@ -113,7 +113,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
     }
 
-    // Bochs  — update AVX permission
+    // Bochs proc_ctrl.cc — update AVX permission
     pub(super) fn handle_avx_mode_change(&mut self) {
         use super::opcodes_table::FetchModeMask;
         if self.cr0.ts() || !self.protected_mode() || !self.cr4.osxsave() {
@@ -139,7 +139,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     /// Update fetchModeMask — must be called every time CS.L / CS.D_B /
     /// CR0.PE / CR0.TS / CR0.EM / CR4.OSFXSR / CR4.OSXSAVE changes.
-    /// Bochs  updateFetchModeMask()
+    /// Bochs cpu.h updateFetchModeMask()
     #[inline]
     pub(super) fn update_fetch_mode_mask(&mut self) {
         use super::cpu::CpuMode;
@@ -157,7 +157,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.fetch_mode_mask.set(FetchModeMask::D_B, d_b);
         self.fetch_mode_mask.set(FetchModeMask::LONG64, long64);
 
-        // Bochs  — also update user_pl
+        // Bochs cpu.h — also update user_pl
         self.user_pl = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .rpl
@@ -198,7 +198,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// WBINVD — Write Back and Invalidate Cache
-    /// Based on Bochs 
+    /// Based on Bochs proc_ctrl.cc
     pub(super) fn wbinvd(
         &mut self,
         _instr: &super::decoder::Instruction,
@@ -216,7 +216,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// INVD — Invalidate Cache
-    /// Based on Bochs 
+    /// Based on Bochs proc_ctrl.cc
     pub(super) fn invd(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
@@ -225,7 +225,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             tracing::debug!("INVD: CPL={} != 0, #GP(0)", cpl);
             return self.exception(super::cpu::Exception::Gp, 0);
         }
-        // Bochs : flushICaches() — invalidate instruction cache
+        // Bochs proc_ctrl.cc: flushICaches() — invalidate instruction cache
         self.invalidate_prefetch_q();
         self.i_cache.flush_all();
         Ok(())
@@ -251,14 +251,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.invalidate_stack_cache();
         self.dtlb.invlpg(laddr);
         self.itlb.invlpg(laddr);
-        // Bochs  — iCache.breakLinks()
+        // Bochs paging.cc — iCache.breakLinks()
         self.i_cache.break_links();
 
         Ok(())
     }
 
     /// CLTS — Clear Task-Switched Flag in CR0
-    /// Based on Bochs 
+    /// Based on Bochs crregs.cc
     pub(super) fn clts(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
@@ -274,7 +274,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // =========================================================================
     // MONITOR — Setup monitor address for MWAIT (opcode 0F 01 C8)
-    // Bochs:  MONITOR instruction
+    // Bochs: mwait.cc MONITOR instruction
     // =========================================================================
 
     pub(super) fn monitor(
@@ -283,7 +283,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     ) -> crate::cpu::Result<()> {
         tracing::debug!("MONITOR: RAX={:#x}", self.rax());
 
-        // Bochs : MONITOR requires CPL==0 (CPL always 0 in real mode)
+        // Bochs mwait.cc: MONITOR requires CPL==0 (CPL always 0 in real mode)
         let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .rpl;
@@ -292,7 +292,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        // Bochs : RCX must be 0 (no optional extensions supported)
+        // Bochs mwait.cc: RCX must be 0 (no optional extensions supported)
         if self.rcx() != 0 {
             tracing::error!(
                 "MONITOR: no optional extensions supported, RCX={:#x}",
@@ -301,7 +301,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
-        // Bochs : bx_address eaddr = RAX & i->asize_mask();
+        // Bochs mwait.cc: bx_address eaddr = RAX & i->asize_mask();
         let seg = super::decoder::BxSegregs::from(instr.seg());
 
         // Match Bochs asize_mask() lookup table: asize = metaInfo1 & 0x3
@@ -315,7 +315,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let asize = (instr.as32_l() != 0) as usize | (((instr.as64_l() != 0) as usize) << 1);
         let eaddr = self.rax() & ASIZE_MASK[asize];
 
-        // Bochs : tickle_read_virtual (1-byte read check)
+        // Bochs mwait.cc: tickle_read_virtual (1-byte read check)
         // Compute the linear address, then translate directly to physical.
         // (read_virtual_byte / v_read_byte don't populate paddress1 —
         //  they call translate_data_read which returns paddr directly.)
@@ -338,12 +338,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             );
         }
 
-        // Bochs : invalidate page in monitoring system
+        // Bochs mwait.cc: invalidate page in monitoring system
         // (In Bochs this calls bx_pc_system.invlpg(paddr) to clear any
         // cached page state. We don't need this since we check is_monitor
         // on every memory write.)
 
-        // Bochs : arm the monitor with the physical address
+        // Bochs mwait.cc: arm the monitor with the physical address
         #[cfg(feature = "bx_support_monitor_mwait")]
         {
             self.monitor
@@ -359,13 +359,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // =========================================================================
     // MWAIT — Monitor Wait (opcode 0F 01 C9)
-    // Bochs:  MWAIT instruction
+    // Bochs: mwait.cc MWAIT instruction
     // =========================================================================
 
     pub(super) fn mwait(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         tracing::debug!("MWAIT: ECX={:#x}", self.ecx());
 
-        // Bochs : MWAIT requires CPL==0 (CPL always 0 in real mode)
+        // Bochs mwait.cc: MWAIT requires CPL==0 (CPL always 0 in real mode)
         let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .rpl;
@@ -374,7 +374,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Ud, 0);
         }
 
-        // Bochs : Check ECX extensions
+        // Bochs mwait.cc: Check ECX extensions
         // ECX[0] = interrupt MWAIT even if EFLAGS.IF = 0
         // ECX[1] = timed MWAITX (MWAITX only, not applicable here)
         // ECX[2] = monitorless MWAIT
@@ -388,7 +388,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             return self.exception(super::cpu::Exception::Gp, 0);
         }
 
-        // Bochs : If monitor not armed, just return
+        // Bochs mwait.cc: If monitor not armed, just return
         #[cfg(feature = "bx_support_monitor_mwait")]
         {
             if !self.monitor.armed_by_monitor() {
@@ -397,11 +397,11 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        // Bochs : Determine sleep state
+        // Bochs mwait.cc: Determine sleep state
         // ECX[0] = 1: wake on interrupt even if IF=0
         let mwait_if = self.ecx() & 0x1 != 0;
 
-        // Bochs : enter_sleep_state(new_state)
+        // Bochs mwait.cc: enter_sleep_state(new_state)
         // Matches the pattern in hlt() — set activity state and async event
         if mwait_if {
             self.activity_state = super::cpu::CpuActivityState::MwaitIf;
@@ -420,7 +420,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     pub(super) fn clac(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
-        // Bochs : CPL must be 0, else #UD
+        // Bochs flag_ctrl.cc: CPL must be 0, else #UD
         let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .rpl;
@@ -436,7 +436,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     pub(super) fn stac(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
-        // Bochs : CPL must be 0, else #UD
+        // Bochs flag_ctrl.cc: CPL must be 0, else #UD
         let cpl = self.sregs[super::decoder::BxSegregs::Cs as usize]
             .selector
             .rpl;
@@ -481,7 +481,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let ticks = self.get_tsc(self.system_ticks());
         self.set_rax(ticks & 0xFFFF_FFFF  );
         self.set_rdx(ticks >> 32  );
-        // ECX = IA32_TSC_AUX MSR (processor ID) — Bochs 
+        // ECX = IA32_TSC_AUX MSR (processor ID) — Bochs proc_ctrl.cc
         self.set_rcx(self.msr.tsc_aux as u64);
 
         Ok(())
@@ -520,7 +520,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // =========================================================================
 
     /// RDMSR — Read Model Specific Register
-    /// Based on Bochs 
+    /// Based on Bochs msr.cc
     pub(super) fn rdmsr(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         use super::msr::*;
 
@@ -561,7 +561,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 let idx = (msr - BX_MSR_MTRRFIX4K_C0000) as usize;
                 self.msr.mtrrfix4k[idx].U64()
             }
-            // Long-mode MSRs (Bochs )
+            // Long-mode MSRs (Bochs msr.cc)
             BX_MSR_EFER => self.efer.get32() as u64,
             BX_MSR_STAR => self.msr.star,
             BX_MSR_LSTAR => self.msr.lstar,
@@ -575,7 +575,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
             BX_MSR_KERNELGSBASE => self.msr.kernelgsbase,
             BX_MSR_TSC_AUX => self.msr.tsc_aux as u64,
-            // VMX capability MSRs (Bochs )
+            // VMX capability MSRs (Bochs msr.cc)
             // Return Bochs-compatible default values so kernel VMX probing doesn't #GP
             0x480 => {
                 // IA32_VMX_BASIC: VMCS revision=1, VMCS size=4096, memory type=WB(6)
@@ -615,7 +615,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// WRMSR — Write Model Specific Register
-    /// Based on Bochs 
+    /// Based on Bochs msr.cc
     pub(super) fn wrmsr(&mut self, _instr: &super::decoder::Instruction) -> crate::cpu::Result<()> {
         use super::msr::*;
 
@@ -670,9 +670,9 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 tracing::debug!("WRMSR: MTRRCAP is read-only, #GP(0)");
                 return self.exception(super::cpu::Exception::Gp, 0);
             }
-            // Long-mode MSRs (Bochs )
+            // Long-mode MSRs (Bochs msr.cc)
             BX_MSR_EFER => {
-                // Bochs  SetEFER()
+                // Bochs crregs.cc SetEFER()
                 let val32 = val as u32;
                 // Check reserved bits against efer_suppmask
                 if (val32 & !self.efer_suppmask) != 0 {
@@ -683,13 +683,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     );
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
-                // Cannot change LME when CR0.PG=1 (Bochs )
+                // Cannot change LME when CR0.PG=1 (Bochs crregs.cc)
                 if self.efer.lme() != ((val32 >> 8) & 1 != 0) && self.cr0.pg() {
                     tracing::debug!("WRMSR EFER: attempt to change LME when CR0.PG=1, #GP(0)");
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
                 // Keep LMA untouched — it's controlled by CR0.PG + EFER.LME
-                // Bochs 
+                // Bochs crregs.cc
                 use super::crregs::BxEfer;
                 let new_efer = BxEfer::from_bits_truncate(
                     (val32 & self.efer_suppmask & !BxEfer::LMA.bits())
@@ -841,7 +841,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn fxsave(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         use super::decoder::BxSegregs;
 
-        // Bochs : check CR0.EM or CR0.TS → #NM
+        // Bochs sse_move.cc: check CR0.EM or CR0.TS → #NM
         if self.cr0.em() || self.cr0.ts() {
             return self.exception(super::cpu::Exception::Nm, 0);
         }
@@ -919,7 +919,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     pub(super) fn fxrstor(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         use super::decoder::BxSegregs;
 
-        // Bochs : check CR0.EM or CR0.TS → #NM
+        // Bochs sse_move.cc: check CR0.EM or CR0.TS → #NM
         if self.cr0.em() || self.cr0.ts() {
             return self.exception(super::cpu::Exception::Nm, 0);
         }
@@ -962,7 +962,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.the_i387.st_space[i as usize].sign_exp = sign_exp;
         }
 
-        // Restore XMM registers only if CR4.OSFXSR is set (Bochs )
+        // Restore XMM registers only if CR4.OSFXSR is set (Bochs sse_move.cc)
         if self.cr4.osfxsr() {
             for i in 0..8u64 {
                 let offset = eaddr.wrapping_add(160 + i * 16);
@@ -1054,7 +1054,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // SYSENTER — Fast System Call Entry (opcode 0F 34)
-    // Bochs: 
+    // Bochs: proc_ctrl.cc
     // ========================================================================
 
     pub(super) fn sysenter(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
@@ -1072,12 +1072,12 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.invalidate_prefetch_q();
 
-        // Clear VM, IF, RF (Bochs )
+        // Clear VM, IF, RF (Bochs proc_ctrl.cc)
         self.clear_vm();
         self.clear_if();
         self.clear_rf();
 
-        // Long mode: canonical checks (Bochs )
+        // Long mode: canonical checks (Bochs proc_ctrl.cc)
         if self.long_mode() {
             if !self.is_canonical(self.msr.sysenter_eip_msr) {
                 return self.exception(super::cpu::Exception::Gp, 0);
@@ -1087,7 +1087,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        // Load CS: flat code segment, DPL=0 (Bochs )
+        // Load CS: flat code segment, DPL=0 (Bochs proc_ctrl.cc)
         let cs_idx = BxSegregs::Cs as usize;
         super::segment_ctrl_pro::parse_selector(
             (self.msr.sysenter_cs_msr & 0xFFFC) as u16,
@@ -1109,10 +1109,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.handle_cpu_mode_change();
         self.alignment_check_mask = 0;
-        // Bochs  — updateFetchModeMask() after CS reload
+        // Bochs proc_ctrl.cc — updateFetchModeMask() after CS reload
         self.update_fetch_mode_mask();
 
-        // Load SS: flat data segment, DPL=0 (Bochs )
+        // Load SS: flat data segment, DPL=0 (Bochs proc_ctrl.cc)
         let ss_idx = BxSegregs::Ss as usize;
         super::segment_ctrl_pro::parse_selector(
             ((self.msr.sysenter_cs_msr + 8) & 0xFFFC) as u16,
@@ -1130,7 +1130,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         self.sregs[ss_idx].cache.u.set_segment_avl(false);
         self.sregs[ss_idx].cache.u.set_segment_l(false);
 
-        // Load RSP/RIP from MSRs (Bochs )
+        // Load RSP/RIP from MSRs (Bochs proc_ctrl.cc)
         if self.long_mode() {
             self.set_rsp(self.msr.sysenter_esp_msr);
             self.set_rip(self.msr.sysenter_eip_msr);
@@ -1146,7 +1146,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // SYSEXIT — Fast System Call Exit (opcode 0F 35)
-    // Bochs: 
+    // Bochs: proc_ctrl.cc
     // ========================================================================
 
     pub(super) fn sysexit(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
@@ -1171,7 +1171,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cs_idx = BxSegregs::Cs as usize;
         let ss_idx = BxSegregs::Ss as usize;
 
-        // 64-bit SYSEXIT (Bochs )
+        // 64-bit SYSEXIT (Bochs proc_ctrl.cc)
         if instr.os64_l() != 0 {
             if !self.is_canonical(self.rdx()) {
                 return self.exception(super::cpu::Exception::Gp, 0);
@@ -1200,7 +1200,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.set_rsp(self.rcx());
             self.set_rip(self.rdx());
         } else {
-            // 32-bit SYSEXIT: CS = (sysenter_cs_msr + 16) | 3 (Bochs )
+            // 32-bit SYSEXIT: CS = (sysenter_cs_msr + 16) | 3 (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
                 (((self.msr.sysenter_cs_msr + 16) & 0xFFFC) | 3) as u16,
                 &mut self.sregs[cs_idx].selector,
@@ -1223,10 +1223,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
         self.handle_cpu_mode_change();
         self.handle_alignment_check();
-        // Bochs  — updateFetchModeMask() after CS reload
+        // Bochs proc_ctrl.cc — updateFetchModeMask() after CS reload
         self.update_fetch_mode_mask();
 
-        // SS = (sysenter_cs_msr + (os64 ? 40 : 24)) | 3 (Bochs )
+        // SS = (sysenter_cs_msr + (os64 ? 40 : 24)) | 3 (Bochs proc_ctrl.cc)
         let ss_offset: u32 = if instr.os64_l() != 0 { 40 } else { 24 };
         super::segment_ctrl_pro::parse_selector(
             (((self.msr.sysenter_cs_msr + ss_offset) & 0xFFFC) | 3) as u16,
@@ -1251,7 +1251,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // SWAPGS — Swap GS base with KernelGSbase MSR (opcode 0F 01 F8)
-    // Bochs: 
+    // Bochs: proc_ctrl.cc
     // ========================================================================
 
     pub(super) fn swapgs(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
@@ -1388,7 +1388,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // SYSCALL — Fast System Call (opcode 0F 05)
-    // Bochs: 
+    // Bochs: proc_ctrl.cc
     // ========================================================================
 
     pub(super) fn syscall(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
@@ -1421,7 +1421,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let ss_idx = BxSegregs::Ss as usize;
 
         if self.long_mode() {
-            // Long mode SYSCALL (Bochs )
+            // Long mode SYSCALL (Bochs proc_ctrl.cc)
             let saved_rip = self.rip();
             self.set_rcx(saved_rip);
             let saved_rflags = self.eflags.bits() & !EFlags::RF.bits();
@@ -1433,7 +1433,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                 self.msr.cstar
             };
 
-            // CS: flat 64-bit code, DPL=0 (Bochs )
+            // CS: flat 64-bit code, DPL=0 (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
                 ((self.msr.star >> 32) & 0xFFFC) as u16,
                 &mut self.sregs[cs_idx].selector,
@@ -1452,10 +1452,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             self.handle_cpu_mode_change();
             self.alignment_check_mask = 0;
-            // Bochs  — updateFetchModeMask() after CS reload
+            // Bochs proc_ctrl.cc — updateFetchModeMask() after CS reload
             self.update_fetch_mode_mask();
 
-            // SS: flat data, DPL=0 (Bochs )
+            // SS: flat data, DPL=0 (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
                 (((self.msr.star >> 32) + 8) & 0xFFFC) as u16,
                 &mut self.sregs[ss_idx].selector,
@@ -1472,17 +1472,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[ss_idx].cache.u.set_segment_l(false);
             self.sregs[ss_idx].cache.u.set_segment_avl(false);
 
-            // Mask RFLAGS with FMASK, clear RF (Bochs )
+            // Mask RFLAGS with FMASK, clear RF (Bochs proc_ctrl.cc)
             let new_flags = saved_rflags & !self.msr.fmask & !EFlags::RF.bits();
             self.write_eflags(new_flags, EFlags::VALID_MASK.bits());
             self.set_rip(temp_rip);
         } else {
-            // Legacy mode SYSCALL (Bochs )
+            // Legacy mode SYSCALL (Bochs proc_ctrl.cc)
             let saved_eip = self.eip();
             self.set_ecx(saved_eip);
             let temp_rip = self.msr.star as u32;
 
-            // CS: flat 32-bit code, DPL=0 (Bochs )
+            // CS: flat 32-bit code, DPL=0 (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
                 ((self.msr.star >> 32) & 0xFFFC) as u16,
                 &mut self.sregs[cs_idx].selector,
@@ -1501,10 +1501,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
             self.handle_cpu_mode_change();
             self.alignment_check_mask = 0;
-            // Bochs  — updateFetchModeMask() after CS reload
+            // Bochs proc_ctrl.cc — updateFetchModeMask() after CS reload
             self.update_fetch_mode_mask();
 
-            // SS: flat data, DPL=0 (Bochs )
+            // SS: flat data, DPL=0 (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
                 (((self.msr.star >> 32) + 8) & 0xFFFC) as u16,
                 &mut self.sregs[ss_idx].selector,
@@ -1534,7 +1534,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // SYSRET — Fast System Call Return (opcode 0F 07)
-    // Bochs: 
+    // Bochs: proc_ctrl.cc
     // ========================================================================
 
     pub(super) fn sysret(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
@@ -1563,14 +1563,14 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         let cs_idx = BxSegregs::Cs as usize;
         let ss_idx = BxSegregs::Ss as usize;
 
-        // Bochs  — temp_RIP stores the return address;
+        // Bochs proc_ctrl.cc — temp_RIP stores the return address;
         // RIP is set AFTER all mode changes (line 1348).
         let temp_rip: u64;
 
         if self.cpu_mode == super::cpu::CpuMode::Long64 {
-            // 64-bit mode SYSRET (Bochs )
+            // 64-bit mode SYSRET (Bochs proc_ctrl.cc)
             if instr.os64_l() != 0 {
-                // Return to 64-bit mode (Bochs )
+                // Return to 64-bit mode (Bochs proc_ctrl.cc)
                 if !self.is_canonical(self.rcx()) {
                     return self.exception(super::cpu::Exception::Gp, 0);
                 }
@@ -1592,10 +1592,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     self.sregs[cs_idx].cache.u.set_segment_l(true); // 64-bit
                     self.sregs[cs_idx].cache.u.set_segment_avl(false);
 
-                // Bochs  — save RCX for later RIP assignment
+                // Bochs proc_ctrl.cc — save RCX for later RIP assignment
                 temp_rip = self.rcx();
             } else {
-                // Return to 32-bit compat mode (Bochs )
+                // Return to 32-bit compat mode (Bochs proc_ctrl.cc)
                 super::segment_ctrl_pro::parse_selector(
                     (((self.msr.star >> 48) & 0xFFFC) | 3) as u16,
                     &mut self.sregs[cs_idx].selector,
@@ -1612,16 +1612,16 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                     self.sregs[cs_idx].cache.u.set_segment_l(false);
                     self.sregs[cs_idx].cache.u.set_segment_avl(false);
 
-                // Bochs  — save ECX for later RIP assignment
+                // Bochs proc_ctrl.cc — save ECX for later RIP assignment
                 temp_rip = self.ecx() as u64;
             }
 
-            // Bochs  — handleCpuModeChange (mode change from CS.L)
+            // Bochs proc_ctrl.cc — handleCpuModeChange (mode change from CS.L)
             self.handle_cpu_mode_change();
-            // Bochs  — handleAlignmentCheck (CPL change)
+            // Bochs proc_ctrl.cc — handleAlignmentCheck (CPL change)
             self.handle_alignment_check();
 
-            // SS: (star >> 48) + 8) | 3 (Bochs )
+            // SS: (star >> 48) + 8) | 3 (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
                 ((((self.msr.star >> 48) + 8) & 0xFFFC) | 3) as u16,
                 &mut self.sregs[ss_idx].selector,
@@ -1632,10 +1632,10 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[ss_idx].cache.segment = true;
             self.sregs[ss_idx].cache.r#type = 0x3;
 
-            // Bochs  — restore RFLAGS from R11
+            // Bochs proc_ctrl.cc — restore RFLAGS from R11
             self.write_eflags(self.r11() as u32, EFlags::VALID_MASK.bits());
         } else {
-            // Legacy/compat mode SYSRET (Bochs )
+            // Legacy/compat mode SYSRET (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
                 (((self.msr.star >> 48) & 0xFFFC) | 3) as u16,
                 &mut self.sregs[cs_idx].selector,
@@ -1652,13 +1652,13 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[cs_idx].cache.u.set_segment_l(false);
             self.sregs[cs_idx].cache.u.set_segment_avl(false);
 
-            // Bochs  — updateFetchModeMask after CS reload
+            // Bochs proc_ctrl.cc — updateFetchModeMask after CS reload
             // (NOT handleCpuModeChange — that's only called at line 1346 outside)
             self.update_fetch_mode_mask();
-            // Bochs  — handleAlignmentCheck (CPL change)
+            // Bochs proc_ctrl.cc — handleAlignmentCheck (CPL change)
             self.handle_alignment_check();
 
-            // SS: (star >> 48) + 8) | 3 (Bochs )
+            // SS: (star >> 48) + 8) | 3 (Bochs proc_ctrl.cc)
             super::segment_ctrl_pro::parse_selector(
                 ((((self.msr.star >> 48) + 8) & 0xFFFC) | 3) as u16,
                 &mut self.sregs[ss_idx].selector,
@@ -1669,17 +1669,17 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             self.sregs[ss_idx].cache.segment = true;
             self.sregs[ss_idx].cache.r#type = 0x3;
 
-            // Bochs  — assert_IF()
+            // Bochs proc_ctrl.cc — assert_IF()
             self.eflags.insert(super::eflags::EFlags::IF_);
             self.handle_interrupt_mask_change();
-            // Bochs  — temp_RIP = ECX
+            // Bochs proc_ctrl.cc — temp_RIP = ECX
             temp_rip = self.ecx() as u64;
         }
 
-        // Bochs  — handleCpuModeChange (final, outside if/else)
+        // Bochs proc_ctrl.cc — handleCpuModeChange (final, outside if/else)
         self.handle_cpu_mode_change();
 
-        // Bochs  — RIP = temp_RIP (set AFTER all mode changes)
+        // Bochs proc_ctrl.cc — RIP = temp_RIP (set AFTER all mode changes)
         self.set_rip(temp_rip);
 
         // Bochs: BX_NEXT_TRACE(i) — force trace break after RIP change
@@ -1689,7 +1689,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // XGETBV — Get Extended Control Register (opcode 0F 01 D0)
-    // Bochs: 
+    // Bochs: proc_ctrl.cc
     // ========================================================================
 
     pub(super) fn xgetbv(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
@@ -1722,7 +1722,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // XSETBV — Set Extended Control Register (opcode 0F 01 D1)
-    // Bochs: 
+    // Bochs: proc_ctrl.cc
     // ========================================================================
 
     pub(super) fn xsetbv(&mut self, _instr: &super::decoder::Instruction) -> super::Result<()> {
@@ -1787,7 +1787,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // XSAVE — Save Processor Extended State (opcode 0F AE /4)
-    // Bochs: 
+    // Bochs: xsave.cc
     // Saves x87 + SSE state + XSAVE header based on XCR0 & EDX:EAX mask
     // ========================================================================
 
@@ -1822,7 +1822,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         // Read existing xstate_bv from header
         let mut xstate_bv = self.v_read_qword(seg, eaddr.wrapping_add(512))?;
 
-        // Compute xinuse vector (Bochs )
+        // Compute xinuse vector (Bochs xsave.cc)
         let xinuse = self.get_xinuse_vector(requested);
 
         // Save x87 FPU state if requested (bit 0)
@@ -1836,7 +1836,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        // Save MXCSR if SSE or YMM requested (Bochs )
+        // Save MXCSR if SSE or YMM requested (Bochs xsave.cc)
         if (requested & 0x6) != 0 {
             self.v_write_dword(seg, eaddr.wrapping_add(24), self.mxcsr.mxcsr)?;
             self.v_write_dword(seg, eaddr.wrapping_add(28), self.mxcsr_mask)?;
@@ -1875,7 +1875,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // XRSTOR — Restore Processor Extended State (opcode 0F AE /5)
-    // Bochs:  — delegates to xrstor_unified
+    // Bochs: xsave.cc — delegates to xrstor_unified
     // ========================================================================
 
     pub(super) fn xrstor(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
@@ -2038,7 +2038,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     }
 
     /// INVPCID — Invalidate Process-Context Identifier
-    /// Bochs 
+    /// Bochs vmx.cc
     /// Opcode: 66 0F 38 82 (memory-only, #UD if mod==11)
     pub(super) fn invpcid(&mut self, instr: &super::decoder::Instruction) -> super::Result<()> {
         // v8086 mode: #GP(0)
@@ -2357,7 +2357,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         use super::xmm::MXCSR_RESET;
         let mut xinuse: u64 = 0;
 
-        // FPU (bit 0) — Bochs 
+        // FPU (bit 0) — Bochs xsave.cc
         if (rfbm & 1) != 0 {
             if self.the_i387.cwd != 0x037F || self.the_i387.swd != 0
                 || self.the_i387.twd != 0xFFFF
@@ -2378,7 +2378,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        // SSE (bit 1) — also set if MXCSR != reset (Bochs )
+        // SSE (bit 1) — also set if MXCSR != reset (Bochs xsave.cc)
         if (rfbm & 2) != 0 {
             if self.mxcsr.mxcsr != MXCSR_RESET {
                 xinuse |= 2;
@@ -2458,7 +2458,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // XSAVEOPT — Optimized Save (opcode 0F AE /6)
-    // Bochs  (shared with XSAVE, xsaveopt flag)
+    // Bochs xsave.cc (shared with XSAVE, xsaveopt flag)
     // Same as XSAVE but only saves components that are in-use
     // ========================================================================
 
@@ -2501,7 +2501,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
             }
         }
 
-        // MXCSR: always written when SSE or YMM requested (Bochs )
+        // MXCSR: always written when SSE or YMM requested (Bochs xsave.cc)
         // NOT gated on xinuse — matches standard XSAVE behavior
         if (requested & 0x6) != 0 {
             self.v_write_dword(seg, eaddr.wrapping_add(24), self.mxcsr.mxcsr)?;
@@ -2542,7 +2542,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
     // ========================================================================
     // XSAVEC — Compacted Save (opcode 0F C7 /4)
     // XSAVES — Compacted Save with Supervisor state (opcode 0F C7 /5)
-    // Bochs 
+    // Bochs xsave.cc
     // ========================================================================
 
     pub(super) fn xsavec(&mut self, instr: &super::decoder::Instruction, is_xsaves: bool) -> super::Result<()> {
@@ -2603,7 +2603,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
         }
 
         // Extended features in compacted format starting at offset 576
-        // Bochs  — offset advances for every requested feature
+        // Bochs xsave.cc — offset advances for every requested feature
         let mut offset: u64 = 576; // XSAVE_YMM_STATE_OFFSET
         for feature in 2..=7u32 {
             let mask = 1u64 << feature;
@@ -2628,7 +2628,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
 
     // ========================================================================
     // XRSTOR unified (standard + compacted) / XRSTORS
-    // Bochs 
+    // Bochs xsave.cc
     // Replaces the basic xrstor() — handles both standard and compacted format
     // XRSTORS is the same but requires CPL=0 and compaction, adds XSS
     // ========================================================================
@@ -2777,7 +2777,7 @@ impl<I: BxCpuIdTrait> BxCpuC<'_, I> {
                         self.xrstor_init_extended_component(feature);
                     }
 
-                    // Offset advances inside the requested block (Bochs )
+                    // Offset advances inside the requested block (Bochs xsave.cc)
                     if (format & mask) != 0 {
                         offset += Self::xsave_component_len(feature);
                     }
