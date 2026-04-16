@@ -75,6 +75,11 @@ name = "rusty_box_egui"
 path = "examples/gui/rusty_box_egui.rs"
 required-features = ["std", "gui-egui"]
 
+[[example]]
+name = "alpine_strace"
+path = "examples/alpine_strace.rs"
+required-features = ["std", "instrumentation"]
+
 
 [dev-dependencies]
 tracing-subscriber.workspace = true
